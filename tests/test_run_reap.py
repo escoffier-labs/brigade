@@ -20,6 +20,7 @@ from brigade import fleet_hub
 from brigade import localio
 from brigade import proc
 from brigade import run_checkpoint
+from brigade import run_dirfd
 from brigade import run_events
 from brigade import run_journal
 from brigade import run_lifecycle
@@ -888,3 +889,392 @@ def test_reap_swap_from_inside_the_sanctioned_writer_is_bounded_to_the_run_direc
     assert json.loads(outside_before)["marker"] == "outside-canary"
     assert not (outside / "events").exists()
     assert not (outside / "checkpoints").exists()
+
+
+# --- Descriptor-bound orphan-reaper transaction (phase 2) ---------------------
+#
+# The reaper binds the candidate run directory and runs the whole sanctioned
+# transaction under that binding. Every swap below lands AFTER the binding is
+# taken, from inside one stage of the writer. The invariant under test is the
+# same each time: writes may only reach the original held run inode, or the
+# stage fails closed. Nothing outside the run directory is ever written.
+
+
+def _outside_canary(tmp_path: Path, name: str) -> tuple[Path, Path, bytes]:
+    outside = tmp_path / name
+    outside.mkdir()
+    outside_json = outside / "run.json"
+    localio.write_json(
+        outside_json,
+        {"status": "dispatching", "started_at": OLD_STARTED, "marker": "outside-canary"},
+    )
+    return outside, outside_json, outside_json.read_bytes()
+
+
+def _swap_aside(run_dir: Path, outside: Path) -> Path:
+    """Move the real run directory aside and point its name at ``outside``.
+
+    Unlike an rmtree-then-symlink swap this keeps the original inode reachable
+    under a new name, so a test can prove where a descriptor-relative write
+    actually landed instead of only proving it failed.
+    """
+    moved = run_dir.with_name(f"{run_dir.name}.moved")
+    run_dir.rename(moved)
+    run_dir.symlink_to(outside, target_is_directory=True)
+    return moved
+
+
+def _swap_once(monkeypatch, module, attribute: str, run_dir: Path, outside: Path) -> list[Path]:
+    """Patch one writer stage to swap the run directory on its first call."""
+    real = getattr(module, attribute)
+    moved: list[Path] = []
+
+    def wrapper(*args, **kwargs):
+        if not moved:
+            moved.append(_swap_aside(run_dir, outside))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(module, attribute, wrapper)
+    return moved
+
+
+def _assert_outside_untouched(outside: Path, outside_json: Path, before: bytes) -> None:
+    assert outside_json.read_bytes() == before
+    assert json.loads(before)["marker"] == "outside-canary"
+    assert not (outside / "events").exists()
+    assert not (outside / "revisions").exists()
+    assert sorted(child.name for child in outside.iterdir()) == ["run.json"]
+
+
+def _reap_under_swap(tmp_path, capsys, monkeypatch, module, attribute, *, run_id, extra=None):
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, run_id, extra=dict(extra or JOURNAL_REQUESTED))
+    _write_stale_lock(repo, run_dir)
+    outside, outside_json, before = _outside_canary(tmp_path, f"outside-{run_id}")
+    moved = _swap_once(monkeypatch, module, attribute, run_dir, outside)
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert moved, "the patched stage never ran, so no swap was exercised"
+    _assert_outside_untouched(outside, outside_json, before)
+    return payload, moved[0]
+
+
+def test_swap_before_journal_activation_never_writes_outside_the_bound_run(tmp_path, capsys, monkeypatch):
+    payload, moved = _reap_under_swap(
+        tmp_path,
+        capsys,
+        monkeypatch,
+        run_lifecycle,
+        "prepare_lifecycle_journal",
+        run_id="20260820-120000-bnd00001",
+    )
+    assert not (moved / "events" / "lifecycle.jsonl").exists() or (moved / "events" / "lifecycle.jsonl").is_file()
+    assert payload["reaped"] or payload["skipped"]
+
+
+def test_swap_before_the_checkpoint_write_never_writes_outside_the_bound_run(tmp_path, capsys, monkeypatch):
+    payload, moved = _reap_under_swap(
+        tmp_path,
+        capsys,
+        monkeypatch,
+        run_checkpoint,
+        "write_checkpoint",
+        run_id="20260820-120000-bnd00002",
+    )
+    checkpoints = moved / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    if payload["reaped"]:
+        assert checkpoints.is_dir()
+    assert payload["reaped"] or payload["skipped"]
+
+
+def test_swap_before_the_lifecycle_append_never_writes_outside_the_bound_run(tmp_path, capsys, monkeypatch):
+    payload, moved = _reap_under_swap(
+        tmp_path,
+        capsys,
+        monkeypatch,
+        run_lifecycle,
+        "record_lifecycle_transition",
+        run_id="20260820-120000-bnd00003",
+    )
+    assert payload["reaped"] or payload["skipped"]
+    assert (moved / "run.json").is_file()
+
+
+def test_swap_before_the_shadow_transition_never_writes_outside_the_bound_run(tmp_path, capsys, monkeypatch):
+    from brigade import run_shadow
+
+    payload, moved = _reap_under_swap(
+        tmp_path,
+        capsys,
+        monkeypatch,
+        run_shadow,
+        "record_shadow_comparison",
+        run_id="20260820-120000-bnd00004",
+    )
+    assert payload["reaped"] or payload["skipped"]
+    assert (moved / "run.json").is_file()
+
+
+def test_swap_before_the_terminal_run_json_write_lands_on_the_original_inode(tmp_path, capsys, monkeypatch):
+    """The last write in the transaction must still reach the bound inode."""
+    repo = _repo(tmp_path)
+    run_id = "20260820-120000-bnd00005"
+    run_dir = _write_run(repo, run_id, extra=dict(JOURNAL_REQUESTED))
+    _write_stale_lock(repo, run_dir)
+    outside, outside_json, before = _outside_canary(tmp_path, "outside-terminal")
+
+    real_write = localio.write_text_atomic
+    moved: list[Path] = []
+
+    def swap_then_write(path: Path, data: str) -> None:
+        if not moved and Path(path).name == "run.json":
+            moved.append(_swap_aside(run_dir, outside))
+        return real_write(path, data)
+
+    monkeypatch.setattr(localio, "write_text_atomic", swap_then_write)
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert moved, "the terminal run.json write never ran"
+    _assert_outside_untouched(outside, outside_json, before)
+    assert [row["run_id"] for row in payload["reaped"]] == [run_id]
+    # The descriptor-relative write landed on the inode the reaper bound, which
+    # the swap moved aside; the symlink target never saw it.
+    assert json.loads((moved[0] / "run.json").read_text())["status"] == "orphaned"
+
+
+def test_swap_during_the_reaper_transaction_before_any_writer_fails_closed(tmp_path, capsys, monkeypatch):
+    """A swap that lands between the lock and the binding is a CAS loss."""
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-bnd00006", extra=dict(JOURNAL_REQUESTED))
+    _write_stale_lock(repo, run_dir)
+    outside, outside_json, before = _outside_canary(tmp_path, "outside-transaction")
+    moved: list[Path] = []
+    real_lock = runguard.run_lock
+
+    def swap_then_lock(*args, **kwargs):
+        if not moved:
+            moved.append(_swap_aside(run_dir, outside))
+        return real_lock(*args, **kwargs)
+
+    monkeypatch.setattr(runguard, "run_lock", swap_then_lock)
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert [row["reason"] for row in payload["skipped"]] == ["concurrently-changed"]
+    _assert_outside_untouched(outside, outside_json, before)
+    assert json.loads((moved[0] / "run.json").read_text())["status"] == "dispatching"
+
+
+def test_symlinked_events_directory_fails_closed_and_writes_nothing_outside(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-bnd00007", extra=dict(JOURNAL_REQUESTED))
+    _write_stale_lock(repo, run_dir)
+    outside = tmp_path / "outside-events"
+    outside.mkdir()
+    (run_dir / "events").symlink_to(outside, target_is_directory=True)
+    before = (run_dir / "run.json").read_bytes()
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert [row["reason"] for row in payload["skipped"]] == ["write-refused"]
+    assert (run_dir / "run.json").read_bytes() == before
+    assert list(outside.iterdir()) == []
+
+
+def test_symlinked_recovery_checkpoints_directory_fails_closed(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-bnd00008", extra=dict(JOURNAL_REQUESTED))
+    _write_stale_lock(repo, run_dir)
+    outside = tmp_path / "outside-checkpoints"
+    outside.mkdir()
+    (run_dir / "events").mkdir()
+    (run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME).symlink_to(outside, target_is_directory=True)
+    before = (run_dir / "run.json").read_bytes()
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert [row["reason"] for row in payload["skipped"]] == ["write-refused"]
+    assert (run_dir / "run.json").read_bytes() == before
+    assert list(outside.iterdir()) == []
+
+
+def test_write_refused_under_a_swap_retains_the_claimed_lock(tmp_path, capsys, monkeypatch):
+    """Exception cleanup: a refused bound transaction keeps the recovery claim."""
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-bnd00009", extra=dict(JOURNAL_REQUESTED))
+    _write_stale_lock(repo, run_dir)
+    outside, outside_json, before = _outside_canary(tmp_path, "outside-refused")
+    moved: list[Path] = []
+
+    def swap_then_refuse(*args, **kwargs):
+        if not moved:
+            moved.append(_swap_aside(run_dir, outside))
+        raise run_checkpoint.CheckpointError("checkpoint refused after swap", category="test")
+
+    monkeypatch.setattr(run_checkpoint, "write_checkpoint", swap_then_refuse)
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert [row["reason"] for row in payload["skipped"]] == ["write-refused"]
+    _assert_outside_untouched(outside, outside_json, before)
+    owner = json.loads((repo / ".brigade" / "run.lock" / "owner.json").read_text())
+    assert owner["pid"] == os.getpid()
+    assert json.loads((moved[0] / "run.json").read_text())["status"] == "dispatching"
+
+
+def _open_descriptor_count() -> int | None:
+    try:
+        return len(os.listdir("/proc/self/fd"))
+    except OSError:
+        return None
+
+
+def test_the_bound_transaction_closes_every_descriptor_on_both_paths(tmp_path, capsys, monkeypatch):
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-bnd00010", extra=dict(JOURNAL_REQUESTED))
+    refused = _write_run(repo, "20260820-120000-bnd00011", extra=dict(JOURNAL_REQUESTED))
+    _write_stale_lock(repo, refused)
+
+    baseline = _open_descriptor_count()
+    if baseline is None:
+        pytest.skip("descriptor accounting needs /proc/self/fd")
+
+    assert _reap(repo) == 0
+    capsys.readouterr()
+    assert _open_descriptor_count() == baseline
+
+    _write_stale_lock(repo, refused)
+
+    def refuse(*args, **kwargs):
+        raise run_checkpoint.CheckpointError("checkpoint refused in test", category="test")
+
+    monkeypatch.setattr(run_checkpoint, "write_checkpoint", refuse)
+    assert _reap(repo) == 0
+    capsys.readouterr()
+    assert _open_descriptor_count() == baseline
+
+
+def test_no_binding_parity_for_ordinary_run_json_writers(tmp_path):
+    """Ordinary callers never activate a binding and keep pathname behavior."""
+    from brigade import aboyeur, receipt_schema
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-bnd00012", extra=dict(JOURNAL_REQUESTED))
+    run_json = run_dir / "run.json"
+    assert run_dirfd.active_binding_for(run_json) is None
+
+    payload = json.loads(run_json.read_text())
+    payload["status"] = "planning"
+    with runguard.run_lock(repo, run_dir=run_dir, wait_seconds=0):
+        aboyeur._write_json(run_json, receipt_schema.stamp_run_receipt(payload))
+    assert run_dirfd.active_binding_for(run_json) is None
+    assert json.loads(run_json.read_text())["status"] == "planning"
+    assert (run_dir / "events" / "lifecycle.jsonl").is_file()
+
+
+def test_bound_helpers_match_pathname_helpers_without_a_binding(tmp_path):
+    events = tmp_path / "events"
+    events.mkdir()
+    present = events / "lifecycle.jsonl"
+    present.write_bytes(b"payload\n")
+    missing = events / "absent.jsonl"
+    link = events / "link.jsonl"
+    link.symlink_to(present)
+
+    assert run_journal.bound_is_file(present) is present.is_file()
+    assert run_journal.bound_is_file(missing) is missing.is_file()
+    assert run_journal.bound_is_file(link) is link.is_file()
+    assert run_journal.bound_is_dir(events) is events.is_dir()
+    assert run_journal.bound_exists(link) is link.exists()
+    assert run_journal.bound_lexists(link) is os.path.lexists(link)
+    assert run_journal.bound_read_bytes(present) == present.read_bytes()
+    assert run_journal.bound_read_bytes(link) == present.read_bytes()
+    assert run_journal.bound_lstat(present).st_ino == present.lstat().st_ino
+    assert run_journal.bound_lstat(missing) is None
+    assert run_journal.normalize_run_dir(tmp_path) == tmp_path.expanduser().resolve()
+
+
+def test_bound_helpers_stay_on_the_bound_inode_after_a_swap(tmp_path):
+    """A swap after bind cannot redirect a bound read, stat, or normalization."""
+    from brigade import run_dirfd as dirfd_module
+
+    run_dir = tmp_path / "run"
+    (run_dir / "events").mkdir(parents=True)
+    (run_dir / "run.json").write_bytes(b'{"status": "dispatching"}\n')
+    (run_dir / "events" / "lifecycle.jsonl").write_bytes(b"bound\n")
+
+    outside = tmp_path / "outside"
+    (outside / "events").mkdir(parents=True)
+    (outside / "run.json").write_bytes(b'{"status": "outside"}\n')
+    (outside / "events" / "lifecycle.jsonl").write_bytes(b"outside\n")
+
+    with dirfd_module.bound_run_dir(run_dir) as bound:
+        moved = _swap_aside(run_dir, outside)
+        assert run_journal.normalize_run_dir(run_dir) == bound.path
+        assert run_journal.bound_read_bytes(run_dir / "run.json") == b'{"status": "dispatching"}\n'
+        assert run_journal.bound_read_bytes(run_dir / "events" / "lifecycle.jsonl") == b"bound\n"
+        assert run_journal.bound_is_file(run_dir / "events" / "lifecycle.jsonl")
+        assert run_journal.bound_lstat(run_dir / "run.json") is not None
+    assert (moved / "run.json").read_bytes() == b'{"status": "dispatching"}\n'
+    assert (outside / "run.json").read_bytes() == b'{"status": "outside"}\n'
+
+
+def test_a_symlinked_journal_inside_a_binding_is_refused_not_followed(tmp_path):
+    from brigade import run_dirfd as dirfd_module
+
+    run_dir = tmp_path / "run"
+    (run_dir / "events").mkdir(parents=True)
+    outside = tmp_path / "outside.jsonl"
+    outside.write_bytes(b"outside\n")
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    journal.symlink_to(outside)
+
+    with dirfd_module.bound_run_dir(run_dir):
+        assert run_journal.bound_is_file(journal) is False
+        with pytest.raises(run_journal.RunJournalError) as excinfo:
+            run_journal.ensure_journal(journal)
+    assert "lifecycle.jsonl" in excinfo.value.diagnostic
+    assert outside.read_bytes() == b"outside\n"
+
+
+def test_swap_before_the_sanctioned_writer_poisons_no_write_outside_the_run(tmp_path, capsys, monkeypatch):
+    """The swap lands between the reaper's CAS read and ``aboyeur._write_json``.
+
+    ``aboyeur.run_io`` still reads the prior ``run.json`` snapshot by pathname
+    (its authority and transition gates), so a swap here can feed those gates
+    outside bytes. That is the one residual of this slice: it is a read, and
+    every write in the transaction is descriptor-bound, so the outside
+    directory is never mutated and the run is never silently terminalized
+    somewhere else.
+    """
+    from brigade import receipt_schema
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-bnd00013", extra=dict(JOURNAL_REQUESTED))
+    _write_stale_lock(repo, run_dir)
+    outside, outside_json, before = _outside_canary(tmp_path, "outside-poison")
+    real_stamp = receipt_schema.stamp_run_receipt
+    moved: list[Path] = []
+
+    def swap_then_stamp(payload):
+        if not moved:
+            moved.append(_swap_aside(run_dir, outside))
+        return real_stamp(payload)
+
+    monkeypatch.setattr(receipt_schema, "stamp_run_receipt", swap_then_stamp)
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert moved, "the sanctioned writer never ran"
+    _assert_outside_untouched(outside, outside_json, before)
+    written = json.loads((moved[0] / "run.json").read_text())
+    if payload["reaped"]:
+        assert written["status"] == "orphaned"
+    else:
+        assert written["status"] == "dispatching"
