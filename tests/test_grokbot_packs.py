@@ -17,6 +17,7 @@ PACK_IDS = (
     "cerebro-memory",
     "fleet-steward",
     "implementation-worker",
+    "obsidian-operator",
     "operator",
     "repository-scout",
 )
@@ -42,6 +43,14 @@ BACKUP_TOOLS = (
     "backup_propose_action",
     "backup_restore_readiness",
     "backup_target_status",
+)
+OBSIDIAN_TOOLS = (
+    "obsidian_action_status",
+    "obsidian_capabilities",
+    "obsidian_execute_action",
+    "obsidian_propose_action",
+    "obsidian_read",
+    "obsidian_search",
 )
 
 
@@ -102,6 +111,11 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
             assert shown["tools"] == list(CEREBRO_TOOLS)
             assert shown["default_bind"] == "127.0.0.1:8770"
             assert shown["public_route"] == ""
+        elif pack["id"] == "obsidian-operator":
+            assert pack["kind"] == "connector"
+            assert shown["tools"] == list(OBSIDIAN_TOOLS)
+            assert shown["default_bind"] == "127.0.0.1:8773"
+            assert shown["public_route"] == "/mcp"
         else:
             assert pack["kind"] == "connector"
             assert pack["id"] == "fleet-steward"
@@ -183,6 +197,7 @@ def test_first_party_queue_packs_keep_isolated_ports_tools_and_credentials():
     assert grokbot_mcp.parse_bind(packs["cerebro-memory"]["default_bind"])[1] == 8770
     assert grokbot_mcp.parse_bind(packs["fleet-steward"]["default_bind"])[1] == 8771
     assert grokbot_mcp.parse_bind(packs["backup-steward"]["default_bind"])[1] == 8772
+    assert grokbot_mcp.parse_bind(packs["obsidian-operator"]["default_bind"])[1] == 8773
     assert packs["operator"]["tools"] == _queue_tools("operator")
     assert packs["repository-scout"]["tools"] == _queue_tools("repository-scout")
     assert packs["implementation-worker"]["tools"] == _queue_tools("implementation-worker")
@@ -990,6 +1005,14 @@ def test_fleet_setup_refuses_queue_and_cerebro_default_ports(tmp_path: Path, mon
             bearer_env="TEST_GROKBOT_BEARER",
             **paths,
         )
+    with _reject("duplicate-port"):
+        grokbot_packs.apply_setup(
+            tmp_path,
+            "fleet-steward",
+            bind="127.0.0.1:8773",
+            bearer_env="TEST_GROKBOT_BEARER",
+            **paths,
+        )
     assert grokbot_ops.load_config(tmp_path, "operator")["bind"] == "127.0.0.1:8766"
 
 
@@ -1045,7 +1068,7 @@ def test_backup_setup_preview_apply_and_rejects_foreign_keys(tmp_path: Path, mon
 def test_backup_setup_refuses_existing_default_ports(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
     paths = _fleet_paths(tmp_path)
-    for bind in ("127.0.0.1:8766", "127.0.0.1:8770", "127.0.0.1:8771"):
+    for bind in ("127.0.0.1:8766", "127.0.0.1:8770", "127.0.0.1:8771", "127.0.0.1:8773"):
         with _reject("duplicate-port"):
             grokbot_packs.apply_setup(
                 tmp_path,
@@ -1093,3 +1116,154 @@ def test_backup_setup_keeps_prior_config_on_failed_rewrite(tmp_path: Path, monke
             **paths,
         )
     assert pack_path.read_bytes() == prior
+
+
+def _obsidian_paths(tmp_path: Path) -> dict[str, Path]:
+    runtime = tmp_path / "obsidian-runtime.json"
+    actions = tmp_path / "obsidian-actions"
+    approvals = tmp_path / "obsidian-approvals"
+    staging = tmp_path / "obsidian-staging"
+    helper = tmp_path / "excalidraw-helper"
+    runtime.write_text("{}\n", encoding="utf-8")
+    actions.mkdir(mode=0o700)
+    approvals.mkdir(mode=0o700)
+    staging.mkdir(mode=0o700)
+    helper.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(actions, 0o700)
+    os.chmod(approvals, 0o700)
+    os.chmod(staging, 0o700)
+    os.chmod(helper, 0o755)
+    return {
+        "runtime_path": runtime,
+        "action_state_path": actions,
+        "approval_dir": approvals,
+        "staging_dir": staging,
+        "excalidraw_bin": helper,
+    }
+
+
+def _obsidian_setup_kwargs(tmp_path: Path, monkeypatch) -> dict[str, object]:
+    monkeypatch.setenv("TEST_GROKBOT_UPSTREAM", "u" * 16)
+    return {
+        **_obsidian_paths(tmp_path),
+        "upstream_url": "https://127.0.0.1:27124/",
+        "upstream_key_env": "TEST_GROKBOT_UPSTREAM",
+    }
+
+
+def test_obsidian_is_closed_connector_not_a_steward():
+    pack = grokbot_packs.show_pack("obsidian-operator")
+    assert pack["kind"] == "connector"
+    assert pack["instance"] == "obsidian-operator"
+    assert pack["default_bind"] == "127.0.0.1:8773"
+    assert pack["public_route"] == "/mcp"
+    assert pack["tools"] == list(OBSIDIAN_TOOLS)
+    assert "obsidian-operator" not in grokbot_packs.STEWARD_PACK_IDS
+    with _reject("unknown-pack"):
+        grokbot_packs.show_pack("obsidian")
+
+
+def test_obsidian_setup_preview_apply_and_rejects_foreign_keys(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    kwargs = _obsidian_setup_kwargs(tmp_path, monkeypatch)
+    preview = grokbot_packs.preview_setup(
+        tmp_path,
+        "obsidian-operator",
+        bearer_env="TEST_GROKBOT_BEARER",
+        **kwargs,
+    )
+    assert preview["apply"] is False
+    assert preview["bind"] == "127.0.0.1:8773"
+    dumped = json.dumps(preview)
+    assert str(kwargs["runtime_path"]) not in dumped
+    assert str(kwargs["excalidraw_bin"]) not in dumped
+    assert SECRET not in dumped
+    assert "u" * 16 not in dumped
+    assert not grokbot_packs.instance_config_path(tmp_path, "obsidian-operator").exists()
+    assert not grokbot_ops.config_path(tmp_path, "obsidian-operator").exists()
+
+    applied = grokbot_packs.apply_setup(
+        tmp_path,
+        "obsidian-operator",
+        bearer_env="TEST_GROKBOT_BEARER",
+        **kwargs,
+    )
+    pack_path = grokbot_packs.instance_config_path(tmp_path, "obsidian-operator")
+    assert applied["apply"] is True
+    assert pack_path.is_file()
+    assert pack_path.stat().st_mode & 0o777 == 0o600
+    assert not grokbot_ops.config_path(tmp_path, "obsidian-operator").exists()
+    config = json.loads(pack_path.read_text(encoding="utf-8"))
+    assert set(config) == grokbot_packs.OBSIDIAN_INSTANCE_KEYS
+    assert SECRET not in json.dumps(config)
+    assert "cli_executable" not in config
+    assert "ledger_path" not in config
+    assert config["public_route"] == "/mcp"
+    assert config["runtime_path"] == str(kwargs["runtime_path"])
+    assert config["bearer"] == {"kind": "env", "name": "TEST_GROKBOT_BEARER"}
+    assert config["upstream_url"] == "https://127.0.0.1:27124/"
+    assert config["upstream_key"] == {"kind": "env", "name": "TEST_GROKBOT_UPSTREAM"}
+    assert "u" * 16 not in json.dumps(config)
+
+    executable, workdir = _cerebro_paths(tmp_path)
+    with _reject("unexpected-key"):
+        grokbot_packs.apply_setup(
+            tmp_path,
+            "obsidian-operator",
+            bearer_env="TEST_GROKBOT_BEARER",
+            cli_executable=executable,
+            workdir=workdir,
+            **kwargs,
+        )
+    with _reject("unexpected-key"):
+        grokbot_packs.apply_setup(
+            tmp_path,
+            "obsidian-operator",
+            bearer_env="TEST_GROKBOT_BEARER",
+            ledger_path=tmp_path / "ledger.json",
+            **kwargs,
+        )
+    with _reject("missing-path-reference"):
+        grokbot_packs.preview_setup(tmp_path, "obsidian-operator", bearer_env="TEST_GROKBOT_BEARER")
+    with _reject("missing-upstream-reference"):
+        grokbot_packs.preview_setup(
+            tmp_path,
+            "obsidian-operator",
+            bearer_env="TEST_GROKBOT_BEARER",
+            runtime_path=kwargs["runtime_path"],
+            action_state_path=kwargs["action_state_path"],
+            approval_dir=kwargs["approval_dir"],
+            staging_dir=kwargs["staging_dir"],
+            excalidraw_bin=kwargs["excalidraw_bin"],
+        )
+    with _reject("unexpected-key"):
+        grokbot_packs.preview_setup(
+            tmp_path,
+            "operator",
+            bearer_env="TEST_GROKBOT_BEARER",
+            upstream_url="https://127.0.0.1:27124/",
+            upstream_key_env="TEST_GROKBOT_UPSTREAM",
+        )
+
+
+def test_obsidian_setup_refuses_existing_default_ports(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    kwargs = _obsidian_setup_kwargs(tmp_path, monkeypatch)
+    for bind in ("127.0.0.1:8766", "127.0.0.1:8770", "127.0.0.1:8771", "127.0.0.1:8772"):
+        with _reject("duplicate-port"):
+            grokbot_packs.apply_setup(
+                tmp_path,
+                "obsidian-operator",
+                bind=bind,
+                bearer_env="TEST_GROKBOT_BEARER",
+                **kwargs,
+            )
+    grokbot_packs.apply_setup(tmp_path, "operator", bearer_env="TEST_GROKBOT_BEARER")
+    with _reject("duplicate-port"):
+        grokbot_packs.apply_setup(
+            tmp_path,
+            "operator",
+            bind="127.0.0.1:8773",
+            bearer_env="TEST_GROKBOT_BEARER",
+        )
+    assert grokbot_ops.load_config(tmp_path, "operator")["bind"] == "127.0.0.1:8766"
