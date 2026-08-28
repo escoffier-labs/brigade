@@ -38,6 +38,16 @@ def _sidecar_revisions(run_dir: Path, sidecar: str) -> list[Path]:
     return sorted((run_dir / "revisions" / sidecar).glob("*.json"))
 
 
+def test_artifact_helper_imports_before_aboyeur_facade() -> None:
+    result = subprocess.run(
+        [sys.executable, "-c", "import brigade.aboyeur_artifacts"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_approval_handoff_selects_completed_requester_not_unrelated_workers(tmp_path):
     results = [
         aboyeur.WorkerResult(
@@ -3237,6 +3247,25 @@ def test_roster_payload_includes_read_only_capability():
 
     assert payload["agents"]["chef"]["read_only_capable"] is True
     assert payload["agents"]["coder"]["read_only_capable"] is False
+
+
+def test_roster_payload_includes_cloud_safe_mode():
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="plan"),
+            "cloud-worker": Agent(
+                name="cloud-worker",
+                cli="codex-cloud:env-123",
+                role="implement",
+                cloud_safe_mode=True,
+            ),
+        },
+    )
+    payload = aboyeur._roster_payload(roster)
+
+    assert payload["agents"]["cloud-worker"]["cloud_safe_mode"] is True
+    assert payload["agents"]["chef"]["cloud_safe_mode"] is False
 
 
 def test_direct_worker_rejects_incapable_read_only_seat_after_bootstrap_only(monkeypatch, tmp_path, capsys):

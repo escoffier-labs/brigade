@@ -334,6 +334,7 @@ class WorkerResult:
     failure_phase: str | None = None
     failure_kind: str | None = None
     transport_warning: dict[str, object] | None = None
+    cloud_environment: dict[str, str] | None = None
     env_overrides: tuple[str, ...] = ()
     endpoint_host: str | None = None
     attempts: tuple[WorkerAttempt, ...] = ()
@@ -470,6 +471,7 @@ def dispatch(
     on_failed_attempt_persisted: Callable[[WorkerResult], None] | None = None,
     run_id: str | None = None,
     output_dir: Path | None = None,
+    model_lease: Callable[[Agent], Any] | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
 
@@ -510,8 +512,13 @@ def dispatch(
         accepts_var_keyword = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
         accepts_registry = accepts_var_keyword or any(parameter.name == "process_registry" for parameter in parameters)
         accepts_env = accepts_var_keyword or any(parameter.name == "env" for parameter in parameters)
+        accepts_cloud_safe_mode = accepts_var_keyword or any(
+            parameter.name == "cloud_safe_mode" for parameter in parameters
+        )
         if not accepts_registry:
             kwargs.pop("process_registry", None)
+        if not accepts_cloud_safe_mode:
+            kwargs.pop("cloud_safe_mode", None)
         if orchestrator_run_id is not None:
             # Real agents.run_agent accepts env=; legacy fixed-signature test
             # doubles do not. Mirror the process_registry gate so BRIGADE_RUN_ID
@@ -616,6 +623,7 @@ def dispatch(
             assert selected_agent.cli is not None
             cli_ref = selected_agent.cli
             seat_process_registry = process_registry.for_seat(selected_agent.name)
+            cloud_dispatch_kwargs = {"cloud_safe_mode": selected_agent.cloud_safe_mode}
             if selected_agent.transport == "acpx":
                 from . import acpx_adapter
 
@@ -648,6 +656,7 @@ def dispatch(
                     **direct_command_kwargs(selected_agent),
                     resume_session_id=resume_session_id,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                 )
             if selected_agent.env is not None:
                 # Env seats always dispatch through the direct CLI path. The
@@ -667,6 +676,7 @@ def dispatch(
                     read_only=effective_read_only,
                     env=dict(selected_agent.env),
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                     **env_kwargs,
                 )
@@ -726,6 +736,7 @@ def dispatch(
                     cwd=cwd,
                     read_only=effective_read_only,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                 )
             if sandbox is not None and selected_agent.model is None and selected_agent.reasoning is None:
@@ -737,6 +748,7 @@ def dispatch(
                     read_only=effective_read_only,
                     sandbox=sandbox,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                 )
             if sandbox is None and selected_agent.model is not None and selected_agent.reasoning is None:
@@ -748,6 +760,7 @@ def dispatch(
                     read_only=effective_read_only,
                     model=selected_agent.model,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                 )
             if sandbox is None and selected_agent.model is None and selected_agent.reasoning is not None:
@@ -759,6 +772,7 @@ def dispatch(
                     read_only=effective_read_only,
                     reasoning=selected_agent.reasoning,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                 )
             if sandbox is not None and selected_agent.model is not None and selected_agent.reasoning is None:
@@ -771,6 +785,7 @@ def dispatch(
                     sandbox=sandbox,
                     model=selected_agent.model,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                 )
             if sandbox is not None and selected_agent.model is None and selected_agent.reasoning is not None:
@@ -783,6 +798,7 @@ def dispatch(
                     sandbox=sandbox,
                     reasoning=selected_agent.reasoning,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                 )
             if sandbox is None and selected_agent.model is not None and selected_agent.reasoning is not None:
@@ -795,6 +811,7 @@ def dispatch(
                     model=selected_agent.model,
                     reasoning=selected_agent.reasoning,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                 )
             assert sandbox is not None
@@ -810,6 +827,7 @@ def dispatch(
                 model=selected_agent.model,
                 reasoning=selected_agent.reasoning,
                 process_registry=seat_process_registry,
+                **cloud_dispatch_kwargs,
                 **direct_command_kwargs(selected_agent),
             )
 
@@ -829,7 +847,22 @@ def dispatch(
                 return blocked
             attempt = on_dispatch_requested(selected_agent) if on_dispatch_requested is not None else None
             try:
-                result = _invoke_external(selected_agent, selected_prompt, resume_session_id=resume_session_id)
+                if model_lease is None:
+                    result = _invoke_external(selected_agent, selected_prompt, resume_session_id=resume_session_id)
+                else:
+                    with model_lease(selected_agent) as lease_error:
+                        if lease_error is not None:
+                            result = agents.AgentResult(
+                                text="",
+                                ok=False,
+                                detail=lease_error,
+                                failure_phase="preflight",
+                                failure_kind="fleet-model-policy",
+                            )
+                        else:
+                            result = _invoke_external(
+                                selected_agent, selected_prompt, resume_session_id=resume_session_id
+                            )
             except BaseException:
                 if attempt is not None and on_dispatch_failed is not None:
                     on_dispatch_failed(selected_agent, attempt)
@@ -885,6 +918,7 @@ def dispatch(
                     result.failure_kind if captured.delivered or result.failure_kind is not None else "unclassified"
                 ),
                 transport_warning=result.transport_warning,
+                cloud_environment=result.cloud_environment,
                 thread_id=result.thread_id,
                 status=result.status,
                 stdout=_bound_capture_text(result.stdout),

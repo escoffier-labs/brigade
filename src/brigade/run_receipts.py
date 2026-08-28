@@ -79,6 +79,8 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
                 entry["failure"] = failure.payload()
         if result.transport_warning is not None:
             entry["transport_warning"] = dict(result.transport_warning)
+        if result.cloud_environment is not None:
+            entry["cloud_environment"] = dict(result.cloud_environment)
         if result.output_truncated:
             entry["output_truncated"] = True
         if result.thread_id is not None:
@@ -171,6 +173,8 @@ def agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
         payload["failure_kind"] = result.failure_kind
     if result.transport_warning is not None:
         payload["transport_warning"] = dict(result.transport_warning)
+    if result.cloud_environment is not None:
+        payload["cloud_environment"] = dict(result.cloud_environment)
     if result.exit_code is not None:
         payload["exit_code"] = result.exit_code
     if result.exit_code is not None or result.timed_out:
@@ -226,6 +230,7 @@ def agent_result_from_worker(result: WorkerResult) -> agents.AgentResult:
         request_id=result.request_id,
         acpx_version=result.acpx_version,
         safe_events=result.safe_events,
+        cloud_environment=result.cloud_environment,
     )
 
 

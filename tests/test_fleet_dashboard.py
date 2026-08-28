@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import http.client
 import json
 import threading
@@ -81,14 +82,14 @@ def _seed(hub) -> None:
 
 
 def _login_cookie(hub) -> str:
-    status, headers, _text = _request(hub, "GET", f"/?token={TOKEN}")
+    status, headers, _text = _request(hub, "GET", f"/view/machines?token={TOKEN}")
     assert status == 303
     return headers["set-cookie"].split(";")[0]
 
 
 class TestDashboardAuth:
     def test_requires_bearer_or_cookie(self, hub):
-        for path in ("/", "/view/machines", "/view/repos"):
+        for path in ("/view/machines", "/view/repos"):
             status, headers, text = _request(hub, "GET", path)
             assert status == 401, path
             assert "set-cookie" not in headers
@@ -99,7 +100,7 @@ class TestDashboardAuth:
         assert status == 401
 
     def test_bearer_renders_html_with_security_headers(self, hub):
-        status, headers, text = _request(hub, "GET", "/", headers=_bearer())
+        status, headers, text = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert status == 200
         assert headers["content-type"].startswith("text/html")
         assert "nonce-" in headers["content-security-policy"]
@@ -132,13 +133,13 @@ class TestDashboardAuth:
         assert TOKEN not in text
 
     def test_wrong_token_query_sets_no_cookie(self, hub):
-        status, headers, _text = _request(hub, "GET", "/?token=wrong")
+        status, headers, _text = _request(hub, "GET", "/view/machines?token=wrong")
         assert status == 401
         assert "set-cookie" not in headers
 
     def test_cookie_grants_dashboard_only(self, hub):
         cookie = _login_cookie(hub)
-        status, _headers, text = _request(hub, "GET", "/", headers={"Cookie": cookie})
+        status, _headers, text = _request(hub, "GET", "/view/machines", headers={"Cookie": cookie})
         assert status == 200
         assert "Fleet: Machines" in text
         status, _headers, _text = _request(hub, "GET", "/view/repos", headers={"Cookie": cookie})
@@ -160,7 +161,7 @@ class TestDashboardAuth:
 class TestBoards:
     def test_machine_board_renders_seeded_events_and_claims(self, hub):
         _seed(hub)
-        status, _headers, text = _request(hub, "GET", "/", headers=_bearer())
+        status, _headers, text = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert status == 200
         assert f'data-node="{NODE_A}"' in text
         assert f'data-node="{NODE_B}"' in text
@@ -179,7 +180,7 @@ class TestBoards:
 
     def test_include_finished_shows_terminal_runs(self, hub):
         _seed(hub)
-        _status, _headers, text = _request(hub, "GET", "/?all=1", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
         assert "runcharlie" in text
         assert "succeeded" in text
 
@@ -195,8 +196,9 @@ class TestBoards:
         repo_a = by_repo["repo-a"]
         assert "11111111-111" in repo_a and "worker/claude" in repo_a and "running" in repo_a
         assert "22222222-222 · orch ·" in repo_a and "left" in repo_a
-        assert "collision" in repo_a  # running on A, claimed by B
-        assert 'data-collision="1"' in repo_a
+        # Claim-owner drift is visible in the two columns, but only two
+        # concurrently active nodes qualify as a collision.
+        assert 'data-collision="0"' in repo_a
         repo_b = by_repo["repo-b"]
         assert "awaiting approval" in repo_b and 'data-collision="0"' in repo_b
         repo_c = by_repo["repo-c"]
@@ -229,12 +231,12 @@ class TestBoards:
         }
         status, _headers, text = _request(hub, "POST", "/claims", headers=_bearer(), body=claim)
         assert status == 200, text
-        _status, _headers, text = _request(hub, "GET", "/", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert "repo-x" in text
         assert "grokbot" in text and "lease-x" in text
         assert "holder-secret" not in text
         assert "vr-1" not in text
-        _status, _headers, all_text = _request(hub, "GET", "/?all=1", headers=_bearer())
+        _status, _headers, all_text = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
         assert "vr-1" in all_text
         assert "succeeded" in all_text
         assert "holder-secret" not in all_text
@@ -253,14 +255,14 @@ class TestBoards:
         ]
         status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
         assert status == 200, text
-        _status, _headers, all_text = _request(hub, "GET", "/?all=1", headers=_bearer())
+        _status, _headers, all_text = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
         fail_row = next(row for row in all_text.split("<tr") if "vr-fail" in row)
         int_row = next(row for row in all_text.split("<tr") if "vr-int" in row)
         assert 'data-bucket="failed"' in fail_row
         assert 'data-bucket="interrupted"' in int_row
 
     def test_empty_hub_renders(self, hub):
-        _status, _headers, text = _request(hub, "GET", "/", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert "No fleet events recorded yet." in text
         _status, _headers, text = _request(hub, "GET", "/view/repos", headers=_bearer())
         assert "No repos match." in text
@@ -269,25 +271,25 @@ class TestBoards:
 class TestSortAndFilter:
     def test_node_filter(self, hub):
         _seed(hub)
-        _status, _headers, text = _request(hub, "GET", "/?node=1111", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?node=1111", headers=_bearer())
         assert "runalpha" in text and "runbravo" not in text
         assert f'data-node="{NODE_B}"' not in text
 
     def test_attention_only(self, hub):
         _seed(hub)
-        _status, _headers, text = _request(hub, "GET", "/?attention=1", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?attention=1", headers=_bearer())
         assert "runbravo" in text and "runalpha" not in text
         _status, _headers, text = _request(hub, "GET", "/view/repos?attention=1", headers=_bearer())
         assert "repo-b" in text and "repo-c" not in text
-        assert "repo-a" in text  # collision counts as needing attention
+        assert "repo-a" not in text  # claim-owner drift alone is not a collision
 
     def test_state_and_seat_filters(self, hub):
         _seed(hub)
-        _status, _headers, text = _request(hub, "GET", "/?state=paused", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?state=paused", headers=_bearer())
         assert "runbravo" in text and "runalpha" not in text
-        _status, _headers, text = _request(hub, "GET", "/?state=running", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?state=running", headers=_bearer())
         assert "runalpha" in text and "runbravo" not in text
-        _status, _headers, text = _request(hub, "GET", "/?seat=codex", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?seat=codex", headers=_bearer())
         assert "runbravo" in text and "runalpha" not in text
 
     def test_repo_filter_on_repo_board(self, hub):
@@ -298,9 +300,9 @@ class TestSortAndFilter:
     def test_sort_orders_cards(self, hub):
         _seed(hub)
         # Default attention sort: the machine with an awaiting-approval run comes first.
-        _status, _headers, text = _request(hub, "GET", "/", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert text.index(f'data-node="{NODE_B}"') < text.index(f'data-node="{NODE_A}"')
-        _status, _headers, text = _request(hub, "GET", "/?sort=node", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?sort=node", headers=_bearer())
         assert text.index(f'data-node="{NODE_A}"') < text.index(f'data-node="{NODE_B}"')
         assert '<option value="node" selected>' in text
 
@@ -308,7 +310,7 @@ class TestSortAndFilter:
         _seed(hub)
         _status, _headers, text = _request(hub, "GET", "/view/repos", headers=_bearer())
         body = text.split("<tbody>")[1]
-        assert body.index("repo-a") < body.index("repo-b") < body.index("repo-c")  # collision, attention, idle
+        assert body.index("repo-b") < body.index("repo-a") < body.index("repo-c")  # attention, running, idle
         _status, _headers, text = _request(hub, "GET", "/view/repos?sort=repo", headers=_bearer())
         body = text.split("<tbody>")[1]
         assert body.index("repo-a") < body.index("repo-b") < body.index("repo-c")
@@ -318,8 +320,11 @@ class TestSortAndFilter:
 
     def test_filters_round_trip_in_links_and_form(self, hub):
         _seed(hub)
-        _status, _headers, text = _request(hub, "GET", "/?sort=age&node=1111&attention=1", headers=_bearer())
+        _status, _headers, text = _request(
+            hub, "GET", "/view/machines?sort=age&node=1111&attention=1", headers=_bearer()
+        )
         assert 'href="/view/repos?sort=age&amp;node=1111&amp;attention=1"' in text
+        assert 'href="/view/machines?sort=age&amp;node=1111&amp;attention=1"' in text
         assert 'name="node" value="1111"' in text
         assert 'name="attention" value="1" checked' in text
 
@@ -329,7 +334,7 @@ class TestNoSecretsInHtml:
         _seed(hub)
         cookie = _login_cookie(hub)
         cookie_value = cookie.split("=", 1)[1]
-        for path in ("/", "/view/machines", "/view/repos", "/?all=1&sort=node"):
+        for path in ("/view/machines", "/view/repos", "/view/machines?all=1&sort=node"):
             for headers in (_bearer(), {"Cookie": cookie}):
                 status, _headers, text = _request(hub, "GET", path, headers=headers)
                 assert status == 200
@@ -340,9 +345,77 @@ class TestNoSecretsInHtml:
 
     def test_filter_values_are_escaped(self, hub):
         _seed(hub)
-        _status, _headers, text = _request(hub, "GET", "/?node=%3Cscript%3Ex", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?node=%3Cscript%3Ex", headers=_bearer())
         assert "<script>x" not in text
         assert "&lt;script&gt;x" in text
+
+
+def _asset_request(hub, path: str):
+    """Raw bytes request for binary assets; does not decode as text."""
+    host, port = hub
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    conn.request("GET", path, headers={})
+    response = conn.getresponse()
+    data = response.read()
+    headers = {k.lower(): v for k, v in response.getheaders()}
+    result = (response.status, headers, data)
+    conn.close()
+    return result
+
+
+class TestAssets:
+    def test_asset_routes_served_without_auth(self, hub):
+        for path, expected_type in (
+            ("/favicon.ico", "image/x-icon"),
+            ("/favicon-32x32.png", "image/png"),
+            ("/apple-touch-icon.png", "image/png"),
+            ("/icon-192.png", "image/png"),
+            ("/icon-512.png", "image/png"),
+            ("/site.webmanifest", "application/manifest+json"),
+        ):
+            status, headers, body = _asset_request(hub, path)
+            assert status == 200, path
+            assert headers["content-type"].startswith(expected_type), path
+            assert int(headers["content-length"]) == len(body), path
+            assert headers["x-content-type-options"] == "nosniff", path
+            assert "public" in headers["cache-control"], path
+
+    def test_webmanifest_shape(self, hub):
+        status, _headers, body = _asset_request(hub, "/site.webmanifest")
+        assert status == 200
+        manifest = json.loads(body.decode("utf-8"))
+        assert manifest["name"] == "Brigade Fleet Hub"
+        assert manifest["short_name"] == "Fleet Hub"
+        assert manifest["start_url"] == "/"
+        assert manifest["display"] == "standalone"
+        assert manifest["theme_color"] == "#111617"
+        assert manifest["background_color"] == "#182022"
+        icons = {icon["sizes"]: icon for icon in manifest["icons"]}
+        assert "192x192" in icons and "512x512" in icons
+        for icon in manifest["icons"]:
+            assert icon["purpose"] == "any maskable"
+            assert icon["type"] == "image/png"
+
+    def test_unknown_asset_like_paths_still_404(self, hub):
+        for path in ("/favicon-64x64.png", "/site.webmanifest.json", "/assets/favicon.ico", "/icon-999.png"):
+            status, _headers, _text = _request(hub, "GET", path)
+            assert status == 404, path
+
+    def test_legacy_pages_include_asset_metadata(self, hub):
+        for path in ("/view/machines", "/view/repos"):
+            status, _headers, body = _request(hub, "GET", path, headers=_bearer())
+            assert status == 200, path
+            assert '<link rel="icon" type="image/x-icon" href="/favicon.ico"' in body
+            assert '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"' in body
+            assert '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"' in body
+            assert '<link rel="manifest" href="/site.webmanifest"' in body
+            assert '<meta name="theme-color" content="#111617"' in body
+            assert '<meta name="application-name" content="Fleet Hub"' in body
+            assert '<meta name="apple-mobile-web-app-title" content="Fleet Hub"' in body
+
+    def test_api_routes_still_require_auth(self, hub):
+        for path in ("/status", "/claims", "/nodes", "/cloud", "/models"):
+            assert _request(hub, "GET", path)[0] == 401, path
 
 
 class TestPureRendering:
@@ -398,6 +471,50 @@ class TestPureRendering:
         assert rows[0].bucket == "stale"
         assert fleet_dashboard.filter_rows(rows, fleet_dashboard.DashboardQuery(attention_only=True)) == rows
 
+    def test_terminal_suffixes_and_abandoned_rows_are_not_active(self):
+        now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+        old = (now - timedelta(hours=2)).isoformat()
+        rows = fleet_dashboard.build_rows(
+            [
+                {"node_id": "n", "run_id": "done", "state": "run.dispatch.completed", "ts": now.isoformat()},
+                {"node_id": "n", "run_id": "timed", "state": "provider.timed_out", "ts": now.isoformat()},
+                {"node_id": "n", "run_id": "abandoned", "state": "run.started", "ts": old},
+            ],
+            {("n", "done"): old, ("n", "timed"): old, ("n", "abandoned"): old},
+            now=now,
+        )
+
+        by_id = {row.run_id: row for row in rows}
+        assert by_id["done"].live is False and by_id["done"].bucket == "succeeded"
+        assert by_id["timed"].live is False and by_id["timed"].bucket == "interrupted"
+        assert by_id["abandoned"].live is True and by_id["abandoned"].active is False
+        assert fleet_dashboard.filter_rows(rows, fleet_dashboard.DashboardQuery()) == []
+        assert fleet_dashboard.filter_rows(rows, fleet_dashboard.DashboardQuery(attention_only=True)) == [
+            by_id["abandoned"]
+        ]
+
+    def test_repo_collision_requires_two_concurrently_active_nodes(self):
+        now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+        fresh = fleet_dashboard.build_rows(
+            [{"node_id": "a", "run_id": "fresh", "repo": "repo", "state": "run.started", "ts": now.isoformat()}],
+            {("a", "fresh"): now.isoformat()},
+            now=now,
+        )[0]
+        old = (now - timedelta(hours=2)).isoformat()
+        abandoned = fleet_dashboard.build_rows(
+            [{"node_id": "b", "run_id": "old", "repo": "repo", "state": "run.started", "ts": old}],
+            {("b", "old"): old},
+            now=now,
+        )[0]
+        second = fleet_dashboard.build_rows(
+            [{"node_id": "b", "run_id": "fresh-b", "repo": "repo", "state": "run.started", "ts": now.isoformat()}],
+            {("b", "fresh-b"): now.isoformat()},
+            now=now,
+        )[0]
+
+        assert fleet_dashboard._RepoEntry("repo", [fresh], [fresh, abandoned], None, None).collision is False
+        assert fleet_dashboard._RepoEntry("repo", [fresh, second], [fresh, second], None, None).collision is True
+
     def test_format_duration(self):
         assert fleet_dashboard.format_duration(None) == "-"
         assert fleet_dashboard.format_duration(42) == "42s"
@@ -411,3 +528,150 @@ class TestPureRendering:
         )
         assert 'nonce="abc"' in page
         assert "Fleet: Repos" in page
+
+
+TAILSCALE_USER = "tailscale-user@example.invalid"
+
+
+@pytest.fixture()
+def hub_tailscale(tmp_path):
+    db = tmp_path / "hub" / "fleet.db"
+    server = fleet_hub.make_server("127.0.0.1", 0, db, TOKEN, allow_admin_writes=True, trust_tailscale_identity=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield ("127.0.0.1", server.server_address[1])
+    server.shutdown()
+    server.server_close()
+
+
+def _tailscale_headers(identity: str = TAILSCALE_USER, extra: dict | None = None) -> dict:
+    headers = {fleet_hub._TAILSCALE_IDENTITY_HEADER: identity, **(extra or {})}
+    return headers
+
+
+class TestTailscaleIdentity:
+    def test_default_off_rejects_tailscale_header(self, hub):
+        for path in ("/", "/deck", "/deck/repos", "/view/machines", "/view/repos"):
+            status, _headers, text = _request(hub, "GET", path, headers=_tailscale_headers())
+            assert status == 401, path
+            assert TAILSCALE_USER not in text
+
+    def test_trusted_loopback_dashboard_success(self, hub_tailscale):
+        for path in ("/", "/deck", "/deck/repos", "/view/machines", "/view/repos"):
+            status, headers, text = _request(hub_tailscale, "GET", path, headers=_tailscale_headers())
+            assert status == 200, path
+            assert headers["content-type"].startswith("text/html")
+            assert TAILSCALE_USER not in text
+
+    def test_trusted_loopback_allows_bearer_and_cookie_unchanged(self, hub_tailscale):
+        status, _headers, text = _request(hub_tailscale, "GET", "/deck", headers=_bearer())
+        assert status == 200
+        cookie = _login_cookie(hub_tailscale)
+        status, _headers, text = _request(hub_tailscale, "GET", "/deck", headers={"Cookie": cookie})
+        assert status == 200
+
+    def test_missing_empty_invalid_identity_fails(self, hub_tailscale):
+        for identity in (
+            "",
+            "   ",
+            "a" * 257,
+            "user@example\x01invalid.test",
+            "user@example\x1cinvalid.test",
+            "user@example\x7finvalid.test",
+        ):
+            status, _headers, text = _request(hub_tailscale, "GET", "/deck", headers=_tailscale_headers(identity))
+            assert status == 401, repr(identity)
+            if identity:
+                assert identity not in text
+
+    def test_missing_header_fails(self, hub_tailscale):
+        status, _headers, _text = _request(hub_tailscale, "GET", "/deck")
+        assert status == 401
+
+    def test_non_loopback_peer_fails_even_with_valid_header(self, hub_tailscale, monkeypatch):
+        monkeypatch.setattr(fleet_hub, "_is_loopback_address", lambda address: False)
+        status, _headers, text = _request(hub_tailscale, "GET", "/deck", headers=_tailscale_headers())
+        assert status == 401
+        assert TAILSCALE_USER not in text
+
+    def test_tailscale_identity_never_authorizes_api_routes(self, hub_tailscale):
+        for path in ("/status", "/claims", "/nodes", "/cloud", "/models"):
+            status, _headers, _text = _request(hub_tailscale, "GET", path, headers=_tailscale_headers())
+            assert status == 401, path
+        for path in ("/events", "/claims", "/nodes", "/cloud", "/models"):
+            status, _headers, _text = _request(
+                hub_tailscale,
+                "POST",
+                path,
+                headers=_tailscale_headers(extra={"Content-Type": "application/json"}),
+                body={},
+            )
+            assert status == 401, path
+
+    def test_tailscale_identity_not_in_dashboard_body(self, hub_tailscale):
+        _seed(hub_tailscale)
+        for path in ("/", "/deck", "/deck/repos", "/view/machines", "/view/repos"):
+            status, _headers, text = _request(hub_tailscale, "GET", path, headers=_tailscale_headers())
+            assert status == 200, path
+            assert TAILSCALE_USER not in text
+
+
+class TestLoopbackAddressHelper:
+    def test_is_loopback_address_ipv4(self):
+        assert fleet_hub._is_loopback_address("127.0.0.1") is True
+
+    def test_is_loopback_address_ipv6(self):
+        assert fleet_hub._is_loopback_address("::1") is True
+
+    def test_is_loopback_address_ipv4_mapped_ipv6(self):
+        assert fleet_hub._is_loopback_address("::ffff:127.0.0.1") is True
+
+    def test_is_loopback_address_non_loopback(self):
+        assert fleet_hub._is_loopback_address("192.168.1.1") is False
+        assert fleet_hub._is_loopback_address("::ffff:192.168.1.1") is False
+        assert fleet_hub._is_loopback_address("not-an-address") is False
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.0.2.10", "::", "2001:db8::10", "localhost"])
+def test_tailscale_identity_rejects_nonliteral_or_routable_bind(tmp_path, host):
+    with pytest.raises(fleet_hub.FleetHubError, match="requires a loopback --host"):
+        fleet_hub.make_server(
+            host,
+            0,
+            tmp_path / "fleet.db",
+            TOKEN,
+            trust_tailscale_identity=True,
+        )
+
+
+def test_dispatch_serve_forwards_trust_tailscale_identity(monkeypatch):
+    from brigade.cli.fleet import _dispatch_serve
+
+    captured = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("brigade.fleet_hub.run", fake_run)
+    monkeypatch.setattr("brigade.fleet_command_deck.resolve_config_path", lambda path, env: None)
+    args = argparse.Namespace(
+        host="127.0.0.1",
+        port=3774,
+        db=None,
+        token_file=None,
+        allow_admin_writes=False,
+        deck_config=None,
+        trust_tailscale_identity=True,
+    )
+    assert _dispatch_serve(args) == 0
+    assert captured["trust_tailscale_identity"] is True
+    assert captured["host"] == "127.0.0.1"
+
+
+def test_cli_serve_trust_tailscale_identity_defaults_off():
+    from brigade import cli
+
+    args = cli._build_parser().parse_args(["fleet", "serve", "--host", "127.0.0.1"])
+
+    assert args.trust_tailscale_identity is False

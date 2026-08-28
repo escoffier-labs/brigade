@@ -62,6 +62,20 @@ def test_worker_payload_includes_envelope_without_new_body_fields():
     assert "message_body" not in entry
 
 
+def test_worker_payload_includes_cloud_environment_fingerprint():
+    fingerprint = {"environment_fingerprint": "sha256:abc123def456"}
+    result = WorkerResult(
+        worker="cloud-worker",
+        task="fix it",
+        text="done",
+        ok=True,
+        cloud_environment=fingerprint,
+    )
+    entry = worker_payload([result])[0]
+    assert entry["cloud_environment"] == fingerprint
+    assert "environment_id" not in entry["cloud_environment"]
+
+
 def test_legacy_run_message_displays_unknown_provenance_and_is_not_replayed():
     env, display = message_envelope.synthesize_legacy_message_provenance()
     assert display == "UNKNOWN PROVENANCE - legacy message"

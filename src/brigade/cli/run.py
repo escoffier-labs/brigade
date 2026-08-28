@@ -180,6 +180,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Dispatch the full task directly to one worker seat, skipping planning and synthesis.",
     )
     p_run.add_argument(
+        "--model",
+        default=None,
+        help="Override the selected --worker seat's model for this run, subject to Fleet Hub policy.",
+    )
+    p_run.add_argument(
         "--detach",
         action="store_true",
         help="Start the run in a detached child process and return after run metadata is written.",
@@ -356,6 +361,9 @@ def dispatch(args) -> int:
         return 2
     if args.detach and args.inspect:
         print("error: --detach cannot be used with --inspect", file=sys.stderr)
+        return 2
+    if args.model is not None and args.worker is None:
+        print("error: --model requires --worker so the overridden seat is unambiguous", file=sys.stderr)
         return 2
     if args.handoff and args.dry_run:
         print("error: --handoff cannot be used with --dry-run", file=sys.stderr)
@@ -672,6 +680,8 @@ def dispatch(args) -> int:
                 run_kwargs["defer_artifact_collection"] = True
             if args.worker is not None:
                 run_kwargs["worker"] = args.worker
+            if args.model is not None:
+                run_kwargs["model_override"] = args.model
             if args.codex_transport is not None:
                 run_kwargs["codex_transport"] = args.codex_transport
             if args.no_code_graph:
@@ -937,16 +947,21 @@ def _dispatch_detached(
                 roster_resolution=roster_resolution,
                 output_dir=output_dir,
             )
+            detach_mode = proc_mod.DETACH_MODE_INHERITED
             try:
                 with log_path.open("a", encoding="utf-8") as log:
-                    child = Popen(
+                    child, detach_mode = proc_mod.spawn_detached(
                         argv,
                         cwd=run_cwd,
                         stdin=DEVNULL,
                         stdout=log,
                         stderr=STDOUT,
-                        start_new_session=True,
+                        popen=Popen,
                     )
+                    # Mode name only: no argv, environment, or task text, so the
+                    # log stays safe to hand to an operator verbatim.
+                    log.write(f"brigade detach: {detach_mode}\n")
+                    log.flush()
                     startup_registry.register(child)
             except OSError as exc:
                 if child is not None:
@@ -1018,7 +1033,7 @@ def _dispatch_detached(
                     file=sys.stderr,
                 )
             print(f"run: {output_dir.name}")
-            print(f"detached: pid {child.pid}", file=sys.stderr)
+            print(f"detached: pid {child.pid} ({detach_mode})", file=sys.stderr)
             print(f"artifacts: {output_dir}", file=sys.stderr)
             print(f"log: {log_path}", file=sys.stderr)
             return 0
@@ -1061,6 +1076,9 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: 
         argv.append("--read-only")
     if args.worker is not None:
         argv.extend(["--worker", args.worker])
+    model_override = getattr(args, "model", None)
+    if model_override is not None:
+        argv.extend(["--model", model_override])
     if args.wait is not None:
         if math.isinf(args.wait):
             argv.append("--wait")
@@ -1095,6 +1113,9 @@ def _direct_worker_error(worker: str, loaded_roster, roster_mod, *, read_only: b
         capability_error = roster_mod.read_only_capability_error(agent)
         if capability_error is not None:
             return capability_error
+        cloud_error = roster_mod.read_only_cloud_mutation_error(agent)
+        if cloud_error is not None:
+            return cloud_error
     if agent.cli is None:
         return f"worker has no CLI adapter: {worker}"
     if not roster_mod.is_cli_allowed(agent.cli, loaded_roster):

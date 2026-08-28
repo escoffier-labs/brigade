@@ -168,6 +168,8 @@ evaluate shell syntax.
 
 Overrides apply to the spawned CLI process only, `run.json` records the override names and endpoint host (never values), and a missing referenced variable fails the worker before dispatch. If the CLI echoes any resolved override value, Brigade replaces the exact value with its target name in brackets before worker text, detail, stdout, or stderr can be stored. Direct CLI seats only: acpx and codex-cloud seats manage their own environment.
 
+A Codex Cloud worker is `cli = "codex-cloud:configured"` after `brigade run cloud setup --provider codex-cloud --env-var CODEX_CLOUD_ENV`. Inventory canary: `brigade run cloud canary --provider codex-cloud --target . --json`. Apply stays manual: `codex cloud apply <task-id>`.
+
 The isolated `CLAUDE_CONFIG_DIR` is load-bearing: with the default config directory, the `claude` CLI prefers its subscription OAuth over env auth, the upstream returns 401, and the CLI retries silently, which presents as an indefinite hang.
 
 ### Ollama (local and hosted)

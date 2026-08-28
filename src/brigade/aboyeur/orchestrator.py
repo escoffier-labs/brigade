@@ -25,6 +25,7 @@ from .. import agents
 from .. import codex_appserver
 from .. import context_eval
 from .. import evidence_brief as evidence_brief_mod
+from .. import fleet_client
 from .. import graphtrail_delta
 from .. import causal_receipt
 from .. import localio
@@ -62,6 +63,37 @@ from ..route_policy import (
 )
 
 from . import briefs, run_io, planning, prompts, artifacts
+
+
+@dataclass(frozen=True)
+class FleetModelPolicyResolution:
+    roster: Roster
+    receipt: dict[str, object]
+    error: str | None = None
+
+
+def _model_lease_lifecycle(function: Callable[..., int]) -> Callable[..., int]:
+    """Freeze one startup policy snapshot without reserving unused seats."""
+
+    def wrapped(task: str, roster: Roster, *args: Any, **kwargs: Any) -> int:
+        snapshot = fleet_client.load_model_policy_snapshot()
+        kwargs["model_policy_snapshot"] = snapshot
+        return function(task, roster, *args, **kwargs)
+
+    return wrapped
+
+
+def resolve_fleet_model_policy(
+    roster: Roster,
+    *,
+    worker: str | None = None,
+    model_override: str | None = None,
+    snapshot: Mapping[str, Any] | None = None,
+) -> FleetModelPolicyResolution:
+    """Resolve the frozen Fleet Hub model policy for this run."""
+    from ..aboyeur_model_policy import resolve_fleet_model_policy as _resolve
+
+    return _resolve(roster, worker=worker, model_override=model_override, snapshot=snapshot)
 
 
 @contextmanager
@@ -408,6 +440,7 @@ def _write_run_seat_health_receipt(
 
 
 @_terminalize_run_lifecycle
+@_model_lease_lifecycle
 def run(
     task: str,
     roster: Roster,
@@ -433,6 +466,7 @@ def run(
     route_template: str | None = None,
     route_overrides: tuple[str, ...] = (),
     worker: str | None = None,
+    model_override: str | None = None,
     allow_shadow: bool = False,
     authorized_writable_worktree: bool = False,
     fail_fast: bool = True,
@@ -440,6 +474,7 @@ def run(
     defer_artifact_collection: bool = False,
     verification_contract_payload: Mapping[str, Any] | None = None,
     run_budget_payload: Mapping[str, Any] | None = None,
+    model_policy_snapshot: Mapping[str, Any] | None = None,
 ) -> int:
     if run_budget_payload is not None:
         run_budget_payload = run_budget.validate_explicit_declaration(run_budget_payload)
@@ -468,6 +503,72 @@ def run(
     transport_routing_payload: dict[str, object] | None = None
     quarantine_state = seat_health_policy.SeatQuarantineState()
     active_health_probe = seat_health.SeatHealthProbe(collect_executable_version=False)
+
+    model_policy = resolve_fleet_model_policy(
+        roster,
+        worker=worker,
+        model_override=model_override,
+        snapshot=model_policy_snapshot,
+    )
+    roster = model_policy.roster
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        run_io._write_json(output_dir / "model-policy.json", model_policy.receipt)
+        run_path = output_dir / "run.json"
+        if roster.seat_routing and run_path.is_file():
+            artifacts.update_run_receipt(
+                output_dir,
+                seat_routing=[dict(decision) for decision in roster.seat_routing],
+            )
+        run_io._write_json(output_dir / "roster.json", artifacts._roster_payload(roster))
+    if model_policy.error is not None:
+        policy_error = model_policy.error
+        if output_dir is not None and not (output_dir / "run.json").is_file():
+            artifacts.record_run_start(
+                output_dir,
+                task=task,
+                cwd=cwd,
+                roster=roster,
+                read_only=read_only,
+                worker=worker,
+                dry_run=dry_run,
+                lock_workspace=lock_workspace,
+                codex_transport=transport_for_payload,
+                started_at=started_at,
+                scheduler=scheduler,
+                verification_contract_payload=verification_contract_payload,
+                run_budget_payload=run_budget_payload,
+            )
+        if output_dir is not None and (output_dir / "run.json").is_file():
+            artifacts.record_run_termination(
+                output_dir,
+                status="failed",
+                failure_phase="preflight",
+                failure_kind="fleet-model-policy",
+                detail=policy_error,
+                seat=worker or roster.orchestrator,
+            )
+        print(f"error: {policy_error}", file=sys.stderr)
+        return 2
+
+    @contextmanager
+    def lease_model_agent(agent: Agent) -> Iterator[str | None]:
+        if model_policy.receipt.get("state") != "authoritative":
+            yield None
+            return
+        decision = fleet_client.acquire_model_lease(
+            agent.name,
+            agents.model_policy_provider(agent.cli or ""),
+            agents.model_policy_model(agent.cli or "", agent.model),
+        )
+        if not decision.granted:
+            yield f"fleet model policy denied seat {agent.name!r}: {decision.reason}"
+            return
+        try:
+            yield None
+        finally:
+            if decision.lease_id is not None and decision.holder is not None:
+                fleet_client.release_model_lease(decision.lease_id, holder=decision.holder)
 
     def scheduler_resolved(used: str, fallback_reason: str | None) -> None:
         scheduler_resolution["used"] = used
@@ -882,6 +983,7 @@ def run(
                 codex_transport=transport_for_payload,
                 process_registry=process_registry,
                 output_dir=output_dir,
+                model_lease=lease_model_agent,
             )
         except RuntimeError as exc:
             final_attempt = plan_attempts[-1] if plan_attempts else None
@@ -993,6 +1095,7 @@ def run(
             process_registry=process_registry,
             plan_attempts=plan_attempts,
             allow_replan=not dry_run and not direct_worker,
+            model_lease=lease_model_agent,
         )
         plan_doc = receipt_schema.run_plan_document(
             _assignment_payload(assignments),
@@ -1410,6 +1513,7 @@ def run(
                 on_failed_attempt_persisted=persist_failed_attempt,
                 run_id=output_dir.name if output_dir is not None else None,
                 output_dir=output_dir,
+                model_lease=lease_model_agent,
             )
         except runguard.RetainRunLockError:
             raise
@@ -1629,6 +1733,7 @@ def run(
                 sandbox=sandbox,
                 codex_transport=transport_for_payload,
                 process_registry=process_registry,
+                model_lease=lease_model_agent,
             )
             synth_captured = message_envelope.emit(
                 final.text,

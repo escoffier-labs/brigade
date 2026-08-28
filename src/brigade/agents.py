@@ -480,6 +480,7 @@ class AgentResult:
     failure_phase: str | None = None
     failure_kind: str | None = None
     transport_warning: dict[str, object] | None = None
+    cloud_environment: dict[str, str] | None = None
 
 
 def is_known(cli_ref: str) -> bool:
@@ -628,6 +629,43 @@ def supports_model_pinning(cli_ref: str) -> bool:
     return cli_ref in _MODEL_PIN
 
 
+_MODEL_POLICY_PROVIDER_ALIASES = {
+    "antigravity": "google",
+    "claude": "anthropic",
+    "codex": "openai",
+    "codex-cloud": "openai",
+    "gemini": "google",
+    "grok": "xai",
+    "jules-cloud": "google",
+}
+_MODEL_POLICY_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_MODEL_POLICY_INVALID_RUN_RE = re.compile(r"[^a-z0-9._-]+")
+_MODEL_POLICY_HYPHEN_RUN_RE = re.compile(r"-{2,}")
+
+
+def model_policy_provider(cli_ref: str) -> str:
+    """Map a Brigade adapter to the provider slug used by Fleet Hub policy."""
+    base = cli_ref.split(":", 1)[0].strip().lower()
+    return _MODEL_POLICY_PROVIDER_ALIASES.get(base, base)
+
+
+def model_policy_model(cli_ref: str, model: str | None) -> str:
+    """Return the effective registry model, including embedded adapter pins."""
+    raw = ""
+    if model is not None and model.strip():
+        raw = model.strip()
+    elif ":" in cli_ref:
+        embedded = cli_ref.split(":", 1)[1].strip()
+        if embedded:
+            raw = embedded
+    if not raw:
+        return "default"
+    if _MODEL_POLICY_ID_RE.fullmatch(raw):
+        return raw
+    slug = _MODEL_POLICY_INVALID_RUN_RE.sub("-", raw.lower())
+    return _MODEL_POLICY_HYPHEN_RUN_RE.sub("-", slug).strip("-._") or "default"
+
+
 def supports_reasoning(cli_ref: str) -> bool:
     return cli_ref in _REASONING_ADAPTERS
 
@@ -709,12 +747,34 @@ def detect(cli_ref: str, command: tuple[str, ...] | None = None) -> bool:
     return resolve_agent_executable(cli_ref, command=command).runnable
 
 
-def _accepts_process_registry(function: Callable[..., object]) -> bool:
+def _accepts_keyword(function: Callable[..., object], name: str) -> bool:
     parameters = inspect.signature(function).parameters.values()
-    return any(
-        parameter.name == "process_registry" or parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters
-    )
+    return any(parameter.name == name or parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+
+
+def _accepts_process_registry(function: Callable[..., object]) -> bool:
+    return _accepts_keyword(function, "process_registry")
+
+
+def _call_run_cloud_task(
+    function: Callable[..., AgentResult],
+    prompt: str,
+    *,
+    env_id: str,
+    timeout: float,
+    cwd: Path | None,
+    environment_audit: dict[str, str],
+    register_target: Path,
+    process_registry: proc.ProcessRegistry | None = None,
+) -> AgentResult:
+    kwargs: dict[str, object] = {}
+    if _accepts_keyword(function, "environment_audit"):
+        kwargs["environment_audit"] = environment_audit
+    if _accepts_keyword(function, "register_target"):
+        kwargs["register_target"] = register_target
+    if process_registry is not None and _accepts_process_registry(function):
+        kwargs["process_registry"] = process_registry
+    return function(prompt, env_id=env_id, timeout=timeout, cwd=cwd, **kwargs)
 
 
 def ollama_model_present(
@@ -949,6 +1009,7 @@ def run_agent(
     command: tuple[str, ...] | None = None,
     resume_session_id: str | None = None,
     process_registry: proc.ProcessRegistry | None = None,
+    cloud_safe_mode: bool = False,
 ) -> AgentResult:
     child_env: dict[str, str] | None = None
     resolved_overrides: dict[str, str] | None = None
@@ -1002,30 +1063,51 @@ def run_agent(
         )
 
     if cli_ref.startswith(_CODEX_CLOUD_PREFIX):
-        env_id = cli_ref[len(_CODEX_CLOUD_PREFIX) :]
-        if not env_id:
+        env_token = cli_ref[len(_CODEX_CLOUD_PREFIX) :]
+        if not env_token:
             return AgentResult(
                 text="",
                 ok=False,
                 detail="codex-cloud reference needs an environment id: codex-cloud:<env-id>",
             )
+        if (read_only or sandbox == "read-only") and not cloud_safe_mode:
+            return AgentResult(
+                text="",
+                ok=False,
+                detail="read-only runs cannot dispatch mutating codex-cloud tasks without cloud_safe_mode",
+                failure_phase="dispatch",
+                failure_kind="read-only-cloud-blocked",
+            )
+        from . import codex_cloud
+
+        config_root = codex_cloud.resolve_config_target(cwd)
+        try:
+            env_id = codex_cloud.resolve_environment_id(env_token, target=config_root, environ=child_env or os.environ)
+        except codex_cloud.CodexCloudConfigError:
+            return AgentResult(
+                text="",
+                ok=False,
+                detail="codex-cloud environment is not configured",
+                failure_phase="dispatch",
+                failure_kind="codex-cloud-env-unconfigured",
+            )
+        environment_audit = codex_cloud.environment_audit_ref(env_token, env_id)
         if model is not None:
             return AgentResult(
                 text="",
                 ok=False,
                 detail="codex-cloud does not take a model pin; the cloud environment sets the model",
             )
-        from . import codex_cloud
-
-        if process_registry is not None and _accepts_process_registry(codex_cloud.run_cloud_task):
-            return codex_cloud.run_cloud_task(
-                prompt,
-                env_id=env_id,
-                timeout=timeout,
-                cwd=cwd,
-                process_registry=process_registry,
-            )
-        return codex_cloud.run_cloud_task(prompt, env_id=env_id, timeout=timeout, cwd=cwd)
+        return _call_run_cloud_task(
+            codex_cloud.run_cloud_task,
+            prompt,
+            env_id=env_id,
+            timeout=timeout,
+            cwd=cwd,
+            environment_audit=environment_audit,
+            register_target=config_root,
+            process_registry=process_registry,
+        )
 
     if cli_ref.startswith(_OLLAMA_PREFIX):
         ollama_model = cli_ref[len(_OLLAMA_PREFIX) :]

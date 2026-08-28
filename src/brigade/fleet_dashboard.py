@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlencode
 
+from .fleet_command_deck import is_terminal_state
+
 REFRESH_SECONDS = 10
 # A non-terminal run whose latest event is older than this has no heartbeat
 # reaching the hub; it needs a human look.
@@ -41,17 +43,6 @@ DEFAULT_SORT = "attention"
 FILTER_KEYS = ("node", "repo", "seat", "state")
 _MAX_FILTER_LEN = 128
 
-TERMINAL_STATES = frozenset(
-    {
-        "run.completed",
-        "run.failed",
-        "run.interrupted",
-        "verify.completed",
-        "external.completed",
-        "external.failed",
-        "external.canceled",
-    }
-)
 _AWAITING_STATES = frozenset({"run.paused", "approval.requested", "approval.held"})
 
 # Attention buckets in display rank: what needs a human sorts first.
@@ -110,7 +101,11 @@ class RunRow:
 
     @property
     def live(self) -> bool:
-        return self.state not in TERMINAL_STATES
+        return not is_terminal_state(self.state)
+
+    @property
+    def active(self) -> bool:
+        return self.live and self.bucket != "stale"
 
     @property
     def seat_label(self) -> str:
@@ -162,12 +157,14 @@ def bucket_for(state: str, *, age_seconds: float | None, exit_status: int | None
         if exit_status not in (None, 0):
             return "failed"
         return "succeeded"
-    if state in {"run.completed", "external.completed"}:
-        return "succeeded"
-    if state in {"run.interrupted", "external.canceled"}:
+    if state.endswith((".failed", ".cancelled", ".canceled", ".timed_out", ".timeout")):
+        if state.endswith(".failed"):
+            return "failed"
         return "interrupted"
-    if state == "run.failed" or state.endswith(".failed"):
-        return "failed"
+    if state.endswith(".completed"):
+        return "succeeded"
+    if state.endswith(".interrupted"):
+        return "interrupted"
     if state in _AWAITING_STATES:
         return "awaiting approval"
     if age_seconds is not None and age_seconds > STALE_AFTER_SECONDS:
@@ -190,10 +187,10 @@ def build_rows(
         run_id = str(run.get("run_id") or "")
         state = str(run.get("state") or "")
         last_ts = str(run.get("ts") or "")
-        last = _parse_stamp(last_ts)
+        last = _parse_stamp(run.get("received_at")) or _parse_stamp(last_ts)
         age = max(0.0, (now - last).total_seconds()) if last is not None else None
         started = _parse_stamp(started_at.get((node_id, run_id)))
-        live = state not in TERMINAL_STATES
+        live = not is_terminal_state(state)
         elapsed: float | None = None
         if started is not None:
             end = now if live or last is None else last
@@ -237,7 +234,12 @@ def row_matches(row: RunRow, query: DashboardQuery) -> bool:
 
 
 def filter_rows(rows: list[RunRow], query: DashboardQuery) -> list[RunRow]:
-    kept = [row for row in rows if query.include_all or row.live]
+    if query.include_all:
+        kept = rows
+    elif query.attention_only:
+        kept = [row for row in rows if row.active or row.bucket == "stale"]
+    else:
+        kept = [row for row in rows if row.active]
     return [row for row in kept if row_matches(row, query)]
 
 
@@ -388,7 +390,7 @@ def _href(query: DashboardQuery, **overrides: object) -> str:
 
 
 def _summary(rows: list[RunRow], node_ids: list[str], claims: list[ClaimRow]) -> str:
-    live = [row for row in rows if row.live]
+    live = [row for row in rows if row.active]
     attention = sum(1 for row in live if row.bucket in NEEDS_ATTENTION)
     active_claims = sum(1 for claim in claims if not claim.expired)
     if not rows and not node_ids:
@@ -505,7 +507,7 @@ def _machine_card(
 ) -> str:
     last_seen = _parse_stamp((node_info or {}).get("last_received_at"))
     last_age = (now - last_seen).total_seconds() if last_seen is not None else None
-    live_count = sum(1 for row in rows if row.live)
+    live_count = sum(1 for row in rows if row.active)
     meta = [f"{live_count} live", f"last event {format_age(last_age)}"]
     events = (node_info or {}).get("events")
     if isinstance(events, int):
@@ -569,10 +571,8 @@ class _RepoEntry:
 
     @property
     def collision(self) -> bool:
-        nodes = {row.node_id for row in self.all_live}
-        if len(nodes) > 1:
-            return True
-        return bool(self.claim and not self.claim.expired and nodes and self.claim.owner_node not in nodes)
+        nodes = {row.node_id for row in self.all_live if row.active}
+        return len(nodes) > 1
 
     @property
     def rank(self) -> int:
@@ -583,24 +583,32 @@ class _RepoEntry:
 
 def _repo_entries(all_rows: list[RunRow], claims: list[ClaimRow], query: DashboardQuery) -> list[_RepoEntry]:
     live_by_repo: dict[str, list[RunRow]] = {}
+    abandoned_by_repo: dict[str, list[RunRow]] = {}
     outcome_by_repo: dict[str, RunRow] = {}
     for row in all_rows:
         if not row.repo:
             continue
-        if row.live:
+        if row.active:
             live_by_repo.setdefault(row.repo, []).append(row)
+        elif row.live:
+            abandoned_by_repo.setdefault(row.repo, []).append(row)
         else:
             current = outcome_by_repo.get(row.repo)
             if current is None or (row.age_seconds or 0) < (current.age_seconds or 0):
                 outcome_by_repo[row.repo] = row
     claim_by_repo = {claim.target: claim for claim in claims if not claim.expired}
     repos = set(live_by_repo) | set(outcome_by_repo) | set(claim_by_repo)
+    if query.attention_only or query.include_all:
+        repos |= set(abandoned_by_repo)
     entries = []
     for repo in sorted(repos):
         if query.repo and not _contains(repo, query.repo):
             continue
         all_live = live_by_repo.get(repo, [])
-        live = [row for row in all_live if row_matches(row, query)]
+        display_runs = list(all_live)
+        if query.attention_only or query.include_all:
+            display_runs.extend(abandoned_by_repo.get(repo, []))
+        live = [row for row in display_runs if row_matches(row, query)]
         claim = claim_by_repo.get(repo)
         entry = _RepoEntry(repo=repo, live=live, all_live=all_live, claim=claim, last_outcome=outcome_by_repo.get(repo))
         narrowed = bool(query.seat or query.state or query.attention_only)
@@ -715,6 +723,13 @@ def _document(title: str, nonce: str, nav: str, body: str) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="{REFRESH_SECONDS}">
+<meta name="theme-color" content="#111617">
+<meta name="application-name" content="Fleet Hub">
+<meta name="apple-mobile-web-app-title" content="Fleet Hub">
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
 <title>{esc(title)}</title>
 <style nonce="{nonce_attr}">
 body {{

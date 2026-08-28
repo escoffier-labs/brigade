@@ -52,9 +52,11 @@ allow_models = ["codex", "ollama:*"]
 # Pin reasoning with `reasoning = "high"` for codex, grok, opencode, or pi.
 # Cursor workers may opt into reviewed ACP transport with
 # `transport = "acpx"` and `transport_version = "0.12.0"`.
-# A `codex-cloud:<env-id>` seat submits the task to Codex Cloud, polls it to a
-# terminal state, and returns the summary plus unified diff (never auto-applied;
-# land it with `codex cloud apply <task-id>`). Allow it with "codex-cloud:*".
+# A `codex-cloud:configured` seat reads the env id from CODEX_CLOUD_ENV or
+# `brigade run cloud setup --provider codex-cloud`. Literal `codex-cloud:<env-id>`
+# still works. The seat polls to a terminal state and returns the summary plus
+# unified diff (never auto-applied; land it with `codex cloud apply <task-id>`).
+# Allow it with "codex-cloud:*".
 # Fable 5 plans and synthesizes, GPT 5.5 executes, the handoff records the run.
 # Use a model id your CLI account supports (ChatGPT-account codex takes "gpt-5.5").
 #
@@ -216,6 +218,8 @@ def _render_roster_toml(
             lines.append(f"timeout_seconds = {toml_compat.format_toml_value(agent.timeout_seconds)}")
         if not agent.read_only_capable:
             lines.append("read_only_capable = false")
+        if agent.cloud_safe_mode:
+            lines.append("cloud_safe_mode = true")
         if agent.invalid_final_fallback is not None:
             lines.append(f"invalid_final_fallback = {toml_compat.format_toml_value(agent.invalid_final_fallback)}")
         if agent.env is not None:

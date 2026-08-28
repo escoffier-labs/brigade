@@ -46,6 +46,7 @@ class Agent:
     env: dict[str, str] | None = None
     invalid_final_fallback: str | None = None
     read_only_capable: bool = True
+    cloud_safe_mode: bool = False
     purpose: str | None = None
     requires: dict[str, str] | None = None
     fallback: tuple[str, ...] = ()
@@ -472,6 +473,10 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             raw_agent.get("read_only_capable", True),
             f"agents.{agent_name}.read_only_capable",
         )
+        cloud_safe_mode = _as_bool(
+            raw_agent.get("cloud_safe_mode", False),
+            f"agents.{agent_name}.cloud_safe_mode",
+        )
         purpose = _as_optional_str(raw_agent.get("purpose"), f"agents.{agent_name}.purpose")
         requires = _as_requires(raw_agent.get("requires"), agent_name)
         fallback = _as_string_list(raw_agent.get("fallback"), f"agents.{agent_name}.fallback")
@@ -488,10 +493,19 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
                 raise ValueError(f"agents.{agent_name}.reasoning requires a CLI adapter")
         else:
             cli = _as_str(cli_raw, f"agents.{agent_name}.cli")
+            if cli.startswith("codex-cloud:"):
+                from . import codex_cloud
+
+                try:
+                    codex_cloud.validate_selector_token(cli[len("codex-cloud:") :])
+                except codex_cloud.CodexCloudConfigError as exc:
+                    raise ValueError(f"agents.{agent_name}.cli is invalid: {exc}") from exc
             if not agent_adapters.is_known(cli):
                 raise ValueError(f"agents.{agent_name}.cli is unknown: {cli!r}")
             if not _allowed(cli, allow_models):
                 raise ValueError(f"agents.{agent_name}.cli is not allowed by limits.allow_models: {cli!r}")
+        if cloud_safe_mode and (cli is None or not str(cli).startswith("codex-cloud:")):
+            raise ValueError(f"agents.{agent_name}.cloud_safe_mode is only valid on codex-cloud seats")
 
         if env is not None and (transport_raw != "direct" or cli is None or cli.startswith("codex-cloud:")):
             raise ValueError(
@@ -546,6 +560,7 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             env=env,
             invalid_final_fallback=invalid_final_fallback,
             read_only_capable=read_only_capable,
+            cloud_safe_mode=cloud_safe_mode,
             purpose=purpose,
             requires=requires,
             fallback=fallback,
@@ -628,6 +643,17 @@ def read_only_capability_error(agent: Agent) -> str | None:
     if agent.read_only_capable:
         return None
     return f"worker {agent.name!r} cannot run in read-only mode: agents.{agent.name}.read_only_capable is false"
+
+
+def read_only_cloud_mutation_error(agent: Agent) -> str | None:
+    if agent.cli is None or not agent.cli.startswith("codex-cloud:"):
+        return None
+    if agent.cloud_safe_mode:
+        return None
+    return (
+        f"worker {agent.name!r} cannot dispatch read-only to a mutating codex-cloud seat; "
+        f"set agents.{agent.name}.cloud_safe_mode = true only after explicit review"
+    )
 
 
 def _seat_adapter_ref(agent: Agent) -> str | None:

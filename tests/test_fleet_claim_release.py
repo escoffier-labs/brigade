@@ -308,14 +308,14 @@ class TestHubScopes:
         conn.close()
         conn = fleet_hub.init_db(db)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 4
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
             assert [c["target"] for c in fleet_hub.list_claims(conn)] == ["repo-a"]
             # No lease recorded: never supersedable, only released or expired.
             status, _payload = fleet_hub.handle_claim(conn, _claim(holder="h2", scope="node", supersede=_lease("L1")))
             assert status == 409
             assert fleet_hub.handle_claim(conn, _claim("renew", holder="h1"))[1]["renewed"] is True
             # Re-opening is idempotent.
-            assert fleet_hub.init_db(db).execute("PRAGMA user_version").fetchone()[0] == 4
+            assert fleet_hub.init_db(db).execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
         finally:
             conn.close()
 

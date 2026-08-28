@@ -107,6 +107,25 @@ def test_roster_snapshot_preserves_invalid_final_fallback():
     assert roster.agents["grok-review"].invalid_final_fallback == "cursor-grok"
 
 
+def test_roster_snapshot_preserves_cloud_safe_mode():
+    snapshot = {
+        "orchestrator": "chef",
+        "agents": {
+            "chef": {"cli": "codex", "role": "plan"},
+            "cloud-worker": {
+                "cli": "codex-cloud:env-123",
+                "role": "implement",
+                "cloud_safe_mode": True,
+            },
+        },
+    }
+
+    roster = run_resume._roster_from_snapshot(snapshot)
+
+    assert roster.agents["cloud-worker"].cloud_safe_mode is True
+    assert roster.agents["chef"].cloud_safe_mode is False
+
+
 def test_roster_snapshot_preserves_read_only_capability_with_legacy_default():
     snapshot = {
         "orchestrator": "chef",

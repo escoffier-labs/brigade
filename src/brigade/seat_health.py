@@ -501,6 +501,12 @@ class SeatHealthProbe:
     def _model_check(
         self, seat: Any, roster: Any, workspace: Path | None, timeout_seconds: float, allow_model_smoke: bool
     ) -> SeatHealthCheck:
+        if isinstance(seat.cli, str) and seat.cli.startswith("codex-cloud:"):
+            return SeatHealthCheck(
+                "model-reachability",
+                "degraded",
+                "cloud seats validate via `brigade run cloud canary`; model smoke is not provider-safe",
+            )
         if seat.model is None:
             return SeatHealthCheck("model-reachability", "degraded", "seat has no exact model declaration")
         # Roster doctor retains its established inventory rendering below.  It
@@ -740,7 +746,10 @@ def _seat_chain_names(roster: Any) -> tuple[str, ...]:
         if root not in names:
             names.append(root)
         for fallback in roster.agents[root].fallback:
-            if fallback not in names:
+            # Fleet model admission can remove a denied fallback while keeping
+            # its enabled root. Health probes must use the effective roster,
+            # not reintroduce an unavailable seat from its declaration.
+            if fallback in roster.agents and fallback not in names:
                 names.append(fallback)
     return tuple(names)
 
