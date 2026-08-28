@@ -322,7 +322,11 @@ class TestHubScopes:
     def test_lease_column_upgrade_is_safe_under_concurrent_init(self, tmp_path):
         """init_db runs per request on a threading server: many first-touch
         connections against a v2 database (one lease column already present,
-        as a half-finished upgrade would leave it) must all succeed."""
+        as a half-finished upgrade would leave it) must all succeed.
+
+        Bounded ``database is locked`` is retried with the same delays as
+        ``_init_schema``; any other error still fails the test.
+        """
         db = tmp_path / "hub.db"
         conn = sqlite3.connect(str(db))
         conn.execute(
@@ -340,8 +344,21 @@ class TestHubScopes:
         def open_db() -> None:
             try:
                 barrier.wait(timeout=5)
-                c = fleet_hub.init_db(db)
-                c.close()
+                last_locked: sqlite3.OperationalError | None = None
+                for delay in fleet_hub._MIGRATION_LOCK_DELAYS:
+                    try:
+                        c = fleet_hub.init_db(db)
+                        c.close()
+                        return
+                    except sqlite3.OperationalError as exc:
+                        if "locked" not in str(exc).lower():
+                            raise
+                        last_locked = exc
+                        if delay is None:
+                            raise
+                        time.sleep(delay)
+                if last_locked is not None:
+                    raise last_locked
             except BaseException as exc:  # noqa: BLE001 - collected for the assertion
                 errors.append(exc)
 

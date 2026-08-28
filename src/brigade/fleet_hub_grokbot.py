@@ -223,8 +223,14 @@ _OPERATION_ADDITIVE_COLUMNS = {
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create additive Grok Bot authority tables without touching non-Grok rows."""
-    conn.executescript(GROKBOT_SCHEMA)
+    """Create additive Grok Bot authority tables without touching non-Grok rows.
+
+    Uses ``execute`` per statement, not ``executescript``: the latter issues
+    COMMIT first and would drop a caller-held ``BEGIN IMMEDIATE``.
+    """
+    for statement in (part.strip() for part in GROKBOT_SCHEMA.split(";")):
+        if statement:
+            conn.execute(statement)
     existing = {row[1] for row in conn.execute("PRAGMA table_info(grokbot_jobs)")}
     for column, decl in _JOB_ADDITIVE_COLUMNS.items():
         if column not in existing:

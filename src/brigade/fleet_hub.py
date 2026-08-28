@@ -432,7 +432,7 @@ def _model_policy_table_needs_recreation(conn: sqlite3.Connection) -> bool:
     return pk != {"seat"}
 
 
-# Intra-process serialization for the claims migration, in addition to the
+# Intra-process serialization for schema init, in addition to the
 # SQL-level BEGIN IMMEDIATE. Schema work happens once at server startup
 # (``make_server`` → ``init_db``), so within one process this is not
 # per-request contention anymore, but ``init_db`` stays lock-guarded so a
@@ -441,6 +441,9 @@ def _model_policy_table_needs_recreation(conn: sqlite3.Connection) -> bool:
 # busy-timeout races.
 _MIGRATION_LOCKS: dict[str, threading.Lock] = {}
 _MIGRATION_LOCKS_GUARD = threading.Lock()
+# Init waits longer than request opens: a first-touch storm on a loaded host
+# can hold the writer past the 5s ``open_db`` timeout.
+_INIT_BUSY_TIMEOUT_MS = 30_000
 
 
 def _migration_lock(db_path: Path) -> threading.Lock:
@@ -453,55 +456,116 @@ def _migration_lock(db_path: Path) -> threading.Lock:
 _MIGRATION_LOCK_DELAYS: tuple[float | None, ...] = (0.05, 0.1, 0.2, 0.4, 0.8, None)
 
 
-def _migrate_claims_table(conn: sqlite3.Connection) -> None:
-    """Create/upgrade the claims table under one write lock.
+def _locked_operational_error(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
 
-    Serialized twice: same-process callers queue on ``_migration_lock`` (a
-    first-touch storm on a threading server is thread contention), and the
-    DDL itself runs under BEGIN IMMEDIATE with a bounded locked-database
-    backoff so a separate process cannot race it either. A caller that
-    loses either race treats "someone else migrated" as success. The
-    steady state (nothing to migrate) never calls this, so ordinary
-    requests take no write lock.
+
+def _migrate_claims_table(conn: sqlite3.Connection) -> None:
+    """Create/upgrade the claims table. Caller holds the write transaction."""
+    claims_columns = _claims_columns(conn)
+    # Claims are ephemeral TTL state: a pre-holder-token claims table
+    # (early v2 builds) is dropped and recreated rather than migrated.
+    if claims_columns and "holder_token" not in claims_columns:
+        conn.execute("DROP TABLE claims")
+        claims_columns = set()
+    conn.execute(_CLAIMS_SCHEMA)
+    # v2 -> v3: the lease columns are nullable, so live claims survive
+    # the upgrade (they can never be superseded, only released/expired).
+    if claims_columns:
+        for column in _CLAIMS_ADDITIVE_COLUMNS:
+            if column in claims_columns:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE claims ADD COLUMN {column} TEXT")
+            except sqlite3.OperationalError as exc:
+                # A column another connection added is the outcome we
+                # wanted, not an error.
+                if "duplicate column" not in str(exc).lower():
+                    raise
+
+
+def _apply_schema(conn: sqlite3.Connection) -> None:
+    """Create or upgrade every hub table. Caller holds BEGIN IMMEDIATE."""
+    conn.execute(_SCHEMA)
+    for column in _EVENTS_ADDITIVE_COLUMNS:
+        if column not in _events_columns(conn):
+            conn.execute(f"ALTER TABLE events ADD COLUMN {column} {'INTEGER' if column == 'exit_status' else 'TEXT'}")
+    if _claims_table_needs_migration(_claims_columns(conn)):
+        _migrate_claims_table(conn)
+    conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
+    # v3 -> v4 is one additive table; v5-v8 add cloud lease and policy
+    # tables only, and v9 canonicalizes provider aliases. Existing event,
+    # claim, node, and active lease rows survive.
+    conn.execute(_NODES_SCHEMA)
+    conn.execute(_CLOUD_LEASES_SCHEMA)
+    conn.execute(_CLOUD_PROVIDER_STATE_SCHEMA)
+    conn.execute(_MODEL_LEASES_SCHEMA)
+    _canonicalize_cloud_provider_rows(conn)
+    if _model_policy_table_needs_recreation(conn):
+        # Correct the unpublished v8 schema: seat is the authoritative key,
+        # provider-level subscription/circuit fields stay in cloud_provider_state.
+        conn.execute(
+            "CREATE TABLE _model_policy_new (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO _model_policy_new (seat, provider, model, enabled, limit_count, notes, updated_at) "
+            "SELECT seat, provider, model, enabled, limit_count, notes, updated_at FROM model_policy WHERE seat IS NOT NULL"
+        )
+        conn.execute("DROP TABLE model_policy")
+        conn.execute("ALTER TABLE _model_policy_new RENAME TO model_policy")
+    conn.execute(_MODEL_POLICY_SCHEMA)
+    conn.execute("CREATE INDEX IF NOT EXISTS cloud_leases_active ON cloud_leases (provider, expires_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS model_leases_active ON model_leases (seat, expires_at)")
+    from . import fleet_hub_grokbot
+
+    fleet_hub_grokbot.ensure_schema(conn)
+    # v12 -> v13: one-row run preference pin (#1223).
+    fleet_hub_preference.ensure_schema(conn)
+    conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
+def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
+    """Apply hub schema under BEGIN IMMEDIATE with locked-database backoff.
+
+    Same-process callers already queue on ``_migration_lock``. Cross-process
+    first-touch storms retry every schema statement (not just the claims
+    ALTER) so a later CREATE or ``ensure_schema`` cannot escape as
+    ``database is locked``. A caller that loses the write lock treats
+    "someone else already set user_version" as success.
     """
     for delay in _MIGRATION_LOCK_DELAYS:
         try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            _refuse_newer_schema(conn, db_path)
             conn.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError as exc:
-            if "locked" not in str(exc).lower():
+            if not _locked_operational_error(exc):
                 raise
-            if not _claims_table_needs_migration(_claims_columns(conn)):
+            current = conn.execute("PRAGMA user_version").fetchone()[0]
+            if current == SCHEMA_VERSION:
                 return
             if delay is None:
                 raise
             time.sleep(delay)
             continue
-        break
-    try:
-        claims_columns = _claims_columns(conn)
-        # Claims are ephemeral TTL state: a pre-holder-token claims table
-        # (early v2 builds) is dropped and recreated rather than migrated.
-        if claims_columns and "holder_token" not in claims_columns:
-            conn.execute("DROP TABLE claims")
-            claims_columns = set()
-        conn.execute(_CLAIMS_SCHEMA)
-        # v2 -> v3: the lease columns are nullable, so live claims survive
-        # the upgrade (they can never be superseded, only released/expired).
-        if claims_columns:
-            for column in _CLAIMS_ADDITIVE_COLUMNS:
-                if column in claims_columns:
-                    continue
-                try:
-                    conn.execute(f"ALTER TABLE claims ADD COLUMN {column} TEXT")
-                except sqlite3.OperationalError as exc:
-                    # A column another connection added is the outcome we
-                    # wanted, not an error.
-                    if "duplicate column" not in str(exc).lower():
-                        raise
-        conn.commit()
-    except BaseException:
-        conn.rollback()
-        raise
+        try:
+            _apply_schema(conn)
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            conn.rollback()
+            if not _locked_operational_error(exc):
+                raise
+            current = conn.execute("PRAGMA user_version").fetchone()[0]
+            if current == SCHEMA_VERSION:
+                return
+            if delay is None:
+                raise
+            time.sleep(delay)
+        except BaseException:
+            conn.rollback()
+            raise
+        else:
+            return
 
 
 def _refuse_newer_schema(conn: sqlite3.Connection, db_path: Path) -> None:
@@ -553,53 +617,9 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     resolved = db_path.resolve()
     conn = sqlite3.connect(str(resolved), timeout=10)
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        _refuse_newer_schema(conn, resolved)
-        conn.execute(_SCHEMA)
-        for column in _EVENTS_ADDITIVE_COLUMNS:
-            if column not in _events_columns(conn):
-                conn.execute(
-                    f"ALTER TABLE events ADD COLUMN {column} {'INTEGER' if column == 'exit_status' else 'TEXT'}"
-                )
-        if _claims_table_needs_migration(_claims_columns(conn)):
-            with _migration_lock(db_path):
-                # Re-check under the lock: the thread that held it first has
-                # usually done the work already.
-                if _claims_table_needs_migration(_claims_columns(conn)):
-                    _migrate_claims_table(conn)
-        conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
-        # v3 -> v4 is one additive table; v5-v8 add cloud lease and policy
-        # tables only, and v9 canonicalizes provider aliases. Existing event,
-        # claim, node, and active lease rows survive.
-        conn.execute(_NODES_SCHEMA)
-        conn.execute(_CLOUD_LEASES_SCHEMA)
-        conn.execute(_CLOUD_PROVIDER_STATE_SCHEMA)
-        conn.execute(_MODEL_LEASES_SCHEMA)
-        _canonicalize_cloud_provider_rows(conn)
-        with _migration_lock(db_path):
-            if _model_policy_table_needs_recreation(conn):
-                # Correct the unpublished v8 schema: seat is the authoritative key,
-                # provider-level subscription/circuit fields stay in cloud_provider_state.
-                conn.execute(
-                    "CREATE TABLE _model_policy_new (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL)"
-                )
-                conn.execute(
-                    "INSERT INTO _model_policy_new (seat, provider, model, enabled, limit_count, notes, updated_at) "
-                    "SELECT seat, provider, model, enabled, limit_count, notes, updated_at FROM model_policy WHERE seat IS NOT NULL"
-                )
-                conn.execute("DROP TABLE model_policy")
-                conn.execute("ALTER TABLE _model_policy_new RENAME TO model_policy")
-            conn.execute(_MODEL_POLICY_SCHEMA)
-        conn.execute("CREATE INDEX IF NOT EXISTS cloud_leases_active ON cloud_leases (provider, expires_at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS model_leases_active ON model_leases (seat, expires_at)")
-        from . import fleet_hub_grokbot
-
-        fleet_hub_grokbot.ensure_schema(conn)
-        # v12 -> v13: one-row run preference pin (#1223).
-        fleet_hub_preference.ensure_schema(conn)
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-        conn.commit()
+        conn.execute(f"PRAGMA busy_timeout={_INIT_BUSY_TIMEOUT_MS}")
+        with _migration_lock(resolved):
+            _init_schema(conn, resolved)
     except BaseException:
         conn.close()
         raise
