@@ -597,6 +597,48 @@ def test_config_operations_refuse_symlinked_config_file_and_directory(tmp_path: 
     assert config["instance"] == "operator"
 
 
+@pytest.mark.skipif(
+    os.name != "posix" or not getattr(os, "O_PATH", 0), reason="requires POSIX O_PATH directory descriptors"
+)
+def test_posix_path_walker_uses_opath_root_and_keeps_read_write_nofollow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    directory = tmp_path / "nested" / "config"
+    path = directory / "config.json"
+    real_open = os.open
+    root_flags: list[int] = []
+
+    def protected_root_open(
+        name: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if name == "/" and dir_fd is None:
+            root_flags.append(flags)
+            if not flags & os.O_PATH:
+                raise PermissionError("root is unreadable")
+        return real_open(name, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(grokbot_ops.os, "open", protected_root_open)
+
+    grokbot_ops._write_text_nofollow_atomic(path, "safe\n", mode=0o600)
+    assert grokbot_ops._read_regular_text(path) == "safe\n"
+    assert root_flags and root_flags[0] & os.O_PATH
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep me\n", encoding="utf-8")
+    path.unlink()
+    path.symlink_to(outside)
+
+    with pytest.raises(OSError):
+        grokbot_ops._read_regular_text(path)
+    with pytest.raises(OSError):
+        grokbot_ops._write_text_nofollow_atomic(path, "changed\n", mode=0o600)
+    assert outside.read_text(encoding="utf-8") == "keep me\n"
+
+
 def test_write_unit_refuses_symlinked_paths_and_force_replaces_only_the_link(tmp_path: Path):
     config = {
         "schema": grokbot_ops.CONFIG_SCHEMA,
