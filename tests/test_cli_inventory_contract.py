@@ -13,11 +13,20 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from brigade import cli, roadmap_cmd
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMMAND_INVENTORY = REPO_ROOT / "docs" / "command-inventory.md"
+
+
+@pytest.fixture(autouse=True)
+def _pin_extras(monkeypatch, tmp_path):
+    """Keep parser expectations independent from a developer's extras config."""
+    monkeypatch.setenv("BRIGADE_EXTRAS", "0")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
 
 
 def _inventory_command_paths(text: str) -> list[str]:
@@ -37,6 +46,15 @@ def _inventory_command_paths(text: str) -> list[str]:
         if command.startswith("brigade "):
             paths.append(command)
     return paths
+
+
+def _deprecated_inventory_command_paths(text: str) -> list[str]:
+    """Parse generated inventory paths carrying a deprecation marker."""
+    return [
+        line.split("`")[1]
+        for line in text.split("## Commands", 1)[-1].splitlines()
+        if line.startswith("- `brigade ") and " (deprecated; use `" in line
+    ]
 
 
 def _direct_test_invocations(tests_root: Path) -> set[str]:
@@ -124,6 +142,23 @@ def test_untested_parser_paths_report_is_well_formed_and_non_failing():
     # Presence of untested paths is a maintenance signal, not a failure.
 
 
+def test_deprecated_inventory_paths_are_machine_readable_and_parse():
+    payload = roadmap_cmd.command_contract_payload(REPO_ROOT)
+    deprecated = payload["deprecated_paths"]
+    inventory_paths = _deprecated_inventory_command_paths(COMMAND_INVENTORY.read_text(encoding="utf-8"))
+
+    assert deprecated
+    assert {item["path"] for item in deprecated} == set(inventory_paths)
+    assert all(item["path"].startswith("brigade run-cloud") for item in deprecated)
+    assert all(item["replacement"] == item["path"].replace("run-cloud", "run cloud", 1) for item in deprecated)
+
+    parser = cli._build_parser()
+    for path in inventory_paths:
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args([*path.removeprefix("brigade ").split(), "--help"])
+        assert exc.value.code == 0
+
+
 def test_run_cloud_is_a_native_parser_branch():
     parser = cli._build_parser()
     run_parser = parser._subparsers._group_actions[0].choices["run"]
@@ -156,7 +191,8 @@ def test_harness_fragments_writes_shared_backend(tmp_path):
     assert cli.main(["harness", "fragments", "--harness", "hermes", "--out", str(tmp_path / "hermes")]) == 0
 
 
-def test_fragment_aliases_still_dispatch(tmp_path):
+def test_fragment_aliases_still_dispatch(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
     assert cli.main(["openclaw-fragments", "--out", str(tmp_path / "oc")]) == 0
     assert cli.main(["hermes-fragments", "--out", str(tmp_path / "hm")]) == 0
 

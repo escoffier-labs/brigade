@@ -48,6 +48,10 @@ User-visible PRs append a bullet under the root `CHANGELOG.md` `## [Unreleased]`
 
 Union is safe for that append-only Unreleased list when each entry is its own line. When two branches edit the same line or adjacent lines of an existing bullet, union keeps both versions or interleaves wrapped lines and does not conflict. Treat that clean merge as a rewrite to re-read; a human must reconcile.
 
+## Command-path deprecations
+
+Keep a command path as a working deprecated alias for at least one stable release before removing it. The alias must print a one-line notice that names its replacement, appear as deprecated in the generated command inventory, and have a `CHANGELOG.md` release-note entry. The deprecation PR must cite usage evidence, such as a receipt, runbook reference, or `brigade evidence search` result. If no evidence is found, say so explicitly in the PR.
+
 ## What kinds of changes land easily
 
 - **Bug fixes** for `brigade init`, `doctor`, `scrub`, quickstart, security scanning, or the ingester.

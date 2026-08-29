@@ -51,6 +51,7 @@ COMMAND_ALIASES: tuple[tuple[str, str], ...] = (
     ("brigade hermes-fragments", "brigade harness fragments"),
     ("brigade import", "brigade work import"),
 )
+COMMAND_DEPRECATIONS: tuple[tuple[str, str], ...] = (("brigade run-cloud", "brigade run cloud"),)
 ROADMAP_ARCHIVE_RELATIVE_PATH = Path("docs") / "roadmap-archive.md"
 ROADMAP_VERSION_HEADLINE_RE = re.compile(r"\*\*v(\d+)\.(\d+)\.(?:x|\d+) on main\*\*")
 PROJECT_VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)")
@@ -643,6 +644,17 @@ def _apply_command_alias(command: str) -> str:
     return command
 
 
+def _command_deprecation(command: str) -> dict[str, str] | None:
+    """Return generated deprecation metadata for one parser command path."""
+    for source, replacement in COMMAND_DEPRECATIONS:
+        if command == source or command.startswith(f"{source} "):
+            return {
+                "path": command,
+                "replacement": replacement + command[len(source) :],
+            }
+    return None
+
+
 def _normalize_documented_command(command: str, known_prefixes: set[str]) -> str:
     aliased = _apply_command_alias(command)
     for source in (command, aliased):
@@ -970,6 +982,7 @@ def command_contract_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     documented = _documented_brigade_commands(target)
     cli_commands = _cli_command_paths()
+    deprecated_paths = [item for command in cli_commands if (item := _command_deprecation(command)) is not None]
     cli_prefixes = _cli_command_prefixes(cli_commands)
     normalized_documented = sorted({_normalize_documented_command(command, cli_prefixes) for command in documented})
     top_level_names = sorted({command.split()[1] for command in cli_commands if len(command.split()) > 1})
@@ -1020,6 +1033,7 @@ def command_contract_payload(target: Path) -> dict[str, Any]:
         "documented_commands": documented,
         "normalized_documented_commands": normalized_documented,
         "cli_commands": cli_commands,
+        "deprecated_paths": deprecated_paths,
         "groups": groups,
         "group_count": len(groups),
         "inventory_path": str(inventory_path),
@@ -1047,6 +1061,14 @@ def _extras_marker(command: str) -> str:
     return ""
 
 
+def _deprecation_marker(command: str) -> str:
+    """Return the rendered inventory marker for a deprecated command path."""
+    deprecation = _command_deprecation(command)
+    if deprecation is None:
+        return ""
+    return f" (deprecated; use `{deprecation['replacement']}`)"
+
+
 def _command_inventory_markdown(*, groups: list[dict[str, Any]], cli_commands: list[str]) -> str:
     lines = [
         "# Brigade Command Inventory",
@@ -1068,11 +1090,12 @@ def _command_inventory_markdown(*, groups: list[dict[str, Any]], cli_commands: l
         "",
     ]
     for group in groups:
-        marker = _extras_marker(str(group["command"]))
+        command = str(group["command"])
+        marker = _extras_marker(command) + _deprecation_marker(command)
         lines.append(f"- `{group['command']}`{marker}: {group['cli_path_count']} command path(s)")
     lines.extend(["", "## Commands", ""])
     for command in cli_commands:
-        lines.append(f"- `{command}`{_extras_marker(command)}")
+        lines.append(f"- `{command}`{_extras_marker(command)}{_deprecation_marker(command)}")
     lines.append("")
     return "\n".join(lines)
 
