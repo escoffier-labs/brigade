@@ -1488,7 +1488,7 @@ func stationTrailCapsFrom(bin *stationTrailBinary) stationTrailProbe {
 		return stationTrailProbe{Caps: caps, Status: stationTrailProbeOK}
 	}
 	var cmdErr *stationTrailCommandError
-	if errors.As(err, &cmdErr) && looksLikeLegacyStationTrail(cmdErr.Stdout + "\n" + cmdErr.Stderr) {
+	if errors.As(err, &cmdErr) && looksLikeLegacyStationTrail(cmdErr.Stdout+"\n"+cmdErr.Stderr) {
 		if version, ok := stationTrailReportedVersion(bin); ok {
 			approved, listErr := loadStationTrailApprovedDigests()
 			digest, digestErr := bin.digest()
@@ -2224,7 +2224,10 @@ func searchCandidateLimit(limit int) int {
 // heavily filtered query may return fewer results than an exhaustive scan.
 func buildSearchQuery(opts SearchOpts) (string, []any) {
 	limit := normalizedSearchLimit(opts.Limit)
-	candidateWhere := []string{"item_fts match ?", liveDefaultItemPredicate}
+	candidateWhere := []string{
+		"item_fts match ?",
+		"exists(select 1 from items fi where fi.id = item_fts.item_id and " + liveDefaultItemPredicateFor("fi") + ")",
+	}
 	params := []any{ftsQuery(opts.Query)}
 	if opts.Source != "" {
 		candidateWhere = append(candidateWhere, "item_fts.source_kind = ?")
@@ -2248,7 +2251,6 @@ func buildSearchQuery(opts SearchOpts) (string, []any) {
 	sqlText := `with fts_candidates as materialized (
   select item_fts.item_id as item_id, snippet(item_fts, 5, '[', ']', '...', 20) as snippet, bm25(item_fts) as fts_score
   from item_fts
-  join items i on i.id = item_fts.item_id
   where ` + strings.Join(candidateWhere, " and ") + `
   order by fts_score, item_id
   limit ?
