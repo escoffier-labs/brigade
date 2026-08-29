@@ -322,7 +322,8 @@ def _open_parent_nofollow(path: Path, *, create: bool) -> int:
     if os.name != "posix" or not getattr(os, "O_NOFOLLOW", 0):
         return _open_windows_parent_nofollow(parent, create=create)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(parent.anchor, flags)
+    root_flags = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(parent.anchor, root_flags)
     try:
         for component in parent.parts[1:]:
             if component in {"", ".", ".."}:
