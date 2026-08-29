@@ -2634,6 +2634,93 @@ def test_doctor_authority_base_stripped_matching_projection_is_ok(tmp_path: Path
     assert stripped != projected.to_bytes()
 
 
+def _historical_v5_terminal_snapshot(run_dir: Path, event) -> dict:
+    """Return the v5 form of the current projection for a terminal run."""
+    projected = _authority_projected(run_dir, event)
+    historical = dict(projected.snapshot)
+    historical["projector_version"] = 5
+    historical.pop("kind")
+    return historical
+
+
+def _record_authority_terminal_checkpoint(workspace: Path, run_dir: Path, base: dict):
+    """Append an `ok` terminal event and a tail checkpoint that covers it."""
+    from brigade import run_checkpoint, run_lifecycle, runguard
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.record_lifecycle_event(
+            run_dir,
+            event_type="run.completed",
+            payload={"status": "ok"},
+            idempotency_key="historical-v5-terminal",
+            workspace=workspace,
+        )
+        event = run_checkpoint.write_checkpoint(
+            run_dir,
+            _recovery_writer_bytes(base),
+            workspace=workspace,
+            paired_event_type=None,
+            body_kind="base-stripped",
+        )
+    assert event is not None
+    return event
+
+
+def test_doctor_accepts_historical_v5_terminal_projection_metadata(tmp_path: Path):
+    """v6 projector metadata alone does not invalidate a v5 terminal snapshot."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    base = _authority_base(workspace)
+    _activate_authority_recovery_journal_with_checkpoint(workspace, run_dir, base)
+    event = _record_authority_terminal_checkpoint(workspace, run_dir, base)
+    historical = _historical_v5_terminal_snapshot(run_dir, event)
+    (run_dir / "run.json").write_bytes(_recovery_writer_bytes(historical))
+
+    status, _name, detail = _recovery_check(workspace)
+
+    assert status == doctor_mod.OK, detail
+    assert "fail=0" in detail
+
+
+def test_doctor_rejects_noncanonical_historical_v5_terminal_projection(tmp_path: Path):
+    """Historical compatibility keeps the run.json byte contract fail-closed."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    base = _authority_base(workspace)
+    _activate_authority_recovery_journal_with_checkpoint(workspace, run_dir, base)
+    event = _record_authority_terminal_checkpoint(workspace, run_dir, base)
+    historical = _historical_v5_terminal_snapshot(run_dir, event)
+    reordered = {key: historical[key] for key in reversed(historical)}
+    (run_dir / "run.json").write_bytes(json.dumps(reordered, separators=(",", ":")).encode("utf-8"))
+
+    status, _name, detail = _recovery_check(workspace)
+
+    assert status == doctor_mod.FAIL
+    assert _RUN_ID in detail
+    assert "does not match" in detail
+
+
+def test_doctor_rejects_historical_v5_terminal_projection_substantive_mismatch(tmp_path: Path):
+    """Only projector-owned v5 metadata is compatible; task drift remains a failure."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    base = _authority_base(workspace)
+    _activate_authority_recovery_journal_with_checkpoint(workspace, run_dir, base)
+    event = _record_authority_terminal_checkpoint(workspace, run_dir, base)
+    historical = _historical_v5_terminal_snapshot(run_dir, event)
+    historical["task"] = "wrong-task"
+    (run_dir / "run.json").write_bytes(_recovery_writer_bytes(historical))
+
+    status, _name, detail = _recovery_check(workspace)
+
+    assert status == doctor_mod.FAIL
+    assert _RUN_ID in detail
+    assert "does not match" in detail
+
+
 def test_doctor_authority_base_stripped_missing_run_json_is_warn(tmp_path: Path):
     """A missing run.json is WARN only when projection succeeds."""
     workspace = tmp_path / "workspace"
