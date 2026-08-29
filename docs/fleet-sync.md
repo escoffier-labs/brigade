@@ -174,6 +174,91 @@ after the journal write completes and the lock is released):
   undelivered) rather than written to a possibly-readable directory.
 - `brigade fleet status [--all] [--json]`.
 
+## Interactive session presence
+
+The Hub stores live Claude, Codex/T3, and Cursor editor sessions as a separate
+authority from run events and repo claims. Sessions are advisory: they never
+acquire a claim, consume station capacity, or block work.
+
+`brigade fleet sessions` lists active rows from `GET /sessions`.
+`brigade fleet sessions --all` adds ended and expired history.
+`brigade fleet sessions --json` prints the same bounded list the Hub returns.
+
+```json
+[
+  {
+    "node_id": "11111111-1111-4111-8111-111111111111",
+    "harness": "claude",
+    "session_id": "sess-example",
+    "repo_identity": "github.com/example/project",
+    "identity_scope": "fleet",
+    "repo_label": "project",
+    "checkout_path": "/tmp/example/project",
+    "branch": "topic",
+    "dirty_paths": ["src/a.py"],
+    "dirty_truncated": false,
+    "state": "active",
+    "started_at": "2026-08-29T12:00:00+00:00",
+    "heartbeat_at": "2026-08-29T12:01:00+00:00",
+    "ended_at": null,
+    "ttl_seconds": 900,
+    "expires_at": 1787997660.0
+  }
+]
+```
+
+`brigade work brief --json` publishes the current Codex/T3 thread when
+`CODEX_THREAD_ID` is set, then projects overlap against other live rows. A
+warning never blocks the brief or takes a lock.
+
+```json
+{
+  "interactive_sessions": {"published": true},
+  "overlap_warnings": [
+    {
+      "node_id": "22222222-2222-4222-8222-222222222222",
+      "harness": "cursor",
+      "session_id": "sess-other",
+      "branch": "main",
+      "checkout_path": "/tmp/other/project",
+      "age": 120,
+      "paths": ["src/a.py"],
+      "partial": false
+    }
+  ]
+}
+```
+
+Data bounds: at most 64 dirty paths, 512 characters each, 32 KiB encoded JSON,
+128-character opaque harness and session IDs, 512-character repository
+identity, 256-character label and branch, 1,024-character checkout path. Active
+lists cap at 500 rows; history caps at 1,000.
+
+TTL is 120 through 3,600 seconds, default 900. Expiry is a read-time
+classification. An upsert after expiry starts a new active interval. Missing
+end callbacks rely on TTL; no adapter starts a daemon.
+
+Node credentials remain the write identity. The Hub derives `node_id` from the
+bearer token. Public rows never include remotes, tokens, diffs, prompts,
+transcripts, or file contents. A credential-bearing origin URL is stored only
+as its credential-free identity, such as `github.com/example/project`.
+
+Session heartbeats are not placed in the run-event spool. Replaying an old
+heartbeat could resurrect expired presence. A failed heartbeat is discarded;
+the next live hook refresh is authoritative. Hub outage is fail-open for
+editor hooks.
+
+Harness coverage: Claude `SessionStart` / relevant `PostToolUse` / accepted
+`Stop`; Codex and T3 Code through the shared work-loop brief using
+`CODEX_THREAD_ID` as harness `codex`; Cursor managed `sessionStart`,
+`postToolUse`, and `sessionEnd`. Cursor Cloud stays on the existing cloud
+tracker. Overlap warnings require matching repository identity and at least
+one identical dirty path. They are advisory only.
+
+The Command Deck renders a separate Interactive sessions panel and marks repo
+rows with exact live dirty-path overlap. Those rows never join `LiveRun`,
+station `busy`, cloud capacity, run collisions, or outcome history.
+
 ## Phase 3 surface
 
 Hub-served Fleet dashboard (`src/brigade/fleet_dashboard.py`, routed by

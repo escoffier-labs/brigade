@@ -266,9 +266,10 @@ def test_cursor_managed_plugin_rule_hook_surface(tmp_path, monkeypatch, capsys):
     hook_script = home / ".cursor" / "hooks" / "brigade-session-start"
     assert hook_script.is_file()
     assert hook_script.stat().st_mode & 0o111
-    entries = json.loads(hooks_json.read_text())["hooks"]["sessionStart"]
-    assert foreign_entry in entries
-    assert {"command": str(hook_script)} in entries
+    hooks = json.loads(hooks_json.read_text())["hooks"]
+    assert foreign_entry in hooks["sessionStart"]
+    managed_entry = {"command": "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop"}
+    assert managed_entry in hooks["sessionStart"]
 
 
 def test_cursor_edited_managed_rule_reports_conflict_and_preserves_edit(tmp_path, monkeypatch, capsys):

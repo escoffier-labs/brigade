@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from brigade import fleet_dashboard, fleet_hub
+from brigade import fleet_dashboard, fleet_hub, fleet_hub_sessions
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
@@ -528,6 +528,65 @@ class TestPureRendering:
         )
         assert 'nonce="abc"' in page
         assert "Fleet: Repos" in page
+
+
+def test_interactive_sessions_stay_off_legacy_boards_and_station_capacity(tmp_path):
+    config_path = tmp_path / "deck.json"
+    config_path.write_text(
+        json.dumps({"stations": [{"node_id": NODE_A, "name": "Alpha", "capacity": 10}]}),
+        encoding="utf-8",
+    )
+    db = tmp_path / "hub" / "fleet.db"
+    server = fleet_hub.make_server(
+        "127.0.0.1",
+        0,
+        db,
+        TOKEN,
+        allow_admin_writes=True,
+        deck_config_path=config_path,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        hub = ("127.0.0.1", server.server_address[1])
+        conn = fleet_hub.open_db(db)
+        try:
+            status, _payload = fleet_hub_sessions.handle_session(
+                conn,
+                {
+                    "action": "upsert",
+                    "node_id": NODE_A,
+                    "harness": "claude",
+                    "session_id": "sess-board",
+                    "repo_identity": "github.com/example/project",
+                    "identity_scope": "fleet",
+                    "repo_label": "project",
+                    "checkout_path": "<script>alert(1)</script>",
+                    "branch": "main",
+                    "dirty_paths": ["src/a.py"],
+                    "dirty_truncated": False,
+                    "ttl_seconds": 900,
+                },
+                caller_node=None,
+            )
+            assert status == 200
+        finally:
+            conn.close()
+        status, _headers, deck_body = _request(hub, "GET", "/deck", headers=_bearer())
+        assert status == 200
+        assert "Interactive sessions" in deck_body
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in deck_body
+        assert "<script>alert(1)</script>" not in deck_body
+        assert "0/10 busy" in deck_body
+        status, _headers, machines = _request(hub, "GET", "/view/machines", headers=_bearer())
+        assert status == 200
+        assert "sess-board" not in machines
+        assert "<script>alert(1)</script>" not in machines
+        assert "No fleet events recorded yet." in machines
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 TAILSCALE_USER = "tailscale-user@example.invalid"

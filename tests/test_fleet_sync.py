@@ -519,6 +519,7 @@ class TestJournalHook:
         assert seen[0]["ts"] == event.recorded_at
         assert seen[0]["run_id"] == "runA"
         assert seen[0]["repo"] == "ws"
+        assert seen[0]["repo_identity"] is not None
         # The real resolver returns the per-machine home identity, not the
         # workspace-local one that also exists here.
         assert fleet_client.resolve_node_id(journal) == NODE_A
@@ -568,6 +569,7 @@ class TestJournalHook:
         assert spooled["node_id"] == NODE_A
         assert spooled["repo"] == "ws"
         assert spooled["state"] == "run.created"
+        assert isinstance(spooled["repo_identity"], str) and spooled["repo_identity"]
 
     def test_no_hub_configured_does_not_spool(self, tmp_path, monkeypatch):
         from brigade import node as node_mod
@@ -1262,3 +1264,331 @@ class TestHubHardening:
 def test_conftest_clears_fleet_env():
     assert "BRIGADE_FLEET_HUB_URL" not in os.environ
     assert "BRIGADE_FLEET_TOKEN" not in os.environ
+
+
+ADMIN_TOKEN = "admin-token-sessions-12345"
+NODE_A_TOKEN = ""
+NODE_B_TOKEN = ""
+
+
+@pytest.fixture()
+def hub_server(tmp_path):
+    global NODE_A_TOKEN, NODE_B_TOKEN
+    db = tmp_path / "hub" / "sessions.db"
+    server = fleet_hub.make_server("127.0.0.1", 0, db, ADMIN_TOKEN, allow_admin_writes=False)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    NODE_A_TOKEN = _enroll_node(url, NODE_A)
+    NODE_B_TOKEN = _enroll_node(url, NODE_B)
+    try:
+        yield url
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _enroll_node(url: str, node_id: str) -> str:
+    status, payload = _request(url, "POST", "/nodes", body={"action": "add", "node_id": node_id}, token=ADMIN_TOKEN)
+    assert status == 200 and payload["added"] is True, payload
+    return str(payload["token"])
+
+
+def _request(hub, method: str, path: str, *, body=None, token=None, cookie=None) -> tuple[int, dict]:
+    headers: dict[str, str] = {}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    if cookie is not None:
+        headers["Cookie"] = cookie
+    data = json.dumps(body).encode() if body is not None else None
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(hub + path, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        try:
+            return exc.code, json.loads(raw)
+        except json.JSONDecodeError:
+            return exc.code, {}
+
+
+def _request_json(hub, method: str, path: str, *, body=None, token=None, cookie=None) -> tuple[int, dict]:
+    return _request(hub, method, path, body=body, token=token, cookie=cookie)
+
+
+def _upsert(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "action": "upsert",
+        "harness": "claude",
+        "session_id": "sess-1",
+        "repo_identity": "github.com/example/project",
+        "identity_scope": "fleet",
+        "repo_label": "project",
+        "checkout_path": "/tmp/project",
+        "branch": "main",
+        "dirty_paths": ["src/a.py"],
+        "dirty_truncated": False,
+        "ttl_seconds": 900,
+    }
+    body.update(overrides)
+    return body
+
+
+def _dashboard_cookie() -> str:
+    return f"{fleet_hub.DASHBOARD_COOKIE}={fleet_hub.dashboard_cookie_value(ADMIN_TOKEN)}"
+
+
+def _create_session(hub, token: str) -> None:
+    status, payload = _request(hub, "POST", "/sessions", body=_upsert(), token=token)
+    assert status == 200, payload
+
+
+def _revoke_node(hub, node_id: str) -> None:
+    status, payload = _request(hub, "POST", "/nodes", body={"action": "revoke", "node_id": node_id}, token=ADMIN_TOKEN)
+    assert status == 200, payload
+
+
+def test_session_routes_auth_and_node_identity(hub_server):
+    assert _request(hub_server, "GET", "/sessions")[0] == 401
+    assert _request(hub_server, "POST", "/sessions", body=_upsert(node_id=NODE_B), token=NODE_A_TOKEN)[0] == 400
+    assert _request(hub_server, "POST", "/sessions", body=_upsert(), token=NODE_A_TOKEN)[0] == 200
+    status, body = _request_json(hub_server, "GET", "/sessions", token=NODE_A_TOKEN)
+    assert status == 200 and body["sessions"][0]["node_id"] == NODE_A
+    assert _request(hub_server, "POST", "/sessions", body=_upsert(), cookie=_dashboard_cookie())[0] == 401
+    assert _request(hub_server, "POST", "/sessions", body=_upsert(node_id=NODE_A), token=ADMIN_TOKEN)[0] == 403
+
+
+def test_session_admin_writes_include_local_node_id(monkeypatch, session_snapshot, tmp_path):
+    home = tmp_path / "operator"
+    _plant_home_identity(home, NODE_A)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("BRIGADE_HOME", str(home / ".brigade"))
+    calls = _record_hub_calls(monkeypatch, node_token=None, admin_token=ADMIN_TOKEN)
+    assert fleet_client.upsert_session(session_snapshot) is True
+    assert calls[0].body["node_id"] == NODE_A
+    assert "unknown" not in json.dumps(calls[0].body)
+
+
+def test_session_admin_unknown_identity_fails_open_without_unknown(monkeypatch, session_snapshot):
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: "unknown")
+    calls = _record_hub_calls(monkeypatch, node_token=None, admin_token=ADMIN_TOKEN)
+    result = fleet_client.publish_session(session_snapshot)
+    assert result.ok is False
+    assert result.reason == "unknown_node_identity"
+    assert calls == []
+
+
+def test_session_admin_enabled_hub_accepts_body_node_id(tmp_path):
+    db = tmp_path / "hub" / "admin-sessions.db"
+    server = fleet_hub.make_server("127.0.0.1", 0, db, ADMIN_TOKEN, allow_admin_writes=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, payload = _request(url, "POST", "/sessions", body=_upsert(node_id=NODE_A), token=ADMIN_TOKEN)
+        assert status == 200, payload
+        assert payload["session"]["node_id"] == NODE_A
+        listed = _request(url, "GET", "/sessions", token=ADMIN_TOKEN)[1]
+        assert listed["sessions"][0]["node_id"] == NODE_A
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_revoked_node_cannot_refresh_session(hub_server):
+    _create_session(hub_server, NODE_A_TOKEN)
+    _revoke_node(hub_server, NODE_A)
+    assert _request(hub_server, "POST", "/sessions", body=_upsert(), token=NODE_A_TOKEN)[0] == 401
+
+
+def _safe_session_row() -> dict[str, object]:
+    return {
+        "node_id": NODE_A,
+        "harness": "claude",
+        "session_id": "sess-1",
+        "repo_identity": "github.com/example/project",
+        "identity_scope": "fleet",
+        "repo_label": "project",
+        "checkout_path": "/tmp/project",
+        "branch": "main",
+        "dirty_paths": ["src/a.py"],
+        "dirty_truncated": False,
+        "state": "active",
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "heartbeat_at": "2026-01-01T00:00:00+00:00",
+        "ended_at": None,
+        "ttl_seconds": 900,
+        "expires_at": 9_999_999_999.0,
+    }
+
+
+@pytest.fixture()
+def session_snapshot():
+    from brigade.fleet_session_presence import SessionSnapshot
+
+    return SessionSnapshot(
+        harness="claude",
+        session_id="sess-1",
+        repo_identity="github.com/example/project",
+        identity_scope="fleet",
+        repo_label="project",
+        checkout_path="/tmp/project",
+        branch="main",
+        dirty_paths=("src/a.py",),
+        dirty_truncated=False,
+    )
+
+
+def _record_hub_calls(monkeypatch, *, node_token: str | None = "node-token", admin_token: str | None = None):
+    from types import SimpleNamespace
+    from urllib.parse import urlparse
+
+    calls: list[SimpleNamespace] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, size: int = -1):
+            payload = json.dumps({"sessions": [_safe_session_row()]}).encode()
+            return payload if size < 0 else payload[:size]
+
+    def fake_open(request, timeout=None):
+        parsed = urlparse(request.full_url)
+        raw = request.data or b"{}"
+        calls.append(
+            SimpleNamespace(
+                path=parsed.path,
+                headers=dict(request.header_items()),
+                body=json.loads(raw.decode()) if raw else {},
+            )
+        )
+        return FakeResponse()
+
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    if node_token:
+        monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", node_token)
+    else:
+        monkeypatch.delenv("BRIGADE_FLEET_NODE_TOKEN", raising=False)
+    if admin_token:
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", admin_token)
+    else:
+        monkeypatch.delenv("BRIGADE_FLEET_TOKEN", raising=False)
+    monkeypatch.setattr(fleet_client, "_hub_open", fake_open)
+    return calls
+
+
+def test_client_upsert_end_and_fetch_use_node_token(monkeypatch, session_snapshot):
+    calls = _record_hub_calls(monkeypatch)
+    assert fleet_client.upsert_session(session_snapshot) is True
+    assert fleet_client.end_session(session_snapshot) is True
+    assert fleet_client.fetch_sessions() == [_safe_session_row()]
+    assert [call.path for call in calls] == ["/sessions", "/sessions", "/sessions"]
+    assert all("Authorization" in call.headers for call in calls)
+    assert all("node_id" not in call.body for call in calls if call.body)
+
+
+def test_fleet_sessions_cli_is_bounded_and_safe(monkeypatch, capsys):
+    from brigade import cli
+
+    monkeypatch.setattr(fleet_client, "fetch_sessions", lambda **_: [_safe_session_row()])
+    assert cli.main(["fleet", "sessions", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["repo_identity"] == "github.com/example/project"
+    assert "dirty_paths" in payload[0]
+
+
+def test_event_repo_identity_is_stored_and_projected(hub):
+    url, token, _db = hub
+    event = {**_event(), "repo_identity": "github.com/example/project"}
+    assert _post(url, token, event)[0] == 200
+    rows = _get(url, "/status", token)[1]["runs"]
+    assert rows[0]["repo_identity"] == "github.com/example/project"
+
+
+def test_event_repo_identity_rejects_secret_like_controls_and_oversize():
+    from brigade import fleet_hub
+
+    with pytest.raises(fleet_hub.FleetHubError):
+        fleet_hub._validate_event(  # content-guard: allow email
+            {**_event(), "repo_identity": "https://user:secret@github.com/example/project.git"}
+        )
+    with pytest.raises(fleet_hub.FleetHubError):
+        fleet_hub._validate_event({**_event(), "repo_identity": "github.com/example/" + ("a" * 500)})
+    with pytest.raises((fleet_hub.FleetHubError, fleet_hub.FleetHubUnprocessable)):
+        fleet_hub._validate_event({**_event(), "repo_identity": "github.com/example/pro\x1bject"})
+    accepted = fleet_hub._validate_event({**_event(), "repo_identity": "github.com/example/project"})
+    assert accepted["repo_identity"] == "github.com/example/project"
+
+
+def test_fetch_sessions_fails_closed_on_oversized_body(monkeypatch):
+    class HugeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, size: int = -1):
+            assert size > 0
+            return b"x" * size
+
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", "node-token")
+    monkeypatch.setattr(fleet_client, "_hub_open", lambda *_args, **_kwargs: HugeResponse())
+    with pytest.raises(fleet_client.FleetClientError, match="size"):
+        fleet_client.fetch_sessions()
+
+
+def test_fetch_sessions_refuses_unbounded_response_reader(monkeypatch):
+    class UnboundedOnlyResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"sessions":[]}'
+
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", "node-token")
+    monkeypatch.setattr(fleet_client, "_hub_open", lambda *_args, **_kwargs: UnboundedOnlyResponse())
+    with pytest.raises(fleet_client.FleetClientError, match="bounded reads"):
+        fleet_client.fetch_sessions()
+
+
+def test_fleet_sessions_text_renders_remaining_ttl_not_raw_epoch(monkeypatch, capsys):
+    from brigade import cli
+
+    row = _safe_session_row()
+    row["expires_at"] = 1_700_000_900.0
+    row["heartbeat_at"] = "2026-01-01T00:00:00+00:00"
+    monkeypatch.setattr(fleet_client, "fetch_sessions", lambda **_: [row])
+    monkeypatch.setattr("brigade.cli.fleet.datetime", __import__("datetime").datetime)
+    from datetime import datetime, timezone
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
+
+    monkeypatch.setattr("brigade.cli.fleet.datetime", FrozenDateTime)
+    assert cli.main(["fleet", "sessions"]) == 0
+    out = capsys.readouterr().out
+    assert "1700000900" not in out
+    assert "900s" in out or "15m" in out or "expired" in out

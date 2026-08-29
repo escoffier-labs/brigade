@@ -28,7 +28,7 @@ def _prompt_hash(text: str) -> str:
 
 def _isolate_hosted_providers(monkeypatch) -> None:
     """Keep observe_providers tests off the host's live Cursor/Codex inventory."""
-    for key in ("CURSOR_API_KEY", "CURSOR_CLOUD_API_KEY", "BG_AGENT_API_KEY"):
+    for key in ("CURSOR_API_KEY", "CURSOR_CLOUD_API_KEY", "BG_AGENT_API_KEY", "JULES_API_KEY"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: [])
 

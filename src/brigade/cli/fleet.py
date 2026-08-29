@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -21,6 +22,46 @@ def _safe_table_cell(value: object) -> str:
     return "".join(ch if ch.isprintable() else ascii(ch)[1:-1] for ch in text)
 
 
+def _format_duration(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def _format_remaining(expires_at: object, *, now: datetime | None = None) -> str:
+    """Bounded remaining TTL from a Hub epoch or ISO timestamp."""
+    current = now or datetime.now(timezone.utc)
+    epoch: float | None = None
+    if isinstance(expires_at, bool):
+        return "-"
+    if isinstance(expires_at, (int, float)):
+        epoch = float(expires_at)
+    elif isinstance(expires_at, str) and expires_at:
+        try:
+            stamp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                epoch = float(expires_at)
+            except ValueError:
+                return "-"
+        else:
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            epoch = stamp.timestamp()
+    if epoch is None:
+        return "-"
+    if not math.isfinite(epoch):
+        return "-"
+    remaining = int(epoch - current.timestamp())
+    if remaining <= 0:
+        return "expired"
+    return _format_duration(remaining)
+
+
 def _format_age(ts: object, *, now: datetime | None = None) -> str:
     """Human-readable age of an ISO-8601 timestamp ("42s", "3m", "2h", "5d")."""
     if not isinstance(ts, str) or not ts:
@@ -33,13 +74,7 @@ def _format_age(ts: object, *, now: datetime | None = None) -> str:
         then = then.replace(tzinfo=timezone.utc)
     current = now or datetime.now(timezone.utc)
     seconds = max(0, int((current - then).total_seconds()))
-    if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        return f"{seconds // 60}m"
-    if seconds < 86400:
-        return f"{seconds // 3600}h"
-    return f"{seconds // 86400}d"
+    return _format_duration(seconds)
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -115,6 +150,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_status.add_argument("--all", action="store_true", help="Include terminal runs.")
     p_status.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
     p_status.set_defaults(func=_dispatch_status)
+
+    p_sessions = fleet_sub.add_parser("sessions", help="Show interactive sessions from the fleet hub.")
+    p_sessions.add_argument("--all", action="store_true", help="Include ended and expired sessions.")
+    p_sessions.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
+    p_sessions.set_defaults(func=_dispatch_sessions)
 
     p_flush = fleet_sub.add_parser("flush", help="Re-POST locally spooled events to the fleet hub.")
     p_flush.set_defaults(func=_dispatch_flush)
@@ -370,6 +410,49 @@ def _dispatch_sink(args: argparse.Namespace) -> int:
     from .. import fleet_export
 
     return fleet_export.dispatch_sink(args)
+
+
+def _dispatch_sessions(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import fleet_client
+
+    try:
+        sessions = fleet_client.fetch_sessions(include_all=args.all)
+    except fleet_client.FleetClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(_json.dumps(sessions, indent=2, sort_keys=True))
+        return 0
+    headers = ("NODE", "HARNESS", "SESSION", "REPO", "BRANCH", "DIRTY", "AGE", "EXPIRES")
+    rows = []
+    for session in sessions:
+        dirty = session.get("dirty_paths")
+        dirty_count = len(dirty) if isinstance(dirty, list) else 0
+        dirty_cell = f"{dirty_count}+" if session.get("dirty_truncated") else str(dirty_count)
+        rows.append(
+            [
+                _safe_table_cell(str(session.get("node_id") or "-")),
+                _safe_table_cell(str(session.get("harness") or "-")),
+                _safe_table_cell(str(session.get("session_id") or "-")),
+                _safe_table_cell(str(session.get("repo_identity") or "-")),
+                _safe_table_cell(str(session.get("branch") or "-")),
+                _safe_table_cell(dirty_cell),
+                _safe_table_cell(_format_age(session.get("heartbeat_at"))),
+                _safe_table_cell(_format_remaining(session.get("expires_at"))),
+            ]
+        )
+    widths = [
+        max(len(header), *(len(row[index]) for row in rows)) if rows else len(header)
+        for index, header in enumerate(headers)
+    ]
+    print("  ".join(header.ljust(width) for header, width in zip(headers, widths, strict=True)))
+    for row in rows:
+        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)))
+    if not rows:
+        print("(no active fleet sessions)")
+    return 0
 
 
 def _dispatch_status(args: argparse.Namespace) -> int:

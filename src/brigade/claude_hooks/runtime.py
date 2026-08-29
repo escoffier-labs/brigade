@@ -20,7 +20,7 @@ from .. import localio
 from ..component_paths import cache_root
 from ..work_cmd.verification import _tree_fingerprint
 from ..wiring import resolve_wired_target
-from . import compaction_marker, envelope
+from . import compaction_marker, envelope, presence
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
 from .session_state import (
@@ -2378,6 +2378,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
     if event != "Stop":
         _touch_session_targets(session_id, target, payload, task_epoch=task_epoch)
     if event == "SessionStart":
+        presence.emit_presence("SessionStart", target, session_id)
         # True starts and Claude's inject-capable compact source both clear any
         # leftover marker so UserPromptSubmit does not double-inject.
         try:
@@ -2518,6 +2519,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             state.pop("pending_bash_started_at", None)
             state.pop("pending_write_at", None)
             _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+            presence.emit_presence("PostToolUse", target, session_id)
         elif state.get("pending_bash_fingerprint") is not None:
             state.pop("pending_bash_fingerprint", None)
             state.pop("pending_bash_started_at", None)
@@ -2611,6 +2613,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
                     "If this work produced durable knowledge, write a Memory Handoff in "
                     "`.claude/memory-handoffs/` before finishing."
                 )
+            presence.emit_presence("Stop", target, session_id)
             return _additional_context(
                 "Stop",
                 "",
@@ -2619,6 +2622,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
                 records=records,
             )
         if handoff_target is not None:
+            presence.emit_presence("Stop", target, session_id)
             return _additional_context(
                 "Stop",
                 "",
@@ -2629,6 +2633,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
                     "`.claude/memory-handoffs/` before finishing.",
                 ],
             )
+        presence.emit_presence("Stop", target, session_id)
     return None
 
 

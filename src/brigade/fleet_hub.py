@@ -118,7 +118,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -187,7 +187,7 @@ EVENT_FIELDS = {
     "digest": str,
 }
 OPTIONAL_STR_FIELDS = ("repo", "seat", "harness")
-OPTIONAL_EVENT_STR_FIELDS = ("capability_fingerprint",)
+OPTIONAL_EVENT_STR_FIELDS = ("capability_fingerprint", "repo_identity")
 OPTIONAL_EVENT_INT_FIELDS = ("exit_status",)
 
 # Terminal run_event.v1 lifecycle types (see run_events.EVENT_TYPES), plus
@@ -218,6 +218,7 @@ CREATE TABLE IF NOT EXISTS events (
     ts TEXT NOT NULL,
     exit_status INTEGER,
     capability_fingerprint TEXT,
+    repo_identity TEXT,
     received_at TEXT NOT NULL,
     PRIMARY KEY (node_id, run_id, sequence, digest)
 );
@@ -260,7 +261,7 @@ _CLAIMS_ADDITIVE_COLUMNS = (
     "lock_acquired_at",
     "lock_run_dir",
 )
-_EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint")
+_EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint", "repo_identity")
 
 # Per-node credentials (schema v4, issue #1150): node_id -> SHA-256 of the
 # node's bearer token. The plaintext token is returned once by the add
@@ -526,6 +527,10 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     fleet_hub_grokbot.ensure_schema(conn)
     # v12 -> v13: one-row run preference pin (#1223).
     fleet_hub_preference.ensure_schema(conn)
+    # v13 -> v14: interactive session presence (#1261) and nullable event repo identity.
+    from . import fleet_hub_sessions
+
+    fleet_hub_sessions.init_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -653,7 +658,14 @@ def _validate_event(raw: Any) -> dict[str, Any]:
         value = raw.get(field)
         if isinstance(value, str):
             _reject_controls(value, field, kind="event")
-        event[field] = value if isinstance(value, str) and value.strip() else None
+        cleaned = value if isinstance(value, str) and value.strip() else None
+        if field == "repo_identity" and cleaned is not None:
+            cleaned = cleaned.strip()
+            from .fleet_session_presence import validate_repo_identity
+
+            if validate_repo_identity(cleaned) is None:
+                raise FleetHubError("event field 'repo_identity' must be a credential-free identity")
+        event[field] = cleaned
     for field in OPTIONAL_EVENT_INT_FIELDS:
         value = raw.get(field)
         if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
@@ -692,7 +704,7 @@ def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str 
         cursor = conn.execute(
             "INSERT OR IGNORE INTO events "
             "(node_id, run_id, sequence, digest, repo, seat, harness, state, ts, exit_status, "
-            "capability_fingerprint, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "capability_fingerprint, repo_identity, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event["node_id"],
                 event["run_id"],
@@ -705,6 +717,7 @@ def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str 
                 event["ts"],
                 event["exit_status"],
                 event["capability_fingerprint"],
+                event["repo_identity"],
                 received_at,
             ),
         )

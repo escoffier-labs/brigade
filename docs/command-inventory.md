@@ -28,7 +28,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 11 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 14 command path(s)
+- `brigade fleet`: 15 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade guard`: 1 command path(s)
 - `brigade handoff`: 17 command path(s)
@@ -74,7 +74,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade untrusted` (extras): 2 command path(s)
 - `brigade update`: 1 command path(s)
 - `brigade version`: 1 command path(s)
-- `brigade work`: 155 command path(s)
+- `brigade work`: 156 command path(s)
 - `brigade workflow` (extras): 3 command path(s)
 
 ## Commands
@@ -201,6 +201,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet preference pull`
 - `brigade fleet preference set`
 - `brigade fleet serve`
+- `brigade fleet sessions`
 - `brigade fleet sink`
 - `brigade fleet status`
 - `brigade friction add` (extras)
@@ -802,6 +803,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade work plan-promote`
 - `brigade work plan-proposals`
 - `brigade work plans`
+- `brigade work presence-hook`
 - `brigade work ready`
 - `brigade work reassign`
 - `brigade work rebind-authority`
