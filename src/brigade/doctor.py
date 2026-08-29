@@ -565,6 +565,8 @@ def _recovery_checkpoint_run_verdict(target: Path, run_dir: Path) -> tuple[str, 
 
     if run_bytes == compare_bytes:
         success_reason = "projected snapshot matches run.json" if is_authority else "checkpoint bytes match run.json"
+    elif is_authority and _historical_projection_metadata_matches(compare_obj, run_meta, run_bytes):
+        success_reason = "historical projector metadata matches projection"
     else:
         expected = _reconstruct_stale_lock_recovery_receipt(compare_obj, run_meta)
         if expected is not None and expected == run_meta:
@@ -584,6 +586,31 @@ def _recovery_checkpoint_run_verdict(target: Path, run_dir: Path) -> tuple[str, 
     if pending_dispatch:
         return warn_with_pending(success_reason)
     return "ok", success_reason
+
+
+def _historical_projection_metadata_matches(
+    projected: dict[str, object], recorded: dict[str, object], recorded_bytes: bytes
+) -> bool:
+    """Accept only the v5-to-v6 projector metadata compatibility shape.
+
+    Projector v6 added the default ``kind: work`` field and incremented its
+    metadata version. A v5 authority snapshot is accepted only when its raw
+    bytes equal the canonical v5 projection, keeping every other run.json
+    field and the writer encoding fail-closed.
+    """
+    if (
+        projected.get("projector_version") != 6
+        or recorded.get("projector_version") != 5
+        or projected.get("kind") != "work"
+        or "kind" in recorded
+    ):
+        return False
+    historical = dict(projected)
+    historical.pop("kind")
+    historical["projector_version"] = 5
+    from brigade import run_projector  # lazy: authority compatibility only
+
+    return recorded_bytes == run_projector.encode_snapshot_bytes(historical)
 
 
 def _read_run_meta_fail_safe(run_json_path: Path) -> dict[str, object] | None:
