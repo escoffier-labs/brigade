@@ -37,7 +37,7 @@ func TestRetryOnBusyImportSucceedsAfterHeldLock(t *testing.T) {
 
 	holder := openImmediate(t, path)
 	defer holder.Close()
-	if _, err := holder.Exec("BEGIN EXCLUSIVE"); err != nil {
+	if _, err := holder.Exec("BEGIN IMMEDIATE"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -104,7 +104,7 @@ func TestRetryOnBusyBoundedFailureNamesHolderDiagnosis(t *testing.T) {
 
 	holder := openImmediate(t, path)
 	defer holder.Close()
-	if _, err := holder.Exec("BEGIN EXCLUSIVE"); err != nil {
+	if _, err := holder.Exec("BEGIN IMMEDIATE"); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _, _ = holder.Exec("ROLLBACK") }()
@@ -355,7 +355,7 @@ func realBusyResultCode(t *testing.T) error {
 	if _, err := holder.Exec("CREATE TABLE t(x INTEGER)"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := holder.Exec("BEGIN EXCLUSIVE"); err != nil {
+	if _, err := holder.Exec("BEGIN IMMEDIATE"); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = holder.Exec("ROLLBACK") })

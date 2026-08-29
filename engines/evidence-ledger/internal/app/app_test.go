@@ -2002,7 +2002,7 @@ func copyFixture(t *testing.T, from, to string) {
 	}
 }
 
-func insertSyntheticSearchArchive(t *testing.T, db *sql.DB, n int) {
+func insertSyntheticSearchArchive(t testing.TB, db *sql.DB, n int) {
 	t.Helper()
 	if _, err := db.Exec(`insert into sources(id, kind, name, created_at, updated_at) values('source-1','synthetic','Synthetic','2026-07-02T00:00:00Z','2026-07-02T00:00:00Z')`); err != nil {
 		t.Fatal(err)
@@ -2037,7 +2037,7 @@ values(?,?,?,?,?,?,?,?,?,?)`, id, "source-1", "collection-1", "actor-1", id, "me
 	}
 }
 
-func explainPlan(t *testing.T, db *sql.DB, sqlText string, args ...any) string {
+func explainPlan(t testing.TB, db *sql.DB, sqlText string, args ...any) string {
 	t.Helper()
 	rows, err := db.Query("explain query plan "+sqlText, args...)
 	if err != nil {
@@ -2291,8 +2291,8 @@ func TestSearchPlanBoundsFTSCandidatesBeforeJoins(t *testing.T) {
 
 	opts := SearchOpts{Query: "needle", Limit: 5}
 	sqlText, params := buildSearchQuery(opts)
-	if !strings.Contains(sqlText, "join items i on i.id = item_fts.item_id") {
-		t.Fatalf("candidate CTE must join items for latest-live filtering:\n%s", sqlText)
+	if strings.Contains(sqlText, "join items i on i.id = item_fts.item_id") {
+		t.Fatalf("candidate CTE must bound FTS rows before post-pool joins:\n%s", sqlText)
 	}
 	plan := explainPlan(t, db, sqlText, params...)
 	for _, want := range []string{
@@ -2311,18 +2311,18 @@ func TestSearchPlanBoundsFTSCandidatesBeforeJoins(t *testing.T) {
 	for _, want := range []string{
 		"SCAN fc",
 		"SEARCH i USING",
-		"SEARCH im USING COVERING INDEX",
+		"SEARCH im EXISTS USING",
 		"(item_id=?",
 	} {
 		if !strings.Contains(projectPlan, want) {
 			t.Fatalf("project filter plan missing %q:\n%s", want, projectPlan)
 		}
 	}
-	// Latest-live filtering joins items inside the CTE, so SEARCH i may appear
+	// Latest-live filtering probes items inside the CTE, so SEARCH fi may appear
 	// before SCAN fc. Post-pool filters (project metadata) must still run after
 	// the materialized candidate scan.
 	scanFC := strings.Index(projectPlan, "SCAN fc")
-	searchIM := strings.Index(projectPlan, "SEARCH im USING COVERING INDEX")
+	searchIM := strings.Index(projectPlan, "SEARCH im EXISTS USING")
 	if scanFC < 0 || searchIM < 0 || scanFC > searchIM {
 		t.Fatalf("project filter plan does not keep FTS candidates outermost:\n%s", projectPlan)
 	}

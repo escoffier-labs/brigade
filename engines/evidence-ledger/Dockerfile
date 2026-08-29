@@ -2,7 +2,7 @@
 # MiseLedger is pure Go (modernc.org/sqlite), so the build needs no CGO and the
 # result is a static, dependency-free binary.
 
-FROM golang:1.22-bookworm AS builder
+FROM golang:1.25-bookworm AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
