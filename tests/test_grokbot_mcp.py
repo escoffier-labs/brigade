@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -637,6 +638,66 @@ def test_workers_cannot_retrieve_reports_and_operator_can(tmp_path: Path):
     assert retrieved["text"] == report
     assert retrieved["sha256"] == digest
     assert report not in json.dumps(operator.call_tool("grokbot_queue_status", {"job_id": job_id}))
+
+
+GENERIC_CLAIM_ERROR = {"error": {"code": "invalid_request", "message": "Tool input failed validation"}}
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        "terminal_completed",
+        "terminal_failed",
+        "expired",
+        "conflicting",
+        "malformed_job_id",
+        "malformed_extra_field",
+    ),
+)
+def test_rejected_claims_return_generic_error_and_hide_execution_context(tmp_path: Path, kind: str):
+    worker = _adapter(tmp_path)
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), f"{kind}-job")["job_id"]
+    bot_id = worker.config.bot_id
+    now = datetime.now(timezone.utc)
+    arguments = {"job_id": job_id, "lease_id": "lease-b"}
+
+    if kind == "terminal_completed":
+        grokbot_jobs.claim(tmp_path, job_id, bot_id, "lease-a", 300, now=now)
+        grokbot_jobs.transition(tmp_path, job_id, bot_id, "lease-a", "running", now=now)
+        grokbot_jobs.transition(
+            tmp_path,
+            job_id,
+            bot_id,
+            "lease-a",
+            "completed",
+            artifact={
+                "kind": "draft-pr",
+                "url": "https://github.com/example/brigade/pull/1",
+                "branch": "grokbot/job",
+            },
+            now=now,
+        )
+    elif kind == "terminal_failed":
+        grokbot_jobs.claim(tmp_path, job_id, bot_id, "lease-a", 300, now=now)
+        grokbot_jobs.transition(tmp_path, job_id, bot_id, "lease-a", "failed", now=now)
+    elif kind == "expired":
+        grokbot_jobs.expire(tmp_path, job_id, now=now + timedelta(seconds=901))
+        arguments = {"job_id": job_id, "lease_id": "lease-a"}
+    elif kind == "conflicting":
+        worker.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    elif kind == "malformed_job_id":
+        arguments = {"job_id": "not-a-job", "lease_id": "lease-a"}
+    else:
+        arguments = {"job_id": job_id, "lease_id": "lease-a", "role": "operator"}
+
+    with pytest.raises(grokbot_mcp.AdapterError) as error:
+        worker.call_tool("grokbot_queue_claim", arguments)
+
+    payload = error.value.public_error()
+    rendered = json.dumps(payload)
+    assert payload == GENERIC_CLAIM_ERROR
+    assert "PRIVATE_INSTRUCTIONS_MUST_NOT_LEAK" not in rendered
+    assert "execution_context" not in rendered
 
 
 def test_worker_inputs_cannot_select_target_role_bot_identity_or_lease_duration(tmp_path: Path):
