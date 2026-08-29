@@ -18,11 +18,13 @@ from .contracts import (
     FleetError,
     is_offset_datetime,
     omit_undefined,
+    parse_fingerprint,
     parse_identifier,
     parse_opaque_id,
+    parse_wazuh_finding_id,
 )
 from .exec import EXEC_DEFAULT_OUTPUT_BYTES, ExecRequest, Runner, run_exec
-from .probes import PROBE_WORKING_DIRECTORY, _health_class
+from .probes import PROBE_WORKING_DIRECTORY, _health_class, verify_catalogued_service
 from .runtime_config import FLEET_SAFE_SERVICE_UNIT_PATTERN
 
 PROPOSAL_TTL_MS = 15 * 60 * 1000
@@ -35,7 +37,7 @@ MAX_CONSUMED_BYTES = 262_144
 EXECUTABLE_ACTION: dict[str, Any] = {
     "action_id": "restart-service",
     "verification_id": "verify-service",
-    "rollback_id": "rollback-service",
+    "rollback_id": "no-rollback",
     "service_id": "research-bridge",
     "target_alias": "control-plane",
     "finding_kind": "unhealthy-service",
@@ -53,8 +55,50 @@ SHOW_PROPERTIES = (
     "StateChangeTimestampMonotonic",
     "InvocationID",
 )
-RECEIPT_FORBIDDEN = ("stdout", "stderr", "nonce", "finding_revision", "system_revision")
-ACTION_STATE_SUBDIRS = ("proposals", "consumed", "receipts", "reservations")
+RECEIPT_FORBIDDEN = (
+    "stdout",
+    "stderr",
+    "nonce",
+    "finding_revision",
+    "system_revision",
+    "command",
+    "path",
+    "credential",
+    "hostname",
+    "token",
+    "secret",
+    "password",
+    "body",
+    "title",
+    "holder",
+)
+PROPOSAL_BASE_KEYS = frozenset(
+    {
+        "version",
+        "proposal_id",
+        "finding_id",
+        "service_id",
+        "target_alias",
+        "finding_revision",
+        "system_revision",
+        "action_id",
+        "verification_id",
+        "rollback_id",
+        "nonce",
+        "created_at",
+        "expires_at",
+    }
+)
+PROPOSAL_WAZUH_KEYS = PROPOSAL_BASE_KEYS | {
+    "automatic_rollback",
+    "blast_radius",
+    "maintenance_window_id",
+    "wazuh_fingerprint",
+}
+ACTION_STATE_SUBDIRS = ("proposals", "consumed", "receipts", "reservations", "cleanup")
+MAX_CLEANUP = 1
+MAX_CLEANUP_BYTES = 4096
+RECOVERY_JOURNAL_FILENAME = "recovery.json"
 RECEIPT_KINDS = frozenset({"proposal", "approval", "rejection", "execution", "verification"})
 RECEIPT_OUTCOMES = frozenset(
     {
@@ -143,28 +187,14 @@ def _require_datetime(value: object) -> str:
 
 
 def _parse_proposal_record(raw: object, expected: str | None = None) -> dict[str, Any]:
-    if not isinstance(raw, Mapping) or set(raw) != {
-        "version",
-        "proposal_id",
-        "finding_id",
-        "service_id",
-        "target_alias",
-        "finding_revision",
-        "system_revision",
-        "action_id",
-        "verification_id",
-        "rollback_id",
-        "nonce",
-        "created_at",
-        "expires_at",
-    }:
+    if not isinstance(raw, Mapping) or set(raw) not in {PROPOSAL_BASE_KEYS, PROPOSAL_WAZUH_KEYS}:
         _action_state_invalid()
     if raw.get("version") != 1:
         _action_state_invalid()
     record = {
         "version": 1,
         "proposal_id": parse_opaque_id(raw.get("proposal_id")),
-        "finding_id": parse_identifier(raw.get("finding_id")),
+        "finding_id": parse_wazuh_finding_id(raw.get("finding_id")),
         "service_id": raw.get("service_id"),
         "target_alias": raw.get("target_alias"),
         "finding_revision": _parse_revision(raw.get("finding_revision")),
@@ -180,29 +210,22 @@ def _parse_proposal_record(raw: object, expected: str | None = None) -> dict[str
         _action_state_invalid()
     if record["action_id"] != "restart-service" or record["verification_id"] != "verify-service":
         _action_state_invalid()
-    if record["rollback_id"] != "rollback-service":
+    if record["rollback_id"] != "no-rollback":
         _action_state_invalid()
     if expected is not None and record["proposal_id"] != expected:
         _action_state_invalid()
+    if "wazuh_fingerprint" in raw:
+        if raw.get("automatic_rollback") is not False or raw.get("blast_radius") != "one registered service":
+            _action_state_invalid()
+        record["automatic_rollback"] = False
+        record["blast_radius"] = "one registered service"
+        record["wazuh_fingerprint"] = parse_fingerprint(raw.get("wazuh_fingerprint"))
+        record["maintenance_window_id"] = parse_identifier(raw.get("maintenance_window_id"))
     return record
 
 
 def _parse_approval_record(raw: object, expected: str | None = None) -> dict[str, Any]:
-    if not isinstance(raw, Mapping) or set(raw) != {
-        "version",
-        "proposal_id",
-        "finding_id",
-        "service_id",
-        "target_alias",
-        "finding_revision",
-        "system_revision",
-        "action_id",
-        "verification_id",
-        "rollback_id",
-        "nonce",
-        "expires_at",
-        "approved_at",
-    }:
+    if not isinstance(raw, Mapping) or "approved_at" not in raw:
         _action_state_invalid()
     record = {
         **_parse_proposal_record(
@@ -248,6 +271,16 @@ def _parse_revision_claim(raw: object, expected: str | None = None) -> dict[str,
     return record
 
 
+def _receipt_contract(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in receipt.items() if key != "outcome"}
+
+
+def _parse_receipt_contract(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, Mapping) or "outcome" in raw:
+        _action_state_invalid()
+    return _receipt_contract(_parse_receipt({**raw, "outcome": "unverified"}))
+
+
 def _parse_reservation(raw: object, expected: str | None = None) -> dict[str, Any]:
     if not isinstance(raw, Mapping) or set(raw) != {
         "version",
@@ -256,26 +289,73 @@ def _parse_reservation(raw: object, expected: str | None = None) -> dict[str, An
         "slot_count",
         "reserved_bytes",
         "created_at",
+        "receipt_contracts",
     }:
         _action_state_invalid()
-    if raw.get("version") != 1:
+    if raw.get("version") != 2:
         _action_state_invalid()
     slot_count = raw.get("slot_count")
     reserved_bytes = raw.get("reserved_bytes")
+    contracts = raw.get("receipt_contracts")
     if not isinstance(slot_count, int) or isinstance(slot_count, bool) or slot_count < 1:
         _action_state_invalid()
     if not isinstance(reserved_bytes, int) or isinstance(reserved_bytes, bool) or reserved_bytes < 1:
         _action_state_invalid()
+    if not isinstance(contracts, list) or len(contracts) != slot_count:
+        _action_state_invalid()
+    parsed_contracts = [_parse_receipt_contract(item) for item in contracts]
+    if len({item["receipt_id"] for item in parsed_contracts}) != len(parsed_contracts):
+        _action_state_invalid()
     record = {
-        "version": 1,
+        "version": 2,
         "reservation_id": parse_opaque_id(raw.get("reservation_id")),
         "proposal_id": parse_opaque_id(raw.get("proposal_id")),
         "slot_count": slot_count,
         "reserved_bytes": reserved_bytes,
         "created_at": _require_datetime(raw.get("created_at")),
+        "receipt_contracts": parsed_contracts,
     }
     if expected is not None and record["reservation_id"] != expected:
         _action_state_invalid()
+    return record
+
+
+def _parse_claim_cleanup(raw: object) -> dict[str, Any]:
+    required = {
+        "version",
+        "proposal_id",
+        "target_alias",
+        "holder",
+        "reservation_id",
+        "terminal_receipts",
+        "receipt_pending",
+        "release_pending",
+    }
+    if not isinstance(raw, Mapping) or set(raw) != required:
+        _action_state_invalid()
+    if raw.get("version") != 2:
+        _action_state_invalid()
+    terminal = raw.get("terminal_receipts")
+    if not isinstance(terminal, list) or not 1 <= len(terminal) <= 2:
+        _action_state_invalid()
+    receipts = [_parse_receipt(item) for item in terminal]
+    proposal_id = parse_opaque_id(raw.get("proposal_id"))
+    if any(item["proposal_id"] != proposal_id for item in receipts):
+        _action_state_invalid()
+    if any(item["kind"] not in {"rejection", "execution", "verification"} for item in receipts):
+        _action_state_invalid()
+    if not isinstance(raw.get("receipt_pending"), bool) or not isinstance(raw.get("release_pending"), bool):
+        _action_state_invalid()
+    record = {
+        "version": 2,
+        "proposal_id": proposal_id,
+        "target_alias": parse_identifier(raw.get("target_alias")),
+        "holder": parse_opaque_id(raw.get("holder")),
+        "reservation_id": parse_opaque_id(raw.get("reservation_id")),
+        "terminal_receipts": receipts,
+        "receipt_pending": raw["receipt_pending"],
+        "release_pending": raw["release_pending"],
+    }
     return record
 
 
@@ -310,13 +390,13 @@ def _parse_receipt(raw: object) -> dict[str, Any]:
         "created_at": _require_datetime(raw.get("created_at")),
     }
     if "finding_id" in raw:
-        receipt["finding_id"] = parse_identifier(raw.get("finding_id"))
+        receipt["finding_id"] = parse_wazuh_finding_id(raw.get("finding_id"))
     for key, expected in (
         ("service_id", "research-bridge"),
         ("target_alias", "control-plane"),
         ("action_id", "restart-service"),
         ("verification_id", "verify-service"),
-        ("rollback_id", "rollback-service"),
+        ("rollback_id", "no-rollback"),
     ):
         if key in raw:
             if raw[key] != expected:
@@ -404,6 +484,26 @@ def _write_exclusive_json(path: Path, record: Mapping[str, Any]) -> None:
                 pass
         if created:
             _unlink_quiet(path)
+        _action_state_invalid()
+
+
+def _replace_json(path: Path, record: Mapping[str, Any]) -> None:
+    """Durably replace one private state record without an unlink gap."""
+    try:
+        existing = path.lstat()
+    except FileNotFoundError:
+        existing = None
+    except OSError:
+        _action_state_invalid()
+    if existing is not None:
+        _assert_owner_file(existing)
+    temporary = path.parent / f".{path.name}.{secrets.token_hex(16)}.tmp"
+    _write_exclusive_json(temporary, record)
+    try:
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    except OSError:
+        _unlink_quiet(temporary)
         _action_state_invalid()
 
 
@@ -554,6 +654,11 @@ class FleetActionStore:
                 _action_state_invalid()
             return _parse_proposal_record(raw, key)
 
+    def is_consumed(self, proposal_id: str) -> bool:
+        with self._lock:
+            key = parse_opaque_id(proposal_id)
+            return _path_exists_nofollow(self._root / "consumed" / f"{key}.json")
+
     def read_approval(self, proposal_id: str) -> dict[str, Any] | None:
         with self._lock:
             key = parse_opaque_id(proposal_id)
@@ -647,12 +752,13 @@ class FleetActionStore:
             reservation_id = secrets.token_hex(16)
             reservation_path = self._root / "reservations" / f"{reservation_id}.json"
             reservation = {
-                "version": 1,
+                "version": 2,
                 "reservation_id": reservation_id,
                 "proposal_id": proposal_id,
                 "slot_count": len(parsed),
                 "reserved_bytes": incoming_bytes,
                 "created_at": _utc_now().isoformat().replace("+00:00", "Z"),
+                "receipt_contracts": [_receipt_contract(item) for item in parsed],
             }
             _write_exclusive_json(reservation_path, reservation)
             _fsync_directory(reservation_path.parent)
@@ -663,30 +769,46 @@ class FleetActionStore:
             self._ensure_ready()
             key = parse_opaque_id(reservation_id)
             reservation_path = self._root / "reservations" / f"{key}.json"
+            parsed = [_parse_receipt(record) for record in records]
+            if not parsed:
+                _action_state_invalid()
             try:
                 raw = _read_safe_json(reservation_path)
             except FileNotFoundError:
-                _action_state_invalid()
+                persisted: list[dict[str, Any]] = []
+                for receipt in parsed:
+                    try:
+                        persisted.append(
+                            _parse_receipt(_read_safe_json(self._root / "receipts" / f"{receipt['receipt_id']}.json"))
+                        )
+                    except FileNotFoundError:
+                        _action_state_invalid()
+                if persisted != parsed:
+                    _action_state_invalid()
+                return
             reservation = _parse_reservation(raw, key)
-            parsed = [_parse_receipt(record) for record in records]
-            if len(parsed) != reservation["slot_count"]:
+            if len(parsed) > reservation["slot_count"]:
+                _action_state_invalid()
+            contracts = {item["receipt_id"]: item for item in reservation["receipt_contracts"]}
+            if len({item["receipt_id"] for item in parsed}) != len(parsed) or any(
+                contracts.get(item["receipt_id"]) != _receipt_contract(item) for item in parsed
+            ):
                 _action_state_invalid()
             incoming = sum(_encoded_size(item) for item in parsed)
             if incoming > reservation["reserved_bytes"]:
                 raise FleetActionStoreError("denied")
-            written: list[Path] = []
-            try:
-                for receipt in parsed:
-                    dest = self._root / "receipts" / f"{receipt['receipt_id']}.json"
+            for receipt in parsed:
+                dest = self._root / "receipts" / f"{receipt['receipt_id']}.json"
+                try:
+                    existing_receipt = _parse_receipt(_read_safe_json(dest))
+                except FileNotFoundError:
                     _write_exclusive_json(dest, receipt)
-                    written.append(dest)
-                _unlink_required(reservation_path)
-                _fsync_directory(reservation_path.parent)
-                _fsync_directory(self._root / "receipts")
-            except Exception:
-                for dest in written:
-                    _unlink_quiet(dest)
-                raise
+                else:
+                    if existing_receipt != receipt:
+                        _action_state_invalid()
+            _unlink_required(reservation_path)
+            _fsync_directory(reservation_path.parent)
+            _fsync_directory(self._root / "receipts")
 
     def release_receipt_reservation(self, reservation_id: str) -> None:
         with self._lock:
@@ -696,6 +818,58 @@ class FleetActionStore:
             if _path_exists_nofollow(reservation_path):
                 _unlink_required(reservation_path)
                 _fsync_directory(reservation_path.parent)
+
+    def write_claim_cleanup(self, record: Mapping[str, Any]) -> None:
+        with self._lock:
+            self._ensure_ready()
+            parsed = _parse_claim_cleanup(record)
+            path = self._root / "cleanup" / RECOVERY_JOURNAL_FILENAME
+            existing: dict[str, Any] | None = None
+            if _path_exists_nofollow(path):
+                try:
+                    existing = _parse_claim_cleanup(_read_safe_json(path))
+                except FileNotFoundError:
+                    existing = None
+                if existing is not None:
+                    if any(
+                        existing[key] != parsed[key]
+                        for key in ("proposal_id", "target_alias", "holder", "reservation_id")
+                    ):
+                        _action_state_invalid()
+                    if not existing["receipt_pending"] and parsed["terminal_receipts"] != existing["terminal_receipts"]:
+                        _action_state_invalid()
+            if existing is None:
+                self._assert_within_bounds(
+                    self._root / "cleanup",
+                    incoming=_encoded_size(parsed),
+                    max_count=MAX_CLEANUP,
+                    max_bytes=MAX_CLEANUP_BYTES,
+                )
+            elif _encoded_size(parsed) > MAX_CLEANUP_BYTES:
+                raise FleetActionStoreError("denied")
+            _replace_json(path, parsed)
+
+    def read_claim_cleanup(self) -> dict[str, Any] | None:
+        with self._lock:
+            self._ensure_ready()
+            path = self._root / "cleanup" / RECOVERY_JOURNAL_FILENAME
+            try:
+                raw = _read_safe_json(path)
+            except FileNotFoundError:
+                return None
+            except FleetError:
+                raise
+            except Exception:
+                _action_state_invalid()
+            return _parse_claim_cleanup(raw)
+
+    def clear_claim_cleanup(self) -> None:
+        with self._lock:
+            self._ensure_ready()
+            path = self._root / "cleanup" / RECOVERY_JOURNAL_FILENAME
+            if _path_exists_nofollow(path):
+                _unlink_required(path)
+                _fsync_directory(path.parent)
 
     def _ensure_ready(self) -> None:
         _assert_owner_dir(self._root, create=True)
@@ -985,3 +1159,29 @@ class ResearchBridgeRestarter:
             _action_unavailable()
         except Exception:
             _action_unavailable()
+
+
+class CatalogRemediator:
+    """Bounded catalog executor: action IDs only, no command or host input."""
+
+    def __init__(self, restarter: ResearchBridgeRestarter):
+        self._restarter = restarter
+
+    def recheck(self, action_id: str) -> dict[str, str]:
+        if action_id != EXECUTABLE_ACTION["action_id"]:
+            raise FleetError("denied", "Fleet request was denied")
+        return self._restarter.observe_research_bridge_revision()
+
+    def execute(self, action_id: str) -> None:
+        if action_id != EXECUTABLE_ACTION["action_id"]:
+            raise FleetError("denied", "Fleet request was denied")
+        self._restarter.restart_research_bridge()
+
+    def verify(self, verification_id: str) -> bool:
+        if verification_id != EXECUTABLE_ACTION["verification_id"]:
+            raise FleetError("denied", "Fleet request was denied")
+        live = self._restarter.observe_research_bridge_revision()
+        return verify_catalogued_service(live)
+
+    def rollback(self, rollback_id: str) -> None:
+        raise FleetError("denied", "Fleet request was denied")
