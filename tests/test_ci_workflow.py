@@ -125,7 +125,7 @@ def test_ci_workflow_notify_jobs_run_go_steps_only_when_notify_paths_change():
         ),
     ):
         section = _workflow_job_section(text, job_name)
-        for uses in ("actions/checkout@v7", "actions/setup-go@v5"):
+        for uses in ("actions/checkout@v7", "actions/setup-go@v7"):
             uses_at = 0
             while True:
                 try:
@@ -193,8 +193,8 @@ def test_ci_workflow_runs_notify_go_commands_from_notify_directory():
     ubuntu = _workflow_job_section(text, "notify-build-and-test")
     assert "runs-on: ubuntu-latest" in ubuntu
     assert "working-directory: stations/notify" in ubuntu
-    # Two setup-go v5 steps: Go 1.22 for build parity, then stable for the scanner.
-    assert ubuntu.count("uses: actions/setup-go@v5") == 2
+    # Two setup-go v7 steps: Go 1.22 for build parity, then stable for the scanner.
+    assert ubuntu.count("uses: actions/setup-go@v7") == 2
     # Both Go setup steps pin the notify go.sum so the root cache warning clears.
     assert ubuntu.count("cache-dependency-path: stations/notify/go.sum") == 2
     # Checkout must not persist credentials (CodeRabbit review comment 3630426956).
@@ -223,7 +223,7 @@ def test_ci_workflow_runs_notify_go_commands_from_notify_directory():
     windows = _workflow_job_section(text, "notify-windows")
     assert "runs-on: windows-latest" in windows
     assert "working-directory: stations/notify" in windows
-    assert "uses: actions/setup-go@v5" in windows
+    assert "uses: actions/setup-go@v7" in windows
     assert "go-version: '1.22'" in windows
     assert "persist-credentials: false" in windows
     assert "cache-dependency-path: stations/notify/go.sum" in windows
