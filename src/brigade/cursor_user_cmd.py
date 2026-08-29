@@ -11,6 +11,8 @@ from . import __version__, component_bins, harness_profiles, localio
 
 STATE_VERSION = 1
 MANAGED_MCP_NAMES = ("brigade", "graphtrail", "miseledger")
+_MANAGED_HOOK_EVENTS = ("sessionStart", "postToolUse", "sessionEnd")
+_MANAGED_HOOK_COMMAND = "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop"
 
 
 def _home_dir() -> Path:
@@ -88,21 +90,7 @@ In a Brigade-wired repository, invoke the global `brigade-work` skill before sub
 
 
 def _hook_text() -> str:
-    context = (
-        "BRIGADE WORK LOOP: In a Brigade-wired repository, invoke the global brigade-work skill before substantive "
-        "work. Start with brigade work brief --target .. Run checks that should count through brigade work verify "
-        "run with --capture brigade-work. Capture failures, export new receipts to MiseLedger when installed, and "
-        "finish durable work with a Memory Handoff."
-    )
-    return (
-        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "
-        + _shell_single_quote(_json_text({"additional_context": context}).strip())
-        + "\n"
-    )
-
-
-def _shell_single_quote(value: str) -> str:
-    return "'" + value.replace("'", "'\"'\"'") + "'"
+    return "#!/bin/sh\n" + _MANAGED_HOOK_COMMAND + "\n"
 
 
 def _desired_files(root: Path) -> dict[Path, tuple[str, bool, str]]:
@@ -208,41 +196,69 @@ def _read_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     return payload, None
 
 
-def _hook_entry(root: Path) -> dict[str, str]:
-    return {"command": str(root / "hooks" / "brigade-session-start")}
+def _hook_entry(root: Path | None = None) -> dict[str, str]:
+    # hooks.json keeps this direct command. ~/.cursor/hooks/brigade-session-start
+    # is a compatibility executable only; do not redirect the command at that file.
+    del root
+    return {"command": _MANAGED_HOOK_COMMAND}
 
 
-def _plan_hook(root: Path, state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None, str | None]:
+def _plan_hook_event(hooks: dict[str, Any], state: dict[str, Any], event: str, path: Path) -> dict[str, Any]:
+    item: dict[str, Any] = {"surface": "hook-config", "path": str(path), "name": event}
+    entries = hooks.get(event)
+    if entries is None:
+        entries = []
+    if not isinstance(entries, list):
+        item.update(status="conflict", action="skip", detail=f"existing {event} hooks must be a list")
+        return item
+    desired = _hook_entry()
+    desired_fp = _digest_value(desired)
+    if desired in entries:
+        item.update(status="current", action="none", desired_fingerprint=desired_fp)
+        return item
+    prior = state["hooks"].get(event)
+    prior_index = next((index for index, entry in enumerate(entries) if _digest_value(entry) == prior), None)
+    if prior_index is None:
+        item.update(status="missing", action="create", desired_fingerprint=desired_fp)
+    else:
+        item.update(status="changed", action="update", desired_fingerprint=desired_fp, prior_index=prior_index)
+    return item
+
+
+def _plan_hook(root: Path, state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any] | None, str | None]:
     path = root / "hooks.json"
     doc, error = _read_json_object(path)
-    item: dict[str, Any] = {"surface": "hook-config", "path": str(path), "name": "sessionStart"}
     if doc is None:
-        item.update(status="conflict", action="skip", detail=error or "could not read hooks configuration")
-        return item, None, error
+        items = [
+            {
+                "surface": "hook-config",
+                "path": str(path),
+                "name": event,
+                "status": "conflict",
+                "action": "skip",
+                "detail": error or "could not read hooks configuration",
+            }
+            for event in _MANAGED_HOOK_EVENTS
+        ]
+        return items, None, error
     hooks = doc.get("hooks")
     if hooks is None:
         hooks = {}
     if not isinstance(hooks, dict):
-        item.update(status="conflict", action="skip", detail="existing hooks field must be an object")
-        return item, None, str(item["detail"])
-    entries = hooks.get("sessionStart")
-    if entries is None:
-        entries = []
-    if not isinstance(entries, list):
-        item.update(status="conflict", action="skip", detail="existing sessionStart hooks must be a list")
-        return item, None, str(item["detail"])
-    desired = _hook_entry(root)
-    desired_fp = _digest_value(desired)
-    if desired in entries:
-        item.update(status="current", action="none", desired_fingerprint=desired_fp)
-    else:
-        prior = state["hooks"].get("sessionStart")
-        prior_index = next((index for index, entry in enumerate(entries) if _digest_value(entry) == prior), None)
-        if prior_index is None:
-            item.update(status="missing", action="create", desired_fingerprint=desired_fp)
-        else:
-            item.update(status="changed", action="update", desired_fingerprint=desired_fp, prior_index=prior_index)
-    return item, doc, None
+        detail = "existing hooks field must be an object"
+        items = [
+            {
+                "surface": "hook-config",
+                "path": str(path),
+                "name": event,
+                "status": "conflict",
+                "action": "skip",
+                "detail": detail,
+            }
+            for event in _MANAGED_HOOK_EVENTS
+        ]
+        return items, None, detail
+    return [_plan_hook_event(hooks, state, event, path) for event in _MANAGED_HOOK_EVENTS], doc, None
 
 
 def _plan_mcp(root: Path, state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any] | None, str | None]:
@@ -316,9 +332,9 @@ def install(*, write: bool = False, json_output: bool = False) -> int:
         _file_item(root, path, text, executable, surface, state)
         for path, (text, executable, surface) in desired_files.items()
     ]
-    hook_item, hooks_doc, _ = _plan_hook(root, state)
+    hook_items, hooks_doc, _ = _plan_hook(root, state)
     mcp_items, mcp_doc, _ = _plan_mcp(root, state)
-    items.extend([hook_item, *mcp_items])
+    items.extend([*hook_items, *mcp_items])
     state_error = state.get("_read_error")
     if state_error:
         items.append(
@@ -355,21 +371,28 @@ def install(*, write: bool = False, json_output: bool = False) -> int:
             elif _relative(root, path) in state["files"]:
                 next_state["files"][_relative(root, path)] = state["files"][_relative(root, path)]
 
-        if hooks_doc is not None and hook_item["status"] != "conflict":
+        hook_changed = False
+        if hooks_doc is not None and all(item["status"] != "conflict" for item in hook_items):
             hooks = hooks_doc.setdefault("hooks", {})
-            entries = hooks.setdefault("sessionStart", [])
-            desired_hook = _hook_entry(root)
-            if hook_item["action"] == "create":
-                entries.append(desired_hook)
-            elif hook_item["action"] == "update":
-                entries[hook_item["prior_index"]] = desired_hook
-            if hook_item["action"] != "none":
+            desired_hook = _hook_entry()
+            for hook_item in hook_items:
+                event = str(hook_item["name"])
+                entries = hooks.setdefault(event, [])
+                if hook_item["action"] == "create":
+                    entries.append(desired_hook)
+                    hook_changed = True
+                elif hook_item["action"] == "update":
+                    entries[hook_item["prior_index"]] = desired_hook
+                    hook_changed = True
+                next_state["hooks"][event] = hook_item["desired_fingerprint"]
+            if hook_changed:
                 path = root / "hooks.json"
                 localio.write_text_atomic(path, _coowned_json_text(hooks_doc))
                 files_written.append(str(path))
-            next_state["hooks"]["sessionStart"] = hook_item["desired_fingerprint"]
-        elif "sessionStart" in state["hooks"]:
-            next_state["hooks"]["sessionStart"] = state["hooks"]["sessionStart"]
+        else:
+            for event in _MANAGED_HOOK_EVENTS:
+                if event in state["hooks"]:
+                    next_state["hooks"][event] = state["hooks"][event]
 
         if mcp_doc is not None:
             servers = mcp_doc.setdefault("mcpServers", {})
@@ -475,14 +498,17 @@ def uninstall(*, write: bool = False, json_output: bool = False) -> int:
         items.append(item)
 
     hook_path = root / "hooks.json"
-    hook_fp = state["hooks"].get("sessionStart")
     hook_removed = False
-    if hook_fp:
-        doc, error = _read_json_object(hook_path)
-        hook_item: dict[str, Any] = {"surface": "hook-config", "path": str(hook_path), "name": "sessionStart"}
+    hook_doc, hook_error = _read_json_object(hook_path)
+    hook_changed = False
+    for event in _MANAGED_HOOK_EVENTS:
+        hook_fp = state["hooks"].get(event)
+        if not hook_fp:
+            continue
+        hook_item: dict[str, Any] = {"surface": "hook-config", "path": str(hook_path), "name": event}
         entries = None
-        if doc is not None and isinstance(doc.get("hooks"), dict):
-            entries = doc["hooks"].get("sessionStart", [])
+        if hook_doc is not None and isinstance(hook_doc.get("hooks"), dict):
+            entries = hook_doc["hooks"].get(event, [])
         index = (
             next((i for i, entry in enumerate(entries) if _digest_value(entry) == hook_fp), None)
             if isinstance(entries, list)
@@ -491,18 +517,24 @@ def uninstall(*, write: bool = False, json_output: bool = False) -> int:
         if index is not None:
             hook_item.update(status="managed", action="remove")
             if write:
-                assert doc is not None and isinstance(entries, list)
+                assert hook_doc is not None and isinstance(entries, list)
                 entries.pop(index)
                 if not entries:
-                    doc["hooks"].pop("sessionStart", None)
-                localio.write_text_atomic(hook_path, _coowned_json_text(doc))
+                    hook_doc["hooks"].pop(event, None)
+                hook_changed = True
                 hook_removed = True
         elif not hook_path.exists():
             hook_item.update(status="absent", action="none")
         else:
-            hook_item.update(status="conflict", action="preserve", detail=error or "managed hook was edited or removed")
+            hook_item.update(
+                status="conflict",
+                action="preserve",
+                detail=hook_error or "managed hook was edited or removed",
+            )
             conflicts.append(hook_item)
         items.append(hook_item)
+    if write and hook_changed and hook_doc is not None:
+        localio.write_text_atomic(hook_path, _coowned_json_text(hook_doc))
 
     mcp_path = root / "mcp.json"
     mcp_doc, mcp_error = _read_json_object(mcp_path)
@@ -556,9 +588,14 @@ def doctor(*, json_output: bool = False) -> int:
     skill_dir = root / "skills" / "brigade-work"
     hook_script = root / "hooks" / "brigade-session-start"
     hooks_doc, _ = _read_json_object(root / "hooks.json")
-    hook_entries: object = None
+    hook_ok = _file_matches(hook_script, desired[hook_script][0]) and bool(hook_script.stat().st_mode & 0o111)
+    desired_hook = _hook_entry()
     if hooks_doc is not None and isinstance(hooks_doc.get("hooks"), dict):
-        hook_entries = hooks_doc["hooks"].get("sessionStart")
+        for event in _MANAGED_HOOK_EVENTS:
+            entries = hooks_doc["hooks"].get(event)
+            hook_ok = hook_ok and isinstance(entries, list) and desired_hook in entries
+    else:
+        hook_ok = False
     mcp_doc, _ = _read_json_object(root / "mcp.json")
     live_servers = mcp_doc.get("mcpServers") if mcp_doc is not None else None
     checks = [
@@ -579,10 +616,7 @@ def doctor(*, json_output: bool = False) -> int:
         ),
         _check(
             "session-hook",
-            _file_matches(hook_script, desired[hook_script][0])
-            and bool(hook_script.stat().st_mode & 0o111)
-            and isinstance(hook_entries, list)
-            and _hook_entry(root) in hook_entries,
+            hook_ok,
             str(root / "hooks.json"),
         ),
     ]

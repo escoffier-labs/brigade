@@ -37,9 +37,10 @@ FAILURE_STATE_SUFFIXES = (
     ".timed_out",
     ".timeout",
 )
-ACTIVE_LIMIT, OBSERVER_LIMIT, RAIL_FAILURE_LIMIT = 200, 8, 10
+ACTIVE_LIMIT, OBSERVER_LIMIT, RAIL_FAILURE_LIMIT, SESSION_LIMIT = 200, 8, 10, 500
 CLOUD_PROVIDER_LIMIT, CLOUD_LEASE_LIMIT = 8, 16
 CLOUD_TEXT_LIMIT = 256
+SESSION_REPO_IDENTITY_LIMIT, SESSION_CHECKOUT_PATH_LIMIT = 512, 1024
 BUCKET_RANK = {"failed": 0, "awaiting approval": 1, "stale": 2, "running": 3, "queued": 4}
 INTERNAL_OUTCOME_STATES = frozenset({"run.dispatch.completed", "run.synthesis.completed"})
 
@@ -111,6 +112,7 @@ class LiveRun:
     bucket: str
     age_seconds: int | None
     elapsed_seconds: int | None
+    repo_identity: str = ""
 
 
 @dataclass(frozen=True)
@@ -153,6 +155,24 @@ class RepoRow:
     claim: Claim | None
     live: tuple[LiveRun, ...]
     collision: bool
+    interactive_overlap: bool = False
+    repo_identity: str = ""
+
+
+@dataclass(frozen=True)
+class InteractiveSession:
+    """One live interactive session. Separate from runs and station capacity."""
+
+    node_id: str
+    harness: str
+    session_id: str
+    repo_identity: str
+    identity_scope: str
+    repo_label: str
+    checkout_path: str
+    branch: str | None
+    dirty_paths: tuple[str, ...]
+    dirty_truncated: bool
 
 
 @dataclass(frozen=True)
@@ -185,6 +205,7 @@ class DeckView:
     outcomes: tuple[LiveRun, ...]
     observers: tuple[tuple[str, str], ...]
     cloud_workers: tuple[CloudWorker, ...] = ()
+    interactive_sessions: tuple[InteractiveSession, ...] = ()
 
 
 def resolve_config_path(flag_value: str | Path | None, environ: Mapping[str, str]) -> Path | None:
@@ -299,7 +320,7 @@ def collides(target: str, live_runs: Sequence[LiveRun], claims: Mapping[str, Cla
 
 
 _LATEST_ROWS = (
-    "SELECT node_id, run_id, repo, seat, harness, state, ts, received_at FROM ("
+    "SELECT node_id, run_id, repo, seat, harness, state, ts, received_at, repo_identity FROM ("
     "  SELECT e.*, ROW_NUMBER() OVER ("
     "    PARTITION BY node_id, run_id ORDER BY sequence DESC, received_at DESC, digest DESC"
     "  ) AS rn FROM events e"
@@ -337,7 +358,7 @@ def fetch_live_runs(conn: sqlite3.Connection, *, now: datetime, stale_after_seco
     rows = conn.execute(query, (*TERMINAL_STATES, cutoff, *AWAITING_STATES)).fetchall()
     started = fetch_started_at(conn, [(row[0], row[1]) for row in rows])
     runs: list[LiveRun] = []
-    for node_id, run_id, repo, seat, harness, state, _ts, received_at in rows:
+    for node_id, run_id, repo, seat, harness, state, _ts, received_at, repo_identity in rows:
         age = _age_seconds(received_at, now)
         runs.append(
             LiveRun(
@@ -350,6 +371,7 @@ def fetch_live_runs(conn: sqlite3.Connection, *, now: datetime, stale_after_seco
                 bucket=bucket_for(state, age_seconds=age, stale_after_seconds=stale_after_seconds),
                 age_seconds=age,
                 elapsed_seconds=_elapsed_seconds(started.get((node_id, run_id)), now),
+                repo_identity=repo_identity or "",
             )
         )
     return runs
@@ -455,8 +477,8 @@ def cloud_workers_from_snapshot(snapshot: Mapping[str, object]) -> tuple[CloudWo
     return tuple(sorted(workers, key=lambda worker: worker.provider)[:CLOUD_PROVIDER_LIMIT])
 
 
-def _safe_display_text(value: object) -> str:
-    return _strip_controls(value)[:CLOUD_TEXT_LIMIT] if isinstance(value, str) else ""
+def _safe_display_text(value: object, *, limit: int = CLOUD_TEXT_LIMIT) -> str:
+    return _strip_controls(value)[:limit] if isinstance(value, str) else ""
 
 
 def fetch_last_heard(conn: sqlite3.Connection, node_ids: Sequence[str]) -> dict[str, str]:
@@ -469,6 +491,13 @@ def fetch_last_heard(conn: sqlite3.Connection, node_ids: Sequence[str]) -> dict[
         ids,
     ).fetchall()
     return {row[0]: row[1] for row in rows}
+
+
+def fetch_interactive_sessions(conn: sqlite3.Connection, *, now: datetime) -> list[dict[str, object]]:
+    """Active unexpired sessions via the Hub session authority. Capped separately."""
+    from . import fleet_hub_sessions
+
+    return fleet_hub_sessions.list_sessions(conn, now_epoch=now.timestamp())[:SESSION_LIMIT]
 
 
 def fetch_observers(conn: sqlite3.Connection, configured: frozenset[str]) -> list[tuple[str, str]]:
@@ -493,6 +522,7 @@ def _live_run_from_row(row: tuple, *, bucket: str | None = None) -> LiveRun:
         bucket=row[5] if bucket is None else bucket,
         age_seconds=None,
         elapsed_seconds=None,
+        repo_identity=(row[8] or "") if len(row) > 8 else "",
     )
 
 
@@ -527,6 +557,134 @@ def _display_claim(claim: Claim | None, enrolled_labels: Mapping[str, str]) -> C
     )
 
 
+def _interactive_session(raw: Mapping[str, object]) -> InteractiveSession:
+    dirty = raw.get("dirty_paths")
+    paths = tuple(item for item in dirty if isinstance(item, str)) if isinstance(dirty, (list, tuple)) else ()
+    branch = raw.get("branch")
+    return InteractiveSession(
+        node_id=_safe_display_text(raw.get("node_id")),
+        harness=_safe_display_text(raw.get("harness")),
+        session_id=_safe_display_text(raw.get("session_id")),
+        repo_identity=_safe_display_text(raw.get("repo_identity"), limit=SESSION_REPO_IDENTITY_LIMIT),
+        identity_scope=_safe_display_text(raw.get("identity_scope")) or "fleet",
+        repo_label=_safe_display_text(raw.get("repo_label")),
+        checkout_path=_safe_display_text(raw.get("checkout_path"), limit=SESSION_CHECKOUT_PATH_LIMIT),
+        branch=_safe_display_text(branch) if isinstance(branch, str) else None,
+        dirty_paths=paths,
+        dirty_truncated=bool(raw.get("dirty_truncated")),
+    )
+
+
+def _session_dirty_paths(raw: Mapping[str, object]) -> set[str]:
+    from .fleet_session_presence import _normalize_overlap_path, _row_dirty_paths
+
+    paths = {_normalize_overlap_path(path) for path in _row_dirty_paths(raw.get("dirty_paths"))}
+    paths.discard("")
+    return paths
+
+
+def _session_row_label(session: InteractiveSession) -> str:
+    label = session.repo_label.strip() if session.repo_label else ""
+    if label:
+        return label[:256]
+    identity = session.repo_identity
+    if "/" in identity:
+        identity = identity.rsplit("/", 1)[-1]
+    return (identity or "session")[:256]
+
+
+def _session_identity_display_targets(
+    active_runs: Sequence[LiveRun],
+    claims_by_target: Mapping[str, Claim],
+    session_rows: Sequence[InteractiveSession],
+) -> dict[str, set[str]]:
+    """Map canonical repo identity to existing run/claim display targets or a label."""
+    mapped: dict[str, set[str]] = {}
+    occupied = {run.repo for run in active_runs if run.repo} | set(claims_by_target)
+    for run in active_runs:
+        if run.repo_identity and run.repo:
+            mapped.setdefault(run.repo_identity, set()).add(run.repo)
+    for session in session_rows:
+        if not session.repo_identity:
+            continue
+        targets = mapped.setdefault(session.repo_identity, set())
+        if targets:
+            continue
+        if session.repo_identity in claims_by_target:
+            targets.add(session.repo_identity)
+            continue
+        label = _session_row_label(session)
+        if label in occupied:
+            label = _identity_bearing_session_label(session, occupied)
+        occupied.add(label)
+        targets.add(label)
+    return mapped
+
+
+def _identity_bearing_session_label(session: InteractiveSession, occupied: set[str]) -> str:
+    """Render a session-only repo row that cannot collide with a run/claim label."""
+    identity = session.repo_identity.strip()
+    label = _session_row_label(session)
+    candidate = f"{label} ({identity})" if identity and identity != label else identity or label
+    candidate = candidate[:256]
+    if candidate not in occupied:
+        return candidate
+    bounded_identity = identity[:256]
+    if bounded_identity and bounded_identity not in occupied:
+        return bounded_identity
+    suffix = 2
+    while True:
+        suffix_text = f" #{suffix}"
+        extra = f"{candidate[: 256 - len(suffix_text)]}{suffix_text}"
+        if extra not in occupied:
+            return extra
+        suffix += 1
+
+
+def _repo_row_has_exact_overlap(
+    target: str,
+    *,
+    active_runs: Sequence[LiveRun],
+    overlap_identities: set[str],
+    row_identity: str,
+) -> bool:
+    """Mark a run row only from exact ``run.repo_identity``; session-only by identity."""
+    live = tuple(run for run in active_runs if run.repo == target)
+    if live:
+        return any(run.repo_identity and run.repo_identity in overlap_identities for run in live)
+    return bool(row_identity) and row_identity in overlap_identities
+
+
+def _exact_path_overlap_targets(sessions: Sequence[Mapping[str, object]]) -> set[str]:
+    """Repos whose live sessions share at least one exact normalized dirty path."""
+    groups: dict[tuple[str, str, str], list[Mapping[str, object]]] = {}
+    for session in sessions:
+        identity = str(session.get("repo_identity") or "")
+        if not identity:
+            continue
+        scope = str(session.get("identity_scope") or "fleet")
+        node_id = str(session.get("node_id") or "")
+        groups.setdefault((identity, scope, node_id if scope == "node" else ""), []).append(session)
+    overlapped: set[str] = set()
+    for (identity, _scope, _node), rows in groups.items():
+        unique: list[Mapping[str, object]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for row in rows:
+            key = (str(row.get("node_id") or ""), str(row.get("harness") or ""), str(row.get("session_id") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(row)
+        for index, left in enumerate(unique):
+            left_paths = _session_dirty_paths(left)
+            if not left_paths:
+                continue
+            if any(left_paths & _session_dirty_paths(right) for right in unique[index + 1 :]):
+                overlapped.add(identity)
+                break
+    return overlapped
+
+
 def build_view(
     config: DeckConfig,
     *,
@@ -539,6 +697,7 @@ def build_view(
     observers: Sequence[tuple[str, str]],
     now: datetime,
     cloud_workers: Sequence[CloudWorker] = (),
+    interactive_sessions: Sequence[Mapping[str, object]] = (),
 ) -> DeckView:
     del now
     active_runs = tuple(run for run in live_runs if not is_terminal_state(run.state) and run.bucket != "stale")
@@ -547,6 +706,8 @@ def build_view(
     collision_targets = {
         target for target in {run.repo for run in active_runs} if collides(target, active_runs, claims_by_target)
     }
+    session_rows = tuple(_interactive_session(item) for item in interactive_sessions)
+    overlap_targets = _exact_path_overlap_targets(interactive_sessions)
     stations: list[StationView] = []
     for station in config.stations:
         tiles = tuple(
@@ -590,6 +751,24 @@ def build_view(
         for target, claim in sorted(claims_by_target.items())
         if target in collision_targets
     )
+    identity_to_display = _session_identity_display_targets(active_runs, claims_by_target, session_rows)
+    run_identities = {run.repo_identity for run in active_runs if run.repo_identity}
+    repo_targets = {run.repo for run in active_runs} | set(claims_by_target)
+    session_only_targets = {
+        target
+        for identity, targets in identity_to_display.items()
+        if identity not in run_identities
+        for target in targets
+        if target not in repo_targets
+    }
+    repo_targets |= session_only_targets
+    identity_for_target: dict[str, str] = {}
+    for identity, targets in identity_to_display.items():
+        for target in targets:
+            identity_for_target.setdefault(target, identity)
+    for run in active_runs:
+        if run.repo and run.repo_identity:
+            identity_for_target.setdefault(run.repo, run.repo_identity)
     repos = tuple(
         sorted(
             (
@@ -598,10 +777,17 @@ def build_view(
                     claim=display_claims.get(target),
                     live=tuple(run for run in active_runs if run.repo == target),
                     collision=target in collision_targets,
+                    interactive_overlap=_repo_row_has_exact_overlap(
+                        target,
+                        active_runs=active_runs,
+                        overlap_identities=overlap_targets,
+                        row_identity=identity_for_target.get(target, ""),
+                    ),
+                    repo_identity=identity_for_target.get(target, ""),
                 )
-                for target in {run.repo for run in active_runs} | set(claims_by_target)
+                for target in repo_targets
             ),
-            key=lambda row: (not row.collision, row.target),
+            key=lambda row: (not row.collision, not row.interactive_overlap, row.target),
         )
     )
     return DeckView(
@@ -611,6 +797,7 @@ def build_view(
         outcomes=tuple(outcomes),
         observers=tuple(observers),
         cloud_workers=tuple(cloud_workers[:CLOUD_PROVIDER_LIMIT]),
+        interactive_sessions=session_rows,
     )
 
 
@@ -780,6 +967,18 @@ def render_deck(view: DeckView, *, nonce: str, now: datetime) -> str:
         )
         + "</section>"
     )
+    session_items = "".join(_interactive_session_html(session) for session in view.interactive_sessions)
+    parts.append(
+        '<section class="panel" aria-labelledby="interactive-sessions"><header>'
+        '<h2 id="interactive-sessions">Interactive sessions</h2>'
+        f'<p class="panel-count">{len(view.interactive_sessions)} session(s)</p></header>'
+        + (
+            f'<ul class="attention-list">{session_items}</ul>'
+            if session_items
+            else '<p class="empty">No interactive sessions.</p>'
+        )
+        + "</section>"
+    )
     rail_items = "".join(
         f'<li><span class="attention-kind">{_esc(entry.kind)}</span> &middot; {_esc(entry.repo)} &middot; '
         f'{_esc(entry.node_id[:12])} &middot; <span title="{_esc(entry.run_id or entry.node_id)}">'
@@ -822,7 +1021,7 @@ def render_repos(view: DeckView, *, nonce: str, now: datetime) -> str:
         f"<td>{_esc(_owner_text(row.claim))}</td>"
         f"<td>{_esc(str(row.claim.ttl_remaining) + 's left') if row.claim else ''}</td>"
         f"<td>{_esc(', '.join(f'{run.node_id[:12]}:{run.state}' for run in row.live))}</td>"
-        f'<td class="flag">{_esc("! collision") if row.collision else ""}</td>'
+        f'<td class="flag">{_esc(_repo_flags(row))}</td>'
         "</tr>"
         for row in view.repos
     )
@@ -866,6 +1065,28 @@ def _tile_html(tile: Tile) -> str:
         + collision_html
         + "</article>"
     )
+
+
+def _interactive_session_html(session: InteractiveSession) -> str:
+    dirty = f"{len(session.dirty_paths)}+" if session.dirty_truncated else str(len(session.dirty_paths))
+    branch = session.branch or "-"
+    return (
+        "<li>"
+        f"{_esc(session.repo_label or session.repo_identity)} &middot; "
+        f"{_esc(session.harness)}/{_esc(session.session_id)} &middot; "
+        f"{_esc(session.checkout_path)} &middot; "
+        f"{_esc(branch)} &middot; {_esc(dirty)} dirty"
+        "</li>"
+    )
+
+
+def _repo_flags(row: RepoRow) -> str:
+    flags: list[str] = []
+    if row.collision:
+        flags.append("! collision")
+    if row.interactive_overlap:
+        flags.append("! overlap")
+    return " ".join(flags)
 
 
 def _cloud_worker_html(worker: CloudWorker) -> str:

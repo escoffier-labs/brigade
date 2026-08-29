@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import inspect
+import os
 import re
 import shlex
 import shutil
@@ -549,7 +550,48 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         "orphaned_runs": orphaned_runs,
         "update": update_notify.available_update(),
         "cloud_tracker": _cloud_tracker_for_brief(target),
+        **_interactive_presence_for_brief(target),
     }
+
+
+def _interactive_presence_for_brief(target: Path) -> dict[str, Any]:
+    from ... import fleet_client
+    from ... import fleet_session_presence as presence
+
+    session_id = (os.environ.get("CODEX_THREAD_ID") or "").strip()
+    if not session_id:
+        return {"interactive_sessions": {"published": False}, "overlap_warnings": []}
+    if not presence._hub_url_configured():
+        return {
+            "interactive_sessions": {"published": False, "status": "hub_unconfigured"},
+            "overlap_warnings": [],
+        }
+    try:
+        snapshot = presence.build_snapshot(target, harness="codex", session_id=session_id)
+        result = fleet_client.publish_session(snapshot)
+        published = bool(result.ok)
+    except Exception as exc:
+        return {
+            "interactive_sessions": {"published": False, "error": presence._bounded_presence_error(exc)},
+            "overlap_warnings": [],
+        }
+    interactive: dict[str, Any] = {"published": published}
+    if not published:
+        interactive["status"] = result.reason or "unpublished"
+    try:
+        rows = fleet_client.fetch_sessions()
+    except Exception as exc:
+        interactive["error"] = presence._bounded_presence_error(exc)
+        return {"interactive_sessions": interactive, "overlap_warnings": []}
+    try:
+        warnings = presence.overlap_warnings(
+            snapshot,
+            rows,
+            current_node=fleet_client.resolve_node_id(target),
+        )
+    except Exception:
+        warnings = []
+    return {"interactive_sessions": interactive, "overlap_warnings": warnings}
 
 
 def _cloud_tracker_for_brief(target: Path) -> dict[str, Any]:
@@ -605,6 +647,19 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             print(f"  ... {len(dirty) - 8} more")
     else:
         print("git: unavailable")
+    warnings = payload.get("overlap_warnings")
+    if isinstance(warnings, list):
+        for warning in warnings[:3]:
+            if not isinstance(warning, dict):
+                continue
+            raw_paths = warning.get("paths")
+            paths: list[Any] = raw_paths if isinstance(raw_paths, list) else []
+            shown = [str(path) for path in paths[:8]]
+            print(
+                "overlap: "
+                f"{warning.get('node_id')} {warning.get('harness')} "
+                f"{warning.get('session_id')} {' '.join(shown)}"
+            )
 
     active = payload["active_session"]
     if isinstance(active, dict):

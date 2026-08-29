@@ -1,24 +1,33 @@
 import json
-import subprocess
 import os
+import subprocess
 from datetime import datetime, timezone
+
+import pytest
 
 from brigade import aboyeur
 from brigade import cli
 from brigade import center_cmd
 from brigade import dogfood_cmd
+from brigade import fleet_client
 from brigade import localio
 from brigade import repos_cmd
 from brigade import security_cmd
 from brigade import work_cmd
 from brigade.install import install_selection
 from brigade.selection import Selection
+from brigade.work_cmd.session import briefing
 
 from tests.work_cmd_test_helpers import (
     _write_json,
     _init_git_repo,
     _plan_task_id,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_codex_thread_id(monkeypatch):
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
 
 
 def test_work_status_reports_repo_and_dogfood_state(tmp_path, monkeypatch, capsys):
@@ -1947,3 +1956,239 @@ def test_work_inspection_cli(tmp_path, monkeypatch):
         ("show", {"target": tmp_path, "session": "abc123"}),
         ("recap", {"target": tmp_path, "limit": 3, "since": "2026-05-26"}),
     ]
+
+
+def test_presence_hook_upserts_and_ends_without_printing_payload(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    calls = []
+    monkeypatch.setattr(fleet_client, "upsert_session", lambda snap: calls.append(("upsert", snap)) or True)
+    monkeypatch.setattr(fleet_client, "end_session", lambda snap: calls.append(("end", snap)) or True)
+    assert (
+        cli.main(
+            [
+                "work",
+                "presence-hook",
+                "--target",
+                str(tmp_path),
+                "--harness",
+                "codex",
+                "--session",
+                "thread-1",
+                "--event",
+                "start",
+            ]
+        )
+        == 0
+    )
+    assert (
+        cli.main(
+            [
+                "work",
+                "presence-hook",
+                "--target",
+                str(tmp_path),
+                "--harness",
+                "codex",
+                "--session",
+                "thread-1",
+                "--event",
+                "end",
+            ]
+        )
+        == 0
+    )
+    assert [item[0] for item in calls] == ["upsert", "end"]
+    assert capsys.readouterr().out == ""
+
+
+def test_presence_hook_heartbeat_upserts_and_stays_silent(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    calls = []
+    monkeypatch.setattr(fleet_client, "upsert_session", lambda snap: calls.append(snap) or True)
+    assert (
+        cli.main(
+            [
+                "work",
+                "presence-hook",
+                "--target",
+                str(tmp_path),
+                "--harness",
+                "codex",
+                "--session",
+                "thread-2",
+                "--event",
+                "heartbeat",
+            ]
+        )
+        == 0
+    )
+    assert len(calls) == 1
+    assert calls[0].harness == "codex"
+    assert calls[0].session_id == "thread-2"
+    assert capsys.readouterr().out == ""
+
+
+def test_presence_hook_always_exits_zero_when_client_raises(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    monkeypatch.setattr(
+        fleet_client,
+        "upsert_session",
+        lambda snap: (_ for _ in ()).throw(RuntimeError("hub down")),
+    )
+    assert (
+        cli.main(
+            [
+                "work",
+                "presence-hook",
+                "--target",
+                str(tmp_path),
+                "--harness",
+                "codex",
+                "--session",
+                "thread-1",
+                "--event",
+                "start",
+            ]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out == ""
+
+
+def test_presence_hook_rejects_identity_fields_on_argv(tmp_path):
+    parser = cli._build_parser()
+    for flag in ("--node-id", "--repo-identity", "--dirty-paths", "--checkout-path"):
+        try:
+            parser.parse_args(
+                [
+                    "work",
+                    "presence-hook",
+                    "--target",
+                    str(tmp_path),
+                    "--harness",
+                    "codex",
+                    "--session",
+                    "thread-1",
+                    "--event",
+                    "start",
+                    flag,
+                    "planted",
+                ]
+            )
+        except SystemExit:
+            continue
+        raise AssertionError(f"{flag} must not be accepted")
+
+
+def _other_session(dirty_paths):
+    return {
+        "node_id": "node-b",
+        "harness": "cursor",
+        "session_id": "sess-b",
+        "repo_identity": "github.com/example/project",
+        "identity_scope": "fleet",
+        "checkout_path": "/other/project",
+        "branch": "main",
+        "dirty_paths": dirty_paths,
+        "dirty_truncated": False,
+        "state": "active",
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "expires_at": 9_999_999_999.0,
+    }
+
+
+def _make_dirty(target, relpath):
+    target.mkdir(parents=True, exist_ok=True)
+    _init_git_repo(target)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/example/project.git"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    path = target / relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("dirty\n", encoding="utf-8")
+
+
+def test_work_brief_publishes_codex_thread_and_warns_on_exact_overlap(tmp_target, monkeypatch, capsys):
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-1")
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    monkeypatch.setattr(fleet_client, "publish_session", lambda snap: fleet_client.SessionWriteResult(ok=True))
+    monkeypatch.setattr(fleet_client, "upsert_session", lambda snap: True)
+    monkeypatch.setattr(fleet_client, "fetch_sessions", lambda **_: [_other_session(dirty_paths=["src/a.py"])])
+    _make_dirty(tmp_target, "src/a.py")
+    assert briefing.brief(target=tmp_target, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["interactive_sessions"]["published"] is True
+    assert payload["overlap_warnings"][0]["paths"] == ["src/a.py"]
+
+
+def test_work_brief_fetch_failure_records_error_without_warnings(tmp_target, monkeypatch, capsys):
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-1")
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    monkeypatch.setattr(fleet_client, "publish_session", lambda snap: fleet_client.SessionWriteResult(ok=True))
+    monkeypatch.setattr(fleet_client, "upsert_session", lambda snap: True)
+
+    def boom(**_kwargs):
+        raise fleet_client.FleetClientError("hub unreachable")
+
+    monkeypatch.setattr(fleet_client, "fetch_sessions", boom)
+    _make_dirty(tmp_target, "src/a.py")
+    assert briefing.brief(target=tmp_target, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["interactive_sessions"]["published"] is True
+    assert payload["interactive_sessions"]["error"]
+    assert payload["overlap_warnings"] == []
+
+
+def test_work_brief_text_prints_at_most_three_warnings_and_eight_paths(tmp_target, monkeypatch, capsys):
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-1")
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    monkeypatch.setattr(fleet_client, "publish_session", lambda snap: fleet_client.SessionWriteResult(ok=True))
+    monkeypatch.setattr(fleet_client, "upsert_session", lambda snap: True)
+    rows = []
+    for index in range(5):
+        row = _other_session(dirty_paths=["src/a.py", f"src/extra-{index}.py"])
+        row["session_id"] = f"sess-{index}"
+        row["dirty_paths"] = [f"src/p{n}.py" for n in range(12)]
+        row["dirty_paths"][0] = "src/a.py"
+        rows.append(row)
+    monkeypatch.setattr(fleet_client, "fetch_sessions", lambda **_: rows)
+    _make_dirty(tmp_target, "src/a.py")
+    for index in range(12):
+        (tmp_target / f"src/p{index}.py").write_text("x\n", encoding="utf-8")
+    assert briefing.brief(target=tmp_target, json_output=False) == 0
+    out = capsys.readouterr().out
+    warning_lines = [line for line in out.splitlines() if line.startswith("overlap:")]
+    assert len(warning_lines) <= 3
+    for line in warning_lines:
+        path_count = line.count("src/")
+        assert path_count <= 8
+    payload_rc = briefing.brief(target=tmp_target, json_output=True)
+    assert payload_rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["overlap_warnings"]) == 5
+
+
+def test_work_brief_json_includes_bounded_publish_failure_reason(tmp_target, monkeypatch, capsys):
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-1")
+
+    def unpublished(snapshot):
+        from brigade.fleet_client import SessionWriteResult
+
+        del snapshot
+        return SessionWriteResult(ok=False, reason="hub_unconfigured")
+
+    monkeypatch.setattr(fleet_client, "publish_session", unpublished)
+    monkeypatch.setattr(fleet_client, "upsert_session", unpublished)
+    _make_dirty(tmp_target, "src/a.py")
+    assert briefing.brief(target=tmp_target, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["interactive_sessions"]["published"] is False
+    reason = payload["interactive_sessions"].get("status") or payload["interactive_sessions"].get("error")
+    assert reason == "hub_unconfigured"
+    blob = json.dumps(payload["interactive_sessions"])
+    assert "Bearer" not in blob
+    assert "hub_unconfigured" in blob

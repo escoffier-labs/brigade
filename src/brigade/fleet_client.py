@@ -98,8 +98,11 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from .fleet_session_presence import SessionSnapshot
 
 from . import toml_compat as tomllib
 
@@ -127,6 +130,8 @@ CLAIM_TIMEOUT_SECONDS = 2.5
 # reason to start provider work locally.
 CLOUD_TIMEOUT_SECONDS = 2.5
 MAX_CLOUD_RESPONSE_BYTES = 64 * 1024
+MAX_ACTIVE_SESSIONS_RESPONSE_BYTES = 20 * 1024 * 1024
+MAX_SESSION_HISTORY_RESPONSE_BYTES = 40 * 1024 * 1024
 # 4xx statuses that are transient or operator-fixable: keep the spool. 403
 # is a credential mismatch (a node token that is not this node's, or the
 # admin token on a hub without --allow-admin-writes), fixed by config.
@@ -179,6 +184,14 @@ _SHARED_TOKEN_WARNING = (
     "Enroll this machine with 'brigade fleet nodes add <node_id>' and set [fleet] node_token_file "
     "in ~/.brigade/fleet.toml"
 )
+
+
+@dataclass(frozen=True)
+class SessionWriteResult:
+    """Bounded publication outcome. ``reason`` never includes secrets or bodies."""
+
+    ok: bool
+    reason: str | None = None
 
 
 class FleetClientError(RuntimeError):
@@ -925,6 +938,14 @@ def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None 
         raw_payload = envelope.get("payload")
         payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
         workspace = find_workspace_for_path(journal_path) if journal_path is not None else None
+        repo_identity = None
+        if workspace is not None:
+            try:
+                from .fleet_session_presence import repository_identity
+
+                repo_identity = repository_identity(workspace).value
+            except Exception:
+                repo_identity = None
         event = {
             "run_id": envelope.get("run_id"),
             "repo": workspace.name if workspace is not None else None,
@@ -934,6 +955,7 @@ def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None 
             "ts": envelope.get("recorded_at"),
             "sequence": envelope.get("sequence"),
             "digest": envelope.get("event_digest"),
+            "repo_identity": repo_identity,
         }
         if not all(event[k] is not None for k in ("run_id", "state", "ts", "sequence", "digest")):
             return False
@@ -1359,6 +1381,130 @@ def inspect_claim(target: str, **kwargs: Any) -> ClaimDecision:
     dead (issue #1141). Never raises; ``reason`` explains a failure."""
     kwargs.pop("ttl_seconds", None)
     return _claim_op("inspect", target, holder=None, **kwargs)
+
+
+def _session_admin_write_node_id() -> tuple[str | None, str | None]:
+    """Return a body node ID and failure reason for shared-admin writes."""
+    settings = load_fleet_settings()
+    if settings["node_token"] or not settings["admin_token"]:
+        return None, None
+    resolved = resolve_node_id()
+    if not _node_id_is_claimable(resolved):
+        return None, "unknown_node_identity"
+    return resolved, None
+
+
+def _session_request_body(snapshot: SessionSnapshot, *, action: str, node_id: str | None = None) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "action": action,
+        "harness": snapshot.harness,
+        "session_id": snapshot.session_id,
+        "repo_identity": snapshot.repo_identity,
+    }
+    if node_id is not None:
+        body["node_id"] = node_id
+    if action == "end":
+        return body
+    body.update(
+        {
+            "identity_scope": snapshot.identity_scope,
+            "repo_label": snapshot.repo_label,
+            "checkout_path": snapshot.checkout_path,
+            "branch": snapshot.branch,
+            "dirty_paths": list(snapshot.dirty_paths),
+            "dirty_truncated": snapshot.dirty_truncated,
+            "ttl_seconds": snapshot.ttl_seconds,
+        }
+    )
+    return body
+
+
+def _classify_session_write_error(exc: BaseException) -> str:
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"http_status:{exc.code}"
+    if isinstance(exc, urllib.error.URLError):
+        return "connection_error"
+    name = type(exc).__name__
+    if name == "timeout" or "Timeout" in name:
+        return "timeout"
+    return name[:80]
+
+
+def _post_session(snapshot: SessionSnapshot, *, action: str, hub_url: str | None) -> SessionWriteResult:
+    """POST /sessions. Never spools; ordinary failures return a bounded reason."""
+    try:
+        config = load_fleet_config()
+        hub = hub_url or config["hub_url"]
+        if not hub:
+            return SessionWriteResult(ok=False, reason="hub_unconfigured")
+        node_id, identity_reason = _session_admin_write_node_id()
+        if identity_reason is not None:
+            return SessionWriteResult(ok=False, reason=identity_reason)
+        request = urllib.request.Request(
+            hub.rstrip("/") + "/sessions",
+            data=json.dumps(_session_request_body(snapshot, action=action, node_id=node_id)).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {config['token']}"},
+            method="POST",
+        )
+        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
+            if response.status == 200:
+                return SessionWriteResult(ok=True)
+            return SessionWriteResult(ok=False, reason=f"http_status:{response.status}")
+    except Exception as exc:
+        return SessionWriteResult(ok=False, reason=_classify_session_write_error(exc))
+
+
+def publish_session(snapshot: SessionSnapshot, *, hub_url: str | None = None) -> SessionWriteResult:
+    """Refresh one interactive session and return a bounded non-secret status."""
+    return _post_session(snapshot, action="upsert", hub_url=hub_url)
+
+
+def upsert_session(snapshot: SessionSnapshot, *, hub_url: str | None = None) -> bool:
+    """Refresh one interactive session. Returns False on any ordinary failure."""
+    return publish_session(snapshot, hub_url=hub_url).ok
+
+
+def end_session(snapshot: SessionSnapshot, *, hub_url: str | None = None) -> bool:
+    """End one interactive session. Returns False on any ordinary failure."""
+    return _post_session(snapshot, action="end", hub_url=hub_url).ok
+
+
+def _read_bounded_response(response: object, *, limit: int) -> bytes:
+    reader = getattr(response, "read", None)
+    if reader is None:
+        raise FleetClientError("fleet hub sessions response could not be read")
+    try:
+        data = reader(limit + 1)
+    except TypeError as exc:
+        raise FleetClientError("fleet hub sessions response does not support bounded reads") from exc
+    if not isinstance(data, (bytes, bytearray)):
+        raise FleetClientError("fleet hub sessions response was not bytes")
+    if len(data) > limit:
+        raise FleetClientError("fleet hub sessions response exceeded the size limit")
+    return bytes(data)
+
+
+def fetch_sessions(*, hub_url: str | None = None, include_all: bool = False) -> list[dict[str, Any]]:
+    """GET /sessions from the hub; raises FleetClientError when unreachable."""
+    config = load_fleet_config()
+    hub = hub_url or config["hub_url"]
+    if not hub:
+        raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
+    url = hub.rstrip("/") + ("/sessions?all=1" if include_all else "/sessions")
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {config['token']}"})
+    try:
+        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
+            limit = MAX_SESSION_HISTORY_RESPONSE_BYTES if include_all else MAX_ACTIVE_SESSIONS_RESPONSE_BYTES
+            raw = _read_bounded_response(response, limit=limit)
+            payload = json.loads(raw.decode("utf-8"))
+    except FleetClientError:
+        raise
+    except Exception as exc:
+        raise FleetClientError(f"fleet hub sessions failed: {type(exc).__name__}") from exc
+    sessions = payload.get("sessions") if isinstance(payload, dict) else None
+    return list(sessions) if isinstance(sessions, list) else []
 
 
 def fetch_claims(*, hub_url: str | None = None, include_all: bool = False) -> list[dict[str, Any]]:

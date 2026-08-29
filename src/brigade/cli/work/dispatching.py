@@ -79,6 +79,17 @@ def _dispatch_impl(args) -> int:
         if args.target is None:
             return hook_run(event=args.event, package=args.package)
         return hook_run(event=args.event, package=args.package, target=args.target)
+    if args.work_command == "presence-hook":
+        from ...fleet_session_presence import run_presence_hook
+
+        return run_presence_hook(
+            target=args.target,
+            harness=args.harness,
+            session=args.session,
+            event=args.event,
+            stdin=args.stdin,
+            context=args.context,
+        )
     if args.work_command == "sweep":
         if args.sweep_args:
             if args.sweep_args[0] != "closeout":

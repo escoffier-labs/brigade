@@ -246,3 +246,17 @@ def test_env_caps_are_honored(monkeypatch):
 def test_path_redaction_strips_home_prefix():
     home = str(Path.home().expanduser().resolve())
     assert envelope.redact_paths(f"{home}/secret/log") == "~/secret/log"
+
+
+def test_presence_exception_does_not_change_session_start_envelope(tmp_path: Path, monkeypatch):
+    target = _wired_claude(tmp_path)
+    monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "alpha\nbeta")
+    monkeypatch.setattr(runtime, "_run_recall", lambda *_args, **_kwargs: "")
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("hub unavailable")
+
+    monkeypatch.setattr("brigade.fleet_session_presence._publish_presence", boom)
+    result = runtime.handle_payload("SessionStart", _payload(target, "SessionStart"))
+    assert result["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert "alpha" in result["hookSpecificOutput"]["additionalContext"]

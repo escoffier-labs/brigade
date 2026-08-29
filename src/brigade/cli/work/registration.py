@@ -111,6 +111,13 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Pin hook work to this wired workspace. Sessions outside it no-op.",
     )
+    p_work_presence_hook = work_sub.add_parser("presence-hook", help=argparse.SUPPRESS)
+    p_work_presence_hook.add_argument("--target", "-t", type=Path, default=None)
+    p_work_presence_hook.add_argument("--harness", required=True)
+    p_work_presence_hook.add_argument("--session", default=None)
+    p_work_presence_hook.add_argument("--event", choices=("start", "heartbeat", "end"), default=None)
+    p_work_presence_hook.add_argument("--stdin", action="store_true")
+    p_work_presence_hook.add_argument("--context", default=None)
     p_work_sweep = work_sub.add_parser("sweep", help="Run an explicit daily scanner sweep.")
     p_work_sweep.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_sweep.add_argument("--scanner", default=None, help="Run one scanner id instead of due scanners.")

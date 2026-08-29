@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from types import SimpleNamespace
+
 from brigade import cli, localio
 from brigade.claude_hooks import envelope
 from brigade.claude_hooks.package import PACKAGE_REF
@@ -55,6 +57,46 @@ def _payload(target: Path, event: str, *, session_id: str = "session-1", **extra
         "hook_event_name": event,
         **extra,
     }
+
+
+@pytest.fixture
+def target(tmp_path: Path) -> Path:
+    return _wired_claude(tmp_path)
+
+
+def _write_payload(target: Path, session_id: str = "s1"):
+    return _payload(
+        target,
+        "PostToolUse",
+        session_id=session_id,
+        tool_name="Write",
+        tool_input={"file_path": str(target / "src.py"), "content": "x\n"},
+    )
+
+
+def _unverified_write_stop(target: Path, session_id: str = "s1"):
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    runtime.handle_payload("PostToolUse", _write_payload(target, session_id=session_id))
+    return _payload(target, "Stop", session_id=session_id, stop_hook_active=False)
+
+
+def _capture_presence(monkeypatch):
+    calls = []
+
+    def upsert(snap, **_kwargs):
+        calls.append(SimpleNamespace(action="upsert", snapshot=snap))
+        return True
+
+    def end(snap, **_kwargs):
+        calls.append(SimpleNamespace(action="end", snapshot=snap))
+        return True
+
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    monkeypatch.setattr("brigade.fleet_client.upsert_session", upsert)
+    monkeypatch.setattr("brigade.fleet_client.end_session", end)
+    monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "work brief: test")
+    monkeypatch.setattr(runtime, "_run_recall", lambda *_args, **_kwargs: "")
+    return calls
 
 
 def test_session_start_injects_brief_once_per_repo(tmp_path: Path, monkeypatch):
@@ -3035,3 +3077,49 @@ def test_resume_source_keeps_current_task_gate(tmp_path: Path, monkeypatch):
     runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id, source="resume"))
     blocked = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
     assert blocked["decision"] == "block"
+
+
+def test_runtime_presence_shim_lives_outside_runtime():
+    from brigade.claude_hooks import presence as presence_mod
+
+    assert not hasattr(runtime, "_emit_presence")
+    assert hasattr(presence_mod, "emit_presence")
+    assert presence_mod.emit_presence.__doc__
+
+
+def test_claude_presence_start_refresh_and_accepted_stop(target, monkeypatch):
+    calls = _capture_presence(monkeypatch)
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id="s1"))
+    runtime.handle_payload("PostToolUse", _write_payload(target, session_id="s1"))
+    state = runtime.read_session_state(target, "s1")
+    write_at = state["last_verification_write_at"]
+    run_dir = target / ".brigade" / "work" / "verify-runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": write_at,
+                "completed_at": write_at,
+                "target": str(target.resolve()),
+                "harness_session": {
+                    "harness": "claude",
+                    "fingerprint": state["session_fingerprint"],
+                },
+            }
+        )
+        + "\n"
+    )
+    runtime.handle_payload("Stop", _payload(target, "Stop", session_id="s1", stop_hook_active=False))
+    assert [call.action for call in calls] == ["upsert", "upsert", "end"]
+    assert Path(calls[-1].snapshot.checkout_path) == target.resolve()
+    end_calls = [call for call in calls if call.action == "end"]
+    assert len(end_calls) == 1
+
+
+def test_blocked_stop_does_not_end_presence(target, monkeypatch):
+    calls = _capture_presence(monkeypatch)
+    result = runtime.handle_payload("Stop", _unverified_write_stop(target, session_id="s1"))
+    assert result["decision"] == "block"
+    assert all(call.action != "end" for call in calls)

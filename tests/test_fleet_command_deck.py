@@ -13,6 +13,7 @@ import pytest
 
 from brigade import fleet_command_deck as deck
 from brigade import fleet_hub
+from brigade import fleet_hub_sessions
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS events (
     state TEXT NOT NULL,
     ts TEXT NOT NULL,
     received_at TEXT NOT NULL,
+    repo_identity TEXT,
     PRIMARY KEY (node_id, run_id, sequence, digest)
 );
 """
@@ -72,8 +74,222 @@ def _insert(
 def conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.execute(_EVENTS_SCHEMA)
+    fleet_hub_sessions.init_schema(conn)
     yield conn
     conn.close()
+
+
+@pytest.fixture()
+def now() -> datetime:
+    return NOW
+
+
+def _seed_session(
+    conn: sqlite3.Connection,
+    *,
+    node: str = NODE_A,
+    checkout_path: str = "/tmp/project",
+    dirty_paths: list[str] | None = None,
+    harness: str = "claude",
+    session_id: str | None = None,
+    repo_identity: str = "github.com/example/project",
+    identity_scope: str = "fleet",
+    repo_label: str = "project",
+    branch: str = "main",
+) -> None:
+    paths = dirty_paths if dirty_paths is not None else ["src/a.py"]
+    started = NOW.isoformat()
+    conn.execute(
+        "INSERT INTO interactive_sessions ("
+        "node_id, harness, session_id, repo_identity, identity_scope, repo_label, "
+        "checkout_path, branch, dirty_paths_json, dirty_truncated, state, started_at, "
+        "heartbeat_at, ended_at, ttl_seconds, expires_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, NULL, 900, ?)",
+        (
+            node,
+            harness,
+            session_id or f"sess-{node[:8]}",
+            repo_identity,
+            identity_scope,
+            repo_label,
+            checkout_path,
+            branch,
+            json.dumps(paths),
+            started,
+            started,
+            NOW.timestamp() + 900,
+        ),
+    )
+
+
+def test_deck_sessions_are_separate_escaped_and_do_not_consume_capacity(conn, now):
+    _seed_session(conn, checkout_path="<script>alert(1)</script>", dirty_paths=["src/a.py"])
+    sessions = deck.fetch_interactive_sessions(conn, now=now)
+    view = deck.build_view(
+        deck.DeckConfig(stations=(deck.StationConfig(NODE_A, "Alpha", 10),)),
+        live_runs=[],
+        claims=[],
+        enrolled_labels={NODE_A: "Alpha"},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=now,
+        interactive_sessions=sessions,
+    )
+    html = deck.render_deck(view, nonce="nonce", now=now)
+    assert "Interactive sessions" in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "<script>alert(1)</script>" not in html
+    assert view.stations[0].busy == 0
+
+
+def test_repo_page_marks_only_exact_live_dirty_overlap(conn, now):
+    repo_identity = "github.com/example/" + ("a" * 300)
+    _seed_session(conn, node=NODE_A, dirty_paths=["src/a.py"], repo_identity=repo_identity)
+    _seed_session(conn, node=NODE_B, dirty_paths=["src/a.py"], repo_identity=repo_identity)
+    sessions = deck.fetch_interactive_sessions(conn, now=now)
+    view = deck.build_view(
+        deck.DeckConfig(stations=(deck.StationConfig(NODE_A, "Alpha", 10),)),
+        live_runs=[],
+        claims=[],
+        enrolled_labels={NODE_A: "Alpha", NODE_B: "Bravo"},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=now,
+        interactive_sessions=sessions,
+    )
+    assert view.repos[0].target == "project"
+    assert view.repos[0].interactive_overlap is True
+    assert view.repos[0].repo_identity == repo_identity
+    assert all(row.target != repo_identity for row in view.repos)
+
+
+def test_live_run_plus_two_sessions_marks_run_row_without_identity_duplicate(conn, now):
+    identity = "github.com/example/project"
+    _insert(conn, NODE_A, "run-1", 1, "run.started", repo="project")
+    conn.execute("UPDATE events SET repo_identity = ? WHERE run_id = ?", (identity, "run-1"))
+    _seed_session(conn, node=NODE_A, dirty_paths=["src/a.py"], repo_identity=identity, repo_label="project")
+    _seed_session(conn, node=NODE_B, dirty_paths=["src/a.py"], repo_identity=identity, repo_label="project")
+    sessions = deck.fetch_interactive_sessions(conn, now=now)
+    runs = [
+        deck.LiveRun(
+            node_id=NODE_A,
+            run_id="run-1",
+            repo="project",
+            seat="seat",
+            harness="claude",
+            state="run.started",
+            bucket="running",
+            age_seconds=10,
+            elapsed_seconds=10,
+            repo_identity=identity,
+        )
+    ]
+    view = deck.build_view(
+        deck.DeckConfig(stations=(deck.StationConfig(NODE_A, "Alpha", 10),)),
+        live_runs=runs,
+        claims=[],
+        enrolled_labels={NODE_A: "Alpha", NODE_B: "Bravo"},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=now,
+        interactive_sessions=sessions,
+    )
+    targets = [row.target for row in view.repos]
+    assert targets == ["project"]
+    assert identity not in targets
+    assert view.repos[0].interactive_overlap is True
+    assert view.repos[0].repo_identity == identity
+
+
+def test_unrelated_brigade_basename_does_not_attach_session_overlap(conn, now):
+    run_identity = "github.com/example/brigade"
+    session_identity = "github.com/other/brigade"
+    _seed_session(
+        conn,
+        node=NODE_A,
+        dirty_paths=["src/a.py"],
+        repo_identity=session_identity,
+        repo_label="brigade",
+    )
+    _seed_session(
+        conn,
+        node=NODE_B,
+        dirty_paths=["src/a.py"],
+        repo_identity=session_identity,
+        repo_label="brigade",
+        session_id="sess-other",
+    )
+    sessions = deck.fetch_interactive_sessions(conn, now=now)
+    runs = [
+        deck.LiveRun(
+            node_id=NODE_A,
+            run_id="run-brigade",
+            repo="brigade",
+            seat="seat",
+            harness="claude",
+            state="run.started",
+            bucket="running",
+            age_seconds=10,
+            elapsed_seconds=10,
+            repo_identity=run_identity,
+        )
+    ]
+    view = deck.build_view(
+        deck.DeckConfig(stations=(deck.StationConfig(NODE_A, "Alpha", 10),)),
+        live_runs=runs,
+        claims=[],
+        enrolled_labels={NODE_A: "Alpha", NODE_B: "Bravo"},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=now,
+        interactive_sessions=sessions,
+    )
+    run_row = next(row for row in view.repos if row.live)
+    session_row = next(row for row in view.repos if row.interactive_overlap)
+    assert run_row.target == "brigade"
+    assert run_row.interactive_overlap is False
+    assert run_row.repo_identity == run_identity
+    assert session_row.target != "brigade"
+    assert session_row.target != run_row.target
+    assert session_row.repo_identity == session_identity
+    assert session_row.live == ()
+    html = deck.render_repos(view, nonce="nonce", now=now)
+    assert ">brigade<" in html
+    assert session_row.target in html
+    assert html.count("! overlap") == 1
+
+
+def test_identity_bearing_session_label_stays_unique_when_truncated():
+    identity = "github.com/example/" + ("x" * 300)
+    session = deck.InteractiveSession(
+        node_id=NODE_A,
+        harness="claude",
+        session_id="sess-long",
+        repo_identity=identity,
+        identity_scope="fleet",
+        repo_label="x" * 300,
+        checkout_path="/tmp/project",
+        branch="main",
+        dirty_paths=("src/a.py",),
+        dirty_truncated=False,
+    )
+    candidate = f"{session.repo_label} ({identity})"[:256]
+    bounded_identity = identity[:256]
+    occupied = {candidate, bounded_identity}
+
+    label = deck._identity_bearing_session_label(session, occupied)
+
+    assert len(label) <= 256
+    assert label not in occupied
+    assert label.endswith(" #2")
 
 
 def seed_events(

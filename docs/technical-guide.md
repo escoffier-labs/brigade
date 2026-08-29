@@ -808,7 +808,50 @@ It writes or verifies `.brigade/dogfood.toml`, creates local artifact directorie
 
 Start-of-day commands:
 
-- `brigade work brief` shows branch state, active sessions, pending tasks, import counts, latest dogfood run, and the command to continue.
+- `brigade work brief` shows branch state, active sessions, pending tasks, import counts, latest dogfood run, and the command to continue. When a Codex or T3 thread id is present it also publishes bounded interactive presence to the Fleet Hub and may print advisory `overlap:` lines. Those warnings never block work or acquire a claim. `brigade work brief --json` includes `interactive_sessions` and `overlap_warnings`:
+
+```json
+{
+  "interactive_sessions": {"published": true},
+  "overlap_warnings": [
+    {
+      "node_id": "22222222-2222-4222-8222-222222222222",
+      "harness": "cursor",
+      "session_id": "sess-other",
+      "branch": "main",
+      "checkout_path": "/tmp/other/project",
+      "age": 120,
+      "paths": ["src/a.py"],
+      "partial": false
+    }
+  ]
+}
+```
+
+- `brigade fleet sessions [--all] [--json]` lists live interactive Claude, Codex/T3, and Cursor sessions from the Fleet Hub. `--all` is ended and expired history. JSON is the Hub list, not a second schema. Sessions are advisory presence: they do not consume station capacity, do not enter the run-event spool, and never carry remotes, tokens, diffs, or file contents. TTL is 120-3600 seconds (default 900); expiry is read-time. Node credentials remain the write identity.
+
+```json
+[
+  {
+    "node_id": "11111111-1111-4111-8111-111111111111",
+    "harness": "claude",
+    "session_id": "sess-example",
+    "repo_identity": "github.com/example/project",
+    "identity_scope": "fleet",
+    "repo_label": "project",
+    "checkout_path": "/tmp/example/project",
+    "branch": "topic",
+    "dirty_paths": ["src/a.py"],
+    "dirty_truncated": false,
+    "state": "active",
+    "started_at": "2026-08-29T12:00:00+00:00",
+    "heartbeat_at": "2026-08-29T12:01:00+00:00",
+    "ended_at": null,
+    "ttl_seconds": 900,
+    "expires_at": 1787997660.0
+  }
+]
+```
 - `brigade work status` is the quick dashboard for branch state, dogfood readiness, paths, latest run, and extracted next step.
 - `brigade work doctor` checks dogfood config, security config, evidence bundles, Codex CLI, artifact paths, handoff inbox, task acceptance, issue-backed tasks, stale active sessions, ignore coverage, and latest run context.
 - `brigade work hooks install|update|status|uninstall` manages the project-scoped Claude Code work-loop package while preserving foreign settings and hooks. Pass `--scope user` to install the same package into the Claude user home (`$CLAUDE_CONFIG_DIR` or `~/.claude`): a packaged hook script under `hooks/` and managed entries in `settings.json`, with ownership tracked in `brigade/claude-hooks.json`. User-scope `--target <wired-workspace>` pins `hook-run`; omit it for multi-repo mode. Project-scope install refuses the home directory (that path is Claude Code's user settings). The runtime entrypoint is `brigade work hook-run [--target]`; it is called by Claude Code rather than by operators. After two consecutive timeouts against one session target the handler latches off for the rest of the session. The work-loop snapshot fingerprint skips normally-gitignored directories such as model caches, virtualenvs (`.venv`), `__pycache__`, `node_modules`, and generated databases.

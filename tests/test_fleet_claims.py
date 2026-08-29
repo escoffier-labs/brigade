@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from brigade import fleet_client, fleet_hub
+from brigade import fleet_hub_sessions as sessions
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
@@ -2207,3 +2208,155 @@ class TestExitOrphanReleaseHardening:
         assert reacquire_finished.wait(10), "late re-acquire never committed"
         leaked = [c for c in fleet_client.fetch_claims(include_all=True) if c["target"] == "repo-a"]
         assert len(leaked) == 1, "expected exactly the post-final-retry commit to leak as the documented residual"
+
+
+def _schema_13_database(tmp_path: Path) -> Path:
+    db = tmp_path / "schema13.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        """
+        CREATE TABLE events (
+            node_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            digest TEXT NOT NULL,
+            repo TEXT,
+            seat TEXT,
+            harness TEXT,
+            state TEXT NOT NULL,
+            ts TEXT NOT NULL,
+            exit_status INTEGER,
+            capability_fingerprint TEXT,
+            received_at TEXT NOT NULL,
+            PRIMARY KEY (node_id, run_id, sequence, digest)
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO events VALUES ("
+        "'node-a', 'run-1', 1, 'digest-1', NULL, NULL, NULL, "
+        "'run.started', '2026-01-01T00:00:00+00:00', NULL, NULL, "
+        "'2026-01-01T00:00:00+00:00')"
+    )
+    conn.execute("PRAGMA user_version=13")
+    conn.commit()
+    conn.close()
+    return db
+
+
+def _upsert(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "action": "upsert",
+        "harness": "claude",
+        "session_id": "sess-1",
+        "repo_identity": "github.com/example/project",
+        "identity_scope": "fleet",
+        "repo_label": "project",
+        "checkout_path": "/tmp/project",
+        "branch": "main",
+        "dirty_paths": ["src/a.py"],
+        "dirty_truncated": False,
+        "ttl_seconds": 900,
+    }
+    body.update(overrides)
+    return body
+
+
+def _end(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "action": "end",
+        "harness": "claude",
+        "session_id": "sess-1",
+        "repo_identity": "github.com/example/project",
+    }
+    body.update(overrides)
+    return body
+
+
+class TestInteractiveSessions:
+    @pytest.fixture()
+    def conn(self, tmp_path: Path):
+        connection = fleet_hub.init_db(tmp_path / "sessions.db")
+        try:
+            yield connection
+        finally:
+            connection.close()
+
+    def test_schema_13_migrates_to_14_without_touching_existing_rows(self, tmp_path):
+        db = _schema_13_database(tmp_path)
+        conn = fleet_hub.init_db(db)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM interactive_sessions").fetchone()[0] == 0
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
+        assert "repo_identity" in columns
+        conn.close()
+
+    def test_upsert_retry_refresh_end_and_expiry(self, conn, monkeypatch):
+        first = sessions.handle_session(conn, _upsert(), caller_node=NODE_A)
+        retry = sessions.handle_session(conn, _upsert(branch="topic"), caller_node=NODE_A)
+        assert retry[1]["session"]["started_at"] == first[1]["session"]["started_at"]
+        assert retry[1]["session"]["branch"] == "topic"
+        assert sessions.handle_session(conn, _end(), caller_node=NODE_A)[0] == 200
+        assert sessions.list_sessions(conn) == []
+        assert sessions.list_sessions(conn, include_all=True)[0]["state"] == "ended"
+
+    def test_expired_active_rows_are_hidden_until_history(self, conn, monkeypatch):
+        clock = {"now": 1_700_000_000.0}
+        monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: clock["now"])
+        sessions.handle_session(conn, _upsert(ttl_seconds=120), caller_node=NODE_A)
+        assert len(sessions.list_sessions(conn)) == 1
+        first_started = sessions.list_sessions(conn)[0]["started_at"]
+        clock["now"] += 121
+        assert sessions.list_sessions(conn) == []
+        history = sessions.list_sessions(conn, include_all=True)
+        assert history[0]["state"] == "active"
+        refreshed = sessions.handle_session(conn, _upsert(branch="later"), caller_node=NODE_A)
+        assert refreshed[1]["session"]["started_at"] != first_started
+        assert refreshed[1]["session"]["branch"] == "later"
+
+    def test_node_writes_reject_body_node_id_and_admin_requires_it(self, conn):
+        with pytest.raises(fleet_hub.FleetHubError, match="node_id"):
+            sessions.handle_session(conn, _upsert(node_id=NODE_A), caller_node=NODE_A)
+        assert sessions.list_sessions(conn, include_all=True) == []
+        with pytest.raises(fleet_hub.FleetHubError, match="node_id"):
+            sessions.handle_session(conn, _upsert(), caller_node=None)
+        assert sessions.list_sessions(conn, include_all=True) == []
+        status, payload = sessions.handle_session(conn, _upsert(node_id=NODE_B), caller_node=None)
+        assert status == 200
+        assert payload["session"]["node_id"] == NODE_B
+
+    def test_validation_rejects_before_any_write(self, conn):
+        with pytest.raises(fleet_hub.FleetHubError):
+            sessions.handle_session(conn, _upsert(dirty_paths=["/etc/passwd"]), caller_node=NODE_A)
+        with pytest.raises(fleet_hub.FleetHubError):
+            sessions.handle_session(conn, _upsert(dirty_paths=["../secret"]), caller_node=NODE_A)
+        with pytest.raises(fleet_hub.FleetHubError):
+            sessions.handle_session(
+                conn,
+                _upsert(
+                    repo_identity="https://user:secret@github.com/example/project.git"  # content-guard: allow email
+                ),
+                caller_node=NODE_A,
+            )
+        with pytest.raises(fleet_hub.FleetHubUnprocessable):
+            sessions.handle_session(conn, _upsert(branch="topic\x1b"), caller_node=NODE_A)
+        assert sessions.list_sessions(conn, include_all=True) == []
+
+    def test_public_rows_omit_auth_material(self, conn):
+        sessions.handle_session(conn, _upsert(), caller_node=NODE_A)
+        row = sessions.list_sessions(conn)[0]
+        serialized = json.dumps(row)
+        assert "secret" not in serialized
+        assert "token" not in serialized
+        assert "holder" not in serialized
+        assert "Authorization" not in serialized
+
+    def test_handle_session_does_not_commit_caller_owned_transaction(self, conn):
+        conn.execute("BEGIN IMMEDIATE")
+        assert conn.in_transaction
+        status, _payload = sessions.handle_session(conn, _upsert(), caller_node=NODE_A)
+        assert status == 200
+        assert conn.in_transaction
+        conn.rollback()
+        assert sessions.list_sessions(conn, include_all=True) == []

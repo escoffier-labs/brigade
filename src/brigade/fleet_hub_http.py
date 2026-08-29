@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode
 
-from . import fleet_command_deck, fleet_dashboard, fleet_hub_grokbot
+from . import fleet_command_deck, fleet_dashboard, fleet_hub_grokbot, fleet_hub_sessions
 from . import fleet_hub as _hub
 from .fleet_hub import (
     DASHBOARD_COOKIE,
@@ -86,6 +86,14 @@ def handle_node_request(*args: Any, **kwargs: Any) -> Any:
 
 def list_claims(*args: Any, **kwargs: Any) -> Any:
     return _hub.list_claims(*args, **kwargs)
+
+
+def handle_session(*args: Any, **kwargs: Any) -> Any:
+    return fleet_hub_sessions.handle_session(*args, **kwargs)
+
+
+def list_sessions(*args: Any, **kwargs: Any) -> Any:
+    return fleet_hub_sessions.list_sessions(*args, **kwargs)
 
 
 def list_model_policy(*args: Any, **kwargs: Any) -> Any:
@@ -416,6 +424,7 @@ def make_handler(
                 station_ids = [station.node_id for station in frozen_deck.stations]
                 last_heard = fleet_command_deck.fetch_last_heard(conn, station_ids)
                 observers = fleet_command_deck.fetch_observers(conn, frozenset(station_ids))
+                interactive_sessions = fleet_command_deck.fetch_interactive_sessions(conn, now=now)
             except sqlite3.Error as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
@@ -432,6 +441,7 @@ def make_handler(
                 observers=observers,
                 now=now,
                 cloud_workers=cloud_workers,
+                interactive_sessions=interactive_sessions,
             )
             nonce = secrets.token_urlsafe(16)
             page = render(view, nonce=nonce, now=now)
@@ -451,7 +461,7 @@ def make_handler(
             if path.startswith(_DASHBOARD_PREFIX):
                 self._serve_dashboard(path, query)
                 return
-            if path in ("/status", "/claims", "/nodes", "/cloud", "/models", "/preference"):
+            if path in ("/status", "/claims", "/nodes", "/cloud", "/models", "/preference", "/sessions"):
                 if self._bearer() is None:
                     self._send_json(401, {"error": "unauthorized"})
                     return
@@ -486,6 +496,8 @@ def make_handler(
                         payload = {"models": list_model_policy(conn)}
                     elif path == "/preference":
                         payload = {"preference": get_run_preference(conn)}
+                    elif path == "/sessions":
+                        payload = {"sessions": list_sessions(conn, include_all=include_all)}
                     else:
                         payload = {"claims": list_claims(conn, include_all=include_all)}
                 except sqlite3.Error as exc:
@@ -546,7 +558,7 @@ def make_handler(
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
             path = self.path.partition("?")[0]
-            if path not in ("/events", "/claims", "/nodes", "/cloud", "/models", "/grokbot"):
+            if path not in ("/events", "/claims", "/nodes", "/cloud", "/models", "/grokbot", "/sessions"):
                 self._send_json(404, {"error": "not found"})
                 return
             if self._bearer() is None:
@@ -572,7 +584,7 @@ def make_handler(
                     if not is_admin:
                         self._send_json(403, {"error": "the admin token is required to manage nodes"})
                         return
-                elif path in ("/events", "/claims") and is_admin and not allow_admin_writes:
+                elif path in ("/events", "/claims", "/sessions") and is_admin and not allow_admin_writes:
                     self._send_json(
                         403,
                         {
@@ -600,6 +612,8 @@ def make_handler(
                     status, body_payload = 200, dict(store_events(conn, parsed, caller_node=caller_node))
                 elif path == "/claims":
                     status, body_payload = handle_claim(conn, parsed, caller_node=caller_node)
+                elif path == "/sessions":
+                    status, body_payload = handle_session(conn, parsed, caller_node=caller_node)
                 elif path == "/cloud":
                     if (
                         is_admin
