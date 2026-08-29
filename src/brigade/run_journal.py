@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from brigade import run_events
+from brigade import run_dirfd, run_events
 from brigade.run_events import CanonicalizationError, canonical_bytes
 
 _DIR_MODE = 0o700
@@ -299,6 +299,190 @@ class RecoveryReport:
     quarantine_path: Path | None
 
 
+def _bound_target(path: Path) -> tuple[run_dirfd.BoundRunDir, tuple[str, ...], str] | None:
+    """Return the active run-directory binding that authorizes ``path``, or None.
+
+    Authorization is lexical against the exact bound run path. Ordinary
+    callers run with no binding and keep today's pathname behavior.
+    """
+    return run_dirfd.active_binding_for(Path(path))
+
+
+def bound_dir_fd(path: Path, *, create: bool = False) -> int | None:
+    """Held directory descriptor for a bound directory path, else None.
+
+    The descriptor is owned by the binding and cached for its lifetime: a
+    caller must never close it.
+    """
+    target = _bound_target(path)
+    if target is None:
+        return None
+    bound, components, name = target
+    return bound.dir_fd(*components, name, create=create)
+
+
+def normalize_run_dir(run_dir: Path) -> Path:
+    """Normalize a run directory without resolving out of an active binding.
+
+    Every writer module normalizes its ``run_dir`` argument before opening
+    anything under it. ``Path.resolve()`` follows symlinks, so a directory
+    entry swapped for a symlink after bind would resolve the whole transaction
+    into an outside directory and silently drop the binding. When the given
+    path is lexically the bound run directory, the bound path is returned
+    unchanged; otherwise the existing ``expanduser().resolve()`` normalization
+    applies.
+    """
+    path = Path(run_dir).expanduser()
+    target = run_dirfd.active_binding_for(path / "run.json")
+    if target is not None:
+        bound, components, _ = target
+        if not components:
+            return bound.path
+    return path.resolve()
+
+
+def _symlink_refusal(path: Path, exc: OSError, *, wants_directory: bool) -> RunJournalError | None:
+    """Translate the no-follow rejection errnos into the shared bounded error."""
+    if exc.errno == errno.ELOOP:
+        return RunJournalError(_bound(f"refusing symlinked path: {path.name}"))
+    if exc.errno == errno.ENOTDIR and wants_directory:
+        # Linux reports ENOTDIR (not ELOOP) for O_DIRECTORY|O_NOFOLLOW on a
+        # symlinked directory; it is the same rejection.
+        return RunJournalError(_bound(f"refusing symlinked path: {path.name}"))
+    return None
+
+
+def _open_bound(
+    target: tuple[run_dirfd.BoundRunDir, tuple[str, ...], str],
+    path: Path,
+    flags: int,
+    mode: int,
+) -> int:
+    """Open a bound path descriptor-relative through the held run handles."""
+    bound, components, name = target
+    wants_directory = bool(flags & _O_DIRECTORY)
+    open_flags = flags
+    if wants_directory and not _HAS_O_DIRECTORY:
+        open_flags &= ~_O_DIRECTORY
+    try:
+        fd = bound.open_file(components, name, open_flags, mode)
+    except OSError as exc:
+        refusal = _symlink_refusal(path, exc, wants_directory=wants_directory)
+        if refusal is not None:
+            raise refusal from exc
+        raise
+    if not wants_directory or _HAS_O_DIRECTORY:
+        return fd
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise RunJournalError(_bound(f"path is not a directory: {path.name}"))
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def bound_lstat(path: Path) -> os.stat_result | None:
+    """No-follow stat of a final component; None when it does not exist.
+
+    Under a binding the walk runs through held directory descriptors, so a
+    directory entry swapped after bind cannot redirect the stat outside the
+    bound run inode. Any other resolution failure under a binding is reported
+    as absent so callers fail closed instead of trusting a re-resolved path.
+    """
+    target = _bound_target(path)
+    if target is None:
+        try:
+            return os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+    bound, components, name = target
+    try:
+        return bound.stat(components, name)
+    except OSError:
+        return None
+
+
+def bound_lexists(path: Path) -> bool:
+    """``os.path.lexists`` parity, resolved through the binding when active."""
+    if _bound_target(path) is None:
+        return os.path.lexists(path)
+    return bound_lstat(path) is not None
+
+
+def bound_exists(path: Path) -> bool:
+    """``Path.exists`` parity; under a binding a symlinked entry is not an entry.
+
+    A bound run never follows a final symlink, so a symlinked component is
+    reported as absent and the caller's existing no-follow open then fails
+    closed with the shared bounded refusal.
+    """
+    if _bound_target(path) is None:
+        return Path(path).exists()
+    info = bound_lstat(path)
+    return info is not None and not stat.S_ISLNK(info.st_mode)
+
+
+def bound_is_file(path: Path) -> bool:
+    """``Path.is_file`` parity; under a binding only a bound regular file counts."""
+    if _bound_target(path) is None:
+        return Path(path).is_file()
+    info = bound_lstat(path)
+    return info is not None and stat.S_ISREG(info.st_mode)
+
+
+def bound_is_dir(path: Path) -> bool:
+    """``Path.is_dir`` parity; under a binding only a bound directory counts."""
+    if _bound_target(path) is None:
+        return Path(path).is_dir()
+    info = bound_lstat(path)
+    return info is not None and stat.S_ISDIR(info.st_mode)
+
+
+def bound_read_bytes(path: Path) -> bytes:
+    """Read a file's bytes, descriptor-relative when a binding authorizes it.
+
+    Raises ``FileNotFoundError`` when absent and ``OSError`` when the bound
+    entry is a symlink, matching the fail-closed contract of the writers.
+    """
+    return run_dirfd.read_bytes(Path(path))
+
+
+def bound_read_text(path: Path) -> str:
+    """UTF-8 text read, descriptor-relative when a binding authorizes it."""
+    return bound_read_bytes(path).decode("utf-8")
+
+
+def _bound_rename(path: Path, target_path: Path) -> bool:
+    """Rename descriptor-relative through the binding; False when unbound.
+
+    A bound rename must stay inside one directory of the bound run: a
+    cross-directory move is refused rather than re-resolved by pathname.
+    """
+    source = _bound_target(path)
+    destination = _bound_target(target_path)
+    if source is None or destination is None:
+        return False
+    bound, components, name = source
+    _, target_components, target_name = destination
+    if target_components != components:
+        raise RunJournalError(_bound(f"refusing cross-directory rename: {Path(path).name}"))
+    bound.replace(components, name, target_name)
+    return True
+
+
+def bound_rename(path: Path, target_path: Path) -> None:
+    """``Path.rename`` parity, resolved descriptor-relative when bound."""
+    if not _bound_rename(path, target_path):
+        Path(path).rename(target_path)
+
+
+def bound_replace(path: Path, target_path: Path) -> None:
+    """``Path.replace`` parity, resolved descriptor-relative when bound."""
+    if not _bound_rename(path, target_path):
+        Path(path).replace(target_path)
+
+
 def _reject_symlink_final_component(path: Path) -> None:
     """Reject a symlinked final path component via lstat (fallback no-follow guard)."""
     try:
@@ -400,7 +584,15 @@ def _open_nofollow(path: Path, flags: int, mode: int = 0o666) -> int:
     Otherwise the final component is rejected via ``lstat`` before open and
     inode identity is verified with ``lstat``/``fstat`` before the descriptor
     is returned.
+
+    When a run-directory binding authorizes ``path``, the open resolves
+    descriptor-relative through the held handles instead: a directory entry
+    swapped after bind can only reach the original bound inode, or the open
+    fails closed. There is no pathname fallback for a bound path.
     """
+    target = _bound_target(path)
+    if target is not None:
+        return _open_bound(target, path, flags, mode)
     wants_directory = bool(flags & _O_DIRECTORY)
     open_flags = flags
     if wants_directory and not _HAS_O_DIRECTORY:
@@ -444,7 +636,22 @@ def _enforce_dir_mode(path: Path) -> None:
     With ``O_NOFOLLOW`` and ``fchmod``, mode is corrected on the opened
     directory descriptor. Without those APIs, the symlink guard and inode
     identity check run first, then ``chmod`` is applied on the verified path.
+
+    Under a binding the pathname ``lstat`` pre-checks are skipped: the
+    no-follow directory open below already resolves through held descriptors,
+    and re-resolving the name would reintroduce the swap it closes.
     """
+    if _bound_target(path) is not None:
+        fd = _open_nofollow(path, os.O_RDONLY | _O_DIRECTORY)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISDIR(info.st_mode):
+                raise RunJournalError(_bound(f"path is not a directory: {path.name}"))
+            if stat.S_IMODE(info.st_mode) != _DIR_MODE:
+                _chmod_fd_or_path(fd, path, _DIR_MODE)
+        finally:
+            os.close(fd)
+        return
     _reject_symlink_final_component(path)
     try:
         st = os.lstat(path)
@@ -484,7 +691,24 @@ def _enforce_file_mode(path: Path) -> None:
 
 
 def _mkdir_private(path: Path) -> None:
-    """Create a directory with mode 0o700 at mkdir time, then enforce it."""
+    """Create a directory with mode 0o700 at mkdir time, then enforce it.
+
+    Under a binding the directory is created and opened descriptor-relative
+    through the held run handles, so a symlinked or swapped entry fails closed
+    with the shared refusal instead of creating anything outside the run.
+    """
+    target = _bound_target(path)
+    if target is not None:
+        bound, components, name = target
+        try:
+            bound.dir_fd(*components, name, create=True)
+        except OSError as exc:
+            refusal = _symlink_refusal(path, exc, wants_directory=True)
+            if refusal is not None:
+                raise refusal from exc
+            raise RunJournalError(_bound(f"cannot create directory: {path.name}")) from exc
+        _enforce_dir_mode(path)
+        return
     path.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
     _enforce_dir_mode(path)
 
@@ -521,7 +745,7 @@ def ensure_journal(journal_path: Path) -> None:
     events_dir = journal_path.parent
     _mkdir_private(events_dir)
     created = False
-    if not journal_path.exists():
+    if not bound_exists(journal_path):
         fd = _open_nofollow(journal_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, _FILE_MODE)
         os.close(fd)
         created = True
@@ -615,9 +839,9 @@ def _read_tail_state(
     index: dict[str, dict[str, Any]] = {}
     partial_tail: bytes | None = None
     journal_bytes = 0
-    if os.path.lexists(journal_path) and not journal_path.exists():
+    if bound_lexists(journal_path) and not bound_exists(journal_path):
         raise RunJournalError(_bound(f"journal path is a dangling symlink: {journal_path.name}"))
-    if not journal_path.exists():
+    if not bound_exists(journal_path):
         return last_sequence, last_digest, index, partial_tail, journal_bytes
 
     fd = _open_nofollow(journal_path, os.O_RDONLY)
@@ -870,9 +1094,9 @@ def read_journal(journal_path: Path) -> JournalReport:
     """
     journal_path = Path(journal_path)
     report = JournalReport()
-    if os.path.lexists(journal_path) and not journal_path.exists():
+    if bound_lexists(journal_path) and not bound_exists(journal_path):
         raise RunJournalError(_bound(f"journal path is a dangling symlink: {journal_path.name}"))
-    if not journal_path.exists():
+    if not bound_exists(journal_path):
         return report
     raw = _read_bytes_nofollow(journal_path)
 
@@ -922,9 +1146,9 @@ def read_journal_bounded(journal_path: Path) -> JournalReport:
 
     journal_path = Path(journal_path)
     report = JournalReport()
-    if os.path.lexists(journal_path) and not journal_path.exists():
+    if bound_lexists(journal_path) and not bound_exists(journal_path):
         raise RunJournalError(_bound(f"journal path is a dangling symlink: {journal_path.name}"))
-    if not journal_path.exists():
+    if not bound_exists(journal_path):
         return report
 
     fd = _open_nofollow(journal_path, os.O_RDONLY)
@@ -998,7 +1222,7 @@ def recover_partial_tail(journal_path: Path, quarantine_dir: Path) -> RecoveryRe
     is the only API that mutates the journal body.
     """
     journal_path = Path(journal_path)
-    if not journal_path.exists():
+    if not bound_exists(journal_path):
         raise RunJournalError(_bound(f"journal path does not exist: {journal_path.name}"))
     with _append_critical_section(journal_path):
         return _recover_partial_tail_locked(journal_path, Path(quarantine_dir))
@@ -1006,9 +1230,9 @@ def recover_partial_tail(journal_path: Path, quarantine_dir: Path) -> RecoveryRe
 
 def _recover_partial_tail_locked(journal_path: Path, quarantine_dir: Path) -> RecoveryReport:
     """Perform recovery while the append critical section is held."""
-    if os.path.lexists(journal_path) and not journal_path.exists():
+    if bound_lexists(journal_path) and not bound_exists(journal_path):
         raise RunJournalError(_bound(f"journal path is a dangling symlink: {journal_path.name}"))
-    if not journal_path.exists():
+    if not bound_exists(journal_path):
         raise RunJournalError(_bound(f"journal path does not exist: {journal_path.name}"))
     _mkdir_private(quarantine_dir)
 

@@ -117,6 +117,7 @@ STATUS_EVENT_TYPE: dict[str, str] = {
     "timeout": "run.failed",
     "dry-run": "run.completed",
     "incomplete": "run.failed",
+    "orphaned": "run.orphaned",
     "artifact-collection": "run.artifact_collection.started",
     "paused": "run.paused",
     "running": "run.resumed",
@@ -212,7 +213,7 @@ def is_lifecycle_journaling_enabled() -> bool:
 
 
 def _run_id_from_dir(run_dir: Path) -> str:
-    return run_dir.expanduser().resolve().name
+    return run_journal.normalize_run_dir(run_dir).name
 
 
 def _journal_path(run_dir: Path) -> Path:
@@ -230,11 +231,10 @@ def _dispatch_journal_path(run_dir: Path) -> Path | None:
     """
     journal_path = _journal_path(run_dir)
     try:
-        journal_mode = journal_path.lstat().st_mode
-    except FileNotFoundError:
-        journal_mode = None
+        journal_info = run_journal.bound_lstat(journal_path)
     except OSError as exc:
         raise LifecycleJournalError(run_events._bound("lifecycle journal enrollment check failed")) from exc
+    journal_mode = journal_info.st_mode if journal_info is not None else None
     if journal_mode is not None:
         if not stat.S_ISREG(journal_mode):
             raise LifecycleJournalError(run_events._bound("enrolled lifecycle journal is not a regular file"))
@@ -242,15 +242,15 @@ def _dispatch_journal_path(run_dir: Path) -> Path | None:
 
     run_json = run_dir / "run.json"
     try:
-        run_mode = run_json.lstat().st_mode
-    except FileNotFoundError as exc:
-        raise LifecycleJournalError(run_events._bound("dispatch run receipt is missing")) from exc
+        run_info = run_journal.bound_lstat(run_json)
     except OSError as exc:
         raise LifecycleJournalError(run_events._bound("dispatch run receipt enrollment check failed")) from exc
-    if not stat.S_ISREG(run_mode):
+    if run_info is None:
+        raise LifecycleJournalError(run_events._bound("dispatch run receipt is missing"))
+    if not stat.S_ISREG(run_info.st_mode):
         raise LifecycleJournalError(run_events._bound("dispatch run receipt is not a regular file"))
     try:
-        meta = json.loads(run_json.read_bytes())
+        meta = json.loads(run_journal.bound_read_bytes(run_json))
     except (OSError, ValueError, UnicodeDecodeError) as exc:
         raise LifecycleJournalError(run_events._bound("dispatch run receipt enrollment is unreadable")) from exc
     if not isinstance(meta, dict):
@@ -275,9 +275,9 @@ def _journal_requested(
 ) -> bool:
     """True when this run has durably requested lifecycle journaling."""
     run_json = run_dir / "run.json"
-    if run_json.is_file():
+    if run_journal.bound_is_file(run_json):
         try:
-            meta = json.loads(run_json.read_bytes())
+            meta = json.loads(run_journal.bound_read_bytes(run_json))
         except (OSError, ValueError, UnicodeDecodeError):
             return False
         return isinstance(meta, dict) and meta.get(_REQUEST_FIELD) is True
@@ -296,7 +296,7 @@ def _run_snapshot_state(run_dir: Path) -> tuple[str | None, str | None]:
     closed with a bounded category.
     """
     try:
-        raw = (run_dir / "run.json").read_bytes()
+        raw = run_journal.bound_read_bytes(run_dir / "run.json")
     except FileNotFoundError:
         return None, None
     digest = hashlib.sha256(raw).hexdigest()
@@ -361,7 +361,7 @@ def next_dispatch_attempt(run_dir: Path, seat: str) -> int:
     """
     if not isinstance(seat, str) or not seat:
         raise LifecycleJournalError(run_events._bound("dispatch fact seat must be non-empty"))
-    run_dir = Path(run_dir).expanduser().resolve()
+    run_dir = run_journal.normalize_run_dir(run_dir)
     journal_path = _dispatch_journal_path(run_dir)
     if journal_path is None:
         return 1
@@ -386,7 +386,7 @@ def allocate_next_dispatch_attempt(run_dir: Path, seat: str) -> int:
     """
     if not isinstance(seat, str) or not seat:
         raise LifecycleJournalError(run_events._bound("dispatch fact seat must be non-empty"))
-    run_dir = Path(run_dir).expanduser().resolve()
+    run_dir = run_journal.normalize_run_dir(run_dir)
     journal_path = _dispatch_journal_path(run_dir)
     if journal_path is None:
         return 1
@@ -430,7 +430,7 @@ def record_dispatch_fact(
     if attempt is not None and (isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1):
         raise LifecycleJournalError(run_events._bound("dispatch fact attempt must be a positive integer"))
 
-    run_dir = Path(run_dir).expanduser().resolve()
+    run_dir = run_journal.normalize_run_dir(run_dir)
     with checkpoint_event_pair():
         journal_path = _dispatch_journal_path(run_dir)
         if journal_path is None:
@@ -443,7 +443,7 @@ def record_dispatch_fact(
             # writers, now applied before every dispatch pair.
             from brigade import aboyeur, run_shadow
 
-            snapshot = (run_dir / "run.json").read_bytes()
+            snapshot = run_journal.bound_read_bytes(run_dir / "run.json")
             try:
                 snapshot_obj = json.loads(snapshot)
             except (ValueError, UnicodeDecodeError) as exc:
@@ -557,7 +557,7 @@ def _recover_authoritative_dispatch_checkpoint(
     checkpoint = journal_report.events[-1]
     artifact_path = run_shadow.shadow_artifact_path(run_dir)
     try:
-        artifact = json.loads(artifact_path.read_text())
+        artifact = json.loads(run_journal.bound_read_text(artifact_path))
     except (OSError, ValueError) as exc:
         raise LifecycleJournalError(
             run_events._bound("authoritative dispatch checkpoint recovery evidence is unreadable")
@@ -680,6 +680,15 @@ def _allowlisted_payload(
         if len(text) > run_events.MAX_PAYLOAD_STR_LEN:
             text = text[: run_events.MAX_PAYLOAD_STR_LEN]
         payload["detail"] = text
+    incoming = incoming_snapshot or {}
+    if "last_observed_status" in allowed:
+        last_status = incoming.get("last_observed_status")
+        if isinstance(last_status, str) and last_status:
+            payload["last_observed_status"] = last_status[: run_events.MAX_PAYLOAD_STR_LEN]
+    if "uncommitted_change_count" in allowed:
+        dirty = incoming.get("uncommitted_change_count")
+        if isinstance(dirty, int) and not isinstance(dirty, bool) and 0 <= dirty <= run_events.MAX_CANONICAL_INT:
+            payload["uncommitted_change_count"] = dirty
     if event_type in {"run.paused", "run.resumed"}:
         reference = _approval_reference(incoming_snapshot)
         if reference is None:
@@ -752,9 +761,9 @@ def prepare_lifecycle_journal(
     ``LifecycleJournalError`` (generic category; the raw ``OSError`` text can
     carry a path or private value) on any ``ensure_journal`` failure.
     """
-    run_dir = Path(run_dir).expanduser().resolve()
+    run_dir = run_journal.normalize_run_dir(run_dir)
     journal_path = _journal_path(run_dir)
-    if journal_path.is_file():
+    if run_journal.bound_is_file(journal_path):
         return
     if not _journal_requested(run_dir, incoming=incoming_snapshot):
         return
@@ -779,7 +788,7 @@ def record_lifecycle_event(
     workspace: Path | None,
 ) -> run_journal.RunEvent:
     """Append or replay one checkpoint-paired fact under the active run lock."""
-    run_dir = Path(run_dir).expanduser().resolve()
+    run_dir = run_journal.normalize_run_dir(run_dir)
     run_id = _run_id_from_dir(run_dir)
     if not run_events._RUN_ID_RE.match(run_id):
         raise LifecycleJournalError(run_events._bound(f"invalid run_id from run_dir: {run_id!r}"))
@@ -802,7 +811,7 @@ def record_lifecycle_event(
         pairing_key = run_checkpoint.dispatch_pairing_key(event_type, seat, attempt)
     with checkpoint_event_pair():
         journal_path = _journal_path(run_dir)
-        if not journal_path.is_file():
+        if not run_journal.bound_is_file(journal_path):
             raise LifecycleJournalError("lifecycle journal is not active for this run")
         if workspace is None or not runguard.is_active_run_owner(workspace, run_dir):
             raise LifecycleJournalError("lifecycle journal append requires the active run lock for this run")
@@ -819,7 +828,7 @@ def record_lifecycle_event(
             # prior gate used by status and per-worker dispatch pairs.
             from brigade import aboyeur, run_shadow
 
-            snapshot = (run_dir / "run.json").read_bytes()
+            snapshot = run_journal.bound_read_bytes(run_dir / "run.json")
             try:
                 snapshot_obj = json.loads(snapshot)
             except (ValueError, UnicodeDecodeError) as exc:
@@ -911,7 +920,7 @@ def record_lifecycle_transition(
     the workspace from the run receipt payload (``lock_workspace`` or
     ``cwd``), as resolved by ``runguard.resolve_run_lock_workspace``.
     """
-    run_dir = Path(run_dir).expanduser().resolve()
+    run_dir = run_journal.normalize_run_dir(run_dir)
     event_type = STATUS_EVENT_TYPE.get(status)
     if event_type is None:
         # Unmapped statuses are not lifecycle transitions: no event, no
@@ -921,7 +930,7 @@ def record_lifecycle_transition(
     if not run_events._RUN_ID_RE.match(run_id):
         raise LifecycleJournalError(run_events._bound(f"invalid run_id from run_dir: {run_id!r}"))
     journal_path = _journal_path(run_dir)
-    if not journal_path.is_file():
+    if not run_journal.bound_is_file(journal_path):
         # Journal absent. Two legitimate skip paths remain: a legacy/no-request
         # run that never opted in, and a requested run whose activation could
         # not yet happen because the matching lock is not held (the pre-lock

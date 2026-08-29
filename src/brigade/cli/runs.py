@@ -409,6 +409,32 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Replace an existing destination run directory with the same run id.",
     )
     p_runs_import.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    p_runs_reap = runs_sub.add_parser(
+        "reap",
+        help="Terminalize local runs whose recorded owner process is gone.",
+    )
+    p_runs_reap.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be scanned.",
+    )
+    p_runs_reap.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory. Defaults to .brigade/runs under --cwd.",
+    )
+    p_runs_reap.add_argument(
+        "--older-than",
+        default="2h",
+        help="Only consider nonterminal runs older than this duration (default 2h).",
+    )
+    p_runs_reap.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the versioned brigade.runs-reap.v1 JSON contract.",
+    )
     p_runs_validate_archive = runs_sub.add_parser(
         "validate-archive",
         help="Validate a brigade.work-run archive manifest, digests, and export privacy rules.",
@@ -539,6 +565,15 @@ def dispatch(args) -> int:
             cwd=args.cwd,
             runs_dir=args.runs_dir,
             force=args.force,
+            json_output=args.json,
+        )
+    if args.runs_command == "reap":
+        from .. import run_reap
+
+        return run_reap.reap(
+            cwd=args.cwd,
+            runs_dir=args.runs_dir,
+            older_than=args.older_than,
             json_output=args.json,
         )
     if args.runs_command == "validate-archive":

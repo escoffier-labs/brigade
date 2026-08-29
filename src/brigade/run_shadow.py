@@ -163,7 +163,7 @@ def _quarantine_corrupt(artifact_path: Path) -> None:
     try:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         target = artifact_path.with_name(f"{artifact_path.name}.corrupt-{stamp}")
-        artifact_path.replace(target)
+        run_journal.bound_replace(artifact_path, target)
     except Exception:
         return
 
@@ -181,7 +181,7 @@ def _quarantine_stale_projector(artifact_path: Path) -> bool:
     try:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         target = artifact_path.with_name(f".stale-projector-v2-{stamp}")
-        artifact_path.replace(target)
+        run_journal.bound_replace(artifact_path, target)
         return True
     except Exception:
         return False
@@ -225,11 +225,11 @@ def _load_prior_artifact(artifact_path: Path) -> tuple[dict[str, Any] | None, bo
     aside and reported as corrupt so the carry path starts fresh with an
     evidence-unreadable side record instead of raising ``AttributeError``.
     """
-    if not artifact_path.is_file():
+    if not run_journal.bound_is_file(artifact_path):
         return None, False
     try:
-        parsed = json.loads(artifact_path.read_text())
-    except (OSError, ValueError):
+        parsed = json.loads(run_journal.bound_read_text(artifact_path))
+    except (OSError, ValueError, UnicodeDecodeError):
         _quarantine_corrupt(artifact_path)
         return None, True
     if not isinstance(parsed, dict):
@@ -561,14 +561,14 @@ def record_shadow_comparison(run_dir: Path, legacy_snapshot: Mapping[str, Any]) 
     # journal-unreadable before the outer containment returns; a failing evidence
     # write is swallowed silently and leaves the previous artifact in place.
     try:
-        run_dir = Path(run_dir).expanduser().resolve()
+        run_dir = run_journal.normalize_run_dir(run_dir)
         if not isinstance(legacy_snapshot, Mapping):
             return
         status = legacy_snapshot.get("status")
         if not isinstance(status, str) or not status:
             return
         journal_path = run_lifecycle._journal_path(run_dir)
-        if not journal_path.is_file():
+        if not run_journal.bound_is_file(journal_path):
             return
         run_id = run_dir.name
 
@@ -674,16 +674,16 @@ def check_projection_readiness(run_dir: Path) -> ReadinessReport:
     # gate reason branch lands RED-first in its own later task. The outer
     # containment returns evidence-unreadable on any unexpected failure.
     try:
-        run_dir = Path(run_dir).expanduser().resolve()
+        run_dir = run_journal.normalize_run_dir(run_dir)
     except Exception:
         return ReadinessReport(ready=False, reasons=())
     try:
-        if not run_lifecycle._journal_path(run_dir).is_file():
+        if not run_journal.bound_is_file(run_lifecycle._journal_path(run_dir)):
             return ReadinessReport(ready=False, reasons=(REASON_NO_JOURNAL,))
         artifact_path = shadow_artifact_path(run_dir)
-        if not artifact_path.is_file():
+        if not run_journal.bound_is_file(artifact_path):
             return ReadinessReport(ready=False, reasons=(REASON_NO_EVIDENCE,))
-        data = json.loads(artifact_path.read_text())
+        data = json.loads(run_journal.bound_read_text(artifact_path))
         # Version door: a noncurrent projector version closes the gate with
         # the dedicated stale reason BEFORE the schema check fires. Only this
         # reason is returned so callers can distinguish a version rotation

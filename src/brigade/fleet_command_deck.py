@@ -18,7 +18,7 @@ from typing import Mapping, Sequence
 CLAIM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
-TERMINAL_STATES = frozenset({"run.completed", "run.failed", "run.interrupted"})
+TERMINAL_STATES = frozenset({"run.completed", "run.failed", "run.interrupted", "run.orphaned"})
 AWAITING_STATES = frozenset({"run.paused", "approval.requested", "approval.held"})
 TERMINAL_STATE_SUFFIXES = (
     ".completed",
@@ -28,6 +28,7 @@ TERMINAL_STATE_SUFFIXES = (
     ".canceled",
     ".timed_out",
     ".timeout",
+    ".orphaned",
 )
 FAILURE_STATE_SUFFIXES = (
     ".failed",
@@ -93,6 +94,7 @@ def default_cloud_config() -> CloudConfig:
 class DeckConfig:
     stations: Sequence[StationConfig] = ()
     stale_after_seconds: int = 1800
+    stale_history_after_seconds: int = 86400
     outcome_window: int = 20
     failed_lookback_seconds: int = 86400
     cloud: CloudConfig = field(default_factory=default_cloud_config)
@@ -203,6 +205,7 @@ def load_config(path: Path) -> DeckConfig:
     return DeckConfig(
         stations=stations,
         stale_after_seconds=_bounded_int(raw, "stale_after_seconds", 1800, 300, 21600),
+        stale_history_after_seconds=_bounded_int(raw, "stale_history_after_seconds", 86400, 3600, 604800),
         outcome_window=_bounded_int(raw, "outcome_window", 20, 1, 100),
         failed_lookback_seconds=_bounded_int(raw, "failed_lookback_seconds", 86400, 1, 2_592_000),
         cloud=_cloud_config(raw.get("cloud")),
@@ -274,6 +277,10 @@ def is_terminal_state(state: str) -> bool:
 
 
 def bucket_for(state: str, *, age_seconds: int | None, stale_after_seconds: int) -> str:
+    # The Hub's synthetic history state is already an age verdict; bucket it
+    # the same way ``fleet_dashboard.bucket_for`` does regardless of age.
+    if state == "run.stale":
+        return "stale"
     if state in AWAITING_STATES:
         return "awaiting approval"
     if state.endswith(FAILURE_STATE_SUFFIXES):

@@ -30,6 +30,8 @@ CHECKPOINT_EVENT_TYPE = "run.snapshot.checkpointed"
 CHECKPOINT_MEDIA_TYPE = "application/vnd.brigade.run+json"
 CHECKPOINT_PRIVACY_CLASS = "private"
 CHECKPOINT_DIR_NAME = "recovery-checkpoints"
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024
 MAX_JOURNAL_BYTES = 8 * 1024 * 1024
 MAX_JOURNAL_EVENTS = 2048
@@ -482,7 +484,13 @@ def _fsync_directory(path: Path) -> None:
             raise close_err
 
 
-def _cleanup_temp(tmp_path: Path, cp_dir: Path, primary: CheckpointError | None) -> CheckpointError | None:
+def _cleanup_temp(
+    tmp_path: Path,
+    cp_dir: Path,
+    primary: CheckpointError | None,
+    *,
+    parent_fd: int | None = None,
+) -> CheckpointError | None:
     """Unlink the temp and fsync the checkpoint directory after a temp deletion.
 
     Used on the success, collision, and error paths so every successful temp
@@ -493,11 +501,18 @@ def _cleanup_temp(tmp_path: Path, cp_dir: Path, primary: CheckpointError | None)
     suppressed (the directory fsync still runs best-effort so the unlink is
     durable). When ``primary`` is ``None``, a cleanup-only failure returns a
     new bounded ``CheckpointError`` (``unlink`` or ``dir-fsync``).
+
+    ``parent_fd`` is the held checkpoint-directory descriptor of an active run
+    binding. When present the unlink is descriptor-relative, so cleanup can
+    only remove this transaction's own temp inside the bound run directory.
     """
     cleanup_err: CheckpointError | None = None
     unlinked = False
     try:
-        os.unlink(tmp_path)
+        if parent_fd is None:
+            os.unlink(tmp_path)
+        else:
+            os.unlink(tmp_path.name, dir_fd=parent_fd)
     except FileNotFoundError:
         # Preserve Path.unlink(missing_ok=True) semantics while using the
         # same os.unlink boundary on every supported Python version.
@@ -517,15 +532,46 @@ def _cleanup_temp(tmp_path: Path, cp_dir: Path, primary: CheckpointError | None)
 
 
 def _abort_with_cleanup(
-    tmp_path: Path, cp_dir: Path, primary: CheckpointError, *, cause: BaseException | None = None
+    tmp_path: Path,
+    cp_dir: Path,
+    primary: CheckpointError,
+    *,
+    cause: BaseException | None = None,
+    parent_fd: int | None = None,
 ) -> None:
     """Run temp cleanup, then raise ``primary`` (or a cleanup-only error)."""
-    cleanup_err = _cleanup_temp(tmp_path, cp_dir, primary)
+    cleanup_err = _cleanup_temp(tmp_path, cp_dir, primary, parent_fd=parent_fd)
     if cleanup_err is not None and primary is None:
         raise cleanup_err from None
     if cause is not None:
         raise primary from cause
     raise primary
+
+
+def _descriptor_relative_publish_available() -> bool:
+    """Whether link/unlink can be issued relative to a held directory descriptor."""
+    supports: frozenset[Any] = frozenset(getattr(os, "supports_dir_fd", ()))
+    return os.link in supports and os.unlink in supports
+
+
+def _bound_checkpoint_dir_fd(cp_dir: Path) -> int | None:
+    """Held descriptor for the checkpoint directory of an active run binding.
+
+    Returns None when no binding authorizes ``cp_dir``. Raises a bounded
+    ``CheckpointError`` when a binding is active but this platform cannot
+    publish descriptor-relative: a bound transaction never falls back to a
+    pathname link that a swapped directory entry could redirect.
+    """
+    if run_journal._bound_target(cp_dir) is None:
+        return None
+    if not _descriptor_relative_publish_available():
+        raise CheckpointError(_bound("descriptor-relative checkpoint publish is unavailable"), category="link")
+    try:
+        return run_journal.bound_dir_fd(cp_dir)
+    except run_journal.RunJournalError as exc:
+        raise CheckpointError(_bound(f"cannot open checkpoint directory: {exc.diagnostic}"), category="mkdir") from exc
+    except OSError as exc:
+        raise CheckpointError(_bound("cannot open checkpoint directory"), category="mkdir") from exc
 
 
 def publish_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
@@ -563,12 +609,22 @@ def publish_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
     except OSError as exc:
         raise CheckpointError(_bound("cannot create checkpoint directory"), category="mkdir") from exc
     final_path = checkpoint_path(run_dir, sha)
+    parent_fd = _bound_checkpoint_dir_fd(cp_dir)
 
     try:
-        fd, tmp_name = tempfile.mkstemp(dir=cp_dir, prefix=".checkpoint.", suffix=".tmp")
+        if parent_fd is None:
+            fd, tmp_name = tempfile.mkstemp(dir=cp_dir, prefix=".checkpoint.", suffix=".tmp")
+            tmp_path = Path(tmp_name)
+        else:
+            tmp_path = cp_dir / f".checkpoint.{uuid4().hex}.tmp"
+            fd = os.open(
+                tmp_path.name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC,
+                run_journal._FILE_MODE,
+                dir_fd=parent_fd,
+            )
     except OSError as exc:
         raise CheckpointError(_bound("cannot create checkpoint temp"), category="temp-create") from exc
-    tmp_path = Path(tmp_name)
     primary: CheckpointError | None = None
     try:
         try:
@@ -594,29 +650,37 @@ def publish_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
             primary = close_err
 
     if primary is not None:
-        _abort_with_cleanup(tmp_path, cp_dir, primary)
+        _abort_with_cleanup(tmp_path, cp_dir, primary, parent_fd=parent_fd)
 
     try:
-        os.link(tmp_path, final_path)
+        if parent_fd is None:
+            os.link(tmp_path, final_path)
+        else:
+            os.link(
+                tmp_path.name,
+                final_path.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
     except FileExistsError:
         try:
             _verify_collision(final_path, run_json_bytes, sha)
         except CheckpointError as exc:
-            _abort_with_cleanup(tmp_path, cp_dir, exc)
-        cleanup_err = _cleanup_temp(tmp_path, cp_dir, None)
+            _abort_with_cleanup(tmp_path, cp_dir, exc, parent_fd=parent_fd)
+        cleanup_err = _cleanup_temp(tmp_path, cp_dir, None, parent_fd=parent_fd)
         if cleanup_err is not None:
             raise cleanup_err from None
         return final_path
     except OSError as exc:
         primary = CheckpointError(_bound("checkpoint link failed"), category="link")
-        _abort_with_cleanup(tmp_path, cp_dir, primary, cause=exc)
+        _abort_with_cleanup(tmp_path, cp_dir, primary, cause=exc, parent_fd=parent_fd)
 
     try:
         _fsync_directory(cp_dir)
     except CheckpointError as exc:
-        _abort_with_cleanup(tmp_path, cp_dir, exc)
+        _abort_with_cleanup(tmp_path, cp_dir, exc, parent_fd=parent_fd)
 
-    cleanup_err = _cleanup_temp(tmp_path, cp_dir, None)
+    cleanup_err = _cleanup_temp(tmp_path, cp_dir, None, parent_fd=parent_fd)
     if cleanup_err is not None:
         raise cleanup_err from None
 
@@ -751,7 +815,7 @@ def write_checkpoint(
     """
     from brigade import run_lifecycle  # lazy: avoid circular import
 
-    run_dir = Path(run_dir).expanduser().resolve()
+    run_dir = run_journal.normalize_run_dir(run_dir)
     run_json_bytes = bytes(run_json_bytes)
     if pairing_key is not None and (not isinstance(pairing_key, str) or not _HEX64.match(pairing_key)):
         raise CheckpointError(_bound("pairing_key must be 64-char lowercase hex"), category="pairing-key")
@@ -804,7 +868,7 @@ def write_checkpoint(
         publish_bytes = run_json_bytes
     run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
     journal_path = run_lifecycle._journal_path(run_dir)
-    if not journal_path.is_file():
+    if not run_journal.bound_is_file(journal_path):
         return None
     # Journal active: every publish/append must come from the process holding
     # the matching active run lock. A lock-less writer fails closed before any
@@ -900,12 +964,12 @@ def _restore_run_json_from_checkpoint(
     if run_meta is not None:
         return repaired
     run_json = run_dir / "run.json"
-    if run_json.is_file():
+    if run_journal.bound_is_file(run_json):
         # Preserve the corrupt original before replacing it.
         backup = run_json.with_name(f"run.json.corrupt-{uuid4().hex}")
         try:
-            run_json.rename(backup)
-        except OSError as exc:
+            run_journal.bound_rename(run_json, backup)
+        except (OSError, run_journal.RunJournalError) as exc:
             raise CheckpointError(_bound("could not preserve corrupt run.json"), category="preserve-corrupt") from exc
     try:
         localio.write_text_atomic(run_json, checkpoint_bytes.decode("utf-8"))
@@ -1090,12 +1154,12 @@ def recover_from_checkpoint(
     from brigade import run_lifecycle  # lazy: avoid circular import
 
     try:
-        run_dir = Path(run_dir).expanduser().resolve()
+        run_dir = run_journal.normalize_run_dir(run_dir)
     except (OSError, RuntimeError) as exc:
         raise CheckpointError(_bound("could not resolve run directory"), category="path-resolve") from exc
     run_id = run_dir.name
     journal_path = run_lifecycle._journal_path(run_dir)
-    if not journal_path.is_file():
+    if not run_journal.bound_is_file(journal_path):
         raise CheckpointError(_bound("lifecycle journal not found"), category="no-journal")
 
     try:

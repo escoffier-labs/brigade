@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import localio, run_journal
+from brigade import localio, run_dirfd, run_journal
 
 
 def test_read_json_dict_invalid_utf8_returns_none(tmp_path: Path):
@@ -207,6 +207,25 @@ def test_write_text_atomic_writes_lf_not_platform_newline(tmp_path: Path):
     raw = path.read_bytes()
     assert b"\r\n" not in raw
     assert raw.count(b"\n") == 4
+
+
+def test_write_text_atomic_unchanged_without_a_binding(tmp_path: Path):
+    path = tmp_path / "nested" / "receipt.txt"
+    payload = "line\nsecond\n"
+    assert run_dirfd.active_binding_for(path) is None
+    localio.write_text_atomic(path, payload)
+    assert path.read_bytes() == payload.encode("utf-8")
+    assert b"\r\n" not in path.read_bytes()
+    metadata = path.stat()
+    assert stat.S_ISREG(metadata.st_mode)
+
+
+def test_write_bytes_atomic_unchanged_without_a_binding(tmp_path: Path):
+    path = tmp_path / "nested" / "blob.bin"
+    payload = b"\x00\xffhello\n"
+    assert run_dirfd.active_binding_for(path) is None
+    localio.write_bytes_atomic(path, payload)
+    assert path.read_bytes() == payload
 
 
 def test_write_text_exclusive_writes_lf_not_platform_newline(tmp_path: Path):
