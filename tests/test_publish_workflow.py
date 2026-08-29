@@ -107,7 +107,7 @@ def test_go_native_build_disables_setup_go_cache_for_the_cross_platform_matrix()
     section = text[text.index("  build-go-native:") : text.index("  assemble-release:")]
 
     setup_go = section[
-        section.index("      - uses: actions/setup-go@v5") : section.index("      - name: Build pure-Go")
+        section.index("      - uses: actions/setup-go@v7") : section.index("      - name: Build pure-Go")
     ]
     assert "go-version: stable" in setup_go
     assert "cache: false" in setup_go
