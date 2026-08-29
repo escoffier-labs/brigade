@@ -88,19 +88,19 @@ Fleet Hub receives only the persisted opaque `report_event` object: irreversible
 
 ## Slice 3 test-first recipe
 
-- [ ] Write `tests/test_grokbot_fleet_remediation.py::test_proposal_requires_escalated_current_finding_and_operator_approval`; assert suppress/watch, stale revision, wrong target, missing approval, and expired approval all reject without invoking an executor.
-- [ ] Run `pytest -q tests/test_grokbot_fleet_remediation.py::test_proposal_requires_escalated_current_finding_and_operator_approval`; expect failure because the Wazuh binding and action catalog are absent.
-- [ ] Add the fixed typed catalog and policy binding. The first action must name one registered service/target, one verification ID, one rollback ID, one maintenance window, and one maximum blast radius. No input may contain a command, shell, path, username, address, credential, or environment value.
-- [ ] Run the test; expect it to pass.
-- [ ] Write `test_execute_claims_rechecks_verifies_and_records_receipts`; assert the exact call order is approval read, finding revision read, live-state recheck, Fleet claim, executor, verification, and receipt. Assert a failed verification executes the fixed rollback policy or returns a failed receipt when rollback is not permitted.
-- [ ] Run that test; expect failure because the execution path is absent.
-- [ ] Implement the typed proposal/execution path with single-use approval, current-state binding, Fleet claim/renew/release, replay protection, bounded executor arguments, post-action verification, and sanitized receipts.
-- [ ] Run `pytest -q tests/test_grokbot_fleet_remediation.py tests/test_grokbot_fleet_tools.py tests/test_grokbot_fleet_app.py tests/test_grokbot_fleet_lifecycle.py`; expect all tests to pass.
-- [ ] Write `test_non_catalogued_wazuh_findings_remain_review_only`; assert every suppress/watch/unknown finding and every protected, appliance, family, container, or indirect target remains proposal-ineligible.
-- [ ] Run the test; expect failure if any broad path is accidentally executable; repair policy until it passes.
-- [ ] Verify through Brigade: `brigade work verify run --target . --command "pytest -q tests/test_grokbot_fleet_remediation.py tests/test_grokbot_fleet_tools.py tests/test_grokbot_fleet_app.py tests/test_grokbot_fleet_lifecycle.py" --capture grokbot-fleet-bounded-remediator`; expect a successful receipt.
-- [ ] Run the full repository verification through Brigade after the focused receipt, then perform independent security review for command injection, target substitution, secret leakage, replay, stale approvals, claim loss, and rollback behavior.
-- [ ] Commit only the Slice 3 files with `git add src/brigade/grokbot_fleet tests/test_grokbot_fleet_remediation.py tests/test_grokbot_fleet_*.py && git commit -m "feat: add approval-gated fleet remediation"`.
+- [x] Write `tests/test_grokbot_fleet_remediation.py::test_proposal_requires_escalated_current_finding_and_operator_approval`; assert suppress/watch, stale revision, wrong target, missing approval, and expired approval all reject without invoking an executor.
+- [x] Run `pytest -q tests/test_grokbot_fleet_remediation.py::test_proposal_requires_escalated_current_finding_and_operator_approval`; expect failure because the Wazuh binding and action catalog are absent.
+- [x] Add the fixed typed catalog and policy binding. The first action must name one registered service/target, one verification ID, one rollback ID, one maintenance window, and one maximum blast radius. No input may contain a command, shell, path, username, address, credential, or environment value.
+- [x] Run the test; expect it to pass.
+- [x] Write `test_execute_claims_rechecks_verifies_and_records_receipts`; assert the exact call order is approval read, finding revision read, live-state recheck, Fleet claim, executor, verification, and receipt. Assert a failed verification executes the fixed rollback policy or returns a failed receipt when rollback is not permitted.
+- [x] Run that test; expect failure because the execution path is absent.
+- [x] Implement the typed proposal/execution path with single-use approval, current-state binding, Fleet claim/renew/release, replay protection, bounded executor arguments, post-action verification, and sanitized receipts.
+- [x] Run `pytest -q tests/test_grokbot_fleet_remediation.py tests/test_grokbot_fleet_tools.py tests/test_grokbot_fleet_app.py tests/test_grokbot_fleet_lifecycle.py`; expect all tests to pass.
+- [x] Write `test_non_catalogued_wazuh_findings_remain_review_only`; assert every suppress/watch/unknown finding and every protected, appliance, family, container, or indirect target remains proposal-ineligible.
+- [x] Run the test; expect failure if any broad path is accidentally executable; repair policy until it passes.
+- [x] Verify through Brigade: `brigade work verify run --target . --command "pytest -q tests/test_grokbot_fleet_remediation.py tests/test_grokbot_fleet_tools.py tests/test_grokbot_fleet_app.py tests/test_grokbot_fleet_lifecycle.py" --capture grokbot-fleet-bounded-remediator`; expect a successful receipt. Receipt `20260828-233645-work-verify-88fa05` completed with 46 focused tests passing.
+- [x] Run the full repository verification through Brigade after the focused receipt, then perform independent security review for command injection, target substitution, secret leakage, replay, stale approvals, claim loss, and rollback behavior. Receipts `20260829-160756-work-verify-bbfb45` and `20260829-161747-work-verify-2fa1de` covered 10,479 tests with 82.72% coverage; the xdist-unsafe cases were rerun serially. Final focused remediation receipt `20260829-162423-work-verify-3c22ec` passed 67 tests after the independent review findings were closed.
+- [x] Commit only the Slice 3 files with `git add src/brigade/grokbot_fleet tests/test_grokbot_fleet_remediation.py tests/test_grokbot_fleet_*.py && git commit -m "feat: add approval-gated fleet remediation"` (`bcf53231`).
 
 ## End-to-end acceptance
 
