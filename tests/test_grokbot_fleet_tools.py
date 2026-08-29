@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +39,7 @@ class _Store:
         self.consumed = {}
         self.receipts = []
         self.reservations = {}
+        self.claim_cleanup = None
         self._reservation_seq = 0
 
     def create_proposal(self, record):
@@ -86,6 +86,15 @@ class _Store:
 
     def release_receipt_reservation(self, reservation_id):
         self.reservations.pop(reservation_id, None)
+
+    def write_claim_cleanup(self, record):
+        self.claim_cleanup = dict(record)
+
+    def read_claim_cleanup(self):
+        return self.claim_cleanup
+
+    def clear_claim_cleanup(self):
+        self.claim_cleanup = None
 
 
 class _Executor:
@@ -161,6 +170,24 @@ def _tools(tmp_path, *, fail_aliases=(), store=None, executor=None):
     )
 
 
+def _leftover_observer_proposal(proposal_id: str, nonce: str) -> dict[str, object]:
+    return {
+        "version": 1,
+        "proposal_id": proposal_id,
+        "finding_id": "research-bridge:unhealthy-service",
+        "service_id": "research-bridge",
+        "target_alias": "control-plane",
+        "finding_revision": "b" * 64,
+        "system_revision": "c" * 64,
+        "action_id": "restart-service",
+        "verification_id": "verify-service",
+        "rollback_id": "no-rollback",
+        "nonce": nonce,
+        "created_at": "2026-08-27T12:00:00Z",
+        "expires_at": "2027-08-27T12:15:00Z",
+    }
+
+
 def test_overview_preserves_order_and_bounds_unavailable_targets(tmp_path):
     tools = _tools(tmp_path, fail_aliases=("hypervisor",))
     result = tools.fleet_overview({})
@@ -199,23 +226,11 @@ def test_propose_and_execute_follow_fail_closed_replay_rules(tmp_path):
     tools.incident_bundle({"scope": "research-bridge"})
     finding = tools.ledger.finding("research-bridge:unhealthy-service")
     proposed = tools.propose_remediation({"finding_id": finding["finding_id"]})
-    assert proposed["data"]["execution_available"] is True
+    assert proposed["data"]["execution_available"] is False
     assert proposed["data"]["approval_required"] is True
-    proposal_id = proposed["data"]["proposal_id"]
-    with pytest.raises(FleetError) as denied:
-        tools.execute_remediation({"proposal_id": proposal_id})
-    assert denied.value.code == "denied"
-    store.approvals[proposal_id] = {
-        **store.proposals[proposal_id],
-        "approved_at": "2026-08-27T12:01:00Z",
-    }
-    store.approvals[proposal_id].pop("created_at")
-    executed = tools.execute_remediation({"proposal_id": proposal_id})
-    assert executed["data"]["outcome"] == "verified"
-    assert executor.restarted == 1
-    with pytest.raises(FleetError):
-        tools.execute_remediation({"proposal_id": proposal_id})
-    assert executor.restarted == 1
+    assert "proposal_id" not in proposed["data"]
+    assert store.proposals == {}
+    assert executor.restarted == 0
 
 
 def test_unsupported_findings_propose_without_execution(tmp_path):
@@ -260,7 +275,11 @@ def test_repeated_rejected_execution_does_not_unbounded_receipts(tmp_path: Path)
     tools.create_receipt_id = lambda: next(ids)
     tools.incident_bundle({"scope": "research-bridge"})
     proposed = tools.propose_remediation({"finding_id": "research-bridge:unhealthy-service"})
-    proposal_id = proposed["data"]["proposal_id"]
+    assert proposed["data"]["execution_available"] is False
+    assert "proposal_id" not in proposed["data"]
+    proposal_id = next(ids)
+    leftover = _leftover_observer_proposal(proposal_id, next(ids))
+    store.create_proposal(leftover)
     receipts = actions / "receipts"
     before = len(list(receipts.glob("*.json")))
     for _ in range(20):
@@ -273,17 +292,6 @@ def test_repeated_rejected_execution_does_not_unbounded_receipts(tmp_path: Path)
         )
     after = len(list(receipts.glob("*.json")))
     assert after - before <= 1
-    approval = {
-        **{
-            key: store.read_proposal(proposal_id)[key]
-            for key in store.read_proposal(proposal_id)
-            if key != "created_at"
-        },
-        "approved_at": now.isoformat().replace("+00:00", "Z"),
-    }
-    write_fleet_approval_file(str(approvals), approval)
-    executed = tools.execute_remediation({"proposal_id": proposal_id})
-    assert executed["data"]["outcome"] == "verified"
 
 
 def _write_live_receipt(
@@ -329,9 +337,12 @@ def test_execute_remediation_denies_saturated_live_receipts_before_claim_or_rest
     tools.create_receipt_id = lambda: next(ids)
     tools.incident_bundle({"scope": "research-bridge"})
     proposed = tools.propose_remediation({"finding_id": "research-bridge:unhealthy-service"})
-    proposal_id = proposed["data"]["proposal_id"]
+    assert proposed["data"]["execution_available"] is False
+    proposal_id = next(ids)
+    store.create_proposal(_leftover_observer_proposal(proposal_id, next(ids)))
     _write_live_receipt(store, next(ids), proposal_id, outcome="denied")
     _write_live_receipt(store, next(ids), proposal_id, outcome="stale")
+    _write_live_receipt(store, next(ids), proposal_id, outcome="expired")
     assert len(list((actions / "receipts").glob("*.json"))) == 3
     approval = {
         **{
@@ -348,23 +359,6 @@ def test_execute_remediation_denies_saturated_live_receipts_before_claim_or_rest
     assert caught.value.message == ERROR_MESSAGES[caught.value.code]
     assert executor.restarted == 0
     assert list((actions / "consumed").glob("*.json")) == []
-
-    monkeypatch.setattr(actions_mod, "MAX_RECEIPTS", 8)
-    executed = tools.execute_remediation({"proposal_id": proposal_id})
-    assert executed["data"]["outcome"] == "verified"
-    assert executed["data"]["receipt_ref"]
-    assert (actions / "receipts" / f"{executed['data']['receipt_ref']}.json").is_file()
-    execution_receipts = []
-    verification_receipts = []
-    for path in (actions / "receipts").glob("*.json"):
-        payload = path.read_text(encoding="utf-8")
-        if '"kind": "execution"' in payload or '"kind":"execution"' in payload:
-            execution_receipts.append(path)
-        if '"kind": "verification"' in payload or '"kind":"verification"' in payload:
-            verification_receipts.append(path)
-    assert execution_receipts
-    assert verification_receipts
-    assert executor.restarted == 1
 
 
 def test_execute_remediation_releases_stale_reservation_capacity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -394,7 +388,9 @@ def test_execute_remediation_releases_stale_reservation_capacity(tmp_path: Path,
     tools.create_receipt_id = lambda: next(ids)
     tools.incident_bundle({"scope": "research-bridge"})
     proposed = tools.propose_remediation({"finding_id": "research-bridge:unhealthy-service"})
-    proposal_id = proposed["data"]["proposal_id"]
+    assert proposed["data"]["execution_available"] is False
+    proposal_id = next(ids)
+    store.create_proposal(_leftover_observer_proposal(proposal_id, next(ids)))
     approval = {
         **{
             key: store.read_proposal(proposal_id)[key]
@@ -406,8 +402,8 @@ def test_execute_remediation_releases_stale_reservation_capacity(tmp_path: Path,
     write_fleet_approval_file(str(approvals), approval)
     with pytest.raises(FleetError) as caught:
         tools.execute_remediation({"proposal_id": proposal_id})
-    assert caught.value.code == "unavailable"
-    assert executor.restarted == 1
+    assert caught.value.code == "denied"
+    assert executor.restarted == 0
     assert list((actions / "reservations").glob("*.json")) == []
     receipt_id = next(ids)
     _write_live_receipt(store, receipt_id, proposal_id, outcome="failed")
@@ -435,53 +431,18 @@ def test_replay_loser_cannot_drop_winner_reservation_and_winner_commits_after_on
     tools.create_receipt_id = lambda: next(ids)
     tools.incident_bundle({"scope": "research-bridge"})
     proposed = tools.propose_remediation({"finding_id": "research-bridge:unhealthy-service"})
-    proposal_id = proposed["data"]["proposal_id"]
+    assert proposed["data"]["execution_available"] is False
+    proposal_id = next(ids)
+    leftover = _leftover_observer_proposal(proposal_id, next(ids))
+    store.create_proposal(leftover)
     approval = {
-        **{
-            key: store.read_proposal(proposal_id)[key]
-            for key in store.read_proposal(proposal_id)
-            if key != "created_at"
-        },
+        **{key: leftover[key] for key in leftover if key != "created_at"},
         "approved_at": now.isoformat().replace("+00:00", "Z"),
     }
     write_fleet_approval_file(str(approvals), approval)
-
-    loser_codes: list[str] = []
-    reservation_after_loser: dict[str, object] | None = None
-    real_claim = store.claim_consumed
-
-    def claim_then_replay(record):
-        nonlocal reservation_after_loser
-        claimed = real_claim(record)
-        try:
-            tools.execute_remediation({"proposal_id": proposal_id})
-            loser_codes.append("ok")
-        except FleetError as exc:
-            loser_codes.append(exc.code)
-            assert exc.message == ERROR_MESSAGES[exc.code]
-        paths = sorted((actions / "reservations").glob("*.json"))
-        assert len(paths) == 1
-        reservation_after_loser = json.loads(paths[0].read_text(encoding="utf-8"))
-        reservation_after_loser["path_stem"] = paths[0].stem
-        return claimed
-
-    store.claim_consumed = claim_then_replay  # type: ignore[method-assign]
-    winner = tools.execute_remediation({"proposal_id": proposal_id})
-    assert winner["data"]["outcome"] == "verified"
-    assert executor.restarted == 1
-    assert loser_codes == ["unavailable"]
-    assert reservation_after_loser is not None
-    assert reservation_after_loser["proposal_id"] == proposal_id
-    assert reservation_after_loser["reservation_id"] != proposal_id
-    assert reservation_after_loser["reservation_id"] == reservation_after_loser["path_stem"]
-    execution_receipts = []
-    verification_receipts = []
-    for path in (actions / "receipts").glob("*.json"):
-        payload = path.read_text(encoding="utf-8")
-        if '"kind": "execution"' in payload or '"kind":"execution"' in payload:
-            execution_receipts.append(path)
-        if '"kind": "verification"' in payload or '"kind":"verification"' in payload:
-            verification_receipts.append(path)
-    assert len(execution_receipts) == 1
-    assert len(verification_receipts) == 1
+    with pytest.raises(FleetError) as caught:
+        tools.execute_remediation({"proposal_id": proposal_id})
+    assert caught.value.code == "denied"
+    assert executor.restarted == 0
+    assert list((actions / "consumed").glob("*.json")) == []
     assert list((actions / "reservations").glob("*.json")) == []

@@ -517,3 +517,90 @@ def test_live_reservation_is_exclusive_and_token_scoped(tmp_path: Path):
     assert (root / "receipts" / f"{'2' * 32}.json").is_file()
     assert (root / "receipts" / f"{'3' * 32}.json").is_file()
     assert list((root / "reservations").glob("*.json")) == []
+
+
+def test_receipt_reservation_rejects_a_changed_static_contract(tmp_path: Path):
+    store, _root, _approvals = _store(tmp_path)
+    live = _proposal("a" * 32)
+    store.create_proposal(live)
+    reserved = [
+        _receipt("2" * 32, live["proposal_id"], kind="execution", outcome="unverified"),
+        _receipt("3" * 32, live["proposal_id"], kind="verification", outcome="unverified"),
+    ]
+    reservation_id = store.reserve_receipt_capacity(reserved)
+    committed = [
+        {**reserved[0], "outcome": "verified"},
+        {**reserved[1], "outcome": "verified", "verification_id": "different-verification"},
+    ]
+    with pytest.raises(FleetError) as caught:
+        store.commit_reserved_receipts(reservation_id, committed)
+    assert caught.value.code == "protocol_error"
+
+
+def test_receipt_reservation_recovers_only_exact_partially_persisted_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store, root, _approvals = _store(tmp_path)
+    live = _proposal("a" * 32)
+    store.create_proposal(live)
+    reserved = [
+        _receipt("2" * 32, live["proposal_id"], kind="execution", outcome="verified"),
+        _receipt("3" * 32, live["proposal_id"], kind="verification", outcome="verified"),
+    ]
+    reservation_id = store.reserve_receipt_capacity(reserved)
+
+    write_exclusive_json = actions_mod._write_exclusive_json
+
+    def fail_second_terminal_write(path: Path, record: dict[str, object]) -> None:
+        if path.name == f"{'3' * 32}.json":
+            raise OSError("simulated crash")
+        write_exclusive_json(path, record)
+
+    monkeypatch.setattr(actions_mod, "_write_exclusive_json", fail_second_terminal_write)
+    with pytest.raises(OSError, match="simulated crash"):
+        store.commit_reserved_receipts(reservation_id, reserved)
+
+    # The first receipt and the reservation must survive an interrupted second write.
+    assert (root / "receipts" / f"{'2' * 32}.json").is_file()
+    assert (root / "reservations" / f"{reservation_id}.json").is_file()
+    monkeypatch.setattr(actions_mod, "_write_exclusive_json", write_exclusive_json)
+    store.commit_reserved_receipts(reservation_id, reserved)
+
+    assert (root / "receipts" / f"{'2' * 32}.json").is_file()
+    assert (root / "receipts" / f"{'3' * 32}.json").is_file()
+    assert not (root / "reservations" / f"{reservation_id}.json").exists()
+
+    mismatched = [
+        _receipt("4" * 32, live["proposal_id"], kind="execution", outcome="verified"),
+        _receipt("5" * 32, live["proposal_id"], kind="verification", outcome="verified"),
+    ]
+    mismatch_reservation_id = store.reserve_receipt_capacity(mismatched)
+    store.write_receipt({**mismatched[0], "outcome": "failed"})
+
+    with pytest.raises(FleetError) as caught:
+        store.commit_reserved_receipts(mismatch_reservation_id, mismatched)
+
+    assert caught.value.code == "protocol_error"
+    assert (root / "reservations" / f"{mismatch_reservation_id}.json").is_file()
+    assert not (root / "receipts" / f"{'5' * 32}.json").exists()
+
+
+def test_claim_cleanup_replaces_a_provisional_receipt_with_the_terminal_set(tmp_path: Path):
+    store, _root, _approvals = _store(tmp_path)
+    proposal_id = "a" * 32
+    common = {
+        "version": 2,
+        "proposal_id": proposal_id,
+        "target_alias": "control-plane",
+        "holder": "b" * 32,
+        "reservation_id": "c" * 32,
+        "receipt_pending": True,
+        "release_pending": True,
+    }
+    provisional = _receipt("d" * 32, proposal_id, kind="execution", outcome="unverified")
+    terminal = _receipt("e" * 32, proposal_id, kind="rejection", outcome="replayed")
+    store.write_claim_cleanup({**common, "terminal_receipts": [provisional]})
+    store.write_claim_cleanup({**common, "terminal_receipts": [terminal]})
+    cleanup = store.read_claim_cleanup()
+    assert cleanup is not None
+    assert cleanup["terminal_receipts"] == [terminal]

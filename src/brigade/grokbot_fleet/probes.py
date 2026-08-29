@@ -115,6 +115,10 @@ def fleet_finding_id(scope: str, kind: str) -> str:
     return f"{scope}:{kind}"
 
 
+def verify_catalogued_service(observation: Mapping[str, Any]) -> bool:
+    return observation.get("health_class") == "healthy"
+
+
 def remediation_for_finding(finding_id: str) -> dict[str, str] | None:
     kinds = sorted(FLEET_FINDING_CATALOG, key=len, reverse=True)
     for kind in kinds:

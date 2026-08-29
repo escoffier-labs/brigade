@@ -19,7 +19,36 @@ TOOLS = frozenset(
 )
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 OPAQUE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
+MAX_WAZUH_FINDING_ID = 128
 DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
+FORBIDDEN_REMEDIATION_INPUT = frozenset(
+    {
+        "address",
+        "command",
+        "credential",
+        "environment",
+        "hostname",
+        "password",
+        "path",
+        "shell",
+        "token",
+        "username",
+    }
+)
+WAZUH_PROPOSAL_FIELDS = frozenset(
+    {
+        "action_id",
+        "blast_radius",
+        "finding_revision",
+        "maintenance_window_id",
+        "rollback_id",
+        "service_id",
+        "target_alias",
+        "verification_id",
+        "wazuh_fingerprint",
+    }
+)
 ERROR_MESSAGES = {
     "invalid_request": "Tool input failed validation",
     "denied": "Fleet request was denied",
@@ -63,8 +92,18 @@ def parse_identifier(value: object, *, maximum: int = 64) -> str:
     return value
 
 
+def parse_wazuh_finding_id(value: object) -> str:
+    return parse_identifier(value, maximum=MAX_WAZUH_FINDING_ID)
+
+
 def parse_opaque_id(value: object) -> str:
     if not isinstance(value, str) or not OPAQUE_ID_RE.fullmatch(value):
+        raise FleetError("invalid_request", ERROR_MESSAGES["invalid_request"])
+    return value
+
+
+def parse_fingerprint(value: object) -> str:
+    if not isinstance(value, str) or not FINGERPRINT_RE.fullmatch(value):
         raise FleetError("invalid_request", ERROR_MESSAGES["invalid_request"])
     return value
 
@@ -98,13 +137,13 @@ def parse_incident_input(raw: object) -> dict[str, str]:
 
 
 def parse_propose_input(raw: object) -> dict[str, str]:
-    if not isinstance(raw, dict) or set(raw) != {"finding_id"}:
+    if not isinstance(raw, dict) or set(raw) != {"finding_id"} or set(raw) & FORBIDDEN_REMEDIATION_INPUT:
         raise FleetError("invalid_request", ERROR_MESSAGES["invalid_request"])
-    return {"finding_id": parse_identifier(raw.get("finding_id"))}
+    return {"finding_id": parse_wazuh_finding_id(raw.get("finding_id"))}
 
 
 def parse_execute_input(raw: object) -> dict[str, str]:
-    if not isinstance(raw, dict) or set(raw) != {"proposal_id"}:
+    if not isinstance(raw, dict) or set(raw) != {"proposal_id"} or set(raw) & FORBIDDEN_REMEDIATION_INPUT:
         raise FleetError("invalid_request", ERROR_MESSAGES["invalid_request"])
     return {"proposal_id": parse_opaque_id(raw.get("proposal_id"))}
 

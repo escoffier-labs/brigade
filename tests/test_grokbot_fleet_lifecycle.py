@@ -163,6 +163,8 @@ def test_successful_canary_does_not_mutate_ledger_findings_or_action_state(tmp_p
     assert result["auth_rejected_without_bearer"] is True
     assert set(result["tools"]) == set(TOOLS)
     assert snapshot() == before
+    assert "execute_remediation" not in result
+    assert ledger.finding("control-plane:unreachable")["proposed_action_id"] == "inspect-host"
 
 
 def test_runtime_and_state_paths_reject_symlinks(tmp_path: Path):

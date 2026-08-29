@@ -14,6 +14,7 @@ from brigade.grokbot_fleet.contracts import (
     parse_overview_input,
     parse_propose_input,
     parse_service_health_input,
+    parse_wazuh_finding_id,
 )
 
 
@@ -86,3 +87,20 @@ def test_strict_tool_inputs_accept_and_reject_extra_keys():
         parse_host_status_input({"alias": "host-a", "extra": True})
     with pytest.raises(FleetError):
         parse_execute_input({"proposal_id": "restart-service"})
+    with pytest.raises(FleetError):
+        parse_propose_input({"finding_id": "finding-1", "command": "bash"})
+    with pytest.raises(FleetError):
+        parse_execute_input({"proposal_id": "a" * 32, "path": "/tmp/x"})
+
+
+def test_wazuh_finding_id_parser_accepts_128_and_rejects_129():
+    accepted = "A" * 128
+    assert parse_wazuh_finding_id(accepted) == accepted
+    assert parse_wazuh_finding_id("001:service-failure:533") == "001:service-failure:533"
+    assert parse_propose_input({"finding_id": accepted})["finding_id"] == accepted
+    for value in ("", "A" * 129, "-leading", "host/sub", "host token"):
+        with pytest.raises(FleetError) as caught:
+            parse_wazuh_finding_id(value)
+        assert caught.value.code == "invalid_request"
+    with pytest.raises(FleetError):
+        parse_propose_input({"finding_id": "A" * 129})

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, NoReturn
 
 from .. import grokbot_mcp, grokbot_ops
-from .actions import FleetActionStore, ResearchBridgeRestarter
+from .actions import CatalogRemediator, FleetActionStore, ResearchBridgeRestarter
 from .contracts import PACK_ID, TOOLS, FleetError
 from .exec import Runner
 from .ledger import FleetLedger
@@ -26,7 +26,7 @@ from .runtime_config import (
     project_fleet_public_registry,
     read_secure_runtime_text,
 )
-from .tools import FleetStewardTools
+from .tools import FleetHubClaims, FleetStewardTools
 
 MAX_REQUEST_BYTES = 16_384
 SERVICE_NAME = "grokbot-fleet-steward"
@@ -208,6 +208,27 @@ def _load_runtime(target: Path) -> tuple[FleetListenerConfig, str]:
     return config, bearer
 
 
+def _optional_wazuh_source(target: Path) -> Any:
+    try:
+        from .. import grokbot_packs
+        from ..grokbot_wazuh.store import WazuhStore
+
+        payload = grokbot_packs._load_instance_config(target, "wazuh-triage")
+        store = WazuhStore(str(payload["ledger_path"]))
+        store.ready()
+    except Exception:
+        return None
+
+    class _Source:
+        def current_finding(self, finding_id: str) -> dict[str, Any] | None:
+            return store.get_finding(finding_id)
+
+        def suppressions(self) -> list[dict[str, str]]:
+            return store.suppressions()
+
+    return _Source()
+
+
 def build_tools_from_config(
     config: FleetListenerConfig,
     *,
@@ -258,6 +279,7 @@ def build_tools_from_config(
         env=probe_env,
         runner=runner,
     )
+    remediator = CatalogRemediator(executor)
     probes = create_fleet_adapters(
         registry=registry,
         systemctl_file=systemctl_file,
@@ -285,6 +307,9 @@ def build_tools_from_config(
         create_nonce=_opaque_id,
         create_receipt_id=_opaque_id,
         secrets=secret_list,
+        wazuh_source=_optional_wazuh_source(config.target),
+        remediator=remediator,
+        claims=FleetHubClaims(),
     )
 
 
