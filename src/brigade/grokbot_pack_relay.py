@@ -412,7 +412,7 @@ def write_relay_units(target: Path, out_dir: Path, *, force: bool = False, pytho
                 path,
                 rendered,
                 mode=0o644,
-                replace_symlink=force,
+                replace_symlink=False,
                 replace=force or existing is not None,
             )
             written.append(path)
@@ -423,6 +423,8 @@ def write_relay_units(target: Path, out_dir: Path, *, force: bool = False, pytho
 
 
 def _preflight_unit_destination(path: Path, rendered: str, *, force: bool) -> tuple[str | None, tuple[str, int] | None]:
+    if grokbot_ops._path_is_symlink(path) or path.is_symlink():
+        raise PackRelayError("unsafe-path")
     try:
         existing = grokbot_ops._read_regular_text(path)
         snapshot = (existing, stat.S_IMODE(path.lstat().st_mode))
@@ -430,10 +432,7 @@ def _preflight_unit_destination(path: Path, rendered: str, *, force: bool) -> tu
         existing = None
         snapshot = None
     except OSError as exc:
-        if not force or not grokbot_ops._path_is_symlink(path):
-            raise PackRelayError("unsafe-path") from exc
-        existing = None
-        snapshot = None
+        raise PackRelayError("unsafe-path") from exc
     if existing is not None and existing != rendered and not force:
         raise PackRelayError("unsafe-path")
     return existing, snapshot

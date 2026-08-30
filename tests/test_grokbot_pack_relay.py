@@ -470,3 +470,44 @@ def test_write_relay_units_keeps_both_units_unchanged_when_second_write_fails(
     assert caught.value.reason == "unsafe-path"
     assert not service.exists()
     assert timer.read_text(encoding="utf-8") == original_timer
+
+
+def test_write_relay_units_rejects_service_symlink_with_force_before_either_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from brigade import grokbot_ops, grokbot_pack_relay
+
+    target = tmp_path / "queue"
+    target.mkdir()
+    owner = _owner(tmp_path / "owner")
+    grokbot_pack_relay.apply_relay_setup(target, owner)
+    out = tmp_path / "units"
+    out.mkdir()
+    victim = tmp_path / "outside.service"
+    original_target = "# keep the symlink target\n"
+    victim.write_text(original_target, encoding="utf-8")
+    service = out / grokbot_pack_relay.RELAY_SERVICE_UNIT
+    service.symlink_to(victim)
+    timer = out / grokbot_pack_relay.RELAY_TIMER_UNIT
+    original_timer = "# pre-existing timer\n"
+    timer.write_text(original_timer, encoding="utf-8")
+    writes = {"count": 0}
+    real_write = grokbot_ops._write_text_nofollow_atomic
+
+    def fail_second(path: Path, data: str, **kwargs: object) -> None:
+        writes["count"] += 1
+        if writes["count"] >= 2:
+            raise OSError("simulated second-write failure")
+        real_write(path, data, **kwargs)
+
+    monkeypatch.setattr(grokbot_ops, "_write_text_nofollow_atomic", fail_second)
+
+    with pytest.raises(grokbot_pack_relay.PackRelayError) as caught:
+        grokbot_pack_relay.write_relay_units(target, out, force=True)
+
+    assert caught.value.reason == "unsafe-path"
+    assert writes["count"] == 0
+    assert service.is_symlink()
+    assert service.readlink() == victim
+    assert victim.read_text(encoding="utf-8") == original_target
+    assert timer.read_text(encoding="utf-8") == original_timer
