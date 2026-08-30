@@ -31,6 +31,8 @@ _FLEET_HOLDER_DOMAIN = b"brigade.grokbot.fleet-holder"
 _FLEET_SESSION_DOMAIN = b"brigade.grokbot.fleet-session"
 _FLEET_BEST_EFFORT = frozenset({"no-hub", "no-identity", "hub-unavailable"})
 ENVIRONMENT_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
+_DIRECT_QUEUE_HUB_TOKEN_FILE_ENV = "BRIGADE_GROKBOT_HUB_TOKEN_FILE"
+_DIRECT_QUEUE_HUB_TOKEN_MAX_BYTES = 4098
 
 OPERATOR_TOOLS = frozenset(
     {
@@ -150,12 +152,59 @@ def load_hub_token(*, instance: str) -> str | None:
     """
     names = (
         f"BRIGADE_GROKBOT_{instance.replace('-', '_').upper()}_HUB_TOKEN_FILE",
-        "BRIGADE_GROKBOT_HUB_TOKEN_FILE",
+        _DIRECT_QUEUE_HUB_TOKEN_FILE_ENV,
     )
     path_text = next((os.environ.get(name) for name in names if os.environ.get(name)), None)
     if path_text is None:
         return None
     return _read_mode600_secret(Path(path_text))
+
+
+def load_direct_queue_listener_token() -> str | None:
+    """Load only the generic direct-queue listener token from a safe file."""
+    path_text = os.environ.get(_DIRECT_QUEUE_HUB_TOKEN_FILE_ENV)
+    if path_text is None:
+        return None
+    path = Path(path_text)
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if not path.is_absolute() or not isinstance(no_follow, int) or no_follow == 0:
+        raise ConfigurationError("invalid")
+
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | no_follow | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) & 0o077
+            or info.st_size > _DIRECT_QUEUE_HUB_TOKEN_MAX_BYTES
+        ):
+            raise ConfigurationError("invalid")
+        chunks: list[bytes] = []
+        remaining = _DIRECT_QUEUE_HUB_TOKEN_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > _DIRECT_QUEUE_HUB_TOKEN_MAX_BYTES:
+            raise ConfigurationError("invalid")
+        return _validate_bearer(data.decode("utf-8").rstrip("\r\n"))
+    except ConfigurationError:
+        raise
+    except (OSError, UnicodeDecodeError):
+        raise ConfigurationError("invalid") from None
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                raise ConfigurationError("invalid") from None
 
 
 def _read_mode600_secret(path: Path) -> str:

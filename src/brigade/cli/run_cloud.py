@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import json
 import os
 import stat
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, ContextManager
 
 _PROMPT_FILE_MAX_BYTES = 64 * 1024
 _LAUNCH_LABEL_MAX = 120
@@ -1118,36 +1119,43 @@ def _dispatch_grokbot(args, target: Path) -> int:
             raise
         return 0
     try:
-        if command == "enqueue":
-            result = grokbot_jobs.enqueue(target, _read_json_object(args.spec, "--spec"), args.idempotency_key)
-        elif command == "claim":
-            result = grokbot_jobs.claim(target, args.job_id, args.bot_id, args.lease_id, args.lease_seconds)
-        elif command == "renew":
-            result = grokbot_jobs.renew(target, args.job_id, args.bot_id, args.lease_id, args.lease_seconds)
-        elif command == "start":
-            result = grokbot_jobs.transition(target, args.job_id, args.bot_id, args.lease_id, "running")
-        elif command == "complete":
-            result = grokbot_jobs.transition(
-                target,
-                args.job_id,
-                args.bot_id,
-                args.lease_id,
-                "completed",
-                artifact=_read_json_object(args.artifact, "--artifact"),
-            )
-        elif command == "fail":
-            result = grokbot_jobs.transition(target, args.job_id, args.bot_id, args.lease_id, "failed")
-        elif command == "cancel":
-            result = grokbot_jobs.cancel(target, args.job_id)
-        elif command == "ack-cancel":
-            result = grokbot_jobs.acknowledge_cancel(target, args.job_id, args.bot_id, args.lease_id)
-        elif command == "expire":
-            result = grokbot_jobs.expire(target, args.job_id)
-        elif command == "status":
-            result = grokbot_jobs.status(target, args.job_id)
-        else:  # argparse makes this unreachable.
-            print(f"error: unknown Grok Bot command: {command}", file=sys.stderr)
-            return 2
+        token = grokbot_mcp.load_direct_queue_listener_token()
+        identity: ContextManager[None] = nullcontext()
+        if token is not None:
+            from .. import fleet_client_grokbot
+
+            identity = fleet_client_grokbot.listener_identity(token)
+        with identity:
+            if command == "enqueue":
+                result = grokbot_jobs.enqueue(target, _read_json_object(args.spec, "--spec"), args.idempotency_key)
+            elif command == "claim":
+                result = grokbot_jobs.claim(target, args.job_id, args.bot_id, args.lease_id, args.lease_seconds)
+            elif command == "renew":
+                result = grokbot_jobs.renew(target, args.job_id, args.bot_id, args.lease_id, args.lease_seconds)
+            elif command == "start":
+                result = grokbot_jobs.transition(target, args.job_id, args.bot_id, args.lease_id, "running")
+            elif command == "complete":
+                result = grokbot_jobs.transition(
+                    target,
+                    args.job_id,
+                    args.bot_id,
+                    args.lease_id,
+                    "completed",
+                    artifact=_read_json_object(args.artifact, "--artifact"),
+                )
+            elif command == "fail":
+                result = grokbot_jobs.transition(target, args.job_id, args.bot_id, args.lease_id, "failed")
+            elif command == "cancel":
+                result = grokbot_jobs.cancel(target, args.job_id)
+            elif command == "ack-cancel":
+                result = grokbot_jobs.acknowledge_cancel(target, args.job_id, args.bot_id, args.lease_id)
+            elif command == "expire":
+                result = grokbot_jobs.expire(target, args.job_id)
+            elif command == "status":
+                result = grokbot_jobs.status(target, args.job_id)
+            else:  # argparse makes this unreachable.
+                print(f"error: unknown Grok Bot command: {command}", file=sys.stderr)
+                return 2
     except grokbot_jobs.GrokbotJobError as exc:
         print(f"error: {exc.reason}", file=sys.stderr)
         return 2
