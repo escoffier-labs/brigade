@@ -56,8 +56,8 @@ type FileScan struct {
 	Records     int    `json:"records_generated"`
 	Warnings    int    `json:"warnings"`
 	// Skipped is true when an incremental import recognized the file as
-	// unchanged and did not read or hash it. ContentHash stays empty in that
-	// case so callers know not to overwrite the manifest's good hash.
+	// unchanged and avoided parsing it. ContentHash is populated when the skip
+	// was verified by hashing, and stays empty for legacy metadata-only callers.
 	Skipped bool `json:"skipped,omitempty"`
 }
 

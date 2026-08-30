@@ -1391,6 +1391,37 @@ func TestNativeImportFastPathReparsesSameSizeChangedFile(t *testing.T) {
 	}
 }
 
+func TestNativeImportFastPathReparsesSameSizeChangedFileWithRestoredMTime(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	writeCodexFixture(t, path, "alpha")
+	first := runJSON(t, "import", "codex", path, "--json")
+	if first["files_parsed"].(float64) != 1 || first["files_skipped"].(float64) != 0 {
+		t.Fatalf("first import counters = %v", first)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writeCodexFixture(t, path, "bravo")
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	second := runJSON(t, "import", "codex", path, "--json")
+	if second["files_parsed"].(float64) != 1 || second["files_skipped"].(float64) != 0 {
+		t.Fatalf("restored-mtime changed file should be reparsed: %v", second)
+	}
+	if second["inserted_items"].(float64) == 0 {
+		t.Fatalf("restored-mtime changed file imported no new item: %v", second)
+	}
+	search := runJSON(t, "search", "bravo", "--source", "codex", "--json")
+	if len(search["results"].([]any)) == 0 {
+		t.Fatalf("restored-mtime changed file record missing from search: %v", search)
+	}
+}
+
 func TestNativeImportDryRunDoesNotWriteSourceScans(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")

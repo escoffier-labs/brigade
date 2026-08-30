@@ -441,7 +441,7 @@ type ScanRecord struct {
 }
 
 // LoadSourceScans returns the manifest for a source kind keyed by file path,
-// so an incremental import can skip files whose size and mtime are unchanged.
+// so an incremental import can compare each file with its prior content identity.
 func LoadSourceScans(db *sql.DB, sourceKind string) (map[string]ScanRecord, error) {
 	rows, err := db.Query(`select path, size, mtime, content_hash from source_scans where source_kind = ?`, sourceKind)
 	if err != nil {
