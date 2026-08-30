@@ -317,6 +317,12 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     setup_secret = p_setup.add_mutually_exclusive_group(required=True)
     setup_secret.add_argument("--bearer-file", type=Path, help="Path of a protected bearer file (reference only).")
     setup_secret.add_argument("--bearer-env", help="Name of the environment variable holding the bearer.")
+    p_setup.add_argument(
+        "--hub-token-file",
+        type=Path,
+        default=None,
+        help="Protected absolute Fleet Hub node-token file for this worker role (reference only).",
+    )
 
     p_doctor = grokbot_sub.add_parser(
         "doctor", help="Sanitized dependency/config/permission/queue/endpoint diagnostics."
@@ -1519,6 +1525,7 @@ def _dispatch_grokbot_ops(args, target: Path) -> int:
                 allowed_origins=args.allow_origin,
                 bearer_env=args.bearer_env,
                 bearer_file=args.bearer_file,
+                hub_token_file=args.hub_token_file,
             )
             print(f"grokbot config saved: role={instance}")
             return 0

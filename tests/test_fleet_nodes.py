@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import fleet_client, fleet_hub
+from brigade import fleet_client, fleet_client_grokbot, fleet_hub
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
@@ -403,6 +403,62 @@ class TestClientNodeToken:
         with pytest.raises(fleet_client.FleetClientError, match="HTTP 403"):
             fleet_client.fetch_nodes()
 
+    def test_grokbot_actor_enrollment_uses_admin_token_and_returns_safe_metadata(self, hub):
+        url, db = hub
+        node_token = _enroll(url, NODE_A)
+        self._config(url, node=node_token)
+
+        enrolled = fleet_client_grokbot.enroll_actor(
+            node_id=NODE_A,
+            queue_owner_node_id=NODE_A,
+            queue_id="grokbot-queue-main",
+            actor_kind="implementation-worker",
+        )
+
+        assert enrolled == {"enrolled": True, "node_id": NODE_A}
+        assert ADMIN not in json.dumps(enrolled)
+        assert node_token not in json.dumps(enrolled)
+        conn = sqlite3.connect(str(db))
+        try:
+            policy = conn.execute(
+                "SELECT node_id, queue_owner_node_id, queue_id, actor_kind, role, enabled FROM grokbot_actor_policy"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert policy == (NODE_A, NODE_A, "grokbot-queue-main", "implementation-worker", "implementation-worker", 1)
+
+        self._config(url, admin=node_token)
+        with pytest.raises(fleet_client.FleetClientError, match="HTTP 403"):
+            fleet_client_grokbot.enroll_actor(
+                node_id=NODE_B,
+                queue_owner_node_id=NODE_A,
+                queue_id="grokbot-queue-main",
+                actor_kind="repository-scout",
+            )
+
+    def test_grokbot_operator_actor_omits_worker_role(self, hub):
+        url, db = hub
+        _enroll(url, NODE_A)
+        self._config(url)
+
+        enrolled = fleet_client_grokbot.enroll_actor(
+            node_id=NODE_A,
+            queue_owner_node_id=NODE_A,
+            queue_id="grokbot-queue-main",
+            actor_kind="operator",
+        )
+
+        assert enrolled == {"enrolled": True, "node_id": NODE_A}
+        conn = sqlite3.connect(str(db))
+        try:
+            policy = conn.execute(
+                "SELECT actor_kind, role, enabled FROM grokbot_actor_policy WHERE node_id = ?",
+                (NODE_A,),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert policy == ("operator", None, 1)
+
 
 class TestNodesCli:
     @pytest.fixture(autouse=True)
@@ -419,6 +475,43 @@ class TestNodesCli:
         (self.home / "fleet.toml").write_text(
             f'[fleet]\nhub_url = "{url}"\ntoken_file = "{(self.home / "admin.token").as_posix()}"\n'
         )
+
+    def test_grokbot_enroll_actor_cli_posts_one_fixed_role_actor(self, hub, capsys):
+        from brigade import cli
+
+        url, db = hub
+        self._config(url)
+        _enroll(url, NODE_A)
+
+        assert (
+            cli.main(
+                [
+                    "fleet",
+                    "grokbot",
+                    "enroll-actor",
+                    NODE_A,
+                    "--queue-owner-node-id",
+                    NODE_A,
+                    "--queue-id",
+                    "grokbot-queue-main",
+                    "--role",
+                    "repository-scout",
+                    "--json",
+                ]
+            )
+            == 0
+        )
+        output = capsys.readouterr().out
+        assert json.loads(output) == {"enrolled": True, "node_id": NODE_A}
+        assert ADMIN not in output
+        conn = sqlite3.connect(str(db))
+        try:
+            policy = conn.execute(
+                "SELECT node_id, queue_owner_node_id, queue_id, actor_kind, role, enabled FROM grokbot_actor_policy"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert policy == (NODE_A, NODE_A, "grokbot-queue-main", "repository-scout", "repository-scout", 1)
 
     def test_add_list_revoke_round_trip(self, hub, capsys):
         from brigade import cli
