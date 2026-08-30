@@ -219,7 +219,15 @@ def _preserved_field(
         return current
     bindings = existing.get("bindings")
     if isinstance(bindings, dict):
-        bound = bindings.get(key)
+        if key == "brigade_cli":
+            brigade = bindings.get("brigade")
+            bound = brigade.get("cli") if isinstance(brigade, dict) else None
+        elif key in {"t3_instance_id", "t3_service_tier"}:
+            t3_fleet = bindings.get("t3_fleet")
+            nested_key = "instance_id" if key == "t3_instance_id" else "service_tier"
+            bound = t3_fleet.get(nested_key) if isinstance(t3_fleet, dict) else None
+        else:
+            bound = None
         if isinstance(bound, str) and bound:
             return bound
     return default
@@ -403,7 +411,7 @@ def load_model_policy_snapshot(*, hub_url: str | None = None) -> dict[str, Any]:
         "source": source,
         "roster_revision": revision,
         "revision": revision,
-        "roster_digest": payload.get("roster_digest"),
+        "roster_digest": payload.get("document_sha256"),
         "expires_at": payload.get("expires_at"),
         "seats": seats,
         "consumer_defaults": payload.get("consumer_defaults"),

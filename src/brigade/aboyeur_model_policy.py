@@ -294,7 +294,7 @@ def _resolve_versioned(
     raw_source = raw_snapshot.get("source")
     source = raw_source if isinstance(raw_source, str) and raw_source else "hub"
     revision = raw_snapshot.get("roster_revision", raw_snapshot.get("revision"))
-    digest = raw_snapshot.get("roster_digest")
+    digest = raw_snapshot.get("document_sha256", raw_snapshot.get("roster_digest"))
     expires_at = raw_snapshot.get("expires_at")
     raw_seats = raw_snapshot.get("seats")
     seats = [dict(row) for row in raw_seats if isinstance(row, Mapping)] if isinstance(raw_seats, list) else []

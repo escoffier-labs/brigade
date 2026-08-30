@@ -385,7 +385,7 @@ def _validate_envelope(payload: Mapping[str, Any], *, token: str, audience: str)
         return "audience-mismatch"
     if not isinstance(payload.get("mac"), dict):
         return "lkg-mac-invalid"
-    digest = payload.get("roster_digest")
+    digest = payload.get("document_sha256")
     if not isinstance(digest, str) or digest != fleet_model_roster.roster_digest(payload):
         return "digest-mismatch"
     if not _mac_valid(token, payload):
@@ -542,16 +542,22 @@ def _request_digest(body: Mapping[str, Any]) -> str:
 
 def _binding_for(consumer: str, seat: Mapping[str, Any]) -> dict[str, Any] | None:
     raw_bindings = seat.get("bindings")
-    bindings: dict[str, Any] = raw_bindings if isinstance(raw_bindings, dict) else {}
+    bindings: Mapping[str, Any] = raw_bindings if isinstance(raw_bindings, Mapping) else {}
     if consumer == "t3-fleet":
-        instance_id = str(bindings.get("t3_instance_id") or seat.get("t3_instance_id") or "")
+        t3_fleet = bindings.get("t3_fleet")
+        if not isinstance(t3_fleet, Mapping):
+            return None
+        instance_id = str(t3_fleet.get("instance_id") or "")
         if not instance_id:
             return None
         return {
             "instance_id": instance_id,
-            "service_tier": bindings.get("t3_service_tier") or seat.get("t3_service_tier") or None,
+            "service_tier": t3_fleet.get("service_tier") or None,
         }
-    instance_id = str(bindings.get("brigade_cli") or seat.get("brigade_cli") or "")
+    brigade = bindings.get("brigade")
+    if not isinstance(brigade, Mapping):
+        return None
+    instance_id = str(brigade.get("cli") or "")
     if not instance_id:
         return None
     return {"instance_id": instance_id, "service_tier": None}
@@ -581,7 +587,7 @@ def _resolve_from_roster(
                 "source": source,
                 "error": "default-missing",
                 "roster_revision": roster.get("revision"),
-                "roster_digest": roster.get("roster_digest"),
+                "roster_digest": roster.get("document_sha256", roster.get("roster_digest")),
                 "expires_at": roster.get("expires_at"),
             },
         )
@@ -608,7 +614,7 @@ def _resolve_from_roster(
                     "state": "authoritative",
                     "source": source,
                     "roster_revision": roster.get("revision"),
-                    "roster_digest": roster.get("roster_digest"),
+                    "roster_digest": roster.get("document_sha256", roster.get("roster_digest")),
                     "seat": seat_name,
                     "provider": match.get("provider"),
                     "model": match.get("model"),
@@ -623,7 +629,7 @@ def _resolve_from_roster(
         "source": source,
         "error": reason,
         "roster_revision": roster.get("revision"),
-        "roster_digest": roster.get("roster_digest"),
+        "roster_digest": roster.get("document_sha256", roster.get("roster_digest")),
         "seat": seat_name,
         "provider": None if match is None else match.get("provider"),
         "model": None if match is None else match.get("model"),
@@ -718,6 +724,7 @@ def _roster_expectation_conflict(
     expect_digest: str | None,
 ) -> ModelAdmissionDecision | None:
     source = roster.get("source") or "hub"
+    digest = roster.get("document_sha256", roster.get("roster_digest"))
     if expect_revision is not None and int(roster.get("revision") or 0) != expect_revision:
         return _fail(
             "roster_revision_conflict",
@@ -728,10 +735,10 @@ def _roster_expectation_conflict(
                 "source": source,
                 "error": "roster_revision_conflict",
                 "roster_revision": roster.get("revision"),
-                "roster_digest": roster.get("roster_digest"),
+                "roster_digest": digest,
             },
         )
-    if expect_digest is not None and expect_digest != roster.get("roster_digest"):
+    if expect_digest is not None and expect_digest != digest:
         return _fail(
             "roster_digest_conflict",
             4,
@@ -741,7 +748,7 @@ def _roster_expectation_conflict(
                 "source": source,
                 "error": "roster_digest_conflict",
                 "roster_revision": roster.get("revision"),
-                "roster_digest": roster.get("roster_digest"),
+                "roster_digest": digest,
             },
         )
     return None
@@ -1103,7 +1110,7 @@ def doctor_model_roster(*, consumer: str) -> ModelAdmissionDecision:
         "consumer": consumer,
         "hub": "reachable" if roster.get("source") == "hub" else "lkg",
         "roster_revision": roster.get("revision"),
-        "roster_digest": roster.get("roster_digest"),
+        "roster_digest": roster.get("document_sha256", roster.get("roster_digest")),
         "cache_valid": _cache_is_valid(),
         "cache_age_seconds": None,
         "consumer_default": default_seat,

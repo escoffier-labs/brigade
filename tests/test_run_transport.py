@@ -720,7 +720,7 @@ def test_admission_pruned_retired_seat_cannot_be_dispatched(monkeypatch, tmp_pat
         "source": "hub",
         "revision": 2,
         "roster_revision": 2,
-        "roster_digest": "sha256:" + ("ab" * 32),
+        "document_sha256": "sha256:" + ("ab" * 32),
         "expires_at": "2026-08-30T14:15:00Z",
         "seats": [
             {
@@ -729,7 +729,10 @@ def test_admission_pruned_retired_seat_cannot_be_dispatched(monkeypatch, tmp_pat
                 "model": "opus-5",
                 "reasoning": "high",
                 "enabled": True,
-                "bindings": {"brigade_cli": "claude", "t3_instance_id": "claude"},
+                "bindings": {
+                    "brigade": {"cli": "claude"},
+                    "t3_fleet": {"instance_id": "claude", "service_tier": None},
+                },
             }
         ],
         "consumer_defaults": {"brigade-run": "chef"},
@@ -778,7 +781,7 @@ def test_dispatch_receives_hub_approved_model_reasoning_and_binding(monkeypatch,
         "source": "hub",
         "revision": 5,
         "roster_revision": 5,
-        "roster_digest": "sha256:" + ("cd" * 32),
+        "document_sha256": "sha256:" + ("cd" * 32),
         "expires_at": "2026-08-30T14:15:00Z",
         "seats": [
             {
@@ -787,7 +790,10 @@ def test_dispatch_receives_hub_approved_model_reasoning_and_binding(monkeypatch,
                 "model": "opus-5",
                 "reasoning": "high",
                 "enabled": True,
-                "bindings": {"brigade_cli": "claude", "t3_instance_id": "claude"},
+                "bindings": {
+                    "brigade": {"cli": "claude"},
+                    "t3_fleet": {"instance_id": "claude", "service_tier": None},
+                },
             }
         ],
         "consumer_defaults": {"brigade-run": "chef"},
@@ -830,7 +836,7 @@ def test_dispatch_does_not_run_when_versioned_custom_command_or_model_override_i
         "source": "hub",
         "revision": 5,
         "roster_revision": 5,
-        "roster_digest": "sha256:" + ("cd" * 32),
+        "document_sha256": "sha256:" + ("cd" * 32),
         "expires_at": "2026-08-30T14:15:00Z",
         "seats": [
             {
@@ -839,7 +845,10 @@ def test_dispatch_does_not_run_when_versioned_custom_command_or_model_override_i
                 "model": "opus-5",
                 "reasoning": "high",
                 "enabled": True,
-                "bindings": {"brigade_cli": "claude", "t3_instance_id": "claude"},
+                "bindings": {
+                    "brigade": {"cli": "claude"},
+                    "t3_fleet": {"instance_id": "claude", "service_tier": None},
+                },
             }
         ],
         "consumer_defaults": {"brigade-run": "chef"},

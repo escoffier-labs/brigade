@@ -37,7 +37,7 @@ CACHE_ENVELOPE_KEYS = (
     "issued_at",
     "expires_at",
     "audience_node_id",
-    "roster_digest",
+    "document_sha256",
     "seats",
     "consumer_defaults",
     "retired_models",
@@ -150,7 +150,18 @@ def validate_roster_rows(payload: Mapping[str, Any]) -> str | None:
             return "malformed-roster"
         if type(item.get("enabled")) is not bool:
             return "malformed-roster"
-        if "bindings" in item and item["bindings"] is not None and not isinstance(item["bindings"], dict):
+        bindings = item.get("bindings")
+        if not isinstance(bindings, dict) or set(bindings) != {"brigade", "t3_fleet"}:
+            return "malformed-roster"
+        brigade = bindings.get("brigade")
+        if not isinstance(brigade, dict) or set(brigade) != {"cli"} or not isinstance(brigade.get("cli"), str):
+            return "malformed-roster"
+        t3_fleet = bindings.get("t3_fleet")
+        if not isinstance(t3_fleet, dict) or set(t3_fleet) != {"instance_id", "service_tier"}:
+            return "malformed-roster"
+        if not isinstance(t3_fleet.get("instance_id"), str):
+            return "malformed-roster"
+        if t3_fleet.get("service_tier") is not None and not isinstance(t3_fleet.get("service_tier"), str):
             return "malformed-roster"
     defaults = payload.get("consumer_defaults")
     if not isinstance(defaults, dict):

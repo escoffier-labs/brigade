@@ -61,7 +61,7 @@ def _cache_envelope(payload: dict[str, object]) -> dict[str, object]:
             "issued_at",
             "expires_at",
             "audience_node_id",
-            "roster_digest",
+            "document_sha256",
             "seats",
             "consumer_defaults",
             "retired_models",
@@ -224,14 +224,14 @@ def test_roster_digest_is_stable_across_freshness_and_audience():
         "issued_at": "2026-08-30T14:00:00Z",
         "expires_at": "2026-08-30T14:15:00Z",
         "audience_node_id": NODE_A,
-        "roster_digest": "sha256:" + ("aa" * 32),
+        "document_sha256": "sha256:" + ("aa" * 32),
     }
     second = {
         **body,
         "issued_at": "2026-08-30T14:20:00Z",
         "expires_at": "2026-08-30T14:35:00Z",
         "audience_node_id": "22222222-2222-4222-8222-222222222222",
-        "roster_digest": "sha256:" + ("bb" * 32),
+        "document_sha256": "sha256:" + ("bb" * 32),
     }
     assert fleet_model_roster.roster_digest(first) == fleet_model_roster.roster_digest(second)
     assert fleet_model_roster.roster_digest(first) == _expected_digest(body)
@@ -438,7 +438,7 @@ def test_node_get_is_mac_bound_and_admin_get_cannot_seed_lkg(tmp_path):
         families = {(row["provider"], row["family"]) for row in node_payload["retired_models"]}
         assert families == {("openai", "gpt-5.4"), ("openai", "gpt-5.5")}
         assert node_payload["mac"]["algorithm"] == "hmac-sha256-node-bearer-v1"
-        assert hmac.compare_digest(node_payload["roster_digest"], _expected_digest(node_payload))
+        assert hmac.compare_digest(node_payload["document_sha256"], _expected_digest(node_payload))
         assert hmac.compare_digest(node_payload["mac"]["value"], _expected_mac(node_token, node_payload))
         assert node_token not in json.dumps(node_payload)
         status, admin_payload = _request(hub, "GET", "/models", token=ADMIN_TOKEN)
@@ -478,7 +478,7 @@ def test_admit_is_node_bound_idempotent_and_conflicts_on_replay_drift(tmp_path):
             "request_id": "c833a6f6-02fd-4eb2-92cb-d44d3cd29b66",
             "phase": "controller",
             "expect_revision": roster["revision"],
-            "expect_digest": roster["roster_digest"],
+            "expect_digest": roster["document_sha256"],
         }
         status, first = _request(hub, "POST", "/models", token=node_token, body=admit)
         assert status == 200
@@ -487,7 +487,7 @@ def test_admit_is_node_bound_idempotent_and_conflicts_on_replay_drift(tmp_path):
             "state": "authoritative",
             "source": "hub",
             "roster_revision": roster["revision"],
-            "roster_digest": roster["roster_digest"],
+            "roster_digest": roster["document_sha256"],
             "seat": "cursor_grok",
             "provider": "cursor",
             "model": "cursor-grok-4.6-high-fast",
@@ -507,7 +507,7 @@ def test_admit_is_node_bound_idempotent_and_conflicts_on_replay_drift(tmp_path):
         assert status == 409
         assert revision_conflict["error"] == "roster_revision_conflict"
         assert revision_conflict["roster_revision"] == roster["revision"]
-        assert revision_conflict["roster_digest"] == roster["roster_digest"]
+        assert revision_conflict["roster_digest"] == roster["document_sha256"]
         assert revision_conflict.get("seat") is None
         assert revision_conflict.get("provider") is None
         assert revision_conflict.get("model") is None
@@ -524,7 +524,7 @@ def test_admit_is_node_bound_idempotent_and_conflicts_on_replay_drift(tmp_path):
         assert status == 409
         assert digest_conflict["error"] == "roster_digest_conflict"
         assert digest_conflict["roster_revision"] == roster["revision"]
-        assert digest_conflict["roster_digest"] == roster["roster_digest"]
+        assert digest_conflict["roster_digest"] == roster["document_sha256"]
         assert digest_conflict.get("seat") is None
         status, digest_replay = _request(hub, "POST", "/models", token=node_token, body=digest_stale)
         assert status == 409
@@ -580,13 +580,13 @@ def test_admit_is_node_bound_idempotent_and_conflicts_on_replay_drift(tmp_path):
             "request_id": "22222222-2222-4222-8222-222222222222",
             "phase": "controller",
             "expect_revision": retired_roster["revision"],
-            "expect_digest": retired_roster["roster_digest"],
+            "expect_digest": retired_roster["document_sha256"],
         }
         status, denied = _request(hub, "POST", "/models", token=node_token, body=retired)
         assert status == 409
         assert denied["error"] == "retired-model"
         assert denied["roster_revision"] == retired_roster["revision"]
-        assert denied["roster_digest"] == retired_roster["roster_digest"]
+        assert denied["roster_digest"] == retired_roster["document_sha256"]
         assert denied["seat"] == "coder"
         assert denied["provider"] == "openai"
         assert denied["model"] == "gpt-5.6-terra"
@@ -665,21 +665,21 @@ def test_fresh_envelope_after_ttl_keeps_stable_digest_and_revision(tmp_path, mon
         assert first["revision_updated_at"]
         assert first["issued_at"] == "2026-08-30T14:00:00Z"
         assert first["expires_at"] == "2026-08-30T14:15:00Z"
-        assert hmac.compare_digest(first["roster_digest"], _expected_digest(first))
+        assert hmac.compare_digest(first["document_sha256"], _expected_digest(first))
         assert hmac.compare_digest(first["mac"]["value"], _expected_mac(node_token, first))
         clock["now"] = clock["now"] + timedelta(seconds=901)
         status, second = _request(hub, "GET", "/models", token=node_token)
         assert status == 200
         assert second["revision"] == first["revision"]
         assert second["revision_updated_at"] == first["revision_updated_at"]
-        assert second["roster_digest"] == first["roster_digest"]
+        assert second["document_sha256"] == first["document_sha256"]
         assert second["issued_at"] == "2026-08-30T14:15:01Z"
         assert second["expires_at"] == "2026-08-30T14:30:01Z"
         assert hmac.compare_digest(second["mac"]["value"], _expected_mac(node_token, second))
         assert second["mac"]["value"] != first["mac"]["value"]
         status, admin_payload = _request(hub, "GET", "/models", token=ADMIN_TOKEN)
         assert status == 200
-        assert admin_payload["roster_digest"] == first["roster_digest"]
+        assert admin_payload["document_sha256"] == first["document_sha256"]
         assert "audience_node_id" not in admin_payload
         assert "mac" not in admin_payload
 
@@ -833,13 +833,13 @@ def test_admission_denial_without_seat_persists_nullable_fields(tmp_path):
             "request_id": "33333333-3333-4333-8333-333333333333",
             "phase": "controller",
             "expect_revision": roster["revision"],
-            "expect_digest": roster["roster_digest"],
+            "expect_digest": roster["document_sha256"],
         }
         status, denied = _request(hub, "POST", "/models", token=node_token, body=admit)
         assert status == 409
         assert denied["error"] == "default-missing"
         assert denied["roster_revision"] == roster["revision"]
-        assert denied["roster_digest"] == roster["roster_digest"]
+        assert denied["roster_digest"] == roster["document_sha256"]
         assert denied.get("seat") is None
         assert denied.get("provider") is None
         assert denied.get("model") is None
@@ -861,7 +861,7 @@ def test_admission_denial_without_seat_persists_nullable_fields(tmp_path):
             assert row[4] is None
             assert row[5] is None
             assert row[6] == roster["revision"]
-            assert row[7] == roster["roster_digest"]
+            assert row[7] == roster["document_sha256"]
         finally:
             db.close()
 

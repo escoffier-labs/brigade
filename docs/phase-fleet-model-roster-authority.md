@@ -177,7 +177,7 @@ response becomes additive, so old Brigade clients can continue reading
   "issued_at": "2026-08-30T14:00:00Z",
   "expires_at": "2026-08-30T14:15:00Z",
   "audience_node_id": "node-a",
-  "roster_digest": "sha256:0123456789abcdef",
+  "document_sha256": "sha256:0123456789abcdef",
   "mac": {
     "algorithm": "hmac-sha256-node-bearer-v1",
     "value": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -191,9 +191,8 @@ response becomes additive, so old Brigade clients can continue reading
       "reasoning": "high",
       "limit": 8,
       "bindings": {
-        "brigade_cli": "cursor-agent",
-        "t3_instance_id": "cursor",
-        "t3_service_tier": null
+        "brigade": {"cli": "cursor-agent"},
+        "t3_fleet": {"instance_id": "cursor", "service_tier": null}
       }
     }
   ],
@@ -221,17 +220,17 @@ response becomes additive, so old Brigade clients can continue reading
 }
 ```
 
-The revision-stable roster digest covers canonical compact JSON containing
+The revision-stable document SHA-256 covers canonical compact JSON containing
 `schema`, `revision`, `revision_updated_at`, `seats`, `consumer_defaults`, and
 `retired_models`. It excludes per-response freshness and audience fields,
-`roster_digest`, `mac`, and the legacy `models` projection. The digest therefore
+`document_sha256`, `mac`, and the legacy `models` projection. The digest therefore
 stays identical across reads and nodes until a roster mutation increments the
 revision.
 
 `issued_at` is the Hub response time and `expires_at` is exactly 900 seconds
-later. They are not part of `roster_digest`. The node-response MAC covers the
+later. They are not part of `document_sha256`. The node-response MAC covers the
 complete cacheable envelope containing the stable roster body,
-`audience_node_id`, `issued_at`, `expires_at`, and `roster_digest`. Object keys
+`audience_node_id`, `issued_at`, `expires_at`, and `document_sha256`. Object keys
 are sorted and ASCII-safe JSON uses no insignificant whitespace.
 
 For a node-authenticated response, the Hub computes:

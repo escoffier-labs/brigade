@@ -18,6 +18,7 @@ from brigade import agents
 from brigade import cli
 from brigade import fleet_client
 from brigade import fleet_hub
+from brigade import fleet_model_admission
 from brigade import fleet_model_roster
 from brigade.roster import Agent, Roster
 from tests.run_test_helpers import run_aboyeur_guarded
@@ -98,7 +99,10 @@ def _versioned_seat(
         "model": model,
         "reasoning": reasoning,
         "enabled": enabled,
-        "bindings": {"brigade_cli": instance_id, "t3_instance_id": instance_id},
+        "bindings": {
+            "brigade": {"cli": instance_id},
+            "t3_fleet": {"instance_id": instance_id, "service_tier": None},
+        },
     }
 
 
@@ -117,12 +121,62 @@ def _versioned_snapshot(
         "source": source,
         "revision": revision,
         "roster_revision": revision,
-        "roster_digest": digest,
+        "document_sha256": digest,
         "expires_at": expires_at,
         "seats": list(seats),
         "consumer_defaults": {"brigade-run": seats[0]["seat"] if seats else None},
         "retired_models": [],
     }
+
+
+def test_versioned_envelope_requires_document_sha256_and_nested_bindings():
+    issued_at = fleet_model_admission.utc_now().replace(microsecond=0)
+    envelope = {
+        "schema": fleet_model_roster.ROSTER_SCHEMA,
+        "revision": 2,
+        "revision_updated_at": issued_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "issued_at": issued_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "expires_at": (issued_at + timedelta(seconds=fleet_model_roster.LKG_TTL_SECONDS)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "audience_node_id": NODE_A,
+        "seats": [
+            {
+                "seat": "cursor_grok",
+                "provider": "cursor",
+                "model": "cursor-grok-4.6-high-fast",
+                "reasoning": "high",
+                "enabled": True,
+                "bindings": {
+                    "brigade": {"cli": "cursor-agent"},
+                    "t3_fleet": {"instance_id": "cursor", "service_tier": "standard"},
+                },
+            }
+        ],
+        "consumer_defaults": {"brigade-run": "cursor_grok", "t3-fleet": "cursor_grok"},
+        "retired_models": [],
+    }
+    envelope["document_sha256"] = fleet_model_roster.roster_digest(envelope)
+    envelope["mac"] = {
+        "algorithm": fleet_model_roster.MAC_ALGORITHM,
+        "value": fleet_model_roster.roster_mac("node-token", envelope),
+    }
+
+    assert fleet_model_admission._validate_envelope(envelope, token="node-token", audience=NODE_A) is None
+
+    flat = json.loads(json.dumps(envelope))
+    flat["seats"][0]["bindings"] = {"brigade_cli": "cursor-agent", "t3_instance_id": "cursor"}
+    flat["document_sha256"] = fleet_model_roster.roster_digest(flat)
+    flat["mac"]["value"] = fleet_model_roster.roster_mac("node-token", flat)
+    assert fleet_model_admission._validate_envelope(flat, token="node-token", audience=NODE_A) == "malformed-roster"
+
+    legacy_digest = json.loads(json.dumps(envelope))
+    legacy_digest["roster_digest"] = legacy_digest.pop("document_sha256")
+    legacy_digest["mac"]["value"] = fleet_model_roster.roster_mac("node-token", legacy_digest)
+    assert (
+        fleet_model_admission._validate_envelope(legacy_digest, token="node-token", audience=NODE_A)
+        == "malformed-roster"
+    )
 
 
 def _admission_from_payload(payload: dict[str, object], seat: str) -> dict[str, object] | None:
@@ -344,7 +398,7 @@ def test_configured_hub_snapshot_is_versioned_roster_not_legacy_models(tmp_path,
     assert snapshot.get("source") == "hub"
     assert snapshot.get("schema") == fleet_model_roster.ROSTER_SCHEMA
     assert snapshot.get("roster_revision") == roster["revision"]
-    assert snapshot.get("roster_digest") == roster["roster_digest"]
+    assert snapshot.get("roster_digest") == roster["document_sha256"]
     assert isinstance(snapshot.get("expires_at"), str) and snapshot["expires_at"]
     seats = snapshot.get("seats")
     assert isinstance(seats, list) and seats
@@ -354,7 +408,7 @@ def test_configured_hub_snapshot_is_versioned_roster_not_legacy_models(tmp_path,
     assert match["reasoning"] == "high"
     bindings = match["bindings"]
     assert isinstance(bindings, dict)
-    assert bindings.get("brigade_cli") == "cursor-agent"
+    assert bindings.get("brigade") == {"cli": "cursor-agent"}
     assert "models" not in match
     _secret_free(snapshot, node_token, ADMIN_TOKEN)
 
@@ -485,7 +539,7 @@ def test_brigade_run_without_injected_snapshot_dispatches_hub_approved_seat(tmp_
             reasoning="high",
             source="hub",
             revision=int(roster["revision"]),
-            digest=str(roster["roster_digest"]),
+            digest=str(roster["document_sha256"]),
         )
         for payload in (policy, run, roster_out):
             admission = _assert_admission_provenance(payload, **expected)
@@ -1177,7 +1231,7 @@ def test_valid_node_roster_is_cached_after_mac_and_digest_checks(tmp_path, monke
         assert decision.exit_code == 0
         assert decision.payload["schema"] == fleet_model_roster.ROSTER_SCHEMA
         assert decision.payload["revision"] == roster["revision"]
-        assert decision.payload["roster_digest"] == roster["roster_digest"]
+        assert decision.payload["document_sha256"] == roster["document_sha256"]
         assert decision.payload["audience_node_id"] == NODE_A
         lkg = fleet_model_admission.lkg_path()
         high_water = fleet_model_admission.high_water_path()
@@ -1191,7 +1245,7 @@ def test_valid_node_roster_is_cached_after_mac_and_digest_checks(tmp_path, monke
         record = json.loads(lkg.read_text(encoding="utf-8"))
         assert record["highest_revision"] == roster["revision"]
         assert record["roster"]["mac"]["value"] == roster["mac"]["value"]
-        assert record["roster"]["roster_digest"] == roster["roster_digest"]
+        assert record["roster"]["document_sha256"] == roster["document_sha256"]
         assert "cached_at" in record
         _secret_free(record, node_token, ADMIN_TOKEN)
         _secret_free(decision, node_token, ADMIN_TOKEN)
@@ -1406,7 +1460,7 @@ def test_malformed_and_integrity_failures_never_rewrite_lkg(tmp_path, monkeypatc
         assert fleet_model_admission.lkg_path().read_bytes() == before
 
         bad = dict(roster)
-        bad["roster_digest"] = "sha256:" + ("ab" * 32)
+        bad["document_sha256"] = "sha256:" + ("ab" * 32)
         _return(bad)
         digest = fleet_model_admission.fetch_versioned_roster()
         assert digest.ok is False
@@ -1471,7 +1525,7 @@ def test_malformed_and_integrity_failures_never_rewrite_lkg(tmp_path, monkeypatc
 
         rollback = json.loads(json.dumps(roster))
         rollback["revision"] = int(roster["revision"]) - 1
-        rollback["roster_digest"] = fleet_model_roster.roster_digest(rollback)
+        rollback["document_sha256"] = fleet_model_roster.roster_digest(rollback)
         rollback["mac"] = {
             "algorithm": fleet_model_roster.MAC_ALGORITHM,
             "value": fleet_model_roster.roster_mac(node_token, rollback),
@@ -1508,7 +1562,7 @@ def test_admit_hub_success_lkg_success_policy_denial_and_revision_conflict(tmp_p
             "state": "authoritative",
             "source": "hub",
             "roster_revision": roster["revision"],
-            "roster_digest": roster["roster_digest"],
+            "roster_digest": roster["document_sha256"],
             "seat": "cursor_grok",
             "provider": "cursor",
             "model": "cursor-grok-4.6-high-fast",
@@ -1618,7 +1672,7 @@ def test_fleet_models_cli_admit_doctor_reconcile_retire_and_default(tmp_path, mo
         assert doctor["consumer"] == "t3-fleet"
         assert doctor["hub"] == "reachable"
         assert doctor["roster_revision"] == roster["revision"]
-        assert doctor["roster_digest"] == roster["roster_digest"]
+        assert doctor["roster_digest"] == roster["document_sha256"]
         assert doctor["cache_valid"] is True
         assert doctor["consumer_default"] == "cursor_grok"
         assert doctor["provider"] == "cursor"
@@ -1777,8 +1831,8 @@ def test_models_set_fetches_admin_revision_and_sends_reasoning_bindings(tmp_path
         assert status == 200
         seat = next(item for item in roster["seats"] if item["seat"] == "cursor_grok")
         assert seat["reasoning"] == "none"
-        assert seat["bindings"]["brigade_cli"] == ""
-        assert seat["bindings"]["t3_instance_id"] == ""
+        assert seat["bindings"]["brigade"]["cli"] == ""
+        assert seat["bindings"]["t3_fleet"]["instance_id"] == ""
 
 
 def test_model_roster_read_cap_is_one_mib_without_raising_cloud_cap(tmp_path, monkeypatch):
@@ -2141,7 +2195,7 @@ def test_malformed_signed_rows_are_malformed_roster_without_mutation(tmp_path, m
         before = fleet_model_admission.lkg_path().read_bytes()
         bad = json.loads(json.dumps(roster))
         bad["seats"] = [{"seat": "cursor_grok", "provider": "cursor"}]
-        bad["roster_digest"] = fleet_model_roster.roster_digest(bad)
+        bad["document_sha256"] = fleet_model_roster.roster_digest(bad)
         bad["mac"] = {
             "algorithm": fleet_model_roster.MAC_ALGORITHM,
             "value": fleet_model_roster.roster_mac(node_token, bad),
@@ -2484,7 +2538,7 @@ def test_models_set_exposes_exact_fields_and_can_seed_enabled_seat(tmp_path, mon
         assert status == 200
         seat = next(item for item in roster["seats"] if item["seat"] == "cursor_grok")
         assert seat["reasoning"] == "high"
-        assert seat["bindings"]["brigade_cli"] == "cursor-agent"
+        assert seat["bindings"]["brigade"]["cli"] == "cursor-agent"
         assert seat["enabled"] is True
         _secret_free(policy, node_token, ADMIN_TOKEN)
 
@@ -2511,8 +2565,8 @@ def test_models_set_limit_note_update_preserves_exact_fields_and_expected_revisi
         assert status == 200
         seat = next(item for item in after["seats"] if item["seat"] == "cursor_grok")
         assert seat["reasoning"] == "high"
-        assert seat["bindings"]["brigade_cli"] == "cursor-agent"
-        assert seat["bindings"]["t3_instance_id"] == "cursor"
+        assert seat["bindings"]["brigade"]["cli"] == "cursor-agent"
+        assert seat["bindings"]["t3_fleet"]["instance_id"] == "cursor"
         stale = pytest.raises(fleet_client.FleetClientError)
         with stale:
             fleet_client.set_model_policy(
@@ -2767,7 +2821,7 @@ def test_admit_compares_success_revision_and_digest_to_caller_expectations(tmp_p
             consumer="t3-fleet",
             request_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
             phase="controller",
-            expect_digest=str(roster["roster_digest"]),
+            expect_digest=str(roster["document_sha256"]),
         )
         assert digest.ok is False
         assert digest.exit_code == 4

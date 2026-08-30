@@ -222,9 +222,8 @@ def _seats(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             "reasoning": row[3],
             "limit": row[5],
             "bindings": {
-                "brigade_cli": row[6] or "",
-                "t3_instance_id": row[7] or "",
-                "t3_service_tier": row[8] or None,
+                "brigade": {"cli": row[6] or ""},
+                "t3_fleet": {"instance_id": row[7] or "", "service_tier": row[8] or None},
             },
         }
         for row in rows
@@ -254,7 +253,7 @@ def project_roster(
     }
     if audience_node_id:
         payload["audience_node_id"] = audience_node_id
-    payload["roster_digest"] = fleet_model_roster.roster_digest(payload)
+    payload["document_sha256"] = fleet_model_roster.roster_digest(payload)
     payload["models"] = fleet_hub.list_model_policy(conn)
     if audience_node_id and raw_node_bearer:
         payload["mac"] = {
@@ -457,12 +456,21 @@ def set_model_policy(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
 
 
 def _binding_for(consumer: str, seat: Mapping[str, Any]) -> dict[str, Any] | None:
+    bindings = seat.get("bindings")
+    if not isinstance(bindings, Mapping):
+        return None
     if consumer == "t3-fleet":
-        instance_id = str(seat.get("t3_instance_id") or "")
+        t3_fleet = bindings.get("t3_fleet")
+        if not isinstance(t3_fleet, Mapping):
+            return None
+        instance_id = str(t3_fleet.get("instance_id") or "")
         if not instance_id:
             return None
-        return {"instance_id": instance_id, "service_tier": seat.get("t3_service_tier") or None}
-    instance_id = str(seat.get("brigade_cli") or "")
+        return {"instance_id": instance_id, "service_tier": t3_fleet.get("service_tier") or None}
+    brigade = bindings.get("brigade")
+    if not isinstance(brigade, Mapping):
+        return None
+    instance_id = str(brigade.get("cli") or "")
     if not instance_id:
         return None
     return {"instance_id": instance_id, "service_tier": None}
@@ -536,7 +544,7 @@ def _record_admission(
             phase,
             consumer,
             int(roster["revision"]),
-            str(roster["roster_digest"]),
+            str(roster["document_sha256"]),
             seat,
             provider,
             model,
@@ -555,7 +563,7 @@ def _record_admission(
         consumer,
         "hub",
         int(roster["revision"]),
-        str(roster["roster_digest"]),
+        str(roster["document_sha256"]),
         seat,
         provider,
         model,
@@ -639,7 +647,7 @@ def _admit(conn: sqlite3.Connection, raw: Any, *, caller_node: str) -> tuple[int
             if opened:
                 conn.commit()
             return 409, payload
-        if expect_digest is not None and expect_digest != roster["roster_digest"]:
+        if expect_digest is not None and expect_digest != roster["document_sha256"]:
             payload = _record_admission(
                 conn,
                 caller_node=caller_node,
@@ -680,9 +688,10 @@ def _admit(conn: sqlite3.Connection, raw: Any, *, caller_node: str) -> tuple[int
                     "model": row[2],
                     "reasoning": row[3],
                     "enabled": bool(row[4]),
-                    "brigade_cli": row[5],
-                    "t3_instance_id": row[6],
-                    "t3_service_tier": row[7],
+                    "bindings": {
+                        "brigade": {"cli": row[5] or ""},
+                        "t3_fleet": {"instance_id": row[6] or "", "service_tier": row[7] or None},
+                    },
                 }
                 if not seat["enabled"]:
                     decision = "seat-disabled"
