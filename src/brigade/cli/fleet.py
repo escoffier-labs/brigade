@@ -146,6 +146,28 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_nodes_revoke.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     p_nodes_revoke.set_defaults(func=_dispatch_nodes_revoke)
 
+    p_grokbot = fleet_sub.add_parser(
+        "grokbot",
+        help="Enroll an existing fleet node as one Hub-authoritative Grok Bot listener actor.",
+    )
+    grokbot_sub = p_grokbot.add_subparsers(dest="fleet_grokbot_command", metavar="<grokbot-command>")
+    grokbot_sub.required = True
+    p_grokbot_enroll = grokbot_sub.add_parser(
+        "enroll-actor",
+        help="Enroll one enabled, role-scoped listener actor (admin token).",
+    )
+    p_grokbot_enroll.add_argument("node_id", help="Already-enrolled fleet node id that will hold the actor token.")
+    p_grokbot_enroll.add_argument("--queue-owner-node-id", required=True, help="Fleet node id that owns the queue.")
+    p_grokbot_enroll.add_argument("--queue-id", required=True, help="Opaque Hub queue identifier.")
+    p_grokbot_enroll.add_argument(
+        "--role",
+        required=True,
+        choices=("operator", "repository-scout", "implementation-worker"),
+        help="Fixed listener actor kind. Worker kinds also receive the matching queue role.",
+    )
+    p_grokbot_enroll.add_argument("--json", action="store_true", help="Emit safe enrollment metadata as JSON.")
+    p_grokbot_enroll.set_defaults(func=_dispatch_grokbot_enroll_actor)
+
     p_status = fleet_sub.add_parser("status", help="Show latest run state per node from the fleet hub.")
     p_status.add_argument("--all", action="store_true", help="Include terminal runs.")
     p_status.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
@@ -444,6 +466,28 @@ def _dispatch_nodes_revoke(args: argparse.Namespace) -> int:
     node_raw = payload.get("node")
     node: dict = node_raw if isinstance(node_raw, dict) else {}
     print(f"revoked node {node.get('node_id') or args.node_id} (token no longer accepted)")
+    return 0
+
+
+def _dispatch_grokbot_enroll_actor(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import fleet_client, fleet_client_grokbot
+
+    try:
+        payload = fleet_client_grokbot.enroll_actor(
+            node_id=args.node_id,
+            queue_owner_node_id=args.queue_owner_node_id,
+            queue_id=args.queue_id,
+            actor_kind=args.role,
+        )
+    except fleet_client.FleetClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"enrolled Grok Bot actor: node={payload['node_id']} role={args.role}")
     return 0
 
 

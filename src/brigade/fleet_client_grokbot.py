@@ -66,6 +66,8 @@ _OK_KEYS = {
     "ack-cancel": "acknowledged",
 }
 _LISTENER_TOKEN: ContextVar[str | None] = ContextVar("grokbot_listener_token", default=None)
+GROKBOT_LISTENER_ACTORS = frozenset({"operator", "implementation-worker", "repository-scout"})
+GROKBOT_WORKER_ROLES = frozenset({"implementation-worker", "repository-scout"})
 _BOUNDED_REFUSAL_REASONS = frozenset(
     {
         "invalid-request",
@@ -121,6 +123,30 @@ def status(job_id: str, **fields: Any) -> GrokbotHubDecision:
 
 def whoami(**fields: Any) -> GrokbotHubDecision:
     return _op("whoami", **fields)
+
+
+def enroll_actor(*, node_id: str, queue_owner_node_id: str, queue_id: str, actor_kind: str) -> dict[str, object]:
+    """Enroll one existing fleet node as one enabled, role-matched Grok Bot actor.
+
+    This is an admin-only control-plane action. It deliberately returns only
+    the hub's safe enrollment acknowledgement, never either bearer token.
+    """
+    if actor_kind not in GROKBOT_LISTENER_ACTORS:
+        raise FleetClientError("Grok Bot actor kind is invalid")
+    body = {
+        "action": "enroll-actor",
+        "enroll_node_id": node_id,
+        "queue_owner_node_id": queue_owner_node_id,
+        "queue_id": queue_id,
+        "actor_kind": actor_kind,
+        "enabled": True,
+    }
+    if actor_kind in GROKBOT_WORKER_ROLES:
+        body["role"] = actor_kind
+    payload = _client._admin_request("/grokbot", body, what="Grok Bot actor enrollment")
+    if payload.get("enrolled") is not True or payload.get("node_id") != node_id:
+        raise FleetClientError("fleet hub Grok Bot actor enrollment returned an invalid response")
+    return {"enrolled": True, "node_id": node_id}
 
 
 def current_listener_token() -> str | None:

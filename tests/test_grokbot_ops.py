@@ -131,6 +131,127 @@ def test_setup_supports_all_roles_and_secret_file_references(tmp_path: Path):
         assert config["bearer"]["kind"] == "file"
 
 
+def test_setup_stores_hub_token_file_reference_and_renders_role_environment(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    hub_token = tmp_path / "listener.hub-token"
+    hub_token.write_text("hub-node-token-value\n", encoding="utf-8")
+    hub_token.chmod(0o600)
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "cloud",
+                "grokbot",
+                "setup",
+                "--target",
+                str(tmp_path),
+                "--instance",
+                "implementation-worker",
+                "--bearer-env",
+                "TEST_GROKBOT_BEARER",
+                "--hub-token-file",
+                str(hub_token),
+            ]
+        )
+        == 0
+    )
+    config = grokbot_ops.load_config(tmp_path, "implementation-worker")
+    assert config["hub_token_file"] == str(hub_token)
+    rendered_config = json.dumps(config, sort_keys=True)
+    assert "hub-node-token-value" not in rendered_config
+    assert SECRET not in rendered_config
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "cloud",
+                "grokbot",
+                "install-service",
+                "--target",
+                str(tmp_path),
+                "--instance",
+                "implementation-worker",
+            ]
+        )
+        == 0
+    )
+    unit = capsys.readouterr().out
+    assert f"BRIGADE_GROKBOT_IMPLEMENTATION_WORKER_HUB_TOKEN_FILE={hub_token}" in unit
+    assert "hub-node-token-value" not in unit
+    assert "BRIGADE_FLEET_NODE_TOKEN" not in unit
+
+    hub_token.chmod(0o644)
+    with pytest.raises(grokbot_mcp.ConfigurationError):
+        grokbot_ops.save_config(
+            tmp_path,
+            instance="repository-scout",
+            bind="127.0.0.1:8767",
+            allowed_hosts=[],
+            allowed_origins=[],
+            bearer_env="TEST_GROKBOT_BEARER",
+            bearer_file=None,
+            hub_token_file=hub_token,
+        )
+    with pytest.raises(grokbot_mcp.ConfigurationError):
+        grokbot_ops.save_config(
+            tmp_path,
+            instance="repository-scout",
+            bind="127.0.0.1:8767",
+            allowed_hosts=[],
+            allowed_origins=[],
+            bearer_env="TEST_GROKBOT_BEARER",
+            bearer_file=None,
+            hub_token_file=Path("relative.hub-token"),
+        )
+
+
+def test_operator_setup_renders_its_own_hub_actor_token_reference(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    hub_token = tmp_path / "operator.hub-token"
+    hub_token.write_text("operator-node-token\n", encoding="utf-8")
+    hub_token.chmod(0o600)
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "cloud",
+                "grokbot",
+                "setup",
+                "--target",
+                str(tmp_path),
+                "--instance",
+                "operator",
+                "--bearer-env",
+                "TEST_GROKBOT_BEARER",
+                "--hub-token-file",
+                str(hub_token),
+            ]
+        )
+        == 0
+    )
+    assert (
+        cli.main(
+            [
+                "run",
+                "cloud",
+                "grokbot",
+                "install-service",
+                "--target",
+                str(tmp_path),
+                "--instance",
+                "operator",
+            ]
+        )
+        == 0
+    )
+    unit = capsys.readouterr().out
+    assert f"BRIGADE_GROKBOT_OPERATOR_HUB_TOKEN_FILE={hub_token}" in unit
+    assert "operator-node-token" not in unit
+
+
 def test_setup_rejects_bad_instance_and_bad_secret_reference_shape(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
     with pytest.raises(SystemExit):
