@@ -314,6 +314,73 @@ def test_doctor_reports_sanitized_checks_without_private_content(tmp_path: Path,
     assert "PRIVATE_INSTRUCTIONS_MUST_NOT_LEAK" not in combined
 
 
+@pytest.mark.parametrize("instance", ("operator", "repository-scout", "implementation-worker"))
+def test_doctor_uses_configured_listener_actor_for_hub_queue_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, instance: str
+):
+    from brigade import fleet_client_grokbot
+
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    token = f"{instance}-listener-token"
+    token_file = tmp_path / f"{instance}.hub-token"
+    token_file.write_text(token + "\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    assert _setup(tmp_path, instance, ["--hub-token-file", str(token_file)]) == 0
+
+    seen: list[str | None] = []
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "status",
+        lambda _target: seen.append(fleet_client_grokbot.current_listener_token()) or {"jobs": []},
+    )
+
+    checks = grokbot_ops.doctor(tmp_path, instance)
+
+    assert {check["check"]: check["status"] for check in checks}["queue"] == "ok"
+    assert seen == [token]
+
+
+def test_doctor_keeps_host_identity_without_configured_listener_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from brigade import fleet_client_grokbot
+
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    assert _setup(tmp_path, "operator") == 0
+    seen: list[str | None] = []
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "status",
+        lambda _target: seen.append(fleet_client_grokbot.current_listener_token()) or {"jobs": []},
+    )
+
+    checks = grokbot_ops.doctor(tmp_path, "operator")
+
+    assert {check["check"]: check["status"] for check in checks}["queue"] == "ok"
+    assert seen == [None]
+
+
+def test_doctor_refuses_changed_unsafe_listener_token_file_without_secret_or_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    token = SECRET
+    token_file = tmp_path / "listener.hub-token"
+    token_file.write_text(token + "\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    assert _setup(tmp_path, "operator", ["--hub-token-file", str(token_file)]) == 0
+    token_file.chmod(0o640)
+    status_calls: list[object] = []
+    monkeypatch.setattr(grokbot_jobs, "status", lambda _target: status_calls.append(object()) or {"jobs": []})
+
+    checks = grokbot_ops.doctor(tmp_path, "operator")
+
+    statuses = {check["check"]: check["status"] for check in checks}
+    assert statuses["config"] == "fail"
+    assert "queue" not in statuses
+    assert status_calls == []
+    assert token not in json.dumps(checks)
+    assert str(token_file) not in json.dumps(checks)
+
+
 def test_doctor_fails_cleanly_on_missing_config(tmp_path: Path, capsys):
     assert cli.main(["run", "cloud", "grokbot", "doctor", "--target", str(tmp_path), "--instance", "operator"]) == 1
     captured = capsys.readouterr()

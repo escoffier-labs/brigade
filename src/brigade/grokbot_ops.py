@@ -187,9 +187,19 @@ def doctor(target: Path, instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECOND
     record("permissions", bool(writable))
 
     try:
-        grokbot_jobs.status(target)
+        hub_token_file = config.get("hub_token_file")
+        if hub_token_file is None:
+            grokbot_jobs.status(target)
+        else:
+            if not isinstance(hub_token_file, str):
+                raise grokbot_mcp.ConfigurationError("invalid")
+            from . import fleet_client_grokbot
+
+            hub_token = grokbot_mcp.load_hub_token_file(Path(hub_token_file))
+            with fleet_client_grokbot.listener_identity(hub_token):
+                grokbot_jobs.status(target)
         record("queue", True)
-    except (grokbot_jobs.GrokbotJobError, ValueError, OSError):
+    except (grokbot_jobs.GrokbotJobError, grokbot_mcp.ConfigurationError, ValueError, OSError):
         record("queue", False)
 
     record("endpoint", _health_check(config, bearer, timeout))
