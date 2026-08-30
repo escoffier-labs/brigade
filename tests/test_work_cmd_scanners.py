@@ -1354,6 +1354,44 @@ conflict_window = "03:00-03:10"
     assert "status: completed" in out
 
 
+def test_work_scanners_run_show_escapes_terminal_controls_but_json_preserves_them(tmp_path, capsys):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    run_id = "hostile-summary"
+    stdout_summary = "\x1b[2Jstdout\x07\r\x7f\x9b31m"
+    stderr_summary = "\x1b]0;owned\x07stderr\r\x7f\x9b31m"
+    root = scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
+    os.close(root)
+    run_path = helpers._scanner_runs_root(tmp_path) / run_id
+    run_path.mkdir()
+    _record_scanner_run_authority(tmp_path, run_id)
+    _write_json(
+        run_path / "receipt.json",
+        {
+            "run_id": run_id,
+            "scanner_id": "hostile-scanner",
+            "source": "hostile-scanner",
+            "status": "completed",
+            "stdout_summary": stdout_summary,
+            "stderr_summary": stderr_summary,
+        },
+    )
+    _bind_planted_scanner_receipt(tmp_path, run_id)
+    receipt_before = (run_path / "receipt.json").read_bytes()
+
+    assert work_cmd.scanners_run_show(target=tmp_path, run_id=run_id, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["run"]["stdout_summary"] == stdout_summary
+    assert payload["run"]["stderr_summary"] == stderr_summary
+
+    assert work_cmd.scanners_run_show(target=tmp_path, run_id=run_id) == 0
+    out = capsys.readouterr().out
+    assert "stdout_summary: \\x1b[2Jstdout\\x07\\r\\x7f\\x9b31m" in out
+    assert "stderr_summary: \\x1b]0;owned\\x07stderr\\r\\x7f\\x9b31m" in out
+    assert not any(control in out for control in "\x1b\x07\r\x7f\x9b")
+    assert (run_path / "receipt.json").read_bytes() == receipt_before
+
+
 def test_work_scanners_run_refuses_risky_running_timeout_and_failure(tmp_path, capsys):
     _init_git_repo(tmp_path)
     script = tmp_path / "scanner.py"
