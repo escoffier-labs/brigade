@@ -1357,6 +1357,110 @@ def test_authority_downgrade_clears_isolation_posture_marker(tmp_path: Path, mon
     assert healthy is True
 
 
+def test_authority_downgrade_removes_every_reanchored_posture_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A downgrade clears source and destination markers for a moved workspace only."""
+
+    original = tmp_path / "original-workspace"
+    relocated = tmp_path / "relocated-workspace"
+    unrelated = tmp_path / "unrelated-workspace"
+    original.mkdir()
+    unrelated.mkdir()
+    _bind_workspace(original)
+    _bind_workspace(unrelated)
+    item = ledger._make_import("reanchor downgrade", kind="task", source="handoff-ingest")
+    ledger._write_persisted_import_proofs(original, [item], operation_id="0" * 32)
+    source_marker = _isolation_posture_marker_path(original)
+    unrelated_marker = _isolation_posture_marker_path(unrelated)
+    assert source_marker.is_file()
+    assert unrelated_marker.is_file()
+
+    original.rename(relocated)
+    descriptor = ledger._open_import_proof_directory(relocated, create=True)
+    os.close(descriptor)
+    destination_marker = _isolation_posture_marker_path(relocated)
+    assert destination_marker.is_file()
+    assert source_marker.is_file()
+
+    from brigade.security_cmd.commands import authority_downgrade
+
+    monkeypatch.setattr("sys.stdin", type("_NonTty", (), {"isatty": lambda self: False})())
+    assert authority_downgrade(target=relocated, confirm=True) == 0
+
+    assert not source_marker.exists()
+    assert not destination_marker.exists()
+    assert unrelated_marker.is_file()
+
+
+def test_authority_downgrade_removes_marker_added_during_posture_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The locked completion sweep must remove a reanchor written mid-enumeration."""
+
+    _bind_workspace(tmp_path)
+    original = _isolation_posture_marker_path(tmp_path)
+    added = original.with_name("f" * 64)
+    original_bytes = original.read_bytes()
+    real_listdir = authority_marker.os.listdir
+    calls = 0
+
+    def _add_marker_after_listing(path: Path | str) -> list[str]:
+        nonlocal calls
+        names = real_listdir(path)
+        if Path(path) == authority_marker.isolation_marker_root() and calls == 0:
+            calls += 1
+            added.write_bytes(original_bytes)
+        return names
+
+    monkeypatch.setattr(authority_marker.os, "listdir", _add_marker_after_listing)
+    assert ledger.downgrade_external_directory_authority(tmp_path)["posture_marker_removed"] is True
+    assert not original.exists()
+    assert not added.exists()
+
+
+def test_authority_downgrade_refuses_posture_marker_swapped_before_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pathname replacement after enumeration must not be removed as trusted state."""
+
+    _bind_workspace(tmp_path)
+    posture = _isolation_posture_marker_path(tmp_path)
+    replacement = b'{"kind":"replacement"}'
+    real_unlink = Path.unlink
+    swapped = False
+
+    def _swap_before_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        nonlocal swapped
+        if path == posture and not swapped:
+            swapped = True
+            path.write_bytes(replacement)
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _swap_before_unlink)
+    with pytest.raises(OSError, match="identity|replaced"):
+        ledger.downgrade_external_directory_authority(tmp_path)
+    assert posture.read_bytes() == replacement
+
+
+@pytest.mark.skipif(not hasattr(os, "link"), reason="hard links are unsupported")
+def test_authority_downgrade_rejects_multi_link_or_oversize_posture_marker(tmp_path: Path) -> None:
+    """Posture marker snapshots accept only small, single-link regular files."""
+
+    _bind_workspace(tmp_path)
+    posture = _isolation_posture_marker_path(tmp_path)
+    linked = posture.with_name("e" * 64)
+    os.link(posture, linked)
+    with pytest.raises(OSError, match="single-link"):
+        ledger.downgrade_external_directory_authority(tmp_path)
+    linked.unlink()
+    payload = json.loads(posture.read_text(encoding="utf-8"))
+    payload["padding"] = "x" * (authority_marker.ISOLATION_MARKER_MAX_BYTES + 1)
+    posture.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(OSError, match="too large"):
+        ledger.downgrade_external_directory_authority(tmp_path)
+
+
 def test_forged_post_run_receipt_is_rejected_by_legacy_import(tmp_path: Path) -> None:
     """#881 regression: scanner-reproducible receipt bytes bound only by an
     unsigned authority record must not grant a legacy import identity."""

@@ -34,9 +34,12 @@ import os
 import re
 import stat
 from collections.abc import Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
+from . import dirfd
 from .localio import utc_now_iso_z
 
 USER_DIR_ENV = "BRIGADE_USER_DIR"
@@ -55,6 +58,17 @@ MARKER_STATUS_PRESENT = "present"
 MARKER_STATUS_CONFIRMED_ABSENT = "confirmed-absent"
 MARKER_STATUS_UNKNOWN = "unknown"
 ISOLATION_MARKER_SCHEMA_VERSION = 2
+ISOLATION_MARKER_MAX_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class IsolationMarkerSnapshot:
+    """One identity-checked posture marker read through its parent descriptor."""
+
+    name: str
+    path: Path
+    data: bytes
+    identity: tuple[int, int]
 
 
 def user_brigade_dir(*, env: Mapping[str, str] | None = None) -> Path:
@@ -278,6 +292,127 @@ def _isolation_marker_governs(
     return filename == fingerprint
 
 
+@contextmanager
+def isolation_marker_store_lock(*, env: Mapping[str, str] | None = None) -> Iterator[None]:
+    """Serialize isolation-marker reanchors and downgrade sweeps."""
+
+    from .work_cmd import inbox_lock
+
+    root = isolation_marker_root(env=env)
+    lock_path = root.with_name(f"{root.name}.lock")
+    with inbox_lock.held_file_lock(lock_path, deadline_seconds=inbox_lock.DEFAULT_LOCK_DEADLINE_SECONDS):
+        yield
+
+
+def _marker_identity(metadata: os.stat_result) -> tuple[int, int]:
+    return metadata.st_dev, metadata.st_ino
+
+
+def _read_isolation_marker_child(root_descriptor: int, name: str, root: Path) -> IsolationMarkerSnapshot:
+    """Read one bounded, single-link marker and prove its pathname identity."""
+
+    try:
+        descriptor = dirfd.open_child_file(
+            root_descriptor,
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as exc:
+        raise OSError("authority isolation posture marker is unreadable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise OSError("authority isolation posture marker is not a single-link regular file")
+        if metadata.st_size > ISOLATION_MARKER_MAX_BYTES:
+            raise OSError("authority isolation posture marker is too large")
+        data = os.read(descriptor, ISOLATION_MARKER_MAX_BYTES + 1)
+        if len(data) > ISOLATION_MARKER_MAX_BYTES:
+            raise OSError("authority isolation posture marker is too large")
+        named = dirfd.stat_child(root_descriptor, name)
+        if _marker_identity(named) != _marker_identity(metadata):
+            raise OSError("authority isolation posture marker was replaced while being read")
+        return IsolationMarkerSnapshot(name, root / name, data, _marker_identity(metadata))
+    finally:
+        os.close(descriptor)
+
+
+def governing_isolation_marker_paths(
+    target: Path,
+    *,
+    workspace_identity: Mapping[str, int],
+    env: Mapping[str, str] | None = None,
+) -> tuple[IsolationMarkerSnapshot, ...]:
+    """Return every safely-readable posture marker governing ``target``.
+
+    Reanchoring preserves the old path marker and writes a new one, both
+    bound to the workspace identity.  An explicit downgrade must therefore
+    enumerate the whole user-level store rather than only inspect the
+    marker named by the target's current path.  Any unreadable or malformed
+    entry makes the result indeterminate and fails closed.
+    """
+
+    if "device" not in workspace_identity or "inode" not in workspace_identity:
+        raise OSError("workspace identity is incomplete")
+    live = {"device": workspace_identity["device"], "inode": workspace_identity["inode"]}
+    fingerprint = target_fingerprint(target)
+    root = isolation_marker_root(env=env)
+    try:
+        root_descriptor = dirfd.open_directory_nofollow(root)
+    except FileNotFoundError:
+        return ()
+    except OSError as exc:
+        raise OSError("authority isolation posture marker store is unreadable") from exc
+    try:
+        names = sorted(os.listdir(root_descriptor))
+        governing: list[IsolationMarkerSnapshot] = []
+        for name in names:
+            if not _FINGERPRINT_RE.fullmatch(name):
+                raise OSError("authority isolation posture marker store is malformed")
+            snapshot = _read_isolation_marker_child(root_descriptor, name, root)
+            try:
+                payload = json.loads(snapshot.data)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise OSError("authority isolation posture marker is malformed") from exc
+            if not isinstance(payload, dict):
+                raise OSError("authority isolation posture marker is malformed")
+            governs = _isolation_marker_governs(payload, name, fingerprint, live)
+            if governs is None:
+                raise OSError("authority isolation posture marker is malformed")
+            if governs:
+                governing.append(snapshot)
+        return tuple(governing)
+    finally:
+        os.close(root_descriptor)
+
+
+def remove_isolation_marker_snapshots(
+    snapshots: tuple[IsolationMarkerSnapshot, ...], *, env: Mapping[str, str] | None = None
+) -> tuple[Path, ...]:
+    """Delete exactly the snapshotted posture markers, then durably flush the directory."""
+
+    if not snapshots:
+        return ()
+    root = isolation_marker_root(env=env)
+    try:
+        root_descriptor = dirfd.open_directory_nofollow(root)
+    except OSError as exc:
+        raise OSError("authority isolation posture marker store is unreadable") from exc
+    removed: list[Path] = []
+    try:
+        for snapshot in snapshots:
+            current = dirfd.stat_child(root_descriptor, snapshot.name)
+            if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+                raise OSError("authority isolation posture marker is not a single-link regular file")
+            if _marker_identity(current) != snapshot.identity:
+                raise OSError("authority isolation posture marker was replaced before deletion")
+            dirfd.unlink_child(root_descriptor, snapshot.name)
+            removed.append(snapshot.path)
+        dirfd.fsync_directory(root_descriptor)
+        return tuple(removed)
+    finally:
+        os.close(root_descriptor)
+
+
 def isolation_marker_exists(
     target: Path | None,
     *,
@@ -379,26 +514,27 @@ def record_isolation_marker(
     observation callers must treat that as fail-closed, never best effort.
     """
 
-    fingerprint = target_fingerprint(target)
-    path = isolation_marker_path(fingerprint, env=env)
-    reject_unsafe_marker_path(path, target, env=env)
-    if path.is_file() and not path.is_symlink():
-        return path
-    payload: dict[str, Any] = {
-        "schema_version": ISOLATION_MARKER_SCHEMA_VERSION,
-        "kind": "isolation-posture",
-        "target": str(target.expanduser().resolve()),
-        "target_fingerprint": fingerprint,
-        "recorded_by": operator_identity(env=env),
-        "created_at": utc_now_iso_z(),
-    }
-    if workspace_identity is not None and "device" in workspace_identity and "inode" in workspace_identity:
-        payload["workspace_identity"] = {
-            "device": workspace_identity["device"],
-            "inode": workspace_identity["inode"],
+    with isolation_marker_store_lock(env=env):
+        fingerprint = target_fingerprint(target)
+        path = isolation_marker_path(fingerprint, env=env)
+        reject_unsafe_marker_path(path, target, env=env)
+        if path.is_file() and not path.is_symlink():
+            return path
+        payload: dict[str, Any] = {
+            "schema_version": ISOLATION_MARKER_SCHEMA_VERSION,
+            "kind": "isolation-posture",
+            "target": str(target.expanduser().resolve()),
+            "target_fingerprint": fingerprint,
+            "recorded_by": operator_identity(env=env),
+            "created_at": utc_now_iso_z(),
         }
-    _publish_private_marker(path, payload)
-    return path
+        if workspace_identity is not None and "device" in workspace_identity and "inode" in workspace_identity:
+            payload["workspace_identity"] = {
+                "device": workspace_identity["device"],
+                "inode": workspace_identity["inode"],
+            }
+        _publish_private_marker(path, payload)
+        return path
 
 
 def transfer_isolation_marker(
@@ -419,47 +555,48 @@ def transfer_isolation_marker(
     proceed rather than silently drop the posture.
     """
 
-    source_fingerprint = target_fingerprint(source_target)
-    try:
-        source_path = isolation_marker_path(source_fingerprint, env=env)
-        raw = source_path.read_bytes()
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise OSError("isolation posture marker is unreadable") from exc
-    try:
-        payload = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise OSError("isolation posture marker is malformed") from exc
-    if not isinstance(payload, dict) or payload.get("kind") != "isolation-posture":
-        raise OSError("isolation posture marker is malformed")
-    bound = payload.get("workspace_identity")
-    identity: dict[str, Any] | None = None
-    if destination_identity is not None and "device" in destination_identity and "inode" in destination_identity:
-        identity = {"device": destination_identity["device"], "inode": destination_identity["inode"]}
-    elif isinstance(bound, dict) and "device" in bound and "inode" in bound:
-        identity = {"device": bound["device"], "inode": bound["inode"]}
-    destination_fingerprint = target_fingerprint(destination_target)
-    carried: dict[str, Any] = {
-        "schema_version": ISOLATION_MARKER_SCHEMA_VERSION,
-        "kind": "isolation-posture",
-        "target": str(destination_target.expanduser().resolve()),
-        "target_fingerprint": destination_fingerprint,
-        "workspace_identity": identity,
-        "recorded_by": (
-            payload["recorded_by"] if isinstance(payload.get("recorded_by"), str) else operator_identity(env=env)
-        ),
-        "created_at": (payload["created_at"] if isinstance(payload.get("created_at"), str) else utc_now_iso_z()),
-        "carried_from_fingerprint": source_fingerprint,
-        "transferred_at": utc_now_iso_z(),
-    }
-    destination_path = isolation_marker_path(destination_fingerprint, env=env)
-    reject_unsafe_marker_path(destination_path, destination_target, env=env)
-    _publish_private_marker(destination_path, carried)
-    status = isolation_marker_status(destination_target, env=env, workspace_identity=identity)
-    if status != MARKER_STATUS_PRESENT:
-        raise OSError("isolation posture marker transfer failed verification")
-    return destination_path
+    with isolation_marker_store_lock(env=env):
+        source_fingerprint = target_fingerprint(source_target)
+        try:
+            source_path = isolation_marker_path(source_fingerprint, env=env)
+            raw = source_path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise OSError("isolation posture marker is unreadable") from exc
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise OSError("isolation posture marker is malformed") from exc
+        if not isinstance(payload, dict) or payload.get("kind") != "isolation-posture":
+            raise OSError("isolation posture marker is malformed")
+        bound = payload.get("workspace_identity")
+        identity: dict[str, Any] | None = None
+        if destination_identity is not None and "device" in destination_identity and "inode" in destination_identity:
+            identity = {"device": destination_identity["device"], "inode": destination_identity["inode"]}
+        elif isinstance(bound, dict) and "device" in bound and "inode" in bound:
+            identity = {"device": bound["device"], "inode": bound["inode"]}
+        destination_fingerprint = target_fingerprint(destination_target)
+        carried: dict[str, Any] = {
+            "schema_version": ISOLATION_MARKER_SCHEMA_VERSION,
+            "kind": "isolation-posture",
+            "target": str(destination_target.expanduser().resolve()),
+            "target_fingerprint": destination_fingerprint,
+            "workspace_identity": identity,
+            "recorded_by": (
+                payload["recorded_by"] if isinstance(payload.get("recorded_by"), str) else operator_identity(env=env)
+            ),
+            "created_at": (payload["created_at"] if isinstance(payload.get("created_at"), str) else utc_now_iso_z()),
+            "carried_from_fingerprint": source_fingerprint,
+            "transferred_at": utc_now_iso_z(),
+        }
+        destination_path = isolation_marker_path(destination_fingerprint, env=env)
+        reject_unsafe_marker_path(destination_path, destination_target, env=env)
+        _publish_private_marker(destination_path, carried)
+        status = isolation_marker_status(destination_target, env=env, workspace_identity=identity)
+        if status != MARKER_STATUS_PRESENT:
+            raise OSError("isolation posture marker transfer failed verification")
+        return destination_path
 
 
 def audit_path(*, env: Mapping[str, str] | None = None) -> Path:
@@ -537,6 +674,11 @@ def _restore_marker_bytes(path: Path, data: bytes) -> None:
             os.close(descriptor)
         os.replace(temporary, path)
         os.chmod(path, 0o600)
+        directory = dirfd.open_directory_nofollow(path.parent)
+        try:
+            dirfd.fsync_directory(directory)
+        finally:
+            os.close(directory)
     finally:
         try:
             temporary.unlink()
