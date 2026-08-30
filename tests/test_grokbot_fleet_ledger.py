@@ -49,24 +49,51 @@ def test_ledger_marks_change_and_retains_only_the_bound(tmp_path: Path):
     assert len(document["hosts"]["control-plane"]) == MAX_HOST_OBSERVATIONS
 
 
-def test_ledger_replaces_only_the_requested_scope(tmp_path: Path):
-    path = tmp_path / "state" / "ledger.json"
-    ledger = FleetLedger(str(path))
-    finding = {
-        "finding_id": "control-plane:unreachable",
-        "target_alias": "control-plane",
+def _finding(finding_id: str, target_alias: str) -> dict[str, str]:
+    return {
+        "finding_id": finding_id,
+        "target_alias": target_alias,
         "proposed_action_id": "inspect-host",
         "reason": "Host is unreachable",
         "blast_radius": "one registered host",
         "verification_id": "verify-host-reachability",
         "rollback_id": "no-rollback",
     }
-    other = {**finding, "finding_id": "worker:unreachable", "target_alias": "worker"}
+
+
+def test_ledger_replaces_only_the_requested_scope(tmp_path: Path):
+    path = tmp_path / "state" / "ledger.json"
+    ledger = FleetLedger(str(path))
+    finding = _finding("control-plane:unreachable", "control-plane")
+    other = _finding("worker:unreachable", "worker")
     ledger.replace_findings("control-plane", [finding])
     ledger.replace_findings("worker", [other])
     ledger.replace_findings("control-plane", [])
     assert ledger.finding("control-plane:unreachable") is None
     assert ledger.finding("worker:unreachable")["finding_id"] == "worker:unreachable"
+
+
+def test_findings_returns_sorted_detached_copies(tmp_path: Path):
+    path = tmp_path / "state" / "ledger.json"
+    ledger = FleetLedger(str(path))
+    ledger.ready()
+    assert ledger.findings() == []
+    worker = _finding("worker:unreachable", "worker")
+    control = _finding("control-plane:unreachable", "control-plane")
+    ledger.replace_findings("worker", [worker])
+    ledger.replace_findings("control-plane", [control])
+    snapshot = ledger.findings()
+    assert [item["finding_id"] for item in snapshot] == [
+        "control-plane:unreachable",
+        "worker:unreachable",
+    ]
+    snapshot[0]["reason"] = "mutated"
+    snapshot[0]["finding_id"] = "mutated"
+    stored = ledger.finding("control-plane:unreachable")
+    assert stored is not None
+    assert stored["reason"] == "Host is unreachable"
+    assert stored["finding_id"] == "control-plane:unreachable"
+    assert ledger.findings()[0] is not snapshot[0]
 
 
 def test_ledger_fails_closed_on_unsafe_permissions(tmp_path: Path):

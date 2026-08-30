@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from brigade import grokbot_cerebro, grokbot_ops, grokbot_packs
+from tests.test_grokbot_ops import assert_listener_recovery_policy
 
 SECRET_BIN = "/var/lib/secret-cerebro/bin"
 SECRET_CWD = "/var/lib/secret-cerebro/work"
@@ -945,3 +946,16 @@ def test_render_unit_file_bearer_succeeds_without_current_secret_file(tmp_path: 
     written = grokbot_cerebro.write_unit(tmp_path, tmp_path / "units")
     assert written.read_text(encoding="utf-8") == unit
     assert bearer_fixture not in written.read_text(encoding="utf-8")
+
+
+def test_cerebro_unit_uses_shared_listener_recovery_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", "not-a-real-token")
+    executable, workdir = _cerebro_paths(tmp_path)
+    grokbot_packs.apply_setup(
+        tmp_path,
+        "cerebro-memory",
+        bearer_env="TEST_GROKBOT_BEARER",
+        cli_executable=executable,
+        workdir=workdir,
+    )
+    assert_listener_recovery_policy(grokbot_cerebro.render_unit(tmp_path))

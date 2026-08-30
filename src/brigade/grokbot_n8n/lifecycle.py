@@ -13,26 +13,34 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, NoReturn
 
 from .. import grokbot_mcp, grokbot_ops
-from .contracts import PACK_ID, TOOLS, WazuhError
-from .store import WazuhStore, read_secure_text
-from .tools import WazuhTriageTools
+from .actions import N8nActionStore
+from .client import N8nClient
+from .contracts import PACK_ID, TOOLS, N8nError
+from .runtime_config import (
+    assert_disjoint_paths,
+    assert_distinct_secret_files,
+    normalize_absolute_path,
+    parse_runtime_json,
+    permission_policy,
+    read_secure_api_key,
+    read_secure_runtime_text,
+)
+from .tools import N8nOperatorTools
 
 MAX_REQUEST_BYTES = 16_384
-SERVICE_NAME = "grokbot-wazuh-triage"
-WAZUH_PATH_KEYS = ("runtime_path", "ledger_path", "action_state_path", "approval_dir")
-RUNTIME_SCHEMA = "brigade.grokbot.wazuh-runtime.v1"
+SERVICE_NAME = "grokbot-n8n-operator"
 _TOOL_DESCRIPTIONS = {
-    "wazuh_ingest": "Ingest a bounded Wazuh alert batch",
-    "wazuh_alert_status": "Read current Wazuh alert counts",
-    "wazuh_classify": "Read one alert classification",
-    "wazuh_incident_bundle": "Read grouped public Wazuh findings",
-    "wazuh_propose_remediation": "Propose remediation for an escalated finding",
-    "wazuh_action_status": "Read opaque remediation proposal state",
+    "n8n_overview": "Read a bounded n8n overview",
+    "n8n_workflow_status": "Read one workflow status projection",
+    "n8n_execution_bundle": "Read one execution projection",
+    "n8n_propose_action": "Propose an n8n action that still requires approval",
+    "n8n_action_status": "Read n8n action proposal status",
+    "n8n_execute_action": "Execute an approved n8n action proposal",
 }
 
 
 @dataclass(frozen=True)
-class WazuhListenerConfig:
+class N8nListenerConfig:
     target: Path
     bind_host: str
     bind_port: int
@@ -40,21 +48,15 @@ class WazuhListenerConfig:
     allowed_origins: tuple[str, ...]
     bearer: str
     runtime_path: str
-    ledger_path: str
     action_state_path: str
     approval_dir: str
 
     def __repr__(self) -> str:
-        return f"WazuhListenerConfig(bind_host={self.bind_host!r}, bind_port={self.bind_port})"
+        return f"N8nListenerConfig(bind_host={self.bind_host!r}, bind_port={self.bind_port})"
 
 
 def _environment_invalid() -> NoReturn:
-    raise WazuhError("invalid_request", "Wazuh environment is invalid")
-
-
-def normalize_absolute_path(path_value: str) -> str:
-    trimmed = os.path.normpath(path_value).rstrip("/")
-    return trimmed if trimmed else "/"
+    raise N8nError("invalid_request", "n8n environment is invalid")
 
 
 def validate_absolute_reference(path_text: object) -> str:
@@ -67,48 +69,31 @@ def validate_absolute_reference(path_text: object) -> str:
 
 def validate_disjoint_state_paths(
     runtime_path: str,
-    ledger_path: str,
     action_state_path: str,
     approval_dir: str,
 ) -> dict[str, str]:
     paths = {
         "runtime_path": validate_absolute_reference(runtime_path),
-        "ledger_path": validate_absolute_reference(ledger_path),
         "action_state_path": validate_absolute_reference(action_state_path),
         "approval_dir": validate_absolute_reference(approval_dir),
     }
-    values = list(paths.values())
-    for left_index, left in enumerate(values):
-        for right in values[left_index + 1 :]:
-            if left == right or left.startswith(f"{right}/") or right.startswith(f"{left}/"):
-                _environment_invalid()
+    assert_disjoint_paths(list(paths.values()))
     return paths
 
 
-def _lstat_nofollow(path_text: str, *, directory: bool = False) -> os.stat_result:
+def _lstat_nofollow(path_text: str) -> os.stat_result:
+    if permission_policy() != "posix":
+        _environment_invalid()
     path = Path(path_text)
+    if grokbot_ops._path_is_symlink(path) or path.is_symlink():
+        _environment_invalid()
     parent = -1
-    descriptor = -1
     try:
         parent = grokbot_ops._open_parent_nofollow(path, create=False)
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-        if directory:
-            flags |= getattr(os, "O_DIRECTORY", 0)
-        if os.name == "posix":
-            descriptor = os.open(path.name, flags, dir_fd=parent)
-        else:
-            from ..work_cmd import nt_dirfd
-
-            if directory:
-                descriptor = nt_dirfd.open_child_directory(parent, path.name, writable=False)
-            else:
-                descriptor = nt_dirfd.open_file(parent, path.name, os.O_RDONLY)
-        info = os.fstat(descriptor)
+        info = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
     except OSError as exc:
-        raise WazuhError("invalid_request", "Wazuh environment is invalid") from exc
+        raise N8nError("invalid_request", "n8n environment is invalid") from exc
     finally:
-        if descriptor != -1:
-            os.close(descriptor)
         if parent != -1:
             os.close(parent)
     if stat.S_ISLNK(info.st_mode):
@@ -118,10 +103,7 @@ def _lstat_nofollow(path_text: str, *, directory: bool = False) -> os.stat_resul
 
 def validate_runtime_file(path_text: str) -> str:
     normalized = validate_absolute_reference(path_text)
-    try:
-        read_secure_text(normalized)
-    except (OSError, WazuhError) as exc:
-        raise WazuhError("invalid_request", "Wazuh environment is invalid") from exc
+    read_secure_runtime_text(normalized)
     return normalized
 
 
@@ -132,7 +114,7 @@ def validate_state_directory(path_text: str, *, must_exist: bool) -> str:
         if must_exist:
             _environment_invalid()
         return normalized
-    info = _lstat_nofollow(normalized, directory=True)
+    info = _lstat_nofollow(normalized)
     if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
         _environment_invalid()
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
@@ -150,7 +132,6 @@ def _load_validated_instance(target: Path) -> dict[str, Any]:
     payload = grokbot_packs._load_instance_config(target, PACK_ID)
     paths = validate_disjoint_state_paths(
         str(payload["runtime_path"]),
-        str(payload["ledger_path"]),
         str(payload["action_state_path"]),
         str(payload["approval_dir"]),
     )
@@ -168,13 +149,13 @@ def _resolve_bearer(reference: Mapping[str, str]) -> str:
     return bearer
 
 
-def _load_runtime(target: Path) -> tuple[WazuhListenerConfig, str]:
+def _load_runtime(target: Path) -> tuple[N8nListenerConfig, str]:
     from .. import grokbot_packs
 
     payload = _load_validated_instance(target)
     host, port = grokbot_packs._parse_default_bind(str(payload["bind"]))
     bearer = _resolve_bearer(payload["bearer"])
-    config = WazuhListenerConfig(
+    config = N8nListenerConfig(
         target=target,
         bind_host=host,
         bind_port=port,
@@ -182,68 +163,49 @@ def _load_runtime(target: Path) -> tuple[WazuhListenerConfig, str]:
         allowed_origins=tuple(payload["allowed_origins"]),
         bearer=bearer,
         runtime_path=payload["runtime_path"],
-        ledger_path=payload["ledger_path"],
         action_state_path=payload["action_state_path"],
         approval_dir=payload["approval_dir"],
     )
     return config, bearer
 
 
-def _owner_from_runtime(runtime_path: str, default: Path) -> Path:
-    try:
-        text = read_secure_text(validate_absolute_reference(runtime_path))
-    except (OSError, WazuhError) as exc:
-        raise WazuhError("invalid_request", "Wazuh environment is invalid") from exc
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise WazuhError("invalid_request", "Wazuh environment is invalid") from exc
-    if not isinstance(payload, dict):
-        _environment_invalid()
-    if not payload:
-        return default
-    if set(payload) != {"schema", "owner_path"} or payload.get("schema") != RUNTIME_SCHEMA:
-        _environment_invalid()
-    return Path(validate_absolute_reference(payload.get("owner_path")))
-
-
 def build_tools_from_config(
-    config: WazuhListenerConfig,
+    config: N8nListenerConfig,
     *,
-    env: Mapping[str, str] | None = None,
     now: Callable[[], datetime] | None = None,
-) -> WazuhTriageTools:
-    source = os.environ if env is None else env
-    dispatch_token = source.get("GROKBOT_DISPATCH_TOKEN")
-    if dispatch_token is not None and dispatch_token == config.bearer:
-        _environment_invalid()
+    client: N8nClient | None = None,
+) -> N8nOperatorTools:
     runtime_path = validate_runtime_file(config.runtime_path)
     validate_state_directory(config.action_state_path, must_exist=False)
     validate_state_directory(config.approval_dir, must_exist=True)
-    owner = _owner_from_runtime(runtime_path, config.target)
-    store = WazuhStore(config.ledger_path)
+    private_runtime = parse_runtime_json(read_secure_runtime_text(runtime_path))
+    api_key_file = private_runtime["api_key_file"]
+    assert_disjoint_paths([runtime_path, config.action_state_path, config.approval_dir, api_key_file])
+    assert_distinct_secret_files(runtime_path, api_key_file)
+    api_key = read_secure_api_key(api_key_file)
+    store = N8nActionStore(action_state_path=config.action_state_path, approval_dir=config.approval_dir, now=now)
     store.ready()
-    secrets = [
+    clock = now or (lambda: datetime.now(timezone.utc))
+    secret_list = [
         config.bearer,
+        api_key,
+        api_key_file,
         config.runtime_path,
-        config.ledger_path,
         config.action_state_path,
         config.approval_dir,
-        *([dispatch_token] if dispatch_token else []),
     ]
-    return WazuhTriageTools(
+    resolved_client = client or N8nClient(base_url=private_runtime["base_url"], api_key=api_key)
+    return N8nOperatorTools(
+        client=resolved_client,
         store=store,
-        target=config.target,
-        owner=owner,
-        now=now or (lambda: datetime.now(timezone.utc)),
+        now=clock,
         request_id=_opaque_id,
-        create_proposal_id=_opaque_id,
-        secrets=secrets,
+        secrets=secret_list,
     )
 
 
-class WazuhAdapter:
-    def __init__(self, config: WazuhListenerConfig, tools: WazuhTriageTools):
+class N8nAdapter:
+    def __init__(self, config: N8nListenerConfig, tools: N8nOperatorTools):
         self.config = config
         self.tools = tools
 
@@ -266,7 +228,7 @@ class WazuhAdapter:
     def call_tool(self, name: str, arguments: object) -> dict[str, Any]:
         try:
             return self.tools.call_tool(name, arguments)
-        except WazuhError as exc:
+        except N8nError as exc:
             return exc.public_error()
 
 
@@ -287,7 +249,7 @@ def doctor(target: Path, *, timeout: int | None = None) -> list[dict[str, str]]:
     try:
         config, bearer = _load_runtime(target)
         record("config", True)
-    except (WazuhError, grokbot_packs.PackError, grokbot_mcp.ConfigurationError, OSError, ValueError, KeyError):
+    except (N8nError, grokbot_packs.PackError, grokbot_mcp.ConfigurationError, OSError, ValueError, KeyError):
         record("config", False)
         return checks
     parent = grokbot_packs.instance_config_path(target, PACK_ID).parent
@@ -360,25 +322,17 @@ def render_unit(target: Path, *, python: str | None = None) -> str:
     elif reference["kind"] == "env":
         args += ["--bearer-env", reference["name"]]
     exec_start = " ".join(grokbot_ops._systemd_quote(argument) for argument in args)
-    writable = " ".join(
-        grokbot_ops._systemd_quote(path)
-        for path in (
-            str(Path(instance["ledger_path"]).parent),
-            instance["action_state_path"],
-        )
-    )
+    writable = grokbot_ops._systemd_quote(instance["action_state_path"])
     return (
         "# Generated by brigade run cloud grokbot pack install-service.\n"
         f"# Unit: {grokbot_ops.unit_name(PACK_ID)}\n"
         "[Unit]\n"
-        "Description=Brigade Grok Bot MCP listener (wazuh-triage)\n"
-        "After=network.target\n"
-        f"{grokbot_ops.LISTENER_RECOVERY_UNIT_FRAGMENT}"
-        "\n"
+        "Description=Brigade Grok Bot MCP listener (n8n-operator)\n"
+        "After=network.target\n\n"
         "[Service]\n"
         "Type=simple\n"
         f"ExecStart={exec_start}\n"
-        f"{grokbot_ops.LISTENER_RECOVERY_SERVICE_FRAGMENT}"
+        "Restart=on-failure\n"
         "KillMode=mixed\n"
         "TimeoutStopSec=20\n"
         "StandardOutput=journal\n"
@@ -421,9 +375,9 @@ def write_unit(target: Path, out_dir: Path, *, force: bool = False, python: str 
     return path
 
 
-def build_app(config: WazuhListenerConfig, tools: WazuhTriageTools) -> Callable[..., Any]:
+def build_app(config: N8nListenerConfig, tools: N8nOperatorTools) -> Callable[..., Any]:
     MCPServer, JSONResponse, _, TransportSecuritySettings = grokbot_mcp._load_mcp()
-    adapter = WazuhAdapter(config, tools)
+    adapter = N8nAdapter(config, tools)
     server = MCPServer(SERVICE_NAME, version="1")
 
     @server.custom_route("/health", methods=["GET"])
@@ -444,10 +398,10 @@ def build_app(config: WazuhListenerConfig, tools: WazuhTriageTools) -> Callable[
             allowed_origins=list(config.allowed_origins),
         ),
     )
-    return _WazuhGateASGI(app, _WazuhRequestGate(config), adapter)
+    return _N8nGateASGI(app, _N8nRequestGate(config), adapter)
 
 
-def run_listener(config: WazuhListenerConfig, tools: WazuhTriageTools) -> None:
+def run_listener(config: N8nListenerConfig, tools: N8nOperatorTools) -> None:
     grokbot_mcp._load_mcp()
     try:
         import uvicorn
@@ -466,7 +420,7 @@ def build_listener_from_target(
     allowed_origins: list[str],
     bearer_file: Path | None,
     bearer_env: str | None,
-) -> tuple[WazuhListenerConfig, WazuhTriageTools]:
+) -> tuple[N8nListenerConfig, N8nOperatorTools]:
     from .. import grokbot_packs
 
     instance = grokbot_packs._load_instance_config(target, PACK_ID)
@@ -474,7 +428,6 @@ def build_listener_from_target(
     host, port = grokbot_packs._parse_default_bind(chosen_bind)
     paths = validate_disjoint_state_paths(
         str(instance["runtime_path"]),
-        str(instance["ledger_path"]),
         str(instance["action_state_path"]),
         str(instance["approval_dir"]),
     )
@@ -484,7 +437,7 @@ def build_listener_from_target(
     dispatch_token = os.environ.get("GROKBOT_DISPATCH_TOKEN")
     if dispatch_token is not None and bearer == dispatch_token:
         _environment_invalid()
-    config = WazuhListenerConfig(
+    config = N8nListenerConfig(
         target=target.expanduser().resolve(),
         bind_host=host,
         bind_port=port,
@@ -496,43 +449,43 @@ def build_listener_from_target(
     return config, build_tools_from_config(config)
 
 
-def _register_tools(server: Any, adapter: WazuhAdapter) -> None:
-    def wazuh_ingest(alerts: list[dict[str, Any]]) -> dict[str, Any]:
-        return adapter.call_tool("wazuh_ingest", {"alerts": alerts})
+def _register_tools(server: Any, adapter: N8nAdapter) -> None:
+    def n8n_overview() -> dict[str, Any]:
+        return adapter.call_tool("n8n_overview", {})
 
-    def wazuh_alert_status() -> dict[str, Any]:
-        return adapter.call_tool("wazuh_alert_status", {})
+    def n8n_workflow_status(workflow_id: str) -> dict[str, Any]:
+        return adapter.call_tool("n8n_workflow_status", {"workflow_id": workflow_id})
 
-    def wazuh_classify(fingerprint: str) -> dict[str, Any]:
-        return adapter.call_tool("wazuh_classify", {"fingerprint": fingerprint})
+    def n8n_execution_bundle(execution_id: str) -> dict[str, Any]:
+        return adapter.call_tool("n8n_execution_bundle", {"execution_id": execution_id})
 
-    def wazuh_incident_bundle(scope: str) -> dict[str, Any]:
-        return adapter.call_tool("wazuh_incident_bundle", {"scope": scope})
+    def n8n_propose_action(action_id: str, target_id: str) -> dict[str, Any]:
+        return adapter.call_tool("n8n_propose_action", {"action_id": action_id, "target_id": target_id})
 
-    def wazuh_propose_remediation(finding_id: str) -> dict[str, Any]:
-        return adapter.call_tool("wazuh_propose_remediation", {"finding_id": finding_id})
+    def n8n_action_status(proposal_id: str) -> dict[str, Any]:
+        return adapter.call_tool("n8n_action_status", {"proposal_id": proposal_id})
 
-    def wazuh_action_status(proposal_id: str) -> dict[str, Any]:
-        return adapter.call_tool("wazuh_action_status", {"proposal_id": proposal_id})
+    def n8n_execute_action(proposal_id: str) -> dict[str, Any]:
+        return adapter.call_tool("n8n_execute_action", {"proposal_id": proposal_id})
 
     for name, handler in (
-        ("wazuh_ingest", wazuh_ingest),
-        ("wazuh_alert_status", wazuh_alert_status),
-        ("wazuh_classify", wazuh_classify),
-        ("wazuh_incident_bundle", wazuh_incident_bundle),
-        ("wazuh_propose_remediation", wazuh_propose_remediation),
-        ("wazuh_action_status", wazuh_action_status),
+        ("n8n_overview", n8n_overview),
+        ("n8n_workflow_status", n8n_workflow_status),
+        ("n8n_execution_bundle", n8n_execution_bundle),
+        ("n8n_propose_action", n8n_propose_action),
+        ("n8n_action_status", n8n_action_status),
+        ("n8n_execute_action", n8n_execute_action),
     ):
         handler.__name__ = name
         handler.__doc__ = _TOOL_DESCRIPTIONS[name]
         server.tool(name=name, description=_TOOL_DESCRIPTIONS[name])(handler)
 
 
-class _WazuhRequestGate:
-    def __init__(self, config: WazuhListenerConfig, *, max_request_bytes: int = MAX_REQUEST_BYTES):
+class _N8nRequestGate:
+    def __init__(self, config: N8nListenerConfig, *, max_request_bytes: int = MAX_REQUEST_BYTES):
         self.config = config
         self.max_request_bytes = max_request_bytes
-        self._adapter = WazuhAdapter(config, config_tools_placeholder(config))
+        self._adapter = N8nAdapter(config, _placeholder_tools())
 
     def reject_reason(self, headers: Mapping[str, str], body_size: int) -> str | None:
         if body_size < 0 or body_size > self.max_request_bytes:
@@ -550,20 +503,18 @@ class _WazuhRequestGate:
         return None
 
 
-def config_tools_placeholder(config: WazuhListenerConfig) -> WazuhTriageTools:
-    return WazuhTriageTools(  # pragma: no cover - constructed for auth only
-        store=None,  # type: ignore[arg-type]
-        target=config.target,
-        owner=config.target,
+def _placeholder_tools() -> N8nOperatorTools:
+    return N8nOperatorTools(
+        client=None,
+        store=None,
         now=lambda: datetime.now(timezone.utc),
         request_id=_opaque_id,
-        create_proposal_id=_opaque_id,
         secrets=[],
     )
 
 
-class _WazuhGateASGI:
-    def __init__(self, app: Callable[..., Any], gate: _WazuhRequestGate, adapter: WazuhAdapter):
+class _N8nGateASGI:
+    def __init__(self, app: Callable[..., Any], gate: _N8nRequestGate, adapter: N8nAdapter):
         self.app = app
         self.gate = gate
         self.adapter = adapter
@@ -591,26 +542,28 @@ class _WazuhGateASGI:
         if too_large:
             await grokbot_mcp._reject_http(send, 413, "Request body is too large")
             return
-        if scope.get("path") == "/mcp" and _invalid_wazuh_tool_request(body):
+        if scope.get("path") == "/mcp" and _invalid_n8n_tool_request(body):
             await grokbot_mcp._reject_tool(send, body)
             return
         await self.app(scope, grokbot_mcp._replay_messages(messages, receive), send)
 
 
-def _invalid_wazuh_tool_request(body: bytes) -> bool:
+def _invalid_n8n_tool_request(body: bytes) -> bool:
     from .contracts import (
         parse_action_status_input,
-        parse_alert_status_input,
-        parse_classify_input,
-        parse_incident_input,
-        parse_ingest_input,
+        parse_execute_input,
+        parse_execution_bundle_input,
+        parse_overview_input,
         parse_propose_input,
+        parse_workflow_status_input,
     )
 
     try:
         request = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
+    if isinstance(request, list):
+        return True
     if not isinstance(request, dict) or request.get("method") != "tools/call":
         return False
     params = request.get("params")
@@ -621,21 +574,21 @@ def _invalid_wazuh_tool_request(body: bytes) -> bool:
         return True
     arguments = params.get("arguments")
     parser = {
-        "wazuh_ingest": parse_ingest_input,
-        "wazuh_alert_status": parse_alert_status_input,
-        "wazuh_classify": parse_classify_input,
-        "wazuh_incident_bundle": parse_incident_input,
-        "wazuh_propose_remediation": parse_propose_input,
-        "wazuh_action_status": parse_action_status_input,
+        "n8n_overview": parse_overview_input,
+        "n8n_workflow_status": parse_workflow_status_input,
+        "n8n_execution_bundle": parse_execution_bundle_input,
+        "n8n_propose_action": parse_propose_input,
+        "n8n_action_status": parse_action_status_input,
+        "n8n_execute_action": parse_execute_input,
     }[name]
     try:
         parser(arguments if arguments is not None else {})
-    except WazuhError:
+    except N8nError:
         return True
     return False
 
 
-def _health_check(config: WazuhListenerConfig, bearer: str, timeout: int) -> bool:
+def _health_check(config: N8nListenerConfig, bearer: str, timeout: int) -> bool:
     payload = grokbot_ops._request_json(
         f"http://{grokbot_ops._connect_host(config.bind_host)}:{config.bind_port}/health",
         bearer,

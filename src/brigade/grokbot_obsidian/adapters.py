@@ -197,6 +197,29 @@ def _tool_text(result: object) -> str:
     return text
 
 
+def _file_not_found_text(path: str) -> str:
+    return f"File not found: {path}"
+
+
+def _closed_missing_file_envelope(result: object, path: str) -> bool:
+    if not isinstance(result, dict) or set(result) != {"isError", "content"}:
+        return False
+    if result.get("isError") is not True:
+        return False
+    content = result.get("content")
+    if not isinstance(content, list) or len(content) != 1:
+        return False
+    block = content[0]
+    if not isinstance(block, dict) or set(block) != {"type", "text"}:
+        return False
+    if block.get("type") != "text":
+        return False
+    text = block.get("text")
+    if not isinstance(text, str) or utf8_byte_length(text) > MAX_OUTPUT_BYTES:
+        return False
+    return text == _file_not_found_text(path)
+
+
 def _etag(value: object) -> str:
     if not isinstance(value, str) or not REVISION_TOKEN_RE.fullmatch(value):
         _protocol()
@@ -244,16 +267,17 @@ class NativeMcpPort:
             if exc.code == "unavailable":
                 raise
             raise
+        if _closed_missing_file_envelope(raw, path):
+            return None
+        if isinstance(raw, dict) and raw.get("isError") is True:
+            _protocol()
         if raw is None:
             return None
         if isinstance(raw, dict) and raw.get("missing") is True:
             return None
         if isinstance(raw, dict) and "content" in raw and "tags" not in raw and raw.get("type") == "text":
-            try:
-                text = _tool_text(raw)
-            except ObsidianError:
-                return None
-            if text == f"File not found: {path}":
+            text = _tool_text(raw)
+            if text == _file_not_found_text(path):
                 return None
             try:
                 raw = json.loads(text)

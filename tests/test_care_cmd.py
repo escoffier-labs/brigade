@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import care_cmd, cli, managed_block, memory_cmd
+from brigade import care_cmd, care_schedules, cli, managed_block, memory_cmd
 
 
 def test_care_registration_identity_is_stable_and_target_specific(tmp_path):
@@ -1361,6 +1361,303 @@ def test_care_cli_dispatch_passes_entry(monkeypatch, tmp_path):
     assert seen["status"]["entry_ids"] == ["care-scan"]
     assert cli.main(["care", "uninstall", "--target", str(tmp_path), "--entry", "handoff-ingest"]) == 0
     assert seen["uninstall"]["entry_ids"] == ["handoff-ingest"]
+
+
+def test_care_cli_dispatch_passes_schedule_specs(monkeypatch, tmp_path):
+    seen: dict[str, dict] = {}
+
+    def fake_install(**kwargs):
+        seen["install"] = kwargs
+        return 0
+
+    monkeypatch.setattr("brigade.care_cmd.install", fake_install)
+
+    assert (
+        cli.main(
+            [
+                "care",
+                "install",
+                "--target",
+                str(tmp_path),
+                "--entry",
+                "care-scan",
+                "--schedule",
+                "care-scan=*-*-* 07:15:00",
+            ]
+        )
+        == 0
+    )
+    assert seen["install"]["schedule_specs"] == ["care-scan=*-*-* 07:15:00"]
+
+
+@pytest.mark.parametrize("command", ["install", "status", "uninstall"])
+def test_care_cli_does_not_expose_internal_crontab_backend(command, tmp_path):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["care", command, "--target", str(tmp_path), "--backend", "crontab"])
+
+    assert exc_info.value.code == 2
+
+
+def test_care_systemd_custom_schedule_is_installed(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert (
+        care_cmd.install(
+            target=target,
+            backend="systemd",
+            home=home,
+            entry_ids=["care-scan"],
+            schedule_specs=["care-scan=*-*-* 07:15:00"],
+        )
+        == 0
+    )
+    timer = _unit_path(home, target, "care-scan", ".timer")
+    assert "OnCalendar=*-*-* 07:15:00" in timer.read_text(encoding="utf-8")
+
+
+def test_care_systemd_install_preserves_local_schedule_on_upgrade(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert (
+        care_cmd.install(
+            target=target,
+            backend="systemd",
+            home=home,
+            entry_ids=["care-scan"],
+            schedule_specs=["care-scan=*-*-* 07:15:00"],
+        )
+        == 0
+    )
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
+    timer = _unit_path(home, target, "care-scan", ".timer")
+    assert "OnCalendar=*-*-* 07:15:00" in timer.read_text(encoding="utf-8")
+
+
+def test_care_systemd_install_preserves_multiple_calendars_as_separate_directives(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
+    timer = _unit_path(home, target, "care-scan", ".timer")
+    parsed = managed_block.parse_blocks(
+        timer.read_text(encoding="utf-8"),
+        kind=care_cmd.CARE_KIND,
+        style=care_cmd.CARE_MARKER_STYLE,
+    )
+    assert parsed.status == "ok"
+    multi_calendar_body = parsed.body.replace(
+        "OnCalendar=*-*-* 06:15:00",
+        "OnCalendar=*-*-* 06:15:00\nOnCalendar=Mon *-*-* 09:00:00",
+    )
+    timer.write_text(
+        managed_block.render_block(
+            multi_calendar_body,
+            kind=care_cmd.CARE_KIND,
+            profile="systemd",
+            style=care_cmd.CARE_MARKER_STYLE,
+        ),
+        encoding="utf-8",
+    )
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
+    timer_text = timer.read_text(encoding="utf-8")
+    assert timer_text.count("OnCalendar=") == 2
+    assert "OnCalendar=*-*-* 06:15:00\nOnCalendar=Mon *-*-* 09:00:00" in timer_text
+    assert "OnCalendar=*-*-* 06:15:00; Mon *-*-* 09:00:00" not in timer_text
+
+
+def test_care_systemd_status_reports_drop_in_calendar_divergence(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(
+        care_schedules,
+        "effective_systemd_calendar",
+        lambda timer_name: ("*-*-* 07:15:00", None),
+    )
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
+    capsys.readouterr()
+    assert care_cmd.status(target=target, backend="systemd", home=home, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    timer = next(unit for unit in payload["units"] if unit["name"].endswith("care-scan.timer"))
+    assert timer["managed_calendar"] == "*-*-* 06:15:00"
+    assert timer["effective_calendar"] == "*-*-* 07:15:00"
+    assert timer["schedule_diverged"] is True
+
+
+def test_effective_systemd_calendar_extracts_on_calendar_from_structured_output(monkeypatch):
+    result = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout="{ OnCalendar=*-*-* 08:00:00 ; next_elapse=Sun 2026-08-30 08:00:00 EDT }\n",
+        stderr="",
+    )
+    monkeypatch.setattr(care_schedules.subprocess, "run", lambda *args, **kwargs: result)
+
+    assert care_schedules.effective_systemd_calendar("brigade-care-test.timer") == ("*-*-* 08:00:00", None)
+
+
+def test_effective_systemd_calendar_canonicalizes_multiple_structured_entries(monkeypatch):
+    result = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=(
+            "{ OnCalendar=*-*-* 08:00:00 ; next_elapse=Sun 2026-08-30 08:00:00 EDT }\n"
+            "{ OnCalendar=Mon *-*-* 09:00:00 ; next_elapse=Mon 2026-08-31 09:00:00 EDT }\n"
+        ),
+        stderr="",
+    )
+    monkeypatch.setattr(care_schedules.subprocess, "run", lambda *args, **kwargs: result)
+
+    assert care_schedules.effective_systemd_calendar("brigade-care-test.timer") == (
+        "*-*-* 08:00:00; Mon *-*-* 09:00:00",
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("stdout", "error"),
+    [
+        ("", "systemd returned no timer calendar"),
+        ("{ OnCalendar= ; next_elapse=Sun 2026-08-30 08:00:00 EDT }", "systemd returned malformed timer calendar"),
+    ],
+)
+def test_effective_systemd_calendar_reports_bounded_parse_errors(monkeypatch, stdout, error):
+    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+    monkeypatch.setattr(care_schedules.subprocess, "run", lambda *args, **kwargs: result)
+
+    assert care_schedules.effective_systemd_calendar("brigade-care-test.timer") == (None, error)
+
+
+def test_care_systemd_status_warns_on_known_miseledger_schedule_collision(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    _write_operator_runbook(target, "evidence-crawl.json", "evidence-crawl")
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    def fake_systemctl(args, **kwargs):
+        timer_name = args[3]
+        assert args[:3] == ["systemctl", "--user", "show"]
+        assert args[4:] == ["--property=TimersCalendar", "--value"]
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="{ OnCalendar=*-*-* 08:00:00 ; next_elapse=Sun 2026-08-30 08:00:00 EDT }\n",
+            stderr="" if timer_name else "unreachable",
+        )
+
+    monkeypatch.setattr(care_schedules.subprocess, "run", fake_systemctl)
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["evidence-crawl"]) == 0
+    capsys.readouterr()
+    assert care_cmd.status(target=target, backend="systemd", home=home, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schedule_warnings"] == [
+        {
+            "calendar": "*-*-* 08:00:00",
+            "entries": ["evidence-crawl", "brigadeclaw-daily-report"],
+            "kind": "miseledger-calendar-collision",
+        }
+    ]
+
+
+def test_miseledger_collision_matches_one_calendar_from_a_multi_calendar_timer(monkeypatch):
+    monkeypatch.setattr(
+        care_schedules,
+        "effective_systemd_calendar",
+        lambda timer_name: ("*-*-* 08:00:00", None),
+    )
+
+    assert care_schedules.miseledger_schedule_warnings({"evidence-crawl": "*-*-* 08:00:00; Mon *-*-* 09:00:00"}) == [
+        {
+            "kind": "miseledger-calendar-collision",
+            "calendar": "*-*-* 08:00:00",
+            "entries": ["evidence-crawl", "brigadeclaw-daily-report"],
+        }
+    ]
+
+
+def test_care_systemd_status_keeps_default_managed_calendar(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(
+        care_schedules,
+        "effective_systemd_calendar",
+        lambda timer_name: ("*-*-* 06:15:00", None),
+    )
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
+    capsys.readouterr()
+    assert care_cmd.status(target=target, backend="systemd", home=home, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    timer = next(unit for unit in payload["units"] if unit["name"].endswith("care-scan.timer"))
+    assert timer["managed_calendar"] == "*-*-* 06:15:00"
+    assert timer["effective_calendar"] == "*-*-* 06:15:00"
+    assert timer["schedule_diverged"] is False
+
+
+@pytest.mark.parametrize(
+    ("backend", "schedule"),
+    [
+        ("crontab", "15 6 * * *"),
+        ("launchd", "0 7 * * 1"),
+        ("launchd", "*/30 * * * *"),
+        ("schtasks", "*/30 * * * *"),
+    ],
+)
+def test_care_schedule_subsets_validate_without_platform_commands(backend, schedule):
+    care_schedules.validate_schedule(backend, schedule)
+
+
+@pytest.mark.parametrize(
+    ("backend", "schedule"),
+    [
+        ("crontab", "99 6 * * *"),
+        ("launchd", "0 7 1 * *"),
+        ("schtasks", "0 0 1 * *"),
+    ],
+)
+def test_care_schedule_subsets_reject_unsupported_values(backend, schedule):
+    with pytest.raises(ValueError):
+        care_schedules.validate_schedule(backend, schedule)
+
+
+def test_care_systemd_status_keeps_calendar_inspection_failure(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_schedules, "effective_systemd_calendar", lambda timer_name: (None, "no user bus"))
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
+    capsys.readouterr()
+    assert care_cmd.status(target=target, backend="systemd", home=home, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    timer = next(unit for unit in payload["units"] if unit["name"].endswith("care-scan.timer"))
+    assert timer["managed_calendar"] == "*-*-* 06:15:00"
+    assert timer["effective_calendar"] is None
+    assert timer["schedule_diverged"] is False
+    assert timer["schedule_inspection_error"] == "no user bus"
 
 
 def _write_runbook_receipt(

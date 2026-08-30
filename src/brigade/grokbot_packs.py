@@ -21,7 +21,9 @@ from . import (
     grokbot_cerebro,
     grokbot_fleet,
     grokbot_mcp,
+    grokbot_n8n,
     grokbot_obsidian,
+    grokbot_operations_relay,
     grokbot_ops,
     grokbot_wazuh,
 )
@@ -51,11 +53,15 @@ CONNECTOR_DEFAULT_BINDS = {
     "backup-steward": "127.0.0.1:8772",
     "cerebro-memory": "127.0.0.1:8770",
     "fleet-steward": "127.0.0.1:8771",
+    "n8n-operator": "127.0.0.1:8775",
     "obsidian-operator": "127.0.0.1:8773",
+    "operations-relay": "127.0.0.1:8777",
     "wazuh-triage": "127.0.0.1:8774",
 }
 STEWARD_PACK_IDS = frozenset({"backup-steward", "fleet-steward", "wazuh-triage"})
 OBSIDIAN_PACK_ID = "obsidian-operator"
+N8N_PACK_ID = "n8n-operator"
+OPERATIONS_RELAY_PACK_ID = "operations-relay"
 FLEET_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
     {
         "runtime_path",
@@ -75,6 +81,14 @@ OBSIDIAN_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
         "upstream_key",
     }
 )
+N8N_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
+    {
+        "runtime_path",
+        "action_state_path",
+        "approval_dir",
+    }
+)
+OPERATIONS_RELAY_INSTANCE_KEYS = INSTANCE_KEYS | frozenset({"owner_workspace"})
 CONNECTOR_INSTANCE_KEYS = INSTANCE_KEYS | frozenset({"cli_executable", "workdir"})
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 PACK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
@@ -112,6 +126,10 @@ def _connector_tools(pack_id: str) -> frozenset[str]:
         return grokbot_fleet.TOOLS
     if pack_id == OBSIDIAN_PACK_ID:
         return grokbot_obsidian.TOOLS
+    if pack_id == N8N_PACK_ID:
+        return grokbot_n8n.TOOLS
+    if pack_id == OPERATIONS_RELAY_PACK_ID:
+        return grokbot_operations_relay.TOOLS
     if pack_id == "wazuh-triage":
         return grokbot_wazuh.TOOLS
     return frozenset()
@@ -203,6 +221,7 @@ def preview_setup(
     upstream_key_env: str | None = None,
     upstream_key_file: Path | None = None,
     upstream_key: dict[str, Any] | None = None,
+    owner_workspace: str | Path | None = None,
 ) -> dict[str, Any]:
     return _setup(
         target,
@@ -226,6 +245,7 @@ def preview_setup(
         upstream_key_env=upstream_key_env,
         upstream_key_file=upstream_key_file,
         upstream_key=upstream_key,
+        owner_workspace=owner_workspace,
     )
 
 
@@ -251,6 +271,7 @@ def apply_setup(
     upstream_key_env: str | None = None,
     upstream_key_file: Path | None = None,
     upstream_key: dict[str, Any] | None = None,
+    owner_workspace: str | Path | None = None,
 ) -> dict[str, Any]:
     return _setup(
         target,
@@ -274,22 +295,31 @@ def apply_setup(
         upstream_key_env=upstream_key_env,
         upstream_key_file=upstream_key_file,
         upstream_key=upstream_key,
+        owner_workspace=owner_workspace,
     )
 
 
-def doctor(target: Path, pack_id: str) -> list[dict[str, str]]:
+def doctor(target: Path, pack_id: str, *, service_result: bool = False) -> list[dict[str, str]]:
     pack = show_pack(pack_id)
     if pack["kind"] == "queue-role":
-        return grokbot_ops.doctor(target, pack["instance"])
-    if pack["id"] == "fleet-steward":
-        return grokbot_fleet.doctor(target)
-    if pack["id"] == "backup-steward":
-        return grokbot_backup.doctor(target)
-    if pack["id"] == OBSIDIAN_PACK_ID:
-        return grokbot_obsidian.doctor(target)
-    if pack["id"] == "wazuh-triage":
-        return grokbot_wazuh.doctor(target)
-    return grokbot_cerebro.doctor(target)
+        checks = grokbot_ops.doctor(target, pack["instance"])
+    elif pack["id"] == "fleet-steward":
+        checks = grokbot_fleet.doctor(target)
+    elif pack["id"] == "backup-steward":
+        checks = grokbot_backup.doctor(target)
+    elif pack["id"] == OBSIDIAN_PACK_ID:
+        checks = grokbot_obsidian.doctor(target)
+    elif pack["id"] == "wazuh-triage":
+        checks = grokbot_wazuh.doctor(target)
+    elif pack["id"] == N8N_PACK_ID:
+        checks = grokbot_n8n.doctor(target)
+    elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
+        checks = grokbot_operations_relay.doctor(target)
+    else:
+        checks = grokbot_cerebro.doctor(target)
+    if service_result:
+        checks.append(grokbot_ops.inspect_service_result(pack["instance"]))
+    return checks
 
 
 def canary(target: Path, pack_id: str) -> dict[str, Any]:
@@ -304,6 +334,10 @@ def canary(target: Path, pack_id: str) -> dict[str, Any]:
         return grokbot_obsidian.canary(target)
     if pack["id"] == "wazuh-triage":
         return grokbot_wazuh.canary(target)
+    if pack["id"] == N8N_PACK_ID:
+        return grokbot_n8n.canary(target)
+    if pack["id"] == OPERATIONS_RELAY_PACK_ID:
+        return grokbot_operations_relay.canary(target)
     return grokbot_cerebro.canary(target)
 
 
@@ -321,6 +355,10 @@ def render_install_service(target: Path, pack_id: str) -> str:
             return grokbot_obsidian.render_unit(target, python=sys.executable)
         if pack["id"] == "wazuh-triage":
             return grokbot_wazuh.render_unit(target, python=sys.executable)
+        if pack["id"] == N8N_PACK_ID:
+            return grokbot_n8n.render_unit(target, python=sys.executable)
+        if pack["id"] == OPERATIONS_RELAY_PACK_ID:
+            return grokbot_operations_relay.render_unit(target, python=sys.executable)
         return grokbot_cerebro.render_unit(target, python=sys.executable)
     except PackError:
         raise
@@ -333,7 +371,9 @@ def render_install_service(target: Path, pack_id: str) -> str:
                 grokbot_backup.BackupError,
                 grokbot_cerebro.CerebroError,
                 grokbot_fleet.FleetError,
+                grokbot_n8n.N8nError,
                 grokbot_obsidian.ObsidianError,
+                grokbot_operations_relay.OperationsRelayError,
                 grokbot_wazuh.WazuhError,
             ),
         ):
@@ -361,6 +401,10 @@ def apply_install_service(
             path = grokbot_obsidian.write_unit(target, out_dir, force=force)
         elif pack["id"] == "wazuh-triage":
             path = grokbot_wazuh.write_unit(target, out_dir, force=force)
+        elif pack["id"] == N8N_PACK_ID:
+            path = grokbot_n8n.write_unit(target, out_dir, force=force)
+        elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
+            path = grokbot_operations_relay.write_unit(target, out_dir, force=force)
         else:
             path = grokbot_cerebro.write_unit(target, out_dir, force=force)
     except PackError:
@@ -374,7 +418,9 @@ def apply_install_service(
                 grokbot_backup.BackupError,
                 grokbot_cerebro.CerebroError,
                 grokbot_fleet.FleetError,
+                grokbot_n8n.N8nError,
                 grokbot_obsidian.ObsidianError,
+                grokbot_operations_relay.OperationsRelayError,
                 grokbot_wazuh.WazuhError,
             ),
         ):
@@ -422,6 +468,7 @@ def _setup(
     upstream_key_env: str | None = None,
     upstream_key_file: Path | None = None,
     upstream_key: dict[str, Any] | None = None,
+    owner_workspace: str | Path | None = None,
 ) -> dict[str, Any]:
     pack = show_pack(pack_id)
     reference = _bearer_reference(bearer_env=bearer_env, bearer_file=bearer_file, bearer=bearer)
@@ -446,6 +493,7 @@ def _setup(
         if (
             cli_executable is not None
             or workdir is not None
+            or owner_workspace is not None
             or any(path is not None for path in fleet_paths)
             or any(path is not None for path in obsidian_paths)
             or any(field is not None for field in upstream_fields)
@@ -455,21 +503,44 @@ def _setup(
         if (
             cli_executable is not None
             or workdir is not None
+            or owner_workspace is not None
             or any(path is not None for path in obsidian_paths)
             or any(field is not None for field in upstream_fields)
         ):
             raise PackError("unexpected-key")
         payload.update(_steward_path_references(pack["id"], runtime_path, ledger_path, action_state_path, approval_dir))
     elif pack["id"] == OBSIDIAN_PACK_ID:
-        if cli_executable is not None or workdir is not None or ledger_path is not None:
+        if cli_executable is not None or workdir is not None or ledger_path is not None or owner_workspace is not None:
             raise PackError("unexpected-key")
         payload.update(
             _obsidian_path_references(runtime_path, action_state_path, approval_dir, staging_dir, excalidraw_bin)
         )
         payload.update(_obsidian_upstream_references(upstream_url, upstream_key_env, upstream_key_file, upstream_key))
+    elif pack["id"] == N8N_PACK_ID:
+        if (
+            cli_executable is not None
+            or workdir is not None
+            or ledger_path is not None
+            or owner_workspace is not None
+            or any(path is not None for path in obsidian_paths)
+            or any(field is not None for field in upstream_fields)
+        ):
+            raise PackError("unexpected-key")
+        payload.update(_n8n_path_references(runtime_path, action_state_path, approval_dir))
+    elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
+        if (
+            cli_executable is not None
+            or workdir is not None
+            or any(path is not None for path in fleet_paths)
+            or any(path is not None for path in obsidian_paths)
+            or any(field is not None for field in upstream_fields)
+        ):
+            raise PackError("unexpected-key")
+        payload["owner_workspace"] = _operations_relay_owner_reference(owner_workspace)
     else:
         if (
-            any(path is not None for path in fleet_paths)
+            owner_workspace is not None
+            or any(path is not None for path in fleet_paths)
             or any(path is not None for path in obsidian_paths)
             or any(field is not None for field in upstream_fields)
         ):
@@ -853,7 +924,9 @@ def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[
     if not isinstance(route, str) or not PUBLIC_ROUTE_RE.fullmatch(route):
         raise PackError("unexpected-key")
     _validate_bearer_reference(payload.get("bearer"))
-    if pack["id"] == OBSIDIAN_PACK_ID:
+    if pack["id"] == OPERATIONS_RELAY_PACK_ID:
+        _operations_relay_owner_reference(payload.get("owner_workspace"))
+    elif pack["id"] == OBSIDIAN_PACK_ID:
         _obsidian_path_references(
             payload.get("runtime_path"),
             payload.get("action_state_path"),
@@ -866,6 +939,12 @@ def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[
         except grokbot_obsidian.ObsidianError as exc:
             raise PackError("unsafe-path") from exc
         _validate_bearer_reference(payload.get("upstream_key"))
+    elif pack["id"] == N8N_PACK_ID:
+        _n8n_path_references(
+            payload.get("runtime_path"),
+            payload.get("action_state_path"),
+            payload.get("approval_dir"),
+        )
     elif pack["id"] in STEWARD_PACK_IDS:
         _steward_path_references(
             pack["id"],
@@ -921,9 +1000,22 @@ def _instance_keys(pack: Mapping[str, Any]) -> frozenset[str]:
         return INSTANCE_KEYS
     if pack["id"] == OBSIDIAN_PACK_ID:
         return OBSIDIAN_INSTANCE_KEYS
+    if pack["id"] == OPERATIONS_RELAY_PACK_ID:
+        return OPERATIONS_RELAY_INSTANCE_KEYS
+    if pack["id"] == N8N_PACK_ID:
+        return N8N_INSTANCE_KEYS
     if pack["id"] in STEWARD_PACK_IDS:
         return FLEET_INSTANCE_KEYS
     return CONNECTOR_INSTANCE_KEYS
+
+
+def _operations_relay_owner_reference(owner_workspace: object) -> str:
+    if owner_workspace is None:
+        raise PackError("missing-path-reference")
+    try:
+        return grokbot_operations_relay.validate_owner_workspace(owner_workspace)
+    except grokbot_operations_relay.OperationsRelayError as exc:
+        raise PackError("unsafe-path") from exc
 
 
 def _obsidian_upstream_references(
@@ -947,6 +1039,23 @@ def _obsidian_upstream_references(
     else:
         reference = _bearer_reference(bearer_env=upstream_key_env, bearer_file=upstream_key_file, bearer=None)
     return {"upstream_url": url, "upstream_key": reference}
+
+
+def _n8n_path_references(
+    runtime_path: object,
+    action_state_path: object,
+    approval_dir: object,
+) -> dict[str, str]:
+    if any(value is None for value in (runtime_path, action_state_path, approval_dir)):
+        raise PackError("missing-path-reference")
+    try:
+        return grokbot_n8n.validate_disjoint_state_paths(
+            str(runtime_path),
+            str(action_state_path),
+            str(approval_dir),
+        )
+    except grokbot_n8n.N8nError as exc:
+        raise PackError("unsafe-path") from exc
 
 
 def _obsidian_path_references(
@@ -1052,3 +1161,51 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def preview_relay_setup(target: Path, owner_workspace: Path) -> dict[str, Any]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.preview_relay_setup(target, owner_workspace)
+
+
+def apply_relay_setup(target: Path, owner_workspace: Path) -> dict[str, Any]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.apply_relay_setup(target, owner_workspace)
+
+
+def load_relay_config(target: Path) -> dict[str, str]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.load_relay_config(target)
+
+
+def preview_relay(target: Path, limit: int = 1) -> dict[str, Any]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.preview_configured_relay(target, limit=limit)
+
+
+def apply_relay(target: Path, limit: int = 1) -> dict[str, Any]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.apply_configured_relay(target, limit=limit)
+
+
+def relay_doctor(target: Path) -> list[dict[str, str]]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.relay_doctor(target)
+
+
+def render_relay_units(target: Path) -> dict[str, str]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.render_relay_units(target, python=sys.executable)
+
+
+def write_relay_units(target: Path, out_dir: Path, *, force: bool = False) -> list[Path]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.write_relay_units(target, out_dir, force=force)

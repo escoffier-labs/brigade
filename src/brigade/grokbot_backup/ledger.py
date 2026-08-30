@@ -401,6 +401,24 @@ class BackupLedger:
             record = self._last_finding(self._load_records(), key)
             return None if record is None else record["revision"]
 
+    def finding_records(self) -> list[dict[str, Any]]:
+        with self._lock:
+            latest: dict[str, dict[str, Any]] = {}
+            for record in self._load_records():
+                if record["kind"] != "finding":
+                    continue
+                latest[record["finding"]["finding_id"]] = record
+            return [
+                {
+                    "version": item["version"],
+                    "kind": item["kind"],
+                    "recorded_at": item["recorded_at"],
+                    "finding": dict(item["finding"]),
+                    "revision": item["revision"],
+                }
+                for item in sorted(latest.values(), key=lambda item: item["finding"]["finding_id"])
+            ]
+
     def replace_findings(self, scope: str, findings: Sequence[Mapping[str, Any]]) -> None:
         with self._lock:
             requested = parse_identifier(scope)

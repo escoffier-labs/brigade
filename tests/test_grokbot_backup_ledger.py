@@ -59,6 +59,33 @@ def test_ledger_records_observations_and_finding_revisions(tmp_path: Path):
     assert ledger.latest_finding_revision("media-archive:stale-lock") == backup_finding_revision(recorded)
 
 
+def test_finding_records_returns_latest_sorted_detached_copies(tmp_path: Path):
+    ledger = _ledger(tmp_path)
+    assert ledger.finding_records() == []
+    ledger.record_observation(_observation(), "receipt-1")
+    first = _finding("zeta-archive:stale-lock")
+    first["target_alias"] = "zeta-archive"
+    later = {**_finding("media-archive:stale-lock"), "summary": "Lock was refreshed"}
+    ledger.record_finding(_finding("media-archive:stale-lock"))
+    ledger.record_finding(first)
+    ledger.record_finding(later)
+    snapshot = ledger.finding_records()
+    assert [item["finding"]["finding_id"] for item in snapshot] == [
+        "media-archive:stale-lock",
+        "zeta-archive:stale-lock",
+    ]
+    assert snapshot[0]["revision"] == backup_finding_revision(ledger.last_finding("media-archive:stale-lock") or {})
+    assert snapshot[0]["finding"]["summary"] == "Lock was refreshed"
+    assert snapshot[0]["kind"] == "finding"
+    snapshot[0]["finding"]["summary"] = "mutated"
+    snapshot[0]["revision"] = "0" * 64
+    stored = ledger.last_finding("media-archive:stale-lock")
+    assert stored is not None
+    assert stored["summary"] == "Lock was refreshed"
+    assert ledger.latest_finding_revision("media-archive:stale-lock") != "0" * 64
+    assert ledger.finding_records()[0]["finding"] is not snapshot[0]["finding"]
+
+
 def test_ledger_rejects_private_paths_in_public_fields(tmp_path: Path):
     ledger = _ledger(tmp_path)
     with pytest.raises(BackupError) as caught:

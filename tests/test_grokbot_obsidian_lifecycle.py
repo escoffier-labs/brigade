@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from brigade import grokbot_ops, grokbot_packs
+from tests.test_grokbot_ops import assert_listener_recovery_policy
 from brigade.grokbot_obsidian.adapters import NATIVE_MCP_TOOLS
 from brigade.grokbot_obsidian.contracts import TOOLS, ObsidianError
 from brigade.grokbot_obsidian.lifecycle import (
@@ -463,3 +464,13 @@ def test_jsonrpc_batches_and_unknown_tools_are_rejected():
         "obsidian_propose_action",
         "obsidian_execute_action",
     }
+
+
+def test_obsidian_unit_uses_shared_listener_recovery_policy(tmp_path: Path, monkeypatch):
+    grokbot_packs.apply_setup(
+        tmp_path,
+        "obsidian-operator",
+        bearer_env="TEST_GROKBOT_BEARER",
+        **_obsidian_setup_kwargs(tmp_path, monkeypatch),
+    )
+    assert_listener_recovery_policy(render_unit(tmp_path))

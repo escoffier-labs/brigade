@@ -268,7 +268,16 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     serve_identity.add_argument("--instance", choices=("operator", "repository-scout", "implementation-worker"))
     serve_identity.add_argument(
         "--pack",
-        choices=("cerebro-memory", "fleet-steward", "backup-steward", "obsidian-operator", "wazuh-triage"),
+        choices=(
+            "cerebro-memory",
+            "fleet-steward",
+            "backup-steward",
+            "n8n-operator",
+            "obsidian-operator",
+            "operations-relay",
+            "wazuh-triage",
+            "n8n-operator",
+        ),
     )
     p_grokbot_serve.add_argument(
         "--bind", default=None, help="Listener host:port. Defaults to the role or pack loopback."
@@ -366,7 +375,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         "--runtime-path",
         type=Path,
         default=None,
-        help="Absolute runtime JSON path. Required for fleet-steward, backup-steward, obsidian-operator, and wazuh-triage.",
+        help="Absolute runtime JSON path. Required for fleet-steward, backup-steward, obsidian-operator, wazuh-triage, and n8n-operator.",
     )
     p_pack_setup.add_argument(
         "--ledger-path",
@@ -378,13 +387,13 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         "--action-state-path",
         type=Path,
         default=None,
-        help="Absolute action-state directory. Required for fleet-steward, backup-steward, obsidian-operator, and wazuh-triage.",
+        help="Absolute action-state directory. Required for fleet-steward, backup-steward, obsidian-operator, wazuh-triage, and n8n-operator.",
     )
     p_pack_setup.add_argument(
         "--approval-dir",
         type=Path,
         default=None,
-        help="Absolute approval directory. Required for fleet-steward, backup-steward, obsidian-operator, and wazuh-triage.",
+        help="Absolute approval directory. Required for fleet-steward, backup-steward, obsidian-operator, wazuh-triage, and n8n-operator.",
     )
     p_pack_setup.add_argument(
         "--staging-dir",
@@ -413,10 +422,22 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         "--upstream-key-env",
         help="Name of the environment variable holding the upstream key. Required for obsidian-operator.",
     )
+    p_pack_setup.add_argument(
+        "--owner",
+        type=Path,
+        default=None,
+        dest="owner_workspace",
+        help="Absolute owner workspace. Required for operations-relay.",
+    )
     p_pack_setup.add_argument("--apply", action="store_true", help="Write local config. Default is preview only.")
 
     p_pack_doctor = pack_sub.add_parser("doctor", help="Sanitized pack diagnostics.")
     add_pack_id(p_pack_doctor)
+    p_pack_doctor.add_argument(
+        "--service-result",
+        action="store_true",
+        help="Inspect the Brigade-owned service unit Result. Does not start or mutate systemd.",
+    )
 
     p_pack_canary = pack_sub.add_parser("canary", help="Bounded non-mutating pack authentication and inventory check.")
     add_pack_id(p_pack_canary)
@@ -436,6 +457,35 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         "--out", type=Path, default=None, help="Owned unit directory previously written by install-service."
     )
     p_pack_remove.add_argument("--apply", action="store_true", help="Delete owned files. Default is preview only.")
+
+    p_pack_relay_setup = pack_sub.add_parser(
+        "relay-setup",
+        help="Preview or apply first-party finding-relay owner configuration.",
+    )
+    add_target(p_pack_relay_setup)
+    p_pack_relay_setup.add_argument("--owner", type=Path, required=True, help="Absolute owner workspace.")
+    p_pack_relay_setup.add_argument("--apply", action="store_true", help="Write local config. Default is preview only.")
+
+    p_pack_relay_doctor = pack_sub.add_parser("relay-doctor", help="Sanitized first-party finding-relay diagnostics.")
+    add_target(p_pack_relay_doctor)
+
+    p_pack_relay = pack_sub.add_parser(
+        "relay",
+        help="Preview or relay first-party steward findings to owner review and Fleet Hub.",
+    )
+    add_target(p_pack_relay)
+    p_pack_relay.add_argument("--limit", type=int, default=1, help="Maximum new drafts (1-50). Defaults to 1.")
+    p_pack_relay.add_argument(
+        "--apply", action="store_true", help="Write drafts and report events. Default is preview only."
+    )
+
+    p_pack_install_relay = pack_sub.add_parser(
+        "install-relay-service",
+        help="Render or install the first-party findings-relay systemd units.",
+    )
+    add_target(p_pack_install_relay)
+    p_pack_install_relay.add_argument("--out", type=Path, default=None, help="Directory to render the units into.")
+    p_pack_install_relay.add_argument("--force", action="store_true", help="Allow overwriting these relay unit files.")
 
     parser.set_defaults(func=dispatch)
 
@@ -915,6 +965,21 @@ def _dispatch_grokbot(args, target: Path) -> int:
 
                     wazuh_config, wazuh_tools = build_wazuh_listener(target, **listener_kwargs)
                     run_wazuh_listener(wazuh_config, wazuh_tools)
+                elif args.pack == "n8n-operator":
+                    from ..grokbot_n8n.lifecycle import (
+                        build_listener_from_target as build_n8n_listener,
+                        run_listener as run_n8n_listener,
+                    )
+
+                    n8n_config, n8n_tools = build_n8n_listener(target, **listener_kwargs)
+                    run_n8n_listener(n8n_config, n8n_tools)
+                elif args.pack == "operations-relay":
+                    from .. import grokbot_operations_relay
+
+                    operations_config, operations_tools = grokbot_operations_relay.build_listener_from_target(
+                        target, **listener_kwargs
+                    )
+                    grokbot_operations_relay.run_listener(operations_config, operations_tools)
                 else:
                     cerebro_config, cerebro_tools = grokbot_cerebro.build_listener_from_target(
                         target, **listener_kwargs
@@ -942,7 +1007,9 @@ def _dispatch_grokbot(args, target: Path) -> int:
                 grokbot_backup,
                 grokbot_cerebro,
                 grokbot_fleet,
+                grokbot_n8n,
                 grokbot_obsidian,
+                grokbot_operations_relay,
                 grokbot_packs,
                 grokbot_wazuh,
             )
@@ -953,7 +1020,9 @@ def _dispatch_grokbot(args, target: Path) -> int:
                     grokbot_backup.BackupError,
                     grokbot_cerebro.CerebroError,
                     grokbot_fleet.FleetError,
+                    grokbot_n8n.N8nError,
                     grokbot_obsidian.ObsidianError,
+                    grokbot_operations_relay.OperationsRelayError,
                     grokbot_packs.PackError,
                     grokbot_wazuh.WazuhError,
                 ),
@@ -1212,6 +1281,8 @@ def _dispatch_grokbot_pack(args, target: Path) -> int:
     from .. import grokbot_mcp, grokbot_ops, grokbot_packs
 
     command = args.grokbot_pack_command
+    if command in {"relay-setup", "relay-doctor", "relay", "install-relay-service"}:
+        return _dispatch_grokbot_pack_relay(args, target)
     try:
         if command == "list":
             result = {"packs": grokbot_packs.list_packs()}
@@ -1235,6 +1306,7 @@ def _dispatch_grokbot_pack(args, target: Path) -> int:
                 "upstream_url": getattr(args, "upstream_url", None),
                 "upstream_key_env": getattr(args, "upstream_key_env", None),
                 "upstream_key_file": getattr(args, "upstream_key_file", None),
+                "owner_workspace": getattr(args, "owner_workspace", None),
             }
             result = (
                 grokbot_packs.apply_setup(target, args.pack_id, **setup_kwargs)
@@ -1242,7 +1314,7 @@ def _dispatch_grokbot_pack(args, target: Path) -> int:
                 else grokbot_packs.preview_setup(target, args.pack_id, **setup_kwargs)
             )
         elif command == "doctor":
-            checks = grokbot_packs.doctor(target, args.pack_id)
+            checks = grokbot_packs.doctor(target, args.pack_id, service_result=getattr(args, "service_result", False))
             if args.json:
                 print(json.dumps({"checks": checks}, indent=2, sort_keys=True))
             else:
@@ -1295,6 +1367,59 @@ def _dispatch_grokbot_pack(args, target: Path) -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     print(f"grokbot pack {command}: apply={result.get('apply', False)} pack={result.get('pack_id', args.pack_id)}")
+    return 0
+
+
+def _dispatch_grokbot_pack_relay(args, target: Path) -> int:
+    """Preview-first first-party finding relay without printing finding text."""
+    from .. import grokbot_pack_relay, grokbot_packs
+
+    command = args.grokbot_pack_command
+    try:
+        if command == "relay-setup":
+            result = (
+                grokbot_packs.apply_relay_setup(target, args.owner)
+                if args.apply
+                else grokbot_packs.preview_relay_setup(target, args.owner)
+            )
+        elif command == "relay-doctor":
+            checks = grokbot_packs.relay_doctor(target)
+            if args.json:
+                print(json.dumps({"checks": checks}, indent=2, sort_keys=True))
+            else:
+                for check in checks:
+                    print(f"{check['check']}: {check['status']}")
+            return 1 if any(check["status"] != "ok" for check in checks) else 0
+        elif command == "relay":
+            result = (
+                grokbot_packs.apply_relay(target, limit=args.limit)
+                if args.apply
+                else grokbot_packs.preview_relay(target, limit=args.limit)
+            )
+        elif command == "install-relay-service":
+            if args.out is None:
+                units = grokbot_packs.render_relay_units(target)
+                for name in (grokbot_pack_relay.RELAY_SERVICE_UNIT, grokbot_pack_relay.RELAY_TIMER_UNIT):
+                    sys.stdout.write(f"# {name}\n{units[name]}")
+                    if not units[name].endswith("\n"):
+                        sys.stdout.write("\n")
+                return 0
+            written = grokbot_packs.write_relay_units(target, Path(args.out), force=args.force)
+            result = {"action": "install-relay-service", "apply": True, "units": [path.name for path in written]}
+        else:
+            print(f"error: unknown Grok Bot pack command: {command}", file=sys.stderr)
+            return 2
+    except grokbot_pack_relay.PackRelayError as exc:
+        print(f"error: {exc.reason}", file=sys.stderr)
+        return 2
+    except (OSError, ValueError):
+        print("error: Grok Bot pack relay operation failed", file=sys.stderr)
+        return 2
+
+    if args.json or command == "relay":
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(f"grokbot pack {command}: apply={result.get('apply', False)}")
     return 0
 
 

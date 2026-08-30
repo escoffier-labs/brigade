@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .. import grokbot_ops
+from .. import grokbot_findings, grokbot_ops
 from .contracts import (
     CATEGORIES,
     ERROR_MESSAGES,
@@ -255,6 +255,32 @@ class WazuhStore:
 
     def finding_entry(self, stored: Mapping[str, Any]) -> dict[str, str]:
         return {key: str(stored[key]) for key in sorted(FINDING_KEYS)}
+
+    def pending_relay_entries(self) -> list[dict[str, str]]:
+        with self._lock:
+            pending = [
+                self.finding_entry(item)
+                for item in self._load()["alerts"].values()
+                if item.get("relay_status") == "pending"
+            ]
+        return sorted(pending, key=lambda item: (item["finding_id"], item["revision"]))
+
+    def confirm_reported_relays(self, relay_ids: Sequence[str]) -> None:
+        wanted = {parse_fingerprint(value) for value in relay_ids}
+        if not wanted:
+            return
+        with self._lock:
+            state = self._load()
+            changed = False
+            for item in state["alerts"].values():
+                if item.get("relay_status") != "pending":
+                    continue
+                relay_id = grokbot_findings.identity_digest(item["producer"], item["finding_id"], item["revision"])
+                if relay_id in wanted:
+                    item["relay_status"] = "reported"
+                    changed = True
+            if changed:
+                self._persist(state)
 
     def _apply_alert(
         self,

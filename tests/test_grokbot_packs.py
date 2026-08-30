@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from brigade import cli, grokbot_mcp, grokbot_ops, grokbot_packs
+from tests.test_grokbot_ops import assert_listener_recovery_policy
 
 SECRET = "not-a-real-token"
 QUEUE_PACK_IDS = ("implementation-worker", "operator", "repository-scout")
@@ -17,7 +19,9 @@ PACK_IDS = (
     "cerebro-memory",
     "fleet-steward",
     "implementation-worker",
+    "n8n-operator",
     "obsidian-operator",
+    "operations-relay",
     "operator",
     "repository-scout",
     "wazuh-triage",
@@ -60,6 +64,18 @@ WAZUH_TOOLS = (
     "wazuh_incident_bundle",
     "wazuh_ingest",
     "wazuh_propose_remediation",
+)
+N8N_TOOLS = (
+    "n8n_action_status",
+    "n8n_execute_action",
+    "n8n_execution_bundle",
+    "n8n_overview",
+    "n8n_propose_action",
+    "n8n_workflow_status",
+)
+OPERATIONS_RELAY_TOOLS = (
+    "automation_finding_status",
+    "submit_automation_finding",
 )
 
 
@@ -129,6 +145,16 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
             assert pack["kind"] == "connector"
             assert shown["tools"] == list(WAZUH_TOOLS)
             assert shown["default_bind"] == "127.0.0.1:8774"
+            assert shown["public_route"] == ""
+        elif pack["id"] == "n8n-operator":
+            assert pack["kind"] == "connector"
+            assert shown["tools"] == list(N8N_TOOLS)
+            assert shown["default_bind"] == "127.0.0.1:8775"
+            assert shown["public_route"] == ""
+        elif pack["id"] == "operations-relay":
+            assert pack["kind"] == "connector"
+            assert shown["tools"] == list(OPERATIONS_RELAY_TOOLS)
+            assert shown["default_bind"] == "127.0.0.1:8777"
             assert shown["public_route"] == ""
         else:
             assert pack["kind"] == "connector"
@@ -213,6 +239,9 @@ def test_first_party_queue_packs_keep_isolated_ports_tools_and_credentials():
     assert grokbot_mcp.parse_bind(packs["backup-steward"]["default_bind"])[1] == 8772
     assert grokbot_mcp.parse_bind(packs["obsidian-operator"]["default_bind"])[1] == 8773
     assert grokbot_mcp.parse_bind(packs["wazuh-triage"]["default_bind"])[1] == 8774
+    assert grokbot_mcp.parse_bind(packs["n8n-operator"]["default_bind"])[1] == 8775
+    assert grokbot_mcp.parse_bind(packs["operations-relay"]["default_bind"])[1] == 8777
+    assert packs["operations-relay"]["default_bind"] == "127.0.0.1:8777"
     assert packs["operator"]["tools"] == _queue_tools("operator")
     assert packs["repository-scout"]["tools"] == _queue_tools("repository-scout")
     assert packs["implementation-worker"]["tools"] == _queue_tools("implementation-worker")
@@ -643,6 +672,10 @@ def test_parser_inventory_includes_pack_lifecycle_and_legacy_commands():
         "pack install-service",
         "pack update",
         "pack remove",
+        "pack relay-setup",
+        "pack relay-doctor",
+        "pack relay",
+        "pack install-relay-service",
         "setup",
         "doctor",
         "canary",
@@ -722,6 +755,18 @@ def test_backup_steward_pack_is_closed_connector_with_exact_inventory():
     assert pack["tools"] == list(BACKUP_TOOLS)
     with _reject("unknown-pack"):
         grokbot_packs.show_pack("backup")
+
+
+def test_n8n_operator_pack_is_closed_connector_with_exact_inventory():
+    pack = grokbot_packs.show_pack("n8n-operator")
+    assert pack["kind"] == "connector"
+    assert pack["instance"] == "n8n-operator"
+    assert pack["default_bind"] == "127.0.0.1:8775"
+    assert pack["public_route"] == ""
+    assert pack["tools"] == list(N8N_TOOLS)
+    assert "n8n-operator" not in grokbot_packs.STEWARD_PACK_IDS
+    with _reject("unknown-pack"):
+        grokbot_packs.show_pack("n8n")
 
 
 def test_cerebro_setup_preview_apply_and_queue_role_regression(tmp_path: Path, monkeypatch):
@@ -1036,6 +1081,14 @@ def test_fleet_setup_refuses_queue_and_cerebro_default_ports(tmp_path: Path, mon
             bearer_env="TEST_GROKBOT_BEARER",
             **paths,
         )
+    with _reject("duplicate-port"):
+        grokbot_packs.apply_setup(
+            tmp_path,
+            "fleet-steward",
+            bind="127.0.0.1:8775",
+            bearer_env="TEST_GROKBOT_BEARER",
+            **paths,
+        )
     assert grokbot_ops.load_config(tmp_path, "operator")["bind"] == "127.0.0.1:8766"
 
 
@@ -1091,7 +1144,14 @@ def test_backup_setup_preview_apply_and_rejects_foreign_keys(tmp_path: Path, mon
 def test_backup_setup_refuses_existing_default_ports(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
     paths = _fleet_paths(tmp_path)
-    for bind in ("127.0.0.1:8766", "127.0.0.1:8770", "127.0.0.1:8771", "127.0.0.1:8773", "127.0.0.1:8774"):
+    for bind in (
+        "127.0.0.1:8766",
+        "127.0.0.1:8770",
+        "127.0.0.1:8771",
+        "127.0.0.1:8773",
+        "127.0.0.1:8774",
+        "127.0.0.1:8775",
+    ):
         with _reject("duplicate-port"):
             grokbot_packs.apply_setup(
                 tmp_path,
@@ -1290,3 +1350,116 @@ def test_obsidian_setup_refuses_existing_default_ports(tmp_path: Path, monkeypat
             bearer_env="TEST_GROKBOT_BEARER",
         )
     assert grokbot_ops.load_config(tmp_path, "operator")["bind"] == "127.0.0.1:8766"
+
+
+def _record_pack_systemctl(monkeypatch, *, stdout="success\n", returncode=0, error: BaseException | None = None):
+    recorded: list[list[str]] = []
+
+    def fake_run(argv, *args, **kwargs):
+        recorded.append(list(argv))
+        if error is not None:
+            raise error
+        return subprocess.CompletedProcess(list(argv), returncode, stdout=stdout, stderr="secret-stderr")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return recorded
+
+
+def test_pack_doctor_does_not_call_systemctl_without_service_result(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    grokbot_packs.apply_setup(tmp_path, "operator", bearer_env="TEST_GROKBOT_BEARER")
+    recorded = _record_pack_systemctl(monkeypatch)
+    checks = grokbot_packs.doctor(tmp_path, "operator")
+    assert recorded == []
+    assert all(check["check"] != "service-result" for check in checks)
+    explicit = grokbot_packs.doctor(tmp_path, "operator", service_result=False)
+    assert recorded == []
+    assert all(check["check"] != "service-result" for check in explicit)
+
+
+@pytest.mark.parametrize("pack_id", PACK_IDS)
+def test_pack_doctor_service_result_uses_exact_service_argv(tmp_path: Path, monkeypatch, pack_id: str):
+    recorded = _record_pack_systemctl(monkeypatch)
+    checks = grokbot_packs.doctor(tmp_path, pack_id, service_result=True)
+    service = grokbot_ops.unit_name(pack_id)
+    assert recorded == [
+        ["systemctl", "--user", "show", service, "--property=Result", "--value"],
+    ]
+    assert service.endswith(".service")
+    assert not service.endswith(".timer")
+    assert checks[-1] == {"check": "service-result", "status": "ok"}
+    assert all(set(check) == {"check", "status"} for check in checks)
+
+
+def test_pack_doctor_appends_service_result_after_early_config_failure(tmp_path: Path, monkeypatch):
+    recorded = _record_pack_systemctl(monkeypatch, stdout="failed\n")
+    checks = grokbot_packs.doctor(tmp_path, "operator", service_result=True)
+    assert any(check["check"] == "config" and check["status"] == "fail" for check in checks)
+    assert checks[-1] == {"check": "service-result", "status": "fail"}
+    assert recorded[0][3] == "brigade-grokbot-operator.service"
+
+
+def test_pack_doctor_cli_json_and_plain_service_result_shape(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    grokbot_packs.apply_setup(tmp_path, "operator", bearer_env="TEST_GROKBOT_BEARER")
+    _record_pack_systemctl(monkeypatch, stdout="success\n")
+    assert cli.main(_pack_argv(tmp_path, "doctor", "--id", "operator", "--service-result")) == 1
+    plain = capsys.readouterr()
+    assert "service-result: ok" in plain.out
+    assert "secret-stderr" not in plain.out + plain.err
+    assert SECRET not in plain.out + plain.err
+
+    _record_pack_systemctl(monkeypatch, stdout="timeout\n")
+    assert cli.main(_pack_argv(tmp_path, "doctor", "--id", "operator", "--service-result", "--json")) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["checks"][-1] == {"check": "service-result", "status": "fail"}
+    assert all(set(check) == {"check", "status"} for check in payload["checks"])
+    assert "timeout" not in json.dumps(payload)
+
+
+def test_pack_doctor_cli_returns_zero_when_every_check_is_ok(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    grokbot_packs.apply_setup(tmp_path, "operator", bearer_env="TEST_GROKBOT_BEARER")
+    monkeypatch.setattr(
+        grokbot_ops,
+        "doctor",
+        lambda *_args, **_kwargs: [
+            {"check": "dependency", "status": "ok"},
+            {"check": "config", "status": "ok"},
+            {"check": "permissions", "status": "ok"},
+            {"check": "queue", "status": "ok"},
+            {"check": "endpoint", "status": "ok"},
+        ],
+    )
+    _record_pack_systemctl(monkeypatch, stdout="success\n")
+    assert cli.main(_pack_argv(tmp_path, "doctor", "--id", "operator", "--service-result", "--json")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["checks"][-1] == {"check": "service-result", "status": "ok"}
+
+
+def test_service_result_flag_is_pack_doctor_only(tmp_path: Path):
+    with pytest.raises(SystemExit) as caught:
+        cli.main(_pack_argv(tmp_path, "canary", "--id", "operator", "--service-result"))
+    assert caught.value.code == 2
+    with pytest.raises(SystemExit) as caught:
+        cli.main(
+            [
+                "run",
+                "cloud",
+                "grokbot",
+                "doctor",
+                "--target",
+                str(tmp_path),
+                "--instance",
+                "operator",
+                "--service-result",
+            ]
+        )
+    assert caught.value.code == 2
+
+
+def test_first_party_pack_units_use_shared_listener_recovery_policy(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    grokbot_packs.apply_setup(tmp_path, "operator", bearer_env="TEST_GROKBOT_BEARER")
+    unit = grokbot_packs.render_install_service(tmp_path, "operator")
+    assert_listener_recovery_policy(unit)

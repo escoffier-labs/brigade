@@ -10,6 +10,7 @@ import pytest
 
 from brigade.grokbot_obsidian.adapters import (
     ENV_ALLOWLIST,
+    MAX_OUTPUT_BYTES,
     NATIVE_MCP_TOOLS,
     ExcalidrawAdapter,
     NativeMcpPort,
@@ -17,6 +18,7 @@ from brigade.grokbot_obsidian.adapters import (
     assert_safe_excalidraw_scene,
 )
 from brigade.grokbot_obsidian.contracts import ObsidianError
+from brigade.grokbot_obsidian.path_policy import normalize_vault_path
 
 
 class ScriptedClient:
@@ -507,6 +509,120 @@ def test_copy_and_move_use_path_destination_and_forbid_overwrite():
             },
         ),
     ]
+
+
+def test_vault_read_exact_missing_file_envelope_returns_none():
+    requested = "01 - Projects/missing-note.md"
+    normalized = normalize_vault_path(requested)
+    client = ScriptedClient(
+        {
+            "vault_read": {
+                "isError": True,
+                "content": [{"type": "text", "text": f"File not found: {normalized}"}],
+            }
+        }
+    )
+    port = NativeMcpPort(client)
+    assert port.read(requested) is None
+    assert client.calls == [("vault_read", {"path": normalized})]
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        {
+            "isError": True,
+            "content": [{"type": "text", "text": "File not found: 01 - Projects/other.md"}],
+        },
+        {
+            "isError": True,
+            "content": [{"type": "text", "text": "File not found: 01 - Projects/missing-note.md"}],
+            "extra": True,
+        },
+        {
+            "isError": True,
+            "content": [
+                {"type": "text", "text": "File not found: 01 - Projects/missing-note.md"},
+                {"type": "text", "text": "extra"},
+            ],
+        },
+        {
+            "isError": True,
+            "content": [
+                {
+                    "type": "text",
+                    "text": "File not found: 01 - Projects/missing-note.md",
+                    "extra": True,
+                }
+            ],
+        },
+        {
+            "isError": True,
+            "content": [{"type": "image", "text": "File not found: 01 - Projects/missing-note.md"}],
+        },
+        {"isError": True, "content": [{"type": "text", "text": "Permission denied"}]},
+        {"isError": True, "content": [{"type": "text", "text": 1}]},
+        {"isError": True, "content": [{"type": "text", "text": "x" * (MAX_OUTPUT_BYTES + 1)}]},
+        {"isError": True, "missing": True},
+        {
+            "isError": 1,
+            "content": [{"type": "text", "text": "File not found: 01 - Projects/missing-note.md"}],
+        },
+        {"isError": True, "content": []},
+    ],
+    ids=[
+        "different_path",
+        "extra_top_level_keys",
+        "extra_content_blocks",
+        "extra_block_keys",
+        "non_text_block",
+        "other_error_message",
+        "non_string_text",
+        "text_over_max_output_bytes",
+        "is_error_true_and_missing_true",
+        "is_error_integer_1",
+        "empty_is_error_content",
+    ],
+)
+def test_vault_read_inexact_error_envelope_is_protocol_error(envelope: dict[str, object]):
+    requested = "01 - Projects/missing-note.md"
+    client = ScriptedClient({"vault_read": envelope})
+    port = NativeMcpPort(client)
+    with pytest.raises(ObsidianError) as caught:
+        port.read(requested)
+    assert caught.value.code == "protocol_error"
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        {"type": "text", "content": []},
+        {
+            "type": "text",
+            "content": [{"type": "image", "text": "File not found: 01 - Projects/missing-note.md"}],
+        },
+        {"type": "text", "content": [{"type": "text", "text": 1}]},
+        {
+            "type": "text",
+            "content": [{"type": "text", "text": "x" * (MAX_OUTPUT_BYTES + 1)}],
+        },
+    ],
+    ids=[
+        "empty_content",
+        "non_text_content",
+        "non_string_text",
+        "oversized_text",
+    ],
+)
+def test_vault_read_malformed_legacy_type_text_wrapper_is_protocol_error(
+    envelope: dict[str, object],
+):
+    requested = "01 - Projects/missing-note.md"
+    client = ScriptedClient({"vault_read": envelope})
+    port = NativeMcpPort(client)
+    with pytest.raises(ObsidianError) as caught:
+        port.read(requested)
+    assert caught.value.code == "protocol_error"
 
 
 def test_excalidraw_embed_is_a_staged_heading_patch(tmp_path: Path):

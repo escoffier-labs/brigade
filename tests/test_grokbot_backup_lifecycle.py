@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from brigade import grokbot_ops, grokbot_packs
+from tests.test_grokbot_ops import assert_listener_recovery_policy
 from brigade.grokbot_backup.contracts import TOOLS, BackupError
 from brigade.grokbot_backup.ledger import BackupLedger
 from brigade.grokbot_backup.lifecycle import (
@@ -281,3 +282,14 @@ def test_listener_rejects_invalid_process_cap_at_startup(tmp_path: Path):
     with pytest.raises(BackupError) as caught:
         build_tools_from_config(_tools_config(tmp_path, payload), env={})
     assert caught.value.code == "invalid_request"
+
+
+def test_backup_unit_uses_shared_listener_recovery_policy(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    grokbot_packs.apply_setup(
+        tmp_path,
+        "backup-steward",
+        bearer_env="TEST_GROKBOT_BEARER",
+        **_backup_paths(tmp_path),
+    )
+    assert_listener_recovery_policy(render_unit(tmp_path))
