@@ -1536,3 +1536,220 @@ def test_grokbot_refuses_unscoped_null_queue_rows(conn):
     ).fetchone()
     assert after == before
     assert conn.execute("SELECT COUNT(*) FROM grokbot_jobs WHERE queue_id IS NOT NULL").fetchone()[0] == 0
+
+
+def test_grokbot_ack_cancel_emits_external_cancel_acknowledged(conn):
+    from brigade import fleet_hub_grokbot
+
+    _enroll_actors(conn)
+    job_id = "grokbot-" + "7" * 24
+    queued = fleet_hub_grokbot.handle_grokbot(
+        conn, _grokbot_enqueue(job_id, "7" * 64, operation_id="op-enq-ack"), caller_node=FEED_NODE
+    )[1]["job"]
+    claimed = fleet_hub_grokbot.handle_grokbot(
+        conn, _claim_body(job_id, lease_id="lease-ack", operation_id="op-claim-ack"), caller_node=WORKER_NODE
+    )
+    generation = claimed[1]["lease_generation"]
+    started = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        _holder_body(
+            "start",
+            job_id,
+            revision=claimed[1]["job"]["item_revision"],
+            generation=generation,
+            lease_id="lease-ack",
+            operation_id="op-start-ack",
+        ),
+        caller_node=WORKER_NODE,
+    )
+    canceled = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        {
+            "action": "cancel",
+            "job_id": job_id,
+            "expected_item_revision": started[1]["job"]["item_revision"],
+            "operation_id": "op-cancel-ack",
+        },
+        caller_node=OPERATOR_NODE,
+    )
+    assert canceled[0] == 200
+    acknowledged = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        _holder_body(
+            "ack-cancel",
+            job_id,
+            revision=canceled[1]["job"]["item_revision"],
+            generation=generation,
+            lease_id="lease-ack",
+            operation_id="op-ack-cancel",
+        ),
+        caller_node=WORKER_NODE,
+    )
+    assert acknowledged[0] == 200
+    assert acknowledged[1]["job"]["state"] == "canceled"
+    states = [
+        row[0]
+        for row in conn.execute("SELECT state FROM events WHERE run_id=? ORDER BY sequence", (job_id,)).fetchall()
+    ]
+    assert states[-1] == "external.cancel-acknowledged"
+    assert "external.canceled" not in states
+    assert queued["job_id"] == job_id
+
+
+def test_grokbot_lifecycle_retry_records_one_sanitized_event_per_revision(conn):
+    from brigade import fleet_hub_grokbot
+
+    _enroll_actors(conn)
+    job_id = "grokbot-" + "8" * 24
+    secret_task = "implement the secret task and paste the report body"
+    enqueue = _grokbot_enqueue(job_id, "8" * 64, operation_id="op-enq-retry")
+    enqueue["label"] = secret_task
+    queued = fleet_hub_grokbot.handle_grokbot(conn, enqueue, caller_node=FEED_NODE)[1]["job"]
+    assert queued["label"] == secret_task
+    claimed = fleet_hub_grokbot.handle_grokbot(
+        conn, _claim_body(job_id, lease_id="lease-retry", operation_id="op-claim-retry"), caller_node=WORKER_NODE
+    )
+    assert claimed[0] == 200
+    job = fleet_hub_grokbot._require_job(conn, job_id)
+    before = conn.execute("SELECT COUNT(*) FROM events WHERE run_id=?", (job_id,)).fetchone()[0]
+    fleet_hub_grokbot._record_event(conn, job, "claimed")
+    mutated = dict(job)
+    mutated["artifact_ref"] = "https://github.com/example/brigade/pull/99"
+    mutated["claimant_worker"] = "stolen-worker"
+    mutated["label"] = secret_task
+    fleet_hub_grokbot._record_event(conn, mutated, "claimed")
+    rows = conn.execute("SELECT * FROM events WHERE run_id=?", (job_id,)).fetchall()
+    assert len(rows) == before
+    dumped = json.dumps(rows)
+    assert secret_task not in dumped
+    assert "report body" not in dumped
+    payload_path = json.dumps(fleet_hub_grokbot._job_payload(mutated))
+    assert secret_task in payload_path
+    first = fleet_hub.store_events(
+        conn,
+        {
+            "node_id": NODE_A,
+            "run_id": "generic-run",
+            "sequence": 1,
+            "digest": "digest-a",
+            "state": "run.started",
+            "ts": "2026-08-30T00:00:00+00:00",
+        },
+    )
+    second = fleet_hub.store_events(
+        conn,
+        {
+            "node_id": NODE_A,
+            "run_id": "generic-run",
+            "sequence": 1,
+            "digest": "digest-b",
+            "state": "run.started",
+            "ts": "2026-08-30T00:00:01+00:00",
+        },
+    )
+    assert first["accepted"] == 1 and second["accepted"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM events WHERE run_id='generic-run'").fetchone()[0] == 2
+
+
+def test_node_cannot_ingest_reserved_grokbot_harness(conn):
+    before = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    poison = {
+        "node_id": NODE_A,
+        "run_id": "poison-run",
+        "sequence": 1,
+        "digest": "digest-poison",
+        "repo": "example/brigade",
+        "seat": "implementation-worker",
+        "harness": "grokbot",
+        "state": "external.queued",
+        "ts": "2026-08-30T00:00:00+00:00",
+    }
+    with pytest.raises(fleet_hub.FleetHubError, match="grokbot"):
+        fleet_hub.store_events(conn, poison, caller_node=NODE_A)
+    assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == before
+    assert conn.execute("SELECT COUNT(*) FROM events WHERE harness='grokbot'").fetchone()[0] == 0
+
+
+def test_grokbot_event_rejects_item_revision_sequence_mismatch(conn):
+    from brigade import fleet_hub_grokbot
+
+    _enroll_actors(conn)
+    job_id = "grokbot-" + "9" * 24
+    queued = fleet_hub_grokbot.handle_grokbot(
+        conn, _grokbot_enqueue(job_id, "9" * 64, operation_id="op-enq-mismatch"), caller_node=FEED_NODE
+    )[1]["job"]
+    job = fleet_hub_grokbot._require_job(conn, job_id)
+    mismatched = dict(job)
+    mismatched["sequence"] = int(job["sequence"]) + 1
+    before = conn.execute("SELECT COUNT(*) FROM events WHERE run_id=?", (job_id,)).fetchone()[0]
+    with pytest.raises(fleet_hub.FleetHubError):
+        fleet_hub_grokbot._record_event(conn, mismatched, "queued")
+    assert conn.execute("SELECT COUNT(*) FROM events WHERE run_id=?", (job_id,)).fetchone()[0] == before
+    assert queued["item_revision"] == queued["sequence"] == 1
+
+
+def test_grokbot_enqueue_rejects_local_repository_path(conn):
+    from brigade import fleet_hub_grokbot
+
+    _enroll_actors(conn)
+    job_id = "grokbot-" + "a" * 24
+    body = _grokbot_enqueue(job_id, "a" * 64, operation_id="op-enq-local")
+    body["repository"] = "/tmp/local-brigade"
+    before_jobs = conn.execute("SELECT COUNT(*) FROM grokbot_jobs").fetchone()[0]
+    before_events = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    with pytest.raises(fleet_hub.FleetHubError, match="repository"):
+        fleet_hub_grokbot.handle_grokbot(conn, body, caller_node=FEED_NODE)
+    assert conn.execute("SELECT COUNT(*) FROM grokbot_jobs").fetchone()[0] == before_jobs
+    assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == before_events
+    assert conn.execute("SELECT COUNT(*) FROM grokbot_jobs WHERE job_id=?", (job_id,)).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM events WHERE run_id=?", (job_id,)).fetchone()[0] == 0
+
+
+def test_external_expired_is_terminal_and_releases_hub_capacity(conn):
+    from brigade import fleet_hub_grokbot
+
+    _enroll_actors(conn)
+    job_id = "grokbot-" + "e" * 24
+    queued = fleet_hub_grokbot.handle_grokbot(
+        conn, _grokbot_enqueue(job_id, "e" * 64, operation_id="op-enq-exp"), caller_node=FEED_NODE
+    )[1]["job"]
+    claimed = fleet_hub_grokbot.handle_grokbot(
+        conn, _claim_body(job_id, lease_id="lease-exp", operation_id="op-claim-exp"), caller_node=WORKER_NODE
+    )
+    assert claimed[0] == 200
+    assert fleet_hub.list_cloud_leases(conn)
+    conn.execute(
+        "UPDATE grokbot_jobs SET lease_expires_at=?, queued_at=? WHERE job_id=?",
+        ("2020-01-01T00:00:00+00:00", "2020-01-01T00:00:00+00:00", job_id),
+    )
+    conn.commit()
+    expired = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        {
+            "action": "expire",
+            "job_id": job_id,
+            "expected_item_revision": claimed[1]["job"]["item_revision"],
+            "operation_id": "op-expire-exp",
+        },
+        caller_node=OPERATOR_NODE,
+    )
+    assert expired[0] == 200 and expired[1]["expired"] is True
+    assert expired[1]["job"]["state"] == "expired"
+    states = [row[0] for row in conn.execute("SELECT state FROM events WHERE run_id=?", (job_id,)).fetchall()]
+    assert "external.expired" in states
+    assert "external.expired" in fleet_hub.TERMINAL_STATES
+    assert deck.is_terminal_state("external.expired") is True
+    snapshot = fleet_hub.cloud_snapshot(conn, deck.DeckConfig())
+    assert snapshot["grokbot"]["active"] == []
+    assert snapshot["grokbot"]["history"][0]["state"] == "expired"
+    grok = next(worker for worker in deck.cloud_workers_from_snapshot(snapshot) if worker.provider == "grok-bot")
+    assert grok.used == 0
+    assert grok.leases == ()
+    assert fleet_hub.list_cloud_leases(conn) == []
+    live_states = {row["state"] for row in fleet_hub.latest_status(conn, include_all=False) if row["run_id"] == job_id}
+    assert "external.expired" not in live_states
+    history_states = {
+        row["state"] for row in fleet_hub.latest_status(conn, include_all=True) if row["run_id"] == job_id
+    }
+    assert "external.expired" in history_states
+    assert queued["job_id"] == job_id

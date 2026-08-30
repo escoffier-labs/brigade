@@ -26,9 +26,11 @@ TERMINAL_STATE_SUFFIXES = (
     ".interrupted",
     ".cancelled",
     ".canceled",
+    ".cancel-acknowledged",
     ".timed_out",
     ".timeout",
     ".orphaned",
+    ".expired",
 )
 FAILURE_STATE_SUFFIXES = (
     ".failed",
@@ -342,6 +344,7 @@ _IS_TERMINAL_SQL = (
 _FAILURE_MATCH_SQL = " OR ".join(f"state LIKE '%{suffix}'" for suffix in FAILURE_STATE_SUFFIXES)
 _INTERNAL_OUTCOME_PARAMS = tuple(sorted(INTERNAL_OUTCOME_STATES))
 _INTERNAL_OUTCOME_PLACEHOLDERS = ",".join("?" for _ in _INTERNAL_OUTCOME_PARAMS)
+_REPO_IDENTITY_SQL = "COALESCE(NULLIF(repo_identity, ''), NULLIF(repo, ''))"
 
 
 def fetch_live_runs(conn: sqlite3.Connection, *, now: datetime, stale_after_seconds: int) -> list[LiveRun]:
@@ -406,23 +409,34 @@ def fetch_outcomes(conn: sqlite3.Connection, *, outcome_window: int) -> list[Liv
     return [_live_run_from_row(row) for row in rows]
 
 
-def fetch_failed_outcomes(conn: sqlite3.Connection, *, now: datetime, lookback_seconds: int) -> list[LiveRun]:
+def fetch_failed_outcomes(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    lookback_seconds: int,
+    stale_after_seconds: int = 1800,
+) -> list[LiveRun]:
     cutoff = datetime.fromtimestamp(now.timestamp() - lookback_seconds, tz=now.tzinfo or _UTC).isoformat()
+    stale_cutoff = datetime.fromtimestamp(now.timestamp() - stale_after_seconds, tz=now.tzinfo or _UTC).isoformat()
     rows = conn.execute(
         "WITH latest AS (" + _LATEST_ROWS + "), failures AS ("
-        "SELECT node_id, run_id, repo, seat, harness, state, ts, ROW_NUMBER() OVER ("
-        "PARTITION BY node_id, COALESCE(repo, '') ORDER BY ts DESC, run_id DESC"
+        "SELECT node_id, run_id, repo, seat, harness, state, ts, received_at, repo_identity, "
+        f"{_REPO_IDENTITY_SQL} AS identity, ROW_NUMBER() OVER ("
+        f"PARTITION BY node_id, {_REPO_IDENTITY_SQL} ORDER BY received_at DESC, run_id DESC"
         ") AS attention_rank FROM latest "
-        f"WHERE ({_FAILURE_MATCH_SQL}) AND ts >= ?"
-        "), active AS ("
-        "SELECT node_id, repo, ts FROM latest "
-        f"WHERE {_NOT_TERMINAL_SQL}"
-        ") SELECT node_id, run_id, repo, seat, harness, state, ts FROM failures AS failure "
+        f"WHERE ({_FAILURE_MATCH_SQL}) AND received_at >= ?"
+        "), successors AS ("
+        f"SELECT node_id, {_REPO_IDENTITY_SQL} AS identity, received_at FROM latest "
+        f"WHERE ({_NOT_TERMINAL_SQL} AND received_at >= ?)"
+        f" OR (state LIKE '%.completed' AND state NOT IN ({_INTERNAL_OUTCOME_PLACEHOLDERS}))"
+        ") SELECT node_id, run_id, repo, seat, harness, state, ts, received_at, repo_identity "
+        "FROM failures AS failure "
         "WHERE attention_rank = 1 AND NOT EXISTS ("
-        "SELECT 1 FROM active WHERE active.node_id = failure.node_id "
-        "AND COALESCE(active.repo, '') = COALESCE(failure.repo, '') AND active.ts > failure.ts"
-        f") ORDER BY ts DESC, run_id DESC LIMIT {RAIL_FAILURE_LIMIT}",
-        (cutoff, *TERMINAL_STATES),
+        "SELECT 1 FROM successors WHERE successors.node_id = failure.node_id "
+        "AND failure.identity IS NOT NULL AND successors.identity IS NOT NULL "
+        "AND successors.identity = failure.identity AND successors.received_at > failure.received_at"
+        f") ORDER BY received_at DESC, run_id DESC LIMIT {RAIL_FAILURE_LIMIT}",
+        (cutoff, *TERMINAL_STATES, stale_cutoff, *_INTERNAL_OUTCOME_PARAMS),
     ).fetchall()
     return [_live_run_from_row(row, bucket="failed") for row in rows]
 

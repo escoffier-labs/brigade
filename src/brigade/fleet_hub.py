@@ -202,6 +202,8 @@ TERMINAL_STATES = frozenset(
         "external.completed",
         "external.failed",
         "external.canceled",
+        "external.cancel-acknowledged",
+        "external.expired",
     }
 )
 
@@ -697,6 +699,8 @@ def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str 
                 raise FleetHubForbidden(
                     f"event node_id {event['node_id']!r} does not match the caller's node token ({caller_node})"
                 )
+            if event.get("harness") == "grokbot":
+                raise FleetHubError("event field 'harness' is reserved for hub-owned grokbot lifecycle")
     accepted = 0
     duplicate = 0
     received_at = _utc_now()

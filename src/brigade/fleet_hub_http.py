@@ -412,7 +412,10 @@ def make_handler(
                     )
                 outcomes = fleet_command_deck.fetch_outcomes(conn, outcome_window=frozen_deck.outcome_window)
                 failed_outcomes = fleet_command_deck.fetch_failed_outcomes(
-                    conn, now=now, lookback_seconds=frozen_deck.failed_lookback_seconds
+                    conn,
+                    now=now,
+                    lookback_seconds=frozen_deck.failed_lookback_seconds,
+                    stale_after_seconds=frozen_deck.stale_after_seconds,
                 )
                 cloud_workers = fleet_command_deck.cloud_workers_from_snapshot(cloud_snapshot(conn, frozen_deck))
                 # Only unrevoked enrollments feed the label/enrolled mapping.

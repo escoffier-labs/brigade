@@ -51,10 +51,12 @@ def _insert(
     ts: str | None = None,
     received_at: str | None = None,
     repo: str = "repo",
+    repo_identity: str | None = None,
 ) -> None:
+    stamp = ts if ts is not None else _ts(10)
     conn.execute(
-        "INSERT INTO events (node_id, run_id, sequence, digest, repo, seat, harness, state, ts, received_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO events (node_id, run_id, sequence, digest, repo, seat, harness, state, ts, received_at, repo_identity)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             node_id,
             run_id,
@@ -64,9 +66,16 @@ def _insert(
             "seat",
             "claude",
             state,
-            ts if ts is not None else _ts(10),
-            received_at if received_at is not None else _ts(5),
+            stamp,
+            received_at if received_at is not None else stamp,
+            repo_identity,
         ),
+    )
+
+
+def _failed(conn: sqlite3.Connection, *, lookback_seconds: int = 86400, stale_after_seconds: int = 1800):
+    return deck.fetch_failed_outcomes(
+        conn, now=NOW, lookback_seconds=lookback_seconds, stale_after_seconds=stale_after_seconds
     )
 
 
@@ -371,7 +380,7 @@ def test_terminal_suffix_states_never_appear_in_live_reads_or_outcomes(conn):
         _insert(conn, NODE_A, f"key-{index}", 1, "run.created", ts=_ts(600), repo=f"repo-{index}")
         _insert(conn, NODE_A, f"key-{index}", 2, state, ts=_ts(60), repo=f"repo-{index}")
     assert deck.fetch_live_runs(conn, now=NOW, stale_after_seconds=1800) == []
-    failed = deck.fetch_failed_outcomes(conn, now=NOW, lookback_seconds=86400)
+    failed = _failed(conn)
     assert sorted(run.state for run in failed) == [
         "engine.timeout",
         "run.dispatch.failed",
@@ -508,11 +517,163 @@ def test_failed_attention_keeps_newest_per_node_repo_and_suppresses_active_retri
     _insert(conn, NODE_A, "prefix.alpha", 1, "run.dispatch.failed", ts=_ts(90), repo="repo-a")
     _insert(conn, NODE_A, "prefix.beta", 1, "run.dispatch.failed", ts=_ts(120), repo="repo-b")
 
-    assert [(run.run_id, run.repo) for run in deck.fetch_failed_outcomes(conn, now=NOW, lookback_seconds=86400)] == [
+    assert [(run.run_id, run.repo) for run in _failed(conn)] == [
         ("failure.new", "same-repo"),
         ("prefix.alpha", "repo-a"),
         ("prefix.beta", "repo-b"),
     ]
+
+
+def test_newer_successful_terminal_clears_failed_needs_you_for_same_repo(conn):
+    _insert(conn, NODE_A, "failure.old", 1, "run.failed", ts=_ts(180), repo="same-repo")
+    _insert(conn, NODE_A, "success.new", 1, "run.completed", ts=_ts(30), repo="same-repo")
+    _insert(conn, NODE_A, "other.fail", 1, "run.failed", ts=_ts(60), repo="other-repo")
+
+    assert [(run.run_id, run.repo) for run in _failed(conn)] == [("other.fail", "other-repo")]
+
+
+def test_stale_nonterminal_retry_does_not_hide_failed_needs_you(conn):
+    _insert(conn, NODE_A, "failure.old", 1, "run.failed", ts=_ts(240), repo="retrying")
+    _insert(conn, NODE_A, "retry.dead", 1, "run.started", ts=_ts(30), received_at=_ts(7200), repo="retrying")
+
+    assert [(run.run_id, run.repo) for run in _failed(conn, stale_after_seconds=1800)] == [("failure.old", "retrying")]
+
+
+def test_fresh_active_retry_suppresses_failed_needs_you(conn):
+    _insert(conn, NODE_A, "failure.old", 1, "run.failed", ts=_ts(240), repo="retrying")
+    _insert(conn, NODE_A, "retry.live", 1, "run.started", ts=_ts(30), repo="retrying")
+
+    assert _failed(conn, stale_after_seconds=1800) == []
+
+
+def test_different_node_cannot_clear_failed_needs_you(conn):
+    identity = "github.com/example/shared"
+    _insert(
+        conn,
+        NODE_A,
+        "failure.a",
+        1,
+        "run.failed",
+        ts=_ts(180),
+        repo="checkout-a",
+        repo_identity=identity,
+    )
+    _insert(
+        conn,
+        NODE_B,
+        "success.b",
+        1,
+        "run.completed",
+        ts=_ts(30),
+        repo="checkout-b",
+        repo_identity=identity,
+    )
+
+    assert [(run.run_id, run.node_id) for run in _failed(conn)] == [("failure.a", NODE_A)]
+
+
+def test_repoless_run_cannot_clear_another_repoless_failure(conn):
+    _insert(conn, NODE_A, "failure.empty", 1, "run.failed", ts=_ts(180), repo="")
+    _insert(conn, NODE_A, "retry.empty", 1, "run.started", ts=_ts(30), repo="")
+    _insert(conn, NODE_A, "success.empty", 1, "run.completed", ts=_ts(20), repo="")
+
+    assert [(run.run_id, run.repo) for run in _failed(conn)] == [("failure.empty", "")]
+
+
+def test_internal_completed_placeholder_does_not_clear_failed_needs_you(conn):
+    _insert(conn, NODE_A, "failure.old", 1, "run.failed", ts=_ts(180), repo="same-repo")
+    _insert(conn, NODE_A, "dispatch.done", 1, "run.dispatch.completed", ts=_ts(30), repo="same-repo")
+
+    assert [(run.run_id, run.repo) for run in _failed(conn)] == [("failure.old", "same-repo")]
+
+
+def test_skewed_node_ts_does_not_hide_failed_needs_you(conn):
+    _insert(
+        conn,
+        NODE_A,
+        "failure.old",
+        1,
+        "run.failed",
+        ts=_ts(30),
+        received_at=_ts(180),
+        repo="same-repo",
+        repo_identity="github.com/example/same",
+    )
+    _insert(
+        conn,
+        NODE_A,
+        "retry.skewed",
+        1,
+        "run.started",
+        ts=_ts(-7200),
+        received_at=_ts(7200),
+        repo="same-repo",
+        repo_identity="github.com/example/same",
+    )
+
+    assert [(run.run_id, run.repo) for run in _failed(conn, stale_after_seconds=1800)] == [("failure.old", "same-repo")]
+
+
+def test_needs_you_prefers_repo_identity_over_local_checkout_name(conn):
+    _insert(
+        conn,
+        NODE_A,
+        "failure.old",
+        1,
+        "run.failed",
+        ts=_ts(180),
+        repo="checkout-a",
+        repo_identity="github.com/example/same",
+    )
+    _insert(
+        conn,
+        NODE_A,
+        "success.new",
+        1,
+        "run.completed",
+        ts=_ts(30),
+        repo="checkout-b",
+        repo_identity="github.com/example/same",
+    )
+    _insert(
+        conn,
+        NODE_A,
+        "other.fail",
+        1,
+        "run.failed",
+        ts=_ts(60),
+        repo="checkout-a",
+        repo_identity="github.com/example/other",
+    )
+
+    assert [(run.run_id, run.repo_identity) for run in _failed(conn)] == [("other.fail", "github.com/example/other")]
+
+
+def test_external_expired_is_terminal_and_does_not_stay_live(conn):
+    _insert(conn, NODE_A, "expired-job", 1, "external.expired", ts=_ts(20), repo="repo-expired")
+    _insert(conn, NODE_A, "ack-job", 1, "external.cancel-acknowledged", ts=_ts(10), repo="repo-ack")
+    _insert(conn, NODE_A, "live-job", 1, "run.started", ts=_ts(15), repo="repo-live")
+
+    assert deck.is_terminal_state("external.expired") is True
+    assert deck.is_terminal_state("external.cancel-acknowledged") is True
+    live = deck.fetch_live_runs(conn, now=NOW, stale_after_seconds=1800)
+    assert [run.run_id for run in live] == ["live-job"]
+    outcomes = {run.run_id: run.state for run in deck.fetch_outcomes(conn, outcome_window=10)}
+    assert outcomes["expired-job"] == "external.expired"
+    assert outcomes["ack-job"] == "external.cancel-acknowledged"
+    view = deck.build_view(
+        deck.DeckConfig(stations=(deck.StationConfig(NODE_A, "Alpha", 4),)),
+        live_runs=live,
+        claims=[],
+        enrolled_labels={NODE_A: "Alpha"},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=NOW,
+    )
+    assert view.stations[0].busy == 1
+    assert [tile.run.run_id for tile in view.stations[0].tiles] == ["live-job"]
 
 
 # --- HTTP integration: hub-served Command Deck (task 2) ----------------------
