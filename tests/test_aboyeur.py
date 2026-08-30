@@ -15,6 +15,7 @@ from brigade import context_eval
 from brigade import evidence_brief
 from brigade import proc
 from brigade import provenance
+from brigade import run_transport
 from brigade import runguard
 from brigade.roster import Agent, Roster
 from tests import thread_sync
@@ -198,13 +199,16 @@ def _grok_roster(*, fallback=False):
     )
 
 
+_GROK_SESSION_ID = "019f0000-0000-7000-8000-000000000001"
+
+
 def _grok_envelope(answer, *, valid=True, stop_reason="EndTurn"):
     structured = {"kind": "answer", "answer": answer}
     return json.dumps(
         {
             "text": json.dumps(structured),
             "stopReason": stop_reason,
-            "sessionId": "019f0000-0000-7000-8000-000000000001",
+            "sessionId": _GROK_SESSION_ID,
             "requestId": "00000000-0000-4000-8000-000000000001",
             "structuredOutput": structured if valid else None,
             "structuredOutputError": None if valid else "model did not produce structured output",
@@ -217,9 +221,19 @@ def _stub_grok_process(monkeypatch, *results):
     outputs = iter(results)
     calls = []
 
+    monkeypatch.setattr(run_transport.uuid, "uuid4", lambda: _GROK_SESSION_ID)
+
     def fake_run(argv, **kwargs):
         if argv and Path(argv[0]).name == "grok":
             calls.append(argv)
+            if len(calls) == 1:
+                assert "--session-id" in argv
+                assert argv[argv.index("--session-id") + 1] == _GROK_SESSION_ID
+                assert "--resume" not in argv
+            else:
+                assert "--resume" in argv
+                assert argv[argv.index("--resume") + 1] == _GROK_SESSION_ID
+                assert "--session-id" not in argv
             return next(outputs)
         return real_run(argv, **kwargs)
 
@@ -2107,8 +2121,7 @@ def test_run_direct_grok_progress_only_output_fails_with_honest_artifacts(monkey
         "Reviewing the README.md and tools/brigade.md diffs against Brigade 0.22.0. "
         "Gathering the git diffs and current file content first."
     )
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
-    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
+    _stub_grok_process(monkeypatch, agents.proc.Result(0, output + "\n", ""))
     output_dir = tmp_path / "run"
 
     rc = run_aboyeur_guarded(
@@ -2124,22 +2137,18 @@ def test_run_direct_grok_progress_only_output_fails_with_honest_artifacts(monkey
     assert rc == 2
     run_payload = json.loads((output_dir / "run.json").read_text())
     assert run_payload["status"] == "failed"
-    assert run_payload["error"] == (
-        "grok invalid-final result did not include the session id required for exact continuation"
-    )
+    assert run_payload["error"] == "grok result session id did not match the launcher-owned dispatch binding"
     assert run_payload["suspected_noop"] is False
     worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
     assert worker["ok"] is False
-    assert worker["detail"] == (
-        "grok invalid-final result did not include the session id required for exact continuation"
-    )
-    assert worker["failure_kind"] == "grok-session-missing"
+    assert worker["detail"] == "grok result session id did not match the launcher-owned dispatch binding"
+    assert worker["failure_kind"] == "grok-session-unbound"
     assert worker["exit_code"] == 0
     assert len(worker["attempts"]) == 1
-    assert worker["attempts"][0]["failure_kind"] == "malformed-final-output"
+    assert worker["attempts"][0]["failure_kind"] == "grok-session-unbound"
     assert worker["attempts"][0]["selected"] is False
     assert (output_dir / worker["stdout_log"]).read_text() == output + "\n"
-    assert (output_dir / "final.txt").read_text().strip() == output
+    assert (output_dir / "final.txt").read_text().strip() == ""
 
 
 def test_run_direct_grok_structured_final_succeeds_with_honest_artifacts(monkeypatch, tmp_path):
@@ -2149,13 +2158,12 @@ def test_run_direct_grok_structured_final_succeeds_with_honest_artifacts(monkeyp
         {
             "text": json.dumps(structured),
             "stopReason": "EndTurn",
-            "sessionId": "019f0000-0000-7000-8000-000000000001",
+            "sessionId": _GROK_SESSION_ID,
             "requestId": "00000000-0000-4000-8000-000000000001",
             "structuredOutput": structured,
         }
     )
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
-    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+    _stub_grok_process(monkeypatch, agents.proc.Result(0, stdout + "\n", ""))
     output_dir = tmp_path / "run"
 
     rc = run_aboyeur_guarded(
@@ -2403,13 +2411,12 @@ def test_run_defers_success_until_worktree_artifact_collection(monkeypatch, tmp_
         {
             "text": json.dumps(structured),
             "stopReason": "EndTurn",
-            "sessionId": "019f0000-0000-7000-8000-000000000001",
+            "sessionId": _GROK_SESSION_ID,
             "requestId": "00000000-0000-4000-8000-000000000001",
             "structuredOutput": structured,
         }
     )
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
-    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+    _stub_grok_process(monkeypatch, agents.proc.Result(0, stdout + "\n", ""))
     output_dir = tmp_path / "run"
 
     rc = run_aboyeur_guarded(
