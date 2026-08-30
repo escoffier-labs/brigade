@@ -698,6 +698,7 @@ def test_lkg_path_swap_between_validation_and_open_never_writes_decoy(tmp_path, 
 
 
 def test_windows_without_nofollow_fails_closed(tmp_path, monkeypatch):
+    """Fail closed without O_NOFOLLOW/dir_fd: high-water cannot be trusted."""
     from brigade import fleet_model_admission
 
     with _hub(tmp_path) as hub:
@@ -752,17 +753,18 @@ def test_lkg_is_used_only_after_timeout_transport_or_http_5xx(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize(
-    ("exc", "reason"),
+    ("exc", "reason", "exit_code"),
     [
-        (urllib.error.HTTPError("http://hub.invalid/models", 401, "no", {}, None), "auth-failed"),
-        (urllib.error.HTTPError("http://hub.invalid/models", 403, "no", {}, None), "auth-failed"),
+        (urllib.error.HTTPError("http://hub.invalid/models", 401, "no", {}, None), "auth-failed", 1),
+        (urllib.error.HTTPError("http://hub.invalid/models", 403, "no", {}, None), "auth-failed", 1),
         (
             urllib.error.HTTPError("http://hub.invalid/models", 409, "conflict", {}, None),
             "revision-conflict",
+            4,
         ),
     ],
 )
-def test_authoritative_auth_and_conflict_never_fall_back_to_lkg(tmp_path, monkeypatch, exc, reason):
+def test_authoritative_auth_and_conflict_never_fall_back_to_lkg(tmp_path, monkeypatch, exc, reason, exit_code):
     from brigade import fleet_model_admission
 
     with _hub(tmp_path) as hub:
@@ -778,7 +780,7 @@ def test_authoritative_auth_and_conflict_never_fall_back_to_lkg(tmp_path, monkey
         )
         decision = fleet_model_admission.fetch_versioned_roster()
         assert decision.ok is False
-        assert decision.exit_code == 1
+        assert decision.exit_code == exit_code
         assert decision.reason == reason
         assert fleet_model_admission.lkg_path().read_bytes() == before
         _secret_free(decision, node_token, ADMIN_TOKEN)
@@ -1212,3 +1214,428 @@ def test_model_roster_read_cap_is_one_mib_without_raising_cloud_cap(tmp_path, mo
     assert "exceeded the size limit" not in decision.reason
     with pytest.raises(fleet_client.FleetClientError, match="size limit"):
         fleet_client.fetch_cloud()
+
+
+def _admission_success_body(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "schema": fleet_model_roster.ADMISSION_SCHEMA,
+        "state": "authoritative",
+        "source": "hub",
+        "roster_revision": 2,
+        "roster_digest": "sha256:" + ("ab" * 32),
+        "seat": "cursor_grok",
+        "provider": "cursor",
+        "model": "cursor-grok-4.6-high-fast",
+        "reasoning": "high",
+        "binding": {"instance_id": "cursor", "service_tier": "standard"},
+        "expires_at": "2026-08-30T14:15:00Z",
+    }
+    body.update(overrides)
+    return body
+
+
+def test_map_hub_admission_rejects_non_authoritative_or_extra_fields_and_applies_retired_floor():
+    from brigade import fleet_model_admission
+
+    extra = _admission_success_body(token="secret-token")
+    extra_decision = fleet_model_admission._map_hub_admission(200, extra)
+    assert extra_decision.ok is False
+    assert extra_decision.exit_code == 2
+    assert extra_decision.reason == "unsupported-schema"
+    _secret_free(extra_decision, "secret-token")
+
+    wrong_schema = _admission_success_body(schema="brigade.model_admission.v0")
+    schema_decision = fleet_model_admission._map_hub_admission(200, wrong_schema)
+    assert schema_decision.ok is False
+    assert schema_decision.exit_code == 2
+    assert schema_decision.reason == "unsupported-schema"
+
+    stale_state = _admission_success_body(state="denied")
+    state_decision = fleet_model_admission._map_hub_admission(200, stale_state)
+    assert state_decision.ok is False
+    assert state_decision.exit_code == 2
+
+    with_error = _admission_success_body()
+    with_error["error"] = "retired-model"
+    error_decision = fleet_model_admission._map_hub_admission(200, with_error)
+    assert error_decision.ok is False
+    assert error_decision.exit_code == 2
+
+    retired = _admission_success_body(provider="codex", model="gpt-5.5", seat="coder")
+    retired_decision = fleet_model_admission._map_hub_admission(200, retired)
+    assert retired_decision.ok is False
+    assert retired_decision.exit_code == 3
+    assert retired_decision.reason == "retired-model"
+
+    ok = fleet_model_admission._map_hub_admission(200, _admission_success_body())
+    assert ok.ok is True
+    assert ok.exit_code == 0
+    assert set(ok.payload) == {
+        "schema",
+        "state",
+        "source",
+        "roster_revision",
+        "roster_digest",
+        "seat",
+        "provider",
+        "model",
+        "reasoning",
+        "binding",
+        "expires_at",
+    }
+
+
+def test_reconcile_authority_failure_is_nonzero_and_doctor_does_not_write_cache(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        assert not fleet_model_admission.lkg_path().exists()
+        assert not fleet_model_admission.high_water_path().exists()
+        doctor = fleet_model_admission.doctor_model_roster(consumer="t3-fleet")
+        assert doctor.ok is True
+        assert not fleet_model_admission.lkg_path().exists()
+        assert not fleet_model_admission.high_water_path().exists()
+        assert doctor.payload["cache_valid"] is False
+
+        seeded = fleet_model_admission.fetch_versioned_roster()
+        assert seeded.ok is True
+        lkg_before = fleet_model_admission.lkg_path().read_bytes()
+        high_before = fleet_model_admission.high_water_path().read_bytes()
+        doctor_again = fleet_model_admission.doctor_model_roster(consumer="t3-fleet")
+        assert doctor_again.ok is True
+        assert doctor_again.payload["cache_valid"] is True
+        assert fleet_model_admission.lkg_path().read_bytes() == lkg_before
+        assert fleet_model_admission.high_water_path().read_bytes() == high_before
+
+        reconcile = fleet_model_admission.reconcile_model_roster(consumer="t3-fleet")
+        assert reconcile.ok is True
+        assert fleet_model_admission.lkg_path().read_bytes() == lkg_before
+        assert fleet_model_admission.high_water_path().read_bytes() == high_before
+
+        monkeypatch.setattr(
+            fleet_client,
+            "_run_with_deadline",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                urllib.error.HTTPError("http://hub.invalid/models", 401, "no", {}, None)
+            ),
+        )
+        failed = fleet_model_admission.reconcile_model_roster(consumer="t3-fleet")
+        assert failed.ok is False
+        assert failed.exit_code == 1
+        assert failed.reason == "auth-failed"
+        assert failed.payload.get("findings") in (None, [])
+        assert fleet_model_admission.lkg_path().read_bytes() == lkg_before
+
+
+def test_doctor_cache_valid_revalidates_mac_not_existence(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        assert fleet_model_admission.fetch_versioned_roster().ok is True
+        lkg = fleet_model_admission.lkg_path()
+        record = json.loads(lkg.read_text(encoding="utf-8"))
+        record["roster"]["mac"] = {
+            "algorithm": fleet_model_roster.MAC_ALGORITHM,
+            "value": "ab" * 32,
+        }
+        lkg.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+        os.chmod(lkg, 0o600)
+        doctor = fleet_model_admission.doctor_model_roster(consumer="t3-fleet")
+        assert doctor.ok is True
+        assert doctor.payload["cache_valid"] is False
+
+
+def test_malformed_signed_rows_are_malformed_roster_without_mutation(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        roster = _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        assert fleet_model_admission.fetch_versioned_roster().ok is True
+        before = fleet_model_admission.lkg_path().read_bytes()
+        bad = json.loads(json.dumps(roster))
+        bad["seats"] = [{"seat": "cursor_grok", "provider": "cursor"}]
+        bad["roster_digest"] = fleet_model_roster.roster_digest(bad)
+        bad["mac"] = {
+            "algorithm": fleet_model_roster.MAC_ALGORITHM,
+            "value": fleet_model_roster.roster_mac(node_token, bad),
+        }
+        monkeypatch.setattr(fleet_client, "_run_with_deadline", lambda *args, **kwargs: bad)
+        decision = fleet_model_admission.fetch_versioned_roster()
+        assert decision.ok is False
+        assert decision.reason == "malformed-roster"
+        assert decision.exit_code == 1
+        assert fleet_model_admission.lkg_path().read_bytes() == before
+
+
+def test_lkg_enforces_independent_ttl_windows(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        roster = _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        assert fleet_model_admission.fetch_versioned_roster().ok is True
+        before = fleet_model_admission.lkg_path().read_bytes()
+
+        wide = json.loads(json.dumps(roster))
+        issued = datetime.now(timezone.utc).replace(microsecond=0)
+        wide["issued_at"] = issued.strftime("%Y-%m-%dT%H:%M:%SZ")
+        wide["expires_at"] = (issued + timedelta(seconds=901)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        wide["mac"] = {
+            "algorithm": fleet_model_roster.MAC_ALGORITHM,
+            "value": fleet_model_roster.roster_mac(node_token, wide),
+        }
+        monkeypatch.setattr(fleet_client, "_run_with_deadline", lambda *args, **kwargs: wide)
+        window = fleet_model_admission.fetch_versioned_roster(allow_lkg=False)
+        assert window.ok is False
+        assert window.reason in {"lkg-expired", "malformed-roster"}
+        assert fleet_model_admission.lkg_path().read_bytes() == before
+
+        record = json.loads(before.decode("ascii"))
+        record["cached_at"] = (issued - timedelta(seconds=901)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        fleet_model_admission.lkg_path().write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+        os.chmod(fleet_model_admission.lkg_path(), 0o600)
+        monkeypatch.setattr(
+            fleet_client,
+            "_run_with_deadline",
+            lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("deadline")),
+        )
+        aged = fleet_model_admission.fetch_versioned_roster()
+        assert aged.ok is False
+        assert aged.reason == "lkg-expired"
+
+
+def test_admit_malformed_and_client_errors_never_use_lkg(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        assert fleet_model_admission.fetch_versioned_roster().ok is True
+        before = fleet_model_admission.lkg_path().read_bytes()
+
+        def _deadline(fn, *, timeout):  # noqa: ARG001
+            return fn()
+
+        monkeypatch.setattr(fleet_client, "_run_with_deadline", _deadline)
+        monkeypatch.setattr(
+            fleet_client,
+            "_get_models_blocking",
+            lambda *args, **kwargs: json.loads(before.decode("ascii"))["roster"],
+        )
+        monkeypatch.setattr(
+            fleet_client,
+            "_post_model_policy_blocking",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                fleet_client.FleetClientError("fleet hub cloud response exceeded the size limit")
+            ),
+        )
+        oversized = fleet_model_admission.admit_model(
+            consumer="t3-fleet",
+            request_id="99999999-9999-4999-8999-999999999999",
+            phase="controller",
+        )
+        assert oversized.ok is False
+        assert oversized.exit_code == 1
+        assert oversized.payload.get("source") != "lkg"
+        assert fleet_model_admission.lkg_path().read_bytes() == before
+
+        monkeypatch.setattr(
+            fleet_client,
+            "_post_model_policy_blocking",
+            lambda *args, **kwargs: (200, {"schema": "other", "token": "secret-token"}),
+        )
+        schema = fleet_model_admission.admit_model(
+            consumer="t3-fleet",
+            request_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            phase="controller",
+        )
+        assert schema.ok is False
+        assert schema.exit_code == 2
+        assert schema.reason == "unsupported-schema"
+        assert schema.payload.get("source") != "lkg"
+        _secret_free(schema, "secret-token")
+
+
+def test_admit_validates_request_id_and_seat_before_hub(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        calls: list[str] = []
+
+        def _deadline(fn, *, timeout):  # noqa: ARG001
+            calls.append("hub")
+            return fn()
+
+        monkeypatch.setattr(fleet_client, "_run_with_deadline", _deadline)
+        bad_id = fleet_model_admission.admit_model(
+            consumer="t3-fleet",
+            request_id="not a valid id",
+            phase="controller",
+        )
+        assert bad_id.ok is False
+        assert bad_id.exit_code == 2
+        assert bad_id.reason == "unsupported-schema"
+        assert calls == []
+
+        bad_seat = fleet_model_admission.admit_model(
+            consumer="t3-fleet",
+            request_id=ADMIT_REQUEST_ID,
+            phase="controller",
+            seat="BadSeat",
+        )
+        assert bad_seat.ok is False
+        assert bad_seat.exit_code == 2
+        assert bad_seat.reason == "unsupported-schema"
+        assert calls == []
+
+
+def test_reconcile_missing_default_and_enabled_seats_are_instance_missing(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        _seed_hub(hub, node_token)
+        assert (
+            _admin_set(
+                hub,
+                seat="cursor_composer",
+                model="composer-2.5",
+                brigade_cli="cursor-agent",
+                t3_instance_id="cursor",
+            )[0]
+            == 200
+        )
+        home = _configure_client(monkeypatch, tmp_path, hub, node_token)
+        (home / ".brigade").mkdir(parents=True, exist_ok=True)
+        (home / ".brigade" / "roster.toml").write_text(
+            'orchestrator = "chef"\n\n[agents.chef]\ncli = "claude"\nrole = "plan"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(home)
+        decision = fleet_model_admission.reconcile_model_roster(consumer="t3-fleet")
+        assert decision.ok is True
+        codes = {item["code"] for item in decision.payload["findings"]}
+        seats = {item.get("seat") for item in decision.payload["findings"]}
+        assert "instance-missing" in codes
+        assert "cursor_grok" in seats
+        assert "cursor_composer" in seats
+
+
+def test_lkg_cache_omits_legacy_models_projection(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        assert fleet_model_admission.fetch_versioned_roster().ok is True
+        record = json.loads(fleet_model_admission.lkg_path().read_text(encoding="utf-8"))
+        assert "models" not in record["roster"]
+        assert set(record["roster"]) <= set(fleet_model_roster.CACHE_ENVELOPE_KEYS) | {"mac"}
+
+
+def test_audit_spool_bounds_replay_and_fails_closed_on_corrupt(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        assert fleet_model_admission.fetch_versioned_roster().ok is True
+        monkeypatch.setattr(
+            fleet_client,
+            "_run_with_deadline",
+            lambda *args, **kwargs: (_ for _ in ()).throw(urllib.error.URLError("offline")),
+        )
+        admitted = fleet_model_admission.admit_model(
+            consumer="t3-fleet",
+            request_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            phase="controller",
+        )
+        assert admitted.ok is True
+        spool = fleet_model_admission.audit_spool_path()
+        rows = [json.loads(line) for line in spool.read_text(encoding="utf-8").splitlines() if line]
+        assert "created_at" in rows[-1]
+        assert rows[-1].get("node_id") == NODE_A
+        _secret_free(rows[-1], node_token, ADMIN_TOKEN, str(tmp_path), "prompt")
+
+        stale = {
+            "source": "lkg",
+            "request_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            "phase": "controller",
+            "consumer": "t3-fleet",
+            "request_digest": "ab" * 32,
+            "decision": "admitted",
+            "admission": {},
+            "created_at": "2020-01-01T00:00:00Z",
+            "node_id": NODE_A,
+        }
+        current = json.loads(spool.read_text(encoding="utf-8").splitlines()[-1])
+        spool.write_text(
+            json.dumps(stale, sort_keys=True) + "\n" + json.dumps(current, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(spool, 0o600)
+        replay = fleet_model_admission.admit_model(
+            consumer="t3-fleet",
+            request_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            phase="controller",
+        )
+        assert replay.payload == admitted.payload
+        extra = fleet_model_admission.admit_model(
+            consumer="t3-fleet",
+            request_id="ffffffff-ffff-4fff-8fff-ffffffffffff",
+            phase="controller",
+        )
+        assert extra.ok is True
+        kept = [json.loads(line) for line in spool.read_text(encoding="utf-8").splitlines() if line]
+        assert all(row.get("request_id") != stale["request_id"] for row in kept)
+
+        spool.write_text("{not-json\n", encoding="utf-8")
+        os.chmod(spool, 0o600)
+        corrupt = fleet_model_admission.admit_model(
+            consumer="t3-fleet",
+            request_id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            phase="controller",
+        )
+        assert corrupt.ok is False
+        assert corrupt.reason in {"lkg-unsafe", "malformed-roster"}
+
+
+def test_admin_mutation_constructs_safe_output_and_maps_get_style_409(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        roster = _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        decision = fleet_model_admission.set_consumer_default(
+            "t3-fleet", "cursor_grok", expected_revision=int(roster["revision"])
+        )
+        assert decision.ok is True
+        assert decision.exit_code == 0
+        assert set(decision.payload) <= {"updated", "revision", "consumer", "seat", "policy", "retired"}
+        _secret_free(decision, node_token, ADMIN_TOKEN, str(tmp_path))
+
+        monkeypatch.setattr(
+            fleet_client,
+            "_run_with_deadline",
+            lambda *args, **kwargs: (409, {"error": "roster_revision_conflict", "token": "secret"}),
+        )
+        conflict = fleet_model_admission.set_consumer_default("t3-fleet", "cursor_grok", expected_revision=1)
+        assert conflict.ok is False
+        assert conflict.exit_code == 4
+        _secret_free(conflict, "secret")

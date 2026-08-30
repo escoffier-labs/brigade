@@ -172,6 +172,13 @@ def test_retired_family_match_does_not_catch_gpt_5_40():
     assert fleet_model_roster.retired_reason("openai", "gpt-5.40") is None
 
 
+@pytest.mark.parametrize("provider", ["codex", "openai-codex"])
+def test_permanent_retired_floor_canonicalizes_openai_provider_aliases(provider):
+    assert fleet_model_roster.retired_reason(provider, "gpt-5.4") == "permanently-retired"
+    assert fleet_model_roster.retired_reason(provider, "gpt-5.5-high") == "permanently-retired"
+    assert fleet_model_roster.retired_reason(provider, "gpt-5.40") is None
+
+
 def test_retired_family_normalizes_stored_family_and_cursor_prefixed_model():
     rows = (
         {
