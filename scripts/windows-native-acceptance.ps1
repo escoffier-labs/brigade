@@ -837,6 +837,71 @@ else:
         & $brigadePython $inboxProbeScript $inboxProbeRoot
         if ($LASTEXITCODE -ne 0) { throw "import inbox Windows probe failed" }
 
+        Write-Step "inbox lock msvcrt contention deadline"
+        $inboxLockProbeRoot = Join-Path $acceptRoot "inbox-lock-probe"
+        New-Item -ItemType Directory -Force -Path $inboxLockProbeRoot | Out-Null
+        $inboxLockProbeScript = Join-Path $acceptRoot "inbox_lock_contention_probe.py"
+        @'
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from brigade.work_cmd import inbox_lock
+
+target = Path(sys.argv[1]).resolve()
+probe_root = Path(sys.argv[2]).resolve()
+probe_root.mkdir(parents=True, exist_ok=True)
+(target / ".brigade" / "work" / "imports").mkdir(parents=True, exist_ok=True)
+ready = probe_root / "holder-ready"
+holder = probe_root / "holder.py"
+holder.write_text(
+    "from pathlib import Path\n"
+    "import sys\n"
+    "import time\n"
+    "from brigade.work_cmd import inbox_lock\n"
+    "target = Path(sys.argv[1])\n"
+    "ready = Path(sys.argv[2])\n"
+    "with inbox_lock.inbox_writer_lock(target, deadline_seconds=10):\n"
+    "    ready.write_text('ready', encoding='utf-8')\n"
+    "    time.sleep(10)\n",
+    encoding="utf-8",
+)
+
+holder_process = subprocess.Popen([sys.executable, str(holder), str(target), str(ready)])
+try:
+    wait_deadline = time.monotonic() + 5
+    while not ready.exists():
+        if holder_process.poll() is not None:
+            raise SystemExit(f"native lock holder exited early: {holder_process.returncode}")
+        if time.monotonic() >= wait_deadline:
+            raise SystemExit("native lock holder did not become ready")
+        time.sleep(0.02)
+
+    if inbox_lock.msvcrt is None:
+        raise SystemExit("msvcrt is unavailable in native Windows acceptance")
+    if inbox_lock.fcntl is not None:
+        raise SystemExit("fcntl unexpectedly available in native Windows acceptance")
+
+    started = time.monotonic()
+    try:
+        with inbox_lock.inbox_writer_lock(target, deadline_seconds=0.5):
+            raise SystemExit("inbox writer lock did not time out behind native holder")
+    except inbox_lock.InboxLockTimeout:
+        elapsed = time.monotonic() - started
+        if elapsed < 0.35 or elapsed > 2:
+            raise SystemExit(f"native LK_NBLCK acquisition exceeded deadline bound: {elapsed:.3f}s")
+finally:
+    holder_process.terminate()
+    try:
+        holder_process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        holder_process.kill()
+        holder_process.wait(timeout=10)
+'@ | Set-Content -Path $inboxLockProbeScript -Encoding UTF8
+        & $brigadePython $inboxLockProbeScript $workRepo $inboxLockProbeRoot
+        if ($LASTEXITCODE -ne 0) { throw "native msvcrt inbox lock contention probe failed" }
+
         # import-issues reads .brigade/memory-care/decay/refresh-queue.json.
         # operator quickstart / init create the decay directory, not the queue;
         # scan is the producer (same order as the daily-care-pass runbook).
