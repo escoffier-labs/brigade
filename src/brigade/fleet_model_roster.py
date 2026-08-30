@@ -13,6 +13,7 @@ ADMISSION_REQUEST_SCHEMA = "brigade.model_admission_request.v1"
 MAC_PREFIX = b"brigade.fleet-model-roster.lkg.v1\0"
 MAC_ALGORITHM = "hmac-sha256-node-bearer-v1"
 LKG_TTL_SECONDS = 900
+CLOCK_SKEW_SECONDS = 60
 FAMILY_SEPARATORS = ("-", "/", ":")
 PROVIDER_SEPARATORS = ("/", ":")
 PERMANENT_REASON = "permanently-retired"

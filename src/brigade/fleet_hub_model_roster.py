@@ -621,13 +621,43 @@ def _admit(conn: sqlite3.Connection, raw: Any, *, caller_node: str) -> tuple[int
             return (200, payload) if str(existing[13]) == "admitted" else (409, payload)
         roster = project_roster(conn, audience_node_id=caller_node)
         if expect_revision is not None and int(roster["revision"]) != expect_revision:
+            payload = _record_admission(
+                conn,
+                caller_node=caller_node,
+                request_id=request_id,
+                phase=str(phase),
+                consumer=consumer,
+                roster=roster,
+                request_digest=request_digest,
+                decision="roster_revision_conflict",
+                seat=None,
+                provider=None,
+                model=None,
+                reasoning=None,
+                binding=None,
+            )
             if opened:
-                conn.rollback()
-            return 409, {"error": "roster_revision_conflict"}
+                conn.commit()
+            return 409, payload
         if expect_digest is not None and expect_digest != roster["roster_digest"]:
+            payload = _record_admission(
+                conn,
+                caller_node=caller_node,
+                request_id=request_id,
+                phase=str(phase),
+                consumer=consumer,
+                roster=roster,
+                request_digest=request_digest,
+                decision="roster_digest_conflict",
+                seat=None,
+                provider=None,
+                model=None,
+                reasoning=None,
+                binding=None,
+            )
             if opened:
-                conn.rollback()
-            return 409, {"error": "roster_digest_conflict"}
+                conn.commit()
+            return 409, payload
         seat_name = requested_seat or _consumer_defaults(conn).get(consumer)
         seat: dict[str, Any] | None = None
         binding: dict[str, Any] | None = None

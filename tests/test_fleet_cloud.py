@@ -531,6 +531,51 @@ def test_changing_seat_route_replaces_only_that_seat(tmp_path):
         assert by_seat["reviewer"]["model"] == "gpt-5.6-terra"
 
 
+def test_set_model_policy_fetches_revision_and_sends_reasoning_bindings(monkeypatch):
+    posted: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub", "admin_token": "admin-token", "node_token": ""},
+    )
+
+    def _deadline(fn, *, timeout):  # noqa: ARG001
+        return fn()
+
+    monkeypatch.setattr(fleet_client, "_run_with_deadline", _deadline)
+
+    def _get(hub_url, path, token, *, timeout):  # noqa: ARG001
+        assert path == "/models"
+        assert token == "admin-token"
+        return {"schema": "brigade.fleet_model_roster.v1", "revision": 7, "models": []}
+
+    monkeypatch.setattr(fleet_client, "_get_models_blocking", _get)
+
+    def _post(hub_url, token, body, *, timeout):  # noqa: ARG001
+        posted.update(body)
+        return 200, {
+            "policy": {
+                "provider": body["provider"],
+                "model": body["model"],
+                "seat": body["seat"],
+                "enabled": body["enabled"],
+                "limit": body.get("limit"),
+                "notes": body.get("notes"),
+            }
+        }
+
+    monkeypatch.setattr(fleet_client, "_post_model_policy_blocking", _post)
+    policy = fleet_client.set_model_policy("openai", "gpt-5.6-terra", "coder", enabled=True)
+    assert policy["seat"] == "coder"
+    assert posted["action"] == "set"
+    assert posted["expected_revision"] == 7
+    assert posted["reasoning"] == "none"
+    assert posted["brigade_cli"] == ""
+    assert posted["t3_instance_id"] == ""
+    assert posted["t3_service_tier"] == ""
+
+
 def test_set_model_policy_fails_closed_on_oversized_response(monkeypatch):
     class _OversizedResponse:
         status = 200

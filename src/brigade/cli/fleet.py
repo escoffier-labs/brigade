@@ -179,6 +179,42 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_models_set.add_argument("--notes", default=None, help="Optional operator note (stored as safe policy metadata).")
     p_models_set.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     p_models_set.set_defaults(func=_dispatch_models_set)
+    p_models_admit = models_sub.add_parser("admit", help="Admit one consumer/seat from the hub roster.")
+    p_models_admit.add_argument("--consumer", required=True, help="brigade-run or t3-fleet.")
+    p_models_admit.add_argument("--request-id", required=True, help="Caller-generated idempotency key.")
+    p_models_admit.add_argument("--phase", required=True, help="controller, target, or brigade-run.")
+    p_models_admit.add_argument("--seat", default=None, help="Optional explicit seat instead of the consumer default.")
+    p_models_admit.add_argument("--expect-revision", type=int, default=None, help="Bind replay to this revision.")
+    p_models_admit.add_argument("--expect-digest", default=None, help="Bind replay to this roster digest.")
+    p_models_admit.add_argument("--no-lkg", action="store_true", help="Disable last-known-good fallback.")
+    p_models_admit.add_argument("--json", action="store_true", help="Emit JSON.")
+    p_models_admit.set_defaults(func=_dispatch_models_admit)
+    p_models_doctor = models_sub.add_parser("doctor", help="Read-only hub/cache/roster health for one consumer.")
+    p_models_doctor.add_argument("--consumer", required=True, help="brigade-run or t3-fleet.")
+    p_models_doctor.add_argument("--json", action="store_true", help="Emit JSON.")
+    p_models_doctor.set_defaults(func=_dispatch_models_doctor)
+    p_models_reconcile = models_sub.add_parser(
+        "reconcile", help="Report local roster and project-default drift without mutating Hub or T3."
+    )
+    p_models_reconcile.add_argument("--consumer", required=True, help="brigade-run or t3-fleet.")
+    p_models_reconcile.add_argument("--json", action="store_true", help="Emit JSON.")
+    p_models_reconcile.set_defaults(func=_dispatch_models_reconcile)
+    p_models_retire = models_sub.add_parser("retire", help="Retire a provider/family on the hub roster.")
+    p_models_retire.add_argument("provider", help="Lowercase provider identifier.")
+    p_models_retire.add_argument("family", help="Family root such as gpt-5.4.")
+    p_models_retire.add_argument("--permanent", action="store_true", help="Mark the retirement as permanent.")
+    p_models_retire.add_argument("--expect-revision", type=int, required=True, help="Current hub roster revision.")
+    p_models_retire.add_argument("--reason-code", default="operator-retired", help="Bounded retirement reason.")
+    p_models_retire.add_argument("--json", action="store_true", help="Emit JSON.")
+    p_models_retire.set_defaults(func=_dispatch_models_retire)
+    p_models_default = models_sub.add_parser("default", help="Mutate a consumer default seat.")
+    default_sub = p_models_default.add_subparsers(dest="models_default_command", metavar="<default-command>")
+    p_models_default_set = default_sub.add_parser("set", help="Set the hub consumer default seat.")
+    p_models_default_set.add_argument("consumer", help="brigade-run or t3-fleet.")
+    p_models_default_set.add_argument("seat", help="Enabled roster seat.")
+    p_models_default_set.add_argument("--expect-revision", type=int, required=True, help="Current hub roster revision.")
+    p_models_default_set.add_argument("--json", action="store_true", help="Emit JSON.")
+    p_models_default_set.set_defaults(func=_dispatch_models_default_set)
 
     p_claims = fleet_sub.add_parser("claims", help="List active repo claims held on the fleet hub, or release one.")
     p_claims.add_argument("--all", action="store_true", help="Include expired claims.")
@@ -1148,6 +1184,97 @@ def _dispatch_models_set(args: argparse.Namespace) -> int:
         f"{'enabled' if policy.get('enabled') else 'disabled'}"
     )
     return 0
+
+
+def _print_admission_json(payload: object) -> None:
+    import json as _json
+
+    print(_json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _dispatch_models_admit(args: argparse.Namespace) -> int:
+    from .. import fleet_model_admission, fleet_model_roster
+
+    if args.consumer not in fleet_model_roster.CONSUMERS or args.phase not in fleet_model_roster.ADMISSION_PHASES:
+        if args.json:
+            _print_admission_json({"reason": "unsupported-schema"})
+        else:
+            print("error: unsupported consumer or phase", file=sys.stderr)
+        return 2
+    decision = fleet_model_admission.admit_model(
+        consumer=args.consumer,
+        request_id=args.request_id,
+        phase=args.phase,
+        seat=args.seat,
+        expect_revision=args.expect_revision,
+        expect_digest=args.expect_digest,
+        allow_lkg=not args.no_lkg,
+    )
+    if args.json:
+        _print_admission_json(decision.payload)
+    elif not decision.ok:
+        print(f"error: {decision.reason}", file=sys.stderr)
+    return decision.exit_code
+
+
+def _dispatch_models_doctor(args: argparse.Namespace) -> int:
+    from .. import fleet_model_admission, fleet_model_roster
+
+    if args.consumer not in fleet_model_roster.CONSUMERS:
+        if args.json:
+            _print_admission_json({"reason": "unsupported-schema"})
+        return 2
+    decision = fleet_model_admission.doctor_model_roster(consumer=args.consumer)
+    if args.json:
+        _print_admission_json(decision.payload)
+    elif not decision.ok:
+        print(f"error: {decision.reason}", file=sys.stderr)
+    return decision.exit_code
+
+
+def _dispatch_models_reconcile(args: argparse.Namespace) -> int:
+    from .. import fleet_model_admission, fleet_model_roster
+
+    if args.consumer not in fleet_model_roster.CONSUMERS:
+        if args.json:
+            _print_admission_json({"reason": "unsupported-schema"})
+        return 2
+    decision = fleet_model_admission.reconcile_model_roster(consumer=args.consumer)
+    if args.json:
+        _print_admission_json(decision.payload)
+    elif not decision.ok:
+        print(f"error: {decision.reason}", file=sys.stderr)
+    return decision.exit_code
+
+
+def _dispatch_models_retire(args: argparse.Namespace) -> int:
+    from .. import fleet_model_admission
+
+    decision = fleet_model_admission.retire_model(
+        args.provider,
+        args.family,
+        permanent=bool(args.permanent),
+        expected_revision=args.expect_revision,
+        reason_code=args.reason_code,
+    )
+    if args.json:
+        _print_admission_json(decision.payload)
+    elif not decision.ok:
+        print(f"error: {decision.reason}", file=sys.stderr)
+    return decision.exit_code
+
+
+def _dispatch_models_default_set(args: argparse.Namespace) -> int:
+    from .. import fleet_model_admission
+
+    decision = fleet_model_admission.set_consumer_default(
+        args.consumer, args.seat, expected_revision=args.expect_revision
+    )
+    if args.json:
+        _print_admission_json(decision.payload)
+    elif not decision.ok:
+        print(f"error: {decision.reason}", file=sys.stderr)
+    return decision.exit_code
 
 
 def _dispatch_flush(args: argparse.Namespace) -> int:

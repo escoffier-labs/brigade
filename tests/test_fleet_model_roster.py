@@ -482,6 +482,33 @@ def test_admit_is_node_bound_idempotent_and_conflicts_on_replay_drift(tmp_path):
         status, revision_conflict = _request(hub, "POST", "/models", token=node_token, body=stale)
         assert status == 409
         assert revision_conflict["error"] == "roster_revision_conflict"
+        assert revision_conflict["roster_revision"] == roster["revision"]
+        assert revision_conflict["roster_digest"] == roster["roster_digest"]
+        assert revision_conflict.get("seat") is None
+        assert revision_conflict.get("provider") is None
+        assert revision_conflict.get("model") is None
+        assert revision_conflict.get("reasoning") is None
+        status, revision_replay = _request(hub, "POST", "/models", token=node_token, body=stale)
+        assert status == 409
+        assert revision_replay == revision_conflict
+        digest_stale = dict(
+            admit,
+            request_id="44444444-4444-4444-8444-444444444444",
+            expect_digest="sha256:" + ("ab" * 32),
+        )
+        status, digest_conflict = _request(hub, "POST", "/models", token=node_token, body=digest_stale)
+        assert status == 409
+        assert digest_conflict["error"] == "roster_digest_conflict"
+        assert digest_conflict["roster_revision"] == roster["revision"]
+        assert digest_conflict["roster_digest"] == roster["roster_digest"]
+        assert digest_conflict.get("seat") is None
+        status, digest_replay = _request(hub, "POST", "/models", token=node_token, body=digest_stale)
+        assert status == 409
+        assert digest_replay == digest_conflict
+        drifted_conflict = dict(digest_stale, expect_revision=1)
+        status, digest_drift = _request(hub, "POST", "/models", token=node_token, body=drifted_conflict)
+        assert status == 409
+        assert digest_drift["error"] == "admission-conflict"
         assert (
             _request(
                 hub,
@@ -565,6 +592,26 @@ def test_admit_is_node_bound_idempotent_and_conflicts_on_replay_drift(tmp_path):
                     "cursor",
                     "cursor-grok-4.6-high-fast",
                     "high",
+                ),
+                (
+                    NODE_A,
+                    "11111111-1111-4111-8111-111111111111",
+                    "controller",
+                    "t3-fleet",
+                    "roster_revision_conflict",
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    NODE_A,
+                    "44444444-4444-4444-8444-444444444444",
+                    "controller",
+                    "t3-fleet",
+                    "roster_digest_conflict",
+                    None,
+                    None,
+                    None,
                 ),
                 (
                     NODE_A,

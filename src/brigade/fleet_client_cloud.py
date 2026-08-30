@@ -92,10 +92,10 @@ _CLOUD_LEASE_FIELDS = frozenset(
 _MODEL_POLICY_FIELDS = frozenset({"provider", "model", "seat", "enabled", "limit", "notes"})
 
 
-def _bounded_json_response(response: Any) -> Any:
+def _bounded_json_response(response: Any, *, limit: int = MAX_CLOUD_RESPONSE_BYTES) -> Any:
     """Decode one small hub response without retaining arbitrary bodies."""
-    raw = response.read(MAX_CLOUD_RESPONSE_BYTES + 1)
-    if len(raw) > MAX_CLOUD_RESPONSE_BYTES:
+    raw = response.read(limit + 1)
+    if len(raw) > limit:
         raise FleetClientError("fleet hub cloud response exceeded the size limit")
     try:
         return json.loads(raw.decode("utf-8"))
@@ -152,6 +152,19 @@ def _get_cloud_blocking(hub_url: str, path: str, token: str, *, timeout: float) 
         if response.status != 200:
             raise FleetClientError(f"fleet hub cloud request failed: HTTP {response.status}")
         return _bounded_json_response(response)
+
+
+def _get_models_blocking(hub_url: str, path: str, token: str, *, timeout: float) -> Any:
+    """GET /models with the roster cap. Cloud endpoints stay at 64 KiB."""
+    roster_limit = 1024 * 1024
+    request = urllib.request.Request(
+        hub_url.rstrip("/") + path,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    with _hub_open(request, timeout=timeout) as response:
+        if response.status != 200:
+            raise FleetClientError(f"fleet hub model roster request failed: HTTP {response.status}")
+        return _bounded_json_response(response, limit=roster_limit)
 
 
 def _safe_cloud_lease(raw: Any) -> dict[str, Any] | None:
@@ -278,6 +291,8 @@ def fetch_cloud(*, hub_url: str | None = None, include_all: bool = False) -> dic
             ),
             timeout=CLOUD_TIMEOUT_SECONDS,
         )
+    except FleetClientError:
+        raise
     except Exception as exc:
         raise FleetClientError("fleet hub cloud read failed") from exc
     if not isinstance(payload, dict):
@@ -320,7 +335,7 @@ def load_model_policy_snapshot(*, hub_url: str | None = None) -> dict[str, Any]:
         return {"state": "unconfigured", "models": []}
     try:
         payload = _run_with_deadline(
-            lambda: _get_cloud_blocking(hub, "/models", config["token"], timeout=CLOUD_TIMEOUT_SECONDS),
+            lambda: _client._get_models_blocking(hub, "/models", config["token"], timeout=CLOUD_TIMEOUT_SECONDS),
             timeout=CLOUD_TIMEOUT_SECONDS,
         )
     except urllib.error.HTTPError as exc:
@@ -337,18 +352,20 @@ def load_model_policy_snapshot(*, hub_url: str | None = None) -> dict[str, Any]:
 
 
 def set_model_policy(
-    provider: str, model: str, seat: str, *, enabled: bool, limit: int | None = None, notes: str | None = None
+    provider: str,
+    model: str,
+    seat: str,
+    *,
+    enabled: bool,
+    limit: int | None = None,
+    notes: str | None = None,
+    reasoning: str = "none",
+    brigade_cli: str = "",
+    t3_instance_id: str = "",
+    t3_service_tier: str = "",
+    expected_revision: int | None = None,
 ) -> dict[str, Any]:
     """Set one seat's provider/model policy with the configured admin token."""
-    body = {
-        "action": "set",
-        "provider": provider,
-        "model": model,
-        "seat": seat,
-        "enabled": enabled,
-        "limit": limit,
-        "notes": notes,
-    }
     try:
         settings = load_fleet_settings()
         hub = settings["hub_url"]
@@ -359,8 +376,31 @@ def set_model_policy(
             raise FleetClientError(
                 "no fleet admin token configured (~/.brigade/fleet.toml [fleet] token_file or BRIGADE_FLEET_TOKEN)"
             )
+        revision = expected_revision
+        if revision is None:
+            snapshot = _run_with_deadline(
+                lambda: _client._get_models_blocking(hub, "/models", admin_token, timeout=CLOUD_TIMEOUT_SECONDS),
+                timeout=CLOUD_TIMEOUT_SECONDS,
+            )
+            if not isinstance(snapshot, dict) or type(snapshot.get("revision")) is not int:
+                raise FleetClientError("fleet hub model policy revision is missing")
+            revision = int(snapshot["revision"])
+        body = {
+            "action": "set",
+            "provider": provider,
+            "model": model,
+            "seat": seat,
+            "enabled": enabled,
+            "limit": limit,
+            "notes": notes,
+            "reasoning": reasoning,
+            "brigade_cli": brigade_cli,
+            "t3_instance_id": t3_instance_id,
+            "t3_service_tier": t3_service_tier,
+            "expected_revision": revision,
+        }
         status, payload = _run_with_deadline(
-            lambda: _post_model_policy_blocking(hub, admin_token, body, timeout=CLOUD_TIMEOUT_SECONDS),
+            lambda: _client._post_model_policy_blocking(hub, admin_token, body, timeout=CLOUD_TIMEOUT_SECONDS),
             timeout=CLOUD_TIMEOUT_SECONDS,
         )
     except Exception as exc:

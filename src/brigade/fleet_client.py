@@ -174,6 +174,20 @@ def _post_cloud_blocking(hub_url: str, token: str, body: dict[str, Any], *, time
     return post(hub_url, token, body, timeout=timeout)
 
 
+def _get_models_blocking(hub_url: str, path: str, token: str, *, timeout: float) -> Any:
+    """Compatibility seam for versioned roster GET (1 MiB cap)."""
+    from .fleet_client_cloud import _get_models_blocking as get
+
+    return get(hub_url, path, token, timeout=timeout)
+
+
+def _post_model_policy_blocking(hub_url: str, token: str, body: dict[str, Any], *, timeout: float) -> tuple[int, Any]:
+    """Compatibility seam for /models POST mutations and admission."""
+    from .fleet_client_cloud import _post_model_policy_blocking as post
+
+    return post(hub_url, token, body, timeout=timeout)
+
+
 _SPOOL_PROCESS_LOCK = threading.Lock()
 # The deprecated shared-token fallback is warned about once per process,
 # not once per journal append.
