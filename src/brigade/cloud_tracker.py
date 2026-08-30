@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,16 @@ CLASSIFICATIONS = (
     "orphaned",
     "needs-investigation",
 )
+
+
+@dataclass(frozen=True)
+class ProviderObservation:
+    """Bounded, sanitized health and inventory evidence for one provider."""
+
+    configured: bool
+    reachable: bool
+    reason: str | None
+    tasks: dict[str, dict[str, Any]]
 
 
 def _root(target: Path) -> Path:
@@ -319,11 +330,15 @@ def _classify_entry(
     stale_ready_hours: int,
     now: datetime,
     cursor_wired: bool,
+    provider_observations: dict[str, ProviderObservation] | None = None,
 ) -> dict[str, Any]:
     provider = str(entry.get("provider") or "")
     task_id = entry.get("task_id")
     branch = entry.get("branch") if isinstance(entry.get("branch"), str) else None
-    provider_info = provider_tasks.get(str(task_id)) if task_id else None
+    observation = provider_observations.get(provider) if provider_observations else None
+    provider_info = observation.tasks.get(str(task_id)) if observation and task_id else None
+    if provider_info is None:
+        provider_info = provider_tasks.get(str(task_id)) if task_id else None
     provider_state = None
     ready_at = None
     if isinstance(provider_info, dict):
@@ -341,7 +356,7 @@ def _classify_entry(
     evidence: dict[str, Any] = {
         "registry": {"id": entry.get("id"), "source": entry.get("source"), "dispatched_at": entry.get("dispatched_at")},
         "provider": {
-            "wired": provider != "cursor-cloud" or cursor_wired,
+            "wired": observation.configured if observation else provider != "cursor-cloud" or cursor_wired,
             "state": provider_state,
             "task_id": task_id,
         },
@@ -351,9 +366,17 @@ def _classify_entry(
             "prs": prs,
         },
     }
+    if observation is not None:
+        evidence["provider"].update(
+            {
+                "configured": observation.configured,
+                "reachable": observation.reachable,
+                "reason": observation.reason,
+            }
+        )
 
     classification = "pending"
-    if provider == "cursor-cloud" and not cursor_wired:
+    if provider == "cursor-cloud" and not (observation.configured if observation else cursor_wired):
         evidence["provider"] = "unwired"
         if branch_exists and (provider_state in FAILED_STATES or not task_id):
             classification = "orphaned"
@@ -594,6 +617,7 @@ def status_payload(
     provider_tasks: dict[str, Any] | None = None,
     github: dict[str, Any] | None = None,
     cursor_wired: bool = False,
+    provider_observations: dict[str, ProviderObservation] | None = None,
 ) -> dict[str, Any]:
     from . import grokbot_jobs
 
@@ -605,6 +629,7 @@ def status_payload(
     provider_tasks = provider_tasks if isinstance(provider_tasks, dict) else {}
     github = github if isinstance(github, dict) else {"branches": [], "prs": []}
     jules_wired = jules_cloud_wired()
+    provider_observations = provider_observations if isinstance(provider_observations, dict) else None
 
     entries = [
         _classify_entry(
@@ -614,6 +639,7 @@ def status_payload(
             stale_ready_hours=stale_ready_hours,
             now=observed,
             cursor_wired=cursor_wired,
+            provider_observations=provider_observations,
         )
         for entry in registry["entries"]
     ]
@@ -634,35 +660,56 @@ def status_payload(
         )
     )
 
+    sources: dict[str, dict[str, Any]] = {
+        "codex-cloud": {"wired": True, "authority": "best-effort"},
+        "cursor-cloud": {
+            "wired": bool(cursor_wired),
+            "authority": "best-effort" if cursor_wired else "unwired",
+            "detail": None if cursor_wired else "no API key; cursor cloud left unwired",
+        },
+        "claude-cloud": {
+            "wired": False,
+            "authority": "disabled-by-policy",
+            "detail": "local/background sessions are not cloud discovery; claude cloud remains untracked/disabled until a structured bindable provider surface exists",
+        },
+        "jules": {
+            "wired": jules_wired,
+            "authority": "alpha REST" if jules_wired else "unwired",
+            "detail": None if jules_wired else "JULES_API_KEY not set",
+        },
+        "grokbot-cloud": {
+            "wired": True,
+            "authority": "hub" if grokbot_jobs.hub_authority(target) else "local-queue",
+            **({"degraded": True, "detail": "hub unavailable"} if grokbot_degraded else {}),
+        },
+        "github": {"wired": True, "authority": "ground-truth"},
+    }
+    if provider_observations:
+        for provider, observation in provider_observations.items():
+            source = sources.get(provider)
+            if source is None:
+                continue
+            source.update(
+                {
+                    "wired": observation.configured,
+                    "configured": observation.configured,
+                    "reachable": observation.reachable,
+                    "reason": observation.reason,
+                }
+            )
+            if provider == "claude-cloud":
+                source["detail"] = "disabled-by-policy"
+            elif observation.reason is not None:
+                source["detail"] = observation.reason
+            elif "detail" in source:
+                source["detail"] = None
+
     return {
         "schema": STATUS_SCHEMA,
         "target": str(target.expanduser().resolve()),
         "observed_at": _now_iso(observed),
         "stale_ready_hours": stale_ready_hours,
-        "sources": {
-            "codex-cloud": {"wired": True, "authority": "best-effort"},
-            "cursor-cloud": {
-                "wired": bool(cursor_wired),
-                "authority": "best-effort" if cursor_wired else "unwired",
-                "detail": None if cursor_wired else "no API key; cursor cloud left unwired",
-            },
-            "claude-cloud": {
-                "wired": False,
-                "authority": "disabled-by-policy",
-                "detail": "local/background sessions are not cloud discovery; claude cloud remains untracked/disabled until a structured bindable provider surface exists",
-            },
-            "jules": {
-                "wired": jules_wired,
-                "authority": "alpha REST" if jules_wired else "unwired",
-                "detail": None if jules_wired else "JULES_API_KEY not set",
-            },
-            "grokbot-cloud": {
-                "wired": True,
-                "authority": "hub" if grokbot_jobs.hub_authority(target) else "local-queue",
-                **({"degraded": True, "detail": "hub unavailable"} if grokbot_degraded else {}),
-            },
-            "github": {"wired": True, "authority": "ground-truth"},
-        },
+        "sources": sources,
         "entries": entries,
         "counts": {
             classification: sum(1 for row in entries if row.get("classification") == classification)
@@ -678,6 +725,7 @@ def sync_payload(
     provider_tasks: dict[str, Any] | None = None,
     github: dict[str, Any] | None = None,
     cursor_wired: bool = False,
+    provider_observations: dict[str, ProviderObservation] | None = None,
     hub_leases: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Reconcile registry observations with hub leases without secrets.
@@ -699,6 +747,7 @@ def sync_payload(
         provider_tasks=provider_tasks,
         github=github,
         cursor_wired=cursor_wired,
+        provider_observations=provider_observations,
     )
     hub_leases = hub_leases if isinstance(hub_leases, list) else []
 
@@ -1027,36 +1076,48 @@ def _parse_codex_cloud_list(stdout: str) -> dict[str, Any]:
     return tasks
 
 
-def observe_codex_cloud_tasks(target: Path) -> dict[str, Any]:
+def _codex_cloud_observation(target: Path) -> ProviderObservation:
     from . import codex_cloud
 
     try:
         inventory = codex_cloud.list_tasks(cwd=target)
     except Exception:  # noqa: BLE001 - observation must stay bounded
-        inventory = codex_cloud.ListTasksResult([])
-    if inventory.tasks:
-        return {
-            row["id"]: {"state": row.get("state"), "ready_at": None}
-            for row in inventory.tasks
-            if isinstance(row.get("id"), str)
-        }
+        return ProviderObservation(True, False, "transport-failure", {})
+    tasks = {
+        row["id"]: {"state": row.get("state"), "ready_at": None}
+        for row in inventory.tasks
+        if isinstance(row.get("id"), str)
+    }
+    if not tasks:
+        # Preserve the established bounded positive-evidence fallback for
+        # registered tasks. Failure or absence never implies a terminal state.
+        registry = load_registry(target)
+        for entry in registry["entries"]:
+            task_id = entry.get("task_id")
+            if not isinstance(task_id, str) or entry.get("provider") != "codex-cloud":
+                continue
+            scode, sout, serr = _run_text(["codex", "cloud", "status", task_id], cwd=target)
+            blob = (sout + "\n" + serr).strip()
+            if scode != 0 and not blob:
+                continue
+            state = codex_cloud._scan_status(blob)  # noqa: SLF001 - shared status scanner
+            if state is not None:
+                tasks[task_id] = {"state": state, "ready_at": None}
+    if not inventory.ok:
+        reason = inventory.reason or "provider-error"
+        if reason in {"provider-missing", "provider-unavailable"}:
+            return ProviderObservation(False, False, reason, tasks)
+        if reason == "provider-timeout":
+            return ProviderObservation(True, False, "transport-failure", tasks)
+        if reason == "auth-failure":
+            return ProviderObservation(True, False, reason, tasks)
+        return ProviderObservation(True, True, reason, tasks)
+    return ProviderObservation(True, True, None, tasks)
 
-    # Empty or unavailable structured inventory is not terminal evidence. Fall
-    # back to status reads only for task ids already present in the local
-    # registry, and never infer completion from absence.
-    registry = load_registry(target)
-    tasks: dict[str, Any] = {}
-    for entry in registry["entries"]:
-        task_id = entry.get("task_id")
-        if not isinstance(task_id, str) or entry.get("provider") != "codex-cloud":
-            continue
-        scode, sout, serr = _run_text(["codex", "cloud", "status", task_id], cwd=target)
-        blob = (sout + "\n" + serr).strip()
-        if scode != 0 and not blob:
-            continue
-        state = codex_cloud._scan_status(blob)  # noqa: SLF001 - shared status scanner
-        tasks[task_id] = {"state": state, "ready_at": None}
-    return tasks
+
+def observe_codex_cloud_tasks(target: Path) -> dict[str, Any]:
+    """Compatibility wrapper returning only Codex Cloud inventory rows."""
+    return _codex_cloud_observation(target).tasks
 
 
 def observe_github(target: Path) -> dict[str, Any]:
@@ -1147,7 +1208,16 @@ def _cursor_api_key() -> str | None:
     return None
 
 
-def observe_cursor_cloud_tasks(target: Path) -> dict[str, Any]:
+def _provider_error_observation(error: BaseException) -> ProviderObservation:
+    reason = getattr(error, "reason", None)
+    if reason == "auth-failure":
+        return ProviderObservation(True, False, "auth-failure", {})
+    if reason == "transport-failure" or isinstance(error, (OSError, TimeoutError)):
+        return ProviderObservation(True, False, "transport-failure", {})
+    return ProviderObservation(True, True, "provider-error", {})
+
+
+def _cursor_cloud_observation(target: Path) -> ProviderObservation:
     """Fetch sanitized Cursor Cloud inventory when an API key is present.
 
     Provider API failures are bounded: the tracker stays available and no
@@ -1155,13 +1225,13 @@ def observe_cursor_cloud_tasks(target: Path) -> dict[str, Any]:
     """
     api_key = _cursor_api_key()
     if not api_key:
-        return {}
+        return ProviderObservation(False, False, "unconfigured", {})
     try:
         from . import cursor_cloud
 
         agents = cursor_cloud.list_agents(api_key, max_pages=2, max_items=100, include_usage=True)
-    except Exception:  # noqa: BLE001 - observation must stay bounded
-        return {}
+    except Exception as exc:  # noqa: BLE001 - observation must stay bounded
+        return _provider_error_observation(exc)
     tasks: dict[str, Any] = {}
     for agent in agents:
         if not isinstance(agent, dict):
@@ -1186,7 +1256,12 @@ def observe_cursor_cloud_tasks(target: Path) -> dict[str, Any]:
         if usage:
             row["usage"] = usage
         tasks[agent_id] = row
-    return tasks
+    return ProviderObservation(True, True, None, tasks)
+
+
+def observe_cursor_cloud_tasks(target: Path) -> dict[str, Any]:
+    """Compatibility wrapper returning only Cursor Cloud inventory rows."""
+    return _cursor_cloud_observation(target).tasks
 
 
 def jules_cloud_wired() -> bool:
@@ -1204,7 +1279,7 @@ def _jules_api_key() -> str | None:
     return value or None
 
 
-def observe_jules_cloud_tasks(target: Path) -> dict[str, Any]:
+def _jules_cloud_observation(target: Path) -> ProviderObservation:
     """Fetch sanitized Jules Cloud inventory when an API key is present.
 
     Provider API failures are bounded: the tracker stays available and no
@@ -1215,13 +1290,13 @@ def observe_jules_cloud_tasks(target: Path) -> dict[str, Any]:
     """
     api_key = _jules_api_key()
     if not api_key:
-        return {}
+        return ProviderObservation(False, False, "unconfigured", {})
     try:
         from . import jules_cloud
 
         sessions = jules_cloud.list_sessions(api_key, max_pages=2, max_items=100)
-    except Exception:  # noqa: BLE001 - observation must stay bounded
-        return {}
+    except Exception as exc:  # noqa: BLE001 - observation must stay bounded
+        return _provider_error_observation(exc)
     tasks: dict[str, Any] = {}
     for session in sessions:
         if not isinstance(session, dict):
@@ -1230,26 +1305,71 @@ def observe_jules_cloud_tasks(target: Path) -> dict[str, Any]:
         if not isinstance(session_id, str):
             continue
         tasks[session_id] = {"state": normalize_provider_state(session.get("state"))}
+    return ProviderObservation(True, True, None, tasks)
+
+
+def observe_jules_cloud_tasks(target: Path) -> dict[str, Any]:
+    """Compatibility wrapper returning only Jules Cloud inventory rows."""
+    return _jules_cloud_observation(target).tasks
+
+
+def _grokbot_cloud_observation() -> ProviderObservation:
+    from . import fleet_client_grokbot
+
+    try:
+        decision = fleet_client_grokbot.whoami()
+    except Exception:  # noqa: BLE001 - provider health must stay bounded
+        return ProviderObservation(True, False, "transport-failure", {})
+    if decision.granted:
+        return ProviderObservation(True, True, None, {})
+    if decision.reason == "no-hub":
+        return ProviderObservation(False, False, "unconfigured", {})
+    if decision.reason == "no-identity":
+        return ProviderObservation(True, False, "actor-not-enrolled", {})
+    if decision.reason == "auth-failed":
+        return ProviderObservation(True, False, "auth-failure", {})
+    if decision.reason == "hub-unavailable":
+        return ProviderObservation(True, False, "transport-failure", {})
+    return ProviderObservation(True, True, decision.reason, {})
+
+
+def observe_provider(provider: str, target: Path) -> ProviderObservation:
+    """Observe exactly one provider without exposing credentials or bodies."""
+    if provider == "codex-cloud":
+        return _codex_cloud_observation(target)
+    if provider == "cursor-cloud":
+        return _cursor_cloud_observation(target)
+    if provider == "jules":
+        return _jules_cloud_observation(target)
+    if provider == "grokbot-cloud":
+        return _grokbot_cloud_observation()
+    if provider == "claude-cloud":
+        return ProviderObservation(False, False, "disabled-by-policy", {})
+    return ProviderObservation(False, False, "unsupported-provider", {})
+
+
+def observe_provider_details(target: Path, **_kwargs: Any) -> tuple[dict[str, ProviderObservation], dict[str, Any]]:
+    """Return per-provider health so failed empty inventories stay visible."""
+    observations: dict[str, ProviderObservation] = {}
+    for provider in TRACKER_PROVIDERS:
+        try:
+            observations[provider] = observe_provider(provider, target)
+        except Exception:  # noqa: BLE001 - observation must stay bounded
+            observations[provider] = ProviderObservation(True, False, "transport-failure", {})
+    return observations, observe_github(target)
+
+
+def _legacy_provider_tasks(observations: dict[str, ProviderObservation]) -> dict[str, Any]:
+    tasks: dict[str, Any] = {}
+    for provider in ("codex-cloud", "cursor-cloud", "jules"):
+        tasks.update(observations.get(provider, ProviderObservation(False, False, None, {})).tasks)
     return tasks
 
 
 def observe_providers(target: Path, **_kwargs: Any) -> tuple[dict[str, Any], dict[str, Any], bool]:
-    provider_tasks: dict[str, Any] = {}
-    try:
-        provider_tasks.update(observe_codex_cloud_tasks(target))
-    except Exception:  # noqa: BLE001 - observation must stay bounded
-        pass
-    if cursor_cloud_wired():
-        try:
-            provider_tasks.update(observe_cursor_cloud_tasks(target))
-        except Exception:  # noqa: BLE001 - observation must stay bounded
-            pass
-    if jules_cloud_wired():
-        try:
-            provider_tasks.update(observe_jules_cloud_tasks(target))
-        except Exception:  # noqa: BLE001 - observation must stay bounded
-            pass
-    return provider_tasks, observe_github(target), cursor_cloud_wired()
+    """Compatibility wrapper for callers that only accept a flattened inventory."""
+    observations, github = observe_provider_details(target)
+    return _legacy_provider_tasks(observations), github, observations["cursor-cloud"].configured
 
 
 def center_activity_records(

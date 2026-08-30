@@ -123,14 +123,12 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p_setup = cloud_sub.add_parser("setup", help="Write local Codex Cloud environment configuration (no live task).")
     p_setup.add_argument("--target", type=Path, default=Path("."))
-    p_setup.add_argument(
-        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
-    )
+    p_setup.add_argument("--provider", required=True, choices=("codex-cloud",))
     setup_src = p_setup.add_mutually_exclusive_group(required=True)
     setup_src.add_argument("--env-var", help="Name of the environment variable holding the Codex Cloud env id.")
     setup_src.add_argument("--env-id", help="Store a Codex Cloud env id locally. Prefer --env-var.")
 
-    p_doctor = cloud_sub.add_parser("doctor", help="Check Codex Cloud seat configuration without submitting a task.")
+    p_doctor = cloud_sub.add_parser("doctor", help="Check one cloud provider without submitting a task.")
     p_doctor.add_argument("--target", type=Path, default=Path("."))
     p_doctor.add_argument(
         "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
@@ -139,10 +137,10 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     p_doctor.add_argument(
         "--selector",
         default="configured",
-        help="Codex Cloud environment selector to validate (configured, $VAR, or literal id).",
+        help="Codex Cloud environment selector to validate (Codex Cloud only).",
     )
 
-    p_canary = cloud_sub.add_parser("canary", help="Bounded Codex Cloud inventory check. Never exec or apply.")
+    p_canary = cloud_sub.add_parser("canary", help="Bounded cloud inventory check. Never exec or apply.")
     p_canary.add_argument("--target", type=Path, default=Path("."))
     p_canary.add_argument(
         "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
@@ -151,7 +149,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     p_canary.add_argument(
         "--selector",
         default="configured",
-        help="Codex Cloud environment selector to validate (configured, $VAR, or literal id).",
+        help="Codex Cloud environment selector to validate (Codex Cloud only).",
     )
 
     p_grokbot = cloud_sub.add_parser("grokbot", help="Manage the private local Grok Bot job queue.")
@@ -510,7 +508,7 @@ def dispatch(args) -> int:
     if command == "grokbot":
         return _dispatch_grokbot(args, target)
     if command in {"setup", "doctor", "canary"}:
-        return _dispatch_codex_cloud_ops(args, target)
+        return _dispatch_cloud_ops(args, target)
 
     from .. import cloud_tracker
 
@@ -565,7 +563,9 @@ def dispatch(args) -> int:
     if command == "sync":
         from .. import fleet_client
 
-        provider_tasks, github, cursor_wired = cloud_tracker.observe_providers(target)
+        observations, github = cloud_tracker.observe_provider_details(target)
+        provider_tasks = cloud_tracker._legacy_provider_tasks(observations)  # noqa: SLF001 - compatibility projection
+        cursor_wired = observations["cursor-cloud"].configured
         hub_leases: list[dict[str, Any]] = []
         try:
             snapshot = fleet_client.fetch_cloud()
@@ -580,6 +580,7 @@ def dispatch(args) -> int:
             provider_tasks=provider_tasks,
             github=github,
             cursor_wired=cursor_wired,
+            provider_observations=observations,
             hub_leases=hub_leases,
         )
         if args.json:
@@ -601,12 +602,15 @@ def dispatch(args) -> int:
             except ValueError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return 2
-        provider_tasks, github, cursor_wired = cloud_tracker.observe_providers(target)
+        observations, github = cloud_tracker.observe_provider_details(target)
+        provider_tasks = cloud_tracker._legacy_provider_tasks(observations)  # noqa: SLF001 - compatibility projection
+        cursor_wired = observations["cursor-cloud"].configured
         payload = cloud_tracker.status_payload(
             target,
             provider_tasks=provider_tasks,
             github=github,
             cursor_wired=cursor_wired,
+            provider_observations=observations,
         )
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
@@ -626,12 +630,15 @@ def dispatch(args) -> int:
         return 0
 
     if command == "sweep":
-        provider_tasks, github, cursor_wired = cloud_tracker.observe_providers(target)
+        observations, github = cloud_tracker.observe_provider_details(target)
+        provider_tasks = cloud_tracker._legacy_provider_tasks(observations)  # noqa: SLF001 - compatibility projection
+        cursor_wired = observations["cursor-cloud"].configured
         status = cloud_tracker.status_payload(
             target,
             provider_tasks=provider_tasks,
             github=github,
             cursor_wired=cursor_wired,
+            provider_observations=observations,
         )
         report = cloud_tracker.sweep(target, status=status)
         if args.json:
@@ -644,7 +651,9 @@ def dispatch(args) -> int:
         return 0
 
     if command == "compact":
-        provider_tasks, github, cursor_wired = cloud_tracker.observe_providers(target)
+        observations, github = cloud_tracker.observe_provider_details(target)
+        provider_tasks = cloud_tracker._legacy_provider_tasks(observations)  # noqa: SLF001 - compatibility projection
+        cursor_wired = observations["cursor-cloud"].configured
         try:
             report = cloud_tracker.compact_registry(
                 target,
@@ -845,15 +854,15 @@ def _emit_launch_payload(payload: dict[str, Any], *, as_json: bool, exit_code: i
     return exit_code
 
 
-def _dispatch_codex_cloud_ops(args, target: Path) -> int:
-    """Setup, doctor, and inventory canary for a Codex Cloud run seat."""
-    from .. import codex_cloud
+def _dispatch_cloud_ops(args, target: Path) -> int:
+    """Route setup, doctor, and canary to their bounded provider operation."""
+    from .. import cloud_tracker, codex_cloud
 
-    if getattr(args, "provider", None) != "codex-cloud":
-        print("error: setup, doctor, and canary currently support --provider codex-cloud", file=sys.stderr)
-        return 2
     command = args.run_cloud_command
     if command == "setup":
+        if getattr(args, "provider", None) != "codex-cloud":
+            print("error: setup supports --provider codex-cloud only", file=sys.stderr)
+            return 2
         try:
             if args.env_var:
                 codex_cloud.save_environment_config(target, environment_id_env=args.env_var)
@@ -864,7 +873,7 @@ def _dispatch_codex_cloud_ops(args, target: Path) -> int:
             return 2
         print("codex-cloud config saved")
         return 0
-    if command == "doctor":
+    if command == "doctor" and args.provider == "codex-cloud":
         result = codex_cloud.doctor(target, selector=args.selector)
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True))
@@ -873,7 +882,7 @@ def _dispatch_codex_cloud_ops(args, target: Path) -> int:
             print(f"environment_configured: {'yes' if result['environment_configured'] else 'no'}")
             print(f"selector: {result.get('selector', args.selector)}")
         return 0 if result["ok"] else 1
-    if command == "canary":
+    if command == "canary" and args.provider == "codex-cloud":
         result = codex_cloud.canary(target, selector=args.selector)
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True))
@@ -886,8 +895,79 @@ def _dispatch_codex_cloud_ops(args, target: Path) -> int:
             print(f"task_count: {result['task_count']}")
             print("apply: no")
         return 0 if result["ok"] else 1
-    print(f"error: unknown cloud command: {command}", file=sys.stderr)
-    return 2
+    if command not in {"doctor", "canary"}:
+        print(f"error: unknown cloud command: {command}", file=sys.stderr)
+        return 2
+
+    observation = cloud_tracker.observe_provider(args.provider, target)
+    provider_result: dict[str, Any] = {
+        "ok": observation.configured and observation.reachable and observation.reason is None,
+        "provider": args.provider,
+        "configured": observation.configured,
+        "reachable": observation.reachable,
+        "reason": observation.reason,
+    }
+    if command == "canary":
+        tasks = observation.tasks
+        if args.provider == "grokbot-cloud" and provider_result["ok"]:
+            from .. import fleet_client_grokbot
+
+            decision = fleet_client_grokbot.list_jobs(include_all=False)
+            if not decision.granted or decision.jobs is None:
+                health_reason = _grokbot_health_reason(decision.reason)
+                provider_result.update(
+                    {
+                        "ok": False,
+                        "reachable": health_reason
+                        not in {
+                            "unconfigured",
+                            "actor-not-enrolled",
+                            "auth-failure",
+                            "transport-failure",
+                        },
+                        "reason": health_reason,
+                    }
+                )
+                tasks = {}
+            else:
+                tasks = {
+                    str(job.get("job_id")): {
+                        "job_id": str(job.get("job_id")),
+                        "state": str(job.get("state")),
+                        "role": job.get("role"),
+                    }
+                    for job in decision.jobs[:20]
+                    if isinstance(job, dict)
+                    and isinstance(job.get("job_id"), str)
+                    and cloud_tracker.is_active_state(job.get("state"))
+                }
+        provider_result["tasks"] = list(tasks.values())[:20]
+        provider_result["task_count"] = len(provider_result["tasks"])
+        provider_result["apply"] = False
+    if args.json:
+        print(json.dumps(provider_result, indent=2, sort_keys=True))
+    else:
+        print(f"{args.provider} {command}: {'ok' if provider_result['ok'] else 'fail'}")
+        print(f"configured: {'yes' if provider_result['configured'] else 'no'}")
+        print(f"reachable: {'yes' if provider_result['reachable'] else 'no'}")
+        if provider_result["reason"]:
+            print(f"reason: {provider_result['reason']}")
+        if command == "canary":
+            print(f"task_count: {provider_result['task_count']}")
+            print("apply: no")
+    return 0 if provider_result["ok"] else 1
+
+
+def _grokbot_health_reason(reason: str) -> str:
+    if reason == "no-hub":
+        return "unconfigured"
+    if reason == "no-identity":
+        return "actor-not-enrolled"
+    if reason == "hub-unavailable":
+        return "transport-failure"
+    if reason == "auth-failed":
+        return "auth-failure"
+    return reason
 
 
 def _dispatch_grokbot(args, target: Path) -> int:
