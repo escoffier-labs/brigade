@@ -21,6 +21,7 @@ PACK_IDS = (
     "implementation-worker",
     "n8n-operator",
     "obsidian-operator",
+    "operations-relay",
     "operator",
     "repository-scout",
     "wazuh-triage",
@@ -71,6 +72,10 @@ N8N_TOOLS = (
     "n8n_overview",
     "n8n_propose_action",
     "n8n_workflow_status",
+)
+OPERATIONS_RELAY_TOOLS = (
+    "automation_finding_status",
+    "submit_automation_finding",
 )
 
 
@@ -145,6 +150,11 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
             assert pack["kind"] == "connector"
             assert shown["tools"] == list(N8N_TOOLS)
             assert shown["default_bind"] == "127.0.0.1:8775"
+            assert shown["public_route"] == ""
+        elif pack["id"] == "operations-relay":
+            assert pack["kind"] == "connector"
+            assert shown["tools"] == list(OPERATIONS_RELAY_TOOLS)
+            assert shown["default_bind"] == "127.0.0.1:8777"
             assert shown["public_route"] == ""
         else:
             assert pack["kind"] == "connector"
@@ -230,6 +240,8 @@ def test_first_party_queue_packs_keep_isolated_ports_tools_and_credentials():
     assert grokbot_mcp.parse_bind(packs["obsidian-operator"]["default_bind"])[1] == 8773
     assert grokbot_mcp.parse_bind(packs["wazuh-triage"]["default_bind"])[1] == 8774
     assert grokbot_mcp.parse_bind(packs["n8n-operator"]["default_bind"])[1] == 8775
+    assert grokbot_mcp.parse_bind(packs["operations-relay"]["default_bind"])[1] == 8777
+    assert packs["operations-relay"]["default_bind"] == "127.0.0.1:8777"
     assert packs["operator"]["tools"] == _queue_tools("operator")
     assert packs["repository-scout"]["tools"] == _queue_tools("repository-scout")
     assert packs["implementation-worker"]["tools"] == _queue_tools("implementation-worker")
