@@ -80,17 +80,31 @@ def canonicalize_provider(provider: str) -> str:
     return PROVIDER_ALIASES.get(provider, provider)
 
 
+def _model_prefixes(provider: str) -> tuple[str, ...]:
+    """Allowed provider spellings that may prefix a model id for this provider."""
+    canonical = canonicalize_provider(provider)
+    prefixes = {provider, canonical}
+    for alias, target in PROVIDER_ALIASES.items():
+        if target == canonical or canonicalize_provider(alias) == canonical:
+            prefixes.add(alias)
+            prefixes.add(target)
+    return tuple(sorted(prefixes, key=len, reverse=True))
+
+
 def normalize_model(provider: str, model: str) -> str:
     """Strip a leading provider alias separated by ``/`` or ``:``.
 
     Hyphens stay in the model id so ``cursor-grok-4.6`` is not treated as a
-    ``cursor`` alias of ``grok-4.6``.
+    ``cursor`` alias of ``grok-4.6``. OpenAI-family aliases (``codex``,
+    ``openai-codex``) are stripped so ``codex/gpt-5.4`` matches the permanent
+    floor without treating ``gpt-5.40`` as ``gpt-5.4``.
     """
     raw = model.strip()
-    for separator in PROVIDER_SEPARATORS:
-        token = f"{provider}{separator}"
-        if raw.startswith(token):
-            return raw[len(token) :]
+    for prefix in _model_prefixes(provider):
+        for separator in PROVIDER_SEPARATORS:
+            token = f"{prefix}{separator}"
+            if raw.startswith(token):
+                return raw[len(token) :]
     return raw
 
 
@@ -130,7 +144,9 @@ def validate_roster_rows(payload: Mapping[str, Any]) -> str | None:
     for item in seats:
         if not isinstance(item, dict):
             return "malformed-roster"
-        if any(not isinstance(item.get(key), str) or not item[key] for key in ("seat", "provider", "model")):
+        if any(
+            not isinstance(item.get(key), str) or not item[key] for key in ("seat", "provider", "model", "reasoning")
+        ):
             return "malformed-roster"
         if type(item.get("enabled")) is not bool:
             return "malformed-roster"

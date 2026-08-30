@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 from . import fleet_client as _client
@@ -90,7 +90,20 @@ _CLOUD_LEASE_FIELDS = frozenset(
         "expired",
     }
 )
-_MODEL_POLICY_FIELDS = frozenset({"provider", "model", "seat", "enabled", "limit", "notes"})
+_MODEL_POLICY_FIELDS = frozenset(
+    {
+        "provider",
+        "model",
+        "seat",
+        "enabled",
+        "limit",
+        "notes",
+        "reasoning",
+        "brigade_cli",
+        "t3_instance_id",
+        "t3_service_tier",
+    }
+)
 
 
 def _bounded_json_response(response: Any, *, limit: int = MAX_CLOUD_RESPONSE_BYTES) -> Any:
@@ -178,6 +191,38 @@ def _safe_model_policy(raw: Any) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
     return {key: value for key, value in raw.items() if key in _MODEL_POLICY_FIELDS}
+
+
+def _existing_seat(snapshot: Mapping[str, Any], seat: str) -> dict[str, Any] | None:
+    raw_seats = snapshot.get("seats")
+    if not isinstance(raw_seats, list):
+        return None
+    for item in raw_seats:
+        if isinstance(item, dict) and item.get("seat") == seat:
+            return item
+    return None
+
+
+def _preserved_field(
+    value: str | None,
+    existing: Mapping[str, Any] | None,
+    key: str,
+    *,
+    default: str = "",
+) -> str:
+    if value is not None:
+        return value
+    if existing is None:
+        return default
+    current = existing.get(key)
+    if isinstance(current, str) and current:
+        return current
+    bindings = existing.get("bindings")
+    if isinstance(bindings, dict):
+        bound = bindings.get(key)
+        if isinstance(bound, str) and bound:
+            return bound
+    return default
 
 
 def _normalize_cloud_prompt_hash(value: str | None) -> str | None:
@@ -342,6 +387,8 @@ def load_model_policy_snapshot(*, hub_url: str | None = None) -> dict[str, Any]:
     if not decision.ok:
         if decision.reason == "auth-failed":
             return {"state": "auth-failed", "models": []}
+        if decision.reason in {"unsupported-schema", "node-token-required", "admin-token-not-cacheable"}:
+            return {"state": decision.reason, "models": []}
         return {"state": "unavailable", "models": []}
     payload = decision.payload if isinstance(decision.payload, dict) else {}
     seats = [dict(item) for item in payload.get("seats") or [] if isinstance(item, dict)]
@@ -373,10 +420,10 @@ def set_model_policy(
     enabled: bool,
     limit: int | None = None,
     notes: str | None = None,
-    reasoning: str = "none",
-    brigade_cli: str = "",
-    t3_instance_id: str = "",
-    t3_service_tier: str = "",
+    reasoning: str | None = None,
+    brigade_cli: str | None = None,
+    t3_instance_id: str | None = None,
+    t3_service_tier: str | None = None,
     expected_revision: int | None = None,
 ) -> dict[str, Any]:
     """Set one seat's provider/model policy with the configured admin token."""
@@ -390,15 +437,18 @@ def set_model_policy(
             raise FleetClientError(
                 "no fleet admin token configured (~/.brigade/fleet.toml [fleet] token_file or BRIGADE_FLEET_TOKEN)"
             )
-        revision = expected_revision
-        if revision is None:
-            snapshot = _run_with_deadline(
-                lambda: _client._get_models_blocking(hub, "/models", admin_token, timeout=CLOUD_TIMEOUT_SECONDS),
-                timeout=CLOUD_TIMEOUT_SECONDS,
-            )
-            if not isinstance(snapshot, dict) or type(snapshot.get("revision")) is not int:
-                raise FleetClientError("fleet hub model policy revision is missing")
-            revision = int(snapshot["revision"])
+        snapshot = _run_with_deadline(
+            lambda: _client._get_models_blocking(hub, "/models", admin_token, timeout=CLOUD_TIMEOUT_SECONDS),
+            timeout=CLOUD_TIMEOUT_SECONDS,
+        )
+        if not isinstance(snapshot, dict) or type(snapshot.get("revision")) is not int:
+            raise FleetClientError("fleet hub model policy revision is missing")
+        revision = int(snapshot["revision"]) if expected_revision is None else expected_revision
+        existing = _existing_seat(snapshot, seat)
+        resolved_reasoning = _preserved_field(reasoning, existing, "reasoning", default="none")
+        resolved_cli = _preserved_field(brigade_cli, existing, "brigade_cli")
+        resolved_t3 = _preserved_field(t3_instance_id, existing, "t3_instance_id")
+        resolved_tier = _preserved_field(t3_service_tier, existing, "t3_service_tier")
         body = {
             "action": "set",
             "provider": provider,
@@ -407,10 +457,10 @@ def set_model_policy(
             "enabled": enabled,
             "limit": limit,
             "notes": notes,
-            "reasoning": reasoning,
-            "brigade_cli": brigade_cli,
-            "t3_instance_id": t3_instance_id,
-            "t3_service_tier": t3_service_tier,
+            "reasoning": resolved_reasoning,
+            "brigade_cli": resolved_cli,
+            "t3_instance_id": resolved_t3,
+            "t3_service_tier": resolved_tier,
             "expected_revision": revision,
         }
         status, payload = _run_with_deadline(

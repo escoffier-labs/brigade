@@ -171,8 +171,7 @@ def _ok(reason: str, payload: Mapping[str, Any]) -> ModelAdmissionDecision:
 
 
 def _node_token() -> str:
-    settings = _client.load_fleet_settings()
-    return settings["node_token"] or _client.load_fleet_config().get("token") or ""
+    return _client.load_fleet_settings()["node_token"] or ""
 
 
 def _validate_leaf_stat(opened: os.stat_result, *, label: str) -> None:
@@ -466,11 +465,18 @@ def fetch_versioned_roster(
         return _fail("cache-unsafe-platform")
     config = _client.load_fleet_config()
     hub = hub_url or config["hub_url"]
-    token = config["token"]
     if not hub:
         return _fail("hub-unavailable")
     audience = _client.resolve_node_id()
-    node_token = _node_token()
+    settings = _client.load_fleet_settings()
+    node_token = settings["node_token"]
+    if not node_token:
+        if settings["admin_token"] and config["token"] == settings["admin_token"]:
+            return _fail("node-token-required")
+        node_token = config["token"]
+    if not node_token:
+        return _fail("node-token-required")
+    token = node_token
     try:
         payload = _client._run_with_deadline(
             lambda: _client._get_models_blocking(hub, "/models", token, timeout=_client.CLOUD_TIMEOUT_SECONDS),
@@ -588,6 +594,8 @@ def _resolve_from_roster(
         str(match.get("provider") or ""), str(match.get("model") or ""), retired_rows
     ):
         reason = "retired-model"
+    elif not isinstance(match.get("reasoning"), str) or not str(match.get("reasoning") or "").strip():
+        reason = "binding-missing"
     else:
         binding = _binding_for(consumer, match)
         if binding is None:
@@ -824,6 +832,43 @@ def _exact_admission_success(body: Mapping[str, Any]) -> dict[str, Any] | None:
     return {key: body[key] for key in _SUCCESS_ADMISSION_KEYS}
 
 
+def _apply_admission_expectations(
+    decision: ModelAdmissionDecision,
+    *,
+    expect_revision: int | None,
+    expect_digest: str | None,
+) -> ModelAdmissionDecision:
+    if not decision.ok:
+        return decision
+    if expect_revision is not None and decision.payload.get("roster_revision") != expect_revision:
+        return _fail(
+            "roster_revision_conflict",
+            4,
+            {
+                "schema": fleet_model_roster.ADMISSION_SCHEMA,
+                "state": "denied",
+                "source": decision.payload.get("source") or "hub",
+                "error": "roster_revision_conflict",
+                "roster_revision": decision.payload.get("roster_revision"),
+                "roster_digest": decision.payload.get("roster_digest"),
+            },
+        )
+    if expect_digest is not None and decision.payload.get("roster_digest") != expect_digest:
+        return _fail(
+            "roster_digest_conflict",
+            4,
+            {
+                "schema": fleet_model_roster.ADMISSION_SCHEMA,
+                "state": "denied",
+                "source": decision.payload.get("source") or "hub",
+                "error": "roster_digest_conflict",
+                "roster_revision": decision.payload.get("roster_revision"),
+                "roster_digest": decision.payload.get("roster_digest"),
+            },
+        )
+    return decision
+
+
 def _map_hub_admission(status: int, payload: Any) -> ModelAdmissionDecision:
     if status == 200:
         if not isinstance(payload, dict):
@@ -833,6 +878,9 @@ def _map_hub_admission(status: int, payload: Any) -> ModelAdmissionDecision:
             return _fail("unsupported-schema", 2)
         provider = str(exact.get("provider") or "")
         model = str(exact.get("model") or "")
+        expires = _parse_iso(exact.get("expires_at"))
+        if expires is not None and expires <= utc_now():
+            return _fail("admission-expired")
         if fleet_model_roster.retired_reason(provider, model):
             denied = dict(exact)
             denied["state"] = "denied"
@@ -888,6 +936,8 @@ def admit_model(
         "future-timestamp",
         "lkg-expired",
         "revision-rollback",
+        "node-token-required",
+        "admin-token-not-cacheable",
     }:
         return fetched
     config = _client.load_fleet_config()
@@ -909,7 +959,11 @@ def admit_model(
                 lambda: _client._post_model_policy_blocking(hub, token, body, timeout=_client.CLOUD_TIMEOUT_SECONDS),
                 timeout=_client.CLOUD_TIMEOUT_SECONDS,
             )
-            return _map_hub_admission(status, payload)
+            return _apply_admission_expectations(
+                _map_hub_admission(status, payload),
+                expect_revision=expect_revision,
+                expect_digest=expect_digest,
+            )
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
                 return _fail("auth-failed")
@@ -1036,6 +1090,15 @@ def doctor_model_roster(*, consumer: str) -> ModelAdmissionDecision:
         "local_roster_drift": drift,
         "audit_spool": spool_label,
     }
+    if not payload["binding_present"]:
+        payload["remediation"] = _empty_binding_remediation(
+            {
+                "seat": default_seat,
+                "provider": resolved.payload.get("provider") or payload.get("provider"),
+                "model": resolved.payload.get("model") or payload.get("model"),
+            },
+            roster,
+        )
     try:
         record = _load_lkg_record()
         cached_at = _parse_iso(record.get("cached_at"))
@@ -1070,6 +1133,15 @@ def _reconcile_findings(
         if not relevant:
             continue
         seen.add(seat_name)
+        if _binding_for(consumer, item) is None:
+            findings.append(
+                {
+                    "code": "empty-binding",
+                    "seat": seat_name,
+                    "remediation": _empty_binding_remediation(item, roster),
+                }
+            )
+            continue
         local_model = _local_model_for(local_agents, seat_name)
         if not local_model:
             findings.append({"code": "instance-missing", "seat": seat_name})
@@ -1087,6 +1159,18 @@ def _reconcile_findings(
         if not _local_model_for(local_agents, str(default_seat)):
             findings.append({"code": "instance-missing", "seat": default_seat})
     return findings
+
+
+def _empty_binding_remediation(seat: Mapping[str, Any], roster: Mapping[str, Any]) -> str:
+    revision = roster.get("revision") or roster.get("roster_revision") or "N"
+    name = seat.get("seat") or "SEAT"
+    provider = seat.get("provider") or "provider"
+    model = seat.get("model") or "model"
+    return (
+        f"brigade fleet models set {provider} {model} {name} --enable "
+        f"--reasoning <reasoning> --brigade-cli <cli> --t3-instance-id <id> "
+        f"--expect-revision {revision}"
+    )
 
 
 def reconcile_model_roster(*, consumer: str) -> ModelAdmissionDecision:

@@ -494,6 +494,58 @@ def test_model_policy_cli_set_uses_bounded_admin_client(monkeypatch, capsys):
     assert '"enabled": false' in capsys.readouterr().out
 
 
+def test_model_policy_cli_set_exposes_exact_fields_and_expected_revision(monkeypatch, capsys):
+    captured: dict[str, object] = {}
+
+    def _set(provider, model, seat, **fields):
+        captured.update(provider=provider, model=model, seat=seat, **fields)
+        return {
+            "provider": provider,
+            "model": model,
+            "seat": seat,
+            "enabled": fields.get("enabled"),
+            "reasoning": fields.get("reasoning") or "high",
+            "brigade_cli": fields.get("brigade_cli") or "cursor-agent",
+            "t3_instance_id": fields.get("t3_instance_id") or "cursor",
+            "t3_service_tier": fields.get("t3_service_tier") or "standard",
+        }
+
+    monkeypatch.setattr(fleet_client, "set_model_policy", _set)
+    assert (
+        cli.main(
+            [
+                "fleet",
+                "models",
+                "set",
+                "cursor",
+                "cursor-grok-4.6-high-fast",
+                "cursor_grok",
+                "--enable",
+                "--reasoning",
+                "high",
+                "--brigade-cli",
+                "cursor-agent",
+                "--t3-instance-id",
+                "cursor",
+                "--t3-service-tier",
+                "standard",
+                "--expect-revision",
+                "4",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert captured["reasoning"] == "high"
+    assert captured["brigade_cli"] == "cursor-agent"
+    assert captured["t3_instance_id"] == "cursor"
+    assert captured["t3_service_tier"] == "standard"
+    assert captured["expected_revision"] == 4
+    out = capsys.readouterr().out
+    assert '"reasoning": "high"' in out
+    assert '"brigade_cli": "cursor-agent"' in out
+
+
 def test_two_seats_can_share_one_model(tmp_path):
     with _hub(tmp_path) as hub:
         db = fleet_hub.open_db(hub[2])

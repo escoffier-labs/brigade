@@ -177,6 +177,17 @@ def register(sub: argparse._SubParsersAction) -> None:
     enabled.add_argument("--disable", action="store_true", help="Disable this model policy.")
     p_models_set.add_argument("--limit", type=int, default=None, help="Optional concurrent-use limit (0 through 64).")
     p_models_set.add_argument("--notes", default=None, help="Optional operator note (stored as safe policy metadata).")
+    p_models_set.add_argument("--reasoning", default=None, help="Exact reasoning value for the seat.")
+    p_models_set.add_argument("--brigade-cli", default=None, dest="brigade_cli", help="Exact Brigade CLI binding.")
+    p_models_set.add_argument(
+        "--t3-instance-id", default=None, dest="t3_instance_id", help="Exact T3 instance binding."
+    )
+    p_models_set.add_argument(
+        "--t3-service-tier", default=None, dest="t3_service_tier", help="Optional T3 service tier."
+    )
+    p_models_set.add_argument(
+        "--expect-revision", type=int, default=None, dest="expect_revision", help="Current hub roster revision."
+    )
     p_models_set.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     p_models_set.set_defaults(func=_dispatch_models_set)
     p_models_admit = models_sub.add_parser("admit", help="Admit one consumer/seat from the hub roster.")
@@ -1165,14 +1176,22 @@ def _dispatch_models_set(args: argparse.Namespace) -> int:
     from .. import fleet_client
 
     try:
-        policy = fleet_client.set_model_policy(
-            args.provider,
-            args.model,
-            args.seat,
-            enabled=bool(args.enable),
-            limit=args.limit,
-            notes=args.notes,
-        )
+        kwargs: dict[str, object] = {
+            "enabled": bool(args.enable),
+            "limit": args.limit,
+            "notes": args.notes,
+        }
+        if args.reasoning is not None:
+            kwargs["reasoning"] = args.reasoning
+        if args.brigade_cli is not None:
+            kwargs["brigade_cli"] = args.brigade_cli
+        if args.t3_instance_id is not None:
+            kwargs["t3_instance_id"] = args.t3_instance_id
+        if args.t3_service_tier is not None:
+            kwargs["t3_service_tier"] = args.t3_service_tier
+        if args.expect_revision is not None:
+            kwargs["expected_revision"] = args.expect_revision
+        policy = fleet_client.set_model_policy(args.provider, args.model, args.seat, **kwargs)
     except fleet_client.FleetClientError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -1186,10 +1205,18 @@ def _dispatch_models_set(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_admission_json(payload: object) -> None:
+def _print_admission_json(payload: object, *, reason: str | None = None, include_error: bool = False) -> None:
     import json as _json
 
-    print(_json.dumps(payload, indent=2, sort_keys=True))
+    body = dict(payload) if isinstance(payload, dict) else {}
+    if reason and "reason" not in body:
+        body["reason"] = reason
+    if include_error:
+        if "error" not in body:
+            body["error"] = body.get("reason") or reason
+        if "reason" not in body:
+            body["reason"] = body.get("error")
+    print(_json.dumps(body, indent=2, sort_keys=True))
 
 
 def _dispatch_models_admit(args: argparse.Namespace) -> int:
@@ -1197,7 +1224,7 @@ def _dispatch_models_admit(args: argparse.Namespace) -> int:
 
     if args.consumer not in fleet_model_roster.CONSUMERS or args.phase not in fleet_model_roster.ADMISSION_PHASES:
         if args.json:
-            _print_admission_json({"reason": "unsupported-schema"})
+            _print_admission_json({"reason": "unsupported-schema", "error": "unsupported-schema"})
         else:
             print("error: unsupported consumer or phase", file=sys.stderr)
         return 2
@@ -1211,7 +1238,10 @@ def _dispatch_models_admit(args: argparse.Namespace) -> int:
         allow_lkg=not args.no_lkg,
     )
     if args.json:
-        _print_admission_json(decision.payload)
+        if decision.ok:
+            _print_admission_json(decision.payload)
+        else:
+            _print_admission_json(decision.payload, reason=decision.reason, include_error=True)
     elif not decision.ok:
         print(f"error: {decision.reason}", file=sys.stderr)
     return decision.exit_code

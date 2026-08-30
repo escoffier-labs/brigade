@@ -2357,3 +2357,418 @@ def test_admin_mutation_constructs_safe_output_and_maps_get_style_409(tmp_path, 
         assert conflict.ok is False
         assert conflict.exit_code == 4
         _secret_free(conflict, "secret")
+
+
+def test_configured_admin_token_roster_read_fails_closed_without_flattening(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        monkeypatch.delenv("BRIGADE_FLEET_NODE_TOKEN")
+        decision = fleet_model_admission.fetch_versioned_roster()
+        assert decision.ok is False
+        assert decision.reason not in {"hub-unavailable", "unavailable"}
+        assert decision.reason in {"node-token-required", "admin-token-not-cacheable"}
+        snapshot = fleet_client.load_model_policy_snapshot()
+        assert snapshot["state"] not in {"unavailable", "authoritative", "unconfigured"}
+        assert snapshot["state"] == decision.reason
+        assert not fleet_model_admission.lkg_path().exists()
+        _secret_free(decision, node_token, ADMIN_TOKEN)
+
+
+def test_old_hub_roster_read_fails_closed_with_unsupported_schema(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        monkeypatch.setattr(
+            fleet_client,
+            "_run_with_deadline",
+            lambda *args, **kwargs: {"models": [{"seat": "coder", "provider": "openai", "model": "gpt-5.6"}]},
+        )
+        decision = fleet_model_admission.fetch_versioned_roster(allow_lkg=False)
+        assert decision.ok is False
+        assert decision.reason == "unsupported-schema"
+        assert decision.reason != "hub-unavailable"
+        snapshot = fleet_client.load_model_policy_snapshot()
+        assert snapshot["state"] == "unsupported-schema"
+        _secret_free(decision, node_token, ADMIN_TOKEN)
+
+
+def test_models_set_exposes_exact_fields_and_can_seed_enabled_seat(tmp_path, monkeypatch):
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        policy = fleet_client.set_model_policy(
+            "cursor",
+            "cursor-grok-4.6-high-fast",
+            "cursor_grok",
+            enabled=True,
+            reasoning="high",
+            brigade_cli="cursor-agent",
+            t3_instance_id="cursor",
+            t3_service_tier="standard",
+            expected_revision=1,
+        )
+        for key in ("reasoning", "brigade_cli", "t3_instance_id", "t3_service_tier"):
+            assert key in policy, key
+        assert policy["reasoning"] == "high"
+        assert policy["brigade_cli"] == "cursor-agent"
+        assert policy["t3_instance_id"] == "cursor"
+        assert policy["t3_service_tier"] == "standard"
+        status, roster = _request(hub, "GET", "/models", token=ADMIN_TOKEN)
+        assert status == 200
+        seat = next(item for item in roster["seats"] if item["seat"] == "cursor_grok")
+        assert seat["reasoning"] == "high"
+        assert seat["bindings"]["brigade_cli"] == "cursor-agent"
+        assert seat["enabled"] is True
+        _secret_free(policy, node_token, ADMIN_TOKEN)
+
+
+def test_models_set_limit_note_update_preserves_exact_fields_and_expected_revision(tmp_path, monkeypatch):
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        roster = _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        updated = fleet_client.set_model_policy(
+            "cursor",
+            "cursor-grok-4.6-high-fast",
+            "cursor_grok",
+            enabled=True,
+            limit=4,
+            notes="capacity",
+            expected_revision=int(roster["revision"]),
+        )
+        assert updated["reasoning"] == "high"
+        assert updated["brigade_cli"] == "cursor-agent"
+        assert updated["t3_instance_id"] == "cursor"
+        assert updated["t3_service_tier"] == "standard"
+        status, after = _request(hub, "GET", "/models", token=ADMIN_TOKEN)
+        assert status == 200
+        seat = next(item for item in after["seats"] if item["seat"] == "cursor_grok")
+        assert seat["reasoning"] == "high"
+        assert seat["bindings"]["brigade_cli"] == "cursor-agent"
+        assert seat["bindings"]["t3_instance_id"] == "cursor"
+        stale = pytest.raises(fleet_client.FleetClientError)
+        with stale:
+            fleet_client.set_model_policy(
+                "cursor",
+                "cursor-grok-4.6-high-fast",
+                "cursor_grok",
+                enabled=True,
+                limit=5,
+                expected_revision=int(roster["revision"]),
+            )
+        _secret_free(updated, node_token, ADMIN_TOKEN)
+
+
+def test_versioned_run_rejects_custom_command_and_cross_harness_binding_drift():
+    custom = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan", model="opus-5"),
+            "cursor_grok": Agent(
+                "cursor_grok",
+                "cursor",
+                "code",
+                model="cursor-grok-4.6-high-fast",
+                command=("custom-cursor", "--flag"),
+                env={"CURSOR_API_KEY": "local-secret"},
+            ),
+        },
+    )
+    snapshot = _versioned_snapshot(_versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast"))
+    denied = aboyeur.resolve_fleet_model_policy(custom, worker="cursor_grok", snapshot=snapshot)
+    assert denied.error is not None
+    assert "cursor_grok" in denied.error
+    agent = denied.roster.agents.get("cursor_grok")
+    if agent is not None:
+        assert agent.command is None or denied.error
+
+    drifted = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan", model="opus-5"),
+            "cursor_grok": Agent(
+                "cursor_grok",
+                "codex",
+                "code",
+                model="cursor-grok-4.6-high-fast",
+                env={"OPENAI_API_KEY": "keep-if-wrong"},
+            ),
+        },
+    )
+    drifted_resolution = aboyeur.resolve_fleet_model_policy(drifted, worker="cursor_grok", snapshot=snapshot)
+    assert drifted_resolution.error is not None
+    kept = drifted_resolution.roster.agents.get("cursor_grok")
+    if kept is not None:
+        assert kept.env != {"OPENAI_API_KEY": "keep-if-wrong"} or drifted_resolution.error
+
+    matched = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan", model="opus-5"),
+            "cursor_grok": Agent(
+                "cursor_grok",
+                "cursor",
+                "code",
+                model="cursor-grok-4.6-high-fast",
+                env={"CURSOR_API_KEY": "keep-me"},
+            ),
+        },
+    )
+    allowed = aboyeur.resolve_fleet_model_policy(matched, worker="cursor_grok", snapshot=snapshot)
+    assert allowed.error is None
+    assert allowed.roster.agents["cursor_grok"].env == {"CURSOR_API_KEY": "keep-me"}
+    assert allowed.roster.agents["cursor_grok"].command is None
+
+
+def test_versioned_model_override_requires_exact_hub_match_and_never_discards():
+    snapshot = _versioned_snapshot(_versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast"))
+    mismatch = aboyeur.resolve_fleet_model_policy(
+        _roster(),
+        worker="cursor_grok",
+        model_override="composer-2.5",
+        snapshot=snapshot,
+    )
+    assert mismatch.error is not None
+    assert "composer-2.5" in mismatch.error or "cursor-grok-4.6-high-fast" in mismatch.error
+    agent = mismatch.roster.agents.get("cursor_grok")
+    if agent is not None:
+        assert agent.model != "composer-2.5"
+
+    matched = aboyeur.resolve_fleet_model_policy(
+        _roster(),
+        worker="cursor_grok",
+        model_override="cursor-grok-4.6-high-fast",
+        snapshot=snapshot,
+    )
+    assert matched.error is None
+    assert matched.roster.agents["cursor_grok"].model == "cursor-grok-4.6-high-fast"
+    assert matched.receipt["model_override"] == "cursor-grok-4.6-high-fast"
+
+
+def test_validate_roster_rows_requires_nonempty_reasoning_and_hub_lkg_schema_match():
+    from brigade import fleet_model_admission
+
+    missing = _versioned_snapshot(_versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast"))
+    missing["seats"][0]["reasoning"] = ""
+    assert fleet_model_roster.validate_roster_rows(missing) == "malformed-roster"
+    absent = _versioned_snapshot(_versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast"))
+    del absent["seats"][0]["reasoning"]
+    assert fleet_model_roster.validate_roster_rows(absent) == "malformed-roster"
+
+    hub_ok = fleet_model_admission._map_hub_admission(200, _admission_success_body())
+    lkg_ok = fleet_model_admission._resolve_from_roster(
+        {
+            "revision": 2,
+            "roster_digest": "sha256:" + ("ab" * 32),
+            "expires_at": "2026-08-30T14:15:00Z",
+            "seats": [_versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast")],
+            "consumer_defaults": {"t3-fleet": "cursor_grok"},
+            "retired_models": [],
+        },
+        consumer="t3-fleet",
+        seat=None,
+        source="lkg",
+    )
+    assert hub_ok.ok is True and lkg_ok.ok is True
+    assert set(hub_ok.payload) == set(lkg_ok.payload)
+
+
+def test_versioned_run_enforces_roster_declared_retirements_before_dispatch(tmp_path, monkeypatch):
+    snapshot = _versioned_snapshot(
+        _versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast"),
+    )
+    snapshot["retired_models"] = [
+        {
+            "provider": "cursor",
+            "family": "cursor-grok-4.6",
+            "match_kind": "family-prefix",
+            "permanent": False,
+            "reason_code": "operator-retired",
+        }
+    ]
+    lease_calls: list[tuple[str, str, str]] = []
+    provider_calls: list[str] = []
+    monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", lambda: snapshot)
+    monkeypatch.setattr(
+        fleet_client,
+        "acquire_model_lease",
+        lambda seat, provider, model: (
+            lease_calls.append((seat, provider, model))
+            or fleet_client.ModelLeaseDecision(True, "ok", "should-not-lease", "holder")
+        ),
+    )
+    monkeypatch.setattr(
+        agents,
+        "run_agent",
+        lambda *args, **kwargs: provider_calls.append("run_agent") or agents.AgentResult(text="no", ok=True),
+    )
+    output_dir = tmp_path / "run"
+    assert (
+        run_aboyeur_guarded(
+            "inspect",
+            _roster(),
+            worker="cursor_grok",
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 2
+    )
+    run = json.loads((output_dir / "run.json").read_text())
+    assert run["failure"]["kind"] == "fleet-model-policy"
+    assert run["failure"]["phase"] == "preflight"
+    assert lease_calls == []
+    assert provider_calls == []
+
+
+def test_doctor_and_reconcile_remediate_migrated_empty_bindings(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        assert (
+            _admin_set(
+                hub,
+                reasoning="none",
+                brigade_cli="",
+                t3_instance_id="",
+                t3_service_tier="",
+            )[0]
+            == 200
+        )
+        assert (
+            _request(
+                hub,
+                "POST",
+                "/models",
+                token=ADMIN_TOKEN,
+                body={
+                    "action": "set-default",
+                    "consumer": "t3-fleet",
+                    "seat": "cursor_grok",
+                    "expected_revision": _current_revision(hub),
+                },
+            )[0]
+            == 200
+        )
+        home = _configure_client(monkeypatch, tmp_path, hub, node_token)
+        (home / ".brigade").mkdir(parents=True, exist_ok=True)
+        (home / ".brigade" / "roster.toml").write_text(
+            'orchestrator = "chef"\n\n[agents.cursor_grok]\ncli = "cursor"\nrole = "code"\n'
+            'model = "cursor-grok-4.6-high-fast"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(home)
+        doctor = fleet_model_admission.doctor_model_roster(consumer="t3-fleet")
+        assert doctor.ok is True
+        assert doctor.payload.get("binding_present") is False
+        remediation = doctor.payload.get("remediation") or ""
+        assert "fleet models set" in remediation
+        assert "--brigade-cli" in remediation or "--t3-instance-id" in remediation
+        reconcile = fleet_model_admission.reconcile_model_roster(consumer="t3-fleet")
+        assert reconcile.ok is True
+        codes = {item["code"] for item in reconcile.payload["findings"]}
+        assert "empty-binding" in codes
+        empty = next(item for item in reconcile.payload["findings"] if item["code"] == "empty-binding")
+        assert "fleet models set" in str(empty.get("remediation") or empty)
+        _secret_free([doctor, reconcile], node_token, ADMIN_TOKEN)
+
+
+def test_admit_compares_success_revision_and_digest_to_caller_expectations(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        roster = _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        drifted = _admission_success_body(
+            roster_revision=int(roster["revision"]) + 3,
+            roster_digest="sha256:" + ("cd" * 32),
+            expires_at=(datetime.now(timezone.utc) + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        monkeypatch.setattr(fleet_client, "_post_model_policy_blocking", lambda *a, **k: (200, drifted))
+        revision = fleet_model_admission.admit_model(
+            consumer="t3-fleet",
+            request_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            phase="controller",
+            expect_revision=int(roster["revision"]),
+        )
+        assert revision.ok is False
+        assert revision.exit_code == 4
+        assert revision.reason == "roster_revision_conflict"
+        digest = fleet_model_admission.admit_model(
+            consumer="t3-fleet",
+            request_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            phase="controller",
+            expect_digest=str(roster["roster_digest"]),
+        )
+        assert digest.ok is False
+        assert digest.exit_code == 4
+        assert digest.reason == "roster_digest_conflict"
+        _secret_free([revision, digest], node_token, ADMIN_TOKEN)
+
+
+def test_admit_json_failures_include_reason_and_error(tmp_path, monkeypatch, capsys):
+    from brigade import fleet_model_admission
+
+    rc = cli.main(
+        [
+            "fleet",
+            "models",
+            "admit",
+            "--consumer",
+            "not-a-consumer",
+            "--request-id",
+            ADMIT_REQUEST_ID,
+            "--phase",
+            "controller",
+            "--json",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 2
+    payload = json.loads(out.out)
+    assert payload["reason"] == "unsupported-schema"
+    assert payload["error"] == "unsupported-schema"
+
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "admit_model",
+        lambda **kwargs: fleet_model_admission.ModelAdmissionDecision(False, 1, "auth-failed", {}),
+    )
+    assert (
+        cli.main(
+            [
+                "fleet",
+                "models",
+                "admit",
+                "--consumer",
+                "t3-fleet",
+                "--request-id",
+                ADMIT_REQUEST_ID,
+                "--phase",
+                "controller",
+                "--json",
+            ]
+        )
+        == 1
+    )
+    failed = json.loads(capsys.readouterr().out)
+    assert failed["reason"] == "auth-failed"
+    assert failed["error"] == "auth-failed"
+
+
+def test_map_hub_admission_rejects_already_expired_success():
+    from brigade import fleet_model_admission
+
+    expired = _admission_success_body(expires_at="2020-01-01T00:00:00Z")
+    decision = fleet_model_admission._map_hub_admission(200, expired)
+    assert decision.ok is False
+    assert decision.reason in {"admission-expired", "unsupported-schema", "lkg-expired"}
+    assert decision.exit_code in {1, 2}

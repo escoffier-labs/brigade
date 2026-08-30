@@ -170,6 +170,23 @@ def test_permanent_retired_openai_families_match_structurally(model):
 
 def test_retired_family_match_does_not_catch_gpt_5_40():
     assert fleet_model_roster.retired_reason("openai", "gpt-5.40") is None
+    assert fleet_model_roster.retired_reason("openai", "openai/gpt-5.40") is None
+    assert fleet_model_roster.retired_reason("codex", "codex/gpt-5.40") is None
+    assert fleet_model_roster.retired_reason("openai-codex", "openai-codex/gpt-5.40") is None
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [
+        ("openai", "codex/gpt-5.4"),
+        ("openai", "openai-codex/gpt-5.4"),
+        ("openai", "openai-codex:gpt-5.5"),
+        ("codex", "openai/gpt-5.5"),
+        ("openai-codex", "codex/gpt-5.4-high"),
+    ],
+)
+def test_permanent_retired_matches_allowed_provider_prefixed_spellings(provider, model):
+    assert fleet_model_roster.retired_reason(provider, model) == "permanently-retired"
 
 
 @pytest.mark.parametrize("provider", ["codex", "openai-codex"])

@@ -91,6 +91,17 @@ def _cli_from_binding(aboyeur: Any, instance_id: str) -> str | None:
     return mapped if mapped is not None and aboyeur.agents.is_known(mapped) else None
 
 
+def _local_cli_matches_hub_binding(aboyeur: Any, agent: Agent, binding: Mapping[str, Any]) -> bool:
+    instance_id = str(binding.get("instance_id") or "")
+    resolved = _cli_from_binding(aboyeur, instance_id)
+    local = agent.cli or ""
+    if not resolved or not local:
+        return False
+    if local == resolved:
+        return True
+    return aboyeur.agents.command_for(local) == instance_id
+
+
 def resolve_fleet_model_policy(
     roster: Roster,
     *,
@@ -101,6 +112,7 @@ def resolve_fleet_model_policy(
     """Resolve one immutable Fleet Hub policy snapshot into an effective roster."""
     aboyeur = _aboyeur()
     effective = roster
+    cleaned_override: str | None = None
     if model_override is not None:
         cleaned_override = model_override.strip()
         if worker is None:
@@ -129,9 +141,6 @@ def resolve_fleet_model_policy(
                 receipt={"state": "invalid", "authoritative": False, "models": [], "decisions": []},
                 error=f"seat {worker!r} uses {cli!r}, which does not support a per-run model override",
             )
-        updated_agents = dict(roster.agents)
-        updated_agents[worker] = replace(agent, model=cleaned_override)
-        effective = replace(roster, agents=updated_agents)
 
     raw_snapshot = dict(snapshot) if snapshot is not None else aboyeur.fleet_client.load_model_policy_snapshot()
     if _is_versioned_snapshot(raw_snapshot):
@@ -140,8 +149,13 @@ def resolve_fleet_model_policy(
             effective,
             raw_snapshot,
             worker=worker,
-            model_override=model_override,
+            model_override=cleaned_override,
         )
+    if cleaned_override is not None and worker is not None:
+        agent = roster.agents[worker]
+        updated_agents = dict(roster.agents)
+        updated_agents[worker] = replace(agent, model=cleaned_override)
+        effective = replace(roster, agents=updated_agents)
 
     state = raw_snapshot.get("state") if isinstance(raw_snapshot.get("state"), str) else "unavailable"
     raw_models = raw_snapshot.get("models")
@@ -169,6 +183,18 @@ def resolve_fleet_model_policy(
             roster=effective,
             receipt=receipt,
             error="fleet model policy could not authenticate this node; refusing new dispatch",
+        )
+    if state == "node-token-required":
+        return aboyeur.FleetModelPolicyResolution(
+            roster=effective,
+            receipt=receipt,
+            error="fleet model policy requires a node token; refusing new dispatch",
+        )
+    if state == "unsupported-schema":
+        return aboyeur.FleetModelPolicyResolution(
+            roster=effective,
+            receipt=receipt,
+            error="fleet model policy hub returned an unsupported roster schema; refusing new dispatch",
         )
     if state != "authoritative":
         return aboyeur.FleetModelPolicyResolution(roster=effective, receipt=receipt)
@@ -324,14 +350,21 @@ def _resolve_versioned(
             error="fleet model policy snapshot is malformed; refusing new dispatch",
         )
 
+    raw_retired = raw_snapshot.get("retired_models")
+    retired_rows = (
+        [dict(row) for row in raw_retired if isinstance(row, Mapping)] if isinstance(raw_retired, list) else []
+    )
     seat_rows = {row.get("seat"): row for row in seats if isinstance(row.get("seat"), str) and row.get("seat")}
     kept_agents = dict(effective.agents)
     decisions: list[dict[str, object]] = []
     denied: dict[str, str] = {}
     admissions: list[dict[str, object]] = []
+    cleaned_override = model_override.strip() if model_override is not None else None
     for seat, agent in effective.agents.items():
         requested_provider = aboyeur.agents.model_policy_provider(agent.cli or "")
-        requested_model = aboyeur.agents.model_policy_model(agent.cli or "", agent.model)
+        requested_model = aboyeur.agents.model_policy_model(
+            agent.cli or "", cleaned_override if seat == worker and cleaned_override is not None else agent.model
+        )
         row = seat_rows.get(seat)
         decision: dict[str, object] = {
             "kind": "fleet-model-policy",
@@ -350,13 +383,20 @@ def _resolve_versioned(
             decision["policy_model"] = policy_model
             decision["policy_enabled"] = row.get("enabled") is True
             binding = fleet_model_admission._binding_for("brigade-run", row)
-            policy_floor = _permanent_floor(policy_provider, policy_model)
+            policy_floor = fleet_model_roster.retired_reason(
+                str(policy_provider or ""),
+                str(policy_model or ""),
+                retired_rows or None,
+            )
             if policy_floor is not None:
                 outcome = "retired"
                 detail = policy_floor
             elif not isinstance(policy_provider, str) or not isinstance(policy_model, str):
                 outcome = "mismatch"
                 detail = "registry entry is missing exact provider/model"
+            elif cleaned_override is not None and seat == worker and cleaned_override != policy_model:
+                outcome = "mismatch"
+                detail = f"--model {cleaned_override!r} does not match Hub model {policy_model!r}"
             elif not isinstance(policy_reasoning, str) or not policy_reasoning:
                 outcome = "binding-missing"
                 detail = "registry entry is missing exact reasoning"
@@ -366,6 +406,9 @@ def _resolve_versioned(
             elif row.get("enabled") is not True:
                 outcome = "disabled"
                 detail = "registry entry is disabled"
+            elif agent.command:
+                outcome = "custom-command"
+                detail = "custom Agent command is not permitted under Hub provenance"
             else:
                 resolved_cli = _cli_from_binding(aboyeur, str(binding["instance_id"]))
                 if resolved_cli is None:
@@ -376,14 +419,20 @@ def _resolve_versioned(
                     detail = (
                         f"registry binding {binding['instance_id']!r} is inconsistent with provider {policy_provider!r}"
                     )
+                elif not _local_cli_matches_hub_binding(aboyeur, agent, binding):
+                    outcome = "inconsistent-binding"
+                    detail = f"local CLI {agent.cli!r} does not match Hub binding {binding['instance_id']!r}"
                 else:
                     outcome = "enabled"
                     detail = "exact seat/provider/model/reasoning/binding entry is enabled"
+                    keep_env = _local_cli_matches_hub_binding(aboyeur, agent, binding)
                     kept_agents[seat] = replace(
                         agent,
                         cli=resolved_cli,
                         model=policy_model,
                         reasoning=policy_reasoning,
+                        command=None,
+                        env=agent.env if keep_env else None,
                     )
                     admission = _admission_record(
                         source=source,
