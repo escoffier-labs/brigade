@@ -7,6 +7,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import uuid
 import urllib.error
@@ -23,6 +24,8 @@ CONFIG_DIR = Path(".brigade") / "grokbot"
 QUEUE_STATE_DIR = Path(".brigade") / "cloud" / "grokbot"
 DEFAULT_TIMEOUT_SECONDS = 5
 MAX_CANARY_BODY_BYTES = 65_536
+LISTENER_RECOVERY_UNIT_FRAGMENT = "StartLimitIntervalSec=15min\nStartLimitBurst=3\n"
+LISTENER_RECOVERY_SERVICE_FRAGMENT = "Restart=on-failure\nRestartSec=60s\nRestartPreventExitStatus=2\n"
 _SYSTEMD_UNQUOTED_ARG_RE = re.compile(r"^[A-Za-z0-9_@%+=:,./-]+$")
 
 
@@ -39,6 +42,37 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def unit_name(instance: str) -> str:
     return f"brigade-grokbot-{instance}.service"
+
+
+def service_result_argv(instance: str) -> list[str]:
+    return [
+        "systemctl",
+        "--user",
+        "show",
+        unit_name(instance),
+        "--property=Result",
+        "--value",
+    ]
+
+
+def inspect_service_result(instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> dict[str, str]:
+    """Return a sanitized service-result check. Never mutates systemd or echoes raw output."""
+    failed = {"check": "service-result", "status": "fail"}
+    argv = service_result_argv(instance)
+    try:
+        completed = subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError, ValueError):
+        return failed
+    stdout = completed.stdout if isinstance(completed.stdout, str) else ""
+    if completed.returncode == 0 and stdout.strip() == "success":
+        return {"check": "service-result", "status": "ok"}
+    return failed
 
 
 def config_path(target: Path, instance: str) -> Path:
@@ -233,11 +267,13 @@ def render_unit(config: dict[str, Any], *, python: str, exec_root: Path) -> str:
         f"# Unit: {unit_name(instance)}\n"
         "[Unit]\n"
         f"Description=Brigade Grok Bot MCP listener ({instance})\n"
-        "After=network.target\n\n"
+        "After=network.target\n"
+        f"{LISTENER_RECOVERY_UNIT_FRAGMENT}"
+        "\n"
         "[Service]\n"
         "Type=simple\n"
         f"ExecStart={exec_start}\n"
-        "Restart=on-failure\n"
+        f"{LISTENER_RECOVERY_SERVICE_FRAGMENT}"
         "NoNewPrivileges=yes\n"
         "PrivateTmp=yes\n"
         "ProtectSystem=strict\n"

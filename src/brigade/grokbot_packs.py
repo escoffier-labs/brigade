@@ -277,19 +277,23 @@ def apply_setup(
     )
 
 
-def doctor(target: Path, pack_id: str) -> list[dict[str, str]]:
+def doctor(target: Path, pack_id: str, *, service_result: bool = False) -> list[dict[str, str]]:
     pack = show_pack(pack_id)
     if pack["kind"] == "queue-role":
-        return grokbot_ops.doctor(target, pack["instance"])
-    if pack["id"] == "fleet-steward":
-        return grokbot_fleet.doctor(target)
-    if pack["id"] == "backup-steward":
-        return grokbot_backup.doctor(target)
-    if pack["id"] == OBSIDIAN_PACK_ID:
-        return grokbot_obsidian.doctor(target)
-    if pack["id"] == "wazuh-triage":
-        return grokbot_wazuh.doctor(target)
-    return grokbot_cerebro.doctor(target)
+        checks = grokbot_ops.doctor(target, pack["instance"])
+    elif pack["id"] == "fleet-steward":
+        checks = grokbot_fleet.doctor(target)
+    elif pack["id"] == "backup-steward":
+        checks = grokbot_backup.doctor(target)
+    elif pack["id"] == OBSIDIAN_PACK_ID:
+        checks = grokbot_obsidian.doctor(target)
+    elif pack["id"] == "wazuh-triage":
+        checks = grokbot_wazuh.doctor(target)
+    else:
+        checks = grokbot_cerebro.doctor(target)
+    if service_result:
+        checks.append(grokbot_ops.inspect_service_result(pack["instance"]))
+    return checks
 
 
 def canary(target: Path, pack_id: str) -> dict[str, Any]:

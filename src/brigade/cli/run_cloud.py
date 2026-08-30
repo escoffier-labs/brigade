@@ -417,6 +417,11 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p_pack_doctor = pack_sub.add_parser("doctor", help="Sanitized pack diagnostics.")
     add_pack_id(p_pack_doctor)
+    p_pack_doctor.add_argument(
+        "--service-result",
+        action="store_true",
+        help="Inspect the Brigade-owned service unit Result. Does not start or mutate systemd.",
+    )
 
     p_pack_canary = pack_sub.add_parser("canary", help="Bounded non-mutating pack authentication and inventory check.")
     add_pack_id(p_pack_canary)
@@ -1273,7 +1278,7 @@ def _dispatch_grokbot_pack(args, target: Path) -> int:
                 else grokbot_packs.preview_setup(target, args.pack_id, **setup_kwargs)
             )
         elif command == "doctor":
-            checks = grokbot_packs.doctor(target, args.pack_id)
+            checks = grokbot_packs.doctor(target, args.pack_id, service_result=getattr(args, "service_result", False))
             if args.json:
                 print(json.dumps({"checks": checks}, indent=2, sort_keys=True))
             else:
