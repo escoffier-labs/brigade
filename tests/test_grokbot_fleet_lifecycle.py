@@ -14,6 +14,7 @@ from brigade.grokbot_fleet.lifecycle import (
     validate_disjoint_state_paths,
 )
 from brigade import grokbot_ops, grokbot_packs
+from tests.test_grokbot_ops import assert_listener_recovery_policy
 
 SECRET = "not-a-real-token-value-32chars!!"
 
@@ -185,3 +186,14 @@ def test_runtime_and_state_paths_reject_symlinks(tmp_path: Path):
     linked_dir.symlink_to(directory)
     with pytest.raises(FleetError):
         validate_state_directory(str(linked_dir), must_exist=True)
+
+
+def test_fleet_unit_uses_shared_listener_recovery_policy(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    grokbot_packs.apply_setup(
+        tmp_path,
+        "fleet-steward",
+        bearer_env="TEST_GROKBOT_BEARER",
+        **_fleet_paths(tmp_path),
+    )
+    assert_listener_recovery_policy(render_unit(tmp_path))

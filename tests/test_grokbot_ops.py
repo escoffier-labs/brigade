@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import urllib.error
@@ -15,6 +16,42 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from brigade import cli, grokbot_jobs, grokbot_mcp, grokbot_ops
+
+LISTENER_RECOVERY_UNIT_LINES = ("StartLimitIntervalSec=15min", "StartLimitBurst=3")
+LISTENER_RECOVERY_SERVICE_LINES = (
+    "Restart=on-failure",
+    "RestartSec=60s",
+    "RestartPreventExitStatus=2",
+)
+_SYSTEMD_MUTATION_VERBS = frozenset(
+    {"start", "stop", "restart", "enable", "disable", "reload", "daemon-reload", "isolate", "kill"}
+)
+
+
+def systemd_sections(unit: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in unit.splitlines():
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1]
+            sections[current] = []
+            continue
+        if current is not None:
+            sections[current].append(line)
+    return {name: "\n".join(lines) for name, lines in sections.items()}
+
+
+def assert_listener_recovery_policy(unit: str) -> None:
+    sections = systemd_sections(unit)
+    unit_lines = [line for line in sections["Unit"].splitlines() if line]
+    service_lines = [line for line in sections["Service"].splitlines() if line]
+    for line in LISTENER_RECOVERY_UNIT_LINES:
+        assert line in unit_lines
+        assert line not in service_lines
+    for line in LISTENER_RECOVERY_SERVICE_LINES:
+        assert line in service_lines
+        assert line not in unit_lines
+
 
 SECRET = "not-a-real-token"
 
@@ -733,3 +770,102 @@ def test_new_grokbot_commands_appear_in_parser_derived_inventory():
     paths = _cli_command_paths()
     for command in ("setup", "doctor", "canary", "install-service", "reconcile-reports"):
         assert f"brigade run-cloud grokbot {command}" in paths
+
+
+@pytest.mark.parametrize("instance", ("operator", "repository-scout", "implementation-worker"))
+def test_queue_role_units_use_shared_listener_recovery_policy(tmp_path: Path, instance: str):
+    unit = grokbot_ops.render_unit(
+        {
+            "schema": grokbot_ops.CONFIG_SCHEMA,
+            "instance": instance,
+            "bind": "127.0.0.1:8766",
+            "allowed_hosts": [],
+            "allowed_origins": [],
+            "bearer": {"kind": "env", "name": "TEST_GROKBOT_BEARER"},
+        },
+        python="/usr/bin/python3",
+        exec_root=tmp_path,
+    )
+    assert_listener_recovery_policy(unit)
+    assert grokbot_ops.LISTENER_RECOVERY_UNIT_FRAGMENT in unit
+    assert grokbot_ops.LISTENER_RECOVERY_SERVICE_FRAGMENT in unit
+
+
+def _record_systemctl(monkeypatch, *, stdout="success\n", returncode=0, error: BaseException | None = None):
+    recorded: list[dict[str, object]] = []
+
+    def fake_run(argv, *args, **kwargs):
+        recorded.append({"argv": list(argv), "kwargs": dict(kwargs)})
+        if error is not None:
+            raise error
+        return subprocess.CompletedProcess(list(argv), returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return recorded
+
+
+def test_inspect_service_result_uses_fixed_argv_and_succeeds_on_exact_success(monkeypatch):
+    recorded = _record_systemctl(monkeypatch, stdout="  success \n")
+    check = grokbot_ops.inspect_service_result("operator")
+    assert check == {"check": "service-result", "status": "ok"}
+    assert recorded[0]["argv"] == [
+        "systemctl",
+        "--user",
+        "show",
+        "brigade-grokbot-operator.service",
+        "--property=Result",
+        "--value",
+    ]
+    kwargs = recorded[0]["kwargs"]
+    assert kwargs.get("shell") is not True
+    assert kwargs.get("check") is not True
+    assert kwargs.get("timeout") == grokbot_ops.DEFAULT_TIMEOUT_SECONDS
+    assert not any(verb in recorded[0]["argv"] for verb in _SYSTEMD_MUTATION_VERBS)
+    assert not any(str(part).endswith(".timer") for part in recorded[0]["argv"])
+
+
+@pytest.mark.parametrize(
+    "stdout,returncode,error",
+    (
+        ("failed\n", 0, None),
+        ("Result=success\n", 0, None),
+        ("SUCCESS\n", 0, None),
+        ("success extra\n", 0, None),
+        ("", 0, None),
+        ("success\n", 1, None),
+        ("success\n", 0, FileNotFoundError("systemctl")),
+        ("success\n", 0, OSError("unavailable")),
+        (
+            "success\n",
+            0,
+            subprocess.TimeoutExpired(
+                ["systemctl", "--user", "show", "brigade-grokbot-operator.service"],
+                5,
+            ),
+        ),
+    ),
+)
+def test_inspect_service_result_fails_closed_without_raw_output(
+    monkeypatch, stdout: str, returncode: int, error: BaseException | None
+):
+    recorded = _record_systemctl(monkeypatch, stdout=stdout, returncode=returncode, error=error)
+    check = grokbot_ops.inspect_service_result("operator")
+    assert check == {"check": "service-result", "status": "fail"}
+    assert set(check) == {"check", "status"}
+    if error is None:
+        assert recorded[0]["argv"][3] == "brigade-grokbot-operator.service"
+
+
+def test_inspect_service_result_sanitizes_raw_stdout_and_stderr(monkeypatch):
+    leak = "timeout /home/secret/.config/systemd/user/brigade-grokbot-operator.service token=not-a-real-token"
+
+    def fake_run(argv, *args, **kwargs):
+        return subprocess.CompletedProcess(list(argv), 0, stdout=leak, stderr=leak)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    check = grokbot_ops.inspect_service_result("operator")
+    rendered = json.dumps(check)
+    assert check == {"check": "service-result", "status": "fail"}
+    assert leak not in rendered
+    assert "not-a-real-token" not in rendered
+    assert "/home/secret" not in rendered

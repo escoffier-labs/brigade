@@ -259,3 +259,16 @@ def test_cli_pack_and_serve_choices_include_wazuh_triage():
     assert served.pack == "wazuh-triage"
     assert not hasattr(served, "wazuh_token")
     assert "wazuh-triage" in grokbot_packs.STEWARD_PACK_IDS
+
+
+def test_wazuh_unit_uses_shared_listener_recovery_policy(tmp_path: Path, monkeypatch):
+    from tests.test_grokbot_ops import assert_listener_recovery_policy
+
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    grokbot_packs.apply_setup(
+        tmp_path,
+        "wazuh-triage",
+        bearer_env="TEST_GROKBOT_BEARER",
+        **_wazuh_paths(tmp_path),
+    )
+    assert_listener_recovery_policy(render_unit(tmp_path))
