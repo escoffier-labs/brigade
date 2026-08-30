@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,147 @@ import (
 	"github.com/escoffier-labs/miseledger/internal/archive"
 	"github.com/escoffier-labs/miseledger/internal/ingest"
 )
+
+type csvFormulaStringer struct{}
+
+func (csvFormulaStringer) String() string { return "+other" }
+
+func TestWriteCSVNeutralizesFormulaCellsAndPreservesTypedNumbers(t *testing.T) {
+	rows := []map[string]any{{
+		"=dangerous-header": "safe",
+		"equal":             "=formula",
+		"plus":              "+formula",
+		"minus_text":        "-42",
+		"at":                "@formula",
+		"tab":               "\tformula",
+		"return":            "\rformula",
+		"bytes":             []byte("-bytes"),
+		"stringer":          csvFormulaStringer{},
+		"safe":              "plain text",
+		"already_literal":   "'=formula",
+		"empty":             "",
+		"nil":               nil,
+		"int_pos":           int(1),
+		"int_neg":           int(-1),
+		"int8_pos":          int8(2),
+		"int8_neg":          int8(-2),
+		"int16_pos":         int16(3),
+		"int16_neg":         int16(-3),
+		"int32_pos":         int32(4),
+		"int32_neg":         int32(-4),
+		"int64_pos":         int64(5),
+		"int64_neg":         int64(-5),
+		"uint_pos":          uint(6),
+		"uint8_pos":         uint8(7),
+		"uint16_pos":        uint16(8),
+		"uint32_pos":        uint32(9),
+		"uint64_pos":        uint64(10),
+		"uintptr_pos":       uintptr(11),
+		"float32_pos":       float32(1.5),
+		"float32_neg":       float32(-1.5),
+		"float64_pos":       float64(2.5),
+		"float64_neg":       float64(-2.5),
+	}}
+
+	var out bytes.Buffer
+	writeCSV(&out, rows)
+	if rows[0]["equal"] != "=formula" || rows[0]["=dangerous-header"] != "safe" {
+		t.Fatalf("writeCSV mutated string values or dynamic headers: %#v", rows[0])
+	}
+	if gotBytes, ok := rows[0]["bytes"].([]byte); !ok || !bytes.Equal(gotBytes, []byte("-bytes")) {
+		t.Fatalf("writeCSV mutated []byte input: %#v", rows[0]["bytes"])
+	}
+	records, err := csv.NewReader(&out).ReadAll()
+	if err != nil {
+		t.Fatalf("decode csv: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("csv records = %d, want 2: %q", len(records), records)
+	}
+	got := map[string]string{}
+	for i, header := range records[0] {
+		got[header] = records[1][i]
+	}
+	if got["'=dangerous-header"] != "safe" {
+		t.Fatalf("dangerous header or safe value = %q", got)
+	}
+	for name, want := range map[string]string{
+		"equal":           "'=formula",
+		"plus":            "'+formula",
+		"minus_text":      "'-42",
+		"at":              "'@formula",
+		"tab":             "'\tformula",
+		"return":          "'\rformula",
+		"bytes":           "'-bytes",
+		"stringer":        "'+other",
+		"safe":            "plain text",
+		"already_literal": "'=formula",
+		"empty":           "",
+		"nil":             "",
+		"int_pos":         "1",
+		"int_neg":         "-1",
+		"int8_pos":        "2",
+		"int8_neg":        "-2",
+		"int16_pos":       "3",
+		"int16_neg":       "-3",
+		"int32_pos":       "4",
+		"int32_neg":       "-4",
+		"int64_pos":       "5",
+		"int64_neg":       "-5",
+		"uint_pos":        "6",
+		"uint8_pos":       "7",
+		"uint16_pos":      "8",
+		"uint32_pos":      "9",
+		"uint64_pos":      "10",
+		"uintptr_pos":     "11",
+		"float32_pos":     "1.5",
+		"float32_neg":     "-1.5",
+		"float64_pos":     "2.5",
+		"float64_neg":     "-2.5",
+	} {
+		if got[name] != want {
+			t.Errorf("csv %s = %q, want %q", name, got[name], want)
+		}
+	}
+}
+
+func TestSQLCSVNeutralizesTextWithoutChangingJSON(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	query := `select '=formula' as "=header", '-42' as text_value, -7 as negative_int, 3.5 as positive_float`
+
+	csvOut := runOK(t, "sql", query)
+	csvRecords, err := csv.NewReader(strings.NewReader(csvOut)).ReadAll()
+	if err != nil {
+		t.Fatalf("decode sql csv: %v", err)
+	}
+	if len(csvRecords) != 2 {
+		t.Fatalf("sql csv records = %d, want 2: %q", len(csvRecords), csvRecords)
+	}
+	csvRow := map[string]string{}
+	for i, header := range csvRecords[0] {
+		csvRow[header] = csvRecords[1][i]
+	}
+	for name, want := range map[string]string{
+		"'=header":       "'=formula",
+		"text_value":     "'-42",
+		"negative_int":   "-7",
+		"positive_float": "3.5",
+	} {
+		if csvRow[name] != want {
+			t.Errorf("sql csv %s = %q, want %q", name, csvRow[name], want)
+		}
+	}
+
+	jsonOut := runJSON(t, "sql", query, "--json")
+	jsonRow := jsonOut["rows"].([]any)[0].(map[string]any)
+	if jsonRow["=header"] != "=formula" || jsonRow["text_value"] != "-42" {
+		t.Fatalf("json strings changed: %v", jsonRow)
+	}
+	if jsonRow["negative_int"] != float64(-7) || jsonRow["positive_float"] != 3.5 {
+		t.Fatalf("json numbers changed type or value: %v", jsonRow)
+	}
+}
 
 func TestInitCreatesPrivateDirsAndDoctorJSON(t *testing.T) {
 	withTempHome(t)

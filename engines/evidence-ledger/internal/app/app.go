@@ -4026,13 +4026,45 @@ func writeCSV(w io.Writer, rows []map[string]any) {
 		cols = append(cols, col)
 	}
 	sort.Strings(cols)
-	_ = cw.Write(cols)
+	headers := make([]string, len(cols))
+	for i, col := range cols {
+		headers[i] = csvCell(col)
+	}
+	_ = cw.Write(headers)
 	for _, row := range rows {
 		vals := make([]string, len(cols))
 		for i, col := range cols {
-			vals[i] = fmt.Sprint(row[col])
+			vals[i] = csvCell(row[col])
 		}
 		_ = cw.Write(vals)
 	}
 	cw.Flush()
+}
+
+func csvCell(value any) string {
+	if value == nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, uintptr, float32, float64:
+		return fmt.Sprint(v)
+	case string:
+		return neutralizeCSVText(v)
+	case []byte:
+		return neutralizeCSVText(string(v))
+	default:
+		return neutralizeCSVText(fmt.Sprint(v))
+	}
+}
+
+func neutralizeCSVText(text string) string {
+	if len(text) == 0 {
+		return text
+	}
+	switch text[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + text
+	default:
+		return text
+	}
 }
