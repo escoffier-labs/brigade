@@ -2282,10 +2282,10 @@ class TestInteractiveSessions:
         finally:
             connection.close()
 
-    def test_schema_13_migrates_to_14_without_touching_existing_rows(self, tmp_path):
+    def test_schema_13_migrates_to_current_without_touching_existing_rows(self, tmp_path):
         db = _schema_13_database(tmp_path)
         conn = fleet_hub.init_db(db)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
         assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM interactive_sessions").fetchone()[0] == 0
         columns = {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}

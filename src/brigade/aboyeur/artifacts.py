@@ -594,6 +594,20 @@ def _roster_payload(roster: Roster) -> dict[str, object]:
     return payload
 
 
+def roster_payload_with_admission(
+    roster: Roster,
+    receipt: Mapping[str, Any],
+) -> dict[str, object]:
+    payload = _roster_payload(roster)
+    admission = receipt.get("model_admission")
+    if isinstance(admission, dict):
+        payload["model_admission"] = dict(admission)
+    admissions = receipt.get("admissions")
+    if isinstance(admissions, list):
+        payload["admissions"] = [dict(item) for item in admissions if isinstance(item, dict)]
+    return payload
+
+
 def _run_payload(
     *,
     task: str,

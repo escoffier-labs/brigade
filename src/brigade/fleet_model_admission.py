@@ -711,16 +711,13 @@ def _read_audit_spool() -> list[dict[str, Any]]:
     return _parse_audit_lines(raw)
 
 
-def _lkg_admit(
+def _roster_expectation_conflict(
     roster: Mapping[str, Any],
     *,
-    consumer: str,
-    request_id: str,
-    phase: str,
-    seat: str | None,
     expect_revision: int | None,
     expect_digest: str | None,
-) -> ModelAdmissionDecision:
+) -> ModelAdmissionDecision | None:
+    source = roster.get("source") or "hub"
     if expect_revision is not None and int(roster.get("revision") or 0) != expect_revision:
         return _fail(
             "roster_revision_conflict",
@@ -728,7 +725,7 @@ def _lkg_admit(
             {
                 "schema": fleet_model_roster.ADMISSION_SCHEMA,
                 "state": "denied",
-                "source": "lkg",
+                "source": source,
                 "error": "roster_revision_conflict",
                 "roster_revision": roster.get("revision"),
                 "roster_digest": roster.get("roster_digest"),
@@ -741,12 +738,32 @@ def _lkg_admit(
             {
                 "schema": fleet_model_roster.ADMISSION_SCHEMA,
                 "state": "denied",
-                "source": "lkg",
+                "source": source,
                 "error": "roster_digest_conflict",
                 "roster_revision": roster.get("revision"),
                 "roster_digest": roster.get("roster_digest"),
             },
         )
+    return None
+
+
+def _lkg_admit(
+    roster: Mapping[str, Any],
+    *,
+    consumer: str,
+    request_id: str,
+    phase: str,
+    seat: str | None,
+    expect_revision: int | None,
+    expect_digest: str | None,
+) -> ModelAdmissionDecision:
+    conflict = _roster_expectation_conflict(
+        roster,
+        expect_revision=expect_revision,
+        expect_digest=expect_digest,
+    )
+    if conflict is not None:
+        return conflict
     request = {
         "consumer": consumer,
         "expect_digest": expect_digest,
@@ -940,6 +957,14 @@ def admit_model(
         "admin-token-not-cacheable",
     }:
         return fetched
+    if fetched.ok:
+        conflict = _roster_expectation_conflict(
+            fetched.payload,
+            expect_revision=expect_revision,
+            expect_digest=expect_digest,
+        )
+        if conflict is not None:
+            return conflict
     config = _client.load_fleet_config()
     hub = config["hub_url"]
     token = config["token"]

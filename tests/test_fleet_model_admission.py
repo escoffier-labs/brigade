@@ -1817,6 +1817,7 @@ def test_model_roster_read_cap_is_one_mib_without_raising_cloud_cap(tmp_path, mo
 
 
 def _admission_success_body(**overrides: object) -> dict[str, object]:
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
     body: dict[str, object] = {
         "schema": fleet_model_roster.ADMISSION_SCHEMA,
         "state": "authoritative",
@@ -1828,10 +1829,70 @@ def _admission_success_body(**overrides: object) -> dict[str, object]:
         "model": "cursor-grok-4.6-high-fast",
         "reasoning": "high",
         "binding": {"instance_id": "cursor", "service_tier": "standard"},
-        "expires_at": "2026-08-30T14:15:00Z",
+        "expires_at": expires_at,
     }
     body.update(overrides)
     return body
+
+
+def test_target_admission_rejects_fresh_roster_drift_before_hub_replay(monkeypatch):
+    from brigade import fleet_model_admission
+
+    current_digest = "sha256:" + ("cd" * 32)
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **_kwargs: fleet_model_admission.ModelAdmissionDecision(
+            True,
+            0,
+            "hub",
+            _versioned_snapshot(
+                _versioned_seat(
+                    "cursor_grok",
+                    "cursor",
+                    "cursor-grok-4.6-high-fast",
+                ),
+                revision=3,
+                digest=current_digest,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_config",
+        lambda: {"hub_url": "https://hub.invalid", "token": "node-token"},
+    )
+    post_calls: list[dict[str, object]] = []
+
+    def replay_prior_admission(
+        _hub: str,
+        _token: str,
+        body: dict[str, object],
+        *,
+        timeout: float,
+    ) -> tuple[int, dict[str, object]]:
+        del timeout
+        post_calls.append(body)
+        return 200, _admission_success_body(expires_at="2099-08-30T14:15:00Z")
+
+    monkeypatch.setattr(fleet_client, "_post_model_policy_blocking", replay_prior_admission)
+    monkeypatch.setattr(fleet_client, "_run_with_deadline", lambda function, **_kwargs: function())
+
+    decision = fleet_model_admission.admit_model(
+        consumer="t3-fleet",
+        request_id=ADMIT_REQUEST_ID,
+        phase="target",
+        seat="cursor_grok",
+        expect_revision=2,
+        expect_digest="sha256:" + ("ab" * 32),
+    )
+
+    assert decision.ok is False
+    assert decision.exit_code == 4
+    assert decision.reason == "roster_revision_conflict"
+    assert decision.payload["roster_revision"] == 3
+    assert decision.payload["roster_digest"] == current_digest
+    assert post_calls == []
 
 
 def test_validate_envelope_rejects_expires_at_not_after_issued_at(tmp_path, monkeypatch):
