@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import grokbot_jobs
+from brigade import fleet_client_grokbot, grokbot_jobs
 from brigade import cli
 
 
@@ -696,6 +696,95 @@ def test_corrupted_idempotency_record_fails_closed(tmp_path: Path):
 
 def _run_grokbot(target: Path, *command: str) -> int:
     return cli.main(["run", "cloud", "grokbot", *command, "--target", str(target)])
+
+
+def test_cli_queue_lifecycle_uses_generic_listener_identity_file(tmp_path: Path, monkeypatch, capsys):
+    token = "direct-queue-listener-token"
+    token_file = tmp_path / "listener.hub-token"
+    token_file.write_text(token + "\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    monkeypatch.setenv("BRIGADE_GROKBOT_HUB_TOKEN_FILE", str(token_file))
+    seen: list[str | None] = []
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "status",
+        lambda *_args, **_kwargs: seen.append(fleet_client_grokbot.current_listener_token()) or {"jobs": []},
+    )
+
+    assert _run_grokbot(tmp_path, "status", "--json") == 0
+    assert json.loads(capsys.readouterr().out) == {"jobs": []}
+    assert seen == [token]
+
+
+def test_cli_queue_lifecycle_keeps_host_identity_without_generic_listener_file(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.delenv("BRIGADE_GROKBOT_HUB_TOKEN_FILE", raising=False)
+    seen: list[str | None] = []
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "status",
+        lambda *_args, **_kwargs: seen.append(fleet_client_grokbot.current_listener_token()) or {"jobs": []},
+    )
+
+    assert _run_grokbot(tmp_path, "status", "--json") == 0
+    assert json.loads(capsys.readouterr().out) == {"jobs": []}
+    assert seen == [None]
+
+
+@pytest.mark.parametrize("kind", ("relative", "symlink", "directory", "unsafe-mode"))
+def test_cli_queue_lifecycle_rejects_unsafe_generic_listener_file_before_hub_call(
+    tmp_path: Path, monkeypatch, capsys, kind: str
+):
+    token = "direct-queue-token-must-not-leak"
+    configured_path = tmp_path / "listener.hub-token"
+    if kind == "relative":
+        configured_text = "listener.hub-token"
+    elif kind == "symlink":
+        target = tmp_path / "real.hub-token"
+        target.write_text(token + "\n", encoding="utf-8")
+        target.chmod(0o600)
+        configured_path.symlink_to(target)
+        configured_text = str(configured_path)
+    elif kind == "directory":
+        configured_path.mkdir()
+        configured_text = str(configured_path)
+    else:
+        configured_path.write_text(token + "\n", encoding="utf-8")
+        configured_path.chmod(0o640)
+        configured_text = str(configured_path)
+    monkeypatch.setenv("BRIGADE_GROKBOT_HUB_TOKEN_FILE", configured_text)
+    hub_calls: list[object] = []
+    monkeypatch.setattr(grokbot_jobs, "status", lambda *_args, **_kwargs: hub_calls.append(object()) or {"jobs": []})
+
+    assert _run_grokbot(tmp_path, "status") == 2
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert hub_calls == []
+    assert token not in rendered
+    assert configured_text not in rendered
+
+
+def test_cli_generic_listener_identity_does_not_override_hub_role_policy(tmp_path: Path, monkeypatch, capsys):
+    token = "role-checked-listener-token"
+    token_file = tmp_path / "listener.hub-token"
+    token_file.write_text(token + "\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    monkeypatch.setenv("BRIGADE_GROKBOT_HUB_TOKEN_FILE", str(token_file))
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: True)
+    seen: list[str | None] = []
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "list_jobs",
+        lambda **_kwargs: (
+            seen.append(fleet_client_grokbot.current_listener_token())
+            or fleet_client_grokbot.GrokbotHubDecision(False, "role-forbidden")
+        ),
+    )
+
+    assert _run_grokbot(tmp_path, "status") == 2
+    captured = capsys.readouterr()
+    assert seen == [token]
+    assert captured.out == ""
+    assert captured.err.strip() == "error: role-forbidden"
 
 
 def test_cli_grokbot_lifecycle_commands_keep_private_content_out_of_output(tmp_path: Path, capsys):
