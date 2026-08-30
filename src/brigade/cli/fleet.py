@@ -162,8 +162,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_grokbot_enroll.add_argument(
         "--role",
         required=True,
-        choices=("operator", "repository-scout", "implementation-worker"),
-        help="Fixed listener actor kind. Worker kinds also receive the matching queue role.",
+        choices=("feed", "control", "operator", "repository-scout", "implementation-worker"),
+        help="Fixed Grok Bot actor kind. Worker kinds also receive the matching queue role.",
     )
     p_grokbot_enroll.add_argument("--json", action="store_true", help="Emit safe enrollment metadata as JSON.")
     p_grokbot_enroll.set_defaults(func=_dispatch_grokbot_enroll_actor)

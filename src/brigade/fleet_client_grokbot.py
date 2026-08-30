@@ -66,7 +66,7 @@ _OK_KEYS = {
     "ack-cancel": "acknowledged",
 }
 _LISTENER_TOKEN: ContextVar[str | None] = ContextVar("grokbot_listener_token", default=None)
-GROKBOT_LISTENER_ACTORS = frozenset({"operator", "implementation-worker", "repository-scout"})
+GROKBOT_LISTENER_ACTORS = frozenset({"feed", "control", "operator", "implementation-worker", "repository-scout"})
 GROKBOT_WORKER_ROLES = frozenset({"implementation-worker", "repository-scout"})
 _BOUNDED_REFUSAL_REASONS = frozenset(
     {

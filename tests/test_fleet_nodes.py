@@ -513,6 +513,45 @@ class TestNodesCli:
             conn.close()
         assert policy == (NODE_A, NODE_A, "grokbot-queue-main", "repository-scout", "repository-scout", 1)
 
+    @pytest.mark.parametrize("actor_kind", ("feed", "control"))
+    def test_grokbot_enroll_actor_cli_accepts_service_actor_kinds(self, monkeypatch, capsys, actor_kind):
+        from brigade import cli
+
+        calls: list[dict[str, str]] = []
+        monkeypatch.setattr(
+            fleet_client_grokbot,
+            "enroll_actor",
+            lambda **kwargs: calls.append(kwargs) or {"enrolled": True, "node_id": NODE_A},
+        )
+
+        assert (
+            cli.main(
+                [
+                    "fleet",
+                    "grokbot",
+                    "enroll-actor",
+                    NODE_A,
+                    "--queue-owner-node-id",
+                    NODE_A,
+                    "--queue-id",
+                    "grokbot-queue-main",
+                    "--role",
+                    actor_kind,
+                    "--json",
+                ]
+            )
+            == 0
+        )
+        assert json.loads(capsys.readouterr().out) == {"enrolled": True, "node_id": NODE_A}
+        assert calls == [
+            {
+                "node_id": NODE_A,
+                "queue_owner_node_id": NODE_A,
+                "queue_id": "grokbot-queue-main",
+                "actor_kind": actor_kind,
+            }
+        ]
+
     def test_add_list_revoke_round_trip(self, hub, capsys):
         from brigade import cli
 

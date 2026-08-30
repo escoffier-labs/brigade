@@ -33,6 +33,7 @@ _FLEET_BEST_EFFORT = frozenset({"no-hub", "no-identity", "hub-unavailable"})
 ENVIRONMENT_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 _DIRECT_QUEUE_HUB_TOKEN_FILE_ENV = "BRIGADE_GROKBOT_HUB_TOKEN_FILE"
 _DIRECT_QUEUE_HUB_TOKEN_MAX_BYTES = 4098
+_FEED_HUB_TOKEN_FILE_ENV = "BRIGADE_GROKBOT_FEED_HUB_TOKEN_FILE"
 
 OPERATOR_TOOLS = frozenset(
     {
@@ -165,9 +166,22 @@ def load_direct_queue_listener_token() -> str | None:
     path_text = os.environ.get(_DIRECT_QUEUE_HUB_TOKEN_FILE_ENV)
     if path_text is None:
         return None
-    path = Path(path_text)
+    return _read_descriptor_safe_token_file(Path(path_text))
+
+
+def load_feed_hub_token() -> str | None:
+    """Load the feed actor's dedicated Fleet Hub token without fallback."""
+    path_text = os.environ.get(_FEED_HUB_TOKEN_FILE_ENV)
+    if path_text is None:
+        return None
+    return _read_descriptor_safe_token_file(Path(path_text))
+
+
+def _read_descriptor_safe_token_file(path: Path) -> str:
+    """Read one owner-private token through a no-follow descriptor."""
     no_follow = getattr(os, "O_NOFOLLOW", None)
-    if not path.is_absolute() or not isinstance(no_follow, int) or no_follow == 0:
+    owner = getattr(os, "getuid", None)
+    if not path.is_absolute() or not isinstance(no_follow, int) or no_follow == 0 or not callable(owner):
         raise ConfigurationError("invalid")
 
     descriptor: int | None = None
@@ -179,6 +193,7 @@ def load_direct_queue_listener_token() -> str | None:
         info = os.fstat(descriptor)
         if (
             not stat.S_ISREG(info.st_mode)
+            or info.st_uid != owner()
             or stat.S_IMODE(info.st_mode) & 0o077
             or info.st_size > _DIRECT_QUEUE_HUB_TOKEN_MAX_BYTES
         ):
@@ -197,7 +212,7 @@ def load_direct_queue_listener_token() -> str | None:
         return _validate_bearer(data.decode("utf-8").rstrip("\r\n"))
     except ConfigurationError:
         raise
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError, ValueError):
         raise ConfigurationError("invalid") from None
     finally:
         if descriptor is not None:

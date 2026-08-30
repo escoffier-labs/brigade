@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, grokbot_scout_feed
+from brigade import cli, fleet_client_grokbot, grokbot_jobs, grokbot_scout_feed
 
 
 NOW = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
@@ -506,6 +506,34 @@ def test_cli_scout_feed_apply_json_creates_one_queued_job(tmp_path: Path, monkey
     assert payload["issue_number"] == 7
     assert payload["handle"]["state"] == "queued"
     assert len(list((tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs").glob("*.json"))) == 1
+
+
+def test_cli_scout_feed_apply_binds_dedicated_feed_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    token = "dedicated-scout-feed-token"
+    token_file = tmp_path / "feed.hub-token"
+    token_file.write_text(token + "\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    monkeypatch.setenv("BRIGADE_GROKBOT_FEED_HUB_TOKEN_FILE", str(token_file))
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: True)
+    _gh_numbers(monkeypatch, [7])
+    seen: list[str | None] = []
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "enqueue_repository_scout",
+        lambda *_args, **_kwargs: (
+            seen.append(fleet_client_grokbot.current_listener_token())
+            or {
+                "reason": "created",
+                "created_today": 1,
+                "handle": {"job_id": "grokbot-" + "a" * 24, "state": "queued", "idempotent": False},
+            }
+        ),
+    )
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+
+    assert _run_scout_feed(tmp_path, policy, "--apply") == 0
+    assert seen == [token]
+    assert token not in capsys.readouterr().out
 
 
 def test_cli_scout_feed_text_reports_no_work_without_private_policy_context(

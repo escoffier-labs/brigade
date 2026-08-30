@@ -756,6 +756,7 @@ OTHER_WORKER = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
 OPERATOR_NODE = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 SCOUT_NODE = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 OTHER_FEED = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+CONTROL_NODE = "12121212-1212-4212-8212-121212121212"
 QUEUE_ID = "grokbot-queue-main"
 OTHER_QUEUE = "grokbot-queue-other"
 
@@ -1061,6 +1062,19 @@ def test_grokbot_actor_policy_isolates_node_queue_and_role(conn):
         fleet_hub_grokbot.handle_grokbot(
             conn, {"action": "claim", **_claim_body(job["job_id"])}, caller_node=OPERATOR_NODE
         )
+
+
+def test_grokbot_control_actor_is_enqueue_only_administrative_readiness(conn):
+    from brigade import fleet_hub_grokbot
+
+    _enroll_actors(conn)
+    _enroll_actor(conn, CONTROL_NODE, kind="control", queue_id=QUEUE_ID)
+
+    status, payload = fleet_hub_grokbot.handle_grokbot(conn, {"action": "whoami"}, caller_node=CONTROL_NODE)
+    assert status == 200
+    assert payload == {"actor_kind": "control", "role": None}
+    with pytest.raises(fleet_hub.FleetHubForbidden):
+        fleet_hub_grokbot.handle_grokbot(conn, {"action": "list"}, caller_node=CONTROL_NODE)
 
 
 def test_grokbot_operation_replay_and_revision_fencing(conn):

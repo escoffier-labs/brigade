@@ -1603,6 +1603,11 @@ def _write_hub_token_file(path: Path, token: str) -> Path:
     return path
 
 
+def test_descriptor_safe_hub_token_reader_rejects_nul_path():
+    with pytest.raises(grokbot_mcp.ConfigurationError, match="^invalid$"):
+        grokbot_mcp._read_descriptor_safe_token_file(Path("/tmp/invalid\x00hub-token"))
+
+
 def test_three_listeners_use_distinct_hub_node_tokens_and_public_args_cannot_override(tmp_path: Path, monkeypatch):
     from brigade import fleet_client_grokbot
 
