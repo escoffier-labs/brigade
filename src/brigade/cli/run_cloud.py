@@ -268,7 +268,14 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     serve_identity.add_argument("--instance", choices=("operator", "repository-scout", "implementation-worker"))
     serve_identity.add_argument(
         "--pack",
-        choices=("cerebro-memory", "fleet-steward", "backup-steward", "obsidian-operator", "wazuh-triage"),
+        choices=(
+            "cerebro-memory",
+            "fleet-steward",
+            "backup-steward",
+            "obsidian-operator",
+            "wazuh-triage",
+            "n8n-operator",
+        ),
     )
     p_grokbot_serve.add_argument(
         "--bind", default=None, help="Listener host:port. Defaults to the role or pack loopback."
@@ -366,7 +373,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         "--runtime-path",
         type=Path,
         default=None,
-        help="Absolute runtime JSON path. Required for fleet-steward, backup-steward, obsidian-operator, and wazuh-triage.",
+        help="Absolute runtime JSON path. Required for fleet-steward, backup-steward, obsidian-operator, wazuh-triage, and n8n-operator.",
     )
     p_pack_setup.add_argument(
         "--ledger-path",
@@ -378,13 +385,13 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         "--action-state-path",
         type=Path,
         default=None,
-        help="Absolute action-state directory. Required for fleet-steward, backup-steward, obsidian-operator, and wazuh-triage.",
+        help="Absolute action-state directory. Required for fleet-steward, backup-steward, obsidian-operator, wazuh-triage, and n8n-operator.",
     )
     p_pack_setup.add_argument(
         "--approval-dir",
         type=Path,
         default=None,
-        help="Absolute approval directory. Required for fleet-steward, backup-steward, obsidian-operator, and wazuh-triage.",
+        help="Absolute approval directory. Required for fleet-steward, backup-steward, obsidian-operator, wazuh-triage, and n8n-operator.",
     )
     p_pack_setup.add_argument(
         "--staging-dir",
@@ -949,6 +956,14 @@ def _dispatch_grokbot(args, target: Path) -> int:
 
                     wazuh_config, wazuh_tools = build_wazuh_listener(target, **listener_kwargs)
                     run_wazuh_listener(wazuh_config, wazuh_tools)
+                elif args.pack == "n8n-operator":
+                    from ..grokbot_n8n.lifecycle import (
+                        build_listener_from_target as build_n8n_listener,
+                        run_listener as run_n8n_listener,
+                    )
+
+                    n8n_config, n8n_tools = build_n8n_listener(target, **listener_kwargs)
+                    run_n8n_listener(n8n_config, n8n_tools)
                 else:
                     cerebro_config, cerebro_tools = grokbot_cerebro.build_listener_from_target(
                         target, **listener_kwargs
@@ -976,6 +991,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                 grokbot_backup,
                 grokbot_cerebro,
                 grokbot_fleet,
+                grokbot_n8n,
                 grokbot_obsidian,
                 grokbot_packs,
                 grokbot_wazuh,
@@ -987,6 +1003,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                     grokbot_backup.BackupError,
                     grokbot_cerebro.CerebroError,
                     grokbot_fleet.FleetError,
+                    grokbot_n8n.N8nError,
                     grokbot_obsidian.ObsidianError,
                     grokbot_packs.PackError,
                     grokbot_wazuh.WazuhError,
