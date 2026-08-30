@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -220,6 +221,258 @@ func TestAdapterImportSearchShowExportAndIdempotency(t *testing.T) {
 	if status["items"].(float64) != 4 {
 		t.Fatalf("items after reimport = %v, want 4", status["items"])
 	}
+}
+
+func TestMarkdownExportUsesCollisionResistantCollectionFilenames(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+
+	fixture := filepath.Join(t.TempDir(), "markdown-collision.adapter.jsonl")
+	records := []map[string]any{
+		markdownExportFixtureRecord("alpha-plus", "alpha+beta", "ALPHA_PLUS_EXPORT_BODY"),
+		markdownExportFixtureRecord("alpha-dash", "alpha-beta", "ALPHA_DASH_EXPORT_BODY"),
+	}
+	var data strings.Builder
+	for _, record := range records {
+		line, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data.Write(line)
+		data.WriteByte('\n')
+	}
+	if err := os.WriteFile(fixture, []byte(data.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "import", "adapter", fixture, "--source", "markdown-collision", "--json")
+	reviewAllLiveItemsInjectionClean(t)
+
+	first := filepath.Join(t.TempDir(), "first")
+	second := filepath.Join(t.TempDir(), "second")
+	for _, outDir := range []string{first, second} {
+		out := runJSON(t, "export", "markdown", "--out", outDir)
+		if out["files"] != float64(2) {
+			t.Fatalf("export files = %v, want 2: %v", out["files"], out)
+		}
+	}
+
+	firstFiles := markdownExportFiles(t, first)
+	secondFiles := markdownExportFiles(t, second)
+	if len(firstFiles) != 2 || len(secondFiles) != 2 {
+		t.Fatalf("exported files = %v and %v, want two in each directory", firstFiles, secondFiles)
+	}
+	if fmt.Sprint(firstFiles) != fmt.Sprint(secondFiles) {
+		t.Fatalf("export names are not stable: first=%v second=%v", firstFiles, secondFiles)
+	}
+	for _, name := range firstFiles {
+		if len(name) > 255 || !strings.HasSuffix(name, ".md") || !markdownExportBasenameHasDigest(name) {
+			t.Fatalf("export filename is not a bounded digest-bearing basename: %q", name)
+		}
+	}
+
+	firstBodies := markdownExportBodies(t, first, firstFiles)
+	secondBodies := markdownExportBodies(t, second, secondFiles)
+	if !reflect.DeepEqual(firstBodies, secondBodies) {
+		t.Fatalf("export filename-to-content maps are not stable: first=%v second=%v", firstBodies, secondBodies)
+	}
+	assertMarkdownExportBody(t, firstBodies, "# markdown-collision/fixture/alpha+beta\n", "ALPHA_PLUS_EXPORT_BODY", "ALPHA_DASH_EXPORT_BODY")
+	assertMarkdownExportBody(t, firstBodies, "# markdown-collision/fixture/alpha-beta\n", "ALPHA_DASH_EXPORT_BODY", "ALPHA_PLUS_EXPORT_BODY")
+
+	boundaryLeft := exportMarkdownGroup{source: "a/", collectionKind: "b", collection: "c"}
+	boundaryRight := exportMarkdownGroup{source: "a", collectionKind: "/b", collection: "c"}
+	if markdownExportHeading(boundaryLeft) != markdownExportHeading(boundaryRight) {
+		t.Fatalf("test setup did not create slash-joined ambiguity: %q != %q", markdownExportHeading(boundaryLeft), markdownExportHeading(boundaryRight))
+	}
+	if markdownExportBasename(boundaryLeft) == markdownExportBasename(boundaryRight) {
+		t.Fatalf("tuple boundary ambiguity produced the same basename: %q", markdownExportBasename(boundaryLeft))
+	}
+
+	hostile := exportMarkdownGroup{
+		source:         "source",
+		collectionKind: "fixture",
+		collection:     strings.Repeat("hostile / \\ + ", 80) + "\U0001f642",
+	}
+	hostileName := markdownExportBasename(hostile)
+	if len(hostileName)+len(".md") > 255 || unsafeName.MatchString(hostileName) {
+		t.Fatalf("hostile collection produced unsafe or oversized basename: %q", hostileName)
+	}
+}
+
+func TestMarkdownExportFailsBeforeStagingOnBasenameCollision(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+
+	fixture := filepath.Join(t.TempDir(), "markdown-collision.adapter.jsonl")
+	writeMarkdownExportFixture(t, fixture, []map[string]any{
+		markdownExportFixtureRecord("first", "first", "FIRST_EXPORT_BODY"),
+		markdownExportFixtureRecord("second", "second", "SECOND_EXPORT_BODY"),
+	})
+	runOK(t, "import", "adapter", fixture, "--source", "markdown-collision", "--json")
+	reviewAllLiveItemsInjectionClean(t)
+
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	outDir := filepath.Join(t.TempDir(), "out")
+	count, err := exportMarkdownWithBasename(db, outDir, func(exportMarkdownGroup) string { return "collision" })
+	if err == nil || !strings.Contains(err.Error(), "markdown export filename collision") {
+		t.Fatalf("export collision error = %v, want named collision", err)
+	}
+	if count != 0 {
+		t.Fatalf("export count = %d, want 0 on collision", count)
+	}
+	stageDir := filepath.Join(outDir, exportStageDirName)
+	if _, err := os.Stat(stageDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stage directory exists after collision: %v", err)
+	}
+	staged, err := filepath.Glob(filepath.Join(stageDir, "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(staged) != 0 {
+		t.Fatalf("staged markdown files = %v, want none", staged)
+	}
+}
+
+func TestMarkdownExportCleansManagedDotDotPrefix(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+
+	fixture := filepath.Join(t.TempDir(), "markdown-dotdot.adapter.jsonl")
+	writeMarkdownExportFixture(t, fixture, []map[string]any{
+		markdownExportFixtureRecord("dotdot", "foo..bar", "DOTDOT_EXPORT_BODY"),
+	})
+	runOK(t, "import", "adapter", fixture, "--source", "markdown-dotdot", "--json")
+	reviewAllLiveItemsInjectionClean(t)
+
+	outDir := filepath.Join(t.TempDir(), "out")
+	out := runJSON(t, "export", "markdown", "--out", outDir)
+	if out["files"] != float64(1) {
+		t.Fatalf("export files = %v, want 1: %v", out["files"], out)
+	}
+	files := markdownExportFiles(t, outDir)
+	if len(files) != 1 {
+		t.Fatalf("export files = %v, want 1", files)
+	}
+	obsolete := files[0]
+	if !isManagedExportBasename(obsolete) {
+		t.Fatalf("generated basename was rejected by manifest reader: %q", obsolete)
+	}
+
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("update items set tombstoned_at = 'test'"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	out = runJSON(t, "export", "markdown", "--out", outDir)
+	if out["files"] != float64(0) {
+		t.Fatalf("export files = %v, want 0: %v", out["files"], out)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, obsolete)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("obsolete managed export remains after cleanup: %v", err)
+	}
+}
+
+func markdownExportFixtureRecord(externalID, collection, text string) map[string]any {
+	return map[string]any{
+		"schema": "miseledger.adapter.v1",
+		"source": map[string]any{"kind": "markdown-collision", "name": "Markdown Collision Fixture"},
+		"collection": map[string]any{
+			"external_id": "fixture:" + externalID,
+			"kind":        "fixture",
+			"name":        collection,
+		},
+		"item": map[string]any{
+			"external_id": "fixture:item:" + externalID,
+			"kind":        "message",
+			"created_at":  "2026-08-29T00:00:00Z",
+			"text":        text,
+		},
+		"actor":     map[string]any{"external_id": "fixture:actor", "type": "system", "name": "Fixture"},
+		"artifacts": []any{}, "links": []any{}, "relations": []any{},
+		"raw": map[string]any{"format": "json", "path": externalID + ".jsonl", "ordinal": 1},
+	}
+}
+
+func writeMarkdownExportFixture(t *testing.T, path string, records []map[string]any) {
+	t.Helper()
+	var data strings.Builder
+	for _, record := range records {
+		line, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data.Write(line)
+		data.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(data.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func markdownExportFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".md") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func markdownExportBodies(t *testing.T, dir string, names []string) map[string]string {
+	t.Helper()
+	bodies := make(map[string]string, len(names))
+	for _, name := range names {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		bodies[name] = string(data)
+	}
+	return bodies
+}
+
+func assertMarkdownExportBody(t *testing.T, bodies map[string]string, heading, text, otherText string) {
+	t.Helper()
+	for _, body := range bodies {
+		if strings.Contains(body, heading) && strings.Contains(body, text) {
+			if strings.Contains(body, otherText) {
+				t.Fatalf("export with heading %q contains another collection body %q: %q", heading, otherText, body)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing export with heading %q and body %q: %q", heading, text, bodies)
+}
+
+func markdownExportBasenameHasDigest(name string) bool {
+	base := strings.TrimSuffix(name, ".md")
+	if len(base) < 66 || base[len(base)-65] != '-' {
+		return false
+	}
+	for _, c := range base[len(base)-64:] {
+		if c < '0' || c > '9' {
+			if c < 'a' || c > 'f' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func TestProvenanceSearchSQLFiltersAndLegacyShowSynthesis(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
@@ -3364,6 +3365,10 @@ func cmdExport(args []string, out, errw io.Writer) int {
 }
 
 func exportMarkdown(db *sql.DB, outDir string) (int, error) {
+	return exportMarkdownWithBasename(db, outDir, markdownExportBasename)
+}
+
+func exportMarkdownWithBasename(db *sql.DB, outDir string, basename func(exportMarkdownGroup) string) (int, error) {
 	if err := security.EnsurePrivateDir(outDir); err != nil {
 		return 0, err
 	}
@@ -3383,7 +3388,7 @@ order by s.kind, c.name, i.created_at, i.id`)
 		origin, modality, trustLabel, display                                       string
 		integrityMismatch, contentOmitted                                           bool
 	}
-	grouped := map[string][]row{}
+	grouped := map[exportMarkdownGroup][]row{}
 	for rows.Next() {
 		var r row
 		var metadataJSON, rawJSON string
@@ -3406,8 +3411,22 @@ order by s.kind, c.name, i.created_at, i.id`)
 				return 0, err
 			}
 		}
-		key := r.source + "/" + r.collectionKind + "/" + r.collection
+		key := exportMarkdownGroup{source: r.source, collectionKind: r.collectionKind, collection: r.collection}
 		grouped[key] = append(grouped[key], r)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	names := make(map[exportMarkdownGroup]string, len(grouped))
+	groupsByName := make(map[string]exportMarkdownGroup, len(grouped))
+	for key := range grouped {
+		name := basename(key) + ".md"
+		if other, exists := groupsByName[name]; exists && other != key {
+			return 0, fmt.Errorf("markdown export filename collision for distinct groups %q and %q", markdownExportHeading(other), markdownExportHeading(key))
+		}
+		names[key] = name
+		groupsByName[name] = key
 	}
 
 	stageDir := filepath.Join(outDir, exportStageDirName)
@@ -3420,10 +3439,10 @@ order by s.kind, c.name, i.created_at, i.id`)
 	managed := map[string]struct{}{}
 	count := 0
 	for key, rows := range grouped {
-		name := safeName(key) + ".md"
+		name := names[key]
 		managed[name] = struct{}{}
 		var b strings.Builder
-		fmt.Fprintf(&b, "# %s\n\n", key)
+		fmt.Fprintf(&b, "# %s\n\n", markdownExportHeading(key))
 		for _, r := range rows {
 			fmt.Fprintf(&b, "## %s %s\n\n", r.kind, r.id)
 			if r.created != "" || r.actor != "" {
@@ -3544,6 +3563,42 @@ func writeManagedExportManifest(outDir string, managed map[string]struct{}) erro
 }
 
 var unsafeName = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
+
+const (
+	maxExportFilenameBytes = 255
+	markdownDigestHexBytes = sha256.Size * 2
+	markdownExtensionBytes = len(".md")
+)
+
+type exportMarkdownGroup struct {
+	source, collectionKind, collection string
+}
+
+func markdownExportHeading(group exportMarkdownGroup) string {
+	return group.source + "/" + group.collectionKind + "/" + group.collection
+}
+
+func markdownExportBasename(group exportMarkdownGroup) string {
+	prefix := strings.ReplaceAll(safeName(markdownExportHeading(group)), "..", "-")
+	maxPrefixBytes := maxExportFilenameBytes - 1 - markdownDigestHexBytes - markdownExtensionBytes
+	if len(prefix) > maxPrefixBytes {
+		prefix = prefix[:maxPrefixBytes]
+	}
+	digest := sha256.Sum256(markdownExportTupleEncoding(group))
+	return prefix + "-" + hex.EncodeToString(digest[:])
+}
+
+func markdownExportTupleEncoding(group exportMarkdownGroup) []byte {
+	var b bytes.Buffer
+	b.WriteString("miseledger.markdown-export-filename.v1")
+	for _, field := range []string{group.source, group.collectionKind, group.collection} {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(field)))
+		b.Write(length[:])
+		b.WriteString(field)
+	}
+	return b.Bytes()
+}
 
 func safeName(s string) string {
 	s = strings.Trim(unsafeName.ReplaceAllString(s, "-"), "-")
