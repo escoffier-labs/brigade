@@ -207,6 +207,23 @@ def test_setup_stores_hub_token_file_reference_and_renders_role_environment(tmp_
         )
 
 
+def test_setup_with_hub_authority_does_not_require_queue_status(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    hub_token = tmp_path / "listener.hub-token"
+    hub_token.write_text("hub-node-token-value\n", encoding="utf-8")
+    hub_token.chmod(0o600)
+    grokbot_jobs.admit_hub_authority(tmp_path)
+
+    def fail_status(_target: Path) -> None:
+        raise grokbot_jobs.GrokbotJobError("hub-authentication-failed")
+
+    monkeypatch.setattr(grokbot_jobs, "status", fail_status)
+
+    assert _setup(tmp_path, "implementation-worker", ["--hub-token-file", str(hub_token)]) == 0
+    config = grokbot_ops.load_config(tmp_path, "implementation-worker")
+    assert config["hub_token_file"] == str(hub_token)
+
+
 def test_operator_setup_renders_its_own_hub_actor_token_reference(tmp_path: Path, monkeypatch, capsys):
     monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
     hub_token = tmp_path / "operator.hub-token"

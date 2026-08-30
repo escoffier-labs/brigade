@@ -114,7 +114,8 @@ def save_config(
     if hub_token_file is not None:
         payload["hub_token_file"] = _validated_hub_token_file(hub_token_file)
     _validate_config(payload)
-    grokbot_jobs.status(target)
+    with grokbot_jobs._storage_paths(target):
+        pass
     path = config_path(target, instance)
     try:
         _write_text_nofollow_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n", mode=0o600)
