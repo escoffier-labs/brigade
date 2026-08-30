@@ -1840,13 +1840,10 @@ func nativeFastPathOptions(db *sql.DB, name string, opts sources.Options) (sourc
 	if len(manifest) == 0 {
 		return opts, nil
 	}
-	opts.Scan = func(p string, size int64, mtime string) (sources.ScanDecision, error) {
+	opts.Scan = func(p string, size int64, _ string) (sources.ScanDecision, error) {
 		prior, ok := manifest[p]
 		if !ok || prior.Size != size {
 			return sources.ScanDecision{}, nil
-		}
-		if prior.MTime == mtime {
-			return sources.ScanDecision{Skip: true}, nil
 		}
 		hash, err := sources.FileHash(p)
 		if err != nil {
