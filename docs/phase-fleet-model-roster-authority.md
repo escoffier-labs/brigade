@@ -149,12 +149,14 @@ Primary key: `(provider, family)`. The initial migration inserts permanent
 | `source` | TEXT | `hub` or `lkg` |
 | `roster_revision` | INTEGER | Exact accepted revision |
 | `roster_digest` | TEXT | SHA-256 of the canonical roster body |
-| `seat` | TEXT | Resolved seat |
-| `provider` | TEXT | Resolved provider |
-| `model` | TEXT | Resolved exact model ID |
-| `reasoning` | TEXT | Resolved exact reasoning value |
-| `consumer_binding` | TEXT | Sanitized instance or CLI ID |
+| `seat` | TEXT | Resolved seat, nullable when resolution failed before a seat existed |
+| `provider` | TEXT | Resolved provider, nullable before model resolution |
+| `model` | TEXT | Resolved exact model ID, nullable before model resolution |
+| `reasoning` | TEXT | Resolved exact reasoning value, nullable before model resolution |
+| `consumer_binding` | TEXT | Sanitized instance or CLI ID, nullable before binding resolution |
 | `decision` | TEXT | `admitted` or a bounded denial code |
+| `request_digest` | TEXT | Digest of the canonical admission request for replay fencing |
+| `expires_at` | TEXT | Freshness bound returned with this decision |
 | `created_at` | TEXT | UTC timestamp |
 
 Primary key: `(node_id, request_id, phase)`. Exact replay returns the prior safe
@@ -171,6 +173,7 @@ response becomes additive, so old Brigade clients can continue reading
 {
   "schema": "brigade.fleet_model_roster.v1",
   "revision": 42,
+  "revision_updated_at": "2026-08-30T13:52:00Z",
   "issued_at": "2026-08-30T14:00:00Z",
   "expires_at": "2026-08-30T14:15:00Z",
   "audience_node_id": "node-a",
@@ -218,18 +221,25 @@ response becomes additive, so old Brigade clients can continue reading
 }
 ```
 
-The digest covers canonical compact JSON containing `schema`, `revision`,
-`issued_at`, `expires_at`, `audience_node_id`, `seats`, `consumer_defaults`, and
-`retired_models`. It excludes `roster_digest`, `mac`, and the legacy `models`
-projection. Object keys are sorted and ASCII-safe JSON uses no insignificant
-whitespace.
+The revision-stable roster digest covers canonical compact JSON containing
+`schema`, `revision`, `revision_updated_at`, `seats`, `consumer_defaults`, and
+`retired_models`. It excludes per-response freshness and audience fields,
+`roster_digest`, `mac`, and the legacy `models` projection. The digest therefore
+stays identical across reads and nodes until a roster mutation increments the
+revision.
+
+`issued_at` is the Hub response time and `expires_at` is exactly 900 seconds
+later. They are not part of `roster_digest`. The node-response MAC covers the
+complete cacheable envelope containing the stable roster body,
+`audience_node_id`, `issued_at`, `expires_at`, and `roster_digest`. Object keys
+are sorted and ASCII-safe JSON uses no insignificant whitespace.
 
 For a node-authenticated response, the Hub computes:
 
 ```text
 HMAC-SHA256(
   key = raw node bearer presented on this request,
-  message = "brigade.fleet-model-roster.lkg.v1\0" + canonical_roster_json
+  message = "brigade.fleet-model-roster.lkg.v1\0" + canonical_cache_envelope_json
 )
 ```
 
