@@ -239,3 +239,132 @@ def test_invalid_limit_is_rejected_before_writes(tmp_path: Path, monkeypatch: py
     assert caught.value.reason == "invalid-limit"
     assert list(owner.rglob("*")) == owner_before
     assert not (target / ".brigade" / "cloud" / "grokbot" / "outbox").exists()
+
+
+def test_relay_setup_writes_owner_only_config_and_hides_paths(tmp_path: Path):
+    from brigade import grokbot_pack_relay
+
+    target = tmp_path / "queue"
+    target.mkdir()
+    owner = _owner(tmp_path / "owner")
+    preview = grokbot_pack_relay.preview_relay_setup(target, owner)
+    assert preview["apply"] is False
+    assert str(owner) not in json.dumps(preview)
+    assert not (target / ".brigade" / "grokbot" / "relay.json").exists()
+    applied = grokbot_pack_relay.apply_relay_setup(target, owner)
+    assert applied["apply"] is True
+    config_path = target / ".brigade" / "grokbot" / "relay.json"
+    assert config_path.is_file()
+    assert config_path.stat().st_mode & 0o777 == 0o600
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert set(payload) == {"schema", "owner_workspace"}
+    assert payload["schema"] == "brigade.grokbot.pack-relay.v1"
+    loaded = grokbot_pack_relay.load_relay_config(target)
+    assert loaded["owner_workspace"] == str(owner.resolve())
+    checks = grokbot_pack_relay.relay_doctor(target)
+    assert all(check["status"] == "ok" for check in checks)
+    assert str(owner) not in json.dumps(checks)
+
+
+def test_relay_setup_rejects_insecure_owner_and_config_symlink(tmp_path: Path):
+    from brigade import grokbot_pack_relay
+
+    target = tmp_path / "queue"
+    target.mkdir()
+    owner = tmp_path / "owner"
+    owner.mkdir(mode=0o755)
+    os.chmod(owner, 0o755)
+    with pytest.raises(grokbot_pack_relay.PackRelayError) as caught:
+        grokbot_pack_relay.apply_relay_setup(target, owner)
+    assert caught.value.reason == "invalid-owner"
+    assert not (target / ".brigade" / "grokbot" / "relay.json").exists()
+    safe_owner = _owner(tmp_path / "safe-owner")
+    grokbot_pack_relay.apply_relay_setup(target, safe_owner)
+    config_path = target / ".brigade" / "grokbot" / "relay.json"
+    real = tmp_path / "outside.json"
+    real.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+    os.chmod(real, 0o600)
+    config_path.unlink()
+    config_path.symlink_to(real)
+    with pytest.raises(grokbot_pack_relay.PackRelayError) as linked:
+        grokbot_pack_relay.load_relay_config(target)
+    assert linked.value.reason == "unsafe-config"
+
+
+def test_render_relay_units_are_oneshot_timer_and_hide_owner_text(tmp_path: Path):
+    from brigade import grokbot_pack_relay
+
+    target = tmp_path / "queue"
+    target.mkdir()
+    owner = _owner(tmp_path / "owner")
+    grokbot_pack_relay.apply_relay_setup(target, owner)
+    units = grokbot_pack_relay.render_relay_units(target)
+    service = units["brigade-grokbot-findings-relay.service"]
+    timer = units["brigade-grokbot-findings-relay.timer"]
+    assert "Type=oneshot" in service
+    assert "--apply --limit 50" in service or ("--apply" in service and "--limit" in service and "50" in service)
+    assert "UMask=0077" in service
+    assert "NoNewPrivileges=yes" in service
+    assert "PrivateTmp=yes" in service
+    assert "ProtectSystem=strict" in service
+    assert "ProtectHome=read-only" in service
+    assert "TimeoutStartSec=120" in service
+    assert "ReadWritePaths=" in service
+    assert "OnBootSec=2min" in timer
+    assert "OnUnitActiveSec=5min" in timer
+    assert "RandomizedDelaySec=30s" in timer
+    assert "AccuracySec=30s" in timer
+    assert "Persistent=false" in timer
+    assert PRIVATE_FLEET not in service + timer
+    out = tmp_path / "units"
+    out.mkdir()
+    written = grokbot_pack_relay.write_relay_units(target, out)
+    assert {path.name for path in written} == {
+        "brigade-grokbot-findings-relay.service",
+        "brigade-grokbot-findings-relay.timer",
+    }
+
+
+def test_cli_pack_relay_commands_are_preview_first_and_omit_id(tmp_path: Path, capsys, monkeypatch):
+    from brigade import cli
+
+    target = tmp_path / "queue"
+    target.mkdir()
+    owner = _owner(tmp_path / "owner")
+    argv = [
+        "run",
+        "cloud",
+        "grokbot",
+        "pack",
+        "relay-setup",
+        "--target",
+        str(target),
+        "--owner",
+        str(owner),
+        "--json",
+    ]
+    assert cli.main(argv) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["apply"] is False
+    assert str(owner) not in json.dumps(preview)
+    assert cli.main([*argv, "--apply"]) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["apply"] is True
+    assert cli.main(["run", "cloud", "grokbot", "pack", "relay-doctor", "--target", str(target)]) == 0
+    doctor_out = capsys.readouterr()
+    assert str(owner) not in doctor_out.out + doctor_out.err
+    assert cli.main(["run", "cloud", "grokbot", "pack", "relay", "--target", str(target), "--json"]) == 0
+    relay_preview = json.loads(capsys.readouterr().out)
+    _assert_public(relay_preview)
+    assert relay_preview["apply"] is False
+    assert (
+        cli.main(["run", "cloud", "grokbot", "pack", "relay", "--target", str(target), "--apply", "--limit", "0"]) == 2
+    )
+    err = capsys.readouterr().err
+    assert "invalid-limit" in err
+    assert cli.main(["run", "cloud", "grokbot", "pack", "install-relay-service", "--target", str(target)]) == 0
+    unit_text = capsys.readouterr().out
+    assert "brigade-grokbot-findings-relay.service" in unit_text
+    assert "OnBootSec=2min" in unit_text
+    wrappers = grokbot_packs.preview_relay_setup(target, owner)
+    assert wrappers["apply"] is False

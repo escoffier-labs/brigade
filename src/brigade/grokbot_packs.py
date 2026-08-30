@@ -1052,3 +1052,51 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def preview_relay_setup(target: Path, owner_workspace: Path) -> dict[str, Any]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.preview_relay_setup(target, owner_workspace)
+
+
+def apply_relay_setup(target: Path, owner_workspace: Path) -> dict[str, Any]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.apply_relay_setup(target, owner_workspace)
+
+
+def load_relay_config(target: Path) -> dict[str, str]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.load_relay_config(target)
+
+
+def preview_relay(target: Path, limit: int = 1) -> dict[str, Any]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.preview_configured_relay(target, limit=limit)
+
+
+def apply_relay(target: Path, limit: int = 1) -> dict[str, Any]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.apply_configured_relay(target, limit=limit)
+
+
+def relay_doctor(target: Path) -> list[dict[str, str]]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.relay_doctor(target)
+
+
+def render_relay_units(target: Path) -> dict[str, str]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.render_relay_units(target, python=sys.executable)
+
+
+def write_relay_units(target: Path, out_dir: Path, *, force: bool = False) -> list[Path]:
+    from . import grokbot_pack_relay
+
+    return grokbot_pack_relay.write_relay_units(target, out_dir, force=force)
