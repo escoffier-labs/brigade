@@ -516,6 +516,16 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "#requires -Version 5.1" in text
 
 
+def test_ci_windows_native_acceptance_script_proves_msvcrt_lock_deadline_contention():
+    """Native Windows acceptance must exercise the actual LK_NBLCK timeout path (#1215)."""
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+
+    assert 'Write-Step "inbox lock msvcrt contention deadline"' in text
+    assert "msvcrt is unavailable in native Windows acceptance" in text
+    assert "inbox writer lock did not time out behind native holder" in text
+    assert "native LK_NBLCK acquisition exceeded deadline bound" in text
+
+
 def test_windows_native_acceptance_schtasks_missing_task_query_does_not_fail_the_job():
     """After /Delete, schtasks /Query exits 1 with
     'ERROR: The system cannot find the file specified'. That names the
