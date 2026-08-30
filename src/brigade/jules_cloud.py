@@ -58,6 +58,10 @@ _ACTIVE_STATES = frozenset(
 class JulesCloudError(RuntimeError):
     """Raised on Jules Cloud failures; message carries no secrets or bodies."""
 
+    def __init__(self, message: str, *, reason: str = "provider-error") -> None:
+        super().__init__(message)
+        self.reason = reason
+
 
 @dataclass(frozen=True)
 class LaunchResult:
@@ -414,9 +418,10 @@ def _call(
         raise
     except urllib.error.HTTPError as exc:
         # Sanitize: never re-read or include the response body.
-        raise JulesCloudError("Jules Cloud request failed") from exc
-    except urllib.error.URLError as exc:
-        raise JulesCloudError("Jules Cloud request failed") from exc
+        reason = "auth-failure" if exc.code in (401, 403) else "provider-error"
+        raise JulesCloudError("Jules Cloud request failed", reason=reason) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise JulesCloudError("Jules Cloud request failed", reason="transport-failure") from exc
     except Exception as exc:
         raise JulesCloudError("Jules Cloud request failed") from exc
 

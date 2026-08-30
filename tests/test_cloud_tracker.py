@@ -776,10 +776,20 @@ def test_sync_command_exists_and_is_non_mutating(tmp_path: Path, capsys, monkeyp
         prompt_hash="sha256:bb",
         dispatched_at=_iso(NOW),
     )
+    observations = {
+        provider: cloud_tracker.ProviderObservation(False, False, "unconfigured", {})
+        for provider in cloud_tracker.TRACKER_PROVIDERS
+    }
+    observations["codex-cloud"] = cloud_tracker.ProviderObservation(
+        True,
+        True,
+        None,
+        {"task-sync": {"state": "running"}},
+    )
     monkeypatch.setattr(
         cloud_tracker,
-        "observe_providers",
-        lambda target, **k: ({"task-sync": {"state": "running"}}, {"branches": [], "prs": []}, False),
+        "observe_provider_details",
+        lambda target, **k: (observations, {"branches": [], "prs": []}),
     )
     rc = cli.main(["run", "cloud", "sync", "--target", str(tmp_path), "--json"])
     assert rc == 0
@@ -989,6 +999,113 @@ def test_observe_providers_does_not_call_claude_local_inventory(monkeypatch, tmp
     tasks, _github, _cursor_wired = cloud_tracker.observe_providers(tmp_path)
     assert tasks == {}
     assert called == []
+
+
+def test_observe_provider_details_keeps_unconfigured_and_failed_inventory_distinct(monkeypatch, tmp_path: Path):
+    """An empty inventory is healthy only when the provider answered it."""
+    from brigade import fleet_client_grokbot
+
+    _isolate_hosted_providers(monkeypatch)
+    monkeypatch.setenv("CURSOR_API_KEY", "fake-cursor-key")
+    monkeypatch.setenv("JULES_API_KEY", "fake-jules-key")
+    monkeypatch.setattr(
+        cursor_cloud,
+        "list_agents",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("network unavailable")),
+    )
+    monkeypatch.setattr(jules_cloud, "list_sessions", lambda *a, **k: [])
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "whoami",
+        lambda **k: fleet_client_grokbot.GrokbotHubDecision(False, "no-identity"),
+    )
+
+    observations, _github = cloud_tracker.observe_provider_details(tmp_path)
+
+    assert observations["cursor-cloud"].configured is True
+    assert observations["cursor-cloud"].reachable is False
+    assert observations["cursor-cloud"].reason == "transport-failure"
+    assert observations["cursor-cloud"].tasks == {}
+    assert observations["jules"].configured is True
+    assert observations["jules"].reachable is True
+    assert observations["jules"].reason is None
+    assert observations["jules"].tasks == {}
+    assert observations["grokbot-cloud"].configured is True
+    assert observations["grokbot-cloud"].reachable is False
+    assert observations["grokbot-cloud"].reason == "actor-not-enrolled"
+    assert observations["claude-cloud"].reason == "disabled-by-policy"
+
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        provider_observations=observations,
+        github={"branches": [], "prs": []},
+    )
+    assert payload["sources"]["cursor-cloud"]["reachable"] is False
+    assert payload["sources"]["jules"]["reachable"] is True
+    assert payload["sources"]["claude-cloud"]["reason"] == "disabled-by-policy"
+
+
+def test_provider_auth_failures_are_configured_but_not_reachable(monkeypatch, tmp_path: Path):
+    from brigade import fleet_client_grokbot
+
+    _isolate_hosted_providers(monkeypatch)
+    monkeypatch.setenv("CURSOR_API_KEY", "fake-cursor-key")
+    monkeypatch.setattr(
+        cursor_cloud,
+        "list_agents",
+        lambda *a, **k: (_ for _ in ()).throw(cursor_cloud.CursorCloudError("sanitized", reason="auth-failure")),
+    )
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "whoami",
+        lambda **k: fleet_client_grokbot.GrokbotHubDecision(False, "auth-failed"),
+    )
+
+    cursor = cloud_tracker.observe_provider("cursor-cloud", tmp_path)
+    grokbot = cloud_tracker.observe_provider("grokbot-cloud", tmp_path)
+
+    assert (cursor.configured, cursor.reachable, cursor.reason) == (
+        True,
+        False,
+        "auth-failure",
+    )
+    assert (grokbot.configured, grokbot.reachable, grokbot.reason) == (
+        True,
+        False,
+        "auth-failure",
+    )
+
+
+def test_codex_failed_inventory_keeps_health_and_bounded_status_evidence(monkeypatch, tmp_path: Path):
+    from brigade import codex_cloud
+
+    cloud_tracker.register(
+        tmp_path,
+        provider="codex-cloud",
+        task_id="task_registered01",
+        label="registered",
+        prompt_hash=_prompt_hash("x"),
+        dispatched_at=_iso(NOW),
+    )
+    monkeypatch.setattr(
+        codex_cloud,
+        "list_tasks",
+        lambda **kwargs: codex_cloud.ListTasksResult([], ok=False, reason="auth-failure"),
+    )
+    monkeypatch.setattr(
+        cloud_tracker,
+        "_run_text",
+        lambda *args, **kwargs: (0, "[COMPLETED] registered", ""),
+    )
+
+    observation = cloud_tracker.observe_provider("codex-cloud", tmp_path)
+
+    assert (observation.configured, observation.reachable, observation.reason) == (
+        True,
+        False,
+        "auth-failure",
+    )
+    assert observation.tasks == {"task_registered01": {"state": "completed", "ready_at": None}}
 
 
 def test_local_claude_session_cannot_make_claude_cloud_registry_row_active(monkeypatch, tmp_path: Path):
@@ -2502,10 +2619,20 @@ class _JulesLaunchOpener:
 def test_cli_run_cloud_compact_json_contract(tmp_path: Path, capsys, monkeypatch):
     ids = _seed_mixed_registry(tmp_path)
     provider_tasks, github = _mixed_provider_and_github()
+    observations = {
+        provider: cloud_tracker.ProviderObservation(False, False, "unconfigured", {})
+        for provider in cloud_tracker.TRACKER_PROVIDERS
+    }
+    observations["codex-cloud"] = cloud_tracker.ProviderObservation(
+        True,
+        True,
+        None,
+        provider_tasks,
+    )
     monkeypatch.setattr(
         cloud_tracker,
-        "observe_providers",
-        lambda target, **kwargs: (provider_tasks, github, False),
+        "observe_provider_details",
+        lambda target, **kwargs: (observations, github),
     )
     rc = cli.main(
         [

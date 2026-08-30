@@ -34,6 +34,10 @@ _TERMINAL_STATES = frozenset({"finished", "error", "cancelled", "expired"})
 class CursorCloudError(RuntimeError):
     """Raised on Cursor Cloud failures; message carries no secrets or bodies."""
 
+    def __init__(self, message: str, *, reason: str = "provider-error") -> None:
+        super().__init__(message)
+        self.reason = reason
+
 
 @dataclass(frozen=True)
 class LaunchResult:
@@ -132,9 +136,10 @@ def _call(opener, request: urllib.request.Request, deadline: float) -> dict[str,
         raise
     except urllib.error.HTTPError as exc:
         # Sanitize: never re-read or include the response body.
-        raise CursorCloudError("Cursor Cloud request failed") from exc
-    except urllib.error.URLError as exc:
-        raise CursorCloudError("Cursor Cloud request failed") from exc
+        reason = "auth-failure" if exc.code in (401, 403) else "provider-error"
+        raise CursorCloudError("Cursor Cloud request failed", reason=reason) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise CursorCloudError("Cursor Cloud request failed", reason="transport-failure") from exc
     except Exception as exc:
         raise CursorCloudError("Cursor Cloud request failed") from exc
 

@@ -4,7 +4,17 @@ from pathlib import Path
 
 import pytest
 
-from brigade import agents, cli, cloud_tracker, codex_cloud, fleet_client, proc
+from brigade import (
+    agents,
+    cli,
+    cloud_tracker,
+    codex_cloud,
+    cursor_cloud,
+    fleet_client,
+    fleet_client_grokbot,
+    jules_cloud,
+    proc,
+)
 
 
 def test_codex_cloud_ref_is_known_and_maps_to_codex():
@@ -1449,3 +1459,95 @@ class TestCodexCloudCli:
         assert all(argv[2] == "list" for argv in codex_calls)
         assert codex_calls
         assert not any(argv[2] in {"exec", "apply"} for argv in calls)
+
+    def test_cloud_doctor_and_canary_route_to_supported_provider_adapters(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setenv("CURSOR_API_KEY", "cursor-key")
+        monkeypatch.setenv("JULES_API_KEY", "jules-key")
+        monkeypatch.setattr(cursor_cloud, "list_agents", lambda *a, **k: [])
+        monkeypatch.setattr(jules_cloud, "list_sessions", lambda *a, **k: [{"id": "sess-1", "state": "running"}])
+        whoami_calls = []
+        monkeypatch.setattr(
+            fleet_client_grokbot,
+            "whoami",
+            lambda **k: whoami_calls.append(k) or fleet_client_grokbot.GrokbotHubDecision(True, "ok"),
+        )
+        monkeypatch.setattr(
+            fleet_client_grokbot,
+            "list_jobs",
+            lambda **k: fleet_client_grokbot.GrokbotHubDecision(
+                True,
+                "ok",
+                jobs=[
+                    {"job_id": "grokbot-active", "state": "running", "role": "implementation-worker"},
+                    {"job_id": "grokbot-done", "state": "completed", "role": "implementation-worker"},
+                ],
+            ),
+        )
+
+        assert (
+            cli.main(["run", "cloud", "doctor", "--provider", "cursor-cloud", "--target", str(tmp_path), "--json"]) == 0
+        )
+        assert json.loads(capsys.readouterr().out)["provider"] == "cursor-cloud"
+        assert cli.main(["run", "cloud", "canary", "--provider", "jules", "--target", str(tmp_path), "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["task_count"] == 1
+        assert (
+            cli.main(["run", "cloud", "doctor", "--provider", "grokbot-cloud", "--target", str(tmp_path), "--json"])
+            == 0
+        )
+        assert whoami_calls
+        capsys.readouterr()
+        assert (
+            cli.main(["run", "cloud", "canary", "--provider", "grokbot-cloud", "--target", str(tmp_path), "--json"])
+            == 0
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["tasks"] == [{"job_id": "grokbot-active", "role": "implementation-worker", "state": "running"}]
+        assert (
+            cli.main(["run", "cloud", "doctor", "--provider", "claude-cloud", "--target", str(tmp_path), "--json"]) == 1
+        )
+        assert json.loads(capsys.readouterr().out)["reason"] == "disabled-by-policy"
+        with pytest.raises(SystemExit) as rejected_setup:
+            cli.main(
+                ["run", "cloud", "setup", "--provider", "cursor-cloud", "--target", str(tmp_path), "--env-id", "env-1"]
+            )
+        assert rejected_setup.value.code == 2
+
+    def test_claude_cloud_doctor_is_static_disabled_policy(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr(
+            cursor_cloud,
+            "list_agents",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("cursor must not run")),
+        )
+        monkeypatch.setattr(
+            jules_cloud,
+            "list_sessions",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("jules must not run")),
+        )
+        monkeypatch.setattr(
+            fleet_client_grokbot,
+            "whoami",
+            lambda **k: (_ for _ in ()).throw(AssertionError("grokbot must not run")),
+        )
+        monkeypatch.setattr(
+            codex_cloud,
+            "list_tasks",
+            lambda **k: (_ for _ in ()).throw(AssertionError("codex must not run")),
+        )
+
+        assert (
+            cli.main(
+                [
+                    "run",
+                    "cloud",
+                    "doctor",
+                    "--provider",
+                    "claude-cloud",
+                    "--target",
+                    str(tmp_path),
+                    "--json",
+                ]
+            )
+            == 1
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["reason"] == "disabled-by-policy"
