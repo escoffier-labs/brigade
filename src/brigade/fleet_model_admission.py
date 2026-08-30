@@ -587,7 +587,7 @@ def _resolve_from_roster(
                 "source": source,
                 "error": "default-missing",
                 "roster_revision": roster.get("revision"),
-                "roster_digest": roster.get("document_sha256", roster.get("roster_digest")),
+                "roster_digest": roster.get("document_sha256"),
                 "expires_at": roster.get("expires_at"),
             },
         )
@@ -614,7 +614,7 @@ def _resolve_from_roster(
                     "state": "authoritative",
                     "source": source,
                     "roster_revision": roster.get("revision"),
-                    "roster_digest": roster.get("document_sha256", roster.get("roster_digest")),
+                    "roster_digest": roster.get("document_sha256"),
                     "seat": seat_name,
                     "provider": match.get("provider"),
                     "model": match.get("model"),
@@ -629,7 +629,7 @@ def _resolve_from_roster(
         "source": source,
         "error": reason,
         "roster_revision": roster.get("revision"),
-        "roster_digest": roster.get("document_sha256", roster.get("roster_digest")),
+        "roster_digest": roster.get("document_sha256"),
         "seat": seat_name,
         "provider": None if match is None else match.get("provider"),
         "model": None if match is None else match.get("model"),
@@ -724,7 +724,7 @@ def _roster_expectation_conflict(
     expect_digest: str | None,
 ) -> ModelAdmissionDecision | None:
     source = roster.get("source") or "hub"
-    digest = roster.get("document_sha256", roster.get("roster_digest"))
+    digest = roster.get("document_sha256")
     if expect_revision is not None and int(roster.get("revision") or 0) != expect_revision:
         return _fail(
             "roster_revision_conflict",
@@ -1110,7 +1110,7 @@ def doctor_model_roster(*, consumer: str) -> ModelAdmissionDecision:
         "consumer": consumer,
         "hub": "reachable" if roster.get("source") == "hub" else "lkg",
         "roster_revision": roster.get("revision"),
-        "roster_digest": roster.get("document_sha256", roster.get("roster_digest")),
+        "roster_digest": roster.get("document_sha256"),
         "cache_valid": _cache_is_valid(),
         "cache_age_seconds": None,
         "consumer_default": default_seat,

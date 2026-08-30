@@ -26,6 +26,7 @@ from .. import codex_appserver
 from .. import context_eval
 from .. import evidence_brief as evidence_brief_mod
 from .. import fleet_client
+from .. import fleet_model_admission
 from .. import graphtrail_delta
 from .. import causal_receipt
 from .. import localio
@@ -560,6 +561,32 @@ def run(
         if model_policy.receipt.get("state") != "authoritative":
             yield None
             return
+        admissions = model_policy.receipt.get("admissions")
+        if isinstance(admissions, list):
+            controller_admission = next(
+                (item for item in admissions if isinstance(item, Mapping) and item.get("seat") == agent.name),
+                None,
+            )
+            if controller_admission is None:
+                yield f"fleet model policy denied seat {agent.name!r}: controller admission is missing"
+                return
+            revision = controller_admission.get("roster_revision")
+            digest = controller_admission.get("roster_digest")
+            if type(revision) is not int or not isinstance(digest, str):
+                yield f"fleet model policy denied seat {agent.name!r}: controller admission is malformed"
+                return
+            target_admission = fleet_model_admission.admit_model(
+                consumer="brigade-run",
+                request_id=str(uuid4()),
+                phase="target",
+                seat=agent.name,
+                expect_revision=revision,
+                expect_digest=digest,
+                allow_lkg=False,
+            )
+            if not target_admission.ok:
+                yield f"fleet model policy denied seat {agent.name!r}: {target_admission.reason}"
+                return
         decision = fleet_client.acquire_model_lease(
             agent.name,
             agents.model_policy_provider(agent.cli or ""),

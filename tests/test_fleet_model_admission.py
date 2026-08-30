@@ -398,6 +398,7 @@ def test_configured_hub_snapshot_is_versioned_roster_not_legacy_models(tmp_path,
     assert snapshot.get("source") == "hub"
     assert snapshot.get("schema") == fleet_model_roster.ROSTER_SCHEMA
     assert snapshot.get("roster_revision") == roster["revision"]
+    assert snapshot.get("document_sha256") == roster["document_sha256"]
     assert snapshot.get("roster_digest") == roster["document_sha256"]
     assert isinstance(snapshot.get("expires_at"), str) and snapshot["expires_at"]
     seats = snapshot.get("seats")
@@ -411,6 +412,17 @@ def test_configured_hub_snapshot_is_versioned_roster_not_legacy_models(tmp_path,
     assert bindings.get("brigade") == {"cli": "cursor-agent"}
     assert "models" not in match
     _secret_free(snapshot, node_token, ADMIN_TOKEN)
+
+
+def test_versioned_snapshot_rejects_legacy_digest_without_document_sha256():
+    snapshot = _versioned_snapshot(
+        _versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast"),
+    )
+    snapshot["roster_digest"] = snapshot.pop("document_sha256")
+
+    resolution = aboyeur.resolve_fleet_model_policy(_roster(), worker="cursor_grok", snapshot=snapshot)
+
+    assert resolution.error == "fleet model policy snapshot is malformed; refusing new dispatch"
 
 
 def test_versioned_resolution_selects_hub_row_over_local_retired_default():
@@ -545,6 +557,74 @@ def test_brigade_run_without_injected_snapshot_dispatches_hub_approved_seat(tmp_
             admission = _assert_admission_provenance(payload, **expected)
             assert admission["binding"]["instance_id"] == "cursor-agent"
             _secret_free(admission, node_token, ADMIN_TOKEN)
+
+
+def test_target_admission_fails_closed_when_roster_changes_after_controller_admission(tmp_path, monkeypatch):
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        roster = _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        controller_snapshot = fleet_client.load_model_policy_snapshot()
+        target_calls: list[dict[str, object]] = []
+        original_admit = fleet_model_admission.admit_model
+
+        def admit_target(**kwargs):
+            target_calls.append(kwargs)
+            return original_admit(**kwargs)
+
+        controller_reads = 0
+
+        def snapshot_then_mutate():
+            nonlocal controller_reads
+            controller_reads += 1
+            assert _admin_set(hub, enabled=False)[0] == 200
+            return controller_snapshot
+
+        monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", snapshot_then_mutate)
+        monkeypatch.setattr(fleet_model_admission, "admit_model", admit_target)
+        lease_calls: list[tuple[str, str, str]] = []
+        monkeypatch.setattr(
+            fleet_client,
+            "acquire_model_lease",
+            lambda seat, provider, model: (
+                lease_calls.append((seat, provider, model))
+                or fleet_client.ModelLeaseDecision(True, "ok", "lease", "holder")
+            ),
+        )
+        dispatched: list[str] = []
+        monkeypatch.setattr(
+            agents,
+            "run_agent",
+            lambda cli_ref, *args, **kwargs: (
+                dispatched.append(cli_ref) or agents.AgentResult(text="unexpected", ok=True)
+            ),
+        )
+
+        output_dir = tmp_path / "run"
+        assert (
+            run_aboyeur_guarded(
+                "inspect",
+                _roster(),
+                worker="cursor_grok",
+                output_dir=output_dir,
+                code_graph_enabled=False,
+                route_enabled=False,
+            )
+            == 2
+        )
+
+    assert controller_reads == 1
+    assert len(target_calls) == 1
+    target_call = target_calls[0]
+    assert target_call["consumer"] == "brigade-run"
+    assert target_call["phase"] == "target"
+    assert target_call["seat"] == "cursor_grok"
+    assert target_call["expect_revision"] == int(roster["revision"])
+    assert target_call["expect_digest"] == str(roster["document_sha256"])
+    assert target_call["allow_lkg"] is False
+    assert isinstance(target_call["request_id"], str) and target_call["request_id"]
+    assert lease_calls == []
+    assert dispatched == []
 
 
 def test_run_writes_effective_policy_and_override_to_artifacts(tmp_path, monkeypatch):
@@ -850,6 +930,14 @@ def test_orchestrated_seats_persist_exact_admission_before_lease(tmp_path, monke
         digest=digest,
     )
     monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", lambda: snapshot)
+    target_admissions: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "admit_model",
+        lambda **kwargs: (
+            target_admissions.append(kwargs) or fleet_model_admission.ModelAdmissionDecision(True, 0, "admitted", {})
+        ),
+    )
     acquired: list[str] = []
     monkeypatch.setattr(
         fleet_client,
@@ -937,6 +1025,14 @@ def test_orchestrated_seats_persist_exact_admission_before_lease(tmp_path, monke
     )
     assert acquired == ["chef", "coder", "chef"]
     assert "reviewer" not in acquired
+    assert [
+        (item["phase"], item["seat"], item["expect_revision"], item["expect_digest"], item["allow_lkg"])
+        for item in target_admissions
+    ] == [
+        ("target", "chef", 4, digest, False),
+        ("target", "coder", 4, digest, False),
+        ("target", "chef", 4, digest, False),
+    ]
 
 
 @pytest.mark.parametrize(("cli", "model"), RETIRED_SPELLINGS)

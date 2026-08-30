@@ -411,6 +411,7 @@ def load_model_policy_snapshot(*, hub_url: str | None = None) -> dict[str, Any]:
         "source": source,
         "roster_revision": revision,
         "revision": revision,
+        "document_sha256": payload.get("document_sha256"),
         "roster_digest": payload.get("document_sha256"),
         "expires_at": payload.get("expires_at"),
         "seats": seats,
