@@ -3326,7 +3326,7 @@ def scanners_run_show(*, target: Path, run_id: str, json_output: bool = False) -
     print(f"stdout: {receipt.get('stdout_path')}")
     print(f"stderr: {receipt.get('stderr_path')}")
     if receipt.get("stdout_summary"):
-        print(f"stdout_summary: {helpers._short(str(receipt.get('stdout_summary')))}")
+        print(f"stdout_summary: {helpers._terminal_safe_short(str(receipt.get('stdout_summary')))}")
     if receipt.get("stderr_summary"):
-        print(f"stderr_summary: {helpers._short(str(receipt.get('stderr_summary')))}")
+        print(f"stderr_summary: {helpers._terminal_safe_short(str(receipt.get('stderr_summary')))}")
     return 0

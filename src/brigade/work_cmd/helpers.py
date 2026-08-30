@@ -55,6 +55,14 @@ def _short(text: str, limit: int = 96) -> str:
     return rendered[: limit - 3].rstrip() + "..."
 
 
+def _terminal_safe_short(text: str, limit: int = 96) -> str:
+    escaped = "".join(
+        char.encode("unicode_escape").decode("ascii") if ord(char) <= 0x1F or 0x7F <= ord(char) <= 0x9F else char
+        for char in text
+    )
+    return _short(escaped, limit)
+
+
 def _count_status(count: object, label: str = "issue") -> str:
     return "ok" if count == 0 else f"{count} {label}(s)"
 
