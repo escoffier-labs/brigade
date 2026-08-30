@@ -400,6 +400,8 @@ def _validate_envelope(payload: Mapping[str, Any], *, token: str, audience: str)
         seconds=fleet_model_roster.CLOCK_SKEW_SECONDS
     ):
         return "future-timestamp"
+    if expires <= issued:
+        return "malformed-roster"
     if expires <= now:
         return "lkg-expired"
     if type(payload.get("revision")) is not int:
@@ -433,7 +435,10 @@ def _accept_lkg(*, token: str, audience: str) -> ModelAdmissionDecision:
         cached_at = _parse_iso(record.get("cached_at"))
         if cached_at is None:
             return _fail("malformed-roster")
-        if (utc_now() - cached_at).total_seconds() > fleet_model_roster.LKG_TTL_SECONDS:
+        now = utc_now()
+        if cached_at > now + timedelta(seconds=fleet_model_roster.CLOCK_SKEW_SECONDS):
+            return _fail("future-timestamp")
+        if (now - cached_at).total_seconds() > fleet_model_roster.LKG_TTL_SECONDS:
             return _fail("lkg-expired")
         if int(envelope["revision"]) < int(record.get("highest_revision") or 0):
             return _fail("revision-rollback")
@@ -628,6 +633,8 @@ def _audit_row_fresh(row: Mapping[str, Any], now: datetime) -> bool:
     created = _audit_created_at(row)
     if created is None:
         return False
+    if created > now + timedelta(seconds=fleet_model_roster.CLOCK_SKEW_SECONDS):
+        return False
     return (now - created).total_seconds() <= fleet_model_roster.LKG_TTL_SECONDS
 
 
@@ -742,11 +749,14 @@ def _lkg_admit(
     digest = _request_digest(request)
     now = utc_now()
     try:
-        existing = [
-            row
-            for row in _read_audit_spool()
-            if row.get("request_id") == request_id and row.get("phase") == phase and _audit_row_fresh(row, now)
+        matching = [
+            row for row in _read_audit_spool() if row.get("request_id") == request_id and row.get("phase") == phase
         ]
+        for row in matching:
+            created = _audit_created_at(row)
+            if created is not None and created > now + timedelta(seconds=fleet_model_roster.CLOCK_SKEW_SECONDS):
+                return _fail("future-timestamp")
+        existing = [row for row in matching if _audit_row_fresh(row, now)]
     except FleetClientError as exc:
         text = str(exc)
         if text == "cache-unsafe-platform":
@@ -790,6 +800,26 @@ def _exact_admission_success(body: Mapping[str, Any]) -> dict[str, Any] | None:
     if body.get("state") != "authoritative":
         return None
     if body.get("error"):
+        return None
+    for key in ("seat", "provider", "model", "reasoning"):
+        value = body.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return None
+    if type(body.get("roster_revision")) is not int:
+        return None
+    digest = body.get("roster_digest")
+    if not isinstance(digest, str) or not digest.startswith("sha256:"):
+        return None
+    hex_part = digest[7:]
+    if len(hex_part) != 64 or any(character not in "0123456789abcdef" for character in hex_part):
+        return None
+    if _parse_iso(body.get("expires_at")) is None:
+        return None
+    binding = body.get("binding")
+    if not isinstance(binding, dict):
+        return None
+    instance_id = binding.get("instance_id")
+    if not isinstance(instance_id, str) or not instance_id:
         return None
     return {key: body[key] for key in _SUCCESS_ADMISSION_KEYS}
 

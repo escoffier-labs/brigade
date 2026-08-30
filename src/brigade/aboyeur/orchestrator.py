@@ -96,6 +96,17 @@ def resolve_fleet_model_policy(
     return _resolve(roster, worker=worker, model_override=model_override, snapshot=snapshot)
 
 
+def _roster_payload_with_admission(roster: Roster, receipt: Mapping[str, Any]) -> dict[str, object]:
+    payload = artifacts._roster_payload(roster)
+    admission = receipt.get("model_admission")
+    if isinstance(admission, dict):
+        payload["model_admission"] = dict(admission)
+    admissions = receipt.get("admissions")
+    if isinstance(admissions, list):
+        payload["admissions"] = [dict(item) for item in admissions if isinstance(item, dict)]
+    return payload
+
+
 @contextmanager
 def terminal_sigterm_handler(
     output_dir: Path | None,
@@ -520,7 +531,7 @@ def run(
                 output_dir,
                 seat_routing=[dict(decision) for decision in roster.seat_routing],
             )
-        run_io._write_json(output_dir / "roster.json", artifacts._roster_payload(roster))
+        run_io._write_json(output_dir / "roster.json", _roster_payload_with_admission(roster, model_policy.receipt))
     if model_policy.error is not None:
         policy_error = model_policy.error
         if output_dir is not None and not (output_dir / "run.json").is_file():
@@ -749,6 +760,7 @@ def run(
             verification_contract_payload=verification_contract_payload,
             run_budget_payload=run_budget_payload,
         )
+        run_io._write_json(output_dir / "roster.json", _roster_payload_with_admission(roster, model_policy.receipt))
     if code_graph is None:
         code_graph = briefs.code_graph_brief(cwd, task) if code_graph_enabled else briefs.CodeGraphBrief(attached=False)
     if drift_impact is None:
@@ -788,7 +800,7 @@ def run(
         if code_graph_delta is None and cwd is not None:
             code_graph_delta_before = graphtrail_delta.capture_before(cwd, output_dir)
             code_graph_delta = code_graph_delta_before
-        run_io._write_json(output_dir / "roster.json", artifacts._roster_payload(roster))
+        run_io._write_json(output_dir / "roster.json", _roster_payload_with_admission(roster, model_policy.receipt))
         run_io._write_json(
             output_dir / "run.json",
             _payload(

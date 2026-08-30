@@ -50,6 +50,28 @@ def _roster() -> Roster:
     )
 
 
+ADMISSION_PROVENANCE_KEYS = (
+    "schema",
+    "source",
+    "roster_revision",
+    "roster_digest",
+    "seat",
+    "provider",
+    "model",
+    "reasoning",
+    "binding",
+    "expires_at",
+)
+RETIRED_SPELLINGS = (
+    ("codex", "gpt-5.4"),
+    ("openai", "gpt-5.4"),
+    ("openai-codex", "openai/gpt-5.4"),
+    ("codex", "gpt-5.4-high"),
+    ("openai", "gpt-5.5"),
+    ("openai-codex", "gpt-5.5:preview"),
+)
+
+
 def _row(seat: str, provider: str, model: str, *, enabled: bool = True) -> dict[str, object]:
     return {
         "seat": seat,
@@ -59,6 +81,96 @@ def _row(seat: str, provider: str, model: str, *, enabled: bool = True) -> dict[
         "limit": None,
         "notes": None,
     }
+
+
+def _versioned_seat(
+    seat: str,
+    provider: str,
+    model: str,
+    *,
+    reasoning: str = "high",
+    enabled: bool = True,
+    instance_id: str = "cursor",
+) -> dict[str, object]:
+    return {
+        "seat": seat,
+        "provider": provider,
+        "model": model,
+        "reasoning": reasoning,
+        "enabled": enabled,
+        "bindings": {"brigade_cli": instance_id, "t3_instance_id": instance_id},
+    }
+
+
+def _versioned_snapshot(
+    *seats: dict[str, object],
+    source: str = "hub",
+    revision: int = 2,
+    digest: str | None = None,
+    expires_at: str = "2026-08-30T14:15:00Z",
+    state: str = "authoritative",
+) -> dict[str, object]:
+    digest = digest or ("sha256:" + ("ab" * 32))
+    return {
+        "schema": fleet_model_roster.ROSTER_SCHEMA,
+        "state": state,
+        "source": source,
+        "revision": revision,
+        "roster_revision": revision,
+        "roster_digest": digest,
+        "expires_at": expires_at,
+        "seats": list(seats),
+        "consumer_defaults": {"brigade-run": seats[0]["seat"] if seats else None},
+        "retired_models": [],
+    }
+
+
+def _admission_from_payload(payload: dict[str, object], seat: str) -> dict[str, object] | None:
+    admission = payload.get("model_admission")
+    if isinstance(admission, dict) and (admission.get("seat") == seat or not seat):
+        return admission
+    for item in payload.get("admissions") or []:
+        if isinstance(item, dict) and item.get("seat") == seat:
+            return item
+    for item in payload.get("seat_routing") or []:
+        if not isinstance(item, dict):
+            continue
+        nested = item.get("model_admission")
+        if isinstance(nested, dict) and nested.get("seat") == seat:
+            return nested
+        if item.get("requested_seat") == seat and all(key in item for key in ADMISSION_PROVENANCE_KEYS):
+            return item
+    return None
+
+
+def _assert_admission_provenance(
+    payload: dict[str, object],
+    *,
+    seat: str,
+    provider: str,
+    model: str,
+    reasoning: str,
+    source: str,
+    revision: int,
+    digest: str,
+) -> dict[str, object]:
+    admission = _admission_from_payload(payload, seat)
+    assert isinstance(admission, dict), f"missing model_admission for {seat} in {sorted(payload)}"
+    for key in ADMISSION_PROVENANCE_KEYS:
+        assert key in admission, f"missing {key} in model_admission"
+    assert admission["schema"] == fleet_model_roster.ADMISSION_SCHEMA
+    assert admission["source"] == source
+    assert admission["roster_revision"] == revision
+    assert admission["roster_digest"] == digest
+    assert admission["seat"] == seat
+    assert admission["provider"] == provider
+    assert admission["model"] == model
+    assert admission["reasoning"] == reasoning
+    binding = admission["binding"]
+    assert isinstance(binding, dict)
+    assert isinstance(binding.get("instance_id"), str) and binding["instance_id"]
+    assert isinstance(admission["expires_at"], str) and admission["expires_at"]
+    return admission
 
 
 def test_model_policy_model_slugifies_display_names_deterministically():
@@ -135,6 +247,28 @@ def test_direct_worker_model_override_fails_closed_when_registry_model_differs()
         "fleet model policy denied seat 'cursor_grok': requested cursor/composer-2.5, "
         "registry allows cursor/cursor-grok-4.6-high-fast"
     )
+
+
+def test_versioned_snapshot_fails_closed_without_exact_reasoning_and_binding():
+    seat = _versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast")
+    del seat["reasoning"]
+    resolution = aboyeur.resolve_fleet_model_policy(
+        _roster(),
+        worker="cursor_grok",
+        snapshot=_versioned_snapshot(seat),
+    )
+    assert resolution.error is not None
+    assert "cursor_grok" in resolution.error
+
+    unbound = _versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast")
+    unbound["bindings"] = {}
+    resolution = aboyeur.resolve_fleet_model_policy(
+        _roster(),
+        worker="cursor_grok",
+        snapshot=_versioned_snapshot(unbound),
+    )
+    assert resolution.error is not None
+    assert "cursor_grok" in resolution.error
 
 
 def test_unconfigured_hub_preserves_local_roster_behavior():
@@ -447,6 +581,312 @@ def test_run_terminalizes_configured_hub_outage_as_model_policy_failure(tmp_path
         "detail": "fleet model policy hub is unavailable; refusing new dispatch",
         "seat": "cursor_grok",
     }
+
+
+def test_direct_worker_versioned_admission_is_persisted_in_all_three_artifacts(tmp_path, monkeypatch):
+    digest = "sha256:" + ("cd" * 32)
+    snapshot = _versioned_snapshot(
+        _versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast", reasoning="high"),
+        source="hub",
+        revision=7,
+        digest=digest,
+    )
+    monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", lambda: snapshot)
+    output_dir = tmp_path / "run"
+
+    assert (
+        run_aboyeur_guarded(
+            "inspect",
+            _roster(),
+            worker="cursor_grok",
+            dry_run=True,
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+
+    policy = json.loads((output_dir / "model-policy.json").read_text())
+    run = json.loads((output_dir / "run.json").read_text())
+    roster = json.loads((output_dir / "roster.json").read_text())
+    expected = dict(
+        seat="cursor_grok",
+        provider="cursor",
+        model="cursor-grok-4.6-high-fast",
+        reasoning="high",
+        source="hub",
+        revision=7,
+        digest=digest,
+    )
+    for payload in (policy, run, roster):
+        admission = _assert_admission_provenance(payload, **expected)
+        _secret_free(admission, "Bearer", "prompt", "/tmp/", str(tmp_path))
+        assert "hmac" not in json.dumps(admission)
+        assert "mac" not in admission
+
+
+def test_orchestrated_seats_persist_exact_admission_before_lease(tmp_path, monkeypatch):
+    digest = "sha256:" + ("ef" * 32)
+    snapshot = _versioned_snapshot(
+        _versioned_seat("chef", "anthropic", "opus-5", reasoning="high", instance_id="claude"),
+        _versioned_seat("coder", "openai", "gpt-5.6-terra", reasoning="medium", instance_id="codex"),
+        _versioned_seat("reviewer", "openai", "gpt-5.6-luna", reasoning="low", instance_id="codex"),
+        revision=4,
+        digest=digest,
+    )
+    monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", lambda: snapshot)
+    acquired: list[str] = []
+    monkeypatch.setattr(
+        fleet_client,
+        "acquire_model_lease",
+        lambda seat, provider, model: (
+            acquired.append(seat) or fleet_client.ModelLeaseDecision(True, "ok", f"lease-{seat}", f"holder-{seat}")
+        ),
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "release_model_lease",
+        lambda lease_id, *, holder: fleet_client.ModelLeaseDecision(True, "ok", lease_id, holder),
+    )
+    calls: list[str] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        calls.append(cli_ref)
+        if len(calls) == 1:
+            return agents.AgentResult(text='{"assignments":[{"worker":"coder","task":"implement it"}]}', ok=True)
+        if len(calls) == 2:
+            return agents.AgentResult(text="implemented", ok=True)
+        return agents.AgentResult(text="synthesized", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan", model="opus-5", reasoning="high"),
+            "coder": Agent("coder", "codex", "code", model="gpt-5.6-terra", reasoning="medium"),
+            "reviewer": Agent("reviewer", "codex", "review", model="gpt-5.6-luna", reasoning="low"),
+        },
+    )
+    output_dir = tmp_path / "run"
+    assert (
+        run_aboyeur_guarded(
+            "implement it",
+            roster,
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+
+    policy = json.loads((output_dir / "model-policy.json").read_text())
+    run = json.loads((output_dir / "run.json").read_text())
+    roster_payload = json.loads((output_dir / "roster.json").read_text())
+    admissions = policy.get("admissions")
+    assert isinstance(admissions, list)
+    by_seat = {item["seat"]: item for item in admissions}
+    assert set(by_seat) >= {"chef", "coder"}
+    assert by_seat["chef"]["reasoning"] == "high"
+    assert by_seat["coder"]["reasoning"] == "medium"
+    assert by_seat["chef"]["roster_revision"] == 4
+    assert by_seat["coder"]["roster_digest"] == digest
+    _assert_admission_provenance(
+        policy,
+        seat="chef",
+        provider="anthropic",
+        model="opus-5",
+        reasoning="high",
+        source="hub",
+        revision=4,
+        digest=digest,
+    )
+    _assert_admission_provenance(
+        run,
+        seat="chef",
+        provider="anthropic",
+        model="opus-5",
+        reasoning="high",
+        source="hub",
+        revision=4,
+        digest=digest,
+    )
+    _assert_admission_provenance(
+        roster_payload,
+        seat="chef",
+        provider="anthropic",
+        model="opus-5",
+        reasoning="high",
+        source="hub",
+        revision=4,
+        digest=digest,
+    )
+    assert acquired == ["chef", "coder", "chef"]
+    assert "reviewer" not in acquired
+
+
+@pytest.mark.parametrize(("cli", "model"), RETIRED_SPELLINGS)
+def test_permanent_floor_stops_retired_spellings_before_provider_or_lease(tmp_path, monkeypatch, cli, model):
+    snapshot = _versioned_snapshot(
+        _versioned_seat("coder", "openai", model, reasoning="medium", instance_id="codex"),
+    )
+    monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", lambda: snapshot)
+    provider_calls: list[str] = []
+    lease_calls: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        fleet_client,
+        "acquire_model_lease",
+        lambda seat, provider, leased_model: (
+            lease_calls.append((seat, provider, leased_model))
+            or fleet_client.ModelLeaseDecision(True, "ok", "should-not-lease", "holder")
+        ),
+    )
+    monkeypatch.setattr(
+        agents,
+        "run_agent",
+        lambda *args, **kwargs: provider_calls.append("run_agent") or agents.AgentResult(text="no", ok=True),
+    )
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan", model="opus-5"),
+            "coder": Agent("coder", cli, "code", model=model),
+        },
+    )
+    output_dir = tmp_path / "run"
+
+    assert (
+        run_aboyeur_guarded(
+            "implement it",
+            roster,
+            worker="coder",
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 2
+    )
+
+    run = json.loads((output_dir / "run.json").read_text())
+    assert run["failure"]["kind"] == "fleet-model-policy"
+    assert run["failure"]["phase"] == "preflight"
+    assert provider_calls == []
+    assert lease_calls == []
+
+
+def test_configured_outage_accepts_valid_lkg_and_rejects_expired(tmp_path, monkeypatch):
+    valid = _versioned_snapshot(
+        _versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast"),
+        source="lkg",
+        revision=3,
+        digest="sha256:" + ("11" * 32),
+        expires_at=(datetime.now(timezone.utc) + timedelta(seconds=800)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", lambda: valid)
+    output_dir = tmp_path / "valid"
+    assert (
+        run_aboyeur_guarded(
+            "inspect",
+            _roster(),
+            worker="cursor_grok",
+            dry_run=True,
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+    policy = json.loads((output_dir / "model-policy.json").read_text())
+    run = json.loads((output_dir / "run.json").read_text())
+    roster = json.loads((output_dir / "roster.json").read_text())
+    for payload in (policy, run, roster):
+        _assert_admission_provenance(
+            payload,
+            seat="cursor_grok",
+            provider="cursor",
+            model="cursor-grok-4.6-high-fast",
+            reasoning="high",
+            source="lkg",
+            revision=3,
+            digest="sha256:" + ("11" * 32),
+        )
+
+    expired = dict(valid)
+    expired["expires_at"] = "2020-01-01T00:15:00Z"
+    monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", lambda: expired)
+    denied_dir = tmp_path / "expired"
+    assert (
+        run_aboyeur_guarded(
+            "inspect",
+            _roster(),
+            worker="cursor_grok",
+            dry_run=True,
+            output_dir=denied_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 2
+    )
+    denied = json.loads((denied_dir / "run.json").read_text())
+    assert denied["failure"]["kind"] == "fleet-model-policy"
+    assert denied["failure"]["phase"] == "preflight"
+
+
+def test_denied_or_retired_seat_is_pruned_from_health_fallback_chain():
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan", model="opus-5", fallback=("coder",)),
+            "coder": Agent("coder", "codex", "code", model="gpt-5.5"),
+            "reviewer": Agent("reviewer", "codex", "review", model="gpt-5.6-luna"),
+        },
+    )
+    resolution = aboyeur.resolve_fleet_model_policy(
+        roster,
+        snapshot=_versioned_snapshot(
+            _versioned_seat("chef", "anthropic", "opus-5", instance_id="claude"),
+            _versioned_seat("reviewer", "openai", "gpt-5.6-luna", instance_id="codex"),
+        ),
+    )
+    assert resolution.error is None
+    assert "coder" not in resolution.roster.agents
+    from brigade import seat_health
+
+    assert "coder" not in seat_health._seat_chain_names(resolution.roster)
+    unhealthy = (seat_health.SeatHealthCheck("declaration", "failed", "probe failed", cause_code="auth-required"),)
+    routing = aboyeur.resolve_orchestrator_health_routing(
+        resolution.roster,
+        (
+            seat_health.SeatHealthResult(
+                "probe-chef",
+                "chef",
+                "fp",
+                "unhealthy",
+                {},
+                unhealthy,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ),
+            seat_health.SeatHealthResult(
+                "probe-reviewer",
+                "reviewer",
+                "fp",
+                "healthy",
+                {},
+                (),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ),
+        ),
+    )
+    rendered = json.dumps(routing.receipt or {}, default=str)
+    assert "coder" not in rendered
+    assert routing.roster.orchestrator != "coder"
+    assert "coder" not in routing.roster.agents
 
 
 def _plant_home_identity(home: Path, node_id: str) -> None:
@@ -1232,6 +1672,124 @@ def _admission_success_body(**overrides: object) -> dict[str, object]:
     }
     body.update(overrides)
     return body
+
+
+def test_validate_envelope_rejects_expires_at_not_after_issued_at(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        roster = _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        equal = json.loads(json.dumps(roster))
+        issued = datetime.now(timezone.utc).replace(microsecond=0)
+        stamp = issued.strftime("%Y-%m-%dT%H:%M:%SZ")
+        equal["issued_at"] = stamp
+        equal["expires_at"] = stamp
+        equal["mac"] = {
+            "algorithm": fleet_model_roster.MAC_ALGORITHM,
+            "value": fleet_model_roster.roster_mac(node_token, equal),
+        }
+        assert fleet_model_admission._validate_envelope(equal, token=node_token, audience=NODE_A) == "malformed-roster"
+
+        inverted = json.loads(json.dumps(roster))
+        inverted["issued_at"] = (issued + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        inverted["expires_at"] = issued.strftime("%Y-%m-%dT%H:%M:%SZ")
+        inverted["mac"] = {
+            "algorithm": fleet_model_roster.MAC_ALGORITHM,
+            "value": fleet_model_roster.roster_mac(node_token, inverted),
+        }
+        assert (
+            fleet_model_admission._validate_envelope(inverted, token=node_token, audience=NODE_A) == "malformed-roster"
+        )
+
+
+def test_lkg_rejects_cached_at_beyond_allowed_future_skew(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        assert fleet_model_admission.fetch_versioned_roster().ok is True
+        lkg = fleet_model_admission.lkg_path()
+        record = json.loads(lkg.read_text(encoding="utf-8"))
+        future = datetime.now(timezone.utc) + timedelta(seconds=fleet_model_roster.CLOCK_SKEW_SECONDS + 30)
+        record["cached_at"] = future.strftime("%Y-%m-%dT%H:%M:%SZ")
+        lkg.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+        os.chmod(lkg, 0o600)
+        monkeypatch.setattr(
+            fleet_client,
+            "_run_with_deadline",
+            lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("deadline")),
+        )
+        decision = fleet_model_admission.fetch_versioned_roster()
+        assert decision.ok is False
+        assert decision.reason in {"future-timestamp", "malformed-roster"}
+
+
+def test_audit_replay_rejects_created_at_beyond_allowed_future_skew(tmp_path, monkeypatch):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        assert fleet_model_admission.fetch_versioned_roster().ok is True
+        monkeypatch.setattr(
+            fleet_client,
+            "_run_with_deadline",
+            lambda *args, **kwargs: (_ for _ in ()).throw(urllib.error.URLError("offline")),
+        )
+        request_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        first = fleet_model_admission.admit_model(
+            consumer="t3-fleet",
+            request_id=request_id,
+            phase="controller",
+        )
+        assert first.ok is True
+        spool = fleet_model_admission.audit_spool_path()
+        rows = [json.loads(line) for line in spool.read_text(encoding="utf-8").splitlines() if line]
+        future = datetime.now(timezone.utc) + timedelta(seconds=fleet_model_roster.CLOCK_SKEW_SECONDS + 45)
+        rows[-1]["created_at"] = future.strftime("%Y-%m-%dT%H:%M:%SZ")
+        spool.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
+        os.chmod(spool, 0o600)
+        replay = fleet_model_admission.admit_model(
+            consumer="t3-fleet",
+            request_id=request_id,
+            phase="controller",
+        )
+        assert replay.ok is False
+        assert replay.reason in {"future-timestamp", "malformed-roster", "lkg-unsafe"}
+
+
+def test_map_hub_admission_type_checks_exact_success_fields_before_ok():
+    from brigade import fleet_model_admission
+
+    for override in (
+        {"seat": ""},
+        {"provider": ""},
+        {"model": ""},
+        {"reasoning": ""},
+        {"roster_revision": "2"},
+        {"roster_digest": "sha256:not-a-digest"},
+        {"roster_digest": "md5:" + ("ab" * 16)},
+        {"expires_at": "not-a-timestamp"},
+        {"binding": {"service_tier": "standard"}},
+        {"binding": {"instance_id": ""}},
+    ):
+        body = _admission_success_body(**override)
+        decision = fleet_model_admission._map_hub_admission(200, body)
+        assert decision.ok is False, override
+        assert decision.exit_code == 2
+        assert decision.reason == "unsupported-schema"
+        _secret_free(decision, "token")
+
+    ok = fleet_model_admission._map_hub_admission(200, _admission_success_body())
+    assert ok.ok is True
+    assert set(ok.payload) == set(ADMISSION_PROVENANCE_KEYS) | {"state"}
+    assert "raw" not in ok.payload
+    assert "models" not in ok.payload
 
 
 def test_map_hub_admission_rejects_non_authoritative_or_extra_fields_and_applies_retired_floor():
