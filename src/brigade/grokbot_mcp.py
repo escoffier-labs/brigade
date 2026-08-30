@@ -177,6 +177,11 @@ def load_feed_hub_token() -> str | None:
     return _read_descriptor_safe_token_file(Path(path_text))
 
 
+def load_hub_token_file(path: Path) -> str:
+    """Load one configured Fleet Hub listener token from a safe file."""
+    return _read_descriptor_safe_token_file(path)
+
+
 def _read_descriptor_safe_token_file(path: Path) -> str:
     """Read one owner-private token through a no-follow descriptor."""
     no_follow = getattr(os, "O_NOFOLLOW", None)
