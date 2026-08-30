@@ -94,7 +94,7 @@ class WazuhTriageTools:
         results = self.store.upsert_alerts(items, now=stamp)
         created = 0
         fingerprints: list[str] = []
-        entries: dict[str, dict[str, str]] = {}
+        entries: dict[tuple[str, str, str], dict[str, str]] = {}
         for result in results:
             fingerprints.append(result["fingerprint"])
             if result["created"]:
@@ -102,18 +102,26 @@ class WazuhTriageTools:
             if result["needs_relay"]:
                 stored = self.store.get_alert(result["fingerprint"])
                 if stored is not None:
-                    entries[result["fingerprint"]] = self.store.finding_entry(stored)
+                    entry = self.store.finding_entry(stored)
+                    entries[(entry["producer"], entry["finding_id"], entry["revision"])] = entry
+        for pending in self.store.pending_relay_entries():
+            entries.setdefault((pending["producer"], pending["finding_id"], pending["revision"]), pending)
         if entries:
+            payload = list(entries.values())[: grokbot_findings.MAX_ENTRIES]
             grokbot_findings_relay.relay_apply(
-                list(entries.values()),
+                payload,
                 self.target,
                 self.owner,
-                limit=min(len(entries), grokbot_findings.MAX_ENTRIES),
+                limit=len(payload),
                 now=stamp,
             )
-            confirmed = _confirmed_reported_fingerprints(self.target, entries)
-            if confirmed:
-                self.store.mark_relay_status(confirmed, "reported")
+            reported = [
+                record["relay_id"]
+                for record in grokbot_findings_relay._read_outbox_records(self.target)
+                if record.get("status") == "reported"
+            ]
+            if reported:
+                self.store.confirm_reported_relays(reported)
         counts = self.store.counts()
         return _envelope(
             request_id=self.request_id(),
@@ -252,24 +260,3 @@ def _count_projected(alerts: Sequence[Mapping[str, Any]]) -> dict[str, int]:
         else:
             counts["watched"] += 1
     return counts
-
-
-def _confirmed_reported_fingerprints(
-    target: Path,
-    entries: Mapping[str, Mapping[str, str]],
-) -> list[str]:
-    reported = {
-        record["relay_id"]
-        for record in grokbot_findings_relay._read_outbox_records(target)
-        if record.get("status") == "reported"
-    }
-    confirmed: list[str] = []
-    for fingerprint, entry in entries.items():
-        relay_id = grokbot_findings.identity_digest(
-            entry["producer"],
-            entry["finding_id"],
-            entry["revision"],
-        )
-        if relay_id in reported:
-            confirmed.append(fingerprint)
-    return confirmed

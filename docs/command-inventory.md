@@ -58,8 +58,8 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade roadmap` (extras): 4 command path(s)
 - `brigade roster`: 4 command path(s)
 - `brigade route`: 1 command path(s)
-- `brigade run`: 40 command path(s)
-- `brigade run-cloud` (deprecated; use `brigade run cloud`): 39 command path(s)
+- `brigade run`: 44 command path(s)
+- `brigade run-cloud` (deprecated; use `brigade run cloud`): 43 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
 - `brigade runs`: 19 command path(s)
 - `brigade scrub`: 1 command path(s)
@@ -497,8 +497,12 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade run cloud grokbot install-service`
 - `brigade run cloud grokbot pack canary`
 - `brigade run cloud grokbot pack doctor`
+- `brigade run cloud grokbot pack install-relay-service`
 - `brigade run cloud grokbot pack install-service`
 - `brigade run cloud grokbot pack list`
+- `brigade run cloud grokbot pack relay`
+- `brigade run cloud grokbot pack relay-doctor`
+- `brigade run cloud grokbot pack relay-setup`
 - `brigade run cloud grokbot pack remove`
 - `brigade run cloud grokbot pack setup`
 - `brigade run cloud grokbot pack show`
@@ -536,8 +540,12 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade run-cloud grokbot install-service` (deprecated; use `brigade run cloud grokbot install-service`)
 - `brigade run-cloud grokbot pack canary` (deprecated; use `brigade run cloud grokbot pack canary`)
 - `brigade run-cloud grokbot pack doctor` (deprecated; use `brigade run cloud grokbot pack doctor`)
+- `brigade run-cloud grokbot pack install-relay-service` (deprecated; use `brigade run cloud grokbot pack install-relay-service`)
 - `brigade run-cloud grokbot pack install-service` (deprecated; use `brigade run cloud grokbot pack install-service`)
 - `brigade run-cloud grokbot pack list` (deprecated; use `brigade run cloud grokbot pack list`)
+- `brigade run-cloud grokbot pack relay` (deprecated; use `brigade run cloud grokbot pack relay`)
+- `brigade run-cloud grokbot pack relay-doctor` (deprecated; use `brigade run cloud grokbot pack relay-doctor`)
+- `brigade run-cloud grokbot pack relay-setup` (deprecated; use `brigade run cloud grokbot pack relay-setup`)
 - `brigade run-cloud grokbot pack remove` (deprecated; use `brigade run cloud grokbot pack remove`)
 - `brigade run-cloud grokbot pack setup` (deprecated; use `brigade run cloud grokbot pack setup`)
 - `brigade run-cloud grokbot pack show` (deprecated; use `brigade run cloud grokbot pack show`)

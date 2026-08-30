@@ -376,6 +376,11 @@ class FleetLedger:
                     return dict(entry)
             return None
 
+    def findings(self) -> list[dict[str, Any]]:
+        with self._lock:
+            document = self._load_document()
+            return [dict(entry) for entry in sorted(document["findings"], key=lambda item: item["finding_id"])]
+
     def replace_findings(self, scope: str, findings: Sequence[Mapping[str, Any]]) -> None:
         with self._lock:
             requested = parse_identifier(scope)
