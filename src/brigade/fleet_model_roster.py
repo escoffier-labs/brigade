@@ -123,15 +123,19 @@ def retired_reason(
     """Return a bounded reason when provider/model matches a retired family."""
     canonical_provider = canonicalize_provider(provider)
     normalized = normalize_model(canonical_provider, normalize_model(provider, model))
-    families: dict[tuple[str, str], str] = {family: PERMANENT_REASON for family in PERMANENT_RETIRED_FAMILIES}
+    families: dict[tuple[str, str], str] = {
+        (canonicalize_provider(provider), family): PERMANENT_REASON for provider, family in PERMANENT_RETIRED_FAMILIES
+    }
     if rows is not None:
         for row in rows:
-            families[(str(row["provider"]), str(row["family"]))] = str(row.get("reason_code") or PERMANENT_REASON)
+            provider_key = canonicalize_provider(str(row["provider"]))
+            family_key = str(row["family"])
+            if (provider_key, family_key) not in families:
+                families[(provider_key, family_key)] = str(row.get("reason_code") or PERMANENT_REASON)
     for (retired_provider, family), reason in families.items():
-        retired_canonical = canonicalize_provider(retired_provider)
-        permanent = (retired_provider, family) in PERMANENT_RETIRED_FAMILIES
-        provider_matches = retired_canonical == canonical_provider if permanent else retired_provider == provider
-        if provider_matches and family_matches(normalize_model(retired_canonical, family), normalized):
+        if retired_provider == canonical_provider and family_matches(
+            normalize_model(retired_provider, family), normalized
+        ):
             return reason
     return None
 
@@ -175,7 +179,9 @@ def validate_roster_rows(payload: Mapping[str, Any]) -> str | None:
     for row in retired:
         if not isinstance(row, dict):
             return "malformed-roster"
-        if not isinstance(row.get("provider"), str) or not isinstance(row.get("family"), str):
+        if any(not isinstance(row.get(key), str) or not row[key] for key in ("provider", "family")):
+            return "malformed-roster"
+        if "reason_code" in row and (not isinstance(row["reason_code"], str) or not row["reason_code"]):
             return "malformed-roster"
         if "permanent" in row and type(row["permanent"]) is not bool:
             return "malformed-roster"

@@ -196,6 +196,33 @@ def test_permanent_retired_floor_canonicalizes_openai_provider_aliases(provider)
     assert fleet_model_roster.retired_reason(provider, "gpt-5.40") is None
 
 
+def test_retirement_rows_canonicalize_provider_aliases_not_only_permanent_rows():
+    rows = (
+        {
+            "provider": "openai-codex",
+            "family": "gpt-5.6-preview",
+            "reason_code": "operator-retired",
+        },
+    )
+
+    assert fleet_model_roster.retired_reason("openai", "gpt-5.6-preview-fast", rows) == "operator-retired"
+    assert fleet_model_roster.retired_reason("codex", "openai/gpt-5.6-preview-fast", rows) == "operator-retired"
+
+
+@pytest.mark.parametrize(
+    "row",
+    (
+        {"family": "gpt-5.6"},
+        {"provider": "openai", "family": ""},
+        {"provider": "", "family": "gpt-5.6"},
+        {"provider": "openai", "family": "gpt-5.6", "reason_code": 3},
+    ),
+)
+def test_validate_roster_rows_rejects_malformed_retirement_rows(row):
+    payload = {"seats": [], "consumer_defaults": {}, "retired_models": [row]}
+    assert fleet_model_roster.validate_roster_rows(payload) == "malformed-roster"
+
+
 def test_retired_family_normalizes_stored_family_and_cursor_prefixed_model():
     rows = (
         {

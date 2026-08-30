@@ -186,7 +186,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--t3-service-tier", default=None, dest="t3_service_tier", help="Optional T3 service tier."
     )
     p_models_set.add_argument(
-        "--expect-revision", type=int, default=None, dest="expect_revision", help="Current hub roster revision."
+        "--expect-revision", type=int, required=True, dest="expect_revision", help="Current hub roster revision."
     )
     p_models_set.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     p_models_set.set_defaults(func=_dispatch_models_set)
@@ -1189,8 +1189,7 @@ def _dispatch_models_set(args: argparse.Namespace) -> int:
             kwargs["t3_instance_id"] = args.t3_instance_id
         if args.t3_service_tier is not None:
             kwargs["t3_service_tier"] = args.t3_service_tier
-        if args.expect_revision is not None:
-            kwargs["expected_revision"] = args.expect_revision
+        kwargs["expected_revision"] = args.expect_revision
         policy = fleet_client.set_model_policy(args.provider, args.model, args.seat, **kwargs)
     except fleet_client.FleetClientError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1235,7 +1234,7 @@ def _dispatch_models_admit(args: argparse.Namespace) -> int:
         seat=args.seat,
         expect_revision=args.expect_revision,
         expect_digest=args.expect_digest,
-        allow_lkg=not args.no_lkg,
+        allow_lkg=False if args.phase == "target" else not args.no_lkg,
     )
     if args.json:
         if decision.ok:

@@ -433,7 +433,7 @@ def set_model_policy(
     brigade_cli: str | None = None,
     t3_instance_id: str | None = None,
     t3_service_tier: str | None = None,
-    expected_revision: int | None = None,
+    expected_revision: int,
 ) -> dict[str, Any]:
     """Set one seat's provider/model policy with the configured admin token."""
     try:
@@ -452,7 +452,7 @@ def set_model_policy(
         )
         if not isinstance(snapshot, dict) or type(snapshot.get("revision")) is not int:
             raise FleetClientError("fleet hub model policy revision is missing")
-        revision = int(snapshot["revision"]) if expected_revision is None else expected_revision
+        revision = expected_revision
         existing = _existing_seat(snapshot, seat)
         resolved_reasoning = _preserved_field(reasoning, existing, "reasoning", default="none")
         resolved_cli = _preserved_field(brigade_cli, existing, "brigade_cli")

@@ -360,7 +360,11 @@ def _load_lkg_record() -> dict[str, Any]:
         raise FleetClientError("lkg was not valid JSON") from exc
     if not isinstance(record, dict) or not isinstance(record.get("roster"), dict):
         raise FleetClientError("lkg is malformed")
-    record["highest_revision"] = max(int(record.get("highest_revision") or 0), high_water)
+    try:
+        cached_highest = int(record.get("highest_revision", 0))
+    except (TypeError, ValueError) as exc:
+        raise FleetClientError("lkg is malformed") from exc
+    record["highest_revision"] = max(cached_highest, high_water)
     return record
 
 
@@ -404,6 +408,25 @@ def _validate_envelope(payload: Mapping[str, Any], *, token: str, audience: str)
     if expires <= now:
         return "lkg-expired"
     if type(payload.get("revision")) is not int:
+        return "malformed-roster"
+    if (expires - issued).total_seconds() > fleet_model_roster.LKG_TTL_SECONDS:
+        return "malformed-roster"
+    return fleet_model_roster.validate_roster_rows(payload)
+
+
+def _validate_inspection_roster(payload: Mapping[str, Any]) -> str | None:
+    """Validate an admin-readable roster without accepting it as node cache input."""
+    if payload.get("schema") != fleet_model_roster.ROSTER_SCHEMA:
+        return "unsupported-schema"
+    required = set(fleet_model_roster.CACHE_ENVELOPE_KEYS).difference({"audience_node_id"})
+    if any(key not in payload for key in required):
+        return "malformed-roster"
+    digest = payload.get("document_sha256")
+    if not isinstance(digest, str) or digest != fleet_model_roster.roster_digest(payload):
+        return "digest-mismatch"
+    issued = _parse_iso(payload.get("issued_at"))
+    expires = _parse_iso(payload.get("expires_at"))
+    if issued is None or expires is None or expires <= issued or type(payload.get("revision")) is not int:
         return "malformed-roster"
     if (expires - issued).total_seconds() > fleet_model_roster.LKG_TTL_SECONDS:
         return "malformed-roster"
@@ -459,10 +482,10 @@ def fetch_versioned_roster(
     allow_lkg: bool = True,
     hub_url: str | None = None,
     cache_write: bool = True,
+    inspect_only: bool = False,
 ) -> ModelAdmissionDecision:
     """GET the node-audience roster, optionally cache it, or fall back to a valid LKG."""
-    if not nofollow_supported():
-        return _fail("cache-unsafe-platform")
+    cache_supported = nofollow_supported()
     config = _client.load_fleet_config()
     hub = hub_url or config["hub_url"]
     if not hub:
@@ -470,10 +493,16 @@ def fetch_versioned_roster(
     audience = _client.resolve_node_id()
     settings = _client.load_fleet_settings()
     node_token = settings["node_token"]
+    admin_read = False
     if not node_token:
+        if inspect_only and settings["admin_token"] and config["token"] == settings["admin_token"]:
+            node_token = settings["admin_token"]
+            admin_read = True
         if settings["admin_token"] and config["token"] == settings["admin_token"]:
-            return _fail("node-token-required")
-        node_token = config["token"]
+            if not admin_read:
+                return _fail("node-token-required")
+        elif not admin_read:
+            node_token = config["token"]
     if not node_token:
         return _fail("node-token-required")
     token = node_token
@@ -484,18 +513,18 @@ def fetch_versioned_roster(
         )
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
-            if lkg_path().exists() and node_token and not _lkg_mac_valid(node_token):
+            if cache_supported and lkg_path().exists() and node_token and not _lkg_mac_valid(node_token):
                 return _fail("token-rotated")
             return _fail("auth-failed")
         if exc.code == 409:
             return _fail("revision-conflict", 4)
-        if exc.code >= 500 and allow_lkg:
+        if exc.code >= 500 and allow_lkg and cache_supported:
             return _accept_lkg(token=node_token or token, audience=audience)
-        return _fail("hub-unavailable")
+        return _fail("cache-unsafe-platform" if not cache_supported else "hub-unavailable")
     except (TimeoutError, urllib.error.URLError):
-        if allow_lkg:
+        if allow_lkg and cache_supported:
             return _accept_lkg(token=node_token or token, audience=audience)
-        return _fail("hub-unavailable")
+        return _fail("cache-unsafe-platform" if not cache_supported else "hub-unavailable")
     except FleetClientError:
         return _fail("hub-unavailable")
     except Exception:
@@ -507,10 +536,14 @@ def fetch_versioned_roster(
             return _fail("malformed-roster", 2)
     if not isinstance(payload, dict):
         return _fail("malformed-roster", 2)
-    reason = _validate_envelope(payload, token=node_token or token, audience=audience)
+    reason = (
+        _validate_inspection_roster(payload)
+        if admin_read
+        else _validate_envelope(payload, token=node_token or token, audience=audience)
+    )
     if reason is not None:
         return _fail(reason, 2 if reason == "unsupported-schema" else 1)
-    if cache_write:
+    if cache_write and cache_supported and not admin_read:
         try:
             with _client._spool_lock(lkg_path()) as dir_fd:
                 _write_cache_locked(payload, revision=int(payload["revision"]), dir_fd=dir_fd)
@@ -706,12 +739,11 @@ def _append_audit_spool(row: Mapping[str, Any]) -> None:
 
 
 def _read_audit_spool() -> list[dict[str, Any]]:
-    if not audit_spool_path().exists():
-        return []
     if not nofollow_supported():
         raise FleetClientError("cache-unsafe-platform")
-    with _client._spool_lock(audit_spool_path()) as dir_fd:
-        raw = _read_leaf_bytes(audit_spool_path(), dir_fd=dir_fd, missing_ok=True)
+    path = audit_spool_path()
+    with _client._spool_lock(path) as dir_fd:
+        raw = _read_leaf_bytes(path, dir_fd=dir_fd, missing_ok=True)
     if not raw:
         return []
     return _parse_audit_lines(raw)
@@ -796,15 +828,23 @@ def _lkg_admit(
         if "size limit" in text:
             return _fail("lkg-oversized")
         return _fail("lkg-unsafe")
+    except OSError:
+        return _fail("lkg-unsafe")
     if existing:
         row = existing[-1]
         if row.get("request_digest") != digest:
             return _fail("admission-conflict", 4, {"error": "admission-conflict"})
         raw_admission = row.get("admission")
         payload: dict[str, Any] = raw_admission if isinstance(raw_admission, dict) else {}
-        ok = row.get("decision") == "admitted"
-        exit_code = 0 if ok else (3 if row.get("decision") in _POLICY_DENIALS else 4)
-        return ModelAdmissionDecision(ok, exit_code, str(row.get("decision") or "lkg"), payload)
+        if row.get("decision") == "admitted":
+            exact = _exact_admission_success(payload)
+            expires = _parse_iso(exact.get("expires_at")) if exact is not None else None
+            expected = _resolve_from_roster(roster, consumer=consumer, seat=seat, source="lkg")
+            if exact is None or expires is None or expires <= now or not expected.ok or exact != expected.payload:
+                return _fail("lkg-unsafe")
+            return ModelAdmissionDecision(True, 0, "admitted", exact)
+        exit_code = 3 if row.get("decision") in _POLICY_DENIALS else 4
+        return ModelAdmissionDecision(False, exit_code, str(row.get("decision") or "lkg"), payload)
     decision = _resolve_from_roster(roster, consumer=consumer, seat=seat, source="lkg")
     row = {
         "source": "lkg",
@@ -946,6 +986,8 @@ def admit_model(
     if seat is not None and seat != "":
         if not isinstance(seat, str) or not fleet_model_roster.SEAT_NAME_PATTERN.fullmatch(seat):
             return _fail("unsupported-schema", 2)
+    if phase == "target":
+        allow_lkg = False
     fetched = fetch_versioned_roster(allow_lkg=allow_lkg)
     if not fetched.ok and fetched.reason in {
         "auth-failed",
@@ -1059,6 +1101,10 @@ def _local_roster_projection() -> dict[str, Any]:
 
 
 def _audit_spool_label() -> str:
+    if not nofollow_supported():
+        return "unsafe"
+    if not _node_token():
+        return "unavailable"
     try:
         rows = _read_audit_spool()
     except FleetClientError:
@@ -1067,6 +1113,8 @@ def _audit_spool_label() -> str:
 
 
 def _cache_is_valid() -> bool:
+    if not nofollow_supported() or not _node_token():
+        return False
     config = _client.load_fleet_config()
     token = _node_token() or config["token"]
     return _accept_lkg(token=token, audience=_client.resolve_node_id()).ok
@@ -1084,7 +1132,7 @@ def _local_model_for(local_agents: Mapping[str, Any], seat: str | None) -> Any:
 def doctor_model_roster(*, consumer: str) -> ModelAdmissionDecision:
     if consumer not in fleet_model_roster.CONSUMERS:
         return _fail("unsupported-schema", 2)
-    fetched = fetch_versioned_roster(cache_write=False)
+    fetched = fetch_versioned_roster(allow_lkg=False, cache_write=False, inspect_only=True)
     local = _local_roster_projection()
     spool_label = _audit_spool_label()
     if not fetched.ok:
@@ -1208,7 +1256,7 @@ def _empty_binding_remediation(seat: Mapping[str, Any], roster: Mapping[str, Any
 def reconcile_model_roster(*, consumer: str) -> ModelAdmissionDecision:
     if consumer not in fleet_model_roster.CONSUMERS:
         return _fail("unsupported-schema", 2)
-    fetched = fetch_versioned_roster(cache_write=False)
+    fetched = fetch_versioned_roster(allow_lkg=False, cache_write=False, inspect_only=True)
     local = _local_roster_projection()
     raw_local_agents = local.get("agents")
     local_agents: dict[str, Any] = raw_local_agents if isinstance(raw_local_agents, dict) else {}

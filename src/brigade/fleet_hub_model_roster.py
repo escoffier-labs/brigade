@@ -697,6 +697,8 @@ def _admit(conn: sqlite3.Connection, raw: Any, *, caller_node: str) -> tuple[int
                     decision = "seat-disabled"
                 elif fleet_model_roster.retired_reason(str(seat["provider"]), str(seat["model"]), _retired_rows(conn)):
                     decision = "retired-model"
+                elif not isinstance(seat["reasoning"], str) or not seat["reasoning"].strip():
+                    decision = "binding-missing"
                 else:
                     binding = _binding_for(consumer, seat)
                     if binding is None:

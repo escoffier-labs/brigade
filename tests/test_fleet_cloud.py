@@ -459,8 +459,16 @@ def test_admin_cloud_lease_writes_need_allow_admin_writes(tmp_path):
 def test_model_policy_cli_set_uses_bounded_admin_client(monkeypatch, capsys):
     captured: dict[str, object] = {}
 
-    def _set(provider, model, seat, *, enabled, limit=None, notes=None):
-        captured.update(provider=provider, model=model, seat=seat, enabled=enabled, limit=limit, notes=notes)
+    def _set(provider, model, seat, *, enabled, limit=None, notes=None, expected_revision):
+        captured.update(
+            provider=provider,
+            model=model,
+            seat=seat,
+            enabled=enabled,
+            limit=limit,
+            notes=notes,
+            expected_revision=expected_revision,
+        )
         return {"provider": provider, "model": model, "seat": seat, "enabled": enabled, "limit": limit, "notes": notes}
 
     monkeypatch.setattr(fleet_client, "set_model_policy", _set)
@@ -478,6 +486,8 @@ def test_model_policy_cli_set_uses_bounded_admin_client(monkeypatch, capsys):
                 "2",
                 "--notes",
                 "paused",
+                "--expect-revision",
+                "7",
                 "--json",
             ]
         )
@@ -490,6 +500,7 @@ def test_model_policy_cli_set_uses_bounded_admin_client(monkeypatch, capsys):
         "enabled": False,
         "limit": 2,
         "notes": "paused",
+        "expected_revision": 7,
     }
     assert '"enabled": false' in capsys.readouterr().out
 
@@ -618,7 +629,7 @@ def test_set_model_policy_fetches_revision_and_sends_reasoning_bindings(monkeypa
         }
 
     monkeypatch.setattr(fleet_client, "_post_model_policy_blocking", _post)
-    policy = fleet_client.set_model_policy("openai", "gpt-5.6-terra", "coder", enabled=True)
+    policy = fleet_client.set_model_policy("openai", "gpt-5.6-terra", "coder", enabled=True, expected_revision=7)
     assert policy["seat"] == "coder"
     assert posted["action"] == "set"
     assert posted["expected_revision"] == 7
@@ -648,7 +659,7 @@ def test_set_model_policy_fails_closed_on_oversized_response(monkeypatch):
     )
     monkeypatch.setattr(fleet_client, "_hub_open", lambda _request, timeout: _OversizedResponse())
     with pytest.raises(fleet_client.FleetClientError):
-        fleet_client.set_model_policy("openai", "gpt-5.6-terra", "coder", enabled=True)
+        fleet_client.set_model_policy("openai", "gpt-5.6-terra", "coder", enabled=True, expected_revision=1)
 
 
 def test_idempotent_admit_refuses_released_and_expired_leases(conn, monkeypatch):
