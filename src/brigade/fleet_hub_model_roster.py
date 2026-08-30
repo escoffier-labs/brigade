@@ -52,11 +52,11 @@ CREATE TABLE IF NOT EXISTS model_admission_audit (
     source TEXT NOT NULL,
     roster_revision INTEGER NOT NULL,
     roster_digest TEXT NOT NULL,
-    seat TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    model TEXT NOT NULL,
-    reasoning TEXT NOT NULL,
-    consumer_binding TEXT NOT NULL,
+    seat TEXT,
+    provider TEXT,
+    model TEXT,
+    reasoning TEXT,
+    consumer_binding TEXT,
     request_digest TEXT NOT NULL,
     decision TEXT NOT NULL,
     expires_at TEXT NOT NULL,
@@ -90,7 +90,6 @@ _RETIRE_FIELDS = frozenset(
         "permanent",
         "reason_code",
         "match_kind",
-        "replace_family",
     }
 )
 _ADMIT_FIELDS = frozenset(
@@ -110,6 +109,11 @@ ROSTER_MUTATIONS = frozenset({"set", "set-default", "retire"})
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def utc_now() -> datetime:
+    """Response-time clock. Tests may monkeypatch this."""
+    return datetime.now(timezone.utc)
 
 
 def _utc_now() -> str:
@@ -237,10 +241,11 @@ def project_roster(
     meta = conn.execute("SELECT revision, updated_at FROM model_roster_meta WHERE singleton=1").fetchone()
     if meta is None:
         raise FleetHubError("model roster revision metadata is missing")
-    issued = _as_utc(str(meta[1]))
+    issued = utc_now()
     payload: dict[str, Any] = {
         "schema": fleet_model_roster.ROSTER_SCHEMA,
         "revision": int(meta[0]),
+        "revision_updated_at": _iso_z(str(meta[1])),
         "issued_at": _iso_z(issued),
         "expires_at": _iso_z(issued + timedelta(seconds=fleet_model_roster.LKG_TTL_SECONDS)),
         "seats": _seats(conn),
@@ -310,7 +315,9 @@ def _validate_set(raw: Any) -> dict[str, Any]:
     limit = raw.get("limit")
     if limit is not None and (type(limit) is not int or not 0 <= limit <= 64):
         raise FleetHubError("model policy field 'limit' must be an integer in 0..64")
-    reasoning = raw.get("reasoning", "none")
+    if "reasoning" not in raw or raw.get("reasoning") is None:
+        raise FleetHubError("model policy field 'reasoning' is required")
+    reasoning = raw.get("reasoning")
     return {
         "seat": fleet_hub._model_policy_name(raw.get("seat"), "seat"),
         "provider": fleet_hub._cloud_provider(raw.get("provider")),
@@ -325,7 +332,16 @@ def _validate_set(raw: Any) -> dict[str, Any]:
     }
 
 
+def _retired_conflict(conn: sqlite3.Connection, provider: str, model: str) -> dict[str, Any] | None:
+    if fleet_model_roster.retired_reason(provider, model, _retired_rows(conn)):
+        return {"error": "retired-model"}
+    return None
+
+
 def _write_set(conn: sqlite3.Connection, request: dict[str, Any]) -> dict[str, Any]:
+    denied = _retired_conflict(conn, str(request["provider"]), str(request["model"]))
+    if denied is not None:
+        return denied
     conn.execute(
         "INSERT INTO model_policy "
         "(seat, provider, model, reasoning, enabled, limit_count, brigade_cli, t3_instance_id, "
@@ -375,8 +391,12 @@ def _write_default(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
     if consumer not in fleet_model_roster.CONSUMERS:
         raise FleetHubError("model policy field 'consumer' must be brigade-run or t3-fleet")
     seat = fleet_hub._model_policy_name(raw.get("seat"), "seat")
-    if conn.execute("SELECT 1 FROM model_policy WHERE seat=?", (seat,)).fetchone() is None:
+    row = conn.execute("SELECT provider, model FROM model_policy WHERE seat=?", (seat,)).fetchone()
+    if row is None:
         raise FleetHubError(f"model policy seat {seat!r} is not defined")
+    denied = _retired_conflict(conn, str(row[0]), str(row[1]))
+    if denied is not None:
+        return denied
     conn.execute(
         "INSERT INTO model_consumer_defaults (consumer, seat, updated_at) VALUES (?, ?, ?) "
         "ON CONFLICT(consumer) DO UPDATE SET seat=excluded.seat, updated_at=excluded.updated_at",
@@ -393,18 +413,13 @@ def _write_retire(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
         raise FleetHubError(f"unknown model policy field(s): {', '.join(sorted(unknown))}")
     provider = fleet_hub._cloud_provider(raw.get("provider"))
     family = fleet_hub._model_policy_name(raw.get("family"), "family")
-    replace_family = raw.get("replace_family")
-    targets = {family}
-    if replace_family is not None:
-        targets.add(fleet_hub._model_policy_name(replace_family, "replace_family"))
-    for target in targets:
-        existing = conn.execute(
-            "SELECT permanent, match_kind, family FROM retired_models WHERE provider=? AND family=?",
-            (provider, target),
-        ).fetchone()
-        seeded = (provider, target) in fleet_model_roster.PERMANENT_RETIRED_FAMILIES
-        if existing is not None and int(existing[0]) == 1 or seeded:
-            return {"error": "permanent-retirement-immutable"}
+    existing = conn.execute(
+        "SELECT permanent, match_kind, family FROM retired_models WHERE provider=? AND family=?",
+        (provider, family),
+    ).fetchone()
+    seeded = (provider, family) in fleet_model_roster.PERMANENT_RETIRED_FAMILIES
+    if (existing is not None and int(existing[0]) == 1) or seeded:
+        return {"error": "permanent-retirement-immutable"}
     permanent = raw.get("permanent", False)
     if type(permanent) is not bool:
         raise FleetHubError("model policy field 'permanent' must be a boolean")
@@ -464,10 +479,17 @@ def _request_digest(raw: dict[str, Any]) -> str:
     return hashlib.sha256(fleet_model_roster.canonical_json(body).encode("ascii")).hexdigest()
 
 
+def _binding_value(raw: Any) -> dict[str, Any] | None:
+    if raw is None or raw == "":
+        return None
+    return json.loads(str(raw))
+
+
 def _admission_payload(row: tuple[Any, ...]) -> dict[str, Any]:
-    return {
+    decision = str(row[13])
+    payload: dict[str, Any] = {
         "schema": fleet_model_roster.ADMISSION_SCHEMA,
-        "state": "authoritative",
+        "state": "authoritative" if decision == "admitted" else "denied",
         "source": row[4],
         "roster_revision": row[5],
         "roster_digest": row[6],
@@ -475,9 +497,76 @@ def _admission_payload(row: tuple[Any, ...]) -> dict[str, Any]:
         "provider": row[8],
         "model": row[9],
         "reasoning": row[10],
-        "binding": json.loads(str(row[11])),
+        "binding": _binding_value(row[11]),
         "expires_at": row[14],
     }
+    if decision != "admitted":
+        return {"error": decision, **payload}
+    return payload
+
+
+def _record_admission(
+    conn: sqlite3.Connection,
+    *,
+    caller_node: str,
+    request_id: str,
+    phase: str,
+    consumer: str,
+    roster: Mapping[str, Any],
+    request_digest: str,
+    decision: str,
+    seat: str | None,
+    provider: str | None,
+    model: str | None,
+    reasoning: str | None,
+    binding: dict[str, Any] | None,
+) -> dict[str, Any]:
+    now = _utc_now()
+    binding_json = (
+        json.dumps(binding, sort_keys=True, separators=(",", ":"), ensure_ascii=True) if binding is not None else None
+    )
+    conn.execute(
+        "INSERT INTO model_admission_audit ("
+        "node_id, request_id, phase, consumer, source, roster_revision, roster_digest, seat, "
+        "provider, model, reasoning, consumer_binding, request_digest, decision, expires_at, created_at"
+        ") VALUES (?, ?, ?, ?, 'hub', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            caller_node,
+            request_id,
+            phase,
+            consumer,
+            int(roster["revision"]),
+            str(roster["roster_digest"]),
+            seat,
+            provider,
+            model,
+            reasoning,
+            binding_json,
+            request_digest,
+            decision,
+            str(roster["expires_at"]),
+            now,
+        ),
+    )
+    row = (
+        caller_node,
+        request_id,
+        phase,
+        consumer,
+        "hub",
+        int(roster["revision"]),
+        str(roster["roster_digest"]),
+        seat,
+        provider,
+        model,
+        reasoning,
+        binding_json,
+        request_digest,
+        decision,
+        str(roster["expires_at"]),
+        now,
+    )
+    return _admission_payload(row)
 
 
 def _admit(conn: sqlite3.Connection, raw: Any, *, caller_node: str) -> tuple[int, dict[str, Any]]:
@@ -526,9 +615,10 @@ def _admit(conn: sqlite3.Connection, raw: Any, *, caller_node: str) -> tuple[int
                 if opened:
                     conn.rollback()
                 return 409, {"error": "admission-conflict"}
+            payload = _admission_payload(existing)
             if opened:
                 conn.commit()
-            return 200, _admission_payload(existing)
+            return (200, payload) if str(existing[13]) == "admitted" else (409, payload)
         roster = project_roster(conn, audience_node_id=caller_node)
         if expect_revision is not None and int(roster["revision"]) != expect_revision:
             if opened:
@@ -539,80 +629,57 @@ def _admit(conn: sqlite3.Connection, raw: Any, *, caller_node: str) -> tuple[int
                 conn.rollback()
             return 409, {"error": "roster_digest_conflict"}
         seat_name = requested_seat or _consumer_defaults(conn).get(consumer)
+        seat: dict[str, Any] | None = None
+        binding: dict[str, Any] | None = None
+        decision = "admitted"
         if not seat_name:
-            if opened:
-                conn.rollback()
-            return 409, {"error": "default-missing"}
-        row = conn.execute(
-            "SELECT seat, provider, model, reasoning, enabled, brigade_cli, t3_instance_id, t3_service_tier "
-            "FROM model_policy WHERE seat=?",
-            (seat_name,),
-        ).fetchone()
-        if row is None:
-            if opened:
-                conn.rollback()
-            return 409, {"error": "seat-missing"}
-        seat = {
-            "seat": row[0],
-            "provider": row[1],
-            "model": row[2],
-            "reasoning": row[3],
-            "enabled": bool(row[4]),
-            "brigade_cli": row[5],
-            "t3_instance_id": row[6],
-            "t3_service_tier": row[7],
-        }
-        if not seat["enabled"]:
-            if opened:
-                conn.rollback()
-            return 409, {"error": "seat-disabled"}
-        if fleet_model_roster.retired_reason(str(seat["provider"]), str(seat["model"]), _retired_rows(conn)):
-            if opened:
-                conn.rollback()
-            return 409, {"error": "retired-model"}
-        binding = _binding_for(consumer, seat)
-        if binding is None:
-            if opened:
-                conn.rollback()
-            return 409, {"error": "binding-missing"}
-        now = _utc_now()
-        conn.execute(
-            "INSERT INTO model_admission_audit ("
-            "node_id, request_id, phase, consumer, source, roster_revision, roster_digest, seat, "
-            "provider, model, reasoning, consumer_binding, request_digest, decision, expires_at, created_at"
-            ") VALUES (?, ?, ?, ?, 'hub', ?, ?, ?, ?, ?, ?, ?, ?, 'admitted', ?, ?)",
-            (
-                caller_node,
-                request_id,
-                phase,
-                consumer,
-                int(roster["revision"]),
-                str(roster["roster_digest"]),
-                seat["seat"],
-                seat["provider"],
-                seat["model"],
-                seat["reasoning"],
-                json.dumps(binding, sort_keys=True, separators=(",", ":"), ensure_ascii=True),
-                request_digest,
-                str(roster["expires_at"]),
-                now,
-            ),
+            decision = "default-missing"
+        else:
+            row = conn.execute(
+                "SELECT seat, provider, model, reasoning, enabled, brigade_cli, t3_instance_id, t3_service_tier "
+                "FROM model_policy WHERE seat=?",
+                (seat_name,),
+            ).fetchone()
+            if row is None:
+                decision = "seat-missing"
+                seat = {"seat": seat_name}
+            else:
+                seat = {
+                    "seat": row[0],
+                    "provider": row[1],
+                    "model": row[2],
+                    "reasoning": row[3],
+                    "enabled": bool(row[4]),
+                    "brigade_cli": row[5],
+                    "t3_instance_id": row[6],
+                    "t3_service_tier": row[7],
+                }
+                if not seat["enabled"]:
+                    decision = "seat-disabled"
+                elif fleet_model_roster.retired_reason(str(seat["provider"]), str(seat["model"]), _retired_rows(conn)):
+                    decision = "retired-model"
+                else:
+                    binding = _binding_for(consumer, seat)
+                    if binding is None:
+                        decision = "binding-missing"
+        payload = _record_admission(
+            conn,
+            caller_node=caller_node,
+            request_id=request_id,
+            phase=str(phase),
+            consumer=consumer,
+            roster=roster,
+            request_digest=request_digest,
+            decision=decision,
+            seat=None if seat is None else str(seat["seat"]),
+            provider=None if seat is None else seat.get("provider"),
+            model=None if seat is None else seat.get("model"),
+            reasoning=None if seat is None else seat.get("reasoning"),
+            binding=binding,
         )
         if opened:
             conn.commit()
-        return 200, {
-            "schema": fleet_model_roster.ADMISSION_SCHEMA,
-            "state": "authoritative",
-            "source": "hub",
-            "roster_revision": roster["revision"],
-            "roster_digest": roster["roster_digest"],
-            "seat": seat["seat"],
-            "provider": seat["provider"],
-            "model": seat["model"],
-            "reasoning": seat["reasoning"],
-            "binding": binding,
-            "expires_at": roster["expires_at"],
-        }
+        return (200, payload) if decision == "admitted" else (409, payload)
     except BaseException:
         if opened:
             conn.rollback()
@@ -620,6 +687,8 @@ def _admit(conn: sqlite3.Connection, raw: Any, *, caller_node: str) -> tuple[int
 
 
 def _handle_lease(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None) -> tuple[int, dict[str, Any]]:
+    if caller_node is None:
+        raise FleetHubForbidden("a node token is required to acquire or release a model lease")
     request = fleet_hub._validate_model_lease_request(raw)
     if caller_node is not None and request["node_id"] != caller_node:
         raise FleetHubForbidden("model lease node_id does not match the caller's node token")

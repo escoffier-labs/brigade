@@ -314,7 +314,7 @@ def _models_revision(hub, *, token: str = ADMIN_TOKEN) -> int:
 
 
 def _admin_set_model(hub, **fields: object):
-    body = {"action": "set", "expected_revision": _models_revision(hub), **fields}
+    body = {"action": "set", "expected_revision": _models_revision(hub), "reasoning": "none", **fields}
     return _request(hub, "POST", "/models", token=ADMIN_TOKEN, body=body)
 
 
@@ -596,6 +596,7 @@ def test_model_policy_limit_is_an_atomic_fenced_expiring_lease(conn, monkeypatch
             "seat": "coder",
             "enabled": True,
             "limit": 0,
+            "reasoning": "none",
         },
     )
     first = {
@@ -622,6 +623,7 @@ def test_model_policy_limit_is_an_atomic_fenced_expiring_lease(conn, monkeypatch
             "seat": "coder",
             "enabled": True,
             "limit": 1,
+            "reasoning": "none",
         },
     )
     assert fleet_hub.handle_model_policy(conn, first, caller_node=NODE_A)[0] == 200
