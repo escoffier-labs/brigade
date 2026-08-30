@@ -1,6 +1,15 @@
 import json
 
+import pytest
+
 from brigade import cli, roadmap_cmd
+
+
+@pytest.fixture(autouse=True)
+def _pin_extras(monkeypatch, tmp_path):
+    """Keep inventory CLI coverage independent from a developer's extras config."""
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
 
 
 def test_roadmap_commands_writes_and_checks_inventory(tmp_path, capsys):
@@ -16,6 +25,7 @@ def test_roadmap_commands_writes_and_checks_inventory(tmp_path, capsys):
     text = inventory.read_text()
     assert "# Brigade Command Inventory" in text
     assert "`brigade roadmap audit`" in text
+    assert "`brigade run-cloud status` (deprecated; use `brigade run cloud status`)" in text
     assert "private-root" not in text
     assert "private-repo" not in text.casefold()
 
