@@ -5,8 +5,8 @@ of the recipes below into your own crontab, user timer, or CI job after
 `brigade init` wires the target, or explicitly opt in with
 `brigade care install --target .`. With the default `auto` backend it installs
 systemd user timers on Linux or launchd agents on macOS and reports an
-unsupported scheduler elsewhere. The public CLI does not install crontab
-entries. Use the manual crontab recipes on this page when cron is your trigger.
+unsupported scheduler elsewhere. Use the manual crontab recipes on this page
+when cron is your trigger.
 Every registration is namespaced by a hash of the absolute target path, so
 status and uninstall operate only on that target. Uninstalling a missing
 registration is a clear no-op. Brigade still does not own a daemon or
@@ -32,6 +32,7 @@ brigade memory care init --with-runbooks --target .
 brigade extras on   # runbook + center report are extras-gated
 brigade care install --target .
 brigade care install --target . --entry handoff-ingest --entry care-scan
+brigade care install --target . --entry care-scan --schedule 'care-scan=*-*-* 07:15:00'
 brigade care status --target . --entry care-scan
 # brigade care uninstall --target . --entry handoff-ingest
 # brigade care uninstall --target .
@@ -49,6 +50,23 @@ receipt; nightly ops calls
 inside a `# BEGIN BRIGADE CARE ... hash:...` managed block so status can detect
 drift and uninstall can remove only Brigade's span.
 
+`--schedule JOB_ID=VALUE` is repeatable and applies only to entries selected by
+`--entry` (or to entries in the default set). Its value uses the selected
+scheduler's syntax: `OnCalendar` syntax for systemd and the supported cron
+subset for launchd and Task Scheduler. A later `care install` reads the
+schedule from an existing managed systemd unit or launchd plist and keeps it
+unless that entry gets another explicit `--schedule` value.
+The schedule is stored in the registration itself, not in a separate Brigade
+preferences file.
+
+For systemd, `care status --json` reports both `managed_calendar`, read from
+Brigade's timer file, and `effective_calendar`, read from
+`systemctl --user show ... TimersCalendar` after systemd resolves drop-ins. A
+different effective value sets `schedule_diverged`. If `evidence-crawl` shares
+an effective calendar with the known `brigadeclaw-daily-report` timer, status
+adds a `miseledger-calendar-collision` warning. The warning is advisory and
+does not disable either timer.
+
 To install one job without the rest of that set, pass `--entry JOB_ID`
 (repeatable). The five maintainer memory jobs from the care-managed inventory
 are `handoff-ingest`, `care-scan`, `memory-refresh`, `evidence-crawl`, and
@@ -57,7 +75,7 @@ operator-approved runbook at `.brigade/memory-care/runbooks/<job-id>.json`; if
 that file is missing, install writes nothing and says why. Omitting `--entry`
 still installs the atomic five-recipe set above. Status and uninstall take the
 same selector, and namespaced backends still key registrations by
-`(target identity, job_id)`. Per-job installs use systemd or launchd. The
+`(target identity, job_id)`. Per-job installs support systemd and launchd. The
 crontab examples below remain operator-owned manual recipes.
 
 Related docs: [memory care](memory-care.md), [scanner registry](scanner-registry.md), [operator center](operator-center.md), [agents guide](agents-guide.md), [execution model](execution-model.md).

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from . import managed_block, memory_cmd, runbook_cmd
+from . import care_schedules, managed_block, memory_cmd, runbook_cmd
 
 CARE_KIND = "CARE"
 CARE_MARKER_VERSION = 1
@@ -30,7 +30,6 @@ CARE_MARKER_STYLE = managed_block.MARKER_STYLE_HASH
 DEFAULT_BACKEND = "auto"
 SUPPORTED_BACKENDS = ("auto", "crontab", "systemd", "launchd", "schtasks")
 SCHTASKS_BACKEND = "schtasks"
-SCHTASKS_WEEKDAYS = ("SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT")
 # /NP (S4U) requires elevation: a non-admin `schtasks /Create /RU user /NP`
 # prompts for a password and exits 1. /IT runs while the user is logged on
 # and works without elevation — the intended zero-setup default. Care tasks
@@ -352,39 +351,7 @@ def _schtasks_schedule_flags(schedule: str) -> str:
     06:15 template — that fallback is what silently mis-scheduled 4 of 5
     default care entries (#1021).
     """
-    fields = schedule.split()
-    if len(fields) != 5:
-        raise ValueError(f"unsupported care schedule for schtasks: {schedule}")
-    minute, hour, day, month, weekday = fields
-    if hour == day == month == weekday == "*" and minute.startswith("*/"):
-        try:
-            every = int(minute[2:])
-        except ValueError as exc:
-            raise ValueError(f"unsupported care schedule for schtasks: {schedule}") from exc
-        if every <= 0:
-            raise ValueError(f"unsupported care schedule for schtasks: {schedule}")
-        return f"/SC MINUTE /MO {every}"
-    try:
-        minute_i = int(minute)
-        hour_i = int(hour)
-    except ValueError as exc:
-        raise ValueError(f"unsupported care schedule for schtasks: {schedule}") from exc
-    if not (0 <= minute_i <= 59 and 0 <= hour_i <= 23):
-        raise ValueError(f"unsupported care schedule for schtasks: {schedule}")
-    start = f"{hour_i:02d}:{minute_i:02d}"
-    if day == month == weekday == "*":
-        return f"/SC DAILY /ST {start}"
-    if day == month == "*" and weekday != "*":
-        try:
-            weekday_i = int(weekday)
-        except ValueError as exc:
-            raise ValueError(f"unsupported care schedule for schtasks: {schedule}") from exc
-        if weekday_i == 7:
-            weekday_i = 0
-        if weekday_i < 0 or weekday_i > 6:
-            raise ValueError(f"unsupported care schedule for schtasks: {schedule}")
-        return f"/SC WEEKLY /D {SCHTASKS_WEEKDAYS[weekday_i]} /ST {start}"
-    raise ValueError(f"unsupported care schedule for schtasks: {schedule}")
+    return care_schedules.schtasks_schedule_flags(schedule)
 
 
 def _schtasks_task_run(entry: CareEntry, *, workspace: Path) -> str:
@@ -1022,21 +989,6 @@ def _launchd_dir(home: Path | None = None) -> Path:
     return (home if home is not None else Path.home()) / "Library" / "LaunchAgents"
 
 
-def _launchd_interval_seconds(schedule: str) -> int | None:
-    fields = schedule.split()
-    if len(fields) != 5:
-        return None
-    minute, hour, day, month, weekday = fields
-    if hour == day == month == weekday == "*" and minute.startswith("*/"):
-        try:
-            every = int(minute[2:])
-        except ValueError:
-            return None
-        if every > 0:
-            return every * 60
-    return None
-
-
 def _launchd_plists(
     *,
     workspace: Path,
@@ -1067,7 +1019,7 @@ def _launchd_plists(
         # launchd supports interval timers directly; calendar recipes use their
         # documented local hour/minute (weekly additionally pins Monday).
         # launchd Weekday uses the same numbering as cron (0/7=Sunday, 1=Monday).
-        interval = _launchd_interval_seconds(entry.schedule)
+        interval = care_schedules.launchd_interval_seconds(entry.schedule)
         if interval is not None:
             payload["StartInterval"] = interval
         else:
@@ -1208,6 +1160,7 @@ def install(
     json_output: bool = False,
     home: Path | None = None,
     entry_ids: list[str] | None = None,
+    schedule_specs: list[str] | None = None,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -1239,6 +1192,27 @@ def install(
         elif backend == "launchd":
             installed = _installed_launchd_entries(target=target, home=home)
             entries, adopted = _adopt_installed_aliases(entries, installed)
+
+    previous_crontab = None
+    if backend == "crontab":
+        current_crontab, read_error = _read_crontab()
+        if not read_error:
+            parsed = managed_block.parse_blocks(current_crontab, kind=CARE_KIND, style=CARE_MARKER_STYLE)
+            previous_crontab = parsed.body if parsed.status == "ok" else None
+    try:
+        entries = care_schedules.install_schedule_overrides(
+            entries,
+            schedule_specs=schedule_specs,
+            backend=backend,
+            known_ids=_catalog_by_id(),
+            systemd_unit_dir=_systemd_user_dir(home),
+            launchd_directory=_launchd_dir(home),
+            identity=_target_identity(target),
+            crontab_body=previous_crontab,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     if _uses_schtasks(backend):
         return _windows_install(workspace=target, entries=entries, json_output=json_output, dry_run=dry_run)
@@ -1426,6 +1400,7 @@ def _systemd_unit_bodies(
         timer_name = f"brigade-care-{identity}-{entry.entry_id}.timer"
         assert entry.kind == "runbook" and entry.runbook_rel is not None
         exec_start = _systemd_exec_start_runbook(entry.runbook_rel)
+        calendar_lines = [f"OnCalendar={value}" for value in entry.on_calendar.splitlines() if value.strip()]
         service_body = "\n".join(
             [
                 "[Unit]",
@@ -1444,7 +1419,7 @@ def _systemd_unit_bodies(
                 f"Description={entry.description} timer",
                 "",
                 "[Timer]",
-                f"OnCalendar={entry.on_calendar}",
+                *calendar_lines,
                 "Persistent=true",
                 "",
                 "[Install]",
@@ -1803,7 +1778,30 @@ def _systemd_backend_status(
         if name.endswith(".timer"):
             timer_enabled.append(_systemd_timer_is_enabled(unit_dir=unit_dir, timer_name=name))
             results[-1]["enabled"] = timer_enabled[-1]
+            managed_calendar = care_schedules.systemd_managed_calendar(existing_text)
+            if path.is_file():
+                effective_calendar, inspection_error = care_schedules.effective_systemd_calendar(name)
+            else:
+                effective_calendar, inspection_error = None, None
+            results[-1].update(
+                {
+                    "managed_calendar": managed_calendar,
+                    "effective_calendar": effective_calendar,
+                    "schedule_diverged": bool(
+                        managed_calendar and effective_calendar and managed_calendar != effective_calendar
+                    ),
+                }
+            )
+            if inspection_error:
+                results[-1]["schedule_inspection_error"] = inspection_error
         unit_statuses.append(public_status)
+    timer_calendars = {
+        name.removeprefix(f"brigade-care-{_target_identity(target)}-").removesuffix(".timer"): result.get(
+            "effective_calendar"
+        )
+        for result in results
+        if (name := str(result["name"])).endswith(".timer")
+    }
     return {
         "backend": "systemd",
         "status": _aggregate_systemd_status(unit_statuses),
@@ -1812,6 +1810,7 @@ def _systemd_backend_status(
         "error": None,
         "unit_dir": str(unit_dir),
         "units": results,
+        "schedule_warnings": care_schedules.miseledger_schedule_warnings(timer_calendars),
     }
 
 

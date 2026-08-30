@@ -41,6 +41,13 @@ def register(sub: argparse._SubParsersAction) -> None:
         metavar="JOB_ID",
         help="Install one named care entry. Repeatable. Default: the atomic scheduled-care set.",
     )
+    p_install.add_argument(
+        "--schedule",
+        dest="schedule_specs",
+        action="append",
+        metavar="JOB_ID=VALUE",
+        help="Override one selected entry's schedule. Repeatable.",
+    )
 
     p_status = care_sub.add_parser(
         "status",
@@ -99,6 +106,7 @@ def dispatch(args) -> int:
             adopt=args.adopt,
             json_output=args.json,
             entry_ids=args.entry_ids,
+            schedule_specs=args.schedule_specs,
         )
     if args.care_command == "status":
         return care_cmd.status(
