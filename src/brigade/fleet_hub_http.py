@@ -19,10 +19,12 @@ from urllib.parse import parse_qs, urlencode
 
 from . import fleet_command_deck, fleet_dashboard, fleet_hub_grokbot, fleet_hub_sessions
 from . import fleet_hub as _hub
+from . import fleet_hub_model_roster
 from .fleet_hub import (
     DASHBOARD_COOKIE,
     DASHBOARD_COOKIE_MAX_AGE,
     MAX_BODY_BYTES,
+    FleetHubConflict,
     FleetHubError,
     FleetHubForbidden,
     FleetHubUnprocessable,
@@ -480,6 +482,7 @@ def make_handler(
                     if caller is None:
                         return
                     is_admin, _node = caller
+                    presented = self._bearer()
                     if path == "/nodes":
                         if not is_admin:
                             self._send_json(403, {"error": "the admin token is required to manage nodes"})
@@ -496,7 +499,11 @@ def make_handler(
                     elif path == "/cloud":
                         payload = cloud_snapshot(conn, frozen_deck, include_all=include_all, include_grokbot=is_admin)
                     elif path == "/models":
-                        payload = {"models": list_model_policy(conn)}
+                        payload = fleet_hub_model_roster.project_roster(
+                            conn,
+                            audience_node_id=None if is_admin else _node,
+                            raw_node_bearer=None if is_admin else presented,
+                        )
                     elif path == "/preference":
                         payload = {"preference": get_run_preference(conn)}
                     elif path == "/sessions":
@@ -658,6 +665,9 @@ def make_handler(
                     status, body_payload = handle_node_request(conn, parsed)
             except FleetHubForbidden as exc:
                 self._send_json(403, {"error": str(exc)})
+                return
+            except FleetHubConflict as exc:
+                self._send_json(409, {"error": str(exc)})
                 return
             except FleetHubUnprocessable as exc:
                 self._send_json(422, {"error": str(exc)})

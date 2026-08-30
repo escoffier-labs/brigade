@@ -307,6 +307,22 @@ def _request(hub, method: str, path: str, *, token: str | None = None, body: dic
     return result
 
 
+def _models_revision(hub, *, token: str = ADMIN_TOKEN) -> int:
+    status, payload = _request(hub, "GET", "/models", token=token)
+    assert status == 200
+    return int(payload.get("revision", 1))
+
+
+def _admin_set_model(hub, **fields: object):
+    body = {"action": "set", "expected_revision": _models_revision(hub), **fields}
+    return _request(hub, "POST", "/models", token=ADMIN_TOKEN, body=body)
+
+
+def _policy_revision(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT revision FROM model_roster_meta WHERE singleton=1").fetchone()
+    return int(row[0]) if row is not None else 1
+
+
 def test_cloud_http_routes_require_valid_auth_and_keep_dashboard_read_only(tmp_path):
     with _hub(tmp_path) as hub:
         assert _request(hub, "GET", "/cloud")[0] == 401
@@ -320,7 +336,12 @@ def test_cloud_http_routes_require_valid_auth_and_keep_dashboard_read_only(tmp_p
         assert _request(hub, "GET", "/cloud", token=node_token)[0] == 401
         status, snapshot = _request(hub, "GET", "/cloud", token=ADMIN_TOKEN)
         assert status == 200 and snapshot["leases"] == []
-        assert _request(hub, "GET", "/models", token=ADMIN_TOKEN) == (200, {"models": []})
+        status, models = _request(hub, "GET", "/models", token=ADMIN_TOKEN)
+        assert status == 200
+        assert models["models"] == []
+        assert models["schema"] == "brigade.fleet_model_roster.v1"
+        assert "audience_node_id" not in models
+        assert "mac" not in models
         # Dashboard routes stay GET-only and cannot turn a bearer into a cloud write.
         assert _request(hub, "POST", "/", token=ADMIN_TOKEN, body={})[0] == 404
 
@@ -347,7 +368,12 @@ def test_cloud_http_node_reads_and_admin_model_policy_mutation(tmp_path):
             db.close()
         status, snapshot = _request(hub, "GET", "/cloud", token=node_token)
         assert status == 200 and snapshot["leases"] == [] and snapshot["policy"]["global_limit"] == 4
-        assert _request(hub, "GET", "/models", token=node_token) == (200, {"models": []})
+        status, empty = _request(hub, "GET", "/models", token=node_token)
+        assert status == 200
+        assert empty["models"] == []
+        assert empty["schema"] == "brigade.fleet_model_roster.v1"
+        assert empty["audience_node_id"] == NODE_A
+        assert empty["mac"]["algorithm"] == "hmac-sha256-node-bearer-v1"
         status, payload = _request(
             hub,
             "POST",
@@ -356,52 +382,36 @@ def test_cloud_http_node_reads_and_admin_model_policy_mutation(tmp_path):
             body={"action": "set", "provider": "openai", "model": "gpt-5.6-terra", "seat": "coder", "enabled": True},
         )
         assert status == 403 and "admin token" in payload["error"]
-        status, payload = _request(
+        status, payload = _admin_set_model(
             hub,
-            "POST",
-            "/models",
-            token=ADMIN_TOKEN,
-            body={
-                "action": "set",
+            provider="openai",
+            model="gpt-5.6-terra",
+            seat="coder",
+            enabled=True,
+            limit=2,
+            notes="primary worker",
+        )
+        assert status == 200 and payload["policy"]["provider"] == "openai"
+        assert payload["policy"]["model"] == "gpt-5.6-terra"
+        assert payload["policy"]["seat"] == "coder"
+        assert payload["policy"]["enabled"] is True
+        assert payload["policy"]["limit"] == 2
+        assert payload["policy"]["notes"] == "primary worker"
+        status, payload = _admin_set_model(hub, provider="openai", model="gpt-5.6-terra", seat="coder", enabled=False)
+        assert status == 200 and payload["policy"]["enabled"] is False
+        status, listed = _request(hub, "GET", "/models", token=node_token)
+        assert status == 200
+        assert listed["models"] == [
+            {
                 "provider": "openai",
                 "model": "gpt-5.6-terra",
                 "seat": "coder",
-                "enabled": True,
-                "limit": 2,
-                "notes": "primary worker",
-            },
-        )
-        assert status == 200 and payload["policy"] == {
-            "provider": "openai",
-            "model": "gpt-5.6-terra",
-            "seat": "coder",
-            "enabled": True,
-            "limit": 2,
-            "notes": "primary worker",
-        }
-        status, payload = _request(
-            hub,
-            "POST",
-            "/models",
-            token=ADMIN_TOKEN,
-            body={"action": "set", "provider": "openai", "model": "gpt-5.6-terra", "seat": "coder", "enabled": False},
-        )
-        assert status == 200 and payload["policy"]["enabled"] is False
-        assert _request(hub, "GET", "/models", token=node_token) == (
-            200,
-            {
-                "models": [
-                    {
-                        "provider": "openai",
-                        "model": "gpt-5.6-terra",
-                        "seat": "coder",
-                        "enabled": False,
-                        "limit": None,
-                        "notes": None,
-                    }
-                ]
-            },
-        )
+                "enabled": False,
+                "limit": None,
+                "notes": None,
+            }
+        ]
+        assert listed["schema"] == "brigade.fleet_model_roster.v1"
 
 
 @pytest.mark.parametrize(
@@ -492,19 +502,13 @@ def test_two_seats_can_share_one_model(tmp_path):
         finally:
             db.close()
         for seat in ("coder", "reviewer"):
-            status, _payload = _request(
+            status, _payload = _admin_set_model(
                 hub,
-                "POST",
-                "/models",
-                token=ADMIN_TOKEN,
-                body={
-                    "action": "set",
-                    "provider": "openai",
-                    "model": "gpt-5.6-terra",
-                    "seat": seat,
-                    "enabled": True,
-                    "limit": 1,
-                },
+                provider="openai",
+                model="gpt-5.6-terra",
+                seat=seat,
+                enabled=True,
+                limit=1,
             )
             assert status == 200
         status, payload = _request(hub, "GET", "/models", token=node_token)
@@ -517,37 +521,13 @@ def test_two_seats_can_share_one_model(tmp_path):
 def test_changing_seat_route_replaces_only_that_seat(tmp_path):
     with _hub(tmp_path) as hub:
         for seat, model in (("coder", "gpt-5.6-terra"), ("reviewer", "gpt-5.6-terra")):
-            _request(
-                hub,
-                "POST",
-                "/models",
-                token=ADMIN_TOKEN,
-                body={
-                    "action": "set",
-                    "provider": "openai",
-                    "model": model,
-                    "seat": seat,
-                    "enabled": True,
-                },
-            )
-        status, _payload = _request(
-            hub,
-            "POST",
-            "/models",
-            token=ADMIN_TOKEN,
-            body={
-                "action": "set",
-                "provider": "openai",
-                "model": "gpt-5.5",
-                "seat": "coder",
-                "enabled": True,
-            },
-        )
+            _admin_set_model(hub, provider="openai", model=model, seat=seat, enabled=True)
+        status, _payload = _admin_set_model(hub, provider="openai", model="gpt-5.6-sol", seat="coder", enabled=True)
         assert status == 200
         status, payload = _request(hub, "GET", "/models", token=ADMIN_TOKEN)
         assert status == 200
         by_seat = {row["seat"]: row for row in payload["models"] if row.get("seat") is not None}
-        assert by_seat["coder"]["model"] == "gpt-5.5"
+        assert by_seat["coder"]["model"] == "gpt-5.6-sol"
         assert by_seat["reviewer"]["model"] == "gpt-5.6-terra"
 
 
@@ -608,7 +588,15 @@ def test_model_policy_limit_is_an_atomic_fenced_expiring_lease(conn, monkeypatch
     monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: clock["now"])
     fleet_hub.set_model_policy(
         conn,
-        {"action": "set", "provider": "openai", "model": "gpt-5.6-terra", "seat": "coder", "enabled": True, "limit": 0},
+        {
+            "action": "set",
+            "expected_revision": _policy_revision(conn),
+            "provider": "openai",
+            "model": "gpt-5.6-terra",
+            "seat": "coder",
+            "enabled": True,
+            "limit": 0,
+        },
     )
     first = {
         "action": "acquire",
@@ -626,7 +614,15 @@ def test_model_policy_limit_is_an_atomic_fenced_expiring_lease(conn, monkeypatch
     )
     fleet_hub.set_model_policy(
         conn,
-        {"action": "set", "provider": "openai", "model": "gpt-5.6-terra", "seat": "coder", "enabled": True, "limit": 1},
+        {
+            "action": "set",
+            "expected_revision": _policy_revision(conn),
+            "provider": "openai",
+            "model": "gpt-5.6-terra",
+            "seat": "coder",
+            "enabled": True,
+            "limit": 1,
+        },
     )
     assert fleet_hub.handle_model_policy(conn, first, caller_node=NODE_A)[0] == 200
     second = dict(first, lease_id="model-b", holder="fence-b")
