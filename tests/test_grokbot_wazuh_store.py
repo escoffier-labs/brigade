@@ -123,3 +123,39 @@ def test_store_updates_semantic_fields_on_same_fingerprint(tmp_path: Path):
     assert stored["revision"] == second["revision"]
     assert stored["content_digest"] == second["content_digest"]
     assert stored["source_digest"] == second["source_digest"]
+
+
+def test_pending_relay_entries_are_opaque_sorted_and_detached(tmp_path: Path):
+    from brigade import grokbot_findings
+
+    path = tmp_path / "state" / "wazuh.json"
+    store = WazuhStore(str(path))
+    store.ready()
+    first = _record(agent_id="002", rule_id="533", rule_description="Service failed")
+    second = _record()
+    store.upsert_alert(first, classify(first, now=NOW), now=NOW)
+    store.upsert_alert(second, classify(second, now=NOW), now=NOW)
+    first_id = grokbot_findings.identity_digest(first["producer"], first["finding_id"], first["revision"])
+    store.confirm_reported_relays([first_id])
+    snapshot = store.pending_relay_entries()
+    assert [item["finding_id"] for item in snapshot] == [second["finding_id"]]
+    assert set(snapshot[0]) == set(store.finding_entry(store.get_alert(second["fingerprint"]) or {}))
+    assert "fingerprint" not in snapshot[0]
+    assert "relay_status" not in snapshot[0]
+    snapshot[0]["title"] = "mutated"
+    stored = store.get_alert(second["fingerprint"])
+    assert stored is not None
+    assert stored["title"] == second["title"]
+    assert store.pending_relay_entries()[0] is not snapshot[0]
+
+
+def test_confirm_reported_relays_ignores_unknown_ids(tmp_path: Path):
+    path = tmp_path / "state" / "wazuh.json"
+    store = WazuhStore(str(path))
+    store.ready()
+    record = _record()
+    store.upsert_alert(record, classify(record, now=NOW), now=NOW)
+    store.confirm_reported_relays(["0" * 64])
+    pending = store.pending_relay_entries()
+    assert len(pending) == 1
+    assert pending[0]["finding_id"] == record["finding_id"]

@@ -15,6 +15,8 @@ from .grokbot_backup.ledger import BackupLedger
 from .grokbot_findings import DEFAULT_LIMIT, FINDINGS_SCHEMA, FindingsError, MAX_ENTRIES
 from .grokbot_fleet.contracts import FleetError
 from .grokbot_fleet.ledger import FleetLedger
+from .grokbot_wazuh.contracts import WazuhError
+from .grokbot_wazuh.store import WazuhStore
 
 PRODUCER_ORDER = ("backup-steward", "fleet-steward", "wazuh-triage")
 LIVE_PRODUCERS = {
@@ -121,6 +123,8 @@ def _relay(
             relays.extend(result["relays"])
             remaining -= result["created"]
     totals["relays"] = _unique(relays)
+    if apply:
+        _confirm_wazuh(target)
     return {key: totals[key] for key in PUBLIC_KEYS}
 
 
@@ -137,7 +141,7 @@ def _collect_entries(target: Path, pack_id: str) -> list[dict[str, str]]:
         return _wazuh_entries(str(ledger_path))
     except FindingsError as exc:
         raise PackRelayError(exc.reason) from exc
-    except (BackupError, FleetError) as exc:
+    except (BackupError, FleetError, WazuhError) as exc:
         raise PackRelayError("unsafe-path") from exc
 
 
@@ -210,8 +214,25 @@ def _fleet_entries(ledger_path: str) -> list[dict[str, str]]:
     return entries
 
 
-def _wazuh_entries(_ledger_path: str) -> list[dict[str, str]]:
-    return []
+def _wazuh_entries(ledger_path: str) -> list[dict[str, str]]:
+    store = WazuhStore(ledger_path)
+    return [dict(entry) for entry in store.pending_relay_entries()]
+
+
+def _confirm_wazuh(target: Path) -> None:
+    config = _optional_instance(target, "wazuh-triage")
+    if config is None:
+        return
+    try:
+        reported = [
+            record["relay_id"]
+            for record in grokbot_findings_relay._read_outbox_records(target)
+            if record.get("status") == "reported"
+        ]
+        WazuhStore(str(config["ledger_path"])).confirm_reported_relays(reported)
+    except (FindingsError, WazuhError) as exc:
+        reason = exc.reason if isinstance(exc, FindingsError) else "unsafe-path"
+        raise PackRelayError(reason) from exc
 
 
 def _fleet_revision(finding: Mapping[str, Any]) -> str:

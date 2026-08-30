@@ -186,6 +186,46 @@ def test_known_backup_does_not_starve_fleet_creation(tmp_path: Path, monkeypatch
     assert PRIVATE_FLEET in bodies
 
 
+def test_apply_recovers_pending_wazuh_relays_and_confirms_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from brigade import grokbot_pack_relay
+    from brigade.grokbot_wazuh.normalize import normalize_alert
+    from brigade.grokbot_wazuh.policy import classify
+    from brigade.grokbot_wazuh.store import WazuhStore
+
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", "not-a-real-token-value-32chars!!")
+    monkeypatch.setattr(fleet_client, "report_event", lambda *_args, **_kwargs: True)
+    target = tmp_path / "queue"
+    target.mkdir()
+    owner = _owner(tmp_path / "owner")
+    wazuh_paths = _steward_paths(tmp_path / "wazuh-state", "wazuh.json")
+    grokbot_packs.apply_setup(target, "wazuh-triage", bearer_env="TEST_GROKBOT_BEARER", **wazuh_paths)
+    store = WazuhStore(str(wazuh_paths["ledger_path"]))
+    store.ready()
+    alert = {
+        "rule_id": "504",
+        "rule_level": 12,
+        "rule_description": "Agent disconnected",
+        "rule_groups": ["agent_disconnected"],
+        "agent_id": "001",
+        "decoder": "agent-buffer",
+        "timestamp": "2026-08-30T09:00:00Z",
+        "detail": "PRIVATE_WAZUH_BODY_TOKEN",
+    }
+    record = normalize_alert(alert)
+    store.upsert_alert(record, classify(record, now=NOW), now=NOW)
+    assert store.pending_relay_entries()
+
+    result = grokbot_pack_relay.apply_relay(target, owner, limit=1, now=NOW)
+
+    assert result["apply"] is True
+    assert result["created"] == 1
+    _assert_public(result)
+    assert "PRIVATE_WAZUH_BODY_TOKEN" not in json.dumps(result)
+    assert store.pending_relay_entries() == []
+    drafts = list((owner / "memory" / "handoff-inbox").glob("*.md"))
+    assert len(drafts) == 1
+
+
 def test_invalid_limit_is_rejected_before_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from brigade import grokbot_pack_relay
 
