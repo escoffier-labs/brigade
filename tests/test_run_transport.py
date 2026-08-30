@@ -759,3 +759,62 @@ def test_admission_pruned_retired_seat_cannot_be_dispatched(monkeypatch, tmp_pat
     assert calls == ["claude"]
     assert "coder" not in calls
     assert "coder" not in resolution.roster.agents
+
+
+def test_dispatch_receives_hub_approved_model_reasoning_and_binding(monkeypatch, tmp_path):
+    from brigade import aboyeur
+    from brigade import fleet_model_roster
+
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="claude", role="plan", model="sonnet-4"),
+        },
+        max_workers=1,
+    )
+    snapshot = {
+        "schema": fleet_model_roster.ROSTER_SCHEMA,
+        "state": "authoritative",
+        "source": "hub",
+        "revision": 5,
+        "roster_revision": 5,
+        "roster_digest": "sha256:" + ("cd" * 32),
+        "expires_at": "2026-08-30T14:15:00Z",
+        "seats": [
+            {
+                "seat": "chef",
+                "provider": "anthropic",
+                "model": "opus-5",
+                "reasoning": "high",
+                "enabled": True,
+                "bindings": {"brigade_cli": "claude", "t3_instance_id": "claude"},
+            }
+        ],
+        "consumer_defaults": {"brigade-run": "chef"},
+        "retired_models": [],
+    }
+    resolution = aboyeur.resolve_fleet_model_policy(roster, snapshot=snapshot)
+    assert resolution.error is None
+    agent = resolution.roster.agents["chef"]
+    assert agent.cli == "claude"
+    assert agent.model == "opus-5"
+    assert agent.reasoning == "high"
+    calls: list[dict[str, object]] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        calls.append({"cli": cli_ref, "model": kwargs.get("model"), "reasoning": kwargs.get("reasoning")})
+        return agents.AgentResult(text="planned", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+    results = run_transport.dispatch(
+        [Assignment(worker="chef", task="plan it")],
+        resolution.roster,
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path,
+    )
+    assert results[0].ok is True
+    assert calls == [{"cli": "claude", "model": "opus-5", "reasoning": "high"}]

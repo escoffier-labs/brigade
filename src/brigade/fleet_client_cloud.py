@@ -5,6 +5,7 @@ holds the independently evolving cloud and model admission protocol so the
 event spool and repository-claim client remain easier to audit.
 """
 
+import importlib
 import json
 import urllib.error
 import urllib.request
@@ -323,32 +324,45 @@ def fetch_model_policy(*, hub_url: str | None = None) -> list[dict[str, Any]]:
 def load_model_policy_snapshot(*, hub_url: str | None = None) -> dict[str, Any]:
     """Classify one bounded model-policy read for run admission.
 
-    A missing hub preserves standalone Brigade behavior. A configured hub that
-    cannot be reached is classified separately so new-run admission can fail
-    closed without affecting work already in flight. Explicit credential
-    rejection is also distinct. A successful read is authoritative even when
-    the registry is empty.
+    A missing hub preserves standalone Brigade behavior. A configured hub
+    lazily fetches the validated versioned roster (LKG permitted). Auth and
+    transport failures stay classified for existing callers. A successful
+    read is authoritative even when the registry is empty.
     """
     config = load_fleet_config()
     hub = hub_url or config["hub_url"]
     if not hub:
         return {"state": "unconfigured", "models": []}
+    admission = importlib.import_module("brigade.fleet_model_admission")
+
     try:
-        payload = _run_with_deadline(
-            lambda: _client._get_models_blocking(hub, "/models", config["token"], timeout=CLOUD_TIMEOUT_SECONDS),
-            timeout=CLOUD_TIMEOUT_SECONDS,
-        )
-    except urllib.error.HTTPError as exc:
-        if exc.code in (401, 403):
-            return {"state": "auth-failed", "models": []}
-        return {"state": "unavailable", "models": []}
+        decision = admission.fetch_versioned_roster(allow_lkg=True, hub_url=hub)
     except Exception:
         return {"state": "unavailable", "models": []}
-    models = payload.get("models") if isinstance(payload, dict) else None
-    safe_models = (
-        [safe for item in models if (safe := _safe_model_policy(item)) is not None] if isinstance(models, list) else []
-    )
-    return {"state": "authoritative", "models": safe_models}
+    if not decision.ok:
+        if decision.reason == "auth-failed":
+            return {"state": "auth-failed", "models": []}
+        return {"state": "unavailable", "models": []}
+    payload = decision.payload if isinstance(decision.payload, dict) else {}
+    seats = [dict(item) for item in payload.get("seats") or [] if isinstance(item, dict)]
+    safe_models = [safe for item in seats if (safe := _safe_model_policy(item)) is not None]
+    revision = payload.get("revision", payload.get("roster_revision"))
+    source = payload.get("source")
+    if not isinstance(source, str) or not source:
+        source = decision.reason if decision.reason in {"hub", "lkg"} else "hub"
+    return {
+        "schema": payload.get("schema"),
+        "state": "authoritative",
+        "source": source,
+        "roster_revision": revision,
+        "revision": revision,
+        "roster_digest": payload.get("roster_digest"),
+        "expires_at": payload.get("expires_at"),
+        "seats": seats,
+        "consumer_defaults": payload.get("consumer_defaults"),
+        "retired_models": payload.get("retired_models"),
+        "models": safe_models,
+    }
 
 
 def set_model_policy(

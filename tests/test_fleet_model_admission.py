@@ -333,6 +333,166 @@ def test_model_policy_snapshot_distinguishes_unconfigured_outage_and_auth(monkey
     assert fleet_client.load_model_policy_snapshot() == {"state": "auth-failed", "models": []}
 
 
+def test_configured_hub_snapshot_is_versioned_roster_not_legacy_models(tmp_path, monkeypatch):
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        roster = _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        snapshot = fleet_client.load_model_policy_snapshot()
+
+    assert snapshot.get("state") == "authoritative"
+    assert snapshot.get("source") == "hub"
+    assert snapshot.get("schema") == fleet_model_roster.ROSTER_SCHEMA
+    assert snapshot.get("roster_revision") == roster["revision"]
+    assert snapshot.get("roster_digest") == roster["roster_digest"]
+    assert isinstance(snapshot.get("expires_at"), str) and snapshot["expires_at"]
+    seats = snapshot.get("seats")
+    assert isinstance(seats, list) and seats
+    match = next(item for item in seats if isinstance(item, dict) and item.get("seat") == "cursor_grok")
+    assert match["provider"] == "cursor"
+    assert match["model"] == "cursor-grok-4.6-high-fast"
+    assert match["reasoning"] == "high"
+    bindings = match["bindings"]
+    assert isinstance(bindings, dict)
+    assert bindings.get("brigade_cli") == "cursor-agent"
+    assert "models" not in match
+    _secret_free(snapshot, node_token, ADMIN_TOKEN)
+
+
+def test_versioned_resolution_selects_hub_row_over_local_retired_default():
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan", model="opus-5"),
+            "coder": Agent("coder", "codex", "code", model="gpt-5.4"),
+        },
+    )
+    resolution = aboyeur.resolve_fleet_model_policy(
+        roster,
+        worker="coder",
+        snapshot=_versioned_snapshot(
+            _versioned_seat("coder", "openai", "gpt-5.6-terra", reasoning="medium", instance_id="codex"),
+        ),
+    )
+
+    assert resolution.error is None
+    agent = resolution.roster.agents["coder"]
+    assert agent.cli == "codex"
+    assert agent.model == "gpt-5.6-terra"
+    assert agent.reasoning == "medium"
+    decision = next(item for item in resolution.receipt["decisions"] if item["seat"] == "coder")
+    assert decision["outcome"] == "enabled"
+    assert decision["policy_provider"] == "openai"
+    assert decision["policy_model"] == "gpt-5.6-terra"
+
+
+def test_inconsistent_binding_rejected_before_lease_or_process(tmp_path, monkeypatch):
+    snapshot = _versioned_snapshot(
+        _versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast", instance_id="codex"),
+    )
+    lease_calls: list[tuple[str, str, str]] = []
+    provider_calls: list[str] = []
+    monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", lambda: snapshot)
+    monkeypatch.setattr(
+        fleet_client,
+        "acquire_model_lease",
+        lambda seat, provider, model: (
+            lease_calls.append((seat, provider, model))
+            or fleet_client.ModelLeaseDecision(True, "ok", "should-not-lease", "holder")
+        ),
+    )
+    monkeypatch.setattr(
+        agents,
+        "run_agent",
+        lambda *args, **kwargs: provider_calls.append("run_agent") or agents.AgentResult(text="no", ok=True),
+    )
+    output_dir = tmp_path / "run"
+
+    assert (
+        run_aboyeur_guarded(
+            "inspect",
+            _roster(),
+            worker="cursor_grok",
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 2
+    )
+
+    run = json.loads((output_dir / "run.json").read_text())
+    assert run["failure"]["kind"] == "fleet-model-policy"
+    assert run["failure"]["phase"] == "preflight"
+    assert lease_calls == []
+    assert provider_calls == []
+
+
+def test_brigade_run_without_injected_snapshot_dispatches_hub_approved_seat(tmp_path, monkeypatch):
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        roster = _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        acquired: list[tuple[str, str, str]] = []
+        monkeypatch.setattr(
+            fleet_client,
+            "acquire_model_lease",
+            lambda seat, provider, model: (
+                acquired.append((seat, provider, model))
+                or fleet_client.ModelLeaseDecision(True, "ok", "lease", "holder")
+            ),
+        )
+        monkeypatch.setattr(
+            fleet_client,
+            "release_model_lease",
+            lambda lease_id, *, holder: fleet_client.ModelLeaseDecision(True, "ok", lease_id, holder),
+        )
+        dispatched: list[dict[str, object]] = []
+
+        def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+            dispatched.append({"cli": cli_ref, "model": kwargs.get("model"), "reasoning": kwargs.get("reasoning")})
+            return agents.AgentResult(text="ok", ok=True)
+
+        monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+        local = Roster(
+            orchestrator="chef",
+            agents={
+                "chef": Agent("chef", "claude", "plan", model="opus-5"),
+                "cursor_grok": Agent("cursor_grok", "cursor", "code", model="composer-2.5"),
+            },
+        )
+        output_dir = tmp_path / "run"
+        assert (
+            run_aboyeur_guarded(
+                "inspect",
+                local,
+                worker="cursor_grok",
+                output_dir=output_dir,
+                code_graph_enabled=False,
+                route_enabled=False,
+            )
+            == 0
+        )
+
+        assert dispatched == [{"cli": "cursor", "model": "cursor-grok-4.6-high-fast", "reasoning": "high"}]
+        assert acquired == [("cursor_grok", "cursor", "cursor-grok-4.6-high-fast")]
+        policy = json.loads((output_dir / "model-policy.json").read_text())
+        run = json.loads((output_dir / "run.json").read_text())
+        roster_out = json.loads((output_dir / "roster.json").read_text())
+        expected = dict(
+            seat="cursor_grok",
+            provider="cursor",
+            model="cursor-grok-4.6-high-fast",
+            reasoning="high",
+            source="hub",
+            revision=int(roster["revision"]),
+            digest=str(roster["roster_digest"]),
+        )
+        for payload in (policy, run, roster_out):
+            admission = _assert_admission_provenance(payload, **expected)
+            assert admission["binding"]["instance_id"] == "cursor-agent"
+            _secret_free(admission, node_token, ADMIN_TOKEN)
+
+
 def test_run_writes_effective_policy_and_override_to_artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fleet_client,

@@ -78,6 +78,19 @@ def _permanent_floor(provider: object, model: object) -> str | None:
     return fleet_model_roster.retired_reason(provider, model)
 
 
+def _cli_from_binding(aboyeur: Any, instance_id: str) -> str | None:
+    """Map a Hub Brigade binding onto a known adapter key."""
+    if aboyeur.agents.is_known(instance_id):
+        return instance_id
+    aliases = {
+        aboyeur.agents.command_for(name): name
+        for name in ("cursor", "antigravity", "continue")
+        if aboyeur.agents.is_known(name)
+    }
+    mapped = aliases.get(instance_id)
+    return mapped if mapped is not None and aboyeur.agents.is_known(mapped) else None
+
+
 def resolve_fleet_model_policy(
     roster: Roster,
     *,
@@ -317,20 +330,16 @@ def _resolve_versioned(
     denied: dict[str, str] = {}
     admissions: list[dict[str, object]] = []
     for seat, agent in effective.agents.items():
-        provider = aboyeur.agents.model_policy_provider(agent.cli or "")
-        model = aboyeur.agents.model_policy_model(agent.cli or "", agent.model)
+        requested_provider = aboyeur.agents.model_policy_provider(agent.cli or "")
+        requested_model = aboyeur.agents.model_policy_model(agent.cli or "", agent.model)
         row = seat_rows.get(seat)
         decision: dict[str, object] = {
             "kind": "fleet-model-policy",
             "seat": seat,
-            "requested_provider": provider,
-            "requested_model": model,
+            "requested_provider": requested_provider,
+            "requested_model": requested_model,
         }
-        floor = _permanent_floor(provider, model)
-        if floor is not None:
-            outcome = "retired"
-            detail = floor
-        elif row is None:
+        if row is None:
             outcome = "omitted"
             detail = "seat is absent from the authoritative registry"
         else:
@@ -348,15 +357,9 @@ def _resolve_versioned(
             elif not isinstance(policy_provider, str) or not isinstance(policy_model, str):
                 outcome = "mismatch"
                 detail = "registry entry is missing exact provider/model"
-            elif policy_provider != provider or policy_model != model:
-                outcome = "mismatch"
-                detail = f"requested {provider}/{model}, registry allows {policy_provider}/{policy_model}"
             elif not isinstance(policy_reasoning, str) or not policy_reasoning:
                 outcome = "binding-missing"
                 detail = "registry entry is missing exact reasoning"
-            elif agent.reasoning is not None and agent.reasoning != policy_reasoning:
-                outcome = "mismatch"
-                detail = f"requested reasoning {agent.reasoning!r}, registry allows {policy_reasoning!r}"
             elif binding is None or not isinstance(binding.get("instance_id"), str) or not binding["instance_id"]:
                 outcome = "binding-missing"
                 detail = "registry entry is missing consumer binding"
@@ -364,21 +367,37 @@ def _resolve_versioned(
                 outcome = "disabled"
                 detail = "registry entry is disabled"
             else:
-                outcome = "enabled"
-                detail = "exact seat/provider/model/reasoning/binding entry is enabled"
-                admission = _admission_record(
-                    source=source,
-                    revision=revision,
-                    digest=digest,
-                    seat=seat,
-                    provider=policy_provider,
-                    model=policy_model,
-                    reasoning=policy_reasoning,
-                    binding=binding,
-                    expires_at=expires_at,
-                )
-                decision["model_admission"] = admission
-                admissions.append(admission)
+                resolved_cli = _cli_from_binding(aboyeur, str(binding["instance_id"]))
+                if resolved_cli is None:
+                    outcome = "unsupported-binding"
+                    detail = "registry binding is not a supported Brigade harness"
+                elif aboyeur.agents.model_policy_provider(resolved_cli) != policy_provider:
+                    outcome = "inconsistent-binding"
+                    detail = (
+                        f"registry binding {binding['instance_id']!r} is inconsistent with provider {policy_provider!r}"
+                    )
+                else:
+                    outcome = "enabled"
+                    detail = "exact seat/provider/model/reasoning/binding entry is enabled"
+                    kept_agents[seat] = replace(
+                        agent,
+                        cli=resolved_cli,
+                        model=policy_model,
+                        reasoning=policy_reasoning,
+                    )
+                    admission = _admission_record(
+                        source=source,
+                        revision=revision,
+                        digest=digest,
+                        seat=seat,
+                        provider=policy_provider,
+                        model=policy_model,
+                        reasoning=policy_reasoning,
+                        binding=binding,
+                        expires_at=expires_at,
+                    )
+                    decision["model_admission"] = admission
+                    admissions.append(admission)
         decision["outcome"] = outcome
         decision["detail"] = detail
         decisions.append(decision)
