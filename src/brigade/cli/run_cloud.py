@@ -272,7 +272,9 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
             "cerebro-memory",
             "fleet-steward",
             "backup-steward",
+            "n8n-operator",
             "obsidian-operator",
+            "operations-relay",
             "wazuh-triage",
             "n8n-operator",
         ),
@@ -419,6 +421,13 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     pack_upstream_key.add_argument(
         "--upstream-key-env",
         help="Name of the environment variable holding the upstream key. Required for obsidian-operator.",
+    )
+    p_pack_setup.add_argument(
+        "--owner",
+        type=Path,
+        default=None,
+        dest="owner_workspace",
+        help="Absolute owner workspace. Required for operations-relay.",
     )
     p_pack_setup.add_argument("--apply", action="store_true", help="Write local config. Default is preview only.")
 
@@ -964,6 +973,13 @@ def _dispatch_grokbot(args, target: Path) -> int:
 
                     n8n_config, n8n_tools = build_n8n_listener(target, **listener_kwargs)
                     run_n8n_listener(n8n_config, n8n_tools)
+                elif args.pack == "operations-relay":
+                    from .. import grokbot_operations_relay
+
+                    operations_config, operations_tools = grokbot_operations_relay.build_listener_from_target(
+                        target, **listener_kwargs
+                    )
+                    grokbot_operations_relay.run_listener(operations_config, operations_tools)
                 else:
                     cerebro_config, cerebro_tools = grokbot_cerebro.build_listener_from_target(
                         target, **listener_kwargs
@@ -993,6 +1009,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                 grokbot_fleet,
                 grokbot_n8n,
                 grokbot_obsidian,
+                grokbot_operations_relay,
                 grokbot_packs,
                 grokbot_wazuh,
             )
@@ -1005,6 +1022,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                     grokbot_fleet.FleetError,
                     grokbot_n8n.N8nError,
                     grokbot_obsidian.ObsidianError,
+                    grokbot_operations_relay.OperationsRelayError,
                     grokbot_packs.PackError,
                     grokbot_wazuh.WazuhError,
                 ),
@@ -1288,6 +1306,7 @@ def _dispatch_grokbot_pack(args, target: Path) -> int:
                 "upstream_url": getattr(args, "upstream_url", None),
                 "upstream_key_env": getattr(args, "upstream_key_env", None),
                 "upstream_key_file": getattr(args, "upstream_key_file", None),
+                "owner_workspace": getattr(args, "owner_workspace", None),
             }
             result = (
                 grokbot_packs.apply_setup(target, args.pack_id, **setup_kwargs)
