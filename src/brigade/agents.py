@@ -61,6 +61,7 @@ _GROK_RESULT_SCHEMA = json.dumps(
     },
     separators=(",", ":"),
 )
+_GROK_SESSION_RESERVED_ARGUMENTS = ("--resume", "--session-id")
 
 
 @dataclass(frozen=True)
@@ -702,6 +703,7 @@ def build_argv(
     reasoning: str | None = None,
     cwd: Path | None = None,
     resume_session_id: str | None = None,
+    session_binding_id: str | None = None,
     oracle_browser_engine: bool = False,
 ) -> List[str]:
     if resume_session_id is not None:
@@ -711,6 +713,15 @@ def build_argv(
             raise ValueError("grok exact-session continuation requires read-only dispatch")
         if not resume_session_id.strip():
             raise ValueError("grok exact-session continuation requires a session id")
+    if session_binding_id is not None:
+        if cli_ref != "grok":
+            raise ValueError("Grok session binding supports grok only")
+        if not (read_only or sandbox == "read-only"):
+            raise ValueError("Grok session binding requires read-only dispatch")
+        if not session_binding_id.strip():
+            raise ValueError("Grok session binding requires a session id")
+        if resume_session_id is not None and resume_session_id != session_binding_id:
+            raise ValueError("Grok continuation must bind the resumed session id")
 
     if cli_ref.startswith(_OLLAMA_PREFIX):
         ollama_model = cli_ref[len(_OLLAMA_PREFIX) :]
@@ -737,6 +748,8 @@ def build_argv(
         argv = [argv[0], "--engine", "browser", *argv[1:]]
     if resume_session_id is not None:
         argv = [argv[0], "--resume", resume_session_id, *argv[1:]]
+    elif session_binding_id is not None:
+        argv = [argv[0], "--session-id", session_binding_id, *argv[1:]]
     if model is not None:
         argv = _with_model(cli_ref, argv, model)
     if reasoning is not None:
@@ -746,6 +759,17 @@ def build_argv(
 
 def detect(cli_ref: str, command: tuple[str, ...] | None = None) -> bool:
     return resolve_agent_executable(cli_ref, command=command).runnable
+
+
+def _reserved_grok_session_argument(command: tuple[str, ...] | None) -> str | None:
+    if command is None:
+        return None
+    for token in command[1:]:
+        if token == "--" or any(
+            token == flag or token.startswith(f"{flag}=") for flag in _GROK_SESSION_RESERVED_ARGUMENTS
+        ):
+            return token
+    return None
 
 
 def _accepts_keyword(function: Callable[..., object], name: str) -> bool:
@@ -1009,6 +1033,7 @@ def run_agent(
     env: dict[str, str] | None = None,
     command: tuple[str, ...] | None = None,
     resume_session_id: str | None = None,
+    session_binding_id: str | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     cloud_safe_mode: bool = False,
 ) -> AgentResult:
@@ -1062,6 +1087,19 @@ def run_agent(
             requested_model=model,
             reasoning=reasoning,
         )
+
+    if session_binding_id is not None:
+        reserved_argument = _reserved_grok_session_argument(command)
+        if reserved_argument is not None:
+            return AgentResult(
+                text="",
+                ok=False,
+                detail=f"reserved Grok session argument is not allowed with session binding: {reserved_argument}",
+                failure_phase="dispatch",
+                failure_kind="invalid-dispatch-args",
+                requested_model=model,
+                reasoning=reasoning,
+            )
 
     if cli_ref.startswith(_CODEX_CLOUD_PREFIX):
         env_token = cli_ref[len(_CODEX_CLOUD_PREFIX) :]
@@ -1152,6 +1190,7 @@ def run_agent(
             reasoning=reasoning,
             cwd=cwd,
             resume_session_id=resume_session_id,
+            session_binding_id=session_binding_id,
             oracle_browser_engine=oracle_browser_engine,
         )
     except UnsupportedSandboxError as exc:
@@ -1291,6 +1330,22 @@ def run_agent(
     safe_structured_error = _scrub_env_override_values(structured_error, resolved_overrides, resolved_secret_targets)[
         :200
     ]
+    if structured_grok and session_binding_id is not None and grok_session_id != session_binding_id:
+        return AgentResult(
+            text="",
+            ok=False,
+            detail="grok result session id did not match the launcher-owned dispatch binding",
+            failure_phase="output-validation",
+            failure_kind="grok-session-unbound",
+            stdout=safe_stdout,
+            stderr=safe_stderr,
+            exit_code=result.code,
+            timed_out=result.code == 124,
+            requested_model=model,
+            reasoning=reasoning,
+            stop_reason=grok_stop_reason,
+            request_id=grok_request_id,
+        )
     if result.code != 0:
         oracle_auth = _oracle_auth_detail(cli_ref, safe_stdout, safe_stderr)
         provider_preflight = oracle_auth or _provider_preflight_detail(cli_ref, safe_stdout, safe_stderr)

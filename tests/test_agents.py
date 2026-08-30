@@ -1197,13 +1197,19 @@ def test_run_agent_classifies_silent_adapter_exit(monkeypatch, cli_ref):
     assert result.exit_code == 0
 
 
-def _grok_json_output(answer: str, *, structured: bool = True, stop_reason: str = "EndTurn") -> str:
+def _grok_json_output(
+    answer: str,
+    *,
+    structured: bool = True,
+    stop_reason: str = "EndTurn",
+    session_id: str = "019f0000-0000-7000-8000-000000000001",
+) -> str:
     result = {"kind": "answer", "answer": answer}
     return json.dumps(
         {
             "text": json.dumps(result),
             "stopReason": stop_reason,
-            "sessionId": "019f0000-0000-7000-8000-000000000001",
+            "sessionId": session_id,
             "requestId": "00000000-0000-4000-8000-000000000001",
             "structuredOutput": result if structured else None,
             "structuredOutputError": None if structured else "model did not produce structured output",
@@ -1361,16 +1367,90 @@ def test_run_agent_resumes_exact_grok_session_with_original_settings(monkeypatch
         model="grok-4.5",
         reasoning="high",
         resume_session_id=session_id,
+        session_binding_id=session_id,
     )
 
     assert result.ok is True
     assert seen["argv"].count("--resume") == 1
     assert seen["argv"][seen["argv"].index("--resume") + 1] == session_id
+    assert "--session-id" not in seen["argv"]
     assert seen["argv"][seen["argv"].index("-p") + 1] == "Return the final answer now."
     assert seen["argv"][seen["argv"].index("-m") + 1] == "grok-4.5"
     assert seen["argv"][seen["argv"].index("--reasoning-effort") + 1] == "high"
     assert seen["kwargs"]["timeout"] == 47
     assert seen["kwargs"]["cwd"] == tmp_path
+
+
+def test_run_agent_binds_initial_grok_session_to_launcher_id(monkeypatch):
+    session_id = "A"
+    seen = {}
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return agents.proc.Result(0, _grok_json_output("No actionable findings.", session_id=session_id), "")
+
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    result = agents.run_agent(
+        "grok",
+        "review it",
+        read_only=True,
+        model="grok-4.5",
+        session_binding_id=session_id,
+    )
+
+    assert result.ok is True
+    assert result.session_id == session_id
+    assert seen["argv"][seen["argv"].index("--session-id") + 1] == session_id
+    assert "--resume" not in seen["argv"]
+
+
+@pytest.mark.parametrize("returned_session_id", ["FOREIGN", None])
+def test_run_agent_rejects_unbound_grok_result_session(monkeypatch, returned_session_id):
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(
+            0,
+            _grok_json_output("FOREIGN_SESSION_CONTENT", session_id=returned_session_id),
+            "",
+        ),
+    )
+
+    result = agents.run_agent(
+        "grok",
+        "review it",
+        read_only=True,
+        model="grok-4.5",
+        session_binding_id="A",
+    )
+
+    assert result.ok is False
+    assert result.text == ""
+    assert result.session_id is None
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "grok-session-unbound"
+
+
+@pytest.mark.parametrize("token", ["--resume", "--resume=A", "--session-id", "--session-id=A", "--"])
+def test_run_agent_rejects_reserved_custom_grok_session_argument_before_launch(monkeypatch, token):
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda *args, **kwargs: pytest.fail("process must not launch"))
+
+    result = agents.run_agent(
+        "grok",
+        "review it",
+        read_only=True,
+        command=("fake-grok", token),
+        session_binding_id="A",
+    )
+
+    assert result.ok is False
+    assert result.failure_phase == "dispatch"
+    assert result.failure_kind == "invalid-dispatch-args"
+    assert "reserved Grok session argument" in result.detail
 
 
 def test_run_agent_keeps_permission_mode_prompt_separate_from_grok_flags(monkeypatch):

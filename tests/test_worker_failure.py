@@ -45,6 +45,7 @@ EXPECTED_LEGACY_CLASSIFICATIONS = {
     "env-ref-missing": FailureClass.CONFIGURATION_INVALID,
     "grok-fallback-missing": FailureClass.CONFIGURATION_INVALID,
     "grok-session-missing": FailureClass.OUTPUT_CONTRACT_VIOLATION,
+    "grok-session-unbound": FailureClass.OUTPUT_CONTRACT_VIOLATION,
     "invalid-dispatch-args": FailureClass.CONFIGURATION_INVALID,
     "invalid-session-continuation": FailureClass.CONFIGURATION_INVALID,
     "malformed-final-output": FailureClass.OUTPUT_CONTRACT_VIOLATION,

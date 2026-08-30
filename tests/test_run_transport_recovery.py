@@ -1,5 +1,7 @@
 from dataclasses import replace
 
+import pytest
+
 from brigade import acpx_adapter, agents, message_envelope, run_transport
 from brigade.roster import Agent, Roster
 from brigade.run_receipts import worker_payload, write_worker_logs
@@ -158,6 +160,19 @@ def _successful_final(text="No actionable findings.") -> agents.AgentResult:
     )
 
 
+def _unbound_session(*, session_id: str | None) -> agents.AgentResult:
+    return agents.AgentResult(
+        text="",
+        ok=False,
+        detail="grok result session id did not match the launcher-owned dispatch binding",
+        exit_code=0,
+        requested_model="grok-4.5",
+        failure_phase="output-validation",
+        failure_kind="grok-session-unbound",
+        session_id=session_id,
+    )
+
+
 def _dispatch_recovery(
     monkeypatch,
     tmp_path,
@@ -225,6 +240,7 @@ def test_direct_grok_continuation_reuses_exact_session_and_settings(monkeypatch,
     _, continuation_prompt, continuation_kwargs = direct_calls[1]
     assert "Return the final answer now" in continuation_prompt
     assert continuation_kwargs["resume_session_id"] == "019f0000-0000-7000-8000-000000000001"
+    assert continuation_kwargs["session_binding_id"] == "019f0000-0000-7000-8000-000000000001"
     assert continuation_kwargs["timeout"] == 31
     assert continuation_kwargs["cwd"] == tmp_path
     assert continuation_kwargs["read_only"] is True
@@ -233,6 +249,34 @@ def test_direct_grok_continuation_reuses_exact_session_and_settings(monkeypatch,
     assert continuation_kwargs["reasoning"] == "high"
     assert [attempt.kind for attempt in result.attempts] == ["initial", "continuation"]
     assert [attempt.selected for attempt in result.attempts] == [False, True]
+
+
+def test_direct_grok_initial_dispatch_uses_launcher_owned_session_uuid(monkeypatch, tmp_path):
+    monkeypatch.setattr(run_transport.uuid, "uuid4", lambda: "A")
+
+    result, direct_calls, fallback_calls = _dispatch_recovery(monkeypatch, tmp_path, [_successful_final()])
+
+    assert result.ok is True
+    assert fallback_calls == []
+    assert direct_calls[0][2]["session_binding_id"] == "A"
+
+
+@pytest.mark.parametrize("session_id", ["FOREIGN", None])
+def test_direct_grok_unbound_session_does_not_resume_or_fallback(monkeypatch, tmp_path, session_id):
+    fallback = replace(_successful_final("Fallback must not launch."), transport="acpx", stop_reason="end_turn")
+    result, direct_calls, fallback_calls = _dispatch_recovery(
+        monkeypatch,
+        tmp_path,
+        [_unbound_session(session_id=session_id)],
+        fallback_result=fallback,
+    )
+
+    assert result.ok is False
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "grok-session-unbound"
+    assert len(direct_calls) == 1
+    assert fallback_calls == []
+    assert [attempt.kind for attempt in result.attempts] == ["initial"]
 
 
 def test_direct_grok_fallback_recovers_after_two_invalid_finals(monkeypatch, tmp_path):

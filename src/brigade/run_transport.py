@@ -7,6 +7,7 @@ import os
 import secrets
 import sys
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -515,10 +516,15 @@ def dispatch(
         accepts_cloud_safe_mode = accepts_var_keyword or any(
             parameter.name == "cloud_safe_mode" for parameter in parameters
         )
+        accepts_session_binding = accepts_var_keyword or any(
+            parameter.name == "session_binding_id" for parameter in parameters
+        )
         if not accepts_registry:
             kwargs.pop("process_registry", None)
         if not accepts_cloud_safe_mode:
             kwargs.pop("cloud_safe_mode", None)
+        if not accepts_session_binding:
+            kwargs.pop("session_binding_id", None)
         if orchestrator_run_id is not None:
             # Real agents.run_agent accepts env=; legacy fixed-signature test
             # doubles do not. Mirror the process_registry gate so BRIGADE_RUN_ID
@@ -624,6 +630,16 @@ def dispatch(
             cli_ref = selected_agent.cli
             seat_process_registry = process_registry.for_seat(selected_agent.name)
             cloud_dispatch_kwargs = {"cloud_safe_mode": selected_agent.cloud_safe_mode}
+            session_binding_id = (
+                resume_session_id or str(uuid.uuid4())
+                if (
+                    direct
+                    and effective_read_only
+                    and selected_agent.cli == "grok"
+                    and selected_agent.transport == "direct"
+                )
+                else None
+            )
             if selected_agent.transport == "acpx":
                 from . import acpx_adapter
 
@@ -655,6 +671,7 @@ def dispatch(
                     env=dict(selected_agent.env) if selected_agent.env is not None else None,
                     **direct_command_kwargs(selected_agent),
                     resume_session_id=resume_session_id,
+                    session_binding_id=session_binding_id,
                     process_registry=seat_process_registry,
                     **cloud_dispatch_kwargs,
                 )
@@ -679,6 +696,7 @@ def dispatch(
                     **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                     **env_kwargs,
+                    session_binding_id=session_binding_id,
                 )
             if selected_agent.cli == "codex" and appserver is not None:
                 approval_prompt = (
@@ -738,6 +756,7 @@ def dispatch(
                     process_registry=seat_process_registry,
                     **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
+                    session_binding_id=session_binding_id,
                 )
             if sandbox is not None and selected_agent.model is None and selected_agent.reasoning is None:
                 return run_direct_agent(
@@ -750,6 +769,7 @@ def dispatch(
                     process_registry=seat_process_registry,
                     **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
+                    session_binding_id=session_binding_id,
                 )
             if sandbox is None and selected_agent.model is not None and selected_agent.reasoning is None:
                 return run_direct_agent(
@@ -762,6 +782,7 @@ def dispatch(
                     process_registry=seat_process_registry,
                     **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
+                    session_binding_id=session_binding_id,
                 )
             if sandbox is None and selected_agent.model is None and selected_agent.reasoning is not None:
                 return run_direct_agent(
@@ -774,6 +795,7 @@ def dispatch(
                     process_registry=seat_process_registry,
                     **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
+                    session_binding_id=session_binding_id,
                 )
             if sandbox is not None and selected_agent.model is not None and selected_agent.reasoning is None:
                 return run_direct_agent(
@@ -787,6 +809,7 @@ def dispatch(
                     process_registry=seat_process_registry,
                     **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
+                    session_binding_id=session_binding_id,
                 )
             if sandbox is not None and selected_agent.model is None and selected_agent.reasoning is not None:
                 return run_direct_agent(
@@ -800,6 +823,7 @@ def dispatch(
                     process_registry=seat_process_registry,
                     **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
+                    session_binding_id=session_binding_id,
                 )
             if sandbox is None and selected_agent.model is not None and selected_agent.reasoning is not None:
                 return run_direct_agent(
@@ -813,6 +837,7 @@ def dispatch(
                     process_registry=seat_process_registry,
                     **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
+                    session_binding_id=session_binding_id,
                 )
             assert sandbox is not None
             assert selected_agent.model is not None
@@ -829,6 +854,7 @@ def dispatch(
                 process_registry=seat_process_registry,
                 **cloud_dispatch_kwargs,
                 **direct_command_kwargs(selected_agent),
+                session_binding_id=session_binding_id,
             )
 
         def invoke(
