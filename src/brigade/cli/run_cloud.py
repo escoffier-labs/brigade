@@ -1172,13 +1172,17 @@ def _dispatch_grokbot(args, target: Path) -> int:
 
 def _dispatch_grokbot_feed(args, target: Path) -> int:
     """Validate or apply an approved feed without printing private task context."""
-    from .. import grokbot_feed
+    from .. import grokbot_feed, grokbot_mcp
 
     try:
         if args.apply:
-            result = grokbot_feed.apply(target, args.manifest, limit=args.limit)
+            with _feed_hub_identity(target):
+                result = grokbot_feed.apply(target, args.manifest, limit=args.limit)
         else:
             result = grokbot_feed.preflight(target, args.manifest, limit=args.limit)
+    except grokbot_mcp.ConfigurationError:
+        print("error: Grok Bot feed configuration is invalid", file=sys.stderr)
+        return 2
     except grokbot_feed.FeedError as exc:
         if exc.reason == "queue-error" and exc.index is not None:
             print(f"error: queue-error index={exc.index}", file=sys.stderr)
@@ -1204,15 +1208,31 @@ def _print_feed_result(result: dict) -> None:
         print(f"job {job['job_id']} state={job['state']}")
 
 
+def _feed_hub_identity(target: Path) -> ContextManager[None]:
+    """Bind the dedicated feed actor for Hub mutations, with no fallback."""
+    from .. import fleet_client_grokbot, grokbot_jobs, grokbot_mcp
+
+    if not grokbot_jobs.hub_authority(target):
+        return nullcontext()
+    token = grokbot_mcp.load_feed_hub_token()
+    if token is None:
+        raise grokbot_mcp.ConfigurationError("invalid")
+    return fleet_client_grokbot.listener_identity(token)
+
+
 def _dispatch_grokbot_scout_feed(args, target: Path) -> int:
     """Preview or enqueue one approved scout without exposing policy content."""
-    from .. import grokbot_scout_feed
+    from .. import grokbot_mcp, grokbot_scout_feed
 
     try:
         if args.apply:
-            result = grokbot_scout_feed.apply(target, args.policy)
+            with _feed_hub_identity(target):
+                result = grokbot_scout_feed.apply(target, args.policy)
         else:
             result = grokbot_scout_feed.preflight(target, args.policy)
+    except grokbot_mcp.ConfigurationError:
+        print("error: Grok Bot feed configuration is invalid", file=sys.stderr)
+        return 2
     except grokbot_scout_feed.ScoutFeedError as exc:
         print(f"error: {exc.reason}", file=sys.stderr)
         return 2
@@ -1237,6 +1257,9 @@ def _print_scout_feed_result(result: dict) -> None:
 
 def _dispatch_grokbot_reconcile(args, target: Path) -> int:
     """Preview or draft canonical-owner handoffs without printing report text."""
+    # Reconciliation reads completed report bytes and writes the owner inbox.
+    # The control actor has only enqueue/whoami authority, so it cannot safely
+    # stand in for this local canonical-owner path.
     from .. import grokbot_reconcile
 
     try:

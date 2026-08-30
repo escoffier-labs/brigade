@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, grokbot_feed, grokbot_jobs
+from brigade import cli, fleet_client_grokbot, grokbot_feed, grokbot_jobs
 
 
 SECRET_INSTRUCTIONS = "SECRET_INSTRUCTION_DO_NOT_PRINT"
@@ -426,6 +426,84 @@ def test_cli_feed_defaults_to_validation_only(tmp_path: Path, capsys):
     assert SECRET_VERIFY not in captured.out
     assert SECRET_OWNERSHIP not in captured.out
     assert not _queue_root(tmp_path).exists()
+
+
+def test_cli_feed_preview_needs_no_feed_identity_or_hub_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    manifest = _write_manifest(tmp_path / "feed.json", _manifest(_entry("task-a")))
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: True)
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "enqueue",
+        lambda *_args, **_kwargs: pytest.fail("preview must not enqueue through the hub"),
+    )
+
+    assert _run_feed(tmp_path, "--manifest", str(manifest)) == 0
+    assert "valid=1" in capsys.readouterr().out
+
+
+def test_cli_feed_apply_binds_dedicated_feed_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    token = "dedicated-feed-token"
+    token_file = tmp_path / "feed.hub-token"
+    token_file.write_text(token + "\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    monkeypatch.setenv("BRIGADE_GROKBOT_FEED_HUB_TOKEN_FILE", str(token_file))
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: True)
+    seen: list[str | None] = []
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "enqueue",
+        lambda *_args, **_kwargs: (
+            seen.append(fleet_client_grokbot.current_listener_token())
+            or {"job_id": "grokbot-" + "a" * 24, "state": "queued", "idempotent": False}
+        ),
+    )
+    manifest = _write_manifest(tmp_path / "feed.json", _manifest(_entry("task-a")))
+
+    assert _run_feed(tmp_path, "--manifest", str(manifest), "--apply") == 0
+    assert seen == [token]
+    assert token not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("kind", ("missing", "relative", "symlink", "directory", "unsafe-mode"))
+def test_cli_feed_apply_rejects_unsafe_dedicated_identity_before_enqueue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, kind: str
+):
+    token = "dedicated-feed-token-must-not-leak"
+    configured_path = tmp_path / "feed.hub-token"
+    if kind == "missing":
+        configured_text = str(configured_path)
+    elif kind == "relative":
+        configured_text = "feed.hub-token"
+    elif kind == "symlink":
+        target = tmp_path / "real.hub-token"
+        target.write_text(token + "\n", encoding="utf-8")
+        target.chmod(0o600)
+        configured_path.symlink_to(target)
+        configured_text = str(configured_path)
+    elif kind == "directory":
+        configured_path.mkdir()
+        configured_text = str(configured_path)
+    else:
+        configured_path.write_text(token + "\n", encoding="utf-8")
+        configured_path.chmod(0o640)
+        configured_text = str(configured_path)
+    monkeypatch.setenv("BRIGADE_GROKBOT_FEED_HUB_TOKEN_FILE", configured_text)
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: True)
+    hub_calls: list[object] = []
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "enqueue",
+        lambda *_args, **_kwargs: hub_calls.append(object()) or pytest.fail("unsafe feed token must block enqueue"),
+    )
+    manifest = _write_manifest(tmp_path / "feed.json", _manifest(_entry("task-a")))
+
+    assert _run_feed(tmp_path, "--manifest", str(manifest), "--apply") == 2
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert hub_calls == []
+    assert rendered == "error: Grok Bot feed configuration is invalid\n"
+    assert token not in rendered
+    assert configured_text not in rendered
 
 
 def test_cli_feed_apply_limit_1_then_repeats_to_the_next_unknown(tmp_path: Path, capsys):
