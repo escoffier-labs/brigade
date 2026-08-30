@@ -260,24 +260,3 @@ def _count_projected(alerts: Sequence[Mapping[str, Any]]) -> dict[str, int]:
         else:
             counts["watched"] += 1
     return counts
-
-
-def _confirmed_reported_fingerprints(
-    target: Path,
-    entries: Mapping[str, Mapping[str, str]],
-) -> list[str]:
-    reported = {
-        record["relay_id"]
-        for record in grokbot_findings_relay._read_outbox_records(target)
-        if record.get("status") == "reported"
-    }
-    confirmed: list[str] = []
-    for fingerprint, entry in entries.items():
-        relay_id = grokbot_findings.identity_digest(
-            entry["producer"],
-            entry["finding_id"],
-            entry["revision"],
-        )
-        if relay_id in reported:
-            confirmed.append(fingerprint)
-    return confirmed

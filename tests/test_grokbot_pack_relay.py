@@ -325,6 +325,21 @@ def test_render_relay_units_are_oneshot_timer_and_hide_owner_text(tmp_path: Path
     }
 
 
+def test_render_relay_units_preview_omits_private_python_executable(tmp_path: Path):
+    from brigade import grokbot_pack_relay
+
+    target = tmp_path / "queue"
+    target.mkdir()
+    owner = _owner(tmp_path / "owner")
+    grokbot_pack_relay.apply_relay_setup(target, owner)
+    python = tmp_path / "private-venv" / "bin" / "python3"
+    units = grokbot_pack_relay.render_relay_units(target, python=str(python))
+    preview = "".join(units.values())
+    assert "brigade-grokbot-findings-relay.service" in units
+    assert str(python) not in preview
+    assert str(python.parent) not in preview
+
+
 def test_cli_pack_relay_commands_are_preview_first_and_omit_id(tmp_path: Path, capsys, monkeypatch):
     from brigade import cli
 
@@ -368,3 +383,90 @@ def test_cli_pack_relay_commands_are_preview_first_and_omit_id(tmp_path: Path, c
     assert "OnBootSec=2min" in unit_text
     wrappers = grokbot_packs.preview_relay_setup(target, owner)
     assert wrappers["apply"] is False
+
+
+def test_cli_install_relay_service_preview_omits_absolute_paths(tmp_path: Path, capsys, monkeypatch):
+    from brigade import cli, grokbot_pack_relay, grokbot_packs
+
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", "not-a-real-token-value-32chars!!")
+    target = tmp_path / "queue"
+    target.mkdir()
+    owner = _owner(tmp_path / "owner")
+    wazuh_paths = _steward_paths(tmp_path / "wazuh-state", "wazuh.json")
+    grokbot_packs.apply_setup(target, "wazuh-triage", bearer_env="TEST_GROKBOT_BEARER", **wazuh_paths)
+    grokbot_pack_relay.apply_relay_setup(target, owner)
+    forbidden = (
+        str(target.resolve()),
+        str(owner.resolve()),
+        str(Path(wazuh_paths["ledger_path"]).resolve()),
+        str(Path(wazuh_paths["ledger_path"]).parent.resolve()),
+    )
+
+    assert cli.main(["run", "cloud", "grokbot", "pack", "install-relay-service", "--target", str(target)]) == 0
+    preview = capsys.readouterr()
+    leaked = preview.out + preview.err
+    assert "brigade-grokbot-findings-relay.service" in preview.out
+    assert "brigade-grokbot-findings-relay.timer" in preview.out
+    for path in forbidden:
+        assert path not in leaked
+
+    out = tmp_path / "units"
+    out.mkdir()
+    assert (
+        cli.main(
+            [
+                "run",
+                "cloud",
+                "grokbot",
+                "pack",
+                "install-relay-service",
+                "--target",
+                str(target),
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    apply_out = capsys.readouterr()
+    apply_leaked = apply_out.out + apply_out.err
+    for path in forbidden:
+        assert path not in apply_leaked
+    written = (out / "brigade-grokbot-findings-relay.service").read_text(encoding="utf-8")
+    assert str(target.resolve()) in written
+    assert str(owner.resolve()) in written
+    assert str(Path(wazuh_paths["ledger_path"]).parent.resolve()) in written
+
+
+def test_write_relay_units_keeps_both_units_unchanged_when_second_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from brigade import grokbot_ops, grokbot_pack_relay
+
+    target = tmp_path / "queue"
+    target.mkdir()
+    owner = _owner(tmp_path / "owner")
+    grokbot_pack_relay.apply_relay_setup(target, owner)
+    out = tmp_path / "units"
+    out.mkdir()
+    timer = out / grokbot_pack_relay.RELAY_TIMER_UNIT
+    original_timer = "# pre-existing timer\n"
+    timer.write_text(original_timer, encoding="utf-8")
+    service = out / grokbot_pack_relay.RELAY_SERVICE_UNIT
+    writes = {"count": 0}
+    real_write = grokbot_ops._write_text_nofollow_atomic
+
+    def fail_second(path: Path, data: str, **kwargs: object) -> None:
+        writes["count"] += 1
+        if writes["count"] >= 2:
+            raise OSError("simulated second-write failure")
+        real_write(path, data, **kwargs)
+
+    monkeypatch.setattr(grokbot_ops, "_write_text_nofollow_atomic", fail_second)
+
+    with pytest.raises(grokbot_pack_relay.PackRelayError) as caught:
+        grokbot_pack_relay.write_relay_units(target, out, force=True)
+
+    assert caught.value.reason == "unsafe-path"
+    assert not service.exists()
+    assert timer.read_text(encoding="utf-8") == original_timer
