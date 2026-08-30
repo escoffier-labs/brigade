@@ -5,12 +5,13 @@ holds the independently evolving cloud and model admission protocol so the
 event spool and repository-claim client remain easier to audit.
 """
 
+import importlib
 import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 from . import fleet_client as _client
@@ -89,13 +90,26 @@ _CLOUD_LEASE_FIELDS = frozenset(
         "expired",
     }
 )
-_MODEL_POLICY_FIELDS = frozenset({"provider", "model", "seat", "enabled", "limit", "notes"})
+_MODEL_POLICY_FIELDS = frozenset(
+    {
+        "provider",
+        "model",
+        "seat",
+        "enabled",
+        "limit",
+        "notes",
+        "reasoning",
+        "brigade_cli",
+        "t3_instance_id",
+        "t3_service_tier",
+    }
+)
 
 
-def _bounded_json_response(response: Any) -> Any:
+def _bounded_json_response(response: Any, *, limit: int = MAX_CLOUD_RESPONSE_BYTES) -> Any:
     """Decode one small hub response without retaining arbitrary bodies."""
-    raw = response.read(MAX_CLOUD_RESPONSE_BYTES + 1)
-    if len(raw) > MAX_CLOUD_RESPONSE_BYTES:
+    raw = response.read(limit + 1)
+    if len(raw) > limit:
         raise FleetClientError("fleet hub cloud response exceeded the size limit")
     try:
         return json.loads(raw.decode("utf-8"))
@@ -154,6 +168,19 @@ def _get_cloud_blocking(hub_url: str, path: str, token: str, *, timeout: float) 
         return _bounded_json_response(response)
 
 
+def _get_models_blocking(hub_url: str, path: str, token: str, *, timeout: float) -> Any:
+    """GET /models with the roster cap. Cloud endpoints stay at 64 KiB."""
+    roster_limit = 1024 * 1024
+    request = urllib.request.Request(
+        hub_url.rstrip("/") + path,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    with _hub_open(request, timeout=timeout) as response:
+        if response.status != 200:
+            raise FleetClientError(f"fleet hub model roster request failed: HTTP {response.status}")
+        return _bounded_json_response(response, limit=roster_limit)
+
+
 def _safe_cloud_lease(raw: Any) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
@@ -164,6 +191,46 @@ def _safe_model_policy(raw: Any) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
     return {key: value for key, value in raw.items() if key in _MODEL_POLICY_FIELDS}
+
+
+def _existing_seat(snapshot: Mapping[str, Any], seat: str) -> dict[str, Any] | None:
+    raw_seats = snapshot.get("seats")
+    if not isinstance(raw_seats, list):
+        return None
+    for item in raw_seats:
+        if isinstance(item, dict) and item.get("seat") == seat:
+            return item
+    return None
+
+
+def _preserved_field(
+    value: str | None,
+    existing: Mapping[str, Any] | None,
+    key: str,
+    *,
+    default: str = "",
+) -> str:
+    if value is not None:
+        return value
+    if existing is None:
+        return default
+    current = existing.get(key)
+    if isinstance(current, str) and current:
+        return current
+    bindings = existing.get("bindings")
+    if isinstance(bindings, dict):
+        if key == "brigade_cli":
+            brigade = bindings.get("brigade")
+            bound = brigade.get("cli") if isinstance(brigade, dict) else None
+        elif key in {"t3_instance_id", "t3_service_tier"}:
+            t3_fleet = bindings.get("t3_fleet")
+            nested_key = "instance_id" if key == "t3_instance_id" else "service_tier"
+            bound = t3_fleet.get(nested_key) if isinstance(t3_fleet, dict) else None
+        else:
+            bound = None
+        if isinstance(bound, str) and bound:
+            return bound
+    return default
 
 
 def _normalize_cloud_prompt_hash(value: str | None) -> str | None:
@@ -278,6 +345,8 @@ def fetch_cloud(*, hub_url: str | None = None, include_all: bool = False) -> dic
             ),
             timeout=CLOUD_TIMEOUT_SECONDS,
         )
+    except FleetClientError:
+        raise
     except Exception as exc:
         raise FleetClientError("fleet hub cloud read failed") from exc
     if not isinstance(payload, dict):
@@ -308,47 +377,65 @@ def fetch_model_policy(*, hub_url: str | None = None) -> list[dict[str, Any]]:
 def load_model_policy_snapshot(*, hub_url: str | None = None) -> dict[str, Any]:
     """Classify one bounded model-policy read for run admission.
 
-    A missing hub preserves standalone Brigade behavior. A configured hub that
-    cannot be reached is classified separately so new-run admission can fail
-    closed without affecting work already in flight. Explicit credential
-    rejection is also distinct. A successful read is authoritative even when
-    the registry is empty.
+    A missing hub preserves standalone Brigade behavior. A configured hub
+    lazily fetches the validated versioned roster (LKG permitted). Auth and
+    transport failures stay classified for existing callers. A successful
+    read is authoritative even when the registry is empty.
     """
     config = load_fleet_config()
     hub = hub_url or config["hub_url"]
     if not hub:
         return {"state": "unconfigured", "models": []}
+    admission = importlib.import_module("brigade.fleet_model_admission")
+
     try:
-        payload = _run_with_deadline(
-            lambda: _get_cloud_blocking(hub, "/models", config["token"], timeout=CLOUD_TIMEOUT_SECONDS),
-            timeout=CLOUD_TIMEOUT_SECONDS,
-        )
-    except urllib.error.HTTPError as exc:
-        if exc.code in (401, 403):
-            return {"state": "auth-failed", "models": []}
-        return {"state": "unavailable", "models": []}
+        decision = admission.fetch_versioned_roster(allow_lkg=True, hub_url=hub)
     except Exception:
         return {"state": "unavailable", "models": []}
-    models = payload.get("models") if isinstance(payload, dict) else None
-    safe_models = (
-        [safe for item in models if (safe := _safe_model_policy(item)) is not None] if isinstance(models, list) else []
-    )
-    return {"state": "authoritative", "models": safe_models}
+    if not decision.ok:
+        if decision.reason == "auth-failed":
+            return {"state": "auth-failed", "models": []}
+        if decision.reason in {"unsupported-schema", "node-token-required", "admin-token-not-cacheable"}:
+            return {"state": decision.reason, "models": []}
+        return {"state": "unavailable", "models": []}
+    payload = decision.payload if isinstance(decision.payload, dict) else {}
+    seats = [dict(item) for item in payload.get("seats") or [] if isinstance(item, dict)]
+    safe_models = [safe for item in seats if (safe := _safe_model_policy(item)) is not None]
+    revision = payload.get("revision", payload.get("roster_revision"))
+    source = payload.get("source")
+    if not isinstance(source, str) or not source:
+        source = decision.reason if decision.reason in {"hub", "lkg"} else "hub"
+    return {
+        "schema": payload.get("schema"),
+        "state": "authoritative",
+        "source": source,
+        "roster_revision": revision,
+        "revision": revision,
+        "document_sha256": payload.get("document_sha256"),
+        "roster_digest": payload.get("document_sha256"),
+        "expires_at": payload.get("expires_at"),
+        "seats": seats,
+        "consumer_defaults": payload.get("consumer_defaults"),
+        "retired_models": payload.get("retired_models"),
+        "models": safe_models,
+    }
 
 
 def set_model_policy(
-    provider: str, model: str, seat: str, *, enabled: bool, limit: int | None = None, notes: str | None = None
+    provider: str,
+    model: str,
+    seat: str,
+    *,
+    enabled: bool,
+    limit: int | None = None,
+    notes: str | None = None,
+    reasoning: str | None = None,
+    brigade_cli: str | None = None,
+    t3_instance_id: str | None = None,
+    t3_service_tier: str | None = None,
+    expected_revision: int,
 ) -> dict[str, Any]:
     """Set one seat's provider/model policy with the configured admin token."""
-    body = {
-        "action": "set",
-        "provider": provider,
-        "model": model,
-        "seat": seat,
-        "enabled": enabled,
-        "limit": limit,
-        "notes": notes,
-    }
     try:
         settings = load_fleet_settings()
         hub = settings["hub_url"]
@@ -359,8 +446,34 @@ def set_model_policy(
             raise FleetClientError(
                 "no fleet admin token configured (~/.brigade/fleet.toml [fleet] token_file or BRIGADE_FLEET_TOKEN)"
             )
+        snapshot = _run_with_deadline(
+            lambda: _client._get_models_blocking(hub, "/models", admin_token, timeout=CLOUD_TIMEOUT_SECONDS),
+            timeout=CLOUD_TIMEOUT_SECONDS,
+        )
+        if not isinstance(snapshot, dict) or type(snapshot.get("revision")) is not int:
+            raise FleetClientError("fleet hub model policy revision is missing")
+        revision = expected_revision
+        existing = _existing_seat(snapshot, seat)
+        resolved_reasoning = _preserved_field(reasoning, existing, "reasoning", default="none")
+        resolved_cli = _preserved_field(brigade_cli, existing, "brigade_cli")
+        resolved_t3 = _preserved_field(t3_instance_id, existing, "t3_instance_id")
+        resolved_tier = _preserved_field(t3_service_tier, existing, "t3_service_tier")
+        body = {
+            "action": "set",
+            "provider": provider,
+            "model": model,
+            "seat": seat,
+            "enabled": enabled,
+            "limit": limit,
+            "notes": notes,
+            "reasoning": resolved_reasoning,
+            "brigade_cli": resolved_cli,
+            "t3_instance_id": resolved_t3,
+            "t3_service_tier": resolved_tier,
+            "expected_revision": revision,
+        }
         status, payload = _run_with_deadline(
-            lambda: _post_model_policy_blocking(hub, admin_token, body, timeout=CLOUD_TIMEOUT_SECONDS),
+            lambda: _client._post_model_policy_blocking(hub, admin_token, body, timeout=CLOUD_TIMEOUT_SECONDS),
             timeout=CLOUD_TIMEOUT_SECONDS,
         )
     except Exception as exc:

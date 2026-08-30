@@ -143,6 +143,9 @@ _CLOUD_API_EXPORTS = frozenset(
     {
         "CloudDecision",
         "ModelLeaseDecision",
+        "_get_models_blocking",
+        "_post_cloud_blocking",
+        "_post_model_policy_blocking",
         "_cloud_op",
         "acquire_model_lease",
         "admit_cloud",
@@ -165,13 +168,6 @@ def __getattr__(name: str) -> Any:
 
         return getattr(fleet_client_cloud, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def _post_cloud_blocking(hub_url: str, token: str, body: dict[str, Any], *, timeout: float) -> tuple[int, Any]:
-    """Compatibility seam for callers and tests that patch cloud transport."""
-    from .fleet_client_cloud import _post_cloud_blocking as post
-
-    return post(hub_url, token, body, timeout=timeout)
 
 
 _SPOOL_PROCESS_LOCK = threading.Lock()

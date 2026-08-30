@@ -1,4 +1,3 @@
-"""Run orchestration, health routing, and SIGTERM handling."""
 # ruff: noqa: F401
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ from functools import partial, wraps
 from json import JSONDecoder
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
-from uuid import uuid4
 
 from .. import agents
 from .. import codex_appserver
@@ -62,7 +60,7 @@ from ..route_policy import (
     worker_skill_policy_constraint,
 )
 
-from . import briefs, run_io, planning, prompts, artifacts
+from . import briefs, run_io, planning, prompts, artifacts, model_admission
 
 
 @dataclass(frozen=True)
@@ -94,6 +92,9 @@ def resolve_fleet_model_policy(
     from ..aboyeur_model_policy import resolve_fleet_model_policy as _resolve
 
     return _resolve(roster, worker=worker, model_override=model_override, snapshot=snapshot)
+
+
+_roster_with_admission = model_admission.roster_payload
 
 
 @contextmanager
@@ -486,14 +487,11 @@ def run(
     output_dir = output_dir.expanduser() if output_dir is not None else None
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
     direct_worker = worker is not None
-    # The command-line sandbox override is part of the effective isolation input,
-    # so seat-health preflight must judge it rather than the static declaration.
+    admission_coordinator = model_admission.RuntimeAdmissionCoordinator.for_run(output_dir)
+    # Judge the command-line sandbox override rather than the static declaration.
     effective_sandbox = sandbox if sandbox is not None else ("read-only" if read_only else None)
     durable_enrollment_expected = False
-
-    # What the roster/flag asked for vs what dispatch actually ran. `used` stays
-    # None until dispatch resolves it, so a run that dies before dispatch reads
-    # as "requested dag, never got there" rather than falsely claiming a mode.
+    # Keep requested and effective scheduler state distinct until dispatch.
     scheduler_resolution: dict[str, object] = {
         "requested": scheduler,
         "used": None,
@@ -503,7 +501,6 @@ def run(
     transport_routing_payload: dict[str, object] | None = None
     quarantine_state = seat_health_policy.SeatQuarantineState()
     active_health_probe = seat_health.SeatHealthProbe(collect_executable_version=False)
-
     model_policy = resolve_fleet_model_policy(
         roster,
         worker=worker,
@@ -520,7 +517,7 @@ def run(
                 output_dir,
                 seat_routing=[dict(decision) for decision in roster.seat_routing],
             )
-        run_io._write_json(output_dir / "roster.json", artifacts._roster_payload(roster))
+        run_io._write_json(output_dir / "roster.json", _roster_with_admission(roster, model_policy.receipt))
     if model_policy.error is not None:
         policy_error = model_policy.error
         if output_dir is not None and not (output_dir / "run.json").is_file():
@@ -553,8 +550,17 @@ def run(
 
     @contextmanager
     def lease_model_agent(agent: Agent) -> Iterator[str | None]:
+        nonlocal roster
         if model_policy.receipt.get("state") != "authoritative":
             yield None
+            return
+        runtime = admission_coordinator.admit(agent.name, model_policy.receipt)
+        if runtime.target is not None:
+            roster = admission_coordinator.attach_target(roster, agent.name, runtime.target)
+        if runtime.records and output_dir is not None:
+            model_admission.persist(output_dir, roster, model_policy.receipt)
+        if runtime.error is not None:
+            yield f"fleet model policy denied seat {agent.name!r}: {runtime.error}"
             return
         decision = fleet_client.acquire_model_lease(
             agent.name,
@@ -749,6 +755,7 @@ def run(
             verification_contract_payload=verification_contract_payload,
             run_budget_payload=run_budget_payload,
         )
+        run_io._write_json(output_dir / "roster.json", _roster_with_admission(roster, model_policy.receipt))
     if code_graph is None:
         code_graph = briefs.code_graph_brief(cwd, task) if code_graph_enabled else briefs.CodeGraphBrief(attached=False)
     if drift_impact is None:
@@ -788,7 +795,7 @@ def run(
         if code_graph_delta is None and cwd is not None:
             code_graph_delta_before = graphtrail_delta.capture_before(cwd, output_dir)
             code_graph_delta = code_graph_delta_before
-        run_io._write_json(output_dir / "roster.json", artifacts._roster_payload(roster))
+        run_io._write_json(output_dir / "roster.json", _roster_with_admission(roster, model_policy.receipt))
         run_io._write_json(
             output_dir / "run.json",
             _payload(

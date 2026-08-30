@@ -669,3 +669,267 @@ def test_worker_output_overflow_kills_group_and_caps_all_artifacts(tmp_path, mon
     assert len(agent_recorded.text.encode("utf-8")) <= message_envelope.MESSAGE_WRAP_MAX_BYTES
     assert len((tmp_path / agent_recorded.stdout_log).read_bytes()) <= proc.MAX_CAPTURE_BYTES
     assert len((tmp_path / agent_recorded.stderr_log).read_bytes()) <= proc.MAX_CAPTURE_BYTES
+
+
+def test_dispatch_does_not_invoke_run_agent_when_admission_lease_denies(monkeypatch, tmp_path):
+    calls: list[str] = []
+
+    def fake_run_agent(*args, **kwargs):  # noqa: ARG001
+        calls.append("run_agent")
+        return agents.AgentResult(text="should not run", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+
+    @contextmanager
+    def deny_lease(agent):  # noqa: ARG001
+        yield "fleet model policy denied seat 'coder': permanently-retired"
+
+    results = run_transport.dispatch(
+        [Assignment(worker="coder", task="implement it")],
+        _roster(),
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path,
+        model_lease=deny_lease,
+    )
+
+    assert results[0].ok is False
+    assert results[0].failure_kind == "fleet-model-policy"
+    assert results[0].failure_phase == "preflight"
+    assert calls == []
+
+
+def test_admission_pruned_retired_seat_cannot_be_dispatched(monkeypatch, tmp_path):
+    from brigade import aboyeur
+    from brigade import fleet_model_roster
+
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="claude", role="plan", model="opus-5", fallback=("coder",)),
+            "coder": Agent(name="coder", cli="codex", role="write", model="gpt-5.5"),
+        },
+        max_workers=2,
+    )
+    snapshot = {
+        "schema": fleet_model_roster.ROSTER_SCHEMA,
+        "state": "authoritative",
+        "source": "hub",
+        "revision": 2,
+        "roster_revision": 2,
+        "document_sha256": "sha256:" + ("ab" * 32),
+        "expires_at": "2026-08-30T14:15:00Z",
+        "seats": [
+            {
+                "seat": "chef",
+                "provider": "anthropic",
+                "model": "opus-5",
+                "reasoning": "high",
+                "enabled": True,
+                "bindings": {
+                    "brigade": {"cli": "claude"},
+                    "t3_fleet": {"instance_id": "claude", "service_tier": None},
+                },
+            }
+        ],
+        "consumer_defaults": {"brigade-run": "chef"},
+        "retired_models": [],
+    }
+    resolution = aboyeur.resolve_fleet_model_policy(roster, snapshot=snapshot)
+    assert resolution.error is None
+    assert "coder" not in resolution.roster.agents
+    calls: list[str] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        calls.append(cli_ref)
+        return agents.AgentResult(text="planned", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+    results = run_transport.dispatch(
+        [Assignment(worker="chef", task="plan it")],
+        resolution.roster,
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path,
+    )
+    assert results[0].ok is True
+    assert calls == ["claude"]
+    assert "coder" not in calls
+    assert "coder" not in resolution.roster.agents
+
+
+def test_dispatch_receives_hub_approved_model_reasoning_and_binding(monkeypatch, tmp_path):
+    from brigade import aboyeur
+    from brigade import fleet_model_roster
+
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="claude", role="plan", model="sonnet-4"),
+        },
+        max_workers=1,
+    )
+    snapshot = {
+        "schema": fleet_model_roster.ROSTER_SCHEMA,
+        "state": "authoritative",
+        "source": "hub",
+        "revision": 5,
+        "roster_revision": 5,
+        "document_sha256": "sha256:" + ("cd" * 32),
+        "expires_at": "2026-08-30T14:15:00Z",
+        "seats": [
+            {
+                "seat": "chef",
+                "provider": "anthropic",
+                "model": "opus-5",
+                "reasoning": "high",
+                "enabled": True,
+                "bindings": {
+                    "brigade": {"cli": "claude"},
+                    "t3_fleet": {"instance_id": "claude", "service_tier": None},
+                },
+            }
+        ],
+        "consumer_defaults": {"brigade-run": "chef"},
+        "retired_models": [],
+    }
+    resolution = aboyeur.resolve_fleet_model_policy(roster, snapshot=snapshot)
+    assert resolution.error is None
+    agent = resolution.roster.agents["chef"]
+    assert agent.cli == "claude"
+    assert agent.model == "opus-5"
+    assert agent.reasoning == "high"
+    calls: list[dict[str, object]] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        calls.append({"cli": cli_ref, "model": kwargs.get("model"), "reasoning": kwargs.get("reasoning")})
+        return agents.AgentResult(text="planned", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+    results = run_transport.dispatch(
+        [Assignment(worker="chef", task="plan it")],
+        resolution.roster,
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path,
+    )
+    assert results[0].ok is True
+    assert calls == [{"cli": "claude", "model": "opus-5", "reasoning": "high"}]
+
+
+def test_dispatch_does_not_run_when_versioned_custom_command_or_model_override_is_denied(monkeypatch, tmp_path):
+    from brigade import aboyeur
+    from brigade import fleet_model_roster
+
+    snapshot = {
+        "schema": fleet_model_roster.ROSTER_SCHEMA,
+        "state": "authoritative",
+        "source": "hub",
+        "revision": 5,
+        "roster_revision": 5,
+        "document_sha256": "sha256:" + ("cd" * 32),
+        "expires_at": "2026-08-30T14:15:00Z",
+        "seats": [
+            {
+                "seat": "chef",
+                "provider": "anthropic",
+                "model": "opus-5",
+                "reasoning": "high",
+                "enabled": True,
+                "bindings": {
+                    "brigade": {"cli": "claude"},
+                    "t3_fleet": {"instance_id": "claude", "service_tier": None},
+                },
+            }
+        ],
+        "consumer_defaults": {"brigade-run": "chef"},
+        "retired_models": [],
+    }
+    custom = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(
+                name="chef",
+                cli="claude",
+                role="plan",
+                model="opus-5",
+                command=("custom-claude",),
+            ),
+        },
+        max_workers=1,
+    )
+    denied = aboyeur.resolve_fleet_model_policy(custom, snapshot=snapshot)
+    assert denied.error is not None
+    calls: list[str] = []
+
+    def fake_run_agent(*args, **kwargs):  # noqa: ARG001
+        calls.append("run_agent")
+        return agents.AgentResult(text="no", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+
+    @contextmanager
+    def deny_lease(agent):  # noqa: ARG001
+        yield denied.error
+
+    results = run_transport.dispatch(
+        [Assignment(worker="chef", task="plan it")],
+        denied.roster,
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path / "custom",
+        model_lease=deny_lease,
+    )
+    assert results[0].ok is False
+    assert results[0].failure_kind == "fleet-model-policy"
+    assert results[0].failure_phase == "preflight"
+    assert calls == []
+
+    override = aboyeur.resolve_fleet_model_policy(
+        Roster(
+            orchestrator="chef",
+            agents={"chef": Agent(name="chef", cli="claude", role="plan", model="opus-5")},
+            max_workers=1,
+        ),
+        worker="chef",
+        model_override="sonnet-4",
+        snapshot=snapshot,
+    )
+    assert override.error is not None
+    override_calls: list[str] = []
+    monkeypatch.setattr(
+        agents,
+        "run_agent",
+        lambda *args, **kwargs: override_calls.append("run_agent") or agents.AgentResult(text="no", ok=True),
+    )
+
+    @contextmanager
+    def deny_override(agent):  # noqa: ARG001
+        yield override.error
+
+    override_results = run_transport.dispatch(
+        [Assignment(worker="chef", task="plan it")],
+        override.roster,
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path / "override",
+        model_lease=deny_override,
+    )
+    assert override_results[0].ok is False
+    assert override_results[0].failure_kind == "fleet-model-policy"
+    assert override_calls == []

@@ -307,6 +307,22 @@ def _request(hub, method: str, path: str, *, token: str | None = None, body: dic
     return result
 
 
+def _models_revision(hub, *, token: str = ADMIN_TOKEN) -> int:
+    status, payload = _request(hub, "GET", "/models", token=token)
+    assert status == 200
+    return int(payload.get("revision", 1))
+
+
+def _admin_set_model(hub, **fields: object):
+    body = {"action": "set", "expected_revision": _models_revision(hub), "reasoning": "none", **fields}
+    return _request(hub, "POST", "/models", token=ADMIN_TOKEN, body=body)
+
+
+def _policy_revision(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT revision FROM model_roster_meta WHERE singleton=1").fetchone()
+    return int(row[0]) if row is not None else 1
+
+
 def test_cloud_http_routes_require_valid_auth_and_keep_dashboard_read_only(tmp_path):
     with _hub(tmp_path) as hub:
         assert _request(hub, "GET", "/cloud")[0] == 401
@@ -320,7 +336,12 @@ def test_cloud_http_routes_require_valid_auth_and_keep_dashboard_read_only(tmp_p
         assert _request(hub, "GET", "/cloud", token=node_token)[0] == 401
         status, snapshot = _request(hub, "GET", "/cloud", token=ADMIN_TOKEN)
         assert status == 200 and snapshot["leases"] == []
-        assert _request(hub, "GET", "/models", token=ADMIN_TOKEN) == (200, {"models": []})
+        status, models = _request(hub, "GET", "/models", token=ADMIN_TOKEN)
+        assert status == 200
+        assert models["models"] == []
+        assert models["schema"] == "brigade.fleet_model_roster.v1"
+        assert "audience_node_id" not in models
+        assert "mac" not in models
         # Dashboard routes stay GET-only and cannot turn a bearer into a cloud write.
         assert _request(hub, "POST", "/", token=ADMIN_TOKEN, body={})[0] == 404
 
@@ -347,7 +368,12 @@ def test_cloud_http_node_reads_and_admin_model_policy_mutation(tmp_path):
             db.close()
         status, snapshot = _request(hub, "GET", "/cloud", token=node_token)
         assert status == 200 and snapshot["leases"] == [] and snapshot["policy"]["global_limit"] == 4
-        assert _request(hub, "GET", "/models", token=node_token) == (200, {"models": []})
+        status, empty = _request(hub, "GET", "/models", token=node_token)
+        assert status == 200
+        assert empty["models"] == []
+        assert empty["schema"] == "brigade.fleet_model_roster.v1"
+        assert empty["audience_node_id"] == NODE_A
+        assert empty["mac"]["algorithm"] == "hmac-sha256-node-bearer-v1"
         status, payload = _request(
             hub,
             "POST",
@@ -356,52 +382,36 @@ def test_cloud_http_node_reads_and_admin_model_policy_mutation(tmp_path):
             body={"action": "set", "provider": "openai", "model": "gpt-5.6-terra", "seat": "coder", "enabled": True},
         )
         assert status == 403 and "admin token" in payload["error"]
-        status, payload = _request(
+        status, payload = _admin_set_model(
             hub,
-            "POST",
-            "/models",
-            token=ADMIN_TOKEN,
-            body={
-                "action": "set",
+            provider="openai",
+            model="gpt-5.6-terra",
+            seat="coder",
+            enabled=True,
+            limit=2,
+            notes="primary worker",
+        )
+        assert status == 200 and payload["policy"]["provider"] == "openai"
+        assert payload["policy"]["model"] == "gpt-5.6-terra"
+        assert payload["policy"]["seat"] == "coder"
+        assert payload["policy"]["enabled"] is True
+        assert payload["policy"]["limit"] == 2
+        assert payload["policy"]["notes"] == "primary worker"
+        status, payload = _admin_set_model(hub, provider="openai", model="gpt-5.6-terra", seat="coder", enabled=False)
+        assert status == 200 and payload["policy"]["enabled"] is False
+        status, listed = _request(hub, "GET", "/models", token=node_token)
+        assert status == 200
+        assert listed["models"] == [
+            {
                 "provider": "openai",
                 "model": "gpt-5.6-terra",
                 "seat": "coder",
-                "enabled": True,
-                "limit": 2,
-                "notes": "primary worker",
-            },
-        )
-        assert status == 200 and payload["policy"] == {
-            "provider": "openai",
-            "model": "gpt-5.6-terra",
-            "seat": "coder",
-            "enabled": True,
-            "limit": 2,
-            "notes": "primary worker",
-        }
-        status, payload = _request(
-            hub,
-            "POST",
-            "/models",
-            token=ADMIN_TOKEN,
-            body={"action": "set", "provider": "openai", "model": "gpt-5.6-terra", "seat": "coder", "enabled": False},
-        )
-        assert status == 200 and payload["policy"]["enabled"] is False
-        assert _request(hub, "GET", "/models", token=node_token) == (
-            200,
-            {
-                "models": [
-                    {
-                        "provider": "openai",
-                        "model": "gpt-5.6-terra",
-                        "seat": "coder",
-                        "enabled": False,
-                        "limit": None,
-                        "notes": None,
-                    }
-                ]
-            },
-        )
+                "enabled": False,
+                "limit": None,
+                "notes": None,
+            }
+        ]
+        assert listed["schema"] == "brigade.fleet_model_roster.v1"
 
 
 @pytest.mark.parametrize(
@@ -449,8 +459,16 @@ def test_admin_cloud_lease_writes_need_allow_admin_writes(tmp_path):
 def test_model_policy_cli_set_uses_bounded_admin_client(monkeypatch, capsys):
     captured: dict[str, object] = {}
 
-    def _set(provider, model, seat, *, enabled, limit=None, notes=None):
-        captured.update(provider=provider, model=model, seat=seat, enabled=enabled, limit=limit, notes=notes)
+    def _set(provider, model, seat, *, enabled, limit=None, notes=None, expected_revision):
+        captured.update(
+            provider=provider,
+            model=model,
+            seat=seat,
+            enabled=enabled,
+            limit=limit,
+            notes=notes,
+            expected_revision=expected_revision,
+        )
         return {"provider": provider, "model": model, "seat": seat, "enabled": enabled, "limit": limit, "notes": notes}
 
     monkeypatch.setattr(fleet_client, "set_model_policy", _set)
@@ -468,6 +486,8 @@ def test_model_policy_cli_set_uses_bounded_admin_client(monkeypatch, capsys):
                 "2",
                 "--notes",
                 "paused",
+                "--expect-revision",
+                "7",
                 "--json",
             ]
         )
@@ -480,8 +500,61 @@ def test_model_policy_cli_set_uses_bounded_admin_client(monkeypatch, capsys):
         "enabled": False,
         "limit": 2,
         "notes": "paused",
+        "expected_revision": 7,
     }
     assert '"enabled": false' in capsys.readouterr().out
+
+
+def test_model_policy_cli_set_exposes_exact_fields_and_expected_revision(monkeypatch, capsys):
+    captured: dict[str, object] = {}
+
+    def _set(provider, model, seat, **fields):
+        captured.update(provider=provider, model=model, seat=seat, **fields)
+        return {
+            "provider": provider,
+            "model": model,
+            "seat": seat,
+            "enabled": fields.get("enabled"),
+            "reasoning": fields.get("reasoning") or "high",
+            "brigade_cli": fields.get("brigade_cli") or "cursor-agent",
+            "t3_instance_id": fields.get("t3_instance_id") or "cursor",
+            "t3_service_tier": fields.get("t3_service_tier") or "standard",
+        }
+
+    monkeypatch.setattr(fleet_client, "set_model_policy", _set)
+    assert (
+        cli.main(
+            [
+                "fleet",
+                "models",
+                "set",
+                "cursor",
+                "cursor-grok-4.6-high-fast",
+                "cursor_grok",
+                "--enable",
+                "--reasoning",
+                "high",
+                "--brigade-cli",
+                "cursor-agent",
+                "--t3-instance-id",
+                "cursor",
+                "--t3-service-tier",
+                "standard",
+                "--expect-revision",
+                "4",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert captured["reasoning"] == "high"
+    assert captured["brigade_cli"] == "cursor-agent"
+    assert captured["t3_instance_id"] == "cursor"
+    assert captured["t3_service_tier"] == "standard"
+    assert captured["expected_revision"] == 4
+    out = capsys.readouterr().out
+    assert '"reasoning": "high"' in out
+    assert '"brigade_cli": "cursor-agent"' in out
 
 
 def test_two_seats_can_share_one_model(tmp_path):
@@ -492,19 +565,13 @@ def test_two_seats_can_share_one_model(tmp_path):
         finally:
             db.close()
         for seat in ("coder", "reviewer"):
-            status, _payload = _request(
+            status, _payload = _admin_set_model(
                 hub,
-                "POST",
-                "/models",
-                token=ADMIN_TOKEN,
-                body={
-                    "action": "set",
-                    "provider": "openai",
-                    "model": "gpt-5.6-terra",
-                    "seat": seat,
-                    "enabled": True,
-                    "limit": 1,
-                },
+                provider="openai",
+                model="gpt-5.6-terra",
+                seat=seat,
+                enabled=True,
+                limit=1,
             )
             assert status == 200
         status, payload = _request(hub, "GET", "/models", token=node_token)
@@ -517,38 +584,59 @@ def test_two_seats_can_share_one_model(tmp_path):
 def test_changing_seat_route_replaces_only_that_seat(tmp_path):
     with _hub(tmp_path) as hub:
         for seat, model in (("coder", "gpt-5.6-terra"), ("reviewer", "gpt-5.6-terra")):
-            _request(
-                hub,
-                "POST",
-                "/models",
-                token=ADMIN_TOKEN,
-                body={
-                    "action": "set",
-                    "provider": "openai",
-                    "model": model,
-                    "seat": seat,
-                    "enabled": True,
-                },
-            )
-        status, _payload = _request(
-            hub,
-            "POST",
-            "/models",
-            token=ADMIN_TOKEN,
-            body={
-                "action": "set",
-                "provider": "openai",
-                "model": "gpt-5.5",
-                "seat": "coder",
-                "enabled": True,
-            },
-        )
+            _admin_set_model(hub, provider="openai", model=model, seat=seat, enabled=True)
+        status, _payload = _admin_set_model(hub, provider="openai", model="gpt-5.6-sol", seat="coder", enabled=True)
         assert status == 200
         status, payload = _request(hub, "GET", "/models", token=ADMIN_TOKEN)
         assert status == 200
         by_seat = {row["seat"]: row for row in payload["models"] if row.get("seat") is not None}
-        assert by_seat["coder"]["model"] == "gpt-5.5"
+        assert by_seat["coder"]["model"] == "gpt-5.6-sol"
         assert by_seat["reviewer"]["model"] == "gpt-5.6-terra"
+
+
+def test_set_model_policy_fetches_revision_and_sends_reasoning_bindings(monkeypatch):
+    posted: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub", "admin_token": "admin-token", "node_token": ""},
+    )
+
+    def _deadline(fn, *, timeout):  # noqa: ARG001
+        return fn()
+
+    monkeypatch.setattr(fleet_client, "_run_with_deadline", _deadline)
+
+    def _get(hub_url, path, token, *, timeout):  # noqa: ARG001
+        assert path == "/models"
+        assert token == "admin-token"
+        return {"schema": "brigade.fleet_model_roster.v1", "revision": 7, "models": []}
+
+    monkeypatch.setattr(fleet_client, "_get_models_blocking", _get)
+
+    def _post(hub_url, token, body, *, timeout):  # noqa: ARG001
+        posted.update(body)
+        return 200, {
+            "policy": {
+                "provider": body["provider"],
+                "model": body["model"],
+                "seat": body["seat"],
+                "enabled": body["enabled"],
+                "limit": body.get("limit"),
+                "notes": body.get("notes"),
+            }
+        }
+
+    monkeypatch.setattr(fleet_client, "_post_model_policy_blocking", _post)
+    policy = fleet_client.set_model_policy("openai", "gpt-5.6-terra", "coder", enabled=True, expected_revision=7)
+    assert policy["seat"] == "coder"
+    assert posted["action"] == "set"
+    assert posted["expected_revision"] == 7
+    assert posted["reasoning"] == "none"
+    assert posted["brigade_cli"] == ""
+    assert posted["t3_instance_id"] == ""
+    assert posted["t3_service_tier"] == ""
 
 
 def test_set_model_policy_fails_closed_on_oversized_response(monkeypatch):
@@ -571,7 +659,7 @@ def test_set_model_policy_fails_closed_on_oversized_response(monkeypatch):
     )
     monkeypatch.setattr(fleet_client, "_hub_open", lambda _request, timeout: _OversizedResponse())
     with pytest.raises(fleet_client.FleetClientError):
-        fleet_client.set_model_policy("openai", "gpt-5.6-terra", "coder", enabled=True)
+        fleet_client.set_model_policy("openai", "gpt-5.6-terra", "coder", enabled=True, expected_revision=1)
 
 
 def test_idempotent_admit_refuses_released_and_expired_leases(conn, monkeypatch):
@@ -608,7 +696,16 @@ def test_model_policy_limit_is_an_atomic_fenced_expiring_lease(conn, monkeypatch
     monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: clock["now"])
     fleet_hub.set_model_policy(
         conn,
-        {"action": "set", "provider": "openai", "model": "gpt-5.6-terra", "seat": "coder", "enabled": True, "limit": 0},
+        {
+            "action": "set",
+            "expected_revision": _policy_revision(conn),
+            "provider": "openai",
+            "model": "gpt-5.6-terra",
+            "seat": "coder",
+            "enabled": True,
+            "limit": 0,
+            "reasoning": "none",
+        },
     )
     first = {
         "action": "acquire",
@@ -626,7 +723,16 @@ def test_model_policy_limit_is_an_atomic_fenced_expiring_lease(conn, monkeypatch
     )
     fleet_hub.set_model_policy(
         conn,
-        {"action": "set", "provider": "openai", "model": "gpt-5.6-terra", "seat": "coder", "enabled": True, "limit": 1},
+        {
+            "action": "set",
+            "expected_revision": _policy_revision(conn),
+            "provider": "openai",
+            "model": "gpt-5.6-terra",
+            "seat": "coder",
+            "enabled": True,
+            "limit": 1,
+            "reasoning": "none",
+        },
     )
     assert fleet_hub.handle_model_policy(conn, first, caller_node=NODE_A)[0] == 200
     second = dict(first, lease_id="model-b", holder="fence-b")
@@ -1536,3 +1642,220 @@ def test_grokbot_refuses_unscoped_null_queue_rows(conn):
     ).fetchone()
     assert after == before
     assert conn.execute("SELECT COUNT(*) FROM grokbot_jobs WHERE queue_id IS NOT NULL").fetchone()[0] == 0
+
+
+def test_grokbot_ack_cancel_emits_external_cancel_acknowledged(conn):
+    from brigade import fleet_hub_grokbot
+
+    _enroll_actors(conn)
+    job_id = "grokbot-" + "7" * 24
+    queued = fleet_hub_grokbot.handle_grokbot(
+        conn, _grokbot_enqueue(job_id, "7" * 64, operation_id="op-enq-ack"), caller_node=FEED_NODE
+    )[1]["job"]
+    claimed = fleet_hub_grokbot.handle_grokbot(
+        conn, _claim_body(job_id, lease_id="lease-ack", operation_id="op-claim-ack"), caller_node=WORKER_NODE
+    )
+    generation = claimed[1]["lease_generation"]
+    started = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        _holder_body(
+            "start",
+            job_id,
+            revision=claimed[1]["job"]["item_revision"],
+            generation=generation,
+            lease_id="lease-ack",
+            operation_id="op-start-ack",
+        ),
+        caller_node=WORKER_NODE,
+    )
+    canceled = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        {
+            "action": "cancel",
+            "job_id": job_id,
+            "expected_item_revision": started[1]["job"]["item_revision"],
+            "operation_id": "op-cancel-ack",
+        },
+        caller_node=OPERATOR_NODE,
+    )
+    assert canceled[0] == 200
+    acknowledged = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        _holder_body(
+            "ack-cancel",
+            job_id,
+            revision=canceled[1]["job"]["item_revision"],
+            generation=generation,
+            lease_id="lease-ack",
+            operation_id="op-ack-cancel",
+        ),
+        caller_node=WORKER_NODE,
+    )
+    assert acknowledged[0] == 200
+    assert acknowledged[1]["job"]["state"] == "canceled"
+    states = [
+        row[0]
+        for row in conn.execute("SELECT state FROM events WHERE run_id=? ORDER BY sequence", (job_id,)).fetchall()
+    ]
+    assert states[-1] == "external.cancel-acknowledged"
+    assert "external.canceled" not in states
+    assert queued["job_id"] == job_id
+
+
+def test_grokbot_lifecycle_retry_records_one_sanitized_event_per_revision(conn):
+    from brigade import fleet_hub_grokbot
+
+    _enroll_actors(conn)
+    job_id = "grokbot-" + "8" * 24
+    secret_task = "implement the secret task and paste the report body"
+    enqueue = _grokbot_enqueue(job_id, "8" * 64, operation_id="op-enq-retry")
+    enqueue["label"] = secret_task
+    queued = fleet_hub_grokbot.handle_grokbot(conn, enqueue, caller_node=FEED_NODE)[1]["job"]
+    assert queued["label"] == secret_task
+    claimed = fleet_hub_grokbot.handle_grokbot(
+        conn, _claim_body(job_id, lease_id="lease-retry", operation_id="op-claim-retry"), caller_node=WORKER_NODE
+    )
+    assert claimed[0] == 200
+    job = fleet_hub_grokbot._require_job(conn, job_id)
+    before = conn.execute("SELECT COUNT(*) FROM events WHERE run_id=?", (job_id,)).fetchone()[0]
+    fleet_hub_grokbot._record_event(conn, job, "claimed")
+    mutated = dict(job)
+    mutated["artifact_ref"] = "https://github.com/example/brigade/pull/99"
+    mutated["claimant_worker"] = "stolen-worker"
+    mutated["label"] = secret_task
+    fleet_hub_grokbot._record_event(conn, mutated, "claimed")
+    rows = conn.execute("SELECT * FROM events WHERE run_id=?", (job_id,)).fetchall()
+    assert len(rows) == before
+    dumped = json.dumps(rows)
+    assert secret_task not in dumped
+    assert "report body" not in dumped
+    payload_path = json.dumps(fleet_hub_grokbot._job_payload(mutated))
+    assert secret_task in payload_path
+    first = fleet_hub.store_events(
+        conn,
+        {
+            "node_id": NODE_A,
+            "run_id": "generic-run",
+            "sequence": 1,
+            "digest": "digest-a",
+            "state": "run.started",
+            "ts": "2026-08-30T00:00:00+00:00",
+        },
+    )
+    second = fleet_hub.store_events(
+        conn,
+        {
+            "node_id": NODE_A,
+            "run_id": "generic-run",
+            "sequence": 1,
+            "digest": "digest-b",
+            "state": "run.started",
+            "ts": "2026-08-30T00:00:01+00:00",
+        },
+    )
+    assert first["accepted"] == 1 and second["accepted"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM events WHERE run_id='generic-run'").fetchone()[0] == 2
+
+
+def test_node_cannot_ingest_reserved_grokbot_harness(conn):
+    before = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    poison = {
+        "node_id": NODE_A,
+        "run_id": "poison-run",
+        "sequence": 1,
+        "digest": "digest-poison",
+        "repo": "example/brigade",
+        "seat": "implementation-worker",
+        "harness": "grokbot",
+        "state": "external.queued",
+        "ts": "2026-08-30T00:00:00+00:00",
+    }
+    with pytest.raises(fleet_hub.FleetHubError, match="grokbot"):
+        fleet_hub.store_events(conn, poison, caller_node=NODE_A)
+    assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == before
+    assert conn.execute("SELECT COUNT(*) FROM events WHERE harness='grokbot'").fetchone()[0] == 0
+
+
+def test_grokbot_event_rejects_item_revision_sequence_mismatch(conn):
+    from brigade import fleet_hub_grokbot
+
+    _enroll_actors(conn)
+    job_id = "grokbot-" + "9" * 24
+    queued = fleet_hub_grokbot.handle_grokbot(
+        conn, _grokbot_enqueue(job_id, "9" * 64, operation_id="op-enq-mismatch"), caller_node=FEED_NODE
+    )[1]["job"]
+    job = fleet_hub_grokbot._require_job(conn, job_id)
+    mismatched = dict(job)
+    mismatched["sequence"] = int(job["sequence"]) + 1
+    before = conn.execute("SELECT COUNT(*) FROM events WHERE run_id=?", (job_id,)).fetchone()[0]
+    with pytest.raises(fleet_hub.FleetHubError):
+        fleet_hub_grokbot._record_event(conn, mismatched, "queued")
+    assert conn.execute("SELECT COUNT(*) FROM events WHERE run_id=?", (job_id,)).fetchone()[0] == before
+    assert queued["item_revision"] == queued["sequence"] == 1
+
+
+def test_grokbot_enqueue_rejects_local_repository_path(conn):
+    from brigade import fleet_hub_grokbot
+
+    _enroll_actors(conn)
+    job_id = "grokbot-" + "a" * 24
+    body = _grokbot_enqueue(job_id, "a" * 64, operation_id="op-enq-local")
+    body["repository"] = "/tmp/local-brigade"
+    before_jobs = conn.execute("SELECT COUNT(*) FROM grokbot_jobs").fetchone()[0]
+    before_events = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    with pytest.raises(fleet_hub.FleetHubError, match="repository"):
+        fleet_hub_grokbot.handle_grokbot(conn, body, caller_node=FEED_NODE)
+    assert conn.execute("SELECT COUNT(*) FROM grokbot_jobs").fetchone()[0] == before_jobs
+    assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == before_events
+    assert conn.execute("SELECT COUNT(*) FROM grokbot_jobs WHERE job_id=?", (job_id,)).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM events WHERE run_id=?", (job_id,)).fetchone()[0] == 0
+
+
+def test_external_expired_is_terminal_and_releases_hub_capacity(conn):
+    from brigade import fleet_hub_grokbot
+
+    _enroll_actors(conn)
+    job_id = "grokbot-" + "e" * 24
+    queued = fleet_hub_grokbot.handle_grokbot(
+        conn, _grokbot_enqueue(job_id, "e" * 64, operation_id="op-enq-exp"), caller_node=FEED_NODE
+    )[1]["job"]
+    claimed = fleet_hub_grokbot.handle_grokbot(
+        conn, _claim_body(job_id, lease_id="lease-exp", operation_id="op-claim-exp"), caller_node=WORKER_NODE
+    )
+    assert claimed[0] == 200
+    assert fleet_hub.list_cloud_leases(conn)
+    conn.execute(
+        "UPDATE grokbot_jobs SET lease_expires_at=?, queued_at=? WHERE job_id=?",
+        ("2020-01-01T00:00:00+00:00", "2020-01-01T00:00:00+00:00", job_id),
+    )
+    conn.commit()
+    expired = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        {
+            "action": "expire",
+            "job_id": job_id,
+            "expected_item_revision": claimed[1]["job"]["item_revision"],
+            "operation_id": "op-expire-exp",
+        },
+        caller_node=OPERATOR_NODE,
+    )
+    assert expired[0] == 200 and expired[1]["expired"] is True
+    assert expired[1]["job"]["state"] == "expired"
+    states = [row[0] for row in conn.execute("SELECT state FROM events WHERE run_id=?", (job_id,)).fetchall()]
+    assert "external.expired" in states
+    assert "external.expired" in fleet_hub.TERMINAL_STATES
+    assert deck.is_terminal_state("external.expired") is True
+    snapshot = fleet_hub.cloud_snapshot(conn, deck.DeckConfig())
+    assert snapshot["grokbot"]["active"] == []
+    assert snapshot["grokbot"]["history"][0]["state"] == "expired"
+    grok = next(worker for worker in deck.cloud_workers_from_snapshot(snapshot) if worker.provider == "grok-bot")
+    assert grok.used == 0
+    assert grok.leases == ()
+    assert fleet_hub.list_cloud_leases(conn) == []
+    live_states = {row["state"] for row in fleet_hub.latest_status(conn, include_all=False) if row["run_id"] == job_id}
+    assert "external.expired" not in live_states
+    history_states = {
+        row["state"] for row in fleet_hub.latest_status(conn, include_all=True) if row["run_id"] == job_id
+    }
+    assert "external.expired" in history_states
+    assert queued["job_id"] == job_id

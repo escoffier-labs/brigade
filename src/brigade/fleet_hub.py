@@ -118,7 +118,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -202,6 +202,8 @@ TERMINAL_STATES = frozenset(
         "external.completed",
         "external.failed",
         "external.canceled",
+        "external.cancel-acknowledged",
+        "external.expired",
     }
 )
 
@@ -318,8 +320,12 @@ CREATE TABLE IF NOT EXISTS model_policy (
     seat TEXT NOT NULL PRIMARY KEY,
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
+    reasoning TEXT NOT NULL DEFAULT 'none',
     enabled INTEGER NOT NULL,
     limit_count INTEGER,
+    brigade_cli TEXT NOT NULL DEFAULT '',
+    t3_instance_id TEXT NOT NULL DEFAULT '',
+    t3_service_tier TEXT NOT NULL DEFAULT '',
     notes TEXT,
     updated_at TEXT NOT NULL
 );
@@ -348,7 +354,7 @@ _MODEL_POLICY_SAFE_FIELDS = frozenset({"provider", "model", "seat", "enabled", "
 _MODEL_POLICY_REQUEST_FIELDS = frozenset(
     {"action", "provider", "model", "seat", "enabled", "limit", "notes", "lease_id", "node_id", "holder", "ttl_seconds"}
 )
-MODEL_ACTIONS = frozenset({"set", "acquire", "release"})
+MODEL_ACTIONS = frozenset({"set", "set-default", "retire", "admit", "acquire", "release"})
 CLOUD_ACTIONS = frozenset({"admit", "bind", "renew", "release", "policy"})
 CLOUD_PROVIDER_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 CLOUD_PROVIDER_ALIASES = {
@@ -430,12 +436,8 @@ def _model_policy_table_needs_recreation(conn: sqlite3.Connection) -> bool:
     rows = conn.execute("PRAGMA table_info(model_policy)").fetchall()
     if not rows:
         return False
-    expected = {"seat", "provider", "model", "enabled", "limit_count", "notes", "updated_at"}
-    names = {str(row[1]) for row in rows}
-    if names != expected:
-        return True
     pk = {str(row[1]) for row in rows if row[5]}
-    return pk != {"seat"}
+    return bool(pk) and pk != {"seat"}
 
 
 # Intra-process serialization for schema init, in addition to the
@@ -531,6 +533,10 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     from . import fleet_hub_sessions
 
     fleet_hub_sessions.init_schema(conn)
+    # v14 -> v15: versioned model roster, permanent retirements, admission audit.
+    from . import fleet_hub_model_roster
+
+    fleet_hub_model_roster.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -697,6 +703,8 @@ def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str 
                 raise FleetHubForbidden(
                     f"event node_id {event['node_id']!r} does not match the caller's node token ({caller_node})"
                 )
+            if event.get("harness") == "grokbot":
+                raise FleetHubError("event field 'harness' is reserved for hub-owned grokbot lifecycle")
     accepted = 0
     duplicate = 0
     received_at = _utc_now()
@@ -1418,103 +1426,18 @@ def _set_cloud_policy(
 
 def set_model_policy(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
     """Upsert one admin-controlled seat policy and return safe fields."""
-    request = _validate_model_policy_request(raw)
-    conn.execute(
-        "INSERT INTO model_policy (seat, provider, model, enabled, limit_count, notes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(seat) DO UPDATE SET provider=excluded.provider, model=excluded.model, enabled=excluded.enabled, "
-        "limit_count=excluded.limit_count, notes=excluded.notes, updated_at=excluded.updated_at",
-        (
-            request["seat"],
-            request["provider"],
-            request["model"],
-            int(request["enabled"]),
-            request["limit"],
-            request["notes"],
-            _utc_now(),
-        ),
-    )
-    conn.commit()
-    return {
-        "seat": request["seat"],
-        "provider": request["provider"],
-        "model": request["model"],
-        "enabled": request["enabled"],
-        "limit": request["limit"],
-        "notes": request["notes"],
-    }
+    from . import fleet_hub_model_roster
+
+    return fleet_hub_model_roster.set_model_policy(conn, raw)
 
 
 def handle_model_policy(
     conn: sqlite3.Connection, raw: Any, *, caller_node: str | None = None
 ) -> tuple[int, dict[str, Any]]:
-    """Mutate policy as admin or atomically fence one policy-seat capacity lease."""
-    action = raw.get("action") if isinstance(raw, dict) else None
-    if action == "set":
-        if caller_node is not None:
-            raise FleetHubForbidden("the admin token is required to mutate model policy")
-        return 200, {"updated": True, "policy": set_model_policy(conn, raw)}
-    request = _validate_model_lease_request(raw)
-    if caller_node is not None and request["node_id"] != caller_node:
-        raise FleetHubForbidden("model lease node_id does not match the caller's node token")
-    now = _now_epoch()
-    if request["action"] == "release":
-        cursor = conn.execute(
-            "UPDATE model_leases SET released_at=? WHERE lease_id=? AND owner_node=? AND holder_token=? AND released_at IS NULL",
-            (_epoch_to_iso(now), request["lease_id"], request["node_id"], request["holder"]),
-        )
-        conn.commit()
-        return (
-            (200, {"released": True})
-            if cursor.rowcount == 1
-            else (409, {"released": False, "error": "model lease is missing or fenced"})
-        )
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        conn.execute(
-            "UPDATE model_leases SET released_at=? WHERE released_at IS NULL AND expires_at <= ?",
-            (_epoch_to_iso(now), now),
-        )
-        policy = conn.execute(
-            "SELECT provider, model, enabled, limit_count FROM model_policy WHERE seat=?", (request["seat"],)
-        ).fetchone()
-        if (
-            policy is None
-            or str(policy[0]) != request["provider"]
-            or str(policy[1]) != request["model"]
-            or not bool(policy[2])
-        ):
-            conn.commit()
-            return 409, {"acquired": False, "error": "model policy denied lease"}
-        limit = policy[3]
-        used = conn.execute(
-            "SELECT COUNT(*) FROM model_leases WHERE seat=? AND released_at IS NULL", (request["seat"],)
-        ).fetchone()[0]
-        if limit is not None and int(used) >= int(limit):
-            conn.commit()
-            return 409, {"acquired": False, "error": "model policy capacity is exhausted"}
-        conn.execute(
-            "INSERT INTO model_leases (lease_id, seat, owner_node, holder_token, acquired_at, expires_at, released_at) VALUES (?, ?, ?, ?, ?, ?, NULL)",
-            (
-                request["lease_id"],
-                request["seat"],
-                request["node_id"],
-                request["holder"],
-                _epoch_to_iso(now),
-                now + request["ttl_seconds"],
-            ),
-        )
-        conn.commit()
-        return 200, {
-            "acquired": True,
-            "lease": {
-                "lease_id": request["lease_id"],
-                "seat": request["seat"],
-                "expires_at": _epoch_to_iso(now + request["ttl_seconds"]),
-            },
-        }
-    except BaseException:
-        conn.rollback()
-        raise
+    """Mutate the versioned roster, admit a seat, or fence one capacity lease."""
+    from . import fleet_hub_model_roster
+
+    return fleet_hub_model_roster.handle_model_policy(conn, raw, caller_node=caller_node)
 
 
 def handle_cloud(

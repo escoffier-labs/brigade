@@ -18,6 +18,7 @@ from typing import Any
 
 from . import fleet_command_deck, fleet_hub
 from .fleet_hub import FleetHubConflict, FleetHubError, FleetHubForbidden
+from .grokbot_job_validation import GrokbotJobError, validate_repository
 
 
 GROKBOT_JOB_ID_RE = re.compile(r"^grokbot-[0-9a-f]{24}$")
@@ -53,6 +54,7 @@ EVENT_STATES = {
     "expired": "external.expired",
     "canceled": "external.canceled",
     "cancel-requested": "external.cancel-requested",
+    "cancel-acknowledged": "external.cancel-acknowledged",
     "renewed": "external.heartbeat",
 }
 FORBIDDEN_REQUEST_KEYS = frozenset(
@@ -681,7 +683,7 @@ def _ack_cancel(
         return 409, {"acknowledged": False, "error": "cancellation-not-requested"}
     updated = _mutate(conn, job, {"state": "canceled"})
     _release_capacity(conn, updated, config, state="canceled")
-    _record_event(conn, updated, "canceled")
+    _record_event(conn, updated, "cancel-acknowledged")
     return 200, {"acknowledged": True, "job": _job_payload(updated)}
 
 
@@ -847,13 +849,22 @@ def _mutate(conn: sqlite3.Connection, job: dict[str, Any], fields: dict[str, Any
 
 def _record_event(conn: sqlite3.Connection, job: dict[str, Any], kind: str) -> None:
     payload = _job_payload(job)
+    revision = payload.get("item_revision")
+    if type(revision) is not int or revision != payload.get("sequence"):
+        raise FleetHubError("grokbot item_revision must equal sequence")
+    event_sequence = revision
     event_state = EVENT_STATES[kind]
+    if conn.execute(
+        "SELECT 1 FROM events WHERE run_id=? AND harness='grokbot' AND sequence=?",
+        (payload["job_id"], event_sequence),
+    ).fetchone():
+        return
     digest_source = {
         "job_id": payload["job_id"],
         "role": payload["role"],
         "harness": "grokbot",
-        "item_revision": payload["item_revision"],
-        "sequence": payload["sequence"],
+        "item_revision": event_sequence,
+        "sequence": event_sequence,
         "task_digest": payload["task_digest"],
         "node_id": payload.get("claimant_node") or payload.get("owner_node"),
         "worker": payload.get("claimant_worker"),
@@ -874,7 +885,7 @@ def _record_event(conn: sqlite3.Connection, job: dict[str, Any], kind: str) -> N
         (
             digest_source["node_id"] or "grokbot",
             payload["job_id"],
-            payload["sequence"],
+            event_sequence,
             digest,
             payload["repository"],
             payload["role"],
@@ -1078,6 +1089,10 @@ def _validate_enqueue(raw: dict[str, Any], request: dict[str, Any]) -> dict[str,
     if role not in ROLE_VALUES:
         raise FleetHubError("grokbot field 'role' is invalid")
     repository = _bounded_text(raw.get("repository"), "repository", 200)
+    try:
+        validate_repository(repository)
+    except GrokbotJobError as exc:
+        raise FleetHubError("grokbot field 'repository' is invalid") from exc
     label = _bounded_text(raw.get("label"), "label", 160)
     digest = raw.get("task_digest")
     if not isinstance(digest, str) or not TASK_DIGEST_RE.fullmatch(digest):
