@@ -150,6 +150,7 @@ class BackupObservers:
             self.runtime["reporters"][target["reporter_id"]],
             target["timeout_ms"],
             parse_raw_target_observation,
+            ("--target-alias", target["alias"]),
         )
 
     def observe_restore_readiness(self, alias: str) -> dict[str, Any]:
@@ -161,14 +162,17 @@ class BackupObservers:
             self.runtime["reporters"][reporter_id],
             target["timeout_ms"],
             parse_raw_restore_readiness,
+            ("--target-alias", target["alias"]),
         )
 
-    def observe_operation(self, _operation_id: str) -> dict[str, Any]:
+    def observe_operation(self, operation_id: str) -> dict[str, Any]:
+        validated = parse_identifier(operation_id)
         timeout_ms = self.registry.targets[0]["timeout_ms"] if self.registry.targets else 12_000
         return self._observe(
             self.runtime["reporters"]["backup-operation-status-v1"],
             timeout_ms,
             parse_raw_operation,
+            ("--operation-id", validated),
         )
 
     def _observe(
@@ -176,19 +180,20 @@ class BackupObservers:
         command: Mapping[str, Any] | None,
         timeout_ms: int,
         parser: Callable[[object], dict[str, Any]],
+        selector: tuple[str, str],
     ) -> dict[str, Any]:
         if command is None:
             raise BackupError("invalid_request", "Backup observation request is invalid")
-        stdout = self.limiter.run(lambda: self._run_reporter(command, timeout_ms))
+        stdout = self.limiter.run(lambda: self._run_reporter(command, timeout_ms, selector))
         return {"raw": parser(_parse_json(stdout)), "receipt_ref": self.create_receipt_ref()}
 
-    def _run_reporter(self, command: Mapping[str, Any], timeout_ms: int) -> str:
+    def _run_reporter(self, command: Mapping[str, Any], timeout_ms: int, selector: tuple[str, str]) -> str:
         executable = command["executable"]
         _assert_absolute_executable(executable)
         result = run_exec(
             ExecRequest(
                 file=executable,
-                args=tuple(command["args"]),
+                args=tuple(command["args"]) + selector,
                 cwd=WORKING_DIRECTORY,
                 timeout_ms=timeout_ms,
                 max_buffer_bytes=EXEC_DEFAULT_OUTPUT_BYTES,
