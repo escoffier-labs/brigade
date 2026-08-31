@@ -887,10 +887,29 @@ def test_grokbot_hub_is_authoritative_for_enqueue_claim_renew_and_replay(conn):
     _enroll_actors(conn)
     first = fleet_hub_grokbot.handle_grokbot(conn, _grokbot_enqueue(), caller_node=FEED_NODE)
     assert first[0] == 200 and first[1]["idempotent"] is False
+    before = conn.execute(
+        "SELECT state, item_revision, sequence FROM grokbot_jobs WHERE job_id=?", (first[1]["job"]["job_id"],)
+    ).fetchone()
+    event_count = conn.execute("SELECT COUNT(*) FROM events WHERE harness='grokbot'").fetchone()[0]
+    job_count = conn.execute("SELECT COUNT(*) FROM grokbot_jobs").fetchone()[0]
     same_op = fleet_hub_grokbot.handle_grokbot(conn, _grokbot_enqueue(), caller_node=FEED_NODE)
     assert same_op[0] == 200
-    assert same_op[1]["job"]["item_revision"] == first[1]["job"]["item_revision"] == 1
-    assert same_op[1]["job"]["sequence"] == first[1]["job"]["sequence"] == 1
+    assert same_op[1]["idempotent"] is True
+    assert same_op[1]["job"] == first[1]["job"]
+    assert (
+        conn.execute(
+            "SELECT state, item_revision, sequence FROM grokbot_jobs WHERE job_id=?", (first[1]["job"]["job_id"],)
+        ).fetchone()
+        == before
+    )
+    assert conn.execute("SELECT COUNT(*) FROM events WHERE harness='grokbot'").fetchone()[0] == event_count
+    assert conn.execute("SELECT COUNT(*) FROM grokbot_jobs").fetchone()[0] == job_count
+    mismatch = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        {**_grokbot_enqueue(), "label": "different label"},
+        caller_node=FEED_NODE,
+    )
+    assert mismatch == (409, {"enqueued": False, "error": "operation-mismatch"})
     replay = fleet_hub_grokbot.handle_grokbot(
         conn, _grokbot_enqueue(operation_id="op-enqueue-retry"), caller_node=FEED_NODE
     )
