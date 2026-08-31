@@ -61,6 +61,10 @@ _GROK_RESULT_SCHEMA = json.dumps(
     },
     separators=(",", ":"),
 )
+# grok <=1.0.12 emitted "EndTurn"; 1.0.13 emits "end_turn". Accept both rather
+# than pinning one CLI build. Keep this an explicit set: normalizing by case and
+# underscore would silently admit "endturn", "END_TURN", and future tokens.
+_GROK_SUCCESS_STOP_REASONS = frozenset({"EndTurn", "end_turn"})
 _GROK_SESSION_RESERVED_ARGUMENTS = ("--resume", "--session-id")
 
 
@@ -280,7 +284,7 @@ def _grok_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | No
     # before dispatch. Keep this base shape stable for argv construction callers.
     if read_only or sandbox == "read-only":
         return ["grok", "-p", prompt, "--permission-mode", "plan"]
-    return ["grok", "-p", prompt, "--always-approve"]
+    return ["grok", "-p", prompt, "--always-approve", "--output-format", "json"]
 
 
 def _amp_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
@@ -386,10 +390,20 @@ def direct_cursor_read_only_limitation(model: str | None) -> str | None:
     return None
 
 
-def _parse_grok_final_output(stdout: str) -> _GrokFinal:
-    """Extract a schema-constrained final answer from Grok's JSON envelope."""
+def _parse_grok_final_output(stdout: str, *, schema_required: bool = True) -> _GrokFinal:
+    """Extract a final answer from Grok's JSON envelope.
+
+    Read-only dispatch pins ``--json-schema`` and requires ``structuredOutput``
+    to match it exactly. Write mode only asks for ``--output-format json``, so
+    the final answer is the envelope's ``text`` and ``structuredOutput`` is
+    absent; the stop reason and structured-error guards still apply.
+    """
     base_error = "grok exited 0 without a structured final response"
     raw = stdout.strip()
+    if not schema_required and not raw:
+        # A silent exit is not an envelope problem. Leave it to run_agent's
+        # empty-output classifier so the trust/permissions hint survives.
+        return _GrokFinal(text="", error="")
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
@@ -419,6 +433,34 @@ def _parse_grok_final_output(stdout: str) -> _GrokFinal:
         if isinstance(nested, dict) and isinstance(nested.get("answer"), str):
             fallback = nested["answer"].strip()
 
+    successful_stop = stop_reason in _GROK_SUCCESS_STOP_REASONS
+    if not schema_required:
+        if not successful_stop or structured_error_present:
+            detail = f"{base_error} ({'; '.join(diagnostic_parts)})" if diagnostic_parts else base_error
+            return _GrokFinal(
+                text=fallback,
+                error=detail,
+                diagnostic=(structured_output_error if isinstance(structured_output_error, str) else ""),
+                session_id=payload.get("sessionId") if isinstance(payload.get("sessionId"), str) else None,
+                request_id=payload.get("requestId") if isinstance(payload.get("requestId"), str) else None,
+                stop_reason=stop_reason if isinstance(stop_reason, str) else None,
+            )
+        if not isinstance(display_text, str) or not display_text.strip():
+            return _GrokFinal(
+                text=fallback,
+                error=base_error,
+                session_id=payload.get("sessionId") if isinstance(payload.get("sessionId"), str) else None,
+                request_id=payload.get("requestId") if isinstance(payload.get("requestId"), str) else None,
+                stop_reason=stop_reason if isinstance(stop_reason, str) else None,
+            )
+        return _GrokFinal(
+            text=display_text.strip(),
+            error="",
+            session_id=payload.get("sessionId") if isinstance(payload.get("sessionId"), str) else None,
+            request_id=payload.get("requestId") if isinstance(payload.get("requestId"), str) else None,
+            stop_reason=stop_reason if isinstance(stop_reason, str) else None,
+        )
+
     structured = payload.get("structuredOutput")
     answer = structured.get("answer") if isinstance(structured, dict) else None
     exact_shape = (
@@ -430,7 +472,6 @@ def _parse_grok_final_output(stdout: str) -> _GrokFinal:
     )
     if not exact_shape and not structured_error_present:
         diagnostic_parts.append("structured output did not match expected schema")
-    successful_stop = stop_reason == "EndTurn"
     no_structured_error = not structured_error_present
     if not successful_stop or not no_structured_error or not exact_shape:
         detail = f"{base_error} ({'; '.join(diagnostic_parts)})" if diagnostic_parts else base_error
@@ -1221,7 +1262,10 @@ def run_agent(
             requested_model=model,
             reasoning=reasoning,
         )
-    structured_grok = cli_ref == "grok" and (read_only or sandbox == "read-only")
+    # Both modes emit a JSON envelope, but only read-only constrains the model
+    # to the {kind, answer} schema; write mode must stay free to use tools.
+    grok_envelope = cli_ref == "grok"
+    structured_grok = grok_envelope and (read_only or sandbox == "read-only")
     if structured_grok:
         if argv[-2:] != ["--permission-mode", "plan"]:
             return AgentResult(
@@ -1318,8 +1362,8 @@ def run_agent(
     grok_session_id = None
     grok_request_id = None
     grok_stop_reason = None
-    if structured_grok:
-        grok_final = _parse_grok_final_output(result.stdout)
+    if grok_envelope:
+        grok_final = _parse_grok_final_output(result.stdout, schema_required=structured_grok)
         text = grok_final.text
         structured_error = grok_final.error
         structured_diagnostic = grok_final.diagnostic
