@@ -1660,7 +1660,7 @@ def _hub_jobs(*, role: str | None = None, include_all: bool = False) -> list[dic
 
     decision = fleet_client_grokbot.list_jobs(role=role, include_all=include_all)
     if not decision.granted or decision.jobs is None:
-        raise GrokbotJobError(decision.reason)
+        raise GrokbotJobError(decision.reason, action="list")
     return [_hub_projection_job(job) for job in decision.jobs]
 
 
@@ -1804,7 +1804,7 @@ def _require_hub(action: str, job_id: str | None = None, **fields: Any) -> Any:
     operation = getattr(fleet_client_grokbot, action)
     decision = operation(job_id, **fields) if job_id is not None else operation(**fields)
     if not decision.granted:
-        raise GrokbotJobError(decision.reason)
+        raise GrokbotJobError(decision.reason, action=action)
     return decision
 
 

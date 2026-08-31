@@ -38,6 +38,7 @@ HUB_STATES = WORK_STATES | TERMINAL_STATES
 CREATE_ACTIONS = frozenset({"enqueue"})
 OPERATOR_ACTIONS = frozenset({"list", "status", "whoami", "cancel", "expire", "report-metadata"})
 WORKER_ACTIONS = frozenset({"list", "status", "whoami", "claim", "start", "renew", "complete", "fail", "ack-cancel"})
+FEED_ACTIONS = frozenset({"enqueue", "list", "whoami"})
 ADMIN_ACTIONS = frozenset({"enroll-actor"})
 IDENTITY_ACTIONS = frozenset({"whoami"})
 ACTIONS = CREATE_ACTIONS | OPERATOR_ACTIONS | WORKER_ACTIONS | ADMIN_ACTIONS | IDENTITY_ACTIONS
@@ -149,8 +150,8 @@ LEASE_SECONDS_MAX = 3600
 DEFAULT_LEASE_SECONDS = 300
 _CLOUD_HOLDER_DOMAIN = b"brigade.grokbot.cloud-holder"
 _ACTOR_KIND_ACTIONS = {
-    "feed": frozenset({"enqueue", "whoami"}),
-    "control": frozenset({"enqueue", "whoami"}),
+    "feed": FEED_ACTIONS,
+    "control": FEED_ACTIONS,
     "operator": OPERATOR_ACTIONS,
     "implementation-worker": WORKER_ACTIONS,
     "repository-scout": WORKER_ACTIONS,

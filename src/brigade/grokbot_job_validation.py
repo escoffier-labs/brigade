@@ -22,8 +22,9 @@ ARTIFACT_KINDS = frozenset({"draft-pr", "branch", "report"})
 class GrokbotJobError(ValueError):
     """A rejected Grok Bot job request with a stable machine-readable reason."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, *, action: str | None = None):
         self.reason = reason
+        self.action = action
         super().__init__(reason)
 
 

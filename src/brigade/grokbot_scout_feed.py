@@ -33,9 +33,31 @@ POLICY_KEYS = frozenset(
 class ScoutFeedError(ValueError):
     """A rejected scout policy or discovery request with a stable reason."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, *, action: str | None = None, actor_kind: str | None = None):
         self.reason = reason
+        self.action = action
+        self.actor_kind = actor_kind
         super().__init__(reason)
+
+    def public_detail(self) -> str:
+        """Stable, path-free, credential-free diagnostic for CLI stderr."""
+        parts = [self.reason]
+        if self.action:
+            parts.append(f"action={self.action}")
+        if self.actor_kind:
+            parts.append(f"actor={self.actor_kind}")
+        return " ".join(parts)
+
+
+def _queue_error(exc: grokbot_jobs.GrokbotJobError) -> ScoutFeedError:
+    """Translate a queue failure, surfacing only hub-bounded refusal reasons.
+
+    A refused hub action carries a reason the Fleet Hub client already bounded,
+    so it is safe to name. Private local storage reasons stay redacted.
+    """
+    if exc.action is None:
+        return ScoutFeedError("queue-error")
+    return ScoutFeedError(exc.reason, action=exc.action)
 
 
 def preflight(target: Path, policy_path: Path, *, now: datetime | None = None) -> dict[str, object]:
@@ -45,7 +67,7 @@ def preflight(target: Path, policy_path: Path, *, now: datetime | None = None) -
     try:
         return _selection(target, policy, numbers, _resolve_now(now))
     except grokbot_jobs.GrokbotJobError as exc:
-        raise ScoutFeedError("queue-error") from exc
+        raise _queue_error(exc) from exc
 
 
 def apply(target: Path, policy_path: Path, *, now: datetime | None = None) -> dict[str, object]:
@@ -72,7 +94,7 @@ def apply(target: Path, policy_path: Path, *, now: datetime | None = None) -> di
             now=instant,
         )
     except grokbot_jobs.GrokbotJobError as exc:
-        raise ScoutFeedError("queue-error") from exc
+        raise _queue_error(exc) from exc
     if admission["reason"] != "created":
         return {
             **selection,

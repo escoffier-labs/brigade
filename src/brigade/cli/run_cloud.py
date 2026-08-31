@@ -9,7 +9,7 @@ import os
 import stat
 import sys
 from pathlib import Path
-from typing import Any, ContextManager
+from typing import Any, ContextManager, NamedTuple
 
 _PROMPT_FILE_MAX_BYTES = 64 * 1024
 _LAUNCH_LABEL_MAX = 120
@@ -1176,7 +1176,7 @@ def _dispatch_grokbot_feed(args, target: Path) -> int:
 
     try:
         if args.apply:
-            with _feed_hub_identity(target):
+            with _feed_hub_identity(target).context:
                 result = grokbot_feed.apply(target, args.manifest, limit=args.limit)
         else:
             result = grokbot_feed.preflight(target, args.manifest, limit=args.limit)
@@ -1208,25 +1208,35 @@ def _print_feed_result(result: dict) -> None:
         print(f"job {job['job_id']} state={job['state']}")
 
 
-def _feed_hub_identity(target: Path) -> ContextManager[None]:
+class _FeedIdentity(NamedTuple):
+    """The bound feed context plus the actor kind it speaks as, when bound."""
+
+    context: ContextManager[None]
+    actor_kind: str | None
+
+
+def _feed_hub_identity(target: Path) -> _FeedIdentity:
     """Bind the dedicated feed actor for Hub mutations, with no fallback."""
     from .. import fleet_client_grokbot, grokbot_jobs, grokbot_mcp
 
     if not grokbot_jobs.hub_authority(target):
-        return nullcontext()
+        return _FeedIdentity(nullcontext(), None)
     token = grokbot_mcp.load_feed_hub_token()
     if token is None:
         raise grokbot_mcp.ConfigurationError("invalid")
-    return fleet_client_grokbot.listener_identity(token)
+    return _FeedIdentity(fleet_client_grokbot.listener_identity(token), "feed")
 
 
 def _dispatch_grokbot_scout_feed(args, target: Path) -> int:
     """Preview or enqueue one approved scout without exposing policy content."""
     from .. import grokbot_mcp, grokbot_scout_feed
 
+    actor_kind: str | None = None
     try:
         if args.apply:
-            with _feed_hub_identity(target):
+            identity = _feed_hub_identity(target)
+            actor_kind = identity.actor_kind
+            with identity.context:
                 result = grokbot_scout_feed.apply(target, args.policy)
         else:
             result = grokbot_scout_feed.preflight(target, args.policy)
@@ -1234,7 +1244,9 @@ def _dispatch_grokbot_scout_feed(args, target: Path) -> int:
         print("error: Grok Bot feed configuration is invalid", file=sys.stderr)
         return 2
     except grokbot_scout_feed.ScoutFeedError as exc:
-        print(f"error: {exc.reason}", file=sys.stderr)
+        if exc.action is not None and exc.actor_kind is None:
+            exc.actor_kind = actor_kind
+        print(f"error: {exc.public_detail()}", file=sys.stderr)
         return 2
 
     if args.json:
@@ -1566,7 +1578,7 @@ def _dispatch_grokbot_ops(args, target: Path) -> int:
             failed = False
             for check in checks:
                 print(f"{check['check']}: {check['status']}")
-                failed = failed or check["status"] != "ok"
+                failed = failed or check["status"] == "fail"
             return 1 if failed else 0
 
         if command == "canary":

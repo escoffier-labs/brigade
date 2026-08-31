@@ -891,6 +891,22 @@ def _holder_body(
     return body
 
 
+def _forbidden_action_body(action: str, job_id: str, *, prefix: str) -> dict[str, object]:
+    """Build a schema-valid body so refusals come from authorization, not validation."""
+    if action == "report-metadata":
+        return {"action": action, "job_id": job_id}
+    if action == "claim":
+        return _claim_body(job_id, operation_id=f"{prefix}-{action}")
+    if action == "complete":
+        return _holder_body("complete", job_id, revision=1, generation=1, operation_id=f"{prefix}-{action}")
+    return {
+        "action": action,
+        "job_id": job_id,
+        "expected_item_revision": 1,
+        "operation_id": f"{prefix}-{action}",
+    }
+
+
 def _refuse_cross_actor(conn, body: dict[str, object], caller_node: str) -> None:
     from brigade import fleet_hub_grokbot
 
@@ -1102,25 +1118,95 @@ def test_grokbot_actor_policy_isolates_node_queue_and_role(conn):
         fleet_hub_grokbot.handle_grokbot(
             conn, _claim_body(scout["job_id"], operation_id="op-wrong-role"), caller_node=WORKER_NODE
         )
-    with pytest.raises(fleet_hub.FleetHubForbidden):
-        fleet_hub_grokbot.handle_grokbot(conn, {"action": "list"}, caller_node=FEED_NODE)
+    feed_listed = fleet_hub_grokbot.handle_grokbot(conn, {"action": "list"}, caller_node=FEED_NODE)
+    assert feed_listed[0] == 200
+    assert {item["job_id"] for item in feed_listed[1]["jobs"]} == {job["job_id"], scout["job_id"]}
+    assert {item["queue_id"] for item in feed_listed[1]["jobs"]} == {QUEUE_ID}
     with pytest.raises(fleet_hub.FleetHubForbidden):
         fleet_hub_grokbot.handle_grokbot(
             conn, {"action": "claim", **_claim_body(job["job_id"])}, caller_node=OPERATOR_NODE
         )
 
 
-def test_grokbot_control_actor_is_enqueue_only_administrative_readiness(conn):
+def test_grokbot_control_actor_lists_only_its_own_queue(conn):
     from brigade import fleet_hub_grokbot
 
     _enroll_actors(conn)
     _enroll_actor(conn, CONTROL_NODE, kind="control", queue_id=QUEUE_ID)
+    _enroll_actor(conn, OTHER_FEED, kind="feed", queue_id=OTHER_QUEUE)
+    mine = fleet_hub_grokbot.handle_grokbot(conn, _grokbot_enqueue(), caller_node=FEED_NODE)[1]["job"]
+    theirs = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        _grokbot_enqueue("grokbot-" + "c" * 24, "c" * 64, operation_id="op-enq-other"),
+        caller_node=OTHER_FEED,
+    )[1]["job"]
 
     status, payload = fleet_hub_grokbot.handle_grokbot(conn, {"action": "whoami"}, caller_node=CONTROL_NODE)
     assert status == 200
     assert payload == {"actor_kind": "control", "role": None}
+    listed = fleet_hub_grokbot.handle_grokbot(conn, {"action": "list"}, caller_node=CONTROL_NODE)
+    assert listed[0] == 200
+    assert [item["job_id"] for item in listed[1]["jobs"]] == [mine["job_id"]]
+    assert theirs["job_id"] not in {item["job_id"] for item in listed[1]["jobs"]}
+    for action in ("claim", "cancel", "expire", "complete", "report-metadata"):
+        with pytest.raises(fleet_hub.FleetHubForbidden):
+            fleet_hub_grokbot.handle_grokbot(
+                conn,
+                _forbidden_action_body(action, mine["job_id"], prefix="op-control"),
+                caller_node=CONTROL_NODE,
+            )
+
+
+def test_grokbot_feed_actor_list_is_scoped_to_its_own_queue(conn):
+    from brigade import fleet_hub_grokbot
+
+    _enroll_actors(conn)
+    _enroll_actor(conn, OTHER_FEED, kind="feed", queue_id=OTHER_QUEUE)
+    mine = fleet_hub_grokbot.handle_grokbot(conn, _grokbot_enqueue(), caller_node=FEED_NODE)[1]["job"]
+    theirs = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        _grokbot_enqueue("grokbot-" + "c" * 24, "c" * 64, operation_id="op-enq-other"),
+        caller_node=OTHER_FEED,
+    )[1]["job"]
+
+    listed = fleet_hub_grokbot.handle_grokbot(conn, {"action": "list"}, caller_node=FEED_NODE)
+
+    assert listed[0] == 200
+    assert [item["job_id"] for item in listed[1]["jobs"]] == [mine["job_id"]]
+    assert theirs["job_id"] not in {item["job_id"] for item in listed[1]["jobs"]}
+    for item in listed[1]["jobs"]:
+        assert set(item) <= set(fleet_hub_grokbot.SAFE_JOB_FIELDS)
+        assert "idempotency_key_hash" not in item
+        assert "lease_token_digest" not in item
+
+
+@pytest.mark.parametrize("action", ("cancel", "expire", "claim", "complete", "report-metadata"))
+def test_grokbot_feed_actor_still_cannot_mutate_or_read_reports(conn, action):
+    from brigade import fleet_hub_grokbot
+
+    _enroll_actors(conn)
+    job = fleet_hub_grokbot.handle_grokbot(conn, _grokbot_enqueue(), caller_node=FEED_NODE)[1]["job"]
+
     with pytest.raises(fleet_hub.FleetHubForbidden):
-        fleet_hub_grokbot.handle_grokbot(conn, {"action": "list"}, caller_node=CONTROL_NODE)
+        fleet_hub_grokbot.handle_grokbot(
+            conn,
+            _forbidden_action_body(action, job["job_id"], prefix="op-feed"),
+            caller_node=FEED_NODE,
+        )
+
+
+def test_grokbot_feed_actor_list_needs_no_reenrollment(conn):
+    from brigade import fleet_hub_grokbot
+
+    _enroll_actors(conn)
+    enrollments = conn.execute("SELECT COUNT(*) FROM grokbot_actor_policy WHERE node_id = ?", (FEED_NODE,)).fetchone()
+    job = fleet_hub_grokbot.handle_grokbot(conn, _grokbot_enqueue(), caller_node=FEED_NODE)[1]["job"]
+
+    listed = fleet_hub_grokbot.handle_grokbot(conn, {"action": "list"}, caller_node=FEED_NODE)
+
+    assert listed[0] == 200
+    assert [item["job_id"] for item in listed[1]["jobs"]] == [job["job_id"]]
+    assert enrollments[0] == 1
 
 
 def test_grokbot_operation_replay_and_revision_fencing(conn):
@@ -1314,7 +1400,8 @@ def test_grokbot_http_get_is_removed_and_admin_cannot_list_unscoped(tmp_path):
         status, payload = _request(hub, "POST", "/grokbot", token=ADMIN_TOKEN, body={"action": "list"})
         assert status == 403
         status, payload = _request(hub, "POST", "/grokbot", token=feed_token, body={"action": "list"})
-        assert status == 403
+        assert status == 200
+        assert {job["queue_id"] for job in payload["jobs"]} == {QUEUE_ID}
 
 
 def test_grokbot_hub_projection_is_deck_only_and_terminal_jobs_release_capacity(conn):
