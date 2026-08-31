@@ -915,7 +915,10 @@ def _replay_operation(conn: sqlite3.Connection, request: dict[str, Any]) -> tupl
         return None, True
     if row[4] not in (None, request["queue_owner_node_id"]):
         return None, True
-    return json.loads(row[1]), False
+    payload = json.loads(row[1])
+    if request["action"] == "enqueue" and payload.get("enqueued") is True:
+        payload["idempotent"] = True
+    return payload, False
 
 
 def _store_operation(conn: sqlite3.Connection, request: dict[str, Any], payload: dict[str, Any]) -> None:

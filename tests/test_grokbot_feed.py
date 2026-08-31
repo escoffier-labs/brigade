@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, fleet_client_grokbot, grokbot_feed, grokbot_jobs
+from brigade import cli, fleet_client_grokbot, fleet_hub, fleet_hub_grokbot, grokbot_feed, grokbot_jobs
 
 
 SECRET_INSTRUCTIONS = "SECRET_INSTRUCTION_DO_NOT_PRINT"
@@ -281,6 +281,68 @@ def test_apply_repeated_run_skips_known_and_creates_next_unknown(tmp_path: Path)
     assert result["jobs"][1]["job_id"] != first_id
     assert len(_job_files(tmp_path)) == 2
     _assert_redacted(result)
+
+
+def test_apply_hub_replay_is_skipped_without_duplicate_job_or_event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    feed_node = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    connection = fleet_hub.init_db(tmp_path / "fleet.db")
+    try:
+        status, payload = fleet_hub_grokbot.handle_grokbot(
+            connection,
+            {
+                "action": "enroll-actor",
+                "enroll_node_id": feed_node,
+                "queue_owner_node_id": feed_node,
+                "queue_id": "grokbot-feed-test",
+                "actor_kind": "feed",
+                "enabled": True,
+            },
+            caller_node=None,
+        )
+        assert (status, payload) == (200, {"enrolled": True, "node_id": feed_node})
+
+        def enqueue(**fields: object) -> fleet_client_grokbot.GrokbotHubDecision:
+            status, payload = fleet_hub_grokbot.handle_grokbot(
+                connection,
+                {"action": "enqueue", **fields},
+                caller_node=feed_node,
+            )
+            return fleet_client_grokbot.GrokbotHubDecision(
+                granted=status == 200 and payload.get("enqueued") is True,
+                reason=payload.get("error", "") if isinstance(payload, dict) else "invalid-response",
+                job=payload.get("job") if isinstance(payload, dict) else None,
+                idempotent=payload.get("idempotent") is True if isinstance(payload, dict) else False,
+            )
+
+        monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: True)
+        monkeypatch.setattr(fleet_client_grokbot, "enqueue", enqueue)
+        manifest = _write_manifest(tmp_path / "feed.json", _manifest(_entry("task-a")))
+
+        first = grokbot_feed.apply(tmp_path, manifest)
+        job_id = first["jobs"][0]["job_id"]
+        before = connection.execute(
+            "SELECT state, item_revision, sequence FROM grokbot_jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
+        event_count = connection.execute("SELECT COUNT(*) FROM events WHERE harness='grokbot'").fetchone()[0]
+
+        second = grokbot_feed.apply(tmp_path, manifest)
+
+        assert first["created"] == 1
+        assert first["skipped"] == 0
+        assert second["known"] == 0
+        assert second["created"] == 0
+        assert second["skipped"] == 1
+        assert second["jobs"] == [{"job_id": job_id, "state": "queued", "idempotent": True}]
+        assert (
+            connection.execute(
+                "SELECT state, item_revision, sequence FROM grokbot_jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
+            == before
+        )
+        assert connection.execute("SELECT COUNT(*) FROM grokbot_jobs").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM events WHERE harness='grokbot'").fetchone()[0] == event_count
+    finally:
+        connection.close()
 
 
 def test_apply_invalid_later_entry_prevents_all_writes(tmp_path: Path):
