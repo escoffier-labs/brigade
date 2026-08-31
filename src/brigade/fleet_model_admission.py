@@ -1248,7 +1248,7 @@ def _empty_binding_remediation(seat: Mapping[str, Any], roster: Mapping[str, Any
     model = seat.get("model") or "model"
     return (
         f"brigade fleet models set {provider} {model} {name} --enable "
-        f"--reasoning <reasoning> --brigade-cli <cli> --t3-instance-id <id> "
+        f"--reasoning <reasoning|none> --brigade-cli <cli> --t3-instance-id <id> "
         f"--expect-revision {revision}"
     )
 

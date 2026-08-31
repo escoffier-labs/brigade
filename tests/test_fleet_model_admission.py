@@ -354,6 +354,72 @@ def test_versioned_snapshot_fails_closed_without_exact_reasoning_and_binding():
     assert "cursor_grok" in resolution.error
 
 
+def test_admitted_none_reasoning_is_not_applied_as_a_pin():
+    resolution = aboyeur.resolve_fleet_model_policy(
+        _roster(),
+        snapshot=_versioned_snapshot(
+            _versioned_seat("chef", "anthropic", "opus-5", reasoning="none", instance_id="claude"),
+        ),
+    )
+
+    assert resolution.error is None
+    assert resolution.roster.agents["chef"].reasoning is None
+    admission = next(item for item in resolution.receipt["admissions"] if item["seat"] == "chef")
+    assert admission["reasoning"] == "none"
+
+
+def test_admitted_reasoning_is_dropped_for_adapters_without_reasoning_support():
+    resolution = aboyeur.resolve_fleet_model_policy(
+        _roster(),
+        snapshot=_versioned_snapshot(
+            _versioned_seat("chef", "anthropic", "opus-5", reasoning="high", instance_id="claude"),
+        ),
+    )
+
+    assert resolution.error is None
+    assert resolution.roster.agents["chef"].reasoning is None
+    decision = next(item for item in resolution.receipt["decisions"] if item["seat"] == "chef")
+    assert decision["outcome"] == "enabled"
+
+
+def _reasoning_adapter_roster() -> Roster:
+    return Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan", model="opus-5"),
+            "coder": Agent("coder", "codex", "code", model="gpt-5.6-terra"),
+        },
+    )
+
+
+def test_admitted_reasoning_is_preserved_for_reasoning_adapters():
+    resolution = aboyeur.resolve_fleet_model_policy(
+        _reasoning_adapter_roster(),
+        worker="coder",
+        snapshot=_versioned_snapshot(
+            _versioned_seat("coder", "openai", "gpt-5.6-terra", reasoning="high", instance_id="codex"),
+        ),
+    )
+
+    assert resolution.error is None
+    assert resolution.roster.agents["coder"].reasoning == "high"
+
+
+def test_admitted_none_reasoning_is_dropped_for_reasoning_adapters_too():
+    resolution = aboyeur.resolve_fleet_model_policy(
+        _reasoning_adapter_roster(),
+        worker="coder",
+        snapshot=_versioned_snapshot(
+            _versioned_seat("coder", "openai", "gpt-5.6-terra", reasoning="none", instance_id="codex"),
+        ),
+    )
+
+    assert resolution.error is None
+    assert resolution.roster.agents["coder"].reasoning is None
+    admission = next(item for item in resolution.receipt["admissions"] if item["seat"] == "coder")
+    assert admission["reasoning"] == "none"
+
+
 def test_unconfigured_hub_preserves_local_roster_behavior():
     resolution = aboyeur.resolve_fleet_model_policy(
         _roster(),
@@ -568,7 +634,9 @@ def test_brigade_run_without_injected_snapshot_dispatches_hub_approved_seat(tmp_
             == 0
         )
 
-        assert dispatched == [{"cli": "cursor", "model": "cursor-grok-4.6-high-fast", "reasoning": "high"}]
+        # cursor-agent has no reasoning flag: the Hub pin stays in the admission
+        # receipt below, but the launch spec drops it instead of failing dispatch.
+        assert dispatched == [{"cli": "cursor", "model": "cursor-grok-4.6-high-fast", "reasoning": None}]
         assert acquired == [("cursor_grok", "cursor", "cursor-grok-4.6-high-fast")]
         policy = json.loads((output_dir / "model-policy.json").read_text())
         run = json.loads((output_dir / "run.json").read_text())
@@ -891,6 +959,69 @@ def test_direct_worker_runs_with_only_its_authoritative_policy_seat(monkeypatch,
     assert "coder" not in effective["agents"]
     assert "reviewer" not in effective["agents"]
     assert invocations == ["cursor"]
+
+
+def test_direct_worker_claude_seat_dispatches_under_none_reasoning_admission(monkeypatch, tmp_path):
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan", model="opus-5"),
+            "claude_standby": Agent("claude_standby", "claude", "code", model="opus"),
+        },
+    )
+    snapshot = _versioned_snapshot(
+        _versioned_seat("claude_standby", "anthropic", "opus", reasoning="none", instance_id="claude"),
+        expires_at="2099-08-30T14:15:00Z",
+    )
+    monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", lambda: snapshot)
+    _mock_exact_runtime_admission(monkeypatch, snapshot)
+    monkeypatch.setattr(
+        fleet_client,
+        "acquire_model_lease",
+        lambda *args, **kwargs: fleet_client.ModelLeaseDecision(True, "ok", "direct-lease", "direct-holder"),
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "release_model_lease",
+        lambda lease_id, *, holder: fleet_client.ModelLeaseDecision(True, "ok", lease_id, holder),
+    )
+    launched: list[list[str]] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        launched.append(
+            agents.build_argv(
+                cli_ref,
+                prompt,
+                read_only=True,
+                model=kwargs.get("model"),
+                reasoning=kwargs.get("reasoning"),
+            )
+        )
+        return agents.AgentResult(text="implemented", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+    output_dir = tmp_path / "run"
+
+    assert (
+        run_aboyeur_guarded(
+            "implement it",
+            roster,
+            worker="claude_standby",
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+
+    assert launched, "worker seat never dispatched"
+    argv = launched[0]
+    assert not any(
+        token in ("--reasoning", "--reasoning-effort", "--thinking", "--variant") or "model_reasoning_effort" in token
+        for token in argv
+    )
+    effective = json.loads((output_dir / "roster.json").read_text())
+    assert effective["agents"]["claude_standby"]["reasoning"] is None
 
 
 def test_orchestrated_run_leases_only_planner_worker_and_synthesis_seats(monkeypatch, tmp_path):

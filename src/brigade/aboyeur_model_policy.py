@@ -76,6 +76,20 @@ def _permanent_floor(provider: object, model: object) -> str | None:
     return fleet_model_roster.retired_reason(provider, model)
 
 
+_NO_REASONING_SENTINEL = "none"
+
+
+def _effective_reasoning(aboyeur: Any, cli_ref: str, policy_reasoning: str) -> str | None:
+    """Hub reasoning is a required column: ``"none"`` is its placeholder, and only
+    some adapters accept a pin at all. Either case leaves the launch spec unpinned;
+    the admission receipt still carries the Hub's exact value."""
+    if policy_reasoning.strip().lower() == _NO_REASONING_SENTINEL:
+        return None
+    if not aboyeur.agents.supports_reasoning(cli_ref):
+        return None
+    return policy_reasoning
+
+
 def _cli_from_binding(aboyeur: Any, instance_id: str) -> str | None:
     """Map a Hub Brigade binding onto a known adapter key."""
     if aboyeur.agents.is_known(instance_id):
@@ -428,7 +442,7 @@ def _resolve_versioned(
                         agent,
                         cli=resolved_cli,
                         model=policy_model,
-                        reasoning=policy_reasoning,
+                        reasoning=_effective_reasoning(aboyeur, resolved_cli, policy_reasoning),
                         command=None,
                         env=agent.env if keep_env else None,
                     )
