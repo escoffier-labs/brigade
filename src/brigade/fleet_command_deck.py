@@ -324,7 +324,8 @@ def collides(target: str, live_runs: Sequence[LiveRun], claims: Mapping[str, Cla
 _LATEST_ROWS = (
     "SELECT node_id, run_id, repo, seat, harness, state, ts, received_at, repo_identity FROM ("
     "  SELECT e.*, ROW_NUMBER() OVER ("
-    "    PARTITION BY node_id, run_id ORDER BY sequence DESC, received_at DESC, digest DESC"
+    "    PARTITION BY CASE WHEN harness = 'grokbot' THEN 'grokbot' ELSE 'node:' || node_id END, run_id "
+    "    ORDER BY sequence DESC, received_at DESC, digest DESC"
     "  ) AS rn FROM events e"
     ") WHERE rn = 1"
 )
@@ -359,7 +360,7 @@ def fetch_live_runs(conn: sqlite3.Connection, *, now: datetime, stale_after_seco
         f" ORDER BY {rank_sql}, ts DESC, node_id, run_id LIMIT {ACTIVE_LIMIT}"
     )
     rows = conn.execute(query, (*TERMINAL_STATES, cutoff, *AWAITING_STATES)).fetchall()
-    started = fetch_started_at(conn, [(row[0], row[1]) for row in rows])
+    started = fetch_started_at(conn, [(row[0], row[1], row[4]) for row in rows])
     runs: list[LiveRun] = []
     for node_id, run_id, repo, seat, harness, state, _ts, received_at, repo_identity in rows:
         age = _age_seconds(received_at, now)
@@ -380,22 +381,44 @@ def fetch_live_runs(conn: sqlite3.Connection, *, now: datetime, stale_after_seco
     return runs
 
 
-def fetch_started_at(conn: sqlite3.Connection, keys: Sequence[tuple[str, str]]) -> dict[tuple[str, str], str]:
+def fetch_started_at(
+    conn: sqlite3.Connection, runs: Sequence[tuple[str, str, str | None]]
+) -> dict[tuple[str, str], str]:
     result: dict[tuple[str, str], str] = {}
-    for start in range(0, len(keys), _START_CHUNK):
-        chunk = keys[start : start + _START_CHUNK]
+    generic_keys = [(node_id, run_id) for node_id, run_id, harness in runs if harness != "grokbot"]
+    for start in range(0, len(generic_keys), _START_CHUNK):
+        chunk = generic_keys[start : start + _START_CHUNK]
         predicate = " OR ".join("(node_id = ? AND run_id = ?)" for _ in chunk)
         params = [value for pair in chunk for value in pair]
         rows = conn.execute(
             "SELECT node_id, run_id, ts FROM ("
             "  SELECT node_id, run_id, ts, ROW_NUMBER() OVER ("
             "    PARTITION BY node_id, run_id ORDER BY sequence ASC, received_at ASC, digest ASC"
-            "  ) AS rn FROM events WHERE " + predicate + ")"
+            "  ) AS rn FROM events WHERE (" + predicate + ") AND (harness IS NULL OR harness != 'grokbot')"
+            ")"
             " WHERE rn = 1",
             params,
         ).fetchall()
         for row in rows:
             result[(row[0], row[1])] = row[2]
+
+    grokbot_keys = [(node_id, run_id) for node_id, run_id, harness in runs if harness == "grokbot"]
+    for start in range(0, len(grokbot_keys), _START_CHUNK):
+        chunk = grokbot_keys[start : start + _START_CHUNK]
+        run_ids = tuple({run_id for _node_id, run_id in chunk})
+        placeholders = ",".join("?" for _ in run_ids)
+        rows = conn.execute(
+            "SELECT run_id, ts FROM ("
+            "  SELECT run_id, ts, ROW_NUMBER() OVER ("
+            "    PARTITION BY run_id ORDER BY sequence ASC, received_at ASC, digest ASC"
+            "  ) AS rn FROM events WHERE harness = 'grokbot' AND run_id IN (" + placeholders + ")"
+            ") WHERE rn = 1",
+            run_ids,
+        ).fetchall()
+        started_by_run_id = {row[0]: row[1] for row in rows}
+        for node_id, run_id in chunk:
+            if run_id in started_by_run_id:
+                result[(node_id, run_id)] = started_by_run_id[run_id]
     return result
 
 

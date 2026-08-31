@@ -748,13 +748,30 @@ def set_run_preference(conn: sqlite3.Connection, raw: Any, *, updated_by: str | 
 
 
 def run_started_at(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
-    """Timestamp of the first observed event per (node_id, run_id), for elapsed."""
+    """Timestamp of the first observed event per dashboard run key, for elapsed."""
     rows = conn.execute(
-        "SELECT node_id, run_id, ts FROM ("
-        "  SELECT node_id, run_id, ts, ROW_NUMBER() OVER ("
+        "WITH starts AS ("
+        "  SELECT node_id, run_id, harness, ts, ROW_NUMBER() OVER ("
         "    PARTITION BY node_id, run_id ORDER BY sequence ASC, received_at ASC, digest ASC"
         "  ) AS rn FROM events"
-        ") WHERE rn = 1"
+        "), latest_grokbot AS ("
+        "  SELECT node_id, run_id FROM ("
+        "    SELECT node_id, run_id, ROW_NUMBER() OVER ("
+        "      PARTITION BY run_id ORDER BY sequence DESC, received_at DESC, digest DESC"
+        "    ) AS rn FROM events WHERE harness = 'grokbot'"
+        "  ) WHERE rn = 1"
+        "), first_grokbot AS ("
+        "  SELECT run_id, ts FROM ("
+        "    SELECT run_id, ts, ROW_NUMBER() OVER ("
+        "      PARTITION BY run_id ORDER BY sequence ASC, received_at ASC, digest ASC"
+        "    ) AS rn FROM events WHERE harness = 'grokbot'"
+        "  ) WHERE rn = 1"
+        ") SELECT starts.node_id, starts.run_id, COALESCE(first_grokbot.ts, starts.ts)"
+        " FROM starts"
+        " LEFT JOIN latest_grokbot ON starts.harness = 'grokbot'"
+        "  AND starts.node_id = latest_grokbot.node_id AND starts.run_id = latest_grokbot.run_id"
+        " LEFT JOIN first_grokbot ON latest_grokbot.run_id = first_grokbot.run_id"
+        " WHERE starts.rn = 1"
     ).fetchall()
     return {(row[0], row[1]): row[2] for row in rows}
 

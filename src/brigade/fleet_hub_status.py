@@ -49,11 +49,13 @@ def latest_status(
     active_ttl_seconds: int = ACTIVE_EVENT_TTL_SECONDS,
     stale_history_after_seconds: int = STALE_HISTORY_AFTER_SECONDS,
 ) -> list[dict[str, Any]]:
-    """Latest event per (node_id, run_id); non-terminal runs unless include_all.
+    """Latest event per run; non-terminal runs unless include_all.
 
-    Exactly one row per (node_id, run_id): ties on sequence (same sequence
-    seen with two digests) resolve to the most recently received, then the
-    larger digest, so the view never shows a run twice.
+    Normal fleet runs are keyed by ``(node_id, run_id)``. Grok Bot jobs are
+    hub-owned, so their lifecycle revisions are keyed globally by ``run_id``
+    even when the feed node and claimant differ. Ties on sequence resolve to
+    the most recently received, then the larger digest, so the view never
+    shows a run twice.
 
     History views (``include_all``) age old nonterminal rows to synthetic
     ``run.stale`` from Hub ``received_at``, keeping the recorded state in
@@ -63,7 +65,8 @@ def latest_status(
         "SELECT node_id, run_id, repo, seat, harness, state, ts, sequence, digest, exit_status, "
         "capability_fingerprint, repo_identity, received_at FROM ("
         "  SELECT e.*, ROW_NUMBER() OVER ("
-        "    PARTITION BY node_id, run_id ORDER BY sequence DESC, received_at DESC, digest DESC"
+        "    PARTITION BY CASE WHEN harness = 'grokbot' THEN 'grokbot' ELSE 'node:' || node_id END, run_id "
+        "    ORDER BY sequence DESC, received_at DESC, digest DESC"
         "  ) AS rn FROM events e"
         ") WHERE rn = 1 ORDER BY node_id, run_id"
     ).fetchall()

@@ -13,6 +13,7 @@ import pytest
 
 from brigade import fleet_command_deck as deck
 from brigade import fleet_hub
+from brigade import fleet_hub_status
 from brigade import fleet_hub_sessions
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
@@ -32,6 +33,8 @@ CREATE TABLE IF NOT EXISTS events (
     ts TEXT NOT NULL,
     received_at TEXT NOT NULL,
     repo_identity TEXT,
+    exit_status INTEGER,
+    capability_fingerprint TEXT,
     PRIMARY KEY (node_id, run_id, sequence, digest)
 );
 """
@@ -52,6 +55,7 @@ def _insert(
     received_at: str | None = None,
     repo: str = "repo",
     repo_identity: str | None = None,
+    harness: str = "claude",
 ) -> None:
     stamp = ts if ts is not None else _ts(10)
     conn.execute(
@@ -64,7 +68,7 @@ def _insert(
             f"{node_id[:8]}-{run_id}-{sequence:04d}",
             repo,
             "seat",
-            "claude",
+            harness,
             state,
             stamp,
             received_at if received_at is not None else stamp,
@@ -674,6 +678,53 @@ def test_external_expired_is_terminal_and_does_not_stay_live(conn):
     )
     assert view.stations[0].busy == 1
     assert [tile.run.run_id for tile in view.stations[0].tiles] == ["live-job"]
+
+
+def test_grokbot_cross_node_revisions_use_one_global_latest_row(conn):
+    terminal_states = ("external.completed", "external.canceled", "external.expired")
+    for index, state in enumerate(terminal_states, start=1):
+        run_id = f"grok-terminal-{index}"
+        _insert(conn, NODE_A, run_id, 1, "external.queued", harness="grokbot", ts=_ts(600))
+        _insert(conn, NODE_B, run_id, 2, state, harness="grokbot", ts=_ts(60))
+
+    _insert(conn, NODE_A, "grok-running", 1, "external.queued", harness="grokbot", ts=_ts(600))
+    _insert(conn, NODE_B, "grok-running", 2, "external.running", harness="grokbot", ts=_ts(30))
+    _insert(conn, NODE_A, "shared-normal-run", 1, "run.started", ts=_ts(50))
+    _insert(conn, NODE_B, "shared-normal-run", 1, "run.started", ts=_ts(40))
+
+    live = deck.fetch_live_runs(conn, now=NOW, stale_after_seconds=1800)
+    assert [(run.node_id, run.run_id, run.state) for run in live] == [
+        (NODE_B, "grok-running", "external.running"),
+        (NODE_B, "shared-normal-run", "run.started"),
+        (NODE_A, "shared-normal-run", "run.started"),
+    ]
+    assert {(run.node_id, run.run_id): run.elapsed_seconds for run in live} == {
+        (NODE_B, "grok-running"): 600.0,
+        (NODE_B, "shared-normal-run"): 40.0,
+        (NODE_A, "shared-normal-run"): 50.0,
+    }
+    outcomes = deck.fetch_outcomes(conn, outcome_window=10)
+    assert {(run.node_id, run.run_id, run.state) for run in outcomes} == {
+        (NODE_B, "grok-terminal-1", "external.completed"),
+        (NODE_B, "grok-terminal-2", "external.canceled"),
+        (NODE_B, "grok-terminal-3", "external.expired"),
+    }
+
+    active_status = fleet_hub_status.latest_status(conn, now=NOW)
+    assert [(row["node_id"], row["run_id"]) for row in active_status] == [
+        (NODE_A, "shared-normal-run"),
+        (NODE_B, "grok-running"),
+        (NODE_B, "shared-normal-run"),
+    ]
+    all_status = fleet_hub_status.latest_status(conn, include_all=True, now=NOW)
+    assert [(row["node_id"], row["run_id"], row["state"]) for row in all_status] == [
+        (NODE_A, "shared-normal-run", "run.started"),
+        (NODE_B, "grok-running", "external.running"),
+        (NODE_B, "grok-terminal-1", "external.completed"),
+        (NODE_B, "grok-terminal-2", "external.canceled"),
+        (NODE_B, "grok-terminal-3", "external.expired"),
+        (NODE_B, "shared-normal-run", "run.started"),
+    ]
 
 
 # --- HTTP integration: hub-served Command Deck (task 2) ----------------------

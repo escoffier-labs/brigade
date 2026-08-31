@@ -346,6 +346,33 @@ def test_cloud_http_routes_require_valid_auth_and_keep_dashboard_read_only(tmp_p
         assert _request(hub, "POST", "/", token=ADMIN_TOKEN, body={})[0] == 404
 
 
+def test_legacy_dashboard_start_map_uses_global_grokbot_start_for_latest_claimant(conn):
+    events = [
+        (NODE_A, "grok-run", 1, "grokbot", "external.queued", "2026-08-30T00:00:00+00:00"),
+        (NODE_B, "grok-run", 2, "grokbot", "external.running", "2026-08-30T00:10:00+00:00"),
+        (NODE_A, "shared-generic", 1, "claude", "run.started", "2026-08-30T00:20:00+00:00"),
+        (NODE_B, "shared-generic", 1, "claude", "run.started", "2026-08-30T00:30:00+00:00"),
+    ]
+    for node_id, run_id, sequence, harness, state, stamp in events:
+        conn.execute(
+            "INSERT INTO events (node_id, run_id, sequence, digest, repo, seat, harness, state, ts, received_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (node_id, run_id, sequence, f"{node_id}-{run_id}-{sequence}", "repo", "seat", harness, state, stamp, stamp),
+        )
+    conn.commit()
+
+    latest = fleet_hub.latest_status(conn, include_all=True)
+    assert [(row["node_id"], row["run_id"]) for row in latest] == [
+        (NODE_A, "shared-generic"),
+        (NODE_B, "grok-run"),
+        (NODE_B, "shared-generic"),
+    ]
+    started = fleet_hub.run_started_at(conn)
+    assert started[(NODE_B, "grok-run")] == "2026-08-30T00:00:00+00:00"
+    assert started[(NODE_A, "shared-generic")] == "2026-08-30T00:20:00+00:00"
+    assert started[(NODE_B, "shared-generic")] == "2026-08-30T00:30:00+00:00"
+
+
 def test_cloud_http_post_binds_node_token_to_lease_owner(tmp_path):
     with _hub(tmp_path) as hub:
         db = fleet_hub.open_db(hub[2])
@@ -1885,10 +1912,14 @@ def test_external_expired_is_terminal_and_releases_hub_capacity(conn):
     assert grok.used == 0
     assert grok.leases == ()
     assert fleet_hub.list_cloud_leases(conn) == []
-    live_states = {row["state"] for row in fleet_hub.latest_status(conn, include_all=False) if row["run_id"] == job_id}
-    assert "external.expired" not in live_states
-    history_states = {
-        row["state"] for row in fleet_hub.latest_status(conn, include_all=True) if row["run_id"] == job_id
-    }
-    assert "external.expired" in history_states
+    live_rows = [row for row in fleet_hub.latest_status(conn, include_all=False) if row["run_id"] == job_id]
+    assert live_rows == []
+    history_rows = [row for row in fleet_hub.latest_status(conn, include_all=True) if row["run_id"] == job_id]
+    assert [(row["node_id"], row["state"], row["sequence"]) for row in history_rows] == [
+        (WORKER_NODE, "external.expired", 3)
+    ]
+    event_count = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE harness='grokbot' AND run_id=?", (job_id,)
+    ).fetchone()[0]
+    assert event_count == 3
     assert queued["job_id"] == job_id
