@@ -56,6 +56,30 @@ A successful worker claim returns the bounded validated envelope (label, role, r
 
 The routine sequence for a worker is: list, claim, validate role and repository, start, renew before expiry, then complete or fail. Repository Scout completion should send `report_text` so the operator can retrieve the snapshot.
 
+## Queue tool arguments
+
+`grokbot_queue_list` takes four optional arguments, and the advertised `inputSchema` carries exactly those four:
+
+| Argument | Type | Default | Effect |
+|---|---|---|---|
+| `state` | string | none | Keeps only jobs in that state. One of `canceled`, `claimed`, `completed`, `expired`, `failed`, `queued`, `running`. |
+| `include_all` | boolean | `true` | `false` hides terminal jobs and leaves `queued`, `claimed`, and `running`. |
+| `limit` | integer | `100` | Caps the returned projections, from 1 to 200. |
+| `role` | string | none | Must be omitted or equal to this listener's own role. It never changes the projection. |
+
+The role stays pinned server-side. A worker listener still lists only its own role's jobs, an operator listener still lists every role, and no argument widens either. A refused list call returns a bounded reason that names the accepted keys, states, or role instead of the generic validation message, so a Bot can correct the call itself. The reason never repeats the value that was sent.
+
+`grokbot_queue_claim` takes a required `job_id` and an optional `lease_id`. When `lease_id` is omitted the listener mints a uuid4 hex lease and returns it in the claim result as `lease_id`. Carry that value on `grokbot_queue_start`, `grokbot_queue_renew`, `grokbot_queue_complete`, `grokbot_queue_fail`, and `grokbot_queue_ack_cancel` for that job. A supplied `lease_id` is echoed back unchanged, and a malformed one is still refused with the generic validation error before any queue mutation. Lease duration, worker identity, and role remain deployment-fixed.
+
+The listener writes one INFO line per tool call to its journal:
+
+```text
+grokbot tool=grokbot_queue_list args=limit,state unknown=0 decision=ok reason=-
+grokbot tool=grokbot_queue_list args=- unknown=1 decision=refused reason=grokbot_queue_list accepts only these arguments: include_all, limit, role, state
+```
+
+The line carries the tool name, the accepted argument keys that were present, a count of unrecognized keys, the decision, and the bounded reason. It never carries argument values, job payloads, lease values, or bearer material. Unrecognized key names are counted rather than printed. Raw requests refused at the HTTP edge are journaled the same way, so a reported "input validation" failure can be read from `journalctl` instead of reproduced by hand.
+
 `doctor` reports sanitized dependency, configuration, permissions, queue, and endpoint checks. It returns nonzero after setup until the listener starts because the endpoint check cannot connect. Run it again after the listener starts. A canary needs the listener already running.
 
 ## Connector packs

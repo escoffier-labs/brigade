@@ -127,6 +127,33 @@ A lease runs from 30 seconds to 3600 seconds and defaults to 300 seconds. The
 holder renews before expiry and within the job deadline. `expire` never
 requeues a job; it finalizes one whose deadline or lease has passed.
 
+`grokbot_queue_claim` takes `lease_id` as an optional argument. A Bot that has
+no lease to supply omits it, and the listener mints a uuid4 hex lease and
+returns it in the claim result as `lease_id`. That returned value is what the
+worker carries on start, renew, complete, fail, and ack-cancel for that job. A
+supplied `lease_id` is echoed back unchanged, and a malformed one is still
+refused before any queue mutation.
+
+### Queue tool arguments
+
+`grokbot_queue_list` accepts four optional arguments: `state` (one of the seven
+job states), `include_all` (boolean, default `true`; `false` hides terminal
+jobs), `limit` (integer 1 to 200, default 100), and `role`. The advertised
+`inputSchema` carries exactly those four.
+
+The role is pinned server-side. `role` is accepted only when it equals this
+listener's own role, it never changes the projection, and no argument lets a
+worker listener see another role's jobs. A refused list call answers with a
+bounded reason naming the accepted keys, states, or role rather than the
+generic validation message, and the reason never repeats the value that was
+sent.
+
+Each tool call writes one INFO journal line: tool name, the accepted argument
+keys that were present, a count of unrecognized keys, the decision (`ok` or
+`refused`), and the bounded reason. Values, job payloads, lease values, and
+bearer material never appear. Requests refused at the HTTP edge are journaled
+the same way.
+
 ### Enrollment and credentials
 
 Enrollment is admin-only:
@@ -415,6 +442,18 @@ output-validation failure with the answer discarded. This is #1345, fixed in
 #1349, which accepts both `EndTurn` and `end_turn`. Until that fix is deployed,
 check the stop reason the CLI actually emitted before you treat a discarded
 answer as a model failure.
+
+**A Bot reports that every tool call fails input validation.** Before #1363,
+`grokbot_queue_list` advertised no arguments and refused any filter with a
+generic `-32602 Invalid request`, and `grokbot_queue_claim` required a
+`lease_id` the Bot had no way to obtain, so a first claim failed too. A model
+that filters a queue list on its first attempt reads that as a dead adapter and
+pauses its routine. After the fix the four list filters are accepted, the claim
+mints a lease when one is not supplied, and every refusal names what it would
+accept. Check `journalctl` for the per-call line
+(`grokbot tool=... decision=refused reason=...`) before reproducing the call by
+hand. An empty journal for a reported failure means the request never reached
+the listener.
 
 **Doctor returns nonzero right after setup.** The endpoint check cannot connect
 until the listener process is running. Start the listener, then run doctor
