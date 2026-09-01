@@ -114,6 +114,8 @@ class TurnResult:
     # #1200: True only when a turn/completed notification for this turn id was
     # actually observed on the stream before the capture cap hit.
     completed_observed: bool = False
+    output_bytes: int = 0
+    output_cap_bytes: int = 0
 
 
 class AppServer:
@@ -140,6 +142,7 @@ class AppServer:
         self._dead = False
         self._capture_budgets: dict[str, proc_mod.ByteBudget] = {}
         self._orphan_budget = proc_mod.ByteBudget()
+        self._stream_budget = proc_mod.ByteBudget(proc_mod.MAX_STREAM_BYTES)
         self._output_limit_exceeded = False
         # #1200: (thread id, turn id) -> status for every parsed turn/completed
         # whose result has not been built yet. Keyed per turn so interleaved
@@ -330,29 +333,19 @@ class AppServer:
             except Exception:
                 pass
 
-    def _trip_output_limit(self, line_bytes: int, thread_id: str | None = None) -> None:
-        """Charge ``line_bytes`` against the cap (overflowing) and stop the child."""
+    def _trip_output_limit(self, line_bytes: int) -> None:
+        """Stop the child after its untrusted transport stream reaches the ceiling."""
 
-        self.capture_budget(thread_id).accept(line_bytes)
+        self._stream_budget.observe(line_bytes)
         self._signal_output_limit()
 
-    def _charge_record(self, line_bytes: int, thread_id: str | None) -> bool:
-        """Account ``line_bytes`` against the cap. False means overflow."""
-
-        if not self.capture_budget(thread_id).try_add(line_bytes):
-            self._signal_output_limit()
-            return False
-        return True
-
     def _ingest_line(self, raw: bytes) -> bool:
-        """Charge one JSONL record, then parse. False means the cap tripped.
+        """Parse one JSONL record under the independent transport ceiling.
 
-        A record larger than the cap is charged and rejected before
-        ``json.loads``. Malformed or non-object records are charged too, so
-        they cannot bypass the cap by failing to parse. An oversized raw
-        record never signals completion (#1200): only a record json.loads
-        parses successfully records a turn/completed, including a parsed
-        record that then overflows the shared budget.
+        A record larger than the ceiling is rejected before ``json.loads`` so it
+        is never fully buffered (#1108), and never signals completion (#1200).
+        A record that merely tips the accumulated ceiling is still parsed first,
+        so a final ``turn/completed`` is recorded before the child is stopped.
         """
 
         if self._output_limit_exceeded:
@@ -361,26 +354,27 @@ class AppServer:
         if not stripped:
             return True
         line_bytes = len(stripped)
-        if line_bytes > proc_mod.MAX_CAPTURE_BYTES:
+        if line_bytes > proc_mod.MAX_STREAM_BYTES:
             self._trip_output_limit(line_bytes)
             return False
+        within_ceiling = self._stream_budget.observe(line_bytes)
         try:
             msg = json.loads(stripped)
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-            return self._charge_record(line_bytes, None)
+            msg = None
         if not isinstance(msg, dict):
-            return self._charge_record(line_bytes, None)
+            if not within_ceiling:
+                self._signal_output_limit()
+                return False
+            return True
         thread_id = _message_thread_id(msg)
-        if not self.capture_budget(thread_id).try_add(line_bytes):
-            # #1200: record parsed completion metadata BEFORE publishing the
-            # limit signal, under the same lock discipline, so a turn waiting
-            # on the limit never wakes to find its entry still absent.
-            if msg.get("method") == "turn/completed":
-                self._note_turn_completed(thread_id, (msg.get("params") or {}).get("turn"))
+        if msg.get("method") == "turn/completed":
+            # #1200: record the completion before publishing the limit signal so
+            # a turn waiting on the limit never wakes to find its entry absent.
+            self._note_turn_completed(thread_id, (msg.get("params") or {}).get("turn"))
+        if not within_ceiling:
             self._signal_output_limit()
             return False
-        if msg.get("method") == "turn/completed":
-            self._note_turn_completed(thread_id, (msg.get("params") or {}).get("turn"))
         if msg.get("id") is not None and "method" in msg:
             self._handle_server_request(msg)
         elif msg.get("id") is not None:
@@ -393,7 +387,7 @@ class AppServer:
         assert self._proc is not None and self._proc.stdout is not None
         stream = _byte_stream(self._proc.stdout)
         leftover = bytearray()
-        limit = proc_mod.MAX_CAPTURE_BYTES
+        limit = proc_mod.MAX_STREAM_BYTES
         chunk_size = _READ_CHUNK_BYTES
         while not self._output_limit_exceeded:
             newline_at = leftover.find(b"\n")
@@ -470,7 +464,9 @@ class AppServer:
         with self._state_lock:
             q = self._queues.get(thread_id)
             if q is None:
-                self._orphans.append((thread_id, msg))
+                payload_bytes = len(json.dumps(msg).encode("utf-8"))
+                if self._orphan_budget.try_add(payload_bytes):
+                    self._orphans.append((thread_id, msg))
                 return
         q.put(msg)
 
@@ -480,6 +476,32 @@ class CodexThread:
         self._server = server
         self.thread_id = thread_id
         self._queue = q
+        # #1144: once the retention budget is spent, later agent text rolls
+        # through one shared bounded tail for the whole turn. Per-item buffers
+        # would let N item ids each retain a full cap's worth of bytes, which
+        # is the memory exhaustion #1108 closed.
+        self._tail_chunks: deque[str] = deque()
+        self._tail_bytes = 0
+
+    def _reset_tail(self) -> None:
+        self._tail_chunks.clear()
+        self._tail_bytes = 0
+
+    def _append_tail(self, text: str) -> None:
+        """Roll ``text`` into the shared tail, evicting oldest chunks. O(1) amortized."""
+
+        if not text:
+            return
+        limit = proc_mod.MAX_CAPTURE_BYTES // 2
+        self._tail_chunks.append(text)
+        self._tail_bytes += len(text.encode("utf-8"))
+        while self._tail_bytes > limit and len(self._tail_chunks) > 1:
+            self._tail_bytes -= len(self._tail_chunks.popleft().encode("utf-8"))
+        if self._tail_bytes > limit:
+            only = self._tail_chunks.pop()
+            trimmed = proc_mod.bound_text_tail(only, limit)
+            self._tail_chunks.append(trimmed)
+            self._tail_bytes = len(trimmed.encode("utf-8"))
 
     def steer(self, text: str, turn_id: str) -> None:
         self._server.request(
@@ -524,6 +546,7 @@ class CodexThread:
                 pass
         deltas: dict[str, list[str]] = {}
         completed_texts: list[str] = []
+        self._reset_tail()
         deadline = time.monotonic() + timeout
 
         completed = self._consume(deadline, turn_id, deltas, completed_texts, on_event)
@@ -606,38 +629,33 @@ class CodexThread:
                 return msg
 
     def _server_output_limited(self) -> bool:
-        if getattr(self._server, "_output_limit_exceeded", False):
-            return True
-        budget = getattr(self._server, "capture_budget", None)
-        if budget is None:
-            return False
-        return bool(budget(self.thread_id).overflowed)
+        return bool(getattr(self._server, "_output_limit_exceeded", False))
 
     def _retain_turn_text(self, delta: str, deltas: dict[str, list[str]], item_id: str) -> bool:
-        """Append a delta under the shared capture cap. False means overflow."""
+        """Append a delta under the shared retention cap without stopping the turn."""
 
         raw = delta.encode("utf-8")
         taken = self._server.capture_budget(self.thread_id).accept(len(raw))
-        if taken <= 0:
-            self._server._signal_output_limit()
-            return False
         if taken < len(raw):
-            deltas.setdefault(item_id, []).append(proc_mod.bound_text(delta, taken))
-            self._server._signal_output_limit()
-            return False
+            # Budget exhausted mid-delta. Retain the prefix the budget was
+            # charged for, then roll the remainder through the shared tail; the
+            # final answer lives at the end of the stream and must survive.
+            chunks = deltas.setdefault(item_id, [])
+            if taken > 0:
+                chunks.append(raw[:taken].decode("utf-8", errors="ignore"))
+                self._append_tail(raw[taken:].decode("utf-8", errors="ignore"))
+            else:
+                self._append_tail(delta)
+            return True
         deltas.setdefault(item_id, []).append(delta)
         return True
 
     def _retain_completed_text(self, text: str, completed_texts: list[str]) -> bool:
         raw = text.encode("utf-8")
         taken = self._server.capture_budget(self.thread_id).accept(len(raw))
-        if taken <= 0:
-            self._server._signal_output_limit()
-            return False
         if taken < len(raw):
-            completed_texts.append(proc_mod.bound_text(text, taken))
-            self._server._signal_output_limit()
-            return False
+            self._append_tail(text)
+            return True
         completed_texts.append(text)
         return True
 
@@ -648,14 +666,26 @@ class CodexThread:
         observed = None
         if turn_id and callable(consume):
             observed = consume(self.thread_id, turn_id)
+        stream_budget = getattr(self._server, "_stream_budget", None)
+        stream_observed = (
+            stream_budget.observed
+            if stream_budget is not None
+            else self._server.capture_budget(self.thread_id).observed
+        )
         return TurnResult(
-            text=proc_mod.bound_text(self._salvage(deltas, completed_texts)),
+            text=proc_mod.bound_text_ends(self._salvage(deltas, completed_texts)),
             ok=False,
             status="failed",
             thread_id=self.thread_id,
-            detail=f"combined output exceeded {proc_mod.MAX_CAPTURE_BYTES} byte limit"[:200],
+            detail=f"combined output exceeded {proc_mod.MAX_STREAM_BYTES} stream byte limit"[:200],
             output_limit_exceeded=True,
             completed_observed=observed == "completed",
+            # This path is reached because the *stream* ceiling tripped, so the
+            # receipt must report the stream volume against the stream ceiling.
+            # Reporting the per-thread retention budget here made the run record
+            # describe a limit that was not the one that fired.
+            output_bytes=stream_observed,
+            output_cap_bytes=proc_mod.MAX_STREAM_BYTES,
         )
 
     def _finish(self, completed, deltas: dict, completed_texts: list[str]) -> TurnResult:
@@ -675,36 +705,61 @@ class CodexThread:
             if isinstance(item, dict) and item.get("type") == "agentMessage"
         ]
         text = (agent_texts[-1] if agent_texts else "") or self._salvage(deltas, completed_texts)
+        budget = self._server.capture_budget(self.thread_id)
+        truncated = budget.overflowed or len(text.encode("utf-8")) > proc_mod.MAX_CAPTURE_BYTES
         if len(text.encode("utf-8")) > proc_mod.MAX_CAPTURE_BYTES:
-            return TurnResult(
-                text=proc_mod.bound_text(text),
-                ok=False,
-                status="failed",
-                thread_id=self.thread_id,
-                detail=f"combined output exceeded {proc_mod.MAX_CAPTURE_BYTES} byte limit"[:200],
-                output_limit_exceeded=True,
-                # #1200: only a genuinely completed turn is a salvage signal.
-                completed_observed=status == "completed",
-            )
+            text = proc_mod.bound_text_ends(text)
+        truncation_detail = (
+            f"combined output exceeded {proc_mod.MAX_CAPTURE_BYTES} byte capture limit; output truncated"
+        )
         if status == "completed":
+            # #1144: a turn that genuinely completed stays ok even when its text
+            # was truncated. Truncation is a capture artifact, not a failed turn.
             return TurnResult(
                 text=text,
                 ok=bool(text),
                 status="complete",
                 thread_id=self.thread_id,
-                detail="" if text else "empty output",
+                detail=(truncation_detail if truncated else "")[:200],
+                output_limit_exceeded=truncated,
+                completed_observed=True,
+                output_bytes=budget.observed,
+                output_cap_bytes=proc_mod.MAX_CAPTURE_BYTES,
             )
         if status == "interrupted":
             return TurnResult(
-                text=text, ok=False, status="interrupted", thread_id=self.thread_id, detail="turn interrupted"
+                text=text,
+                ok=False,
+                status="interrupted",
+                thread_id=self.thread_id,
+                detail="turn interrupted",
+                output_limit_exceeded=truncated,
+                output_bytes=budget.observed,
+                output_cap_bytes=proc_mod.MAX_CAPTURE_BYTES,
             )
         detail = ((turn.get("error") or {}).get("message") or f"turn status: {status}")[:200]
-        return TurnResult(text=text, ok=False, status="failed", thread_id=self.thread_id, detail=detail)
+        return TurnResult(
+            text=text,
+            ok=False,
+            status="failed",
+            thread_id=self.thread_id,
+            detail=detail,
+            output_limit_exceeded=truncated,
+            output_bytes=budget.observed,
+            output_cap_bytes=proc_mod.MAX_CAPTURE_BYTES,
+        )
 
     def _salvage(self, deltas: dict[str, list[str]], completed_texts: list[str]) -> str:
+        head = ""
         if completed_texts:
-            return completed_texts[-1]
-        if deltas:
+            head = completed_texts[-1]
+        elif deltas:
             last_item = list(deltas)[-1]
-            return "".join(deltas[last_item])
-        return ""
+            head = "".join(deltas[last_item])
+        if not self._tail_chunks:
+            return head
+        # #1144: head + tail, so a truncated turn still carries its final text.
+        tail = "".join(self._tail_chunks)
+        if not head:
+            return tail
+        return proc_mod.bound_text(head, proc_mod.MAX_CAPTURE_BYTES // 2) + proc_mod.TRUNCATION_MARKER + tail

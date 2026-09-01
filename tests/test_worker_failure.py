@@ -40,7 +40,10 @@ EXPECTED_LEGACY_CLASSIFICATIONS = {
     "browser-auth": FailureClass.AUTH_REQUIRED,
     "command-not-found": FailureClass.EXECUTABLE_UNAVAILABLE,
     "decode-failure": FailureClass.TRANSPORT_UNAVAILABLE,
-    "output-limit": FailureClass.TRANSPORT_UNAVAILABLE,
+    # #1144: a truncated capture is a Brigade-side output artifact, not a sick
+    # seat. Classifying it as transport-unavailable made recovery and resume
+    # re-probe a healthy seat and report it dead.
+    "output-limit": FailureClass.OUTPUT_CONTRACT_VIOLATION,
     "empty-output": FailureClass.OUTPUT_CONTRACT_VIOLATION,
     "env-ref-missing": FailureClass.CONFIGURATION_INVALID,
     "grok-fallback-missing": FailureClass.CONFIGURATION_INVALID,

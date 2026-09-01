@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,10 @@ from typing import Any, List, Optional
 
 _STREAM_ENCODING = "utf-8"
 MAX_CAPTURE_BYTES = 1_048_576
+# Child output is drained beyond the retained capture cap. This limits the
+# untrusted transport stream without treating transient output as retained
+# memory.
+MAX_STREAM_BYTES = MAX_CAPTURE_BYTES * 16
 # Trusted metadata enumeration (git path listings) scales with repository
 # contents, not model or tool output, so it gets its own larger streaming
 # budget instead of the generic child-output cap.
@@ -414,6 +419,7 @@ class Result:
     stdout_decode_error: str | None = None
     stderr_decode_error: str | None = None
     output_limit_exceeded: bool = False
+    stream_limit_exceeded: bool = False
     incomplete_process_group: bool = False
     descendants_reaped: bool = False
     stdout_bytes: int = 0
@@ -472,6 +478,7 @@ def _result_from_output(
     stdout_bytes: int | None = None,
     stderr_bytes: int | None = None,
     output_limit_exceeded: bool = False,
+    stream_limit_exceeded: bool = False,
 ) -> Result:
     out_text, err_text, stdout_error, stderr_error = _decoded_output(stdout, stderr)
     out_text, err_text = bound_text_pair(out_text, err_text)
@@ -487,6 +494,7 @@ def _result_from_output(
         stdout_decode_error=stdout_error,
         stderr_decode_error=stderr_error,
         output_limit_exceeded=output_limit_exceeded,
+        stream_limit_exceeded=stream_limit_exceeded,
         stdout_bytes=_observed_bytes(stdout, out_text) if stdout_bytes is None else stdout_bytes,
         stderr_bytes=_observed_bytes(stderr, err_text) if stderr_bytes is None else stderr_bytes,
     )
@@ -500,6 +508,40 @@ def bound_text(text: str, max_bytes: int | None = None) -> str:
     if len(raw) <= limit:
         return text
     return raw[:limit].decode(_STREAM_ENCODING, errors="ignore")
+
+
+TRUNCATION_MARKER = "\n[... output truncated ...]\n"
+_TRUNCATION_MARKER = TRUNCATION_MARKER
+
+
+def bound_text_tail(text: str, max_bytes: int | None = None) -> str:
+    """Return the final ``max_bytes`` of UTF-8, cut on a character boundary."""
+
+    limit = MAX_CAPTURE_BYTES if max_bytes is None else max_bytes
+    raw = text.encode(_STREAM_ENCODING)
+    if len(raw) <= limit:
+        return text
+    if limit <= 0:
+        return ""
+    return raw[-limit:].decode(_STREAM_ENCODING, errors="ignore")
+
+
+def bound_text_ends(text: str, max_bytes: int | None = None) -> str:
+    """Bound UTF-8 text while preserving both its beginning and final bytes."""
+
+    limit = MAX_CAPTURE_BYTES if max_bytes is None else max_bytes
+    raw = text.encode(_STREAM_ENCODING)
+    if len(raw) <= limit:
+        return text
+    marker = _TRUNCATION_MARKER.encode(_STREAM_ENCODING)
+    if limit <= len(marker):
+        return raw[-limit:].decode(_STREAM_ENCODING, errors="ignore")
+    retained = limit - len(marker)
+    head_bytes = retained // 2
+    tail_bytes = retained - head_bytes
+    head = raw[:head_bytes].decode(_STREAM_ENCODING, errors="ignore")
+    tail = raw[-tail_bytes:].decode(_STREAM_ENCODING, errors="ignore")
+    return head + _TRUNCATION_MARKER + tail
 
 
 def bound_text_pair(stdout: str, stderr: str, max_bytes: int | None = None) -> tuple[str, str]:
@@ -518,6 +560,7 @@ class ByteBudget:
         self._max_bytes = max_bytes
         self._lock = threading.Lock()
         self.used = 0
+        self.observed = 0
         self.overflowed = False
 
     @property
@@ -530,6 +573,7 @@ class ByteBudget:
         if n <= 0:
             return not self.overflowed
         with self._lock:
+            self.observed += n
             if self.overflowed:
                 return False
             if self.used + n > self.max_bytes:
@@ -544,6 +588,7 @@ class ByteBudget:
         if n <= 0:
             return 0
         with self._lock:
+            self.observed += n
             if self.overflowed:
                 return 0
             remaining = self.max_bytes - self.used
@@ -555,6 +600,25 @@ class ByteBudget:
             if n > remaining:
                 self.overflowed = True
             return taken
+
+    def observe(self, n: int) -> bool:
+        """Charge ``n`` streamed bytes; False once the ceiling is crossed.
+
+        Unlike ``try_add``, the count keeps advancing past the ceiling so the
+        run record can report the volume the child actually produced (#1144).
+        """
+
+        if n <= 0:
+            return not self.overflowed
+        with self._lock:
+            self.observed += n
+            # Latch: once the ceiling is crossed this never reports True again,
+            # or a later small write would wave the reader past an overflow.
+            if self.overflowed or self.used + n > self.max_bytes:
+                self.overflowed = True
+                return False
+            self.used += n
+            return True
 
 
 @dataclass(frozen=True)
@@ -725,49 +789,85 @@ def terminate_process_tree(
 
 
 class _BoundedCollector:
-    """Retain combined stdout/stderr up to ``MAX_CAPTURE_BYTES``."""
+    """Drain a bounded transport stream while retaining its head and tail."""
 
-    def __init__(self, max_bytes: int = MAX_CAPTURE_BYTES) -> None:
-        self.max_bytes = max_bytes
+    def __init__(self, max_bytes: int | None = None, stream_bytes: int | None = None) -> None:
+        # Resolved at construction, not at def time, so the caps stay a single
+        # source of truth that tests and future config can actually move.
+        self.max_bytes = MAX_CAPTURE_BYTES if max_bytes is None else max_bytes
+        self.stream_bytes = MAX_STREAM_BYTES if stream_bytes is None else stream_bytes
         self._lock = threading.Lock()
-        self._buffers = {"stdout": bytearray(), "stderr": bytearray()}
+        self._head = {"stdout": bytearray(), "stderr": bytearray()}
+        self._tail: deque[tuple[str, bytes]] = deque()
+        self._head_bytes = 0
+        self._tail_bytes = 0
+        self._marker = _TRUNCATION_MARKER.encode(_STREAM_ENCODING)
+        # Head and tail split the retention cap, so a truncated capture keeps
+        # both how the output started and how it ended (#1144).
+        self._head_limit = self.max_bytes // 2
+        self._tail_limit = max(0, self.max_bytes - self._head_limit - len(self._marker))
         self.stdout_bytes = 0
         self.stderr_bytes = 0
         self.overflowed = False
+        self.stream_limit_exceeded = False
         self.overflow = threading.Event()
-        # Wakes the collector loop on overflow, reader exit, or process exit.
         self.wake = threading.Event()
 
+    def _append_tail(self, stream: str, data: bytes) -> None:
+        if not data or self._tail_limit <= 0:
+            return
+        self._tail.append((stream, data))
+        self._tail_bytes += len(data)
+        while self._tail_bytes > self._tail_limit:
+            old_stream, old = self._tail[0]
+            excess = self._tail_bytes - self._tail_limit
+            if len(old) <= excess:
+                self._tail.popleft()
+                self._tail_bytes -= len(old)
+            else:
+                self._tail[0] = (old_stream, old[excess:])
+                self._tail_bytes -= excess
+
     def feed(self, stream: str, data: bytes) -> bool:
-        """Retain bytes under the combined cap. Return False after overflow."""
+        """Drain data. False means the stream ceiling, not retention, was hit."""
 
         if not data:
-            return not self.overflowed
+            return True
         with self._lock:
-            if self.overflowed:
+            if self.stream_limit_exceeded:
                 return False
-            remaining = self.max_bytes - (self.stdout_bytes + self.stderr_bytes)
-            if remaining <= 0:
-                self.overflowed = True
-                self.overflow.set()
-                self.wake.set()
-                return False
-            accepted = data[:remaining]
-            self._buffers[stream].extend(accepted)
             if stream == "stdout":
-                self.stdout_bytes += len(accepted)
+                self.stdout_bytes += len(data)
             else:
-                self.stderr_bytes += len(accepted)
-            if len(data) > remaining:
+                self.stderr_bytes += len(data)
+            if self.stdout_bytes + self.stderr_bytes > self.stream_bytes:
+                self.stream_limit_exceeded = True
                 self.overflowed = True
                 self.overflow.set()
                 self.wake.set()
                 return False
+            head_remaining = self._head_limit - self._head_bytes
+            if head_remaining > 0:
+                accepted = data[:head_remaining]
+                self._head[stream].extend(accepted)
+                self._head_bytes += len(accepted)
+                data = data[len(accepted) :]
+            if data:
+                self.overflowed = True
+                self._append_tail(stream, data)
             return True
 
     def snapshot(self) -> tuple[bytes, bytes]:
         with self._lock:
-            return bytes(self._buffers["stdout"]), bytes(self._buffers["stderr"])
+            retained = {name: bytearray(value) for name, value in self._head.items()}
+            if self.overflowed:
+                marker_stream = (
+                    "stdout" if retained["stdout"] or any(n == "stdout" for n, _ in self._tail) else "stderr"
+                )
+                retained[marker_stream].extend(self._marker)
+            for stream, data in self._tail:
+                retained[stream].extend(data)
+            return bytes(retained["stdout"]), bytes(retained["stderr"])
 
 
 def _stop_child(
@@ -821,7 +921,7 @@ def _collection_complete(
     threads: list[threading.Thread],
     collector: _BoundedCollector,
 ) -> bool:
-    return collector.overflowed or (process.poll() is not None and not _readers_alive(threads))
+    return collector.stream_limit_exceeded or (process.poll() is not None and not _readers_alive(threads))
 
 
 def _collect_process_output(
@@ -928,7 +1028,7 @@ def _collect_process_output(
         bounded_stop()
         descendants_reaped = True
 
-    if timed_out or collector.overflowed or incomplete_group:
+    if timed_out or collector.stream_limit_exceeded or incomplete_group:
         bounded_stop()
 
     _join_readers(threads, _TIMED_OUT_DRAIN_SECONDS)
@@ -969,12 +1069,15 @@ def _collect_process_output(
         stdout_bytes=collector.stdout_bytes,
         stderr_bytes=collector.stderr_bytes,
         output_limit_exceeded=collector.overflowed,
+        stream_limit_exceeded=collector.stream_limit_exceeded,
     )
     result.incomplete_process_group = incomplete_group
     result.descendants_reaped = descendants_reaped
     extras: list[str] = []
-    if collector.overflowed:
-        extras.append(f"combined output exceeded {MAX_CAPTURE_BYTES} byte limit")
+    if collector.stream_limit_exceeded:
+        extras.append(f"combined output exceeded {MAX_STREAM_BYTES} stream byte limit; child terminated")
+    elif collector.overflowed:
+        extras.append(f"combined output exceeded {MAX_CAPTURE_BYTES} byte capture limit; output truncated")
     if timed_out:
         extras.append(f"timeout after {timeout}s")
     if incomplete_group:
@@ -994,6 +1097,7 @@ def _collect_process_output(
             stdout_decode_error=result.stdout_decode_error,
             stderr_decode_error=result.stderr_decode_error,
             output_limit_exceeded=result.output_limit_exceeded,
+            stream_limit_exceeded=result.stream_limit_exceeded,
             incomplete_process_group=result.incomplete_process_group,
             descendants_reaped=result.descendants_reaped,
             stdout_bytes=result.stdout_bytes,

@@ -341,6 +341,8 @@ class WorkerResult:
     attempts: tuple[WorkerAttempt, ...] = ()
     provenance: dict[str, Any] | None = None
     output_truncated: bool = False
+    output_bytes: int = 0
+    output_cap_bytes: int = 0
 
 
 def _is_output_limit_failure(result: agents.AgentResult | WorkerResult) -> bool:
@@ -971,6 +973,8 @@ def dispatch(
                 attempts=tuple(attempts or ()),
                 provenance=captured.envelope,
                 output_truncated=over_cap,
+                output_bytes=result.output_bytes,
+                output_cap_bytes=result.output_cap_bytes,
             )
 
         initial_started = _attempt_timestamp()

@@ -18,6 +18,7 @@ from . import (
     agents,
     codex_appserver,
     message_envelope,
+    proc,
     receipt_schema,
     run_budget,
     run_events,
@@ -652,9 +653,10 @@ def _resume_locked(
             entry["detail"] = "" if entry["ok"] else redact_approval_token(turn.detail or f"turn {turn.status}")[:200]
             entry["status"] = turn.status
             if getattr(turn, "output_limit_exceeded", False):
-                entry["ok"] = False
-                entry["failure_phase"] = "harness"
                 entry["failure_kind"] = "output-limit"
+                entry["output_truncated"] = True
+                entry["output_bytes"] = getattr(turn, "output_bytes", 0)
+                entry["output_cap_bytes"] = getattr(turn, "output_cap_bytes", proc.MAX_CAPTURE_BYTES)
                 entry["detail"] = redact_approval_token(turn.detail or entry["detail"])[:200]
             captured = message_envelope.emit(
                 entry["text"],
@@ -695,6 +697,13 @@ def _resume_locked(
             thread_id=r.get("thread_id"),
             status=r.get("status", ""),
             provenance=r.get("provenance") if isinstance(r.get("provenance"), dict) else None,
+            # #1144: without these the rewritten worker-results.json loses the
+            # observed byte count, the configured cap, and the output-limit
+            # classification for every resumed run.
+            failure_kind=r.get("failure_kind"),
+            output_truncated=bool(r.get("output_truncated")),
+            output_bytes=int(r.get("output_bytes") or 0),
+            output_cap_bytes=int(r.get("output_cap_bytes") or 0),
         )
         for r in results
     ]

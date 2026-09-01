@@ -583,10 +583,46 @@ def test_run_caps_combined_output_and_sets_overflow_flag():
     )
 
     assert result.output_limit_exceeded is True
-    assert result.total_bytes == proc.MAX_CAPTURE_BYTES
-    assert result.stdout_bytes + result.stderr_bytes == proc.MAX_CAPTURE_BYTES
-    assert len(result.stdout.encode("utf-8")) + len(result.stderr.encode("utf-8")) >= proc.MAX_CAPTURE_BYTES
+    # #1144: the byte counters report what the child actually produced, so the
+    # run record can state the original volume alongside the configured cap.
+    assert result.total_bytes == overflow
+    assert result.stdout_bytes + result.stderr_bytes == overflow
+    # Retention stays bounded by the cap; that is the #1108 memory invariant.
+    # Slack covers the truncation diagnostic appended to stderr after bounding.
+    retained = len(result.stdout.encode("utf-8")) + len(result.stderr.encode("utf-8"))
+    assert retained <= proc.MAX_CAPTURE_BYTES + 200
+    # Draining past the cap is not a kill: only the stream ceiling terminates.
+    assert result.stream_limit_exceeded is False
+    assert result.code == 0
     assert "combined output exceeded" in result.stderr
+
+
+def test_overflow_retains_head_and_tail_so_final_output_survives():
+    """#1144: the final bytes of a truncated stream must survive truncation."""
+    filler = proc.MAX_CAPTURE_BYTES
+    result = proc.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys;"
+                "sys.stdout.write('HEAD-MARKER');"
+                f"sys.stdout.write('x' * {filler});"
+                "sys.stdout.write('TAIL-MARKER');"
+                "sys.stdout.flush()"
+            ),
+        ],
+        timeout=5.0,
+    )
+
+    assert result.output_limit_exceeded is True
+    assert result.code == 0
+    assert "HEAD-MARKER" in result.stdout
+    # The final answer lives at the end of an agent stream; head-only
+    # truncation discarded exactly the part that mattered.
+    assert "TAIL-MARKER" in result.stdout
+    assert proc.TRUNCATION_MARKER.strip() in result.stdout
+    assert len(result.stdout.encode("utf-8")) <= proc.MAX_CAPTURE_BYTES
 
 
 def test_collect_does_not_poll_overflow_at_fixed_interval(monkeypatch):
@@ -657,6 +693,15 @@ def test_bound_text_pair_stays_at_or_below_cap():
     overshot = ("A" * (proc.MAX_CAPTURE_BYTES - 1)) + "\ufffd"
     stdout, stderr = proc.bound_text_pair(overshot, "E", proc.MAX_CAPTURE_BYTES)
     assert len(stdout.encode("utf-8")) + len(stderr.encode("utf-8")) <= proc.MAX_CAPTURE_BYTES
+
+
+def test_bound_text_ends_keeps_final_utf8_text_under_cap():
+    kept = proc.bound_text_ends("start-" + ("x" * 256) + "-final-answer", 64)
+
+    assert len(kept.encode("utf-8")) <= 64
+    assert kept.startswith("start-")
+    assert "output truncated" in kept
+    assert kept.endswith("-final-answer")
 
 
 def test_run_delimited_splits_nul_fields():
