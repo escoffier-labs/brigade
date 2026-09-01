@@ -804,7 +804,10 @@ def test_dispatch_receives_hub_approved_model_reasoning_and_binding(monkeypatch,
     agent = resolution.roster.agents["chef"]
     assert agent.cli == "claude"
     assert agent.model == "opus-5"
-    assert agent.reasoning == "high"
+    # claude has no reasoning flag, so the hub-approved reasoning is dropped at
+    # the policy layer; flow-through for reasoning adapters is covered in
+    # tests/test_fleet_model_admission.py.
+    assert agent.reasoning is None
     calls: list[dict[str, object]] = []
 
     def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
@@ -823,7 +826,7 @@ def test_dispatch_receives_hub_approved_model_reasoning_and_binding(monkeypatch,
         output_dir=tmp_path,
     )
     assert results[0].ok is True
-    assert calls == [{"cli": "claude", "model": "opus-5", "reasoning": "high"}]
+    assert calls == [{"cli": "claude", "model": "opus-5", "reasoning": None}]
 
 
 def test_dispatch_does_not_run_when_versioned_custom_command_or_model_override_is_denied(monkeypatch, tmp_path):
