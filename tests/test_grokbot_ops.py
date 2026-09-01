@@ -476,7 +476,7 @@ def test_doctor_feed_authority_probe_issues_no_mutating_hub_action(tmp_path: Pat
 
 @pytest.mark.parametrize(
     ("feed_status", "exit_code"),
-    (("skipped", 0), ("ok", 0), ("fail", 1)),
+    (("skipped", 0), ("ok", 0), ("fail", 1), ("unrecognized", 1)),
 )
 def test_doctor_command_treats_a_skipped_feed_authority_probe_as_non_failing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, feed_status: str, exit_code: int

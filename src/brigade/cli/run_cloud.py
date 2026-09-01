@@ -1405,6 +1405,14 @@ def _print_reconcile_result(result: dict) -> None:
         print(f"job {job['job_id']} state={job['state']}")
 
 
+_DOCTOR_NON_FAILING_STATUSES = frozenset({"ok", "skipped"})
+
+
+def _doctor_exit_code(checks: list[dict[str, str]]) -> int:
+    """Fail only on statuses outside the explicit non-failing allowlist."""
+    return 0 if all(check["status"] in _DOCTOR_NON_FAILING_STATUSES for check in checks) else 1
+
+
 def _dispatch_grokbot_pack(args, target: Path) -> int:
     """Preview-first connector-pack lifecycle without printing secret values."""
     from .. import grokbot_mcp, grokbot_ops, grokbot_packs
@@ -1449,7 +1457,7 @@ def _dispatch_grokbot_pack(args, target: Path) -> int:
             else:
                 for check in checks:
                     print(f"{check['check']}: {check['status']}")
-            return 1 if any(check["status"] != "ok" for check in checks) else 0
+            return _doctor_exit_code(checks)
         elif command == "canary":
             result = grokbot_packs.canary(target, args.pack_id)
             if args.json:
@@ -1575,11 +1583,9 @@ def _dispatch_grokbot_ops(args, target: Path) -> int:
 
         if command == "doctor":
             checks = grokbot_ops.doctor(target, instance)
-            failed = False
             for check in checks:
                 print(f"{check['check']}: {check['status']}")
-                failed = failed or check["status"] == "fail"
-            return 1 if failed else 0
+            return _doctor_exit_code(checks)
 
         if command == "canary":
             result = grokbot_ops.canary(target, instance)
