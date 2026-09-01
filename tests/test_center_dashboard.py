@@ -107,7 +107,7 @@ def test_agents_view_renders_machine_cards_and_tiles(dashboard_server, monkeypat
                     "provider": "brigade",
                     "harness": "brigade-run",
                     "kind": "run",
-                    "host": "rocinante",
+                    "host": "alpha",
                     "label": "Brigade run",
                     "task_label": "Browser check task",
                     "model": "gpt-5.6-terra",
