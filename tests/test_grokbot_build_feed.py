@@ -901,6 +901,13 @@ def test_a_refused_hub_enqueue_leaves_no_snapshot_that_reads_as_known(tmp_path: 
         return _hub_decision(granted=True, reason="ok", job=job)
 
     monkeypatch.setattr(fleet_client_grokbot, "enqueue", enqueue)
+    # The hub answers an unknown job id with a bounded invalid-request refusal,
+    # which is what proves the refused enqueue left nothing behind at the hub.
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "status",
+        lambda _job_id, **_kwargs: _hub_decision(granted=False, reason="invalid-request"),
+    )
 
     with pytest.raises(grokbot_build_feed.BuildFeedError, match="^queue-error$"):
         grokbot_build_feed.apply(tmp_path, policy, now=NOW)
@@ -913,6 +920,55 @@ def test_a_refused_hub_enqueue_leaves_no_snapshot_that_reads_as_known(tmp_path: 
     assert result["reason"] == "created"
     assert result["issue_number"] == 7
     assert attempts == [_derived_job_id(grokbot_build_feed._build_key("example/brigade", 7))] * 2
+
+
+def test_an_undecidable_hub_enqueue_keeps_the_snapshot_and_still_reapplies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    hub_jobs: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "list_jobs",
+        lambda **_kwargs: _hub_decision(granted=True, reason="ok", jobs=list(hub_jobs)),
+    )
+    attempts: list[str] = []
+
+    def enqueue(**fields: object):
+        job_id = fields["job_id"]
+        assert isinstance(job_id, str)
+        attempts.append(job_id)
+        if len(attempts) == 1:
+            raise TimeoutError("the client gave up before the hub answered")
+        job = {
+            "job_id": job_id,
+            "role": fields["role"],
+            "state": "queued",
+            "created_at": "2026-08-31T12:00:00Z",
+        }
+        hub_jobs.append(job)
+        return _hub_decision(granted=True, reason="ok", job=job)
+
+    monkeypatch.setattr(fleet_client_grokbot, "enqueue", enqueue)
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "status",
+        lambda _job_id, **_kwargs: _hub_decision(granted=False, reason="hub-unavailable"),
+    )
+
+    derived = _derived_job_id(grokbot_build_feed._build_key("example/brigade", 7))
+    with pytest.raises(TimeoutError):
+        grokbot_build_feed.apply(tmp_path, policy, now=NOW)
+
+    assert (tmp_path / ".brigade" / "cloud" / "grokbot" / "snapshots" / f"{derived}.json").is_file()
+
+    result = grokbot_build_feed.apply(tmp_path, policy, now=NOW)
+
+    assert result["created"] == 1
+    assert result["issue_number"] == 7
+    assert attempts == [derived] * 2
 
 
 def test_a_snapshot_only_counts_as_known_while_the_queue_listing_still_carries_it(tmp_path: Path):
