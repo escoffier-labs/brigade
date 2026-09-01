@@ -8,6 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PY=${PY:-.venv/bin}
+"$PY/python" scripts/verify_env.py
 "$PY/python" -c "import xdist" 2>/dev/null || {
     echo "pytest-xdist is not installed. Re-sync: pip install -e \".[dev]\"" >&2
     exit 1

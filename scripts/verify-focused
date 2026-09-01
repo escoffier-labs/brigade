@@ -8,6 +8,7 @@ if (( $# == 0 )); then
 fi
 
 PY=${PY:-.venv/bin}
+"$PY/python" scripts/verify_env.py
 "$PY/ruff" check .
 "$PY/ruff" format --check .
 "$PY/mypy"
