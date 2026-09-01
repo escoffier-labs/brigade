@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import sys
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping
+
+from .. import worklore_brigade_sync, worklore_github_sync
 
 DEFAULT_PORT = 3774
 DEFAULT_DB_REL_PATH = Path(".brigade") / "fleet-hub.db"
@@ -376,6 +379,117 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_pref_pull = preference_sub.add_parser("pull", help="Refresh the local cache from the hub. Never fails a run.")
     p_pref_pull.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     p_pref_pull.set_defaults(func=_dispatch_preference_pull)
+
+    p_work = fleet_sub.add_parser("work", help="Create, inspect, and schedule Worklore items on the fleet hub.")
+    work_sub = p_work.add_subparsers(dest="work_command", metavar="<work-command>")
+    work_sub.required = True
+    p_work_create = work_sub.add_parser("create", help="Create a native Worklore item (operator node token).")
+    p_work_create.add_argument("--title", required=True, help="Item title.")
+    p_work_create.add_argument("--kind", required=True, help="Item kind (fleet, admin, or other allowed kind).")
+    p_work_create.add_argument(
+        "--idempotency-key",
+        default=None,
+        help="Idempotency key for native create; generated when omitted.",
+    )
+    p_work_create.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_work_create.set_defaults(func=_dispatch_work_create)
+    p_work_show = work_sub.add_parser("show", help="Show one Worklore item.")
+    p_work_show.add_argument("work_id", help="Worklore item id.")
+    p_work_show.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_work_show.set_defaults(func=_dispatch_work_show)
+    p_work_list = work_sub.add_parser("list", help="List Worklore items.")
+    p_work_list.add_argument(
+        "--source",
+        default=None,
+        help="Filter by source (github, brigade, or native).",
+    )
+    p_work_list.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_work_list.set_defaults(func=_dispatch_work_list)
+    p_work_burn = work_sub.add_parser("burn", help="Show one page of the current burn queue.")
+    p_work_burn.add_argument("--limit", type=int, default=None, help="Items per page (1-100, default 50).")
+    p_work_burn.add_argument("--cursor", default=None, help="Page cursor from a previous burn read.")
+    p_work_burn.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_work_burn.set_defaults(func=_dispatch_work_burn)
+    p_work_patch = work_sub.add_parser(
+        "patch", help="Patch scheduling fields on a Worklore item (operator node token)."
+    )
+    p_work_patch.add_argument("work_id", help="Worklore item id.")
+    p_work_patch.add_argument("--if-match", required=True, help="Expected item version.")
+    p_work_patch.add_argument("--title", default=None, help="Replacement title.")
+    p_work_patch.add_argument("--description", default=None, help="Replacement description.")
+    p_work_patch.add_argument("--scope", default=None, help="Replacement scope.")
+    p_work_patch.add_argument("--priority", default=None, help="Replacement priority.")
+    p_work_patch.add_argument("--burn-rank", type=int, default=None, help="Replacement burn rank.")
+    burn_eligible = p_work_patch.add_mutually_exclusive_group()
+    burn_eligible.add_argument(
+        "--burn-eligible",
+        dest="burn_eligible",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Mark the item eligible for burn scheduling.",
+    )
+    burn_eligible.add_argument(
+        "--no-burn-eligible",
+        dest="burn_eligible",
+        action="store_const",
+        const=False,
+        help="Mark the item ineligible for burn scheduling.",
+    )
+    p_work_patch.add_argument("--token-appetite", default=None, help="Replacement token appetite.")
+    p_work_patch.add_argument("--execution-mode", default=None, help="Replacement execution mode.")
+    p_work_patch.add_argument("--acceptance", action="append", default=None, help="Acceptance criterion (repeatable).")
+    p_work_patch.add_argument("--blocker", default=None, help="Replacement blocker text.")
+    p_work_patch.add_argument("--review-after", default=None, help="Replacement review-after timestamp.")
+    p_work_patch.add_argument("--spend-by", default=None, help="Replacement spend-by timestamp.")
+    p_work_patch.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_work_patch.set_defaults(func=_dispatch_work_patch)
+    p_work_transition = work_sub.add_parser(
+        "transition", help="Move a Worklore item to another status (operator node token)."
+    )
+    p_work_transition.add_argument("work_id", help="Worklore item id.")
+    p_work_transition.add_argument("--to-status", required=True, help="Target status.")
+    p_work_transition.add_argument("--if-match", required=True, help="Expected item version.")
+    p_work_transition.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_work_transition.set_defaults(func=_dispatch_work_transition)
+    p_work_attempt = work_sub.add_parser("attempt", help="Record a started, failed, or reset attempt.")
+    p_work_attempt.add_argument("work_id", help="Worklore item id.")
+    p_work_attempt.add_argument(
+        "--action",
+        required=True,
+        choices=("started", "failed", "reset"),
+        help="Attempt action. reset requires an operator node token.",
+    )
+    p_work_attempt.add_argument("--run-id", default=None, help="Fleet run id for started or failed.")
+    p_work_attempt.add_argument("--if-match", required=True, help="Expected item version.")
+    p_work_attempt.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_work_attempt.set_defaults(func=_dispatch_work_attempt)
+    p_work_link = work_sub.add_parser("link", help="Add an operator-managed link (operator node token).")
+    p_work_link.add_argument("work_id", help="Worklore item id.")
+    p_work_link.add_argument("--link-type", required=True, help="Link type (url, github, or brigade).")
+    p_work_link.add_argument("--external-key", required=True, help="Stable external identity.")
+    p_work_link.add_argument("--url", default=None, help="Optional https URL.")
+    p_work_link.add_argument("--display-ref", default=None, help="Optional display label.")
+    p_work_link.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_work_link.set_defaults(func=_dispatch_work_link)
+    p_work_unlink = work_sub.add_parser("unlink", help="Remove one operator-managed link (operator node token).")
+    p_work_unlink.add_argument("work_id", help="Worklore item id.")
+    p_work_unlink.add_argument("link_id", help="Link id.")
+    p_work_unlink.add_argument("--if-match", default=None, help="Optional expected item version.")
+    p_work_unlink.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_work_unlink.set_defaults(func=_dispatch_work_unlink)
+    p_work_sync_github = work_sub.add_parser(
+        "sync-github",
+        help="Import labeled GitHub issues into Worklore.",
+    )
+    p_work_sync_github.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_work_sync_github.set_defaults(func=_dispatch_work_sync_github)
+    p_work_sync_brigade = work_sub.add_parser(
+        "sync-brigade",
+        help="Import configured Brigade ledgers into Worklore.",
+    )
+    p_work_sync_brigade.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_work_sync_brigade.set_defaults(func=_dispatch_work_sync_brigade)
 
 
 def _dispatch_serve(args: argparse.Namespace, *, environ: Mapping[str, str] | None = None) -> int:
@@ -1357,3 +1471,219 @@ def _dispatch_flush(args: argparse.Namespace) -> int:
     flushed = fleet_client.flush_spool(node_id)
     print(f"flushed {flushed} spooled event(s) for node {node_id}")
     return 0
+
+
+def _print_work_payload(payload: object, *, json_output: bool) -> int:
+    import json as _json
+
+    if json_output:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    if isinstance(payload, dict):
+        item = payload.get("item")
+        if isinstance(item, dict) and item.get("work_id"):
+            print(f"{item.get('status') or 'ok'} {item['work_id']}")
+            return 0
+        items = payload.get("items")
+        if isinstance(items, list):
+            print(f"{len(items)} item(s)")
+            return 0
+        link = payload.get("link")
+        if isinstance(link, dict) and link.get("link_id"):
+            print(f"linked {link['link_id']}")
+            return 0
+    print("ok")
+    return 0
+
+
+def _run_work(args: argparse.Namespace, producer: Callable[[], object]) -> int:
+    from .. import worklore_client
+
+    try:
+        payload = producer()
+    except worklore_client.FleetClientError as exc:
+        error = worklore_client._safe_terminal_text(exc) or "fleet hub work failed"
+        if bool(getattr(args, "json", False)):
+            payload = {"error": error}
+            code = worklore_client._error_code(getattr(exc, "code", None))
+            if code is not None:
+                payload["code"] = code
+            print(json.dumps(payload, sort_keys=True), file=sys.stderr)
+            return 1
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    return _print_work_payload(payload, json_output=bool(getattr(args, "json", False)))
+
+
+def _dispatch_work_create(args: argparse.Namespace) -> int:
+    from .. import worklore_client
+
+    return _run_work(
+        args,
+        lambda: worklore_client.create_item(
+            {"title": args.title, "kind": args.kind},
+            idempotency_key=getattr(args, "idempotency_key", None),
+        ),
+    )
+
+
+def _dispatch_work_show(args: argparse.Namespace) -> int:
+    from .. import worklore_client
+
+    return _run_work(args, lambda: worklore_client.get_item(args.work_id))
+
+
+def _dispatch_work_list(args: argparse.Namespace) -> int:
+    from .. import worklore_client
+
+    return _run_work(args, lambda: worklore_client.list_items(source=args.source))
+
+
+def _dispatch_work_burn(args: argparse.Namespace) -> int:
+    from .. import worklore_client
+
+    return _run_work(
+        args,
+        lambda: worklore_client.burn_queue(limit=getattr(args, "limit", None), cursor=getattr(args, "cursor", None)),
+    )
+
+
+def _dispatch_work_patch(args: argparse.Namespace) -> int:
+    from .. import worklore_client
+
+    body: dict[str, object] = {}
+    for name in (
+        "title",
+        "description",
+        "scope",
+        "priority",
+        "burn_rank",
+        "burn_eligible",
+        "token_appetite",
+        "execution_mode",
+        "acceptance",
+        "blocker",
+        "review_after",
+        "spend_by",
+    ):
+        value = getattr(args, name, None)
+        if value is not None:
+            body[name] = value
+    return _run_work(args, lambda: worklore_client.patch_item(args.work_id, body, if_match=args.if_match))
+
+
+def _dispatch_work_transition(args: argparse.Namespace) -> int:
+    from .. import worklore_client
+
+    return _run_work(
+        args,
+        lambda: worklore_client.transition(args.work_id, {"to_status": args.to_status}, if_match=args.if_match),
+    )
+
+
+def _dispatch_work_attempt(args: argparse.Namespace) -> int:
+    from .. import worklore_client
+
+    body: dict[str, object] = {"action": args.action}
+    if getattr(args, "run_id", None):
+        body["run_id"] = args.run_id
+    return _run_work(args, lambda: worklore_client.record_attempt(args.work_id, body, if_match=args.if_match))
+
+
+def _dispatch_work_link(args: argparse.Namespace) -> int:
+    from .. import worklore_client
+
+    body: dict[str, object] = {"link_type": args.link_type, "external_key": args.external_key}
+    if getattr(args, "url", None):
+        body["url"] = args.url
+    if getattr(args, "display_ref", None):
+        body["display_ref"] = args.display_ref
+    return _run_work(args, lambda: worklore_client.add_link(args.work_id, body))
+
+
+def _dispatch_work_unlink(args: argparse.Namespace) -> int:
+    from .. import worklore_client
+
+    return _run_work(
+        args,
+        lambda: worklore_client.delete_link(args.work_id, args.link_id, if_match=getattr(args, "if_match", None)),
+    )
+
+
+def _dispatch_work_sync_github(args: argparse.Namespace) -> int:
+    import json as _json
+
+    try:
+        config = worklore_github_sync.load_github_config()
+        result = worklore_github_sync.sync_github(
+            orgs=config["orgs"],
+            label=config["label"],
+            state=config["state"],
+        )
+    except worklore_github_sync.GitHubSyncError as exc:
+        print(str(exc), file=sys.stderr)
+        if exc.code == "field-bound":
+            return 2
+        return 1
+    counts: dict[str, int] = {}
+    for key in ("observation_count", "posted", "refused", "skipped"):
+        value = result.get(key, 0)
+        counts[key] = value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+    org_names = [org["name"] for org in config["orgs"] if isinstance(org, Mapping) and isinstance(org.get("name"), str)]
+    if bool(getattr(args, "json", False)):
+        print(
+            _json.dumps(
+                {
+                    "observation_count": counts["observation_count"],
+                    "orgs": org_names,
+                    "posted": counts["posted"],
+                    "refused": counts["refused"],
+                    "skipped": counts["skipped"],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        print(
+            f"posted {counts['posted']} batch(es), {counts['observation_count']} observation(s), "
+            f"refused {counts['refused']}, skipped {counts['skipped']}"
+        )
+    return 1 if counts["refused"] > 0 else 0
+
+
+def _dispatch_work_sync_brigade(args: argparse.Namespace) -> int:
+    import json as _json
+
+    try:
+        config = worklore_brigade_sync.load_brigade_config()
+        result = worklore_brigade_sync.sync_brigade(config["targets"])
+    except worklore_brigade_sync.BrigadeSyncError as exc:
+        print(str(exc), file=sys.stderr)
+        if exc.code == "field-bound":
+            return 2
+        return 1
+    counts: dict[str, int] = {}
+    for key in (
+        "created",
+        "identities",
+        "observation_count",
+        "posted",
+        "refused",
+        "skipped",
+        "targets",
+        "unchanged",
+        "updated",
+    ):
+        value = result.get(key, 0)
+        counts[key] = value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+    if bool(getattr(args, "json", False)):
+        print(_json.dumps(counts, indent=2, sort_keys=True))
+    else:
+        print(
+            f"targets {counts['targets']}, identities {counts['identities']}, "
+            f"posted {counts['posted']}, {counts['observation_count']} observation(s), "
+            f"created {counts['created']}, updated {counts['updated']}, unchanged {counts['unchanged']}, "
+            f"refused {counts['refused']}, skipped {counts['skipped']}"
+        )
+    return 1 if counts["refused"] > 0 else 0

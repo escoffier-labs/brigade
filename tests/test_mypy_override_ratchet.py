@@ -32,7 +32,7 @@ def _ignored_module_patterns() -> list[str]:
 
 
 def _ignored_module_patterns_from_text(text: str) -> list[str]:
-    """Python 3.10 path: tomllib is 3.11+ and toml_compat cannot read multiline arrays."""
+    """Python 3.10 path: keep this ratchet independent from the TOML parser."""
     patterns: list[str] = []
     blocks = text.split("[[tool.mypy.overrides]]")[1:]
     for block in blocks:
