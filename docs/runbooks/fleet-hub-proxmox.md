@@ -436,6 +436,23 @@ ls -lh /var/backups/brigade/
 
 Copy backups off the CT through the operator's existing backup system. The local timer is not a replacement for an off-host copy.
 
+## 9. Compact the event journal (optional)
+
+The classic boards (`/view/machines`, `/view/repos`) refresh about every 10s and now read a latest-state-per-run page: terminal history is windowed to 24h unless `all=1`, and each page is LIMITed. That keeps render cost flat as the journal grows. The events table itself is still an append-only log. Dashboard GET handlers never delete rows.
+
+If the SQLite file is still larger than you want, prune events older than N days as a planned maintenance step after a backup (section 8). Stop or briefly idle writers if you can; WAL mode allows a live delete, but take the backup first.
+
+```bash
+systemctl start brigade-fleet-backup.service
+cutoff=$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ)
+sqlite3 /var/lib/brigade/fleet-hub.db \
+  "DELETE FROM events WHERE received_at < '$cutoff';"
+sqlite3 /var/lib/brigade/fleet-hub.db "PRAGMA wal_checkpoint(TRUNCATE);"
+sqlite3 /var/lib/brigade/fleet-hub.db "VACUUM;"
+```
+
+Fourteen days is a starting horizon, not a required policy. Keep at least the deck history window (default 24h, configurable as `stale_history_after_seconds`). Do not run this from a read-only dashboard request. Confirm `/health` and a board refresh afterward.
+
 ## Upgrade and rollback
 
 Before changing the Brigade ref, run a backup and save the current ref:

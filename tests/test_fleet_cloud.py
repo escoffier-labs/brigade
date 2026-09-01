@@ -379,7 +379,13 @@ def test_legacy_dashboard_start_map_uses_global_grokbot_start_for_latest_claiman
         (NODE_B, "grok-run"),
         (NODE_B, "shared-generic"),
     ]
-    started = fleet_hub.run_started_at(conn)
+    started = fleet_hub.run_started_at(
+        conn,
+        [
+            (str(row["node_id"]), str(row["run_id"]), row["harness"] if isinstance(row.get("harness"), str) else None)
+            for row in latest
+        ],
+    )
     assert started[(NODE_B, "grok-run")] == "2026-08-30T00:00:00+00:00"
     assert started[(NODE_A, "shared-generic")] == "2026-08-30T00:20:00+00:00"
     assert started[(NODE_B, "shared-generic")] == "2026-08-30T00:30:00+00:00"

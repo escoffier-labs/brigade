@@ -280,8 +280,14 @@ phone over Tailscale:
 - Query params: `sort=attention|age|node|repo|state|seat`, substring filters
   `node=`, `repo=`, `seat=` (matches seat or harness), `state=` (bucket or raw
   event type), `attention=1` (needs-attention only), `all=1` (include
-  finished runs). Same params on both boards; the board links carry them
-  across.
+  finished runs, still paginated), `offset=` (next LIMIT page). Same params
+  on both boards; the board links carry them across.
+- Board queries reuse latest-state-per-run. The default fetch windows
+  terminal history to the deck horizon (`stale_history_after_seconds`,
+  default 24h) so the 10s refresh does not scan the whole journal; `all=1`
+  drops the window and still applies LIMIT plus a `more` link. Start times
+  and node cards are derived from those rendered rows. GET never prunes
+  events; operators compact the journal from the Proxmox runbook.
 - Server-rendered, stdlib only, no framework or CDN asset. Tables, sorting,
   and filtering are plain HTML + query params and work with JavaScript off;
   refresh is a `<meta http-equiv="refresh" content="10">`. The inline

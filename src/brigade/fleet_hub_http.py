@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlencode
 from . import fleet_command_deck, fleet_dashboard, fleet_hub_grokbot, fleet_hub_sessions, worklore_http
 from . import fleet_hub as _hub
 from . import fleet_hub_model_roster
+from . import fleet_hub_status
 from .fleet_hub import (
     DASHBOARD_COOKIE,
     DASHBOARD_COOKIE_MAX_AGE,
@@ -54,12 +55,27 @@ def latest_status(*args: Any, **kwargs: Any) -> Any:
     return _hub.latest_status(*args, **kwargs)
 
 
+def board_status(*args: Any, **kwargs: Any) -> Any:
+    return _hub.board_status(*args, **kwargs)
+
+
 def run_started_at(*args: Any, **kwargs: Any) -> Any:
     return _hub.run_started_at(*args, **kwargs)
 
 
 def node_summary(*args: Any, **kwargs: Any) -> Any:
     return _hub.node_summary(*args, **kwargs)
+
+
+def _board_include_all(params: dict[str, list[str]]) -> bool:
+    return params.get("all", [""])[0].lower() in ("1", "true", "yes", "on")
+
+
+def _board_more_href(path: str, params: dict[str, list[str]], *, next_offset: int) -> str:
+    next_params = {key: list(values) for key, values in params.items()}
+    next_params["offset"] = [str(next_offset)]
+    rest = urlencode(next_params, doseq=True)
+    return f"{path}?{rest}" if rest else path
 
 
 def handle_claim(*args: Any, **kwargs: Any) -> Any:
@@ -398,28 +414,44 @@ def make_handler(
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
             try:
-                runs = latest_status(
+                include_all = _board_include_all(params)
+                offset = fleet_hub_status.clamp_board_offset(params.get("offset", ["0"])[0])
+                board = board_status(
                     conn,
-                    include_all=True,
+                    include_all=include_all,
+                    offset=offset,
+                    history_window_seconds=frozen_deck.stale_history_after_seconds,
                     stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
                 )
                 claims = list_claims(conn)
-                started_at = run_started_at(conn)
-                nodes = node_summary(conn)
+                started_at = run_started_at(
+                    conn,
+                    [
+                        (
+                            str(row["node_id"]),
+                            str(row["run_id"]),
+                            row["harness"] if isinstance(row.get("harness"), str) else None,
+                        )
+                        for row in board.runs
+                    ],
+                )
+                nodes = node_summary(board.runs)
             except sqlite3.Error as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
             finally:
                 conn.close()
+            more_href = _board_more_href(path, params, next_offset=board.offset + board.limit) if board.more else None
             nonce = secrets.token_urlsafe(16)
             page = fleet_dashboard.render_page(
                 view=view,
                 query_string=urlencode(params, doseq=True),
-                runs=runs,
+                runs=board.runs,
                 claims=claims,
                 nodes=nodes,
                 started_at=started_at,
                 nonce=nonce,
+                more_href=more_href,
             )
             # The legacy board used ``/`` as its machines route. Root now
             # belongs to the Command Deck, so keep every legacy navigation
