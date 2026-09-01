@@ -29,13 +29,17 @@ pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is requ
 
 def control(
     *args: str,
-    root: Path,
+    root: Path | None,
     brigade: str | None = None,
     env_extra: dict[str, str] | None = None,
 ) -> tuple[int, dict]:
-    """Run one control-brigade subcommand and return (exit code, parsed JSON)."""
+    """Run one control-brigade subcommand and return (exit code, parsed JSON).
+
+    `root=None` drops `--root` so the helper falls back to its default state
+    root under `$TMPDIR`, which is the path the symlink probes need.
+    """
     brigade = brigade or shlex.join([sys.executable, "-m", "brigade"])
-    argv = [sys.executable, str(CONTROL), "--brigade", brigade, "--root", str(root), *args]
+    argv = [sys.executable, str(CONTROL), "--brigade", brigade, *(["--root", str(root)] if root else []), *args]
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH", "")]))
     if env_extra:
@@ -195,6 +199,93 @@ def test_root_inside_the_brigade_checkout_is_refused(tmp_path):
     assert "refusing --root" in payload["error"], payload
     assert "inside the Brigade checkout" in payload["error"], payload
     assert not unsafe_root.exists(), "a refused --root must not be created"
+
+
+def test_default_state_root_symlink_is_refused(tmp_path):
+    """A symlink planted at `$TMPDIR/verify-brigade` must not be followed.
+
+    The default state root gets the same treatment as `--root`: any local user
+    can pre-create the default path in a world-writable temp dir, so following
+    it would put every drive - including `cleanup`'s rmtree - wherever the
+    symlink points.
+    """
+    home, temp, env_extra = sandbox(tmp_path)
+    hideout = home / "secret"
+    hideout.mkdir()
+    (temp / "verify-brigade").symlink_to(hideout, target_is_directory=True)
+
+    code, payload = control("new-target", root=None, env_extra=env_extra)
+    assert code == 1, payload
+    assert payload["ok"] is False
+    assert payload["action"] == "new-target"
+    assert "symlink" in payload["error"], payload
+    assert list(hideout.iterdir()) == [], "a refused state root must not be written through"
+
+
+def test_explicit_root_symlink_is_refused(tmp_path):
+    home, temp, env_extra = sandbox(tmp_path)
+    hideout = home / "secret"
+    hideout.mkdir()
+    planted = temp / "planted-root"
+    planted.symlink_to(hideout, target_is_directory=True)
+
+    code, payload = control("doctor", root=planted, env_extra=env_extra)
+    assert code == 1, payload
+    assert payload["ok"] is False
+    assert payload["action"] == "doctor"
+    assert "symlink" in payload["error"], payload
+    assert list(hideout.iterdir()) == [], "a refused state root must not be written through"
+
+
+def test_state_root_subdirectory_symlink_is_refused(tmp_path):
+    home, temp, env_extra = sandbox(tmp_path)
+    hideout = home / "secret"
+    hideout.mkdir()
+    root = temp / "state"
+    root.mkdir()
+    (root / "targets").symlink_to(hideout, target_is_directory=True)
+
+    code, payload = control("doctor", root=root, env_extra=env_extra)
+    assert code == 1, payload
+    assert payload["ok"] is False
+    assert "symlink" in payload["error"], payload
+    assert list(hideout.iterdir()) == [], "a refused state root must not be written through"
+
+
+def test_root_equal_to_the_temp_base_is_refused(tmp_path):
+    home, temp, env_extra = sandbox(tmp_path)
+
+    code, payload = control("doctor", root=temp, env_extra=env_extra)
+    assert code == 1, payload
+    assert payload["ok"] is False
+    assert payload["action"] == "doctor"
+    assert "refusing --root" in payload["error"], payload
+    assert "temp base" in payload["error"], payload
+    assert not (temp / "targets").exists(), "a refused --root must not be populated"
+    assert stat.S_IMODE(temp.stat().st_mode) != 0o700, "a refused --root must not be chmodded"
+    assert list(home.iterdir()) == []
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can write an unwritable directory")
+def test_unwritable_root_reports_the_json_envelope(tmp_path):
+    """A root the process cannot create must be a HelperError, not a traceback."""
+    locked = tmp_path / "locked"
+    locked.mkdir(mode=0o555)
+    try:
+        code, payload = control("doctor", root=locked / "state")
+        assert code == 1, payload
+        assert payload["ok"] is False
+        assert payload["action"] == "doctor"
+        assert "cannot prepare" in payload["error"], payload
+    finally:
+        locked.chmod(0o755)
+
+
+def test_skill_doc_states_what_the_helper_enforces():
+    """SKILL.md must not promise guarantees the helper does not make."""
+    doc = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    assert ".brigade/verification-evidence" in doc
+    assert "--manifest" in doc, "the one flag outside the target contract must be documented"
 
 
 def test_failed_brigade_init_leaves_no_target(tmp_path):

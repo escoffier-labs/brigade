@@ -13,10 +13,28 @@ target and read what it wrote. This skill drives it through one helper,
 Every drive happens in a temp target this skill creates. The helper enforces
 that: `--target` is accepted only when it resolves *under* `<state-root>/targets`,
 so the operator home, the Brigade checkout, and every other path are refused
-before a command runs. `--root` and `--evidence-root` get the same treatment -
-they may not resolve to, or contain, the home directory or the checkout - and
-`cleanup` removes only paths `new-target` recorded. `AGENTS.md` forbids driving
-the real workspace anyway; here it is not reachable.
+before a command runs. The state root gets the same treatment whether it comes
+from `--root` or from the default - resolved, refused if it resolves to or
+contains the home directory or the checkout, and refused if it is a symlink at
+the root or at `targets/`/`captures/`, so a link planted in a world-writable
+temp dir cannot redirect a drive. `cleanup` removes only paths `new-target`
+recorded. `AGENTS.md` forbids driving the real workspace anyway; here it is not
+reachable.
+
+What that paragraph does *not* claim:
+
+- A path under the temp base is allowed even when `$TMPDIR` sits inside the
+  home directory. `$TMPDIR` is the scratch tree by definition; the home refusal
+  is measured against everything else. The temp base itself is refused - a
+  state root there would chmod the shared scratch tree to `0700`.
+- The default evidence root is `<checkout>/.brigade/verification-evidence`,
+  which is inside the checkout. That is the one deliberate exception: it is
+  gitignored, and it sits outside the state root on purpose so `cleanup` cannot
+  reach the proof. `--evidence-root` is guarded like `--root`.
+- `grokbot-feed --manifest` is the one flag outside the target contract. It is
+  a caller-supplied path, read for validation only and never written, so an
+  operator can validate a real private feed manifest from wherever it lives.
+  Everything the drive *writes* still lands in the target or the state root.
 
 ## Launch
 
@@ -195,7 +213,8 @@ Subcommands: `doctor`, `new-target`, `init`, `doctor-target`, `work-verify`,
 
 Global flags: `--brigade "<command>"` to drive a different Brigade build (for
 example `--brigade "$(command -v python3) -m brigade"`), `--root <dir>` to
-isolate the state root when two runs go at once, `--timeout <s>` per call.
+isolate the state root when two runs go at once (a directory under `$TMPDIR`,
+not `$TMPDIR` itself), `--timeout <s>` per call.
 
 Every subcommand that writes accepts `--dry-run`, which reports the command it
 skipped and mutates nothing: `new-target`, `init`, `work-verify`,
@@ -206,8 +225,9 @@ skipped and mutates nothing: `new-target`, `init`, `work-verify`,
 
 `tests/test_verify_brigade_skill.py` runs `new-target`, `doctor-target`,
 `work-verify`, and `cleanup` in a pytest `tmp_path`, and asserts the path
-refusals and the `0600`/`0700` permissions, so CI fails if this helper stops
-working or stops guarding.
+refusals (including a symlink planted at the default state root), the
+unwritable-root JSON envelope, and the `0600`/`0700` permissions, so CI fails
+if this helper stops working or stops guarding.
 
 ## Reporting the proof
 

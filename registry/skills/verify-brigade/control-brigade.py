@@ -9,13 +9,26 @@ Every subcommand prints one JSON object on stdout. Exit codes:
   3  the drive ran fine but the observation is a failure (doctor FAILs,
      verification did not complete)
 
-Nothing here touches the operator workspace or the Brigade checkout. A target is
-accepted only when it resolves under `<state-root>/targets`, so the operator
-home, this checkout, and every path outside the state root are refused before a
-command runs. `--root` and `--evidence-root` are held to the same line: they may
-not resolve to, or under, the home directory or the checkout (the built-in
-defaults - `$TMPDIR/verify-brigade` and `<checkout>/.brigade/verification-evidence`
-- are the exceptions). Only paths this helper recorded are ever removed.
+No drive touches the operator workspace. A target is accepted only when it
+resolves under `<state-root>/targets`, so the operator home, this checkout, and
+every path outside the state root are refused before a command runs.
+
+`--root` and the default state root get the same treatment: both are resolved,
+both are refused if they resolve to or contain the home directory or the
+checkout, and neither may be a symlink at the root or at `targets/` and
+`captures/`. Anything under the temp base is allowed, including when `$TMPDIR`
+itself sits inside the home directory; the temp base itself is refused, because
+a state root there would chmod the shared scratch tree.
+
+Two deliberate exceptions to "nothing under the checkout":
+
+  * evidence. The default evidence root is `<checkout>/.brigade/verification-evidence`,
+    which is inside this checkout - gitignored, and the point is that `cleanup`
+    cannot reach it. `--evidence-root` is guarded like `--root`.
+  * `grokbot-feed --manifest`. That path is a caller's own manifest, read for
+    validation only, and is the one flag outside the target contract.
+
+Only paths this helper recorded are ever removed.
 """
 
 from __future__ import annotations
@@ -110,13 +123,21 @@ def temp_base() -> Path:
 def guard_root(raw: str, *, flag: str, extra_allowed: tuple[Path, ...] = ()) -> Path:
     """Refuse a caller-supplied root that lands in the operator home or this checkout.
 
-    The scratch tree (`$TMPDIR`) and the helper's own defaults are the allowed
-    bases; everything else is measured against the home directory and the
-    Brigade checkout, in both directions (inside it, or containing it).
+    A directory *under* the scratch tree (`$TMPDIR`), and the helper's own
+    defaults, are the allowed bases; everything else is measured against the
+    home directory and the Brigade checkout, in both directions (inside it, or
+    containing it). The temp base itself is not a state root: accepting it
+    would chmod the shared scratch tree to `0700` and scatter `targets/`,
+    `captures/`, and `state.json` across it.
     """
     resolved = Path(raw).expanduser().resolve()
-    for base in (temp_base(), *extra_allowed):
-        if resolved.is_relative_to(base):
+    base = temp_base()
+    if resolved == base:
+        raise HelperError(f"refusing {flag} {resolved}: it is the temp base itself; use a directory under it")
+    if resolved.is_relative_to(base):
+        return resolved
+    for allowed in extra_allowed:
+        if resolved.is_relative_to(allowed):
             return resolved
     for forbidden, label in ((REPO_ROOT, "the Brigade checkout"), (Path.home().resolve(), "the operator home")):
         if resolved.is_relative_to(forbidden):
@@ -126,15 +147,51 @@ def guard_root(raw: str, *, flag: str, extra_allowed: tuple[Path, ...] = ()) -> 
     return resolved
 
 
-def state_root(args: argparse.Namespace) -> Path:
-    root = guard_root(args.root, flag="--root") if args.root else temp_base() / "verify-brigade"
-    root.mkdir(parents=True, exist_ok=True)
-    root.chmod(0o700)
-    for name in ("captures", "targets"):
-        sub = root / name
-        sub.mkdir(exist_ok=True)
-        sub.chmod(0o700)
+def guard_no_symlink(path: Path, *, flag: str) -> None:
+    """Refuse a state-root path that is a symlink.
+
+    `mkdir(exist_ok=True)` follows an existing symlink, so a link planted at
+    the state root - or at one of its subdirectories - would redirect every
+    drive, and `cleanup`'s removal, wherever it points. The temp base is
+    world-writable on most hosts, which makes the *default* root as reachable
+    a plant as an explicit `--root`.
+    """
+    if path.is_symlink():
+        raise HelperError(f"refusing {flag} {path}: it is a symlink")
+
+
+def prepare_state_root(root: Path, *, flag: str) -> Path:
+    """Create the state root and its subdirectories without following a symlink."""
+    guard_no_symlink(root, flag=flag)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        # A link planted between the check and the mkdir would have been
+        # followed silently; the created path must still resolve to itself.
+        guard_no_symlink(root, flag=flag)
+        if root.resolve() != root:
+            raise HelperError(f"refusing {flag} {root}: it resolves to {root.resolve()}")
+        root.chmod(0o700)
+        for name in ("captures", "targets"):
+            sub = root / name
+            guard_no_symlink(sub, flag=f"{flag} subdirectory")
+            sub.mkdir(exist_ok=True)
+            guard_no_symlink(sub, flag=f"{flag} subdirectory")
+            if sub.resolve() != sub:
+                raise HelperError(f"refusing {flag} subdirectory {sub}: it resolves to {sub.resolve()}")
+            sub.chmod(0o700)
+    except OSError as exc:  # PermissionError included: report it, never traceback
+        raise HelperError(f"cannot prepare {flag} {root}: {exc}") from exc
     return root
+
+
+def state_root(args: argparse.Namespace) -> Path:
+    """Resolve, guard, and create the state root - default and `--root` alike."""
+    raw = args.root or str(temp_base() / "verify-brigade")
+    flag = "--root" if args.root else "the default state root"
+    # The symlink check runs on the unresolved path: `resolve()` follows a
+    # planted link, so the guard has to look before it resolves.
+    guard_no_symlink(Path(raw).expanduser(), flag=flag)
+    return prepare_state_root(guard_root(raw, flag=flag), flag=flag)
 
 
 def read_state(root: Path) -> dict:
