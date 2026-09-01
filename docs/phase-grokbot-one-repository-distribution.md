@@ -181,7 +181,8 @@ Soak blockers. These must close before the window ends:
   doctor while the queue stays empty.
 - #1345: Grok stop-reason casing, which reports a finished run as an
   output-validation failure.
-- #1346.
+- #1346: hub model admission applied the "none" reasoning placeholder as a real
+  pin, which made claude seats un-dispatchable.
 
 Window end: 2026-09-14 (operator to confirm). Closing the window requires every
 pack doctor and canary green across the soak period, no rollback invoked, and

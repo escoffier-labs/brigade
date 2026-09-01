@@ -170,8 +170,12 @@ matches another pack's packaged default or installed port is refused as
 `duplicate-port` without printing config contents.
 
 Doctor emits sanitized named checks. Queue roles emit `dependency`, `config`,
-`permissions`, `queue`, and `endpoint`. The `operations-relay` pack emits
-`dependency`, `config`, `permissions`, and `endpoint`; it has no `queue` check.
+`permissions`, `queue`, and `endpoint`. Under hub authority with a configured
+feed token, and with the #1343 fix in place, a queue role also emits
+`feed-authority` with a status of `ok`, `fail`, or `skipped`; a `skipped`
+`feed-authority` check does not fail the command. The `operations-relay` pack
+emits `dependency`, `config`, `permissions`, and `endpoint`; it has no `queue`
+check.
 The legacy `--instance` commands (`setup`, `doctor`, `canary`,
 `install-service`) remain supported and interoperate with pack config.
 
@@ -366,13 +370,17 @@ is the deliverable. A run without a handle is a failed run.
 
 ## Troubleshooting
 
-**A feed enqueue fails with `queue-error index=N`.** Under hub authority, a
-credential refusal from the hub surfaces through the feed command's generic
-queue error, which reads as a queue problem rather than an authorization
-problem. This is #1343. After the fix the refusal prints in the form
+**`scout-feed --apply` fails with an opaque queue error.** Under hub authority,
+`brigade run cloud grokbot scout-feed --apply` reads the existing scout jobs
+through the hub `list` action before it enqueues, so a credential refusal on
+`list` surfaces as a generic queue error rather than an authorization problem.
+This is #1343. After the fix the refusal prints in the form
 `auth-failed action=list actor=feed`, naming the refused action and the actor
-kind. Until then, check the enrolled actor kind and the token file named by
-`BRIGADE_GROKBOT_FEED_HUB_TOKEN_FILE` before you look at the queue itself.
+kind. Until it is deployed, check the enrolled actor kind and the token file
+named by `BRIGADE_GROKBOT_FEED_HUB_TOKEN_FILE` before you look at the queue
+itself. The sibling `brigade run cloud grokbot feed --apply` command enqueues
+only, never calls `list`, and still reports its failures in the opaque
+`queue-error index=N` form, which the #1343 fix does not change.
 
 **Doctor is green while the feed lane is dead.** The queue-role doctor checks
 dependency, config, permissions, queue, and endpoint. None of those exercises
@@ -382,9 +390,12 @@ feed-authority doctor check that covers this. Until it is deployed, confirm the
 lane by watching for newly enqueued jobs, not by reading a green doctor.
 
 **A Grok run that finished is reported as a failure.** The structured-output
-check compares the stop reason against the exact string `EndTurn`. A CLI that
-emits any other casing fails that comparison, and the run is reported as an
-output-validation failure with the answer discarded. This is #1345.
+check compares the stop reason against the exact string `EndTurn`, so a CLI
+that emits any other casing fails that comparison and the run is reported as an
+output-validation failure with the answer discarded. This is #1345, fixed in
+#1349, which accepts both `EndTurn` and `end_turn`. Until that fix is deployed,
+check the stop reason the CLI actually emitted before you treat a discarded
+answer as a model failure.
 
 **Doctor returns nonzero right after setup.** The endpoint check cannot connect
 until the listener process is running. Start the listener, then run doctor
