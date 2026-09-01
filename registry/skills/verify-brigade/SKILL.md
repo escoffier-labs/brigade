@@ -10,9 +10,13 @@ CLI, and the only honest way to prove a change is to run that CLI against a
 target and read what it wrote. This skill drives it through one helper,
 `control-brigade.py`, so a proof is a rerunnable command instead of a story.
 
-Every drive happens in a temp target this skill creates. Never point any of
-these commands at the operator home or at the Brigade checkout - the helper
-refuses both, and `AGENTS.md` forbids it.
+Every drive happens in a temp target this skill creates. The helper enforces
+that: `--target` is accepted only when it resolves *under* `<state-root>/targets`,
+so the operator home, the Brigade checkout, and every other path are refused
+before a command runs. `--root` and `--evidence-root` get the same treatment -
+they may not resolve to, or contain, the home directory or the checkout - and
+`cleanup` removes only paths `new-target` recorded. `AGENTS.md` forbids driving
+the real workspace anyway; here it is not reachable.
 
 ## Launch
 
@@ -39,6 +43,19 @@ recorded the path so `cleanup` can find it later. Ready is
 ```bash
 TARGET=$(registry/skills/verify-brigade/control-brigade.py new-target \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["target"])')
+```
+
+`new-target` records the path before it runs `brigade init`, so `cleanup` can
+reclaim it even when that init fails; a failed init also removes the directory
+it made. `--dry-run` prints the two commands and creates nothing.
+
+To drive an existing directory you already made under `<state-root>/targets`
+(instead of letting `new-target` make one), `init` runs the same
+`brigade init` against it:
+
+```bash
+registry/skills/verify-brigade/control-brigade.py init --target "$TARGET" \
+  --depth workspace --harnesses claude,codex
 ```
 
 Teardown is the `cleanup` section below. Run it after every attempt, including
@@ -179,11 +196,18 @@ Subcommands: `doctor`, `new-target`, `init`, `doctor-target`, `work-verify`,
 Global flags: `--brigade "<command>"` to drive a different Brigade build (for
 example `--brigade "$(command -v python3) -m brigade"`), `--root <dir>` to
 isolate the state root when two runs go at once, `--timeout <s>` per call.
-Every mutating subcommand (`grokbot-pack-setup --apply`,
-`grokbot-pack-remove --apply`, `cleanup`) accepts `--dry-run`.
 
-`tests/test_verify_brigade_skill.py` runs `new-target`, `doctor-target`, and
-`cleanup` in a pytest `tmp_path`, so CI fails if this helper stops working.
+Every subcommand that writes accepts `--dry-run`, which reports the command it
+skipped and mutates nothing: `new-target`, `init`, `work-verify`,
+`grokbot-feed --sample`, `evidence`, `cleanup`, and
+`grokbot-pack-setup`/`grokbot-pack-remove` (there it forces preview even with
+`--apply`). The dry-run envelope carries `"dry_run": true` and a `would_run`,
+`would_remove`, or `would_copy` list.
+
+`tests/test_verify_brigade_skill.py` runs `new-target`, `doctor-target`,
+`work-verify`, and `cleanup` in a pytest `tmp_path`, and asserts the path
+refusals and the `0600`/`0700` permissions, so CI fails if this helper stops
+working or stops guarding.
 
 ## Reporting the proof
 
