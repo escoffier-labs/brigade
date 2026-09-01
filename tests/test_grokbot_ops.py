@@ -381,6 +381,115 @@ def test_doctor_refuses_changed_unsafe_listener_token_file_without_secret_or_pat
     assert str(token_file) not in json.dumps(checks)
 
 
+def _feed_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    token = "feed-listener-token"
+    token_file = tmp_path / "feed.hub-token"
+    token_file.write_text(token + "\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    monkeypatch.setenv("BRIGADE_GROKBOT_FEED_HUB_TOKEN_FILE", str(token_file))
+    return token
+
+
+def _stub_hub(monkeypatch: pytest.MonkeyPatch, *, actor_kind: str = "feed", list_granted: bool = True) -> list[str]:
+    from brigade import fleet_client_grokbot
+
+    actions: list[str] = []
+
+    def whoami(**_fields: object):
+        actions.append("whoami")
+        return fleet_client_grokbot.GrokbotHubDecision(True, "ok", job={"actor_kind": actor_kind, "role": None})
+
+    def list_jobs(**_fields: object):
+        actions.append("list")
+        if not list_granted:
+            return fleet_client_grokbot.GrokbotHubDecision(False, "auth-failed")
+        return fleet_client_grokbot.GrokbotHubDecision(True, "ok", jobs=[])
+
+    monkeypatch.setattr(fleet_client_grokbot, "whoami", whoami)
+    monkeypatch.setattr(fleet_client_grokbot, "list_jobs", list_jobs)
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: True)
+    monkeypatch.setattr(grokbot_jobs, "status", lambda _target: {"jobs": []})
+    return actions
+
+
+def test_doctor_reports_feed_authority_ok_when_feed_can_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    assert _setup(tmp_path, "operator") == 0
+    token = _feed_token(tmp_path, monkeypatch)
+    _stub_hub(monkeypatch)
+
+    checks = grokbot_ops.doctor(tmp_path, "operator")
+
+    assert {check["check"]: check["status"] for check in checks}["feed-authority"] == "ok"
+    assert token not in json.dumps(checks)
+
+
+def test_doctor_reports_feed_authority_fail_when_feed_list_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    assert _setup(tmp_path, "operator") == 0
+    _feed_token(tmp_path, monkeypatch)
+    _stub_hub(monkeypatch, list_granted=False)
+
+    checks = grokbot_ops.doctor(tmp_path, "operator")
+
+    assert {check["check"]: check["status"] for check in checks}["feed-authority"] == "fail"
+
+
+def test_doctor_skips_feed_authority_without_a_configured_feed_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    monkeypatch.delenv("BRIGADE_GROKBOT_FEED_HUB_TOKEN_FILE", raising=False)
+    assert _setup(tmp_path, "operator") == 0
+    actions = _stub_hub(monkeypatch)
+
+    checks = grokbot_ops.doctor(tmp_path, "operator")
+
+    assert {check["check"]: check["status"] for check in checks}["feed-authority"] == "skipped"
+    assert actions == []
+
+
+def test_doctor_omits_feed_authority_without_hub_authority(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    assert _setup(tmp_path, "operator") == 0
+    _feed_token(tmp_path, monkeypatch)
+    actions = _stub_hub(monkeypatch)
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: False)
+
+    checks = grokbot_ops.doctor(tmp_path, "operator")
+
+    assert "feed-authority" not in {check["check"] for check in checks}
+    assert actions == []
+
+
+def test_doctor_feed_authority_probe_issues_no_mutating_hub_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from brigade import fleet_hub_grokbot
+
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    assert _setup(tmp_path, "operator") == 0
+    _feed_token(tmp_path, monkeypatch)
+    actions = _stub_hub(monkeypatch)
+
+    grokbot_ops.doctor(tmp_path, "operator")
+
+    assert set(actions) == {"whoami", "list"}
+    assert not set(actions) & fleet_hub_grokbot.MUTATING_ACTIONS
+
+
+@pytest.mark.parametrize(
+    ("feed_status", "exit_code"),
+    (("skipped", 0), ("ok", 0), ("fail", 1), ("unrecognized", 1)),
+)
+def test_doctor_command_treats_a_skipped_feed_authority_probe_as_non_failing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, feed_status: str, exit_code: int
+):
+    checks = [{"check": "queue", "status": "ok"}, {"check": "feed-authority", "status": feed_status}]
+    monkeypatch.setattr(grokbot_ops, "doctor", lambda *_args, **_kwargs: checks)
+
+    argv = ["run", "cloud", "grokbot", "doctor", "--target", str(tmp_path), "--instance", "operator"]
+
+    assert cli.main(argv) == exit_code
+    assert f"feed-authority: {feed_status}" in capsys.readouterr().out
+
+
 def test_doctor_fails_cleanly_on_missing_config(tmp_path: Path, capsys):
     assert cli.main(["run", "cloud", "grokbot", "doctor", "--target", str(tmp_path), "--instance", "operator"]) == 1
     captured = capsys.readouterr()

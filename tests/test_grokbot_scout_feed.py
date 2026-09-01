@@ -390,6 +390,36 @@ def test_apply_translates_enqueue_errors_at_the_public_boundary(tmp_path: Path, 
         grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
 
 
+def test_apply_surfaces_the_refused_hub_action_and_actor_kind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+    monkeypatch.setattr(
+        grokbot_scout_feed.grokbot_jobs,
+        "enqueue_repository_scout",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            grokbot_scout_feed.grokbot_jobs.GrokbotJobError("auth-failed", action="list")
+        ),
+    )
+
+    with pytest.raises(grokbot_scout_feed.ScoutFeedError) as raised:
+        grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+
+    assert raised.value.reason == "auth-failed"
+    assert raised.value.action == "list"
+    assert raised.value.actor_kind is None
+    assert raised.value.public_detail() == "auth-failed action=list"
+
+
+def test_scout_feed_error_keeps_stable_reasons_for_non_hub_failures():
+    for reason in ("malformed-policy", "gh-unavailable", "unsafe-policy"):
+        error = grokbot_scout_feed.ScoutFeedError(reason)
+        assert error.reason == reason
+        assert error.action is None
+        assert error.actor_kind is None
+        assert error.public_detail() == reason
+        assert "action=" not in error.public_detail()
+
+
 def test_preflight_rejects_symlinked_policy_without_queue_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     real = _write_policy(tmp_path / "real-policy.json", _policy())
     policy = tmp_path / "policy.json"
@@ -534,6 +564,33 @@ def test_cli_scout_feed_apply_binds_dedicated_feed_identity(tmp_path: Path, monk
     assert _run_scout_feed(tmp_path, policy, "--apply") == 0
     assert seen == [token]
     assert token not in capsys.readouterr().out
+
+
+def test_cli_scout_feed_prints_refused_action_without_paths_or_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    token = "dedicated-scout-feed-token"
+    token_file = tmp_path / "feed.hub-token"
+    token_file.write_text(token + "\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    monkeypatch.setenv("BRIGADE_GROKBOT_FEED_HUB_TOKEN_FILE", str(token_file))
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: True)
+    _gh_numbers(monkeypatch, [7])
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "enqueue_repository_scout",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(grokbot_jobs.GrokbotJobError("auth-failed", action="list")),
+    )
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+
+    assert _run_scout_feed(tmp_path, policy, "--apply") == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error: auth-failed action=list actor=feed\n"
+    assert "/" not in captured.err
+    assert "policy.json" not in captured.err
+    assert token not in captured.err
 
 
 def test_cli_scout_feed_text_reports_no_work_without_private_policy_context(

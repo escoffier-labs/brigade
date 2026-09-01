@@ -202,8 +202,42 @@ def doctor(target: Path, instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECOND
     except (grokbot_jobs.GrokbotJobError, grokbot_mcp.ConfigurationError, ValueError, OSError):
         record("queue", False)
 
+    feed_authority = _feed_authority_check(target)
+    if feed_authority is not None:
+        checks.append(feed_authority)
+
     record("endpoint", _health_check(config, bearer, timeout))
     return checks
+
+
+def _feed_authority_check(target: Path) -> dict[str, str] | None:
+    """Prove read-only that the feed actor holds the reads scout-feed --apply needs.
+
+    Only ``whoami`` and ``list`` are issued. A doctor never enqueues.
+    """
+    from . import fleet_client_grokbot
+
+    if not grokbot_jobs.hub_authority(target):
+        return None
+    try:
+        token = grokbot_mcp.load_feed_hub_token()
+    except (grokbot_mcp.ConfigurationError, OSError, ValueError):
+        return {"check": "feed-authority", "status": "fail"}
+    if token is None:
+        return {"check": "feed-authority", "status": "skipped"}
+    try:
+        with fleet_client_grokbot.listener_identity(token):
+            identity = fleet_client_grokbot.whoami()
+            listing = fleet_client_grokbot.list_jobs(role="repository-scout", include_all=True)
+    except (grokbot_mcp.ConfigurationError, OSError, ValueError):
+        return {"check": "feed-authority", "status": "fail"}
+    ok = (
+        identity.granted
+        and isinstance(identity.job, dict)
+        and identity.job.get("actor_kind") in {"feed", "control"}
+        and listing.granted
+    )
+    return {"check": "feed-authority", "status": "ok" if ok else "fail"}
 
 
 def canary(target: Path, instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
