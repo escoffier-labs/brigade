@@ -306,7 +306,7 @@ def resolve_run_sandbox(
     sandbox: str | None = None,
     roster_sandbox: str | None = None,
     read_only: bool = False,
-    health: Mapping[str, Any] | None = None,
+    health: object | None = None,
 ) -> str | None:
     """Resolve the sandbox every write-capable stage for a run must inherit.
 
@@ -314,7 +314,7 @@ def resolve_run_sandbox(
     the roster declaration, then the read-only default. A recorded ``None`` in
     health still falls through so a later explicit or roster value is not lost.
     """
-    if isinstance(health, Mapping):
+    if isinstance(health, dict):
         stored = health.get("effective_sandbox")
         if isinstance(stored, str) and stored:
             return stored

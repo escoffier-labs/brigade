@@ -31,6 +31,7 @@ from . import (
 )
 from .aboyeur.planning import resolve_run_sandbox
 from .roster import Agent, Roster, _as_bool, _as_capabilities, _as_command, _as_env
+from .run_receipts import agent_result_from_worker
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
 _NONTERMINAL_RUN_STATUSES = frozenset(
@@ -424,7 +425,13 @@ def _continuation_prompt(task: str) -> str:
     )
 
 
-def _finish_resume_receipt(run_dir: Path, run_meta: dict, final: agents.AgentResult) -> int:
+def _finish_resume_receipt(
+    run_dir: Path,
+    run_meta: dict,
+    final: agents.AgentResult,
+    *,
+    seat: str,
+) -> int:
     now = datetime.now(timezone.utc).isoformat()
     run_meta.setdefault("resumed_at", []).append(now)
     if not final.ok:
@@ -437,7 +444,7 @@ def _finish_resume_receipt(run_dir: Path, run_meta: dict, final: agents.AgentRes
             "phase": "synthesis",
             "kind": "agent-error",
             "detail": bounded_detail,
-            "seat": run_meta.get("orchestrator"),
+            "seat": seat,
         }
         _refresh_run_timing(run_meta)
         try:
@@ -605,7 +612,7 @@ def _resume_locked(
         sandbox=roster_sandbox if isinstance(roster_sandbox, str) else None,
         roster_sandbox=roster.sandbox,
         read_only=read_only,
-        health=run_meta.get("health") if isinstance(run_meta.get("health"), dict) else None,
+        health=run_meta.get("health"),
     )
     if approval_resume:
         from . import runs_cmd
@@ -770,13 +777,13 @@ def _resume_locked(
             if worker_results
             else aboyeur.WorkerResult(
                 worker=str(run_meta.get("worker") or ""),
-                task=task,
+                task=task if isinstance(task, str) else "",
                 text="",
                 ok=False,
                 detail="direct worker produced no result",
             )
         )
-        final = aboyeur._agent_result_from_worker(direct_result)
+        final = agent_result_from_worker(direct_result)
         synthesis_payload = receipt_schema.synthesis_document(
             mode="direct-worker",
             worker=run_meta.get("worker") if isinstance(run_meta.get("worker"), str) else None,
@@ -784,7 +791,7 @@ def _resume_locked(
             ground_truth=ground_truth,
         )
         aboyeur.write_sidecar_revision(run_dir, "synthesis.json", synthesis_payload)
-        return _finish_resume_receipt(run_dir, run_meta, final)
+        return _finish_resume_receipt(run_dir, run_meta, final, seat=roster.orchestrator)
     synth_prompt = aboyeur.build_synth_prompt(
         task,
         worker_results,
@@ -817,21 +824,17 @@ def _resume_locked(
             file=sys.stderr,
         )
         return 2
-    synth_kwargs: dict[str, object] = {
-        "timeout": orchestrator.timeout_seconds or roster.timeout_seconds,
-        "cwd": cwd,
-        "read_only": read_only,
-        "model": orchestrator.model,
-        "reasoning": orchestrator.reasoning,
-        "env": dict(orchestrator.env) if orchestrator.env is not None else None,
-        "command": orchestrator.command,
-    }
-    if sandbox is not None:
-        synth_kwargs["sandbox"] = sandbox
     final = agents.run_agent(
         orchestrator.cli,
         synth_prompt,
-        **synth_kwargs,
+        timeout=orchestrator.timeout_seconds or roster.timeout_seconds,
+        cwd=cwd,
+        read_only=read_only,
+        sandbox=sandbox,
+        model=orchestrator.model,
+        reasoning=orchestrator.reasoning,
+        env=dict(orchestrator.env) if orchestrator.env is not None else None,
+        command=orchestrator.command,
     )
     synth_captured = message_envelope.emit(
         final.text,
@@ -862,4 +865,4 @@ def _resume_locked(
         "synthesis.json",
         synthesis_payload,
     )
-    return _finish_resume_receipt(run_dir, run_meta, final)
+    return _finish_resume_receipt(run_dir, run_meta, final, seat=roster.orchestrator)
