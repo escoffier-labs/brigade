@@ -675,6 +675,29 @@ def test_run_agent_maps_output_limit_overflow_to_harness_failure(monkeypatch):
     assert "combined output exceeded" in result.detail
 
 
+def test_run_agent_keeps_successful_truncated_exec_output(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(
+            0,
+            "head\n[... output truncated ...]\nfinal answer",
+            "",
+            output_limit_exceeded=True,
+            stdout_bytes=agents.proc.MAX_CAPTURE_BYTES + 32,
+        ),
+    )
+
+    result = agents.run_agent("codex", "do it")
+
+    assert result.ok is True
+    assert result.text.endswith("final answer")
+    assert result.failure_kind == "output-limit"
+    assert result.output_bytes == agents.proc.MAX_CAPTURE_BYTES + 32
+    assert result.output_cap_bytes == agents.proc.MAX_CAPTURE_BYTES
+
+
 def test_run_agent_maps_incomplete_process_group_to_harness_failure(monkeypatch):
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
     monkeypatch.setattr(

@@ -83,6 +83,8 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
             entry["cloud_environment"] = dict(result.cloud_environment)
         if result.output_truncated:
             entry["output_truncated"] = True
+            entry["output_bytes"] = result.output_bytes
+            entry["output_cap_bytes"] = result.output_cap_bytes
         if result.thread_id is not None:
             entry["thread_id"] = result.thread_id
             entry["status"] = result.status

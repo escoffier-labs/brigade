@@ -543,6 +543,8 @@ class AgentResult:
     session_id: str | None = None
     request_id: str | None = None
     acpx_version: str | None = None
+    output_bytes: int = 0
+    output_cap_bytes: int = 0
     safe_events: tuple[dict[str, object], ...] = ()
     # #1200: app-server only; True when turn/completed for this turn was observed.
     turn_completed: bool = False
@@ -1329,9 +1331,9 @@ def run_agent(
     safe_stdout = _scrub_env_override_values(result.stdout, resolved_overrides, resolved_secret_targets)
     safe_stderr = _scrub_env_override_values(result.stderr, resolved_overrides, resolved_secret_targets)
 
-    if result.output_limit_exceeded:
+    if getattr(result, "stream_limit_exceeded", False):
         safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
-        overflow_detail = f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte limit"
+        overflow_detail = f"combined output exceeded {proc.MAX_STREAM_BYTES} stream byte limit"
         failure_detail = scrub_detail(safe_stderr.strip() or overflow_detail)[:200]
         return AgentResult(
             text=safe_text,
@@ -1345,6 +1347,44 @@ def run_agent(
             timed_out=result.code == 124,
             requested_model=model,
             reasoning=reasoning,
+            output_bytes=result.total_bytes,
+            output_cap_bytes=proc.MAX_CAPTURE_BYTES,
+        )
+
+    if result.output_limit_exceeded and result.code == 0:
+        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
+        return AgentResult(
+            text=safe_text,
+            ok=bool(safe_text),
+            detail=f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte capture limit; output truncated"[:200],
+            failure_kind="output-limit",
+            stdout=safe_stdout,
+            stderr=safe_stderr,
+            exit_code=result.code,
+            requested_model=model,
+            reasoning=reasoning,
+            output_bytes=result.total_bytes,
+            output_cap_bytes=proc.MAX_CAPTURE_BYTES,
+        )
+
+    if result.output_limit_exceeded:
+        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
+        overflow_detail = f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte capture limit; output truncated"
+        failure_detail = scrub_detail(safe_stderr.strip() or overflow_detail)[:200]
+        return AgentResult(
+            text=safe_text,
+            ok=False,
+            detail=failure_detail,
+            failure_phase="harness",
+            failure_kind="output-limit",
+            stdout=safe_stdout,
+            stderr=safe_stderr,
+            exit_code=result.code,
+            timed_out=result.code == 124,
+            requested_model=model,
+            reasoning=reasoning,
+            output_bytes=result.total_bytes,
+            output_cap_bytes=proc.MAX_CAPTURE_BYTES,
         )
 
     if getattr(result, "incomplete_process_group", False):
@@ -1631,10 +1671,11 @@ def run_codex_appserver(
     text = turn.text.strip()
     if getattr(turn, "output_limit_exceeded", False) or len(text.encode("utf-8")) > proc.MAX_CAPTURE_BYTES:
         return AgentResult(
-            text=proc.bound_text(text),
-            ok=False,
-            detail=f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte limit"[:200],
-            failure_phase="harness",
+            text=proc.bound_text_ends(text),
+            ok=turn.ok and bool(text),
+            detail=(
+                turn.detail or f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte capture limit; output truncated"
+            )[:200],
             failure_kind="output-limit",
             thread_id=turn.thread_id,
             status=turn.status,
@@ -1653,6 +1694,8 @@ def run_codex_appserver(
             transport="codex-app-server",
             requested_model=model,
             reasoning=reasoning,
+            output_bytes=getattr(turn, "output_bytes", len(text.encode("utf-8"))),
+            output_cap_bytes=getattr(turn, "output_cap_bytes", proc.MAX_CAPTURE_BYTES),
         )
     if not text:
         return AgentResult(

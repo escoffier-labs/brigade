@@ -298,12 +298,14 @@ def test_consume_caps_deltas_during_accumulation(monkeypatch):
     result = thread.run_turn("work", timeout=2.0)
 
     assert result.output_limit_exceeded is True
-    assert result.ok is False
-    assert result.completed_observed is False
+    assert result.ok is True
+    assert result.completed_observed is True
     assert len(result.text.encode("utf-8")) <= 256
     assert server.capture_budget("thread-1").used <= 256
     assert server.capture_budget("thread-1").overflowed is True
-    assert "combined output exceeded" in result.detail
+    assert result.text.startswith("D")
+    assert result.output_bytes > 256
+    assert result.output_cap_bytes == 256
 
 
 def test_over_cap_after_turn_completed_observed_keeps_completion_signal(monkeypatch):
@@ -375,7 +377,7 @@ def _ingestion_server(lines: bytes):
 
 def test_over_cap_completed_record_ingested_via_stream_preserves_completion(monkeypatch):
     """#1200 finding 1: a parsed record that overflows the shared budget records the completion."""
-    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 512)
+    monkeypatch.setattr(proc, "MAX_STREAM_BYTES", 512)
     delta = json.dumps(
         {
             "jsonrpc": "2.0",
@@ -397,9 +399,9 @@ def test_over_cap_completed_record_ingested_via_stream_preserves_completion(monk
             },
         }
     )
-    assert len(delta) * 2 <= proc.MAX_CAPTURE_BYTES
-    assert len(oversized_turn.encode("utf-8")) <= proc.MAX_CAPTURE_BYTES
-    assert len(delta) * 2 + len(oversized_turn) > proc.MAX_CAPTURE_BYTES
+    assert len(delta) * 2 <= proc.MAX_STREAM_BYTES
+    assert len(oversized_turn.encode("utf-8")) <= proc.MAX_STREAM_BYTES
+    assert len(delta) * 2 + len(oversized_turn) > proc.MAX_STREAM_BYTES
     server, q = _ingestion_server((delta + "\n" + delta + "\n" + oversized_turn + "\n").encode("utf-8"))
 
     server._read_loop()
@@ -424,7 +426,7 @@ def test_over_cap_completed_record_ingested_via_stream_preserves_completion(monk
 
 def test_over_cap_completed_record_is_noted_before_limit_signal(monkeypatch):
     """#1200: completion metadata is recorded before the limit signal wakes waiters."""
-    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 512)
+    monkeypatch.setattr(proc, "MAX_STREAM_BYTES", 512)
     delta = json.dumps(
         {
             "jsonrpc": "2.0",
@@ -446,7 +448,7 @@ def test_over_cap_completed_record_is_noted_before_limit_signal(monkeypatch):
             },
         }
     )
-    assert len(delta) * 2 + len(oversized_turn) > proc.MAX_CAPTURE_BYTES
+    assert len(delta) * 2 + len(oversized_turn) > proc.MAX_STREAM_BYTES
     server, _q = _ingestion_server((delta + "\n" + delta + "\n" + oversized_turn + "\n").encode("utf-8"))
     seen_at_signal: dict[str, str | None] = {}
     original_signal = server._signal_output_limit
@@ -500,7 +502,7 @@ def test_ingested_failed_status_over_cap_record_does_not_signal_completion(monke
 
 
 def test_read_loop_stops_queueing_after_line_cap(monkeypatch):
-    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 512)
+    monkeypatch.setattr(proc, "MAX_STREAM_BYTES", 512)
     captured = {"queued": 0, "peak": 0}
 
     class RecordingQueue:
@@ -534,7 +536,7 @@ def test_read_loop_stops_queueing_after_line_cap(monkeypatch):
 
     assert server._output_limit_exceeded is True
     assert captured["peak"] <= 512
-    assert server.capture_budget("t-flood").overflowed is True
+    assert server._stream_budget.overflowed is True
 
 
 class _VirtualRecordStream:
@@ -615,7 +617,7 @@ def _tracking_loads(parsed_sizes: list[int]):
 
 def test_read_loop_oversized_valid_record_trips_cap_without_full_buffer(monkeypatch):
     cap = 512
-    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", cap)
+    monkeypatch.setattr(proc, "MAX_STREAM_BYTES", cap)
     parsed_sizes: list[int] = []
     monkeypatch.setattr(codex_appserver.json, "loads", _tracking_loads(parsed_sizes))
 
@@ -643,13 +645,12 @@ def test_read_loop_oversized_valid_record_trips_cap_without_full_buffer(monkeypa
     assert stream.bytes_served < stream.total
     assert all(size <= cap for size in parsed_sizes)
     assert registry.terminated
-    assert server.capture_budget(None).overflowed is True
-    assert server.capture_budget(None).used == cap
+    assert server._stream_budget.overflowed is True
 
 
 def test_read_loop_oversized_malformed_record_trips_cap_and_charges_budget(monkeypatch):
     cap = 512
-    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", cap)
+    monkeypatch.setattr(proc, "MAX_STREAM_BYTES", cap)
     parsed_sizes: list[int] = []
     monkeypatch.setattr(codex_appserver.json, "loads", _tracking_loads(parsed_sizes))
 
@@ -667,23 +668,31 @@ def test_read_loop_oversized_malformed_record_trips_cap_and_charges_budget(monke
     server._read_loop()
 
     assert server._output_limit_exceeded is True
-    assert server.capture_budget(None).overflowed is True
-    assert server.capture_budget(None).used == cap
+    assert server._stream_budget.overflowed is True
     assert stream.bytes_served <= cap + 1
     assert stream.bytes_served < stream.total
     assert parsed_sizes == []
     assert registry.terminated
 
 
-def test_flood_turn_signals_output_limit_under_small_cap(monkeypatch):
+def test_flood_turn_truncates_but_still_completes_under_small_cap(monkeypatch):
+    """#1144: a delta flood truncates the text; it must not fail the turn.
+
+    Before the fix the retention cap killed the app-server child mid-stream, so
+    turn/completed never arrived and a finished worker's result was discarded.
+    """
     monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 4096)
     with _server() as server:
         thread = server.start_thread(cwd=Path("/tmp"))
         result = thread.run_turn("FLOOD now", timeout=10.0)
     assert result.output_limit_exceeded is True
-    assert result.ok is False
+    assert result.ok is True
+    assert result.status == "complete"
+    assert result.completed_observed is True
     assert len(result.text.encode("utf-8")) <= 4096
-    assert "combined output exceeded" in result.detail
+    assert result.output_cap_bytes == 4096
+    assert result.output_bytes > 0
+    assert "output truncated" in result.detail
 
 
 def test_appserver_env_reaches_child_without_seat_env(monkeypatch):
@@ -733,8 +742,8 @@ def test_appserver_env_reaches_child_without_seat_env(monkeypatch):
 
 
 def test_ingest_line_charges_parsed_record_once(monkeypatch):
-    """#1200 round 3: one valid record charges the budget exactly its length."""
-    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 4096)
+    """#1144: one valid record charges the transport ceiling exactly its length."""
+    monkeypatch.setattr(proc, "MAX_STREAM_BYTES", 4096)
     line = json.dumps(
         {
             "jsonrpc": "2.0",
@@ -748,12 +757,14 @@ def test_ingest_line_charges_parsed_record_once(monkeypatch):
     server.reset_capture("t-once")
 
     assert server._ingest_line(line) is True
-    assert server.capture_budget("t-once").used == len(line)
+    assert server._stream_budget.used == len(line)
+    # Routed-and-discarded traffic must not spend the retention budget (#1144).
+    assert server.capture_budget("t-once").used == 0
 
 
 def test_near_cap_normal_records_ingest_without_overflow(monkeypatch):
-    """#1200 round 3: traffic between half cap and full cap must still ingest."""
-    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 1024)
+    """#1144: traffic between half ceiling and full ceiling must still ingest."""
+    monkeypatch.setattr(proc, "MAX_STREAM_BYTES", 1024)
     server = codex_appserver.AppServer(argv=FAKE)
     q: queue.Queue = queue.Queue()
     server._queues["t-near"] = q
@@ -774,9 +785,9 @@ def test_near_cap_normal_records_ingest_without_overflow(monkeypatch):
     for line in lines:
         assert server._ingest_line(line) is True
 
-    budget = server.capture_budget("t-near")
-    assert budget.used == total
-    assert budget.overflowed is False
+    assert server._stream_budget.used == total
+    assert server._stream_budget.overflowed is False
+    assert server.capture_budget("t-near").used == 0
     assert server._output_limit_exceeded is False
 
 
@@ -793,7 +804,7 @@ def test_reused_turn_id_cannot_inherit_stale_completion():
 
 
 def _overflow_ingest(monkeypatch, payload: bytes):
-    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 512)
+    monkeypatch.setattr(proc, "MAX_STREAM_BYTES", 512)
     server, _q = _ingestion_server(payload)
     server._read_loop()
     assert server._output_limit_exceeded is True

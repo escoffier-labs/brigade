@@ -18,6 +18,7 @@ from . import (
     agents,
     codex_appserver,
     message_envelope,
+    proc,
     receipt_schema,
     run_budget,
     run_events,
@@ -652,9 +653,10 @@ def _resume_locked(
             entry["detail"] = "" if entry["ok"] else redact_approval_token(turn.detail or f"turn {turn.status}")[:200]
             entry["status"] = turn.status
             if getattr(turn, "output_limit_exceeded", False):
-                entry["ok"] = False
-                entry["failure_phase"] = "harness"
                 entry["failure_kind"] = "output-limit"
+                entry["output_truncated"] = True
+                entry["output_bytes"] = getattr(turn, "output_bytes", 0)
+                entry["output_cap_bytes"] = getattr(turn, "output_cap_bytes", proc.MAX_CAPTURE_BYTES)
                 entry["detail"] = redact_approval_token(turn.detail or entry["detail"])[:200]
             captured = message_envelope.emit(
                 entry["text"],

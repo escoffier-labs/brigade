@@ -429,6 +429,8 @@ def _over_cap_appserver_result(**kwargs):
         failure_kind="output-limit",
         status="failed",
         transport="codex-app-server",
+        output_bytes=proc.MAX_CAPTURE_BYTES + 1,
+        output_cap_bytes=proc.MAX_CAPTURE_BYTES,
         **kwargs,
     )
 
@@ -458,6 +460,8 @@ def test_over_cap_worker_result_with_completed_turn_stays_ok(monkeypatch, tmp_pa
     payload = worker_payload_one(worker)
     assert payload["ok"] is True
     assert payload["output_truncated"] is True
+    assert payload["output_bytes"] == agents.proc.MAX_CAPTURE_BYTES + 1
+    assert payload["output_cap_bytes"] == agents.proc.MAX_CAPTURE_BYTES
     assert payload["text"] == "final structured answer"
 
 
@@ -578,6 +582,10 @@ def test_worker_output_overflow_kills_group_and_caps_all_artifacts(tmp_path, mon
 
     sentinel = tmp_path / "descendant-sentinel"
     overflow = proc.MAX_CAPTURE_BYTES + 4096
+    # #1144: draining past the retention cap no longer kills; the stream ceiling
+    # does. Lower it so the runaway child below trips it inside the test budget,
+    # keeping the #1108 guarantee that a flooding group is terminated.
+    monkeypatch.setattr(proc, "MAX_STREAM_BYTES", overflow + 4096)
     worker_code = (
         "import os, sys, time\n"
         f"sentinel = {str(sentinel)!r}\n"
