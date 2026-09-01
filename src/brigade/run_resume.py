@@ -29,6 +29,7 @@ from . import (
     verification_contract,
     worker_events,
 )
+from .aboyeur.planning import resolve_run_sandbox
 from .roster import Agent, Roster, _as_bool, _as_capabilities, _as_command, _as_env
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
@@ -423,6 +424,41 @@ def _continuation_prompt(task: str) -> str:
     )
 
 
+def _finish_resume_receipt(run_dir: Path, run_meta: dict, final: agents.AgentResult) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    run_meta.setdefault("resumed_at", []).append(now)
+    if not final.ok:
+        bounded_detail = (final.detail or "orchestrator failed during synthesis")[:2000]
+        _archive_failure(run_meta)
+        run_meta["status"] = "failed"
+        run_meta["error"] = bounded_detail
+        run_meta["failure_phase"] = "synthesis"
+        run_meta["failure"] = {
+            "phase": "synthesis",
+            "kind": "agent-error",
+            "detail": bounded_detail,
+            "seat": run_meta.get("orchestrator"),
+        }
+        _refresh_run_timing(run_meta)
+        try:
+            aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
+        except run_lifecycle.LifecycleJournalError as exc:
+            raise runguard.RetainRunLockError(f"failed to write failed-synthesis run receipt: {exc}") from exc
+        print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
+        return 2
+    (run_dir / "final.txt").write_text(final.text + "\n")
+    run_meta["status"] = "ok"
+    run_meta.pop("error", None)
+    _archive_failure(run_meta)
+    _refresh_run_timing(run_meta)
+    try:
+        aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
+    except run_lifecycle.LifecycleJournalError as exc:
+        raise runguard.RetainRunLockError(f"failed to write successful-synthesis run receipt: {exc}") from exc
+    print(final.text)
+    return 0
+
+
 def resume(run_dir: Path) -> int:
     run_dir = run_dir.expanduser().resolve()
     run_meta = _load_json(run_dir, "run.json")
@@ -564,7 +600,13 @@ def _resume_locked(
         return 2
 
     read_only = bool(run_meta.get("read_only"))
-    sandbox = roster_snapshot.get("sandbox")
+    roster_sandbox = roster_snapshot.get("sandbox")
+    sandbox = resolve_run_sandbox(
+        sandbox=roster_sandbox if isinstance(roster_sandbox, str) else None,
+        roster_sandbox=roster.sandbox,
+        read_only=read_only,
+        health=run_meta.get("health") if isinstance(run_meta.get("health"), dict) else None,
+    )
     if approval_resume:
         from . import runs_cmd
 
@@ -718,6 +760,31 @@ def _resume_locked(
     )
 
     task = run_meta.get("task", "")
+    direct_worker = isinstance(run_meta.get("worker"), str) and bool(run_meta.get("worker"))
+    if direct_worker:
+        # A finished direct worker is already the user-visible result. Do not
+        # spawn a write-capable chef just to re-speak it, and do not reclassify
+        # a completed worker when a later chef seat would have dropped sandbox.
+        direct_result = (
+            worker_results[0]
+            if worker_results
+            else aboyeur.WorkerResult(
+                worker=str(run_meta.get("worker") or ""),
+                task=task,
+                text="",
+                ok=False,
+                detail="direct worker produced no result",
+            )
+        )
+        final = aboyeur._agent_result_from_worker(direct_result)
+        synthesis_payload = receipt_schema.synthesis_document(
+            mode="direct-worker",
+            worker=run_meta.get("worker") if isinstance(run_meta.get("worker"), str) else None,
+            result={"ok": final.ok, "detail": final.detail, "text": final.text},
+            ground_truth=ground_truth,
+        )
+        aboyeur.write_sidecar_revision(run_dir, "synthesis.json", synthesis_payload)
+        return _finish_resume_receipt(run_dir, run_meta, final)
     synth_prompt = aboyeur.build_synth_prompt(
         task,
         worker_results,
@@ -750,16 +817,21 @@ def _resume_locked(
             file=sys.stderr,
         )
         return 2
+    synth_kwargs: dict[str, object] = {
+        "timeout": orchestrator.timeout_seconds or roster.timeout_seconds,
+        "cwd": cwd,
+        "read_only": read_only,
+        "model": orchestrator.model,
+        "reasoning": orchestrator.reasoning,
+        "env": dict(orchestrator.env) if orchestrator.env is not None else None,
+        "command": orchestrator.command,
+    }
+    if sandbox is not None:
+        synth_kwargs["sandbox"] = sandbox
     final = agents.run_agent(
         orchestrator.cli,
         synth_prompt,
-        timeout=orchestrator.timeout_seconds or roster.timeout_seconds,
-        cwd=cwd,
-        read_only=read_only,
-        model=orchestrator.model,
-        reasoning=orchestrator.reasoning,
-        env=dict(orchestrator.env) if orchestrator.env is not None else None,
-        command=orchestrator.command,
+        **synth_kwargs,
     )
     synth_captured = message_envelope.emit(
         final.text,
@@ -790,35 +862,4 @@ def _resume_locked(
         "synthesis.json",
         synthesis_payload,
     )
-    now = datetime.now(timezone.utc).isoformat()
-    run_meta.setdefault("resumed_at", []).append(now)
-    if not final.ok:
-        bounded_detail = (final.detail or "orchestrator failed during synthesis")[:2000]
-        _archive_failure(run_meta)
-        run_meta["status"] = "failed"
-        run_meta["error"] = bounded_detail
-        run_meta["failure_phase"] = "synthesis"
-        run_meta["failure"] = {
-            "phase": "synthesis",
-            "kind": "agent-error",
-            "detail": bounded_detail,
-            "seat": roster.orchestrator,
-        }
-        _refresh_run_timing(run_meta)
-        try:
-            aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
-        except run_lifecycle.LifecycleJournalError as exc:
-            raise runguard.RetainRunLockError(f"failed to write failed-synthesis run receipt: {exc}") from exc
-        print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
-        return 2
-    (run_dir / "final.txt").write_text(final.text + "\n")
-    run_meta["status"] = "ok"
-    run_meta.pop("error", None)
-    _archive_failure(run_meta)
-    _refresh_run_timing(run_meta)
-    try:
-        aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
-    except run_lifecycle.LifecycleJournalError as exc:
-        raise runguard.RetainRunLockError(f"failed to write successful-synthesis run receipt: {exc}") from exc
-    print(final.text)
-    return 0
+    return _finish_resume_receipt(run_dir, run_meta, final)
