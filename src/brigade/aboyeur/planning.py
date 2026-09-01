@@ -301,6 +301,30 @@ def _orchestrator_failure_detail(
     return result.detail or ""
 
 
+def resolve_run_sandbox(
+    *,
+    sandbox: str | None = None,
+    roster_sandbox: str | None = None,
+    read_only: bool = False,
+    health: object | None = None,
+) -> str | None:
+    """Resolve the sandbox every write-capable stage for a run must inherit.
+
+    Precedence: persisted ``health.effective_sandbox``, the explicit argument,
+    the roster declaration, then the read-only default. A recorded ``None`` in
+    health still falls through so a later explicit or roster value is not lost.
+    """
+    if isinstance(health, dict):
+        stored = health.get("effective_sandbox")
+        if isinstance(stored, str) and stored:
+            return stored
+    if sandbox is not None:
+        return sandbox
+    if roster_sandbox is not None:
+        return roster_sandbox
+    return "read-only" if read_only else None
+
+
 def _run_orchestrator(
     roster: Roster,
     prompt: str,
@@ -337,13 +361,22 @@ def _run_orchestrator(
             failure_phase="preflight",
             failure_kind="provider-config",
         )
+    effective_read_only = read_only if sandbox_read_only is None else sandbox_read_only
+    # Do not invent a sandbox kwarg from read_only alone: legacy run_agent
+    # doubles omit that parameter, and prompt-level read-only already
+    # travels as read_only=. Roster or an explicit flag still propagate.
+    effective_sandbox = resolve_run_sandbox(
+        sandbox=sandbox,
+        roster_sandbox=roster.sandbox,
+        read_only=False,
+    )
     kwargs: dict[str, object] = {
         "timeout": timeout_for(orchestrator, roster),
         "cwd": cwd,
-        "read_only": read_only if sandbox_read_only is None else sandbox_read_only,
+        "read_only": effective_read_only,
     }
-    if sandbox is not None:
-        kwargs["sandbox"] = sandbox
+    if effective_sandbox is not None:
+        kwargs["sandbox"] = effective_sandbox
     if orchestrator.model is not None:
         kwargs["model"] = orchestrator.model
     if orchestrator.reasoning is not None:

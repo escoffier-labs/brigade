@@ -1622,7 +1622,9 @@ role = "code"
 
     monkeypatch.setattr(run_resume.codex_appserver, "AppServer", ResumeServer)
     assert cli.main(["runs", "resume", str(run_dir)]) == 0
-    assert (run_dir / "final.txt").read_text().strip() == "resumed synthesis"
+    # This fixture is a `--worker coder` run. Direct-worker resume now uses the
+    # worker turn as the user-visible result and does not re-speak it through chef.
+    assert (run_dir / "final.txt").read_text().strip() == "approval continuation complete"
     resumed = json.loads((run_dir / "run.json").read_text())
     assert resumed["status"] == "ok"
     assert len(resume_tokens) == 1

@@ -944,3 +944,408 @@ def test_dispatch_does_not_run_when_versioned_custom_command_or_model_override_i
     assert override_results[0].ok is False
     assert override_results[0].failure_kind == "fleet-model-policy"
     assert override_calls == []
+
+
+def _direct_worker_roster(*, chef_cli: str = "claude", coder_cli: str = "codex") -> Roster:
+    return Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli=chef_cli, role="plan"),
+            "coder": Agent(name="coder", cli=coder_cli, role="write"),
+        },
+        max_workers=2,
+    )
+
+
+def test_dispatch_passes_explicit_sandbox_to_direct_worker(monkeypatch, tmp_path):
+    captured: list[dict[str, object]] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        captured.append({"cli": cli_ref, "sandbox": kwargs.get("sandbox"), "read_only": kwargs.get("read_only")})
+        return agents.AgentResult(text="implemented", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+    results = run_transport.dispatch(
+        [Assignment(worker="coder", task="implement it")],
+        _direct_worker_roster(),
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        cwd=tmp_path,
+        sandbox="danger-full-access",
+        output_dir=tmp_path,
+        direct=True,
+    )
+    assert results[0].ok is True
+    assert captured == [{"cli": "codex", "sandbox": "danger-full-access", "read_only": False}]
+
+
+def test_direct_worker_handoff_propagates_explicit_sandbox(monkeypatch, tmp_path):
+    from brigade import aboyeur
+    from brigade import verification_contract
+    from tests.run_test_helpers import run_aboyeur_guarded
+
+    calls: list[dict[str, object]] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        calls.append(
+            {
+                "cli": cli_ref,
+                "sandbox": kwargs.get("sandbox"),
+                "read_only": kwargs.get("read_only"),
+            }
+        )
+        return agents.AgentResult(text="worker final output", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    output_dir = tmp_path / "run"
+    inbox = tmp_path / "handoffs"
+    contract = {
+        "schema": verification_contract.VERIFICATION_CONTRACT_SCHEMA,
+        "schema_version": verification_contract.VERIFICATION_CONTRACT_SCHEMA_VERSION,
+        "verifier": {"source": "command", "command": "true"},
+        "rollback": {"policy": "none"},
+        "budget": {},
+    }
+
+    rc = run_aboyeur_guarded(
+        "implement the bounded fix",
+        _direct_worker_roster(),
+        worker="coder",
+        sandbox="danger-full-access",
+        handoff_inbox=inbox,
+        output_dir=output_dir,
+        cwd=tmp_path,
+        route_enabled=False,
+        code_graph_enabled=False,
+        evidence_enabled=False,
+        verification_contract_payload=contract,
+    )
+
+    assert rc == 0
+    assert [call["cli"] for call in calls] == ["codex"]
+    assert calls[0]["sandbox"] == "danger-full-access"
+    assert calls[0]["read_only"] is False
+    chef_calls = [call for call in calls if call["cli"] == "claude"]
+    assert chef_calls == []
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "ok"
+    assert run_meta["worker"] == "coder"
+    assert list(inbox.glob("*.md"))
+    synthesis = json.loads((output_dir / "synthesis.json").read_text())
+    assert synthesis["mode"] == "direct-worker"
+    assert synthesis["result"]["text"] == "worker final output"
+
+
+def test_direct_worker_read_only_sandbox_never_becomes_a_write(monkeypatch, tmp_path):
+    from brigade import aboyeur
+    from tests.run_test_helpers import run_aboyeur_guarded
+
+    calls: list[dict[str, object]] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        calls.append(
+            {
+                "cli": cli_ref,
+                "sandbox": kwargs.get("sandbox"),
+                "read_only": kwargs.get("read_only"),
+            }
+        )
+        return agents.AgentResult(text="read-only review", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    output_dir = tmp_path / "run"
+
+    rc = run_aboyeur_guarded(
+        "review the diff",
+        _direct_worker_roster(),
+        worker="coder",
+        read_only=True,
+        sandbox="read-only",
+        handoff_inbox=tmp_path / "handoffs",
+        output_dir=output_dir,
+        cwd=tmp_path,
+        route_enabled=False,
+        code_graph_enabled=False,
+        evidence_enabled=False,
+    )
+
+    assert rc == 0
+    assert calls
+    for call in calls:
+        write_invocation = call["sandbox"] not in {"read-only", None} or (
+            call["sandbox"] is None and call["read_only"] is False
+        )
+        assert write_invocation is False
+        assert call["sandbox"] == "read-only"
+        assert call["read_only"] is True
+    assert all(call["cli"] != "claude" for call in calls)
+
+
+def test_handoff_failure_preserves_direct_worker_result_and_verification(monkeypatch, tmp_path):
+    from brigade import aboyeur
+    from brigade import verification_contract
+    from tests.run_test_helpers import run_aboyeur_guarded
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        return agents.AgentResult(text="worker final output", ok=True)
+
+    def fail_handoff(*args, **kwargs):  # noqa: ARG001
+        raise OSError("cannot write handoff")
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    monkeypatch.setattr(aboyeur, "write_run_handoff", fail_handoff)
+    output_dir = tmp_path / "run"
+    contract = {
+        "schema": verification_contract.VERIFICATION_CONTRACT_SCHEMA,
+        "schema_version": verification_contract.VERIFICATION_CONTRACT_SCHEMA_VERSION,
+        "verifier": {"source": "command", "command": "true"},
+        "rollback": {"policy": "none"},
+        "budget": {},
+    }
+
+    rc = run_aboyeur_guarded(
+        "implement the bounded fix",
+        _direct_worker_roster(),
+        worker="coder",
+        sandbox="danger-full-access",
+        handoff_inbox=tmp_path / "handoffs",
+        output_dir=output_dir,
+        cwd=tmp_path,
+        route_enabled=False,
+        code_graph_enabled=False,
+        evidence_enabled=False,
+        verification_contract_payload=contract,
+    )
+
+    assert rc == 2
+    worker_doc = json.loads((output_dir / "worker-results.json").read_text())
+    assert worker_doc["results"][0]["ok"] is True
+    assert worker_doc["results"][0]["text"] == "worker final output"
+    assert "failure_phase" not in worker_doc["results"][0]
+    plan = json.loads((output_dir / "plan.json").read_text())
+    assert plan["verification_contract"]["verifier"]["command"] == "true"
+    synthesis = json.loads((output_dir / "synthesis.json").read_text())
+    assert synthesis["mode"] == "direct-worker"
+    assert synthesis["result"]["ok"] is True
+    assert synthesis["result"]["text"] == "worker final output"
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure_phase"] == "handoff"
+    assert run_meta["failure"]["kind"] == "handoff-write-error"
+
+
+def _interrupted_resume_run(
+    tmp_path,
+    *,
+    worker: str = "cook",
+    direct_worker: bool = False,
+    sandbox: str | None = "danger-full-access",
+):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run_meta = {
+        "task": "implement the bounded fix",
+        "cwd": str(tmp_path),
+        "orchestrator": "chef",
+        "read_only": False,
+        "status": "failed",
+        "started_at": "2026-08-31T00:00:00+00:00",
+        "error": "run owner process 99999999 is no longer active",
+        "failure_phase": "stale-lock-recovery",
+        "failure": {
+            "phase": "stale-lock-recovery",
+            "kind": "owner-process-exited",
+            "owner_pid": 99999999,
+        },
+        "health": {"effective_sandbox": sandbox},
+    }
+    if direct_worker:
+        run_meta["worker"] = worker
+        run_meta["run_mode"] = "direct-worker"
+    (run_dir / "run.json").write_text(json.dumps(run_meta))
+    (run_dir / "roster.json").write_text(
+        json.dumps(
+            {
+                "orchestrator": "chef",
+                "max_workers": 4,
+                "timeout_seconds": 600.0,
+                "allow_models": [],
+                "sandbox": None,
+                "agents": {
+                    "chef": {"cli": "claude", "model": None, "role": "plan", "timeout_seconds": None},
+                    worker: {"cli": "codex", "model": None, "role": "code", "timeout_seconds": None},
+                },
+            }
+        )
+    )
+    (run_dir / "plan.json").write_text(
+        json.dumps({"assignments": [{"stage": 1, "worker": worker, "task": "write the fix"}]})
+    )
+    (run_dir / "worker-results.json").write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "worker": worker,
+                        "task": "write the fix",
+                        "ok": False,
+                        "detail": "timeout",
+                        "text": "partial",
+                        "thread_id": "t-sandbox",
+                        "status": "interrupted",
+                    }
+                ],
+                "ground_truth": {"verify_receipt": "20260831-000147-work-verify-4b2d5d"},
+            }
+        )
+    )
+    return run_dir
+
+
+class _SandboxRecordingServer:
+    def __init__(self, *a, **k):
+        self.resumed = []
+        self.turn_ok = True
+        self.turn_text = "finished now"
+        self.turn_detail = ""
+        self.turn_status = "complete"
+
+    def start(self):
+        pass
+
+    def close(self):
+        pass
+
+    def resume_thread(self, thread_id, *, cwd, model=None, sandbox=None):
+        from brigade import codex_appserver
+
+        self.resumed.append({"thread_id": thread_id, "sandbox": sandbox, "model": model})
+        owner = self
+
+        class _Thread:
+            def __init__(self, thread_id):
+                self.thread_id = thread_id
+
+            def run_turn(self, prompt, *, timeout, on_event=None):  # noqa: ARG002
+                return codex_appserver.TurnResult(
+                    text=owner.turn_text,
+                    ok=owner.turn_ok,
+                    status=owner.turn_status,
+                    detail=owner.turn_detail,
+                    thread_id=self.thread_id,
+                )
+
+        return _Thread(thread_id)
+
+
+def test_resume_synthesis_receives_explicit_sandbox(tmp_path, monkeypatch):
+    from brigade import run_resume
+
+    run_dir = _interrupted_resume_run(tmp_path, worker="cook", direct_worker=False)
+    server = _SandboxRecordingServer()
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", lambda *a, **k: server)
+    captured: dict[str, object] = {}
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        captured["cli"] = cli_ref
+        captured["sandbox"] = kwargs.get("sandbox")
+        captured["read_only"] = kwargs.get("read_only")
+        return agents.AgentResult(text="final synthesis", ok=True)
+
+    monkeypatch.setattr(run_resume.agents, "run_agent", fake_run_agent)
+    assert run_resume.resume(run_dir) == 0
+    assert server.resumed[0]["sandbox"] == "danger-full-access"
+    assert captured == {"cli": "claude", "sandbox": "danger-full-access", "read_only": False}
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "ok"
+
+
+def test_direct_worker_resume_skips_chef_and_keeps_worker_result(tmp_path, monkeypatch):
+    from brigade import run_resume
+
+    run_dir = _interrupted_resume_run(tmp_path, worker="coder", direct_worker=True)
+    server = _SandboxRecordingServer()
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", lambda *a, **k: server)
+    chef_calls: list[dict[str, object]] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        chef_calls.append({"cli": cli_ref, "sandbox": kwargs.get("sandbox"), "read_only": kwargs.get("read_only")})
+        raise AssertionError("direct-worker resume must not invoke chef")
+
+    monkeypatch.setattr(run_resume.agents, "run_agent", fake_run_agent)
+    assert run_resume.resume(run_dir) == 0
+    assert server.resumed[0]["sandbox"] == "danger-full-access"
+    assert chef_calls == []
+    results = json.loads((run_dir / "worker-results.json").read_text())
+    assert results["results"][0]["ok"] is True
+    assert results["results"][0]["text"] == "finished now"
+    assert results["ground_truth"]["verify_receipt"] == "20260831-000147-work-verify-4b2d5d"
+    synthesis = json.loads((run_dir / "synthesis.json").read_text())
+    assert synthesis["mode"] == "direct-worker"
+    assert synthesis["result"]["text"] == "finished now"
+    assert (run_dir / "final.txt").read_text().strip() == "finished now"
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "ok"
+
+
+def test_direct_worker_resume_failed_worker_keeps_worker_failure_typing(tmp_path, monkeypatch, capsys):
+    from brigade import run_resume
+
+    run_dir = _interrupted_resume_run(tmp_path, worker="coder", direct_worker=True)
+    server = _SandboxRecordingServer()
+    server.turn_ok = False
+    server.turn_text = "partial worker output"
+    server.turn_detail = "provider hung up"
+    server.turn_status = "failed"
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", lambda *a, **k: server)
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        raise AssertionError("direct-worker resume must not invoke chef")
+
+    monkeypatch.setattr(run_resume.agents, "run_agent", fake_run_agent)
+    assert run_resume.resume(run_dir) == 2
+    captured = capsys.readouterr()
+    assert "error: worker failed: provider hung up" in captured.err
+    assert "orchestrator failed during synthesis" not in captured.err
+    assert captured.out.strip() == "partial worker output"
+    assert (run_dir / "final.txt").read_text().strip() == "partial worker output"
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure_phase"] == "dispatch"
+    assert run_meta["failure"] == {
+        "phase": "dispatch",
+        "kind": "agent-error",
+        "detail": "provider hung up",
+        "seat": "coder",
+    }
+    synthesis = json.loads((run_dir / "synthesis.json").read_text())
+    assert synthesis["mode"] == "direct-worker"
+    assert synthesis["result"]["ok"] is False
+    assert synthesis["result"]["text"] == "partial worker output"
+
+
+def test_resume_read_only_sandbox_never_becomes_a_write(tmp_path, monkeypatch):
+    from brigade import run_resume
+
+    run_dir = _interrupted_resume_run(tmp_path, worker="cook", direct_worker=False, sandbox="read-only")
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["read_only"] = True
+    (run_dir / "run.json").write_text(json.dumps(run_meta))
+    server = _SandboxRecordingServer()
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", lambda *a, **k: server)
+    captured: dict[str, object] = {}
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        captured["cli"] = cli_ref
+        captured["sandbox"] = kwargs.get("sandbox")
+        captured["read_only"] = kwargs.get("read_only")
+        return agents.AgentResult(text="read-only synthesis", ok=True)
+
+    monkeypatch.setattr(run_resume.agents, "run_agent", fake_run_agent)
+    assert run_resume.resume(run_dir) == 0
+    assert server.resumed[0]["sandbox"] == "read-only"
+    assert captured["sandbox"] == "read-only"
+    assert captured["read_only"] is True
+    write_invocation = captured["sandbox"] not in {"read-only", None} or (
+        captured["sandbox"] is None and captured["read_only"] is False
+    )
+    assert write_invocation is False
