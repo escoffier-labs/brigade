@@ -138,7 +138,7 @@ def render_work_loop_section() -> str:
         '`brigade work verify run --target . --command "<command>" --capture brigade-work`, '
         "capturing failures as evidence so the outcome ledger stays honest.\n\n"
         "After substantial work, create a Memory Handoff through the standard "
-        "Rocinante flow and never edit canonical memory directly.\n"
+        "canonical-owner flow and never edit canonical memory directly.\n"
     )
 
 
