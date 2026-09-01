@@ -852,8 +852,12 @@ class TestOpenDbSideEffectFree:
 
     def test_init_schema_reads_user_version_before_taking_the_write_lock(self):
         source = inspect.getsource(fleet_hub._init_schema)
-        assert source.index("PRAGMA user_version") < source.index("BEGIN IMMEDIATE")
-        assert source.index("if current == SCHEMA_VERSION:") < source.index("BEGIN IMMEDIATE")
+        assert source.index('conn.execute("PRAGMA user_version")') < source.index(
+            'conn.execute("BEGIN IMMEDIATE")'
+        )
+        assert source.index("if current == SCHEMA_VERSION:") < source.index(
+            'conn.execute("BEGIN IMMEDIATE")'
+        )
 
     def test_init_db_skips_write_lock_when_user_version_is_current(self, tmp_path):
         """#1159: a current schema is accepted after a plain ``user_version``
