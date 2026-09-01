@@ -15,7 +15,7 @@ from brigade.research.types import Finding
 from brigade.work_cmd import ledger
 
 PLANTED_EMAIL = "planted.canary9931@probe-corp-canary.com"
-PLANTED_IP = "192.168.4.70"
+PLANTED_IP = "192.168.99.70"
 PLANTED_BEARER = "zqXK9tPLANTEDBEARER7731aabbccddeeff0011"
 
 FAKE_SECRET = 'api_key="sk-test-abcdefghijklmnopqrstuv"'

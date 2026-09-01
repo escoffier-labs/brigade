@@ -65,6 +65,16 @@ Thumbs.db
 !/scripts/ci_pytest_shard.py
 !/scripts/verify_lock.py
 !/scripts/check_size_ratchet_baseline.py
+!/scripts/verify
+!/scripts/verify-focused
+!/scripts/version_sync.py
+!/scripts/managed_snapshot.py
+!/scripts/prepare_dev_wheel.py
+!/scripts/measure_run_journal.py
+!/scripts/verify_component_manifest_provenance.py
+!/scripts/smoke-mcp
+!/scripts/record-quickstart-demo.sh
+!/scripts/benchmark_issue266_work_status_memory.py
 /skills/
 
 # Local plan/spec scratch dirs only. Reviewed planning artifacts ARE
@@ -111,6 +121,14 @@ Thumbs.db
 .hermes/memory-handoffs/*
 !.hermes/memory-handoffs/TEMPLATE.md
 !.hermes/memory-handoffs/.gitkeep
+
+# grok: handoffs are session-local and may contain private context.
+!.grok/
+.grok/*
+!.grok/memory-handoffs/
+.grok/memory-handoffs/*
+!.grok/memory-handoffs/TEMPLATE.md
+!.grok/memory-handoffs/.gitkeep
 
 # Daily session logs are machine-local raw context.
 memory/20[0-9][0-9]-[0-1][0-9]-[0-3][0-9].md
