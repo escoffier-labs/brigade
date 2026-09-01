@@ -32,33 +32,67 @@ def control(
     root: Path | None,
     brigade: str | None = None,
     env_extra: dict[str, str] | None = None,
+    script: Path | None = None,
+    cwd: Path | None = None,
 ) -> tuple[int, dict]:
     """Run one control-brigade subcommand and return (exit code, parsed JSON).
 
     `root=None` drops `--root` so the helper falls back to its default state
-    root under `$TMPDIR`, which is the path the symlink probes need.
+    root under `$TMPDIR`, which is the path the symlink probes need. `script`
+    runs a copy of the helper from a fake checkout; `cwd` matters because a
+    relative `$TMPDIR` resolves against the working directory.
     """
     brigade = brigade or shlex.join([sys.executable, "-m", "brigade"])
-    argv = [sys.executable, str(CONTROL), "--brigade", brigade, *(["--root", str(root)] if root else []), *args]
+    argv = [
+        sys.executable,
+        str(script or CONTROL),
+        "--brigade",
+        brigade,
+        *(["--root", str(root)] if root else []),
+        *args,
+    ]
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH", "")]))
     if env_extra:
         env.update(env_extra)
-    proc = subprocess.run(argv, capture_output=True, text=True, timeout=600, env=env, check=False)
+    proc = subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        env=env,
+        check=False,
+        cwd=str(cwd) if cwd else None,
+    )
     assert proc.stdout, f"no JSON on stdout: {proc.stderr}"
     return proc.returncode, json.loads(proc.stdout)
+
+
+def fake_checkout(tmp_path: Path) -> tuple[Path, Path]:
+    """A copy of the helper inside a throwaway checkout; returns (root, script).
+
+    The helper reads its own `REPO_ROOT` as `Path(__file__).resolve().parents[3]`,
+    so a copy three directories down makes it treat a temp directory as the
+    Brigade checkout. That is the only way to plant a symlink at a default path
+    that lives *in* the checkout without writing into this one.
+    """
+    root = tmp_path / "checkout"
+    skill_dir = root / "registry" / "skills" / "verify-brigade"
+    skill_dir.mkdir(parents=True)
+    script = skill_dir / CONTROL.name
+    shutil.copy2(CONTROL, script)
+    return root, script
 
 
 def sandbox(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     """A fake operator home and temp base for the helper subprocess.
 
-    The helper waves through any path under `$TMPDIR` before it measures a path
-    against the operator home. An autouse fixture in `conftest.py` repoints
-    `HOME` at a `tmp_path_factory` directory, which lives *inside* the temp
-    tree - so a probe under that home is allowed by the `$TMPDIR` clause and
-    the home refusal never runs. Hand the subprocess a home and a temp base
-    that are siblings instead, so "inside the operator home" is a state these
-    tests can actually reach, on any host and in CI.
+    An autouse fixture in `conftest.py` repoints `HOME` at a `tmp_path_factory`
+    directory, which can live *inside* the temp tree - and the helper keeps one
+    carve-out for a temp base that sits inside the home directory. Hand the
+    subprocess a home and a temp base that are siblings instead, so "inside the
+    operator home" and "under the temp base" are separate states these tests
+    can actually reach, on any host and in CI.
     """
     home = tmp_path / "sandbox-home"
     temp = tmp_path / "sandbox-tmp"
@@ -392,3 +426,151 @@ def test_state_root_and_captures_are_private(tmp_path):
     assert captures, "doctor must capture the commands it ran"
     for capture in captures:
         assert stat.S_IMODE(capture.stat().st_mode) == 0o600, capture
+
+
+def test_a_relative_tmpdir_cannot_move_the_temp_base_onto_the_checkout(tmp_path):
+    """`$TMPDIR=.` must be refused, not resolved against the working directory.
+
+    `tempfile.gettempdir()` returns a relative `$TMPDIR` verbatim, so the
+    default state root would resolve against the cwd - the Brigade checkout in
+    every documented invocation - and inherit the temp base allowance.
+    """
+    home, _temp, _env_extra = sandbox(tmp_path)
+    landing = REPO_ROOT / "verify-brigade"
+    assert not landing.exists(), "probe precondition: the checkout has no state root"
+
+    code, payload = control("doctor", root=None, env_extra={"HOME": str(home), "TMPDIR": "."}, cwd=REPO_ROOT)
+    assert code == 1, payload
+    assert payload["ok"] is False
+    assert payload["action"] == "doctor"
+    assert "TMPDIR" in payload["error"], payload
+    assert not landing.exists(), "a relative $TMPDIR must not land a state root in the checkout"
+
+
+def test_a_temp_base_inside_the_checkout_is_still_refused(tmp_path):
+    """The checkout refusal runs before the temp base allowance, never after."""
+    checkout, script = fake_checkout(tmp_path)
+    home = tmp_path / "sandbox-home"
+    home.mkdir()
+    temp = checkout / "scratch"
+    temp.mkdir()
+
+    code, payload = control("doctor", root=None, env_extra={"HOME": str(home), "TMPDIR": str(temp)}, script=script)
+    assert code == 1, payload
+    assert payload["ok"] is False
+    assert "inside the Brigade checkout" in payload["error"], payload
+    assert not (temp / "verify-brigade").exists(), "a refused state root must not be created"
+
+
+def test_a_temp_base_inside_the_operator_home_is_still_allowed(tmp_path):
+    """The one carve-out: `$TMPDIR` itself inside the home, outside the checkout."""
+    home = tmp_path / "sandbox-home"
+    home.mkdir()
+    temp = home / "scratch"
+    temp.mkdir()
+
+    code, payload = control("doctor", root=None, env_extra={"HOME": str(home), "TMPDIR": str(temp)})
+    assert code in {0, 3}, payload
+    assert payload["action"] == "doctor"
+    assert "error" not in payload, payload
+    assert payload["state_root"] == str(temp / "verify-brigade")
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "../../../../escaped",
+        "nested/label",
+        "back\\slash",
+        "spaced label",
+        "x" * 65,
+        "",
+    ],
+)
+def test_evidence_refuses_an_unsafe_label(tmp_path, label):
+    home, temp, env_extra = sandbox(tmp_path)
+    root = temp / "state"
+    evidence_root = temp / "evidence"
+
+    code, payload = control(
+        "evidence",
+        "--evidence-root",
+        str(evidence_root),
+        "--label",
+        label,
+        root=root,
+        env_extra=env_extra,
+    )
+    assert code == 1, payload
+    assert payload["ok"] is False
+    assert payload["action"] == "evidence"
+    assert "refusing --label" in payload["error"], payload
+    assert list(home.iterdir()) == [], "a refused label must not write outside the evidence root"
+    assert not evidence_root.exists(), "a refused label must not create an evidence dir"
+
+
+def test_default_evidence_root_symlink_is_refused(tmp_path):
+    """A symlink at `<checkout>/.brigade/verification-evidence` must not be followed."""
+    checkout, script = fake_checkout(tmp_path)
+    home, temp, env_extra = sandbox(tmp_path)
+    hideout = home / "sneaky"
+    hideout.mkdir()
+    (checkout / ".brigade").mkdir()
+    (checkout / ".brigade" / "verification-evidence").symlink_to(hideout, target_is_directory=True)
+
+    code, payload = control(
+        "evidence", "--label", "symlinkprobe", root=temp / "state", env_extra=env_extra, script=script
+    )
+    assert code == 1, payload
+    assert payload["ok"] is False
+    assert payload["action"] == "evidence"
+    assert "symlink" in payload["error"], payload
+    assert list(hideout.iterdir()) == [], "a refused evidence root must not be written through"
+
+
+def test_explicit_evidence_root_symlink_is_refused(tmp_path):
+    home, temp, env_extra = sandbox(tmp_path)
+    hideout = home / "sneaky"
+    hideout.mkdir()
+    planted = temp / "planted-evidence"
+    planted.symlink_to(hideout, target_is_directory=True)
+
+    code, payload = control(
+        "evidence", "--evidence-root", str(planted), "--label", "probe", root=temp / "state", env_extra=env_extra
+    )
+    assert code == 1, payload
+    assert payload["ok"] is False
+    assert payload["action"] == "evidence"
+    assert "symlink" in payload["error"], payload
+    assert list(hideout.iterdir()) == [], "a refused evidence root must not be written through"
+
+
+def test_cleanup_skips_a_target_that_became_a_symlink(tmp_path):
+    """A recorded target swapped for a symlink is skipped, not reported removed."""
+    root = tmp_path / "state"
+    targets = root / "targets"
+    targets.mkdir(parents=True)
+    hideout = tmp_path / "hideout"
+    hideout.mkdir()
+    (hideout / "keep.txt").write_text("still here\n", encoding="utf-8")
+    swapped = targets / "swapped"
+    swapped.symlink_to(hideout, target_is_directory=True)
+    (root / "state.json").write_text(
+        json.dumps({"schema": "verify-brigade.state.v1", "created_targets": [str(swapped)]}) + "\n",
+        encoding="utf-8",
+    )
+
+    code, preview = control("cleanup", "--dry-run", root=root)
+    assert code == 0, preview
+    assert preview["would_remove"] == [], preview
+    assert preview["skipped"] == [{"path": str(swapped), "reason": "skipped-symlink"}], preview
+
+    code, payload = control("cleanup", root=root)
+    assert code == 0, payload
+    assert payload["ok"] is True
+    assert payload["removed"] == [], payload
+    assert payload["skipped"] == [{"path": str(swapped), "reason": "skipped-symlink"}], payload
+    assert swapped.is_symlink(), "cleanup must leave the swapped path alone"
+    assert (hideout / "keep.txt").is_file(), "cleanup must not remove what the symlink points at"
+    state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+    assert state["created_targets"] == [str(swapped)], "a skipped target stays recorded"

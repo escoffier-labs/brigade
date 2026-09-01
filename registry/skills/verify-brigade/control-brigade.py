@@ -16,15 +16,20 @@ every path outside the state root are refused before a command runs.
 `--root` and the default state root get the same treatment: both are resolved,
 both are refused if they resolve to or contain the home directory or the
 checkout, and neither may be a symlink at the root or at `targets/` and
-`captures/`. Anything under the temp base is allowed, including when `$TMPDIR`
-itself sits inside the home directory; the temp base itself is refused, because
-a state root there would chmod the shared scratch tree.
+`captures/`. Those refusals run before the temp base allowance, so a `$TMPDIR`
+pointed at the home or the checkout cannot launder a path back into either; the
+one carve-out is a temp base that sits inside the home directory and outside the
+checkout. A relative `$TMPDIR` is refused outright, because it would resolve
+against the working directory. The temp base itself is refused too, because a
+state root there would chmod the shared scratch tree.
 
 Two deliberate exceptions to "nothing under the checkout":
 
   * evidence. The default evidence root is `<checkout>/.brigade/verification-evidence`,
     which is inside this checkout - gitignored, and the point is that `cleanup`
-    cannot reach it. `--evidence-root` is guarded like `--root`.
+    cannot reach it. The default and `--evidence-root` are both guarded like
+    `--root`, symlink check included, and `--label` must be a simple
+    `[A-Za-z0-9._-]` name so it cannot steer the directory anywhere.
   * `grokbot-feed --manifest`. That path is a caller's own manifest, read for
     validation only, and is the one flag outside the target contract.
 
@@ -36,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -53,6 +59,7 @@ DEFAULT_DEPTH = "workspace"
 DEFAULT_HARNESSES = "claude,codex"
 DEFAULT_PROBE = "python3 --version"
 DEFAULT_TIMEOUT = 300
+LABEL_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 # Non-secret placeholder. The pack config check only proves the reference
 # resolves; nothing authenticates with this value.
@@ -117,34 +124,61 @@ def resolve_brigade(explicit: str | None) -> list[str]:
 
 
 def temp_base() -> Path:
-    return Path(tempfile.gettempdir()).resolve()
+    """The scratch tree, which must be an absolute path.
+
+    `tempfile.gettempdir()` returns a relative `$TMPDIR` verbatim, and
+    `resolve()` would anchor it to the working directory - the Brigade checkout
+    in every documented invocation. A temp base that moves with the cwd is not
+    a temp base, so refuse it instead of measuring anything against it.
+    """
+    raw = Path(tempfile.gettempdir())
+    if not raw.is_absolute():
+        raise HelperError(f"refusing a relative temp base {raw}: $TMPDIR must be an absolute path")
+    return raw.resolve()
 
 
 def guard_root(raw: str, *, flag: str, extra_allowed: tuple[Path, ...] = ()) -> Path:
     """Refuse a caller-supplied root that lands in the operator home or this checkout.
 
-    A directory *under* the scratch tree (`$TMPDIR`), and the helper's own
-    defaults, are the allowed bases; everything else is measured against the
-    home directory and the Brigade checkout, in both directions (inside it, or
-    containing it). The temp base itself is not a state root: accepting it
-    would chmod the shared scratch tree to `0700` and scatter `targets/`,
-    `captures/`, and `state.json` across it.
+    Order matters. The home and checkout refusals run *before* the temp base
+    allowance, so a `$TMPDIR` pointed at either one cannot launder a path back
+    into them. The single carve-out is a temp base that sits inside the home
+    directory and outside the checkout: `$TMPDIR` is the scratch tree by
+    definition, so a path under it is allowed even though it is also under the
+    home. Nothing excuses the checkout. The temp base itself is not a state
+    root either: accepting it would chmod the shared scratch tree to `0700` and
+    scatter `targets/`, `captures/`, and `state.json` across it.
     """
     resolved = Path(raw).expanduser().resolve()
     base = temp_base()
+    home = Path.home().expanduser().resolve()
     if resolved == base:
         raise HelperError(f"refusing {flag} {resolved}: it is the temp base itself; use a directory under it")
-    if resolved.is_relative_to(base):
-        return resolved
     for allowed in extra_allowed:
         if resolved.is_relative_to(allowed):
             return resolved
-    for forbidden, label in ((REPO_ROOT, "the Brigade checkout"), (Path.home().resolve(), "the operator home")):
+    under_base = resolved.is_relative_to(base)
+    home_excused = under_base and base.is_relative_to(home) and not base.is_relative_to(REPO_ROOT)
+    for forbidden, label in ((REPO_ROOT, "the Brigade checkout"), (home, "the operator home")):
         if resolved.is_relative_to(forbidden):
+            if forbidden == home and home_excused:
+                continue
             raise HelperError(f"refusing {flag} {resolved}: it is inside {label}")
         if forbidden.is_relative_to(resolved):
             raise HelperError(f"refusing {flag} {resolved}: it contains {label}")
     return resolved
+
+
+def guard_label(label: str) -> str:
+    """Refuse a `--label` that is path input rather than a name.
+
+    The label becomes the last component of the evidence directory name, so a
+    label carrying a separator or `..` would place the evidence - and its
+    `mkdir(parents=True)` - anywhere the caller wants.
+    """
+    if any(bad in label for bad in ("/", "\\", "..")) or not LABEL_PATTERN.fullmatch(label):
+        raise HelperError(f"refusing --label {label!r}: use a simple [A-Za-z0-9._-] name of 1-64 characters")
+    return label
 
 
 def guard_no_symlink(path: Path, *, flag: str) -> None:
@@ -182,6 +216,33 @@ def prepare_state_root(root: Path, *, flag: str) -> Path:
     except OSError as exc:  # PermissionError included: report it, never traceback
         raise HelperError(f"cannot prepare {flag} {root}: {exc}") from exc
     return root
+
+
+def evidence_root(args: argparse.Namespace) -> Path:
+    """Resolve and guard the evidence root - default and `--evidence-root` alike.
+
+    Same treatment as the state root: the symlink check runs on the unresolved
+    path, because `resolve()` follows a link planted at
+    `<checkout>/.brigade/verification-evidence` as happily as one planted in a
+    world-writable temp dir.
+    """
+    raw = args.evidence_root or str(DEFAULT_EVIDENCE_ROOT)
+    flag = "--evidence-root" if args.evidence_root else "the default evidence root"
+    guard_no_symlink(Path(raw).expanduser(), flag=flag)
+    return guard_root(raw, flag=flag, extra_allowed=(DEFAULT_EVIDENCE_ROOT,))
+
+
+def prepare_evidence_root(base: Path, *, flag: str) -> Path:
+    """Create the evidence root without following a symlink planted mid-flight."""
+    guard_no_symlink(base, flag=flag)
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        guard_no_symlink(base, flag=flag)
+        if base.resolve() != base:
+            raise HelperError(f"refusing {flag} {base}: it resolves to {base.resolve()}")
+    except OSError as exc:  # PermissionError included: report it, never traceback
+        raise HelperError(f"cannot prepare {flag} {base}: {exc}") from exc
+    return base
 
 
 def state_root(args: argparse.Namespace) -> Path:
@@ -835,13 +896,12 @@ def cmd_evidence(args: argparse.Namespace) -> int:
     """Copy captures and receipts somewhere cleanup never looks."""
     root = state_root(args)
     target = guard_target(Path(args.target), root) if args.target else None
-    base = (
-        guard_root(args.evidence_root, flag="--evidence-root", extra_allowed=(DEFAULT_EVIDENCE_ROOT,))
-        if args.evidence_root
-        else DEFAULT_EVIDENCE_ROOT
-    )
-    evidence = base / f"{now_stamp()}-{args.label}"
+    label = guard_label(args.label)
+    flag = "--evidence-root" if args.evidence_root else "the default evidence root"
+    base = evidence_root(args)
+    evidence = base / f"{now_stamp()}-{label}"
     if not args.dry_run:
+        prepare_evidence_root(base, flag=flag)
         (evidence / "captures").mkdir(parents=True, exist_ok=True)
 
     copied: list[str] = []
@@ -876,7 +936,7 @@ def cmd_evidence(args: argparse.Namespace) -> int:
     manifest = {
         "schema": "verify-brigade.evidence.v1",
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "label": args.label,
+        "label": label,
         "evidence_dir": str(evidence),
         "state_root": str(root),
         "target": str(target) if target else None,
@@ -907,6 +967,13 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     for entry in recorded:
         if not entry.is_relative_to(root / "targets"):
             skipped.append({"path": str(entry), "reason": "outside the state root"})
+            continue
+        # A recorded target swapped for a symlink is not the directory this
+        # helper created: `rmtree` would no-op on it (or, without
+        # `ignore_errors`, follow it), so report a skip instead of a phantom
+        # removal and leave it recorded.
+        if entry.is_symlink():
+            skipped.append({"path": str(entry), "reason": "skipped-symlink"})
             continue
         if not entry.exists():
             skipped.append({"path": str(entry), "reason": "already gone"})
@@ -1037,7 +1104,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("evidence", help="Copy captures and receipts to a named evidence dir.")
     p.add_argument("--target", default=None, help="Temp target whose receipts to copy.")
-    p.add_argument("--label", default="run", help="Suffix for the evidence directory name.")
+    p.add_argument(
+        "--label",
+        default="run",
+        help="Suffix for the evidence directory name ([A-Za-z0-9._-], 1-64 characters).",
+    )
     p.add_argument("--evidence-root", default=None, help="Where evidence dirs live.")
     add_dry_run(p, "Report what would be copied without creating the evidence dir.")
     p.set_defaults(func=cmd_evidence)

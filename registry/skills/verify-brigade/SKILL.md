@@ -24,13 +24,20 @@ reachable.
 What that paragraph does *not* claim:
 
 - A path under the temp base is allowed even when `$TMPDIR` sits inside the
-  home directory. `$TMPDIR` is the scratch tree by definition; the home refusal
-  is measured against everything else. The temp base itself is refused - a
-  state root there would chmod the shared scratch tree to `0700`.
+  home directory. That is the only carve-out, and it is exactly that narrow:
+  the home and checkout refusals run *first*, so the allowance applies only
+  when the temp base itself resolves inside the home directory and outside the
+  checkout. A `$TMPDIR` inside the checkout is still refused, and a relative
+  `$TMPDIR` is refused outright rather than resolved against the working
+  directory. The temp base itself is refused - a state root there would chmod
+  the shared scratch tree to `0700`.
 - The default evidence root is `<checkout>/.brigade/verification-evidence`,
   which is inside the checkout. That is the one deliberate exception: it is
   gitignored, and it sits outside the state root on purpose so `cleanup` cannot
-  reach the proof. `--evidence-root` is guarded like `--root`.
+  reach the proof. The default and `--evidence-root` are both guarded like
+  `--root`, symlink check included: a link planted at either is refused, not
+  followed. `--label` names the directory under that root, so it must be a
+  simple `[A-Za-z0-9._-]` name of 1-64 characters - no separators, no `..`.
 - `grokbot-feed --manifest` is the one flag outside the target contract. It is
   a caller-supplied path, read for validation only and never written, so an
   operator can validate a real private feed manifest from wherever it lives.
