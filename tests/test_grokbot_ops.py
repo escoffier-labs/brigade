@@ -399,8 +399,8 @@ def _stub_hub(monkeypatch: pytest.MonkeyPatch, *, actor_kind: str = "feed", list
         actions.append("whoami")
         return fleet_client_grokbot.GrokbotHubDecision(True, "ok", job={"actor_kind": actor_kind, "role": None})
 
-    def list_jobs(**_fields: object):
-        actions.append("list")
+    def list_jobs(*, role: object = None, **_fields: object):
+        actions.append(f"list:{role}")
         if not list_granted:
             return fleet_client_grokbot.GrokbotHubDecision(False, "auth-failed")
         return fleet_client_grokbot.GrokbotHubDecision(True, "ok", jobs=[])
@@ -435,6 +435,28 @@ def test_doctor_reports_feed_authority_fail_when_feed_list_is_refused(tmp_path: 
     assert {check["check"]: check["status"] for check in checks}["feed-authority"] == "fail"
 
 
+def test_doctor_reports_feed_authority_fail_when_only_the_worker_listing_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from brigade import fleet_client_grokbot
+
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    assert _setup(tmp_path, "operator") == 0
+    _feed_token(tmp_path, monkeypatch)
+    _stub_hub(monkeypatch)
+
+    def list_jobs(*, role: object = None, **_fields: object):
+        if role == "implementation-worker":
+            return fleet_client_grokbot.GrokbotHubDecision(False, "auth-failed")
+        return fleet_client_grokbot.GrokbotHubDecision(True, "ok", jobs=[])
+
+    monkeypatch.setattr(fleet_client_grokbot, "list_jobs", list_jobs)
+
+    checks = grokbot_ops.doctor(tmp_path, "operator")
+
+    assert {check["check"]: check["status"] for check in checks}["feed-authority"] == "fail"
+
+
 def test_doctor_skips_feed_authority_without_a_configured_feed_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
     monkeypatch.delenv("BRIGADE_GROKBOT_FEED_HUB_TOKEN_FILE", raising=False)
@@ -460,7 +482,9 @@ def test_doctor_omits_feed_authority_without_hub_authority(tmp_path: Path, monke
     assert actions == []
 
 
-def test_doctor_feed_authority_probe_issues_no_mutating_hub_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_doctor_feed_authority_probe_lists_both_feed_roles_with_no_mutating_hub_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     from brigade import fleet_hub_grokbot
 
     monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
@@ -470,8 +494,8 @@ def test_doctor_feed_authority_probe_issues_no_mutating_hub_action(tmp_path: Pat
 
     grokbot_ops.doctor(tmp_path, "operator")
 
-    assert set(actions) == {"whoami", "list"}
-    assert not set(actions) & fleet_hub_grokbot.MUTATING_ACTIONS
+    assert actions == ["whoami", "list:repository-scout", "list:implementation-worker"]
+    assert not {action.split(":")[0] for action in actions} & fleet_hub_grokbot.MUTATING_ACTIONS
 
 
 @pytest.mark.parametrize(

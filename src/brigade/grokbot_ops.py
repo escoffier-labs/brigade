@@ -211,9 +211,11 @@ def doctor(target: Path, instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECOND
 
 
 def _feed_authority_check(target: Path) -> dict[str, str] | None:
-    """Prove read-only that the feed actor holds the reads scout-feed --apply needs.
+    """Prove read-only that the feed actor holds the reads both feeds' --apply needs.
 
-    Only ``whoami`` and ``list`` are issued. A doctor never enqueues.
+    ``scout-feed`` lists repository-scout jobs and ``build-feed`` lists
+    implementation-worker jobs, so both roles are probed. Only ``whoami`` and
+    ``list`` are issued. A doctor never enqueues.
     """
     from . import fleet_client_grokbot
 
@@ -228,14 +230,17 @@ def _feed_authority_check(target: Path) -> dict[str, str] | None:
     try:
         with fleet_client_grokbot.listener_identity(token):
             identity = fleet_client_grokbot.whoami()
-            listing = fleet_client_grokbot.list_jobs(role="repository-scout", include_all=True)
+            listings = [
+                fleet_client_grokbot.list_jobs(role=role, include_all=True)
+                for role in ("repository-scout", "implementation-worker")
+            ]
     except (grokbot_mcp.ConfigurationError, OSError, ValueError):
         return {"check": "feed-authority", "status": "fail"}
     ok = (
         identity.granted
         and isinstance(identity.job, dict)
         and identity.job.get("actor_kind") in {"feed", "control"}
-        and listing.granted
+        and all(listing.granted for listing in listings)
     )
     return {"check": "feed-authority", "status": "ok" if ok else "fail"}
 

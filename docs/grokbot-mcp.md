@@ -216,10 +216,15 @@ brigade run cloud grokbot build-feed --target . --policy /etc/brigade/grokbot-bu
 
 The first command is preview-only. `--apply` may create at most one job per
 invocation. `daily_limit` includes every implementation-worker job created that
-UTC day, including failed and expired attempts; preview counts the local queue,
-and apply counts the hub queue under hub authority. Selection takes the lowest
-open issue number carrying the label that has no queue record yet, so a repeated
-run does not re-enqueue an issue that already has a job.
+UTC day, including failed and expired attempts. Apply is the check that counts:
+it recounts under the queue lock on a local-authority target and re-lists at the
+hub under hub authority, at enqueue time, and it also refuses while an earlier
+implementation-worker job is still queued, claimed, or running. Preview reads
+the local queue only, so under hub authority it cannot show the daily limit at
+all: `created_today` is always 0 there and the count arrives with apply.
+Selection takes the lowest open issue number carrying the label that has no
+queue record yet, so a repeated run does not re-enqueue an issue that already
+has a job.
 
 When a completed Repository Scout report snapshot for the same issue is already
 on the queue target, the build job names that report's job id and tells the

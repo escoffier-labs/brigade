@@ -82,7 +82,12 @@ def preflight(target: Path, policy_path: Path, *, now: datetime | None = None) -
 
 
 def apply(target: Path, policy_path: Path, *, now: datetime | None = None) -> dict[str, object]:
-    """Recheck the build policy and queue at most one draft-pull-request job."""
+    """Recheck the build policy and admit at most one draft-pull-request job.
+
+    The daily limit and the one-worker-in-flight bound are decided by the queue
+    authority at enqueue time, not by the earlier selection read, so two
+    concurrent applies cannot both pass a limit that only one of them can hold.
+    """
     policy = load_policy(policy_path)
     instant = _resolve_now(now)
     numbers = _discover_issue_numbers(policy)
@@ -92,20 +97,31 @@ def apply(target: Path, policy_path: Path, *, now: datetime | None = None) -> di
             return {**selection, "handle": None}
 
         issue_number = selection["issue_number"]
-        assert isinstance(issue_number, int)
         repository = policy["repository"]
+        daily_limit = policy["daily_limit"]
+        assert isinstance(issue_number, int)
         assert isinstance(repository, str)
-        handle = grokbot_jobs.enqueue(
+        assert isinstance(daily_limit, int)
+        admission = grokbot_jobs.enqueue_implementation_worker(
             target,
             _worker_spec(policy, issue_number, selection["scout_report"]),
             _build_key(repository, issue_number),
+            daily_limit=daily_limit,
             now=instant,
         )
     except grokbot_jobs.GrokbotJobError as exc:
         raise _queue_error(exc) from exc
-    if handle["idempotent"]:
-        return {**selection, "created": 0, "reason": "all-known", "issue_number": None, "handle": handle}
-    return {**selection, "created": 1, "reason": "created", "handle": handle}
+    if admission["reason"] != "created":
+        return {
+            **selection,
+            "created": 0,
+            "reason": admission["reason"],
+            "issue_number": None,
+            "created_today": admission["created_today"],
+            "scout_report": None,
+            "handle": admission["handle"],
+        }
+    return {**selection, "created": 1, "reason": "created", "handle": admission["handle"]}
 
 
 def load_policy(path: Path) -> dict[str, object]:
@@ -200,9 +216,10 @@ def _selection(
         return {**result, "reason": "no-approved-issues"}
     if created_today >= daily_limit:
         return {**result, "reason": "daily-limit-reached"}
+    queued_job_ids = {record["job_id"] for record in records if isinstance(record.get("job_id"), str)}
     held = False
     for number in numbers:
-        if _known_job_id(target, _build_key(repository, number)) is not None:
+        if _known_job_id(target, _build_key(repository, number), queued_job_ids) is not None:
             continue
         scout_report = _scout_report_reference(target, repository, number)
         if scout_report is None and policy["require_scout_report"]:
@@ -284,12 +301,18 @@ def _local_worker_records(target: Path) -> list[dict[str, Any]]:
     return [record for record in grokbot_scout_feed._queue_snapshot(target) if record["spec"]["role"] == ROLE]
 
 
-def _known_job_id(target: Path, key: str) -> str | None:
+def _known_job_id(target: Path, key: str, queued_job_ids: set[str] | None = None) -> str | None:
     """Return the job id already recorded for one idempotency key, if any.
 
     Local authority writes an idempotency record. Hub authority writes only the
     private task snapshot under a job id derived from the same key hash, so both
     stores answer the same question without calling the hub.
+
+    A snapshot alone is weaker evidence than an idempotency record: it is
+    written before the hub decides, so a refused enqueue can leave one behind.
+    When the caller already holds the queue listing, pass it as
+    ``queued_job_ids`` and a snapshot counts only while that listing still
+    carries the derived job id.
     """
     try:
         existing = grokbot_feed._existing_idempotency(target, key)
@@ -299,7 +322,10 @@ def _known_job_id(target: Path, key: str) -> str | None:
         job_id = existing["job_id"]
         assert isinstance(job_id, str)
         return job_id
-    return _snapshot_job_id(target, key)
+    derived = _snapshot_job_id(target, key)
+    if derived is None or queued_job_ids is None:
+        return derived
+    return derived if derived in queued_job_ids else None
 
 
 def _snapshot_job_id(target: Path, key: str) -> str | None:

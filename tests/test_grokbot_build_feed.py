@@ -417,8 +417,12 @@ def test_apply_reports_all_known_when_the_queue_answers_idempotently(tmp_path: P
     _gh_numbers(monkeypatch, [7])
     monkeypatch.setattr(
         grokbot_build_feed.grokbot_jobs,
-        "enqueue",
-        lambda *_args, **_kwargs: {"job_id": "grokbot-" + "a" * 24, "state": "queued", "idempotent": True},
+        "enqueue_implementation_worker",
+        lambda *_args, **_kwargs: {
+            "reason": "all-known",
+            "created_today": 0,
+            "handle": {"job_id": "grokbot-" + "a" * 24, "state": "queued", "idempotent": True},
+        },
     )
 
     result = grokbot_build_feed.apply(tmp_path, policy, now=NOW)
@@ -606,7 +610,7 @@ def test_apply_translates_enqueue_errors_at_the_public_boundary(tmp_path: Path, 
     _gh_numbers(monkeypatch, [7])
     monkeypatch.setattr(
         grokbot_build_feed.grokbot_jobs,
-        "enqueue",
+        "enqueue_implementation_worker",
         lambda *args, **kwargs: (_ for _ in ()).throw(grokbot_jobs.GrokbotJobError("private-queue")),
     )
 
@@ -619,7 +623,7 @@ def test_apply_surfaces_the_refused_hub_action_and_actor_kind(tmp_path: Path, mo
     _gh_numbers(monkeypatch, [7])
     monkeypatch.setattr(
         grokbot_build_feed.grokbot_jobs,
-        "enqueue",
+        "enqueue_implementation_worker",
         lambda *args, **kwargs: (_ for _ in ()).throw(grokbot_jobs.GrokbotJobError("auth-failed", action="list")),
     )
 
@@ -763,10 +767,14 @@ def test_cli_build_feed_apply_binds_dedicated_feed_identity(tmp_path: Path, monk
     seen: list[str | None] = []
     monkeypatch.setattr(
         grokbot_jobs,
-        "enqueue",
+        "enqueue_implementation_worker",
         lambda *_args, **_kwargs: (
             seen.append(fleet_client_grokbot.current_listener_token())
-            or {"job_id": "grokbot-" + "a" * 24, "state": "queued", "idempotent": False}
+            or {
+                "reason": "created",
+                "created_today": 1,
+                "handle": {"job_id": "grokbot-" + "a" * 24, "state": "queued", "idempotent": False},
+            }
         ),
     )
     policy = _write_policy(tmp_path / "policy.json", _policy())
@@ -789,7 +797,7 @@ def test_cli_build_feed_prints_refused_action_without_paths_or_tokens(
     _gh_numbers(monkeypatch, [7])
     monkeypatch.setattr(
         grokbot_jobs,
-        "enqueue",
+        "enqueue_implementation_worker",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(grokbot_jobs.GrokbotJobError("auth-failed", action="list")),
     )
     policy = _write_policy(tmp_path / "policy.json", _policy())
@@ -832,7 +840,7 @@ def test_cli_build_feed_redacts_queue_errors(tmp_path: Path, monkeypatch: pytest
     _gh_numbers(monkeypatch, [7])
     monkeypatch.setattr(
         grokbot_build_feed.grokbot_jobs,
-        "enqueue",
+        "enqueue_implementation_worker",
         lambda *args, **kwargs: (_ for _ in ()).throw(grokbot_jobs.GrokbotJobError("PRIVATE_QUEUE")),
     )
 
@@ -855,3 +863,193 @@ def test_cli_build_feed_reports_invalid_feed_configuration(tmp_path: Path, monke
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "error: Grok Bot feed configuration is invalid\n"
+
+
+def _derived_job_id(key: str) -> str:
+    return f"grokbot-{grokbot_jobs._idempotency_key_hash(key).removeprefix('sha256:')[:24]}"
+
+
+def _hub_decision(**fields: object):
+    return fleet_client_grokbot.GrokbotHubDecision(**fields)  # type: ignore[arg-type]
+
+
+def test_a_refused_hub_enqueue_leaves_no_snapshot_that_reads_as_known(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    hub_jobs: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "list_jobs",
+        lambda **_kwargs: _hub_decision(granted=True, reason="ok", jobs=list(hub_jobs)),
+    )
+    attempts: list[str] = []
+
+    def enqueue(**fields: object):
+        job_id = fields["job_id"]
+        assert isinstance(job_id, str)
+        attempts.append(job_id)
+        if len(attempts) == 1:
+            return _hub_decision(granted=False, reason="hub-unavailable")
+        job = {
+            "job_id": job_id,
+            "role": fields["role"],
+            "state": "queued",
+            "created_at": "2026-08-31T12:00:00Z",
+        }
+        hub_jobs.append(job)
+        return _hub_decision(granted=True, reason="ok", job=job)
+
+    monkeypatch.setattr(fleet_client_grokbot, "enqueue", enqueue)
+
+    with pytest.raises(grokbot_build_feed.BuildFeedError, match="^queue-error$"):
+        grokbot_build_feed.apply(tmp_path, policy, now=NOW)
+
+    assert not list((tmp_path / ".brigade" / "cloud" / "grokbot" / "snapshots").glob("*.json"))
+
+    result = grokbot_build_feed.apply(tmp_path, policy, now=NOW)
+
+    assert result["created"] == 1
+    assert result["reason"] == "created"
+    assert result["issue_number"] == 7
+    assert attempts == [_derived_job_id(grokbot_build_feed._build_key("example/brigade", 7))] * 2
+
+
+def test_a_snapshot_only_counts_as_known_while_the_queue_listing_still_carries_it(tmp_path: Path):
+    key = grokbot_build_feed._build_key("example/brigade", 7)
+    key_hash = grokbot_jobs._idempotency_key_hash(key)
+    derived = _derived_job_id(key)
+    grokbot_jobs._store_task_snapshot(tmp_path, derived, grokbot_jobs._validate_spec(_worker_spec()), key_hash)
+
+    assert grokbot_build_feed._snapshot_job_id(tmp_path, key) == derived
+    assert grokbot_build_feed._known_job_id(tmp_path, key) == derived
+    assert grokbot_build_feed._known_job_id(tmp_path, key, {derived}) == derived
+    assert grokbot_build_feed._known_job_id(tmp_path, key, set()) is None
+
+
+def test_a_hub_scout_report_snapshot_is_named_from_its_derived_job_id(tmp_path: Path):
+    scout_key = grokbot_scout_feed._scout_key("example/brigade", 7)
+    key_hash = grokbot_jobs._idempotency_key_hash(scout_key)
+    derived = _derived_job_id(scout_key)
+    spec = {
+        **_worker_spec(),
+        "label": "Repository Scout",
+        "role": "repository-scout",
+        "artifact": {"kind": "report"},
+    }
+    grokbot_jobs._store_task_snapshot(tmp_path, derived, grokbot_jobs._validate_spec(spec), key_hash)
+    artifacts = tmp_path / ".brigade" / "cloud" / "grokbot" / "artifacts"
+    (artifacts / f"{derived}.md").write_text("Private scout findings.", encoding="utf-8")
+
+    assert grokbot_build_feed._report_snapshot_exists(tmp_path, derived) is True
+    assert grokbot_build_feed._scout_report_reference(tmp_path, "example/brigade", 7) == derived
+    assert grokbot_build_feed._report_snapshot_exists(tmp_path, "grokbot-" + "c" * 24) is False
+
+
+def test_preflight_never_lists_the_hub_even_under_hub_authority(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "_hub_jobs",
+        lambda **_kwargs: pytest.fail("preflight listed the hub"),
+    )
+
+    assert grokbot_build_feed.preflight(tmp_path, policy, now=NOW) == {
+        "created": 0,
+        "reason": "ready",
+        "issue_number": 7,
+        "daily_limit": 3,
+        "created_today": 0,
+        "scout_report": None,
+    }
+
+
+def test_apply_recounts_the_local_daily_limit_when_selection_read_a_stale_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    policy = _write_policy(tmp_path / "policy.json", _policy(daily_limit=1))
+    _gh_numbers(monkeypatch, [7, 42])
+    monkeypatch.setattr(grokbot_build_feed, "_worker_records", lambda _target: [])
+
+    first = grokbot_build_feed.apply(tmp_path, policy, now=NOW)
+    grokbot_jobs.claim(tmp_path, first["handle"]["job_id"], "bot-a", "lease-a", 30, now=NOW)
+    grokbot_jobs.transition(
+        tmp_path, first["handle"]["job_id"], "bot-a", "lease-a", "failed", now=NOW + timedelta(seconds=1)
+    )
+    second = grokbot_build_feed.apply(tmp_path, policy, now=NOW)
+
+    assert first["created"] == 1
+    assert first["reason"] == "created"
+    assert second == {
+        "created": 0,
+        "reason": "daily-limit-reached",
+        "issue_number": None,
+        "daily_limit": 1,
+        "created_today": 1,
+        "scout_report": None,
+        "handle": None,
+    }
+    assert len(list((tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs").glob("*.json"))) == 1
+
+
+def test_apply_refuses_a_second_worker_while_one_is_still_in_flight(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7, 42])
+    monkeypatch.setattr(grokbot_build_feed, "_worker_records", lambda _target: [])
+
+    first = grokbot_build_feed.apply(tmp_path, policy, now=NOW)
+    second = grokbot_build_feed.apply(tmp_path, policy, now=NOW)
+
+    assert first["created"] == 1
+    assert second == {
+        "created": 0,
+        "reason": "active-implementation-worker",
+        "issue_number": None,
+        "daily_limit": 3,
+        "created_today": 1,
+        "scout_report": None,
+        "handle": None,
+    }
+    assert len(list((tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs").glob("*.json"))) == 1
+
+
+def test_apply_relists_the_hub_daily_limit_before_it_enqueues(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    policy = _write_policy(tmp_path / "policy.json", _policy(daily_limit=1))
+    _gh_numbers(monkeypatch, [7])
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    listings: list[list[dict[str, object]]] = [
+        [],
+        [
+            {
+                "job_id": "grokbot-" + "b" * 24,
+                "role": "implementation-worker",
+                "state": "failed",
+                "created_at": "2026-08-31T09:00:00Z",
+            }
+        ],
+    ]
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "list_jobs",
+        lambda **_kwargs: _hub_decision(granted=True, reason="ok", jobs=listings.pop(0)),
+    )
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "enqueue",
+        lambda **_fields: pytest.fail("apply enqueued past the hub daily limit"),
+    )
+
+    result = grokbot_build_feed.apply(tmp_path, policy, now=NOW)
+
+    assert result == {
+        "created": 0,
+        "reason": "daily-limit-reached",
+        "issue_number": None,
+        "daily_limit": 1,
+        "created_today": 1,
+        "scout_report": None,
+        "handle": None,
+    }
+    assert listings == []

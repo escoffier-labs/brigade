@@ -196,20 +196,62 @@ def enqueue_repository_scout(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Atomically admit one Repository Scout under its active and daily limits."""
+    return _enqueue_under_limits(
+        target,
+        spec,
+        idempotency_key,
+        role="repository-scout",
+        active_reason="active-scout",
+        daily_limit=daily_limit,
+        now=now,
+    )
+
+
+def enqueue_implementation_worker(
+    target: Path,
+    spec: dict[str, Any],
+    idempotency_key: str,
+    *,
+    daily_limit: int,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Atomically admit one Implementation Worker under its active and daily limits."""
+    return _enqueue_under_limits(
+        target,
+        spec,
+        idempotency_key,
+        role="implementation-worker",
+        active_reason="active-implementation-worker",
+        daily_limit=daily_limit,
+        now=now,
+    )
+
+
+def _enqueue_under_limits(
+    target: Path,
+    spec: dict[str, Any],
+    idempotency_key: str,
+    *,
+    role: str,
+    active_reason: str,
+    daily_limit: int,
+    now: datetime | None,
+) -> dict[str, Any]:
+    """Admit one job for a role after rechecking its bounds under queue authority."""
     envelope = _validate_spec(spec)
-    if envelope["role"] != "repository-scout":
+    if envelope["role"] != role:
         raise GrokbotJobError("invalid-role")
     key = _validate_idempotency_key(idempotency_key)
     if type(daily_limit) is not int or daily_limit < 1:
         raise GrokbotJobError("invalid-daily-limit")
     _, instant = _timestamp(now)
     if hub_authority(target):
-        return _enqueue_scout_via_hub(target, envelope, key, daily_limit, instant)
+        return _enqueue_under_limits_via_hub(target, envelope, key, role, active_reason, daily_limit, instant)
     with _storage_paths(target) as storage, _queue_lock(storage):
-        scout_records = _repository_scout_records_locked(storage)
-        created_today = sum(_parse_timestamp(record["created_at"]).date() == instant.date() for record in scout_records)
-        if any(_is_active_repository_scout(record) for record in scout_records):
-            return {"reason": "active-scout", "created_today": created_today, "handle": None}
+        role_records = _role_records_locked(storage, role)
+        created_today = sum(_parse_timestamp(record["created_at"]).date() == instant.date() for record in role_records)
+        if any(_is_active_role_record(record) for record in role_records):
+            return {"reason": active_reason, "created_today": created_today, "handle": None}
         if created_today >= daily_limit:
             return {"reason": "daily-limit-reached", "created_today": created_today, "handle": None}
         handle = _enqueue_locked(storage, envelope, key, instant)
@@ -269,19 +311,19 @@ def _enqueue_locked(storage: _Storage, envelope: dict[str, Any], key: str, now: 
     return _handle(record, idempotent=False)
 
 
-def _repository_scout_records_locked(storage: _Storage) -> list[dict[str, Any]]:
+def _role_records_locked(storage: _Storage, role: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for name in _list_names(storage.jobs, prefix="grokbot-", suffix=".json"):
         payload = _read_json_file(storage.jobs, name)
         if payload is None:
             raise GrokbotJobError("corrupt-storage")
         record = _validate_record(payload)
-        if record["spec"]["role"] == "repository-scout":
+        if record["spec"]["role"] == role:
             records.append(record)
     return records
 
 
-def _is_active_repository_scout(record: dict[str, Any]) -> bool:
+def _is_active_role_record(record: dict[str, Any]) -> bool:
     return record["state"] in {"queued", "claimed", "running"} or (
         "cancel_requested_at" in record and record["state"] not in {"completed", "failed", "expired", "canceled"}
     )
@@ -1546,6 +1588,27 @@ def _store_task_snapshot(target: Path, job_id: str, envelope: dict[str, Any], ke
         raise GrokbotJobError("idempotency-conflict")
 
 
+def _discard_task_snapshot(target: Path, job_id: str, key_hash: str) -> None:
+    """Drop the private snapshot of an enqueue the hub never granted.
+
+    The snapshot is written before the hub decides, so a refused or failed
+    enqueue would otherwise leave a file that later reads as a queued job. Only
+    a snapshot carrying this exact key hash is removed, and a storage failure
+    here never replaces the refusal reason the caller is about to raise.
+    """
+    try:
+        with _storage_paths(target) as storage, _queue_lock(storage):
+            snapshots = storage.snapshots
+            if snapshots is None:
+                return
+            existing = _read_json_file(snapshots, f"{job_id}.json", missing_ok=True)
+            if existing is None or existing.get("idempotency_key_hash") != key_hash:
+                return
+            _unlink_artifact_file(snapshots, f"{job_id}.json")
+    except (GrokbotJobError, OSError):
+        return
+
+
 def _load_task_snapshot(target: Path, job_id: str) -> dict[str, Any]:
     with _storage_paths(target) as storage:
         snapshots = storage.snapshots
@@ -1572,36 +1635,47 @@ def _enqueue_via_hub(target: Path, spec: dict[str, Any], idempotency_key: str, n
         raise GrokbotJobError("legacy-active-needs-reconcile")
     job_id = f"grokbot-{key_hash.removeprefix('sha256:')[:24]}"
     _store_task_snapshot(target, job_id, envelope, key_hash)
-    decision = fleet_client_grokbot.enqueue(
-        job_id=job_id,
-        role=envelope["role"],
-        repository=envelope["repository"],
-        label=envelope["label"],
-        task_digest=task_hash.removeprefix("sha256:"),
-        idempotency_key_hash=key_hash.removeprefix("sha256:"),
-        timeout_seconds=envelope["timeout_seconds"],
-        artifact_kind=envelope["artifact"]["kind"],
-        private_snapshot_id=job_id,
-        operation_id=f"enqueue:{job_id}",
-    )
+    try:
+        decision = fleet_client_grokbot.enqueue(
+            job_id=job_id,
+            role=envelope["role"],
+            repository=envelope["repository"],
+            label=envelope["label"],
+            task_digest=task_hash.removeprefix("sha256:"),
+            idempotency_key_hash=key_hash.removeprefix("sha256:"),
+            timeout_seconds=envelope["timeout_seconds"],
+            artifact_kind=envelope["artifact"]["kind"],
+            private_snapshot_id=job_id,
+            operation_id=f"enqueue:{job_id}",
+        )
+    except BaseException:
+        _discard_task_snapshot(target, job_id, key_hash)
+        raise
     if not decision.granted or decision.job is None:
+        _discard_task_snapshot(target, job_id, key_hash)
         raise GrokbotJobError(decision.reason)
     if not authority_marker_present(target):
         _write_authority_marker(target)
     return {"job_id": decision.job["job_id"], "state": decision.job["state"], "idempotent": decision.idempotent}
 
 
-def _enqueue_scout_via_hub(
-    target: Path, envelope: dict[str, Any], key: str, daily_limit: int, instant: datetime
+def _enqueue_under_limits_via_hub(
+    target: Path,
+    envelope: dict[str, Any],
+    key: str,
+    role: str,
+    active_reason: str,
+    daily_limit: int,
+    instant: datetime,
 ) -> dict[str, Any]:
-    jobs = _hub_jobs(role="repository-scout", include_all=True)
+    jobs = _hub_jobs(role=role, include_all=True)
     created_today = sum(_parse_timestamp(job["created_at"]).date() == instant.date() for job in jobs)
     if any(
         job["state"] in WORK_STATES or "cancel_requested_at" in job
         for job in jobs
-        if job["state"] not in TERMINAL_FOR_SCOUT
+        if job["state"] not in TERMINAL_STATES
     ):
-        return {"reason": "active-scout", "created_today": created_today, "handle": None}
+        return {"reason": active_reason, "created_today": created_today, "handle": None}
     if created_today >= daily_limit:
         return {"reason": "daily-limit-reached", "created_today": created_today, "handle": None}
     handle = _enqueue_via_hub(target, envelope, key, instant)
@@ -1611,7 +1685,7 @@ def _enqueue_scout_via_hub(
 
 
 WORK_STATES = frozenset({"queued", "claimed", "running"})
-TERMINAL_FOR_SCOUT = frozenset({"completed", "failed", "expired", "canceled"})
+TERMINAL_STATES = frozenset({"completed", "failed", "expired", "canceled"})
 
 
 def _hub_unavailable_row() -> dict[str, Any]:
