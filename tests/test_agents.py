@@ -698,6 +698,33 @@ def test_run_agent_keeps_successful_truncated_exec_output(monkeypatch):
     assert result.output_cap_bytes == agents.proc.MAX_CAPTURE_BYTES
 
 
+def test_truncated_exec_output_still_runs_final_output_validation(monkeypatch):
+    """#1144: a truncated capture must not buy its way past the output contract.
+
+    Returning early on a zero-exit overflow skipped `validate_final_output`, so
+    progress-only or tool-only output was reported ok purely because the child
+    happened to overflow the cap.
+    """
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(
+            0,
+            "I'm reviewing the files now",
+            "",
+            output_limit_exceeded=True,
+            stdout_bytes=agents.proc.MAX_CAPTURE_BYTES + 1,
+        ),
+    )
+
+    result = agents.run_agent("codex", "do it")
+
+    assert result.ok is False
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "non-final-output"
+
+
 def test_run_agent_maps_incomplete_process_group_to_harness_failure(monkeypatch):
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
     monkeypatch.setattr(

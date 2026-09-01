@@ -1351,23 +1351,14 @@ def run_agent(
             output_cap_bytes=proc.MAX_CAPTURE_BYTES,
         )
 
-    if result.output_limit_exceeded and result.code == 0:
-        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
-        return AgentResult(
-            text=safe_text,
-            ok=bool(safe_text),
-            detail=f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte capture limit; output truncated"[:200],
-            failure_kind="output-limit",
-            stdout=safe_stdout,
-            stderr=safe_stderr,
-            exit_code=result.code,
-            requested_model=model,
-            reasoning=reasoning,
-            output_bytes=result.total_bytes,
-            output_cap_bytes=proc.MAX_CAPTURE_BYTES,
-        )
+    # #1144: a truncated capture from a child that still exited 0 is not a
+    # failure by itself, but it must not skip the output contract either. It
+    # falls through to the normal Grok parsing and final-output validation
+    # below, and carries its truncation metadata onto whatever result that
+    # produces. Only a nonzero exit is handled as an output-limit failure here.
+    truncated_ok_exit = result.output_limit_exceeded and result.code == 0
 
-    if result.output_limit_exceeded:
+    if result.output_limit_exceeded and not truncated_ok_exit:
         safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
         overflow_detail = f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte capture limit; output truncated"
         failure_detail = scrub_detail(safe_stderr.strip() or overflow_detail)[:200]
@@ -1602,6 +1593,11 @@ def run_agent(
             session_id=grok_session_id,
             request_id=grok_request_id,
         )
+    # #1144: truncation metadata rides along whichever result the contract
+    # produces, so a validation failure on truncated output is still reported
+    # as the validation failure it is.
+    truncation_bytes = result.total_bytes if truncated_ok_exit else 0
+    truncation_cap = proc.MAX_CAPTURE_BYTES if truncated_ok_exit else 0
     output_failure = validate_final_output(text, detail_transform=scrub_detail)
     if output_failure is not None:
         return AgentResult(
@@ -1618,10 +1614,18 @@ def run_agent(
             stop_reason=grok_stop_reason,
             session_id=grok_session_id,
             request_id=grok_request_id,
+            output_bytes=truncation_bytes,
+            output_cap_bytes=truncation_cap,
         )
     return AgentResult(
         text=safe_text,
         ok=True,
+        detail=(
+            f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte capture limit; output truncated"[:200]
+            if truncated_ok_exit
+            else ""
+        ),
+        failure_kind="output-limit" if truncated_ok_exit else None,
         stdout=safe_stdout,
         stderr=safe_stderr,
         exit_code=result.code,
@@ -1630,6 +1634,8 @@ def run_agent(
         stop_reason=grok_stop_reason,
         session_id=grok_session_id,
         request_id=grok_request_id,
+        output_bytes=truncation_bytes,
+        output_cap_bytes=truncation_cap,
     )
 
 
@@ -1683,6 +1689,8 @@ def run_codex_appserver(
             requested_model=model,
             reasoning=reasoning,
             turn_completed=getattr(turn, "completed_observed", False),
+            output_bytes=getattr(turn, "output_bytes", len(text.encode("utf-8"))),
+            output_cap_bytes=getattr(turn, "output_cap_bytes", proc.MAX_CAPTURE_BYTES),
         )
     if not turn.ok:
         return AgentResult(

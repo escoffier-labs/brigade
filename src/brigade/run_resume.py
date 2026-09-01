@@ -697,6 +697,13 @@ def _resume_locked(
             thread_id=r.get("thread_id"),
             status=r.get("status", ""),
             provenance=r.get("provenance") if isinstance(r.get("provenance"), dict) else None,
+            # #1144: without these the rewritten worker-results.json loses the
+            # observed byte count, the configured cap, and the output-limit
+            # classification for every resumed run.
+            failure_kind=r.get("failure_kind"),
+            output_truncated=bool(r.get("output_truncated")),
+            output_bytes=int(r.get("output_bytes") or 0),
+            output_cap_bytes=int(r.get("output_cap_bytes") or 0),
         )
         for r in results
     ]
