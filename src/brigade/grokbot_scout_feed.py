@@ -15,6 +15,9 @@ from typing import Any
 from . import grokbot_feed, grokbot_jobs
 
 POLICY_SCHEMA = "brigade.grokbot.scout-feed.v1"
+ROLE = "repository-scout"
+RETRY_STATES = frozenset(grokbot_jobs.TERMINAL_STATES - {"completed"})
+MAX_RETRY_REVISIONS = 10
 POLICY_KEYS = frozenset(
     {
         "schema",
@@ -64,8 +67,10 @@ def preflight(target: Path, policy_path: Path, *, now: datetime | None = None) -
     """Validate a private policy and discover the first approved issue number."""
     policy = load_policy(policy_path)
     numbers = _discover_issue_numbers(policy)
+    instant = _resolve_now(now)
     try:
-        return _selection(target, policy, numbers, _resolve_now(now))
+        records, listing = _queue_view(target, live=False)
+        return _selection(target, policy, numbers, instant, records, listing)[0]
     except grokbot_jobs.GrokbotJobError as exc:
         raise _queue_error(exc) from exc
 
@@ -76,20 +81,20 @@ def apply(target: Path, policy_path: Path, *, now: datetime | None = None) -> di
     instant = _resolve_now(now)
     numbers = _discover_issue_numbers(policy)
     try:
-        selection = _selection(target, policy, numbers, instant)
+        records, listing = _queue_view(target, live=True)
+        selection, key = _selection(target, policy, numbers, instant, records, listing)
         if selection["reason"] != "ready":
             return {**selection, "handle": None}
 
         issue_number = selection["issue_number"]
-        repository = policy["repository"]
         daily_limit = policy["daily_limit"]
         assert isinstance(issue_number, int)
-        assert isinstance(repository, str)
+        assert isinstance(key, str)
         assert isinstance(daily_limit, int)
         admission = grokbot_jobs.enqueue_repository_scout(
             target,
             _scout_spec(policy, issue_number),
-            _scout_key(repository, issue_number),
+            key,
             daily_limit=daily_limit,
             now=instant,
         )
@@ -165,33 +170,154 @@ def _selection(
     policy: dict[str, object],
     numbers: list[int],
     instant: datetime,
-) -> dict[str, object]:
-    records = _queue_snapshot(target)
+    records: list[dict[str, Any]],
+    listing: dict[str, str] | None,
+) -> tuple[dict[str, object], str | None]:
+    """Pick one issue and the idempotency key its next attempt must carry."""
     daily_limit = policy["daily_limit"]
+    repository = policy["repository"]
     assert isinstance(daily_limit, int)
-    scout_records = [record for record in records if record["spec"]["role"] == "repository-scout"]
+    assert isinstance(repository, str)
     created_today = sum(
-        grokbot_jobs._parse_timestamp(record["created_at"]).date() == instant.date() for record in scout_records
+        grokbot_jobs._parse_timestamp(record["created_at"]).date() == instant.date() for record in records
     )
-    result = {
+    result: dict[str, object] = {
         "created": 0,
         "reason": "ready",
         "issue_number": None,
         "daily_limit": daily_limit,
         "created_today": created_today,
+        "known": 0,
+        "terminal_retry_candidates": 0,
+        "retry_exhausted": 0,
     }
     if not numbers:
-        return {**result, "reason": "no-approved-issues"}
-    if any(_is_active_scout(record) for record in scout_records):
-        return {**result, "reason": "active-scout"}
+        return {**result, "reason": "no-approved-issues"}, None
+    survey = [(number, *_next_attempt(target, repository, number, listing)) for number in numbers]
+    exhausted = sum(1 for _, _, status in survey if status == "exhausted")
+    result = {
+        **result,
+        "known": sum(1 for _, _, status in survey if status == "known"),
+        "terminal_retry_candidates": sum(1 for _, _, status in survey if status == "retry"),
+        "retry_exhausted": exhausted,
+    }
+    if any(_is_active_scout(record) for record in records):
+        return {**result, "reason": "active-scout"}, None
     if created_today >= daily_limit:
-        return {**result, "reason": "daily-limit-reached"}
-    for number in numbers:
-        repository = policy["repository"]
-        assert isinstance(repository, str)
-        if not _idempotency_exists(target, _scout_key(repository, number)):
-            return {**result, "issue_number": number}
-    return {**result, "reason": "all-known"}
+        return {**result, "reason": "daily-limit-reached"}, None
+    for number, revision, _status in survey:
+        if revision is None:
+            continue
+        return {**result, "issue_number": number}, _scout_key(repository, number, revision)
+    return {**result, "reason": "retry-exhausted" if exhausted else "all-known"}, None
+
+
+def _queue_view(target: Path, *, live: bool) -> tuple[list[dict[str, Any]], dict[str, str] | None]:
+    """Return countable scout rows and the live job states, when they are visible.
+
+    Apply runs under the bound feed identity, so the hub listing is available
+    there and decides which issues are still known. Preview stays local-only and
+    never needs a hub credential: under hub authority it holds no listing at
+    all, so it reports every state it cannot see as not yet known rather than
+    trusting a local snapshot that apply is about to contradict.
+    """
+    if grokbot_jobs.hub_authority(target):
+        if not live:
+            return _local_scout_records(target), None
+        records = grokbot_jobs._hub_jobs(role=ROLE, include_all=True)
+    else:
+        records = _local_scout_records(target)
+    return records, {record["job_id"]: record["state"] for record in records}
+
+
+def _local_scout_records(target: Path) -> list[dict[str, Any]]:
+    return [record for record in _queue_snapshot(target) if record["spec"]["role"] == ROLE]
+
+
+def _next_attempt(
+    target: Path,
+    repository: str,
+    issue_number: int,
+    listing: dict[str, str] | None,
+) -> tuple[int | None, str]:
+    """Return the revision the next attempt needs and how the issue reads.
+
+    A scout whose only evidence is a job the queue reports as ``expired``,
+    ``failed``, or ``canceled`` was never delivered, so the issue stays
+    selectable and the next attempt moves to a fresh key. The second element
+    names why: ``unattempted``, ``retry`` (a fresh revision after at least one
+    dead attempt), ``known``, or ``exhausted``. Revisions stop at
+    ``MAX_RETRY_REVISIONS`` so a repeatedly dying issue cannot hold the feed,
+    and an exhausted issue is reported apart from a genuinely known one.
+    """
+    for revision in range(MAX_RETRY_REVISIONS):
+        status = _attempt_status(target, _scout_key(repository, issue_number, revision), listing)
+        if status == "absent":
+            return revision, "retry" if revision else "unattempted"
+        if status == "known":
+            return None, "known"
+    return None, "exhausted"
+
+
+def _attempt_status(target: Path, key: str, listing: dict[str, str] | None) -> str:
+    """Classify one idempotency key as ``absent``, ``dead``, or ``known``.
+
+    The local idempotency record and the private task snapshot both name a job
+    id; the queue listing is what says whether that job still stands. A job the
+    granted listing omits, and a job in a terminal non-completed state, are both
+    weaker than the record that named them, so the issue reads as not known. A
+    caller holding no listing at all (preview under hub authority) treats the
+    same evidence as absent, so it never reports ``all-known`` for a job it
+    cannot see. It may still report ``ready`` for an issue whose live or
+    completed hub job only apply can list; apply is the check that settles that.
+    """
+    job_id = _known_job_id(target, key)
+    if job_id is None or listing is None:
+        return "absent"
+    state = listing.get(job_id)
+    if state is None:
+        return "absent"
+    return "dead" if state in RETRY_STATES else "known"
+
+
+def completed_scout_job_id(
+    target: Path,
+    repository: str,
+    issue_number: int,
+    listing: dict[str, str] | None = None,
+) -> str | None:
+    """Name the completed scout attempt for one issue, whichever revision made it.
+
+    A scout that only succeeded after an earlier attempt expired, failed, or was
+    canceled landed under a later idempotency revision, so revision 0 alone does
+    not answer the question. The retrievable report artifact is the evidence of
+    completion; a caller holding the queue listing may also require that the
+    listing still reports the job ``completed``.
+    """
+    from . import grokbot_build_feed
+
+    for revision in range(MAX_RETRY_REVISIONS):
+        job_id = _known_job_id(target, _scout_key(repository, issue_number, revision))
+        if job_id is None:
+            continue
+        if listing is not None and listing.get(job_id) != "completed":
+            continue
+        if grokbot_build_feed._report_snapshot_exists(target, job_id):
+            return job_id
+    return None
+
+
+def _known_job_id(target: Path, key: str) -> str | None:
+    """Name the job already recorded for one idempotency key, if any.
+
+    The build selector owns this lookup (idempotency record first, then the
+    private task snapshot a hub enqueue leaves behind) and both feeds must
+    answer it the same way. It is imported inside the call because that module
+    imports this one at load time.
+    """
+    from . import grokbot_build_feed
+
+    return grokbot_build_feed._known_job_id(target, key)
 
 
 def _current_utc() -> datetime:
@@ -211,9 +337,18 @@ def _is_active_scout(record: dict[str, Any]) -> bool:
     )
 
 
-def _scout_key(repository: str, issue_number: int) -> str:
+def _scout_key(repository: str, issue_number: int, revision: int = 0) -> str:
+    """Derive the idempotency key for one attempt at one issue.
+
+    Revision 0 keeps the original digest, so an issue already carrying a live or
+    completed scout is still recognized. A later revision is a distinct key, so
+    the queue's idempotency cannot answer a retry with the dead job it replaced.
+    """
     issue_bytes = issue_number.to_bytes((issue_number.bit_length() + 7) // 8, "big")
-    return hashlib.sha256(repository.encode("utf-8") + b"\x00" + issue_bytes).hexdigest()
+    material = repository.encode("utf-8") + b"\x00" + issue_bytes
+    if revision:
+        material += b"\x00" + f"retry-{revision}".encode("ascii")
+    return hashlib.sha256(material).hexdigest()
 
 
 def _scout_spec(policy: dict[str, object], issue_number: int) -> dict[str, object]:
@@ -239,13 +374,6 @@ def _scout_spec(policy: dict[str, object], issue_number: int) -> dict[str, objec
         "artifact": {"kind": "report"},
         "timeout_seconds": policy["timeout_seconds"],
     }
-
-
-def _idempotency_exists(target: Path, key: str) -> bool:
-    try:
-        return grokbot_feed._existing_idempotency(target, key) is not None
-    except grokbot_feed.FeedError as exc:
-        raise grokbot_jobs.GrokbotJobError(exc.reason) from exc
 
 
 def _queue_snapshot(target: Path) -> list[dict[str, Any]]:

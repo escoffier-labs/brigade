@@ -87,6 +87,61 @@ def _enqueue_scout(
     )["job_id"]
 
 
+def _complete_scout(target: Path, job_id: str, *, now: datetime = NOW) -> str:
+    """Drive one queued scout to a completed report so its issue reads as known."""
+    grokbot_jobs.claim(target, job_id, "bot-a", "lease-a", 300, now=now)
+    grokbot_jobs.transition(target, job_id, "bot-a", "lease-a", "running", now=now + timedelta(seconds=1))
+    report = "Private scout findings."
+    grokbot_jobs.complete_report(
+        target,
+        job_id,
+        "bot-a",
+        "lease-a",
+        {"kind": "report", "path": "docs/scout.md", "sha256": sha256(report.encode()).hexdigest()},
+        report,
+        now=now + timedelta(seconds=2),
+    )
+    return job_id
+
+
+def _terminalize_scout(target: Path, job_id: str, state: str, *, created: datetime) -> str:
+    """Drive one queued scout into the terminal, non-completed state named.
+
+    Each state has its own valid instant: a job can only expire after its
+    deadline, and can only be claimed before it.
+    """
+    if state == "expired":
+        grokbot_jobs.expire(target, job_id, now=created + timedelta(seconds=7201))
+    elif state == "canceled":
+        grokbot_jobs.cancel(target, job_id, now=created + timedelta(seconds=60))
+    else:
+        grokbot_jobs.claim(target, job_id, "bot-a", "lease-a", 300, now=created + timedelta(seconds=60))
+        grokbot_jobs.transition(target, job_id, "bot-a", "lease-a", "failed", now=created + timedelta(seconds=120))
+    assert grokbot_jobs.get_job(target, job_id)["state"] == state
+    return job_id
+
+
+def _exhaust_retry_revisions(
+    target: Path,
+    issue_number: int,
+    *,
+    revisions: int,
+    repository: str = "example/brigade",
+) -> list[str]:
+    """Leave one expired attempt per revision, so the issue has no live evidence."""
+    job_ids: list[str] = []
+    for revision in range(revisions):
+        created = NOW - timedelta(days=revisions + 1 - revision)
+        job_id = grokbot_jobs.enqueue(
+            target,
+            _scout_spec(repository),
+            grokbot_scout_feed._scout_key(repository, issue_number, revision),
+            now=created,
+        )["job_id"]
+        job_ids.append(_terminalize_scout(target, job_id, "expired", created=created))
+    return job_ids
+
+
 def test_preflight_discovers_sorted_unique_numbers_without_creating_queue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -101,6 +156,9 @@ def test_preflight_discovers_sorted_unique_numbers_without_creating_queue(
         "issue_number": 7,
         "daily_limit": 3,
         "created_today": 0,
+        "known": 0,
+        "terminal_retry_candidates": 0,
+        "retry_exhausted": 0,
     }
     _assert_no_queue_state(tmp_path)
 
@@ -170,6 +228,9 @@ def test_apply_enqueues_one_fixed_read_only_repository_scout_and_redacts_results
         "issue_number": 7,
         "daily_limit": 3,
         "created_today": 0,
+        "known": 0,
+        "terminal_retry_candidates": 0,
+        "retry_exhausted": 0,
         "handle": {"job_id": result["handle"]["job_id"], "state": "queued", "idempotent": False},
     }
     assert set(result["handle"]) == {"job_id", "state", "idempotent"}
@@ -208,6 +269,9 @@ def test_preflight_and_apply_do_no_work_when_a_scout_is_active(tmp_path: Path, m
         "issue_number": None,
         "daily_limit": 3,
         "created_today": 1,
+        "known": 0,
+        "terminal_retry_candidates": 0,
+        "retry_exhausted": 0,
     }
     assert result == {**preview, "handle": None}
 
@@ -237,19 +301,19 @@ def test_preflight_and_apply_enforce_the_utc_daily_limit_including_failed_and_ex
         "issue_number": None,
         "daily_limit": 3,
         "created_today": 3,
+        "known": 0,
+        "terminal_retry_candidates": 0,
+        "retry_exhausted": 0,
     }
     assert result == {**preview, "handle": None}
 
 
-def test_preflight_and_apply_skip_all_known_issues_without_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_preflight_and_apply_skip_completed_issues_without_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     policy = _write_policy(tmp_path / "policy.json", _policy())
     _gh_numbers(monkeypatch, [42, 7])
-    first = _enqueue_scout(tmp_path, issue_number=7, now=NOW - timedelta(days=1))
-    second = _enqueue_scout(tmp_path, issue_number=42, now=NOW - timedelta(days=1))
-    from brigade import grokbot_jobs
-
-    grokbot_jobs.expire(tmp_path, first, now=NOW)
-    grokbot_jobs.expire(tmp_path, second, now=NOW)
+    yesterday = NOW - timedelta(days=1)
+    _complete_scout(tmp_path, _enqueue_scout(tmp_path, issue_number=7, now=yesterday), now=yesterday)
+    _complete_scout(tmp_path, _enqueue_scout(tmp_path, issue_number=42, now=yesterday), now=yesterday)
     before = sorted((tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs").glob("*.json"))
 
     preview = grokbot_scout_feed.preflight(tmp_path, policy, now=NOW)
@@ -261,9 +325,152 @@ def test_preflight_and_apply_skip_all_known_issues_without_writing(tmp_path: Pat
         "issue_number": None,
         "daily_limit": 3,
         "created_today": 0,
+        "known": 2,
+        "terminal_retry_candidates": 0,
+        "retry_exhausted": 0,
     }
     assert result == {**preview, "handle": None}
     assert sorted((tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs").glob("*.json")) == before
+
+
+@pytest.mark.parametrize("state", sorted(grokbot_scout_feed.RETRY_STATES))
+def test_a_terminal_non_completed_scout_is_selected_again_under_a_fresh_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
+):
+    """A terminal, non-completed attempt is not proof the issue was scouted."""
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+    first = _enqueue_scout(tmp_path, issue_number=7, now=NOW - timedelta(days=1))
+    _terminalize_scout(tmp_path, first, state, created=NOW - timedelta(days=1))
+
+    preview = grokbot_scout_feed.preflight(tmp_path, policy, now=NOW)
+    result = grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+
+    assert preview == {
+        "created": 0,
+        "reason": "ready",
+        "issue_number": 7,
+        "daily_limit": 3,
+        "created_today": 0,
+        "known": 0,
+        "terminal_retry_candidates": 1,
+        "retry_exhausted": 0,
+    }
+    assert result["created"] == 1
+    assert result["reason"] == "created"
+    assert result["issue_number"] == 7
+    assert result["handle"]["job_id"] != first
+    record = json.loads(
+        (tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{result['handle']['job_id']}.json").read_text()
+    )
+    retry_key = grokbot_scout_feed._scout_key("example/brigade", 7, 1)
+    assert retry_key != grokbot_scout_feed._scout_key("example/brigade", 7)
+    assert record["idempotency_key_hash"] == "sha256:" + sha256(retry_key.encode()).hexdigest()
+
+
+def test_a_second_expired_attempt_moves_to_the_next_revision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Each dead attempt advances the key, so the queue never replays a dead job."""
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+    for revision in (0, 1):
+        created = NOW - timedelta(days=2 - revision)
+        job_id = grokbot_jobs.enqueue(
+            tmp_path,
+            _scout_spec(),
+            grokbot_scout_feed._scout_key("example/brigade", 7, revision),
+            now=created,
+        )["job_id"]
+        grokbot_jobs.expire(tmp_path, job_id, now=created + timedelta(seconds=7201))
+
+    preview = grokbot_scout_feed.preflight(tmp_path, policy, now=NOW)
+    result = grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+
+    assert preview["issue_number"] == 7
+    assert preview["terminal_retry_candidates"] == 1
+    assert result["reason"] == "created"
+    record = json.loads(
+        (tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{result['handle']['job_id']}.json").read_text()
+    )
+    assert (
+        record["idempotency_key_hash"]
+        == "sha256:" + sha256(grokbot_scout_feed._scout_key("example/brigade", 7, 2).encode()).hexdigest()
+    )
+
+
+def test_retries_stop_at_the_revision_bound_and_report_retry_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """An issue that dies MAX_RETRY_REVISIONS times must not read as all-known."""
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+    dead = _exhaust_retry_revisions(tmp_path, 7, revisions=grokbot_scout_feed.MAX_RETRY_REVISIONS)
+
+    preview = grokbot_scout_feed.preflight(tmp_path, policy, now=NOW)
+    result = grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+
+    assert preview == {
+        "created": 0,
+        "reason": "retry-exhausted",
+        "issue_number": None,
+        "daily_limit": 3,
+        "created_today": 0,
+        "known": 0,
+        "terminal_retry_candidates": 0,
+        "retry_exhausted": 1,
+    }
+    assert result == {**preview, "handle": None}
+    assert sorted(
+        path.stem for path in (tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs").glob("grokbot-*.json")
+    ) == sorted(dead)
+
+
+def test_an_exhausted_issue_is_not_counted_as_known(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A completed issue and a burnt-out issue are different kinds of no work."""
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7, 42])
+    yesterday = NOW - timedelta(days=1)
+    _complete_scout(tmp_path, _enqueue_scout(tmp_path, issue_number=7, now=yesterday), now=yesterday)
+    _exhaust_retry_revisions(tmp_path, 42, revisions=grokbot_scout_feed.MAX_RETRY_REVISIONS)
+
+    result = grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+
+    assert result["reason"] == "retry-exhausted"
+    assert result["issue_number"] is None
+    assert result["known"] == 1
+    assert result["retry_exhausted"] == 1
+
+
+def test_completed_scout_job_id_names_the_revision_that_produced_the_report(tmp_path: Path):
+    """The completed attempt may be any revision, so revision 0 does not answer it."""
+    yesterday = NOW - timedelta(days=1)
+    _terminalize_scout(
+        tmp_path,
+        _enqueue_scout(tmp_path, issue_number=7, now=yesterday),
+        "expired",
+        created=yesterday,
+    )
+    retry = grokbot_jobs.enqueue(
+        tmp_path,
+        _scout_spec(),
+        grokbot_scout_feed._scout_key("example/brigade", 7, 1),
+        now=NOW,
+    )["job_id"]
+
+    assert grokbot_scout_feed.completed_scout_job_id(tmp_path, "example/brigade", 7) is None
+
+    _complete_scout(tmp_path, retry, now=NOW)
+
+    assert grokbot_scout_feed.completed_scout_job_id(tmp_path, "example/brigade", 7) == retry
+    assert grokbot_scout_feed.completed_scout_job_id(tmp_path, "example/brigade", 42) is None
+
+
+def test_completed_scout_job_id_skips_attempts_a_listing_no_longer_stands_behind(tmp_path: Path):
+    """When the caller holds a listing, only a job it still reports completed counts."""
+    completed = _complete_scout(tmp_path, _enqueue_scout(tmp_path, issue_number=7, now=NOW), now=NOW)
+
+    assert grokbot_scout_feed.completed_scout_job_id(tmp_path, "example/brigade", 7, {completed: "completed"}) == (
+        completed
+    )
+    assert grokbot_scout_feed.completed_scout_job_id(tmp_path, "example/brigade", 7, {completed: "expired"}) is None
+    assert grokbot_scout_feed.completed_scout_job_id(tmp_path, "example/brigade", 7, {}) is None
 
 
 def test_preflight_and_apply_report_no_approved_issues_without_queue_state(
@@ -278,6 +485,9 @@ def test_preflight_and_apply_report_no_approved_issues_without_queue_state(
         "issue_number": None,
         "daily_limit": 3,
         "created_today": 0,
+        "known": 0,
+        "terminal_retry_candidates": 0,
+        "retry_exhausted": 0,
     }
     assert grokbot_scout_feed.apply(tmp_path, policy, now=NOW) == {
         "created": 0,
@@ -285,6 +495,9 @@ def test_preflight_and_apply_report_no_approved_issues_without_queue_state(
         "issue_number": None,
         "daily_limit": 3,
         "created_today": 0,
+        "known": 0,
+        "terminal_retry_candidates": 0,
+        "retry_exhausted": 0,
         "handle": None,
     }
     _assert_no_queue_state(tmp_path)
@@ -410,6 +623,148 @@ def test_apply_surfaces_the_refused_hub_action_and_actor_kind(tmp_path: Path, mo
     assert raised.value.public_detail() == "auth-failed action=list"
 
 
+def _derived_job_id(key: str) -> str:
+    return f"grokbot-{grokbot_jobs._idempotency_key_hash(key).removeprefix('sha256:')[:24]}"
+
+
+def _hub_decision(**fields: object):
+    return fleet_client_grokbot.GrokbotHubDecision(**fields)  # type: ignore[arg-type]
+
+
+def _store_scout_snapshot(target: Path, issue_number: int, revision: int = 0) -> str:
+    """Write the private task snapshot one hub enqueue for this issue leaves behind."""
+    key = grokbot_scout_feed._scout_key("example/brigade", issue_number, revision)
+    derived = _derived_job_id(key)
+    grokbot_jobs._store_task_snapshot(
+        target,
+        derived,
+        grokbot_jobs._validate_spec(grokbot_scout_feed._scout_spec(_policy(), issue_number)),
+        grokbot_jobs._idempotency_key_hash(key),
+    )
+    return derived
+
+
+def _hub_scout_job(job_id: str, state: str, *, created_at: str = "2026-08-26T03:00:00Z") -> dict[str, object]:
+    return {
+        "job_id": job_id,
+        "role": "repository-scout",
+        "repository": "example/brigade",
+        "state": state,
+        "created_at": created_at,
+        "artifact_kind": "report",
+    }
+
+
+def _hub_queue(monkeypatch: pytest.MonkeyPatch, jobs: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Serve one granted listing and admit new enqueues into the same listing."""
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "list_jobs",
+        lambda **_kwargs: _hub_decision(granted=True, reason="ok", jobs=list(jobs)),
+    )
+    enqueued: list[dict[str, object]] = []
+
+    def enqueue(**fields: object):
+        enqueued.append(fields)
+        job = _hub_scout_job(str(fields["job_id"]), "queued", created_at="2026-08-26T12:00:00Z")
+        jobs.append(job)
+        return _hub_decision(granted=True, reason="ok", job=job)
+
+    monkeypatch.setattr(fleet_client_grokbot, "enqueue", enqueue)
+    return enqueued
+
+
+def test_hub_preview_and_apply_both_select_an_issue_whose_hub_job_expired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The stale snapshot of an expired hub job must not read as known on either path."""
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    derived = _store_scout_snapshot(tmp_path, 7)
+    enqueued = _hub_queue(monkeypatch, [_hub_scout_job(derived, "expired")])
+
+    preview = grokbot_scout_feed.preflight(tmp_path, policy, now=NOW)
+    result = grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+
+    assert preview["reason"] == "ready"
+    assert preview["issue_number"] == 7
+    assert result["reason"] == "created"
+    assert result["issue_number"] == 7
+    assert result["created_today"] == 1
+    assert result["terminal_retry_candidates"] == 1
+    retry_key = grokbot_scout_feed._scout_key("example/brigade", 7, 1)
+    assert enqueued[0]["job_id"] == _derived_job_id(retry_key)
+    assert enqueued[0]["idempotency_key_hash"] == grokbot_jobs._idempotency_key_hash(retry_key).removeprefix("sha256:")
+    assert enqueued[0]["job_id"] != derived
+
+
+def test_a_completed_hub_job_keeps_its_issue_known_but_hub_preview_still_reports_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The documented divergence: preview holds no hub listing, so apply settles it."""
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    derived = _store_scout_snapshot(tmp_path, 7)
+    enqueued = _hub_queue(monkeypatch, [_hub_scout_job(derived, "completed")])
+
+    preview = grokbot_scout_feed.preflight(tmp_path, policy, now=NOW)
+    result = grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+
+    assert preview["reason"] == "ready"
+    assert preview["issue_number"] == 7
+    assert preview["known"] == 0
+    assert result["reason"] == "all-known"
+    assert result["issue_number"] is None
+    assert result["known"] == 1
+    assert result["terminal_retry_candidates"] == 0
+    assert enqueued == []
+
+
+def test_a_snapshot_the_hub_listing_omits_is_not_known(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A snapshot left by a refused enqueue is not evidence the issue was scouted."""
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    _store_scout_snapshot(tmp_path, 7)
+    enqueued = _hub_queue(monkeypatch, [])
+
+    result = grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+
+    assert result["reason"] == "created"
+    assert result["issue_number"] == 7
+    assert result["known"] == 0
+    assert result["terminal_retry_candidates"] == 0
+    assert enqueued[0]["job_id"] == _derived_job_id(grokbot_scout_feed._scout_key("example/brigade", 7))
+
+
+def test_a_refused_hub_listing_reports_the_bounded_reason_instead_of_all_known(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    _store_scout_snapshot(tmp_path, 7)
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "list_jobs",
+        lambda **_kwargs: _hub_decision(granted=False, reason="auth-failed"),
+    )
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "enqueue",
+        lambda **_kwargs: pytest.fail("apply enqueued without a granted listing"),
+    )
+
+    with pytest.raises(grokbot_scout_feed.ScoutFeedError) as raised:
+        grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+
+    assert raised.value.reason == "auth-failed"
+    assert raised.value.action == "list"
+    assert raised.value.public_detail() == "auth-failed action=list"
+
+
 def test_scout_feed_error_keeps_stable_reasons_for_non_hub_failures():
     for reason in ("malformed-policy", "gh-unavailable", "unsafe-policy"):
         error = grokbot_scout_feed.ScoutFeedError(reason)
@@ -520,7 +875,10 @@ def test_cli_scout_feed_preview_json_discovers_without_creating_queue(
         "created_today": 0,
         "daily_limit": 3,
         "issue_number": 7,
+        "known": 0,
         "reason": "ready",
+        "retry_exhausted": 0,
+        "terminal_retry_candidates": 0,
     }
     _assert_no_queue_state(tmp_path)
 
@@ -545,6 +903,7 @@ def test_cli_scout_feed_apply_binds_dedicated_feed_identity(tmp_path: Path, monk
     token_file.chmod(0o600)
     monkeypatch.setenv("BRIGADE_GROKBOT_FEED_HUB_TOKEN_FILE", str(token_file))
     monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: True)
+    monkeypatch.setattr(grokbot_jobs, "_hub_jobs", lambda **_kwargs: [])
     _gh_numbers(monkeypatch, [7])
     seen: list[str | None] = []
     monkeypatch.setattr(
@@ -575,6 +934,7 @@ def test_cli_scout_feed_prints_refused_action_without_paths_or_tokens(
     token_file.chmod(0o600)
     monkeypatch.setenv("BRIGADE_GROKBOT_FEED_HUB_TOKEN_FILE", str(token_file))
     monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: True)
+    monkeypatch.setattr(grokbot_jobs, "_hub_jobs", lambda **_kwargs: [])
     _gh_numbers(monkeypatch, [7])
     monkeypatch.setattr(
         grokbot_jobs,
@@ -604,10 +964,26 @@ def test_cli_scout_feed_text_reports_no_work_without_private_policy_context(
 
     assert _run_scout_feed(tmp_path, policy) == 0
     captured = capsys.readouterr()
-    assert captured.out.strip() == "grokbot scout-feed: created=0 reason=no-approved-issues"
+    assert captured.out.strip() == (
+        "grokbot scout-feed: created=0 reason=no-approved-issues known=0 terminal_retry_candidates=0 retry_exhausted=0"
+    )
     assert captured.err == ""
     assert "PRIVATE_" not in captured.out
     _assert_no_queue_state(tmp_path)
+
+
+def test_cli_scout_feed_text_reports_the_selection_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    """The counts that separate exhausted retries from known work are not json-only."""
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7, 42])
+    yesterday = NOW - timedelta(days=1)
+    _complete_scout(tmp_path, _enqueue_scout(tmp_path, issue_number=7, now=yesterday), now=yesterday)
+    _exhaust_retry_revisions(tmp_path, 42, revisions=grokbot_scout_feed.MAX_RETRY_REVISIONS)
+
+    assert _run_scout_feed(tmp_path, policy) == 0
+    assert capsys.readouterr().out.strip() == (
+        "grokbot scout-feed: created=0 reason=retry-exhausted known=1 terminal_retry_candidates=0 retry_exhausted=1"
+    )
 
 
 def test_cli_scout_feed_reports_only_stable_malformed_policy_error(tmp_path: Path, capsys):

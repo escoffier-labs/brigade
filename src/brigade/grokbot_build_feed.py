@@ -345,11 +345,13 @@ def _snapshot_job_id(target: Path, key: str) -> str | None:
 
 
 def _scout_report_reference(target: Path, repository: str, issue_number: int) -> str | None:
-    """Name the local report snapshot of a completed scout for the same issue."""
-    job_id = _known_job_id(target, grokbot_scout_feed._scout_key(repository, issue_number))
-    if job_id is None or not _report_snapshot_exists(target, job_id):
-        return None
-    return job_id
+    """Name the local report snapshot of a completed scout for the same issue.
+
+    The scout selector retries a dead attempt under a fresh idempotency
+    revision, so the completed attempt is not always revision 0. The scout feed
+    owns that revision walk and both feeds must answer it the same way.
+    """
+    return grokbot_scout_feed.completed_scout_job_id(target, repository, issue_number)
 
 
 def _report_snapshot_exists(target: Path, job_id: str) -> bool:

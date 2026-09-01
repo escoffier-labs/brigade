@@ -93,6 +93,7 @@ def _complete_scout_report(
     issue_number: int,
     repository: str = "example/brigade",
     now: datetime = NOW,
+    revision: int = 0,
 ) -> str:
     """Queue and complete one Repository Scout so its report snapshot exists locally."""
     spec = {
@@ -104,7 +105,7 @@ def _complete_scout_report(
     job_id = grokbot_jobs.enqueue(
         target,
         spec,
-        grokbot_scout_feed._scout_key(repository, issue_number),
+        grokbot_scout_feed._scout_key(repository, issue_number, revision),
         now=now,
     )["job_id"]
     grokbot_jobs.claim(target, job_id, "bot-a", "lease-a", 300, now=now)
@@ -248,6 +249,49 @@ def test_apply_names_a_completed_scout_report_snapshot_for_the_same_issue(
     assert f"Scout report job: {scout_job}\n" in record["spec"]["instructions"]
     assert "Retrieve that report through the operator report path" in record["spec"]["instructions"]
     assert "Private scout findings." not in json.dumps(record)
+
+
+def test_a_scout_report_produced_by_a_retry_revision_is_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A scout that only succeeded after a retry landed under a later revision key."""
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+    dead = grokbot_jobs.enqueue(
+        tmp_path,
+        {**_worker_spec(), "label": "Repository Scout", "role": "repository-scout", "artifact": {"kind": "report"}},
+        grokbot_scout_feed._scout_key("example/brigade", 7),
+        now=NOW - timedelta(days=1),
+    )["job_id"]
+    grokbot_jobs.expire(tmp_path, dead, now=NOW - timedelta(hours=20))
+    scout_job = _complete_scout_report(tmp_path, issue_number=7, revision=1)
+
+    preview = grokbot_build_feed.preflight(tmp_path, policy, now=NOW)
+    result = grokbot_build_feed.apply(tmp_path, policy, now=NOW)
+
+    assert scout_job != dead
+    assert preview["scout_report"] == scout_job
+    assert result["scout_report"] == scout_job
+    record = json.loads(
+        (tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{result['handle']['job_id']}.json").read_text()
+    )
+    assert f"Scout report job: {scout_job}\n" in record["spec"]["instructions"]
+
+
+def test_require_scout_report_accepts_a_report_produced_by_a_retry_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Holding an issue whose scout succeeded on retry would hold it forever."""
+    policy = _write_policy(tmp_path / "policy.json", _policy(require_scout_report=True))
+    _gh_numbers(monkeypatch, [7])
+    scout_job = _complete_scout_report(tmp_path, issue_number=7, revision=2)
+
+    preview = grokbot_build_feed.preflight(tmp_path, policy, now=NOW)
+    result = grokbot_build_feed.apply(tmp_path, policy, now=NOW)
+
+    assert preview["reason"] == "ready"
+    assert preview["scout_report"] == scout_job
+    assert result["reason"] == "created"
+    assert result["issue_number"] == 7
+    assert result["scout_report"] == scout_job
 
 
 def test_a_scout_without_a_completed_report_snapshot_is_not_referenced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -543,7 +587,9 @@ def test_build_key_is_a_role_separated_sha256_digest(tmp_path: Path):
     assert len(key) == 64
     assert key.islower()
     assert key == _build_key("example/brigade", 7)
-    assert key != grokbot_scout_feed._scout_key("example/brigade", 7)
+    scout_keys = [grokbot_scout_feed._scout_key("example/brigade", 7, revision) for revision in range(3)]
+    assert key not in scout_keys
+    assert len(set(scout_keys)) == 3
 
 
 def test_preflight_rejects_missing_gh_without_queue_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
