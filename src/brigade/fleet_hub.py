@@ -111,14 +111,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from . import fleet_command_deck, fleet_hub_preference
+from . import fleet_command_deck, fleet_hub_preference, worklore_store
 from .fleet_hub_status import (
     ACTIVE_EVENT_TTL_SECONDS as ACTIVE_EVENT_TTL_SECONDS,
     STALE_HISTORY_AFTER_SECONDS as STALE_HISTORY_AFTER_SECONDS,
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 18
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -537,6 +537,16 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     from . import fleet_hub_model_roster
 
     fleet_hub_model_roster.ensure_schema(conn)
+    # v15 -> v16: Worklore tables. HTTP routes stay 404 until the feature gate opens.
+    # v16 -> v17: link adapter ownership (owner_node) and the per-identity source
+    # high-water.
+    # v17 -> v18: per-identity import refusals (work_import_keys.refused), the
+    # reconciliation marker (work_schema_meta) that keeps the one-time quota migration off
+    # every start, and the seeded high-water for identities imported before v17. A legacy
+    # item over the Worklore link ceiling no longer refuses startup: reads are cut by SQL,
+    # new writes still enforce the ceiling, and an operator unlinks the excess on a
+    # running hub rather than needing one that will not start.
+    worklore_store.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 

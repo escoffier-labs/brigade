@@ -53,6 +53,69 @@ def test_fallback_preserves_hash_inside_quoted_values(monkeypatch):
     assert payload["label"] == "value # not comment"
 
 
+def test_fallback_loads_multiline_array_of_inline_tables(monkeypatch):
+    monkeypatch.setattr(toml_compat, "_stdlib_tomllib", None)
+
+    payload = toml_compat.loads(
+        """
+        [fleet.worklore.brigade]
+        targets = [
+          # Keep this comment between values.
+          { name = "primary", path = "/tmp/primary" },
+          { name = "secondary", path = "/tmp/secondary" }, # trailing comment
+        ]
+        """
+    )
+
+    assert payload["fleet"]["worklore"]["brigade"]["targets"] == [
+        {"name": "primary", "path": "/tmp/primary"},
+        {"name": "secondary", "path": "/tmp/secondary"},
+    ]
+
+
+def test_fallback_reports_incomplete_multiline_value_at_start_line(monkeypatch):
+    monkeypatch.setattr(toml_compat, "_stdlib_tomllib", None)
+    payload = '[fleet]\ntargets = [\n  { name = "primary" },\n'
+
+    with pytest.raises(toml_compat.TOMLDecodeError, match="incomplete TOML value on line 2"):
+        toml_compat.loads(payload)
+
+
+def test_fallback_scans_each_multiline_fragment_once(monkeypatch):
+    monkeypatch.setattr(toml_compat, "_stdlib_tomllib", None)
+    original_scan = toml_compat._CollectionState.scan
+    scanned_characters = 0
+
+    def counting_scan(self, fragment, line_number, *, preceded_by_newline=False):
+        nonlocal scanned_characters
+        scanned_characters += len(fragment) + preceded_by_newline
+        return original_scan(
+            self,
+            fragment,
+            line_number,
+            preceded_by_newline=preceded_by_newline,
+        )
+
+    monkeypatch.setattr(toml_compat._CollectionState, "scan", counting_scan)
+    fragments = ["  0," for _ in range(10_000)]
+    payload = "values = [\n" + "\n".join(fragments)
+
+    with pytest.raises(toml_compat.TOMLDecodeError, match="incomplete TOML value on line 1"):
+        toml_compat.loads(payload)
+
+    stripped_characters = len("[") + sum(len(fragment.strip()) for fragment in fragments)
+    assert scanned_characters == stripped_characters + len(fragments)
+
+
+@pytest.mark.parametrize(("opening", "closer"), [("[", "}"), ("{", "]")])
+def test_fallback_rejects_mismatched_multiline_closer_at_start_line(monkeypatch, opening, closer):
+    monkeypatch.setattr(toml_compat, "_stdlib_tomllib", None)
+    payload = f'[fleet]\ntargets = {opening}\n  name = "primary",\n{closer}\n'
+
+    with pytest.raises(toml_compat.TOMLDecodeError, match="mismatched closing delimiter on line 2"):
+        toml_compat.loads(payload)
+
+
 def test_fallback_reports_invalid_values(monkeypatch):
     monkeypatch.setattr(toml_compat, "_stdlib_tomllib", None)
 

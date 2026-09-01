@@ -211,6 +211,7 @@ def test_v4_migration_preserves_existing_rows(tmp_path):
         assert migrated.execute("SELECT run_id FROM events").fetchone()[0] == "run-a"
         assert migrated.execute("SELECT COUNT(*) FROM cloud_leases").fetchone()[0] == 0
         assert migrated.execute("SELECT COUNT(*) FROM grokbot_jobs").fetchone()[0] == 0
+        assert migrated.execute("SELECT COUNT(*) FROM work_items").fetchone()[0] == 0
         assert migrated.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
     finally:
         migrated.close()
@@ -292,12 +293,22 @@ def _hub(tmp_path):
         thread.join(timeout=5)
 
 
-def _request(hub, method: str, path: str, *, token: str | None = None, body: dict[str, object] | None = None):
+def _request(
+    hub,
+    method: str,
+    path: str,
+    *,
+    token: str | None = None,
+    body: dict[str, object] | None = None,
+    extra_headers: dict[str, str] | None = None,
+):
     host, port, _db = hub
     connection = http.client.HTTPConnection(host, port, timeout=5)
     headers = {"Content-Type": "application/json"} if body is not None else {}
     if token is not None:
         headers["Authorization"] = f"Bearer {token}"
+    if extra_headers:
+        headers.update(extra_headers)
     connection.request(
         method, path, body=json.dumps(body).encode("utf-8") if body is not None else None, headers=headers
     )
@@ -344,6 +355,7 @@ def test_cloud_http_routes_require_valid_auth_and_keep_dashboard_read_only(tmp_p
         assert "mac" not in models
         # Dashboard routes stay GET-only and cannot turn a bearer into a cloud write.
         assert _request(hub, "POST", "/", token=ADMIN_TOKEN, body={})[0] == 404
+        assert _request(hub, "GET", "/work/items", token=ADMIN_TOKEN) == (404, {"error": "not found"})
 
 
 def test_legacy_dashboard_start_map_uses_global_grokbot_start_for_latest_claimant(conn):

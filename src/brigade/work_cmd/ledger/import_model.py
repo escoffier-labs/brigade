@@ -643,6 +643,9 @@ def _extract_issue_acceptance(body: object) -> list[str]:
     return _normalize_acceptance(extracted)
 
 
+extract_issue_acceptance = _extract_issue_acceptance
+
+
 def _task_issue_metadata(task: dict[str, Any]) -> dict[str, Any] | None:
     metadata = _metadata(task)
     issue = metadata.get("github_issue") if isinstance(metadata.get("github_issue"), dict) else None

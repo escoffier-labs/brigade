@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode
 
-from . import fleet_command_deck, fleet_dashboard, fleet_hub_grokbot, fleet_hub_sessions
+from . import fleet_command_deck, fleet_dashboard, fleet_hub_grokbot, fleet_hub_sessions, worklore_http
 from . import fleet_hub as _hub
 from . import fleet_hub_model_roster
 from .fleet_hub import (
@@ -218,6 +218,80 @@ def make_handler(
             identity = identity.strip()
             if not identity:
                 return False
+            return True
+
+        def _worklore_path(self) -> str | None:
+            path = self.path.partition("?")[0]
+            if path == "/work" or path.startswith("/work/"):
+                return path
+            return None
+
+        def _read_worklore_body(self, path: str) -> dict[str, Any] | None:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._send_json(400, {"error": "bad Content-Length"})
+                return None
+            limit = 1048576 if path == "/work/imports" else 262144
+            if self.command == "DELETE" and length == 0:
+                return {}
+            if length <= 0 or length > limit:
+                self._send_json(400, {"error": "missing or oversized body"})
+                return None
+            raw = self.rfile.read(length)
+            try:
+                parsed = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send_json(400, {"error": "body is not valid JSON"})
+                return None
+            if not isinstance(parsed, dict):
+                self._send_json(400, {"error": "body is not valid JSON"})
+                return None
+            return parsed
+
+        def _handle_worklore(self) -> bool:
+            path = self._worklore_path()
+            if path is None:
+                return False
+            if not worklore_http.enabled():
+                self._send_json(404, {"error": "not found"})
+                return True
+            try:
+                conn = open_db(Path(db_path))
+            except (FleetHubError, sqlite3.Error):
+                self._send_json(500, {"error": "hub database error"})
+                return True
+            try:
+                caller = self._caller(conn)
+                if caller is None:
+                    return True
+                is_admin, node_id = caller
+                is_operator = bool(node_id) and node_id in worklore_http.operator_nodes()
+                body: dict[str, Any] = {}
+                if self.command in {"POST", "PATCH", "DELETE"}:
+                    parsed = self._read_worklore_body(path)
+                    if parsed is None:
+                        return True
+                    body = parsed
+                status, payload = worklore_http.handle(
+                    conn,
+                    worklore_http.Request(
+                        method=self.command,
+                        path=self.path,
+                        is_admin=is_admin,
+                        node_id=node_id,
+                        is_operator=is_operator,
+                        operator_authorization_resolved=True,
+                        body=body,
+                        headers={key: value for key, value in self.headers.items()},
+                    ),
+                )
+            except sqlite3.Error:
+                self._send_json(500, {"error": "hub database error"})
+                return True
+            finally:
+                conn.close()
+            self._send_json(status, payload)
             return True
 
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
@@ -517,6 +591,8 @@ def make_handler(
                     conn.close()
                 self._send_json(200, payload)
                 return
+            if self._handle_worklore():
+                return
             self._send_json(404, {"error": "not found"})
 
         def do_PUT(self) -> None:  # noqa: N802 - stdlib handler API
@@ -566,8 +642,25 @@ def make_handler(
                 conn.close()
             self._send_json(200, payload)
 
+        def do_PATCH(self) -> None:  # noqa: N802 - stdlib handler API
+            path = self.path.partition("?")[0]
+            if not path.startswith("/work/"):
+                self._send_json(404, {"error": "not found"})
+                return
+            self._handle_worklore()
+
+        def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
+            path = self.path.partition("?")[0]
+            if not path.startswith("/work/"):
+                self._send_json(404, {"error": "not found"})
+                return
+            self._handle_worklore()
+
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
             path = self.path.partition("?")[0]
+            if path.startswith("/work/"):
+                self._handle_worklore()
+                return
             if path not in ("/events", "/claims", "/nodes", "/cloud", "/models", "/grokbot", "/sessions"):
                 self._send_json(404, {"error": "not found"})
                 return

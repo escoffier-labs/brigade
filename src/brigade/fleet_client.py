@@ -136,9 +136,7 @@ MAX_SESSION_HISTORY_RESPONSE_BYTES = 40 * 1024 * 1024
 # is a credential mismatch (a node token that is not this node's, or the
 # admin token on a hub without --allow-admin-writes), fixed by config.
 _RETRYABLE_4XX = frozenset({401, 403, 408, 429})
-
 _LOG = logging.getLogger("brigade.fleet")
-
 _CLOUD_API_EXPORTS = frozenset(
     {
         "CloudDecision",
@@ -162,12 +160,14 @@ _CLOUD_API_EXPORTS = frozenset(
 
 
 def __getattr__(name: str) -> Any:
-    """Lazily preserve the public cloud API without a circular import."""
+    """Lazily preserve the public cloud and Worklore APIs without a circular import."""
     if name in _CLOUD_API_EXPORTS:
-        from . import fleet_client_cloud
-
-        return getattr(fleet_client_cloud, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+        module = "fleet_client_cloud"
+    elif name in {"burn_queue", "create_item", "import_batch", "link_execution", "list_items", "record_attempt"}:
+        module = "worklore_client"
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(__import__(f"brigade.{module}", fromlist=[name]), name)
 
 
 _SPOOL_PROCESS_LOCK = threading.Lock()

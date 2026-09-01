@@ -15,6 +15,48 @@ class TOMLDecodeError(ValueError):
     """Raised when the fallback TOML reader cannot parse local config."""
 
 
+class _CollectionState:
+    def __init__(self) -> None:
+        self._stack: list[str] = []
+        self._quote = ""
+        self._escaped = False
+
+    @property
+    def balanced(self) -> bool:
+        return not self._stack
+
+    def scan(self, fragment: str, line_number: int, *, preceded_by_newline: bool = False) -> None:
+        if preceded_by_newline:
+            self._scan_character("\n", line_number)
+        for character in fragment:
+            self._scan_character(character, line_number)
+
+    def _scan_character(self, character: str, line_number: int) -> None:
+        if self._quote:
+            if self._escaped:
+                self._escaped = False
+            elif character == "\\":
+                self._escaped = True
+            elif character == self._quote:
+                self._quote = ""
+            return
+        if character in {"'", '"'}:
+            self._quote = character
+            return
+        if character in {"[", "{"}:
+            self._stack.append(character)
+            return
+        if character == "]":
+            expected_opening = "["
+        elif character == "}":
+            expected_opening = "{"
+        else:
+            return
+        if not self._stack or self._stack[-1] != expected_opening:
+            raise TOMLDecodeError(f"mismatched closing delimiter on line {line_number}")
+        self._stack.pop()
+
+
 def loads(text: str) -> dict[str, Any]:
     if _stdlib_tomllib is not None:
         try:
@@ -27,10 +69,26 @@ def loads(text: str) -> dict[str, Any]:
 def _fallback_loads(text: str) -> dict[str, Any]:
     data: dict[str, Any] = {}
     current: dict[str, Any] = data
+    pending_key: str | None = None
+    pending_value: list[str] = []
+    pending_line_number = 0
+    pending_state: _CollectionState | None = None
 
     for line_number, raw_line in enumerate(text.splitlines(), start=1):
         line = _strip_comment(raw_line).strip()
         if not line:
+            continue
+        if pending_key is not None:
+            assert pending_state is not None
+            pending_value.append(line)
+            pending_state.scan(line, pending_line_number, preceded_by_newline=True)
+            if not pending_state.balanced:
+                continue
+            raw_value = "\n".join(pending_value)
+            current[pending_key] = _parse_value(raw_value, pending_line_number)
+            pending_key = None
+            pending_value.clear()
+            pending_state = None
             continue
         if line.startswith("[[") and line.endswith("]]"):
             current = _array_table(data, line[2:-2], line_number)
@@ -44,7 +102,19 @@ def _fallback_loads(text: str) -> dict[str, Any]:
         key = key.strip()
         if not key:
             raise TOMLDecodeError(f"invalid TOML key on line {line_number}")
-        current[key] = _parse_value(raw_value.strip(), line_number)
+        raw_value = raw_value.strip()
+        collection_state = _CollectionState()
+        collection_state.scan(raw_value, line_number)
+        if not collection_state.balanced:
+            pending_key = key
+            pending_value = [raw_value]
+            pending_line_number = line_number
+            pending_state = collection_state
+            continue
+        current[key] = _parse_value(raw_value, line_number)
+
+    if pending_key is not None:
+        raise TOMLDecodeError(f"incomplete TOML value on line {pending_line_number}")
 
     return data
 
