@@ -11,6 +11,7 @@ claim row that run took under its ``run.lock`` lease — and ``brigade run
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import sqlite3
@@ -358,9 +359,11 @@ class TestHubScopes:
             conn.close()
 
     def test_lease_column_upgrade_is_safe_under_concurrent_init(self, tmp_path):
-        """init_db runs per request on a threading server: many first-touch
-        connections against a v2 database (one lease column already present,
-        as a half-finished upgrade would leave it) must all succeed.
+        """Many first-touch ``init_db`` callers against a v2 database (one
+        lease column already present, as a half-finished upgrade would
+        leave it) must all succeed. Request handlers no longer call
+        ``init_db`` (#1161); this still covers tools, tests, and a
+        cross-process first-touch storm (#1159).
 
         Bounded ``database is locked`` is retried with the same delays as
         ``_init_schema``; any other error still fails the test.
@@ -1178,3 +1181,99 @@ def test_run_lock_reports_reconciled_dead_owner_and_its_own_lease(tmp_path):
         with runguard.run_lock(repo, on_reconcile=seen.append):
             pass  # pragma: no cover - never entered
     assert seen == []
+
+
+class TestWorkspaceFromRunDir:
+    """#1159: ``_workspace_from_run_dir`` wraps ``resolve_run_lock_workspace``
+    and keeps CLI-only refusal reasons when a workspace is missing here."""
+
+    def test_source_calls_runguard_helper_instead_of_a_local_parser(self):
+        from brigade.cli import fleet as fleet_cli
+
+        source = inspect.getsource(fleet_cli._workspace_from_run_dir)
+        assert "resolve_run_lock_workspace" in source
+        assert 'for key in ("lock_workspace", "cwd")' not in source
+
+    def test_delegates_resolution_to_runguard(self, tmp_path, monkeypatch):
+        from brigade import runguard
+        from brigade.cli import fleet as fleet_cli
+
+        workspace = tmp_path / "ws"
+        run_dir = workspace / ".brigade" / "runs" / "r1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text(json.dumps({"lock_workspace": str(workspace), "status": "completed"}))
+        seen: list[tuple[dict[str, object], Path]] = []
+        real = runguard.resolve_run_lock_workspace
+
+        def spy(meta: dict[str, object], path: Path, **kwargs: object) -> Path | None:
+            seen.append((dict(meta), Path(path)))
+            assert kwargs == {}
+            return real(meta, path)
+
+        monkeypatch.setattr(runguard, "resolve_run_lock_workspace", spy)
+        resolved, why = fleet_cli._workspace_from_run_dir(str(run_dir))
+        assert resolved == workspace.resolve() and why == "ok"
+        assert len(seen) == 1
+        assert seen[0][0]["lock_workspace"] == str(workspace)
+        assert seen[0][1] == run_dir
+
+    def test_follows_runguard_precedence_over_cwd(self, tmp_path):
+        from brigade.cli import fleet as fleet_cli
+
+        canonical = tmp_path / "canonical"
+        worktree = tmp_path / "worktree"
+        canonical.mkdir()
+        worktree.mkdir()
+        run_dir = worktree / ".brigade" / "runs" / "r1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text(json.dumps({"lock_workspace": str(canonical), "cwd": str(worktree)}))
+        resolved, why = fleet_cli._workspace_from_run_dir(str(run_dir))
+        assert resolved == canonical.resolve() and why == "ok"
+
+    def test_layout_without_run_json_still_resolves(self, tmp_path):
+        from brigade.cli import fleet as fleet_cli
+
+        workspace = tmp_path / "ws"
+        run_dir = workspace / ".brigade" / "runs" / "r1"
+        run_dir.mkdir(parents=True)
+        resolved, why = fleet_cli._workspace_from_run_dir(str(run_dir))
+        assert resolved == workspace.resolve() and why == "ok"
+
+    def test_missing_run_dir_keeps_cli_refusal_and_does_not_call_runguard(self, monkeypatch):
+        from brigade import runguard
+        from brigade.cli import fleet as fleet_cli
+
+        def boom(*_args: object, **_kwargs: object) -> Path | None:
+            raise AssertionError("resolve_run_lock_workspace must not run before the run dir exists")
+
+        monkeypatch.setattr(runguard, "resolve_run_lock_workspace", boom)
+        resolved, why = fleet_cli._workspace_from_run_dir(None)
+        assert resolved is None and why == "the claim records no run directory"
+        resolved, why = fleet_cli._workspace_from_run_dir("/nonexistent/.brigade/runs/x")
+        assert resolved is None
+        assert why == "its run directory /nonexistent/.brigade/runs/x does not exist on this machine"
+
+    def test_refuses_when_recorded_workspace_is_missing_on_this_machine(self, tmp_path):
+        from brigade.cli import fleet as fleet_cli
+
+        missing = tmp_path / "gone"
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        run_dir = worktree / ".brigade" / "runs" / "r1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text(json.dumps({"lock_workspace": str(missing), "cwd": str(worktree)}))
+        resolved, why = fleet_cli._workspace_from_run_dir(str(run_dir))
+        assert resolved is None
+        assert str(missing.resolve()) in why
+        assert "does not exist on this machine" in why
+
+    def test_unreadable_run_json_off_layout_keeps_cli_refusal(self, tmp_path):
+        from brigade.cli import fleet as fleet_cli
+
+        run_dir = tmp_path / "orphan" / "r1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text("{not-json")
+        resolved, why = fleet_cli._workspace_from_run_dir(str(run_dir))
+        assert resolved is None
+        assert "has no readable run.json naming its workspace" in why
+        assert "<workspace>/.brigade/runs layout" in why

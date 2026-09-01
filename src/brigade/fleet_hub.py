@@ -564,11 +564,19 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
     ALTER) so a later CREATE or ``ensure_schema`` cannot escape as
     ``database is locked``. A caller that loses the write lock treats
     "someone else already set user_version" as success.
+
+    A current ``user_version`` is accepted after a plain read so an
+    already-migrated database never takes the write lock (#1159). Request
+    handlers still use ``open_db`` (#1161); this path is for startup and
+    other ``init_db`` callers (tools, tests, a first-touch storm).
     """
     for delay in _MIGRATION_LOCK_DELAYS:
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
             _refuse_newer_schema(conn, db_path)
+            current = conn.execute("PRAGMA user_version").fetchone()[0]
+            if current == SCHEMA_VERSION:
+                return
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError as exc:
             if not _locked_operational_error(exc):
