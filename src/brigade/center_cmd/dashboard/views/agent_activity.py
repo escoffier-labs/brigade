@@ -40,12 +40,6 @@ _LIVE_RANK = {
 _NEEDS_ATTENTION = frozenset({"running", "awaiting approval", "blocked", "failed"})
 _RECENCY_WINDOW_SECONDS = 12 * 3600
 _ANTHROPIC_CORAL = "#d97757"
-_MACHINE_KIND = {
-    "rocinante": "workstation",
-    "shadowfax": "gpu",
-    "gandalf": "desktop",
-    "cloud": "cloud",
-}
 
 
 def fetch(target: Path) -> dict:
@@ -58,6 +52,9 @@ def fetch(target: Path) -> dict:
         "agent_activity_count": len(records),
         "agent_activity_summary": activity_records.summary(records),
         "completed_window_seconds": activity_records.completed_window_seconds(target),
+        "default_hosts": list(activity_records.default_hosts(target)),
+        "host_kinds": activity_records.host_kinds(target),
+        "local_host": activity_records.local_host_alias(target),
     }
 
 
@@ -69,9 +66,14 @@ def render(payload: dict, nonce: str) -> str:
     if not isinstance(window, int) or window < _RECENCY_WINDOW_SECONDS:
         window = _RECENCY_WINDOW_SECONDS
     now = datetime.now(timezone.utc)
-    summary = _summary_strip(records)
+    hosts = [str(name) for name in payload.get("default_hosts", []) if isinstance(name, str)]
+    kinds = payload.get("host_kinds")
+    kinds = {str(k): str(v) for k, v in kinds.items()} if isinstance(kinds, dict) else {"cloud": "cloud"}
+    local_host = payload.get("local_host")
+    local_host = local_host if isinstance(local_host, str) and local_host else "local"
+    summary = _summary_strip(records, local_host)
     legend = _state_legend()
-    cards = _machine_cards_html(records, window, now)
+    cards = _machine_cards_html(records, window, now, hosts, kinds, local_host)
     table_panel = html.panel(html.esc("Table"), _table(records, now))
     return _stylesheet(nonce) + summary + legend + cards + table_panel
 
@@ -81,7 +83,7 @@ def _bucket_state(record: dict) -> str:
     return state if state in _STATE_ICON else "unknown"
 
 
-def _summary_strip(records: list[dict]) -> str:
+def _summary_strip(records: list[dict], local_host: str = "local") -> str:
     counts: dict[str, int] = {}
     blocked_hosts: set[str] = set()
     for record in records:
@@ -90,7 +92,7 @@ def _summary_strip(records: list[dict]) -> str:
         if state == "blocked":
             host = str(record.get("host") or "local").lower()
             if host == "local":
-                host = "rocinante"
+                host = local_host
             blocked_hosts.add(host)
     total = len(records)
     if not total:
@@ -123,27 +125,34 @@ def _state_legend() -> str:
     return f'<div class="state-legend" aria-label="State legend">{"".join(entries)}</div>'
 
 
-def _machine_cards_html(records: list[dict], window: int, now: datetime) -> str:
+def _machine_cards_html(
+    records: list[dict],
+    window: int,
+    now: datetime,
+    default_hosts: list[str],
+    kinds: dict[str, str],
+    local_host: str,
+) -> str:
     by_host: dict[str, list[dict]] = {}
     for record in records:
         host = str(record.get("host") or "local").lower()
         if host == "local":
-            host = "rocinante"
+            host = local_host
         by_host.setdefault(host, []).append(record)
     hosts: list[str] = []
-    for name in activity_records.default_hosts():
+    for name in default_hosts:
         if name not in hosts:
             hosts.append(name)
     for name in sorted(by_host):
         if name not in hosts and name != "cloud":
             hosts.append(name)
     hosts.append("cloud")
-    cards = [_machine_card(host, by_host.get(host, []), window, now) for host in hosts]
+    cards = [_machine_card(host, by_host.get(host, []), window, now, kinds) for host in hosts]
     return f'<section class="machine-board" aria-label="{html.esc(TITLE)}">{"".join(cards)}</section>'
 
 
-def _machine_card(host: str, records: list[dict], window: int, now: datetime) -> str:
-    kind = _MACHINE_KIND.get(host, "server")
+def _machine_card(host: str, records: list[dict], window: int, now: datetime, kinds: dict[str, str]) -> str:
+    kind = kinds.get(host, "server")
     live, completed = _partition_records(records, window, now)
     live_sorted = sorted(live, key=_sort_key)
     trees = _build_trees(live_sorted)

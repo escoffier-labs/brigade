@@ -1,6 +1,7 @@
 """Private Fleet Hub client for authoritative Grok Bot queue operations.
 
-The listener on Rocinante is the only caller that holds a fleet node token.
+The listener on the canonical memory owner host is the only caller that
+holds a fleet node token.
 Cloud workers never see this module's credentials. Request bodies and
 returned projections are metadata-only.
 """

@@ -22,7 +22,7 @@ _DEFAULT_COMPLETED_WINDOW_SECONDS = 3600
 _SESSION_MTIME_WINDOW_SECONDS = 7 * 24 * 60 * 60
 _SESSION_READ_SIZE_CAP = 1_048_576
 _UNKNOWN_TASK = "Unknown task"
-_DEFAULT_HOSTS = ("rocinante", "shadowfax", "gandalf")
+_DEFAULT_HOST_KINDS = {"cloud": "cloud"}
 _RUNNING_STATUSES = {
     "started",
     "planning",
@@ -103,8 +103,38 @@ def completed_window_seconds(target: Path) -> int:
     return _DEFAULT_COMPLETED_WINDOW_SECONDS
 
 
-def default_hosts() -> tuple[str, ...]:
-    return _DEFAULT_HOSTS
+def default_hosts(target: Path | None = None) -> tuple[str, ...]:
+    """Return the machine cards to always render, from workspace config.
+
+    Falls back to this machine's own alias so a fresh install labels its work
+    after the host it runs on rather than a name baked into the source.
+    """
+    if target is None:
+        return ()
+    config = _read_json(target / ".brigade" / "center" / "agent-activity-sources.json") or {}
+    configured = config.get("hosts")
+    hosts: list[str] = []
+    if isinstance(configured, list):
+        for entry in configured:
+            alias = _safe_alias(entry)
+            if alias != "local" and alias not in hosts:
+                hosts.append(alias)
+    return tuple(hosts) if hosts else (local_host_alias(target),)
+
+
+def host_kinds(target: Path | None = None) -> dict[str, str]:
+    """Return the host -> machine-kind glyph map, from workspace config."""
+    kinds = dict(_DEFAULT_HOST_KINDS)
+    if target is None:
+        return kinds
+    config = _read_json(target / ".brigade" / "center" / "agent-activity-sources.json") or {}
+    configured = config.get("host_kinds")
+    if isinstance(configured, dict):
+        for host, kind in configured.items():
+            alias = _safe_alias(host)
+            if alias != "local" and isinstance(kind, str) and kind.strip():
+                kinds[alias] = _safe_alias(kind)
+    return kinds
 
 
 def _brigade_records(target: Path, now: datetime, local_host: str) -> list[dict[str, Any]]:
