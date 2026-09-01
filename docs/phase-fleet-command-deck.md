@@ -37,7 +37,7 @@ Non-goals for this feature:
 
 - Any write path: no POST routes, no claim mutation, no node management, no acknowledge or resolve buttons.
 - Public hosting of any kind, including Vercel or any non-tailnet exposure. The hub keeps its required `--host` bind.
-- Cutting v0.27.0 or changing the release process. rollout rides the beta main ref swap documented in `docs/runbooks/fleet-hub-hogwarts.md`.
+- Cutting v0.27.0 or changing the release process. rollout rides the beta main ref swap documented in `docs/runbooks/fleet-hub-proxmox.md`.
 - Fixing the legacy boards' unbounded queries, their login-cookie lifetime, or hub lock behavior beyond what the deck itself needs. those remain separate open follow-ups.
 - Campaigns (issue #1128). Deck renders whatever the claims table already arbitrates. campaign semantics land later and must not change deck contracts except by adding rows.
 - New event types, heartbeats, or client-side changes to `fleet_client.py`. The deck is a hub-side projection of existing tables.
@@ -272,7 +272,7 @@ Browser acceptance (manual, or optionally scripted later with the existing `rese
 
 ## 10. Rollout and rollback on beta main
 
-Rollout rides the documented ref-swap procedure in `docs/runbooks/fleet-hub-hogwarts.md` (backup, `pipx install --force` at a reviewed ref, restart, health check). Sequence:
+Rollout rides the documented ref-swap procedure in `docs/runbooks/fleet-hub-proxmox.md` (backup, `pipx install --force` at a reviewed ref, restart, health check). Sequence:
 
 1. Land slice 1 (section 12) on beta main with `/deck` parallel. Nothing about `/` changes, so a deploy is additive: worst case is an ugly unused route.
 2. Operator adds `--deck-config` to the hub unit's `ExecStart` with the CT-local config file and restarts once. Verify `GET /health` then `GET /deck` from a tailnet device.

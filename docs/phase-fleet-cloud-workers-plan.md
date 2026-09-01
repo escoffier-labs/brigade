@@ -277,7 +277,7 @@ implement the Cursor private cloud worker mode or the Claude self-hosted pool.
 - [ ] Add failing pure and HTTP tests for a separate Cloud Workers section with
   Cursor, Codex, Claude, and Jules `used/limit`, circuit state, safe active task
   cards, and zero-work empty states.
-- [ ] Prove cloud work never increments Rocinante, Shadowfax, or Gandalf busy
+- [ ] Prove cloud work never increments workstation, GPU box, or desktop busy
   counts. Prove expired/terminal leases move to outcomes or Needs You and do not
   render as active.
 - [ ] Prove task labels, IDs, repos, and URLs are escaped, and no bearer,
@@ -305,7 +305,7 @@ implement the Cursor private cloud worker mode or the Claude self-hosted pool.
   `brigade work verify run --target . --command "timeout 3600 ./scripts/verify" --capture brigade-work`.
 - [ ] Write and lint the Memory Handoff.
 - [ ] Deploy the verified beta checkout to the hub CT and update Brigade on
-  Rocinante, Shadowfax, and Gandalf using the device-fleet runbook. Preserve each
+  the workstation, GPU box, and desktop using the device-fleet runbook. Preserve each
   machine's own node identity and token files.
 - [ ] Update `/etc/brigade/command-deck.json` with physical 10/8/4 and approved
   cloud 3/2/0/15/global-4 limits. Restart only the fleet hub service after config

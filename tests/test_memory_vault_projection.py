@@ -244,23 +244,23 @@ def test_project_vault_skips_a_manually_edited_conflict_copy_when_linking(tmp_pa
 
 def test_project_vault_titles_a_note_from_its_leading_heading(tmp_path: Path, vault: Path, capsys) -> None:
     """Cards without a frontmatter title fall back to their slug, which reads badly in a vault."""
-    path = tmp_path / "memory" / "cards" / "rocinante-gateway-beta-worktree-steering.md"
+    path = tmp_path / "memory" / "cards" / "workbench-gateway-beta-worktree-steering.md"
     path.parent.mkdir(parents=True)
     path.write_text(
         "---\nid: card-00000000-0000-4000-8000-00000000000c\ncategory: operations\ntags: []\n---\n"
-        "# Rocinante gateway from a worktree\n\nSteer the beta from a worktree.\n",
+        "# Workbench gateway from a worktree\n\nSteer the beta from a worktree.\n",
         encoding="utf-8",
     )
 
     _project(tmp_path, vault, capsys)
 
-    note = vault / "Brigade Memory" / "Cards" / "Rocinante gateway from a worktree.md"
+    note = vault / "Brigade Memory" / "Cards" / "Workbench gateway from a worktree.md"
     assert note.is_file()
     text = note.read_text(encoding="utf-8")
-    assert 'title: "Rocinante gateway from a worktree"' in text
-    assert text.count("# Rocinante gateway from a worktree") == 1
+    assert 'title: "Workbench gateway from a worktree"' in text
+    assert text.count("# Workbench gateway from a worktree") == 1
     # Provenance still points at the slug file the card actually lives in.
-    assert "canonical_path: " in text and "rocinante-gateway-beta-worktree-steering.md" in text
+    assert "canonical_path: " in text and "workbench-gateway-beta-worktree-steering.md" in text
 
 
 def test_project_vault_keeps_an_explicit_frontmatter_title_over_the_body_heading(

@@ -38,9 +38,9 @@ Cloud capacity is separate from physical-machine capacity:
 | Jules Cloud | 15 | Google AI Pro subscription |
 | All hosted cloud providers | 4 | Brigade fleet policy |
 | Grok Bot | tracked, not hosted | Local/self-hosted seat policy |
-| Rocinante | 10 | Existing physical station configuration |
-| Shadowfax | 8 | Existing physical station configuration |
-| Gandalf | 4 | Existing physical station configuration |
+| workstation | 10 | Existing physical station configuration |
+| gpu-box | 8 | Existing physical station configuration |
+| desktop | 4 | Existing physical station configuration |
 
 The provider-specific and global cloud limits must both admit a launch. A
 provider authentication, quota, or billing-limit response closes that provider's
