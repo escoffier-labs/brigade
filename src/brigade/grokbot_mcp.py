@@ -27,7 +27,7 @@ DEFAULT_BIND = "127.0.0.1:8766"
 MAX_REQUEST_BYTES = 80_000
 LEASE_SECONDS = 300
 MAX_LISTED_JOBS = 100
-MAX_LIST_LIMIT = 200
+MAX_LIST_LIMIT = 100
 LIST_ARGUMENT_KEYS = ("include_all", "limit", "role", "state")
 JOURNAL_LOGGER_NAME = __name__
 _JOURNAL_HANDLER_NAME = "brigade-grokbot-journal"
@@ -311,6 +311,7 @@ class GrokbotAdapter:
         if name not in self._tools() or not isinstance(arguments, dict):
             journal_tool_call(name, arguments, "refused", None)
             raise AdapterError()
+        arguments = _without_null_optionals(name, arguments)
         try:
             result = self._call(name, arguments)
         except AdapterError as exc:
@@ -907,7 +908,7 @@ def _job_id(arguments: dict[str, Any], expected: set[str] | None = None, optiona
 
 def _lease_id(arguments: dict[str, Any], *, mint: bool = False) -> str:
     """Return the caller's lease, or mint one when the tool allows omission."""
-    if mint and "lease_id" not in arguments:
+    if mint and arguments.get("lease_id") is None:
         return uuid.uuid4().hex
     lease_id = arguments.get("lease_id")
     if not isinstance(lease_id, str):
@@ -936,6 +937,7 @@ def list_options(arguments: Mapping[str, Any] | None, instance: str) -> ListOpti
         raise AdapterError(
             f"grokbot_queue_list accepts only these arguments: {', '.join(LIST_ARGUMENT_KEYS)}",
         )
+    arguments = _without_null_optionals("grokbot_queue_list", arguments)
     state = arguments.get("state")
     if state is not None and (not isinstance(state, str) or state not in grokbot_jobs.JOB_STATES):
         raise AdapterError(f"state must be one of: {', '.join(sorted(grokbot_jobs.JOB_STATES))}")
@@ -947,6 +949,11 @@ def list_options(arguments: Mapping[str, Any] | None, instance: str) -> ListOpti
         raise AdapterError(f"limit must be an integer between 1 and {MAX_LIST_LIMIT}")
     if "role" in arguments and arguments["role"] != instance:
         raise AdapterError(f"role is fixed by this listener and must be omitted or equal to: {instance}")
+    if not include_all and state in grokbot_jobs.TERMINAL_STATES:
+        # The two filters intersect, so this pair can only ever answer with an
+        # empty list. Say so instead of returning the silence a Bot reads as a
+        # broken queue. `state` is already pinned to the closed state set.
+        raise AdapterError(f"state {state} requires include_all")
     return ListOptions(state=state, include_all=include_all, limit=limit)
 
 
@@ -1030,6 +1037,17 @@ _TOOL_ARGUMENT_TYPES: dict[str, tuple[dict[str, type[object]], dict[str, type[ob
 }
 
 
+def _without_null_optionals(name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop optional arguments sent as null, which the schema itself permits.
+
+    Every optional parameter is advertised as ``X | None``, so a caller that
+    fills its optionals with null is inside the contract and must land on the
+    same behaviour as omitting them.
+    """
+    optional = _TOOL_ARGUMENT_TYPES.get(name, ({}, {}))[1]
+    return {key: value for key, value in arguments.items() if not (key in optional and value is None)}
+
+
 def _typed(value: object, expected: type[object]) -> bool:
     """Exact typing for bool and int so a boolean cannot pass as a limit."""
     if expected in (bool, int):
@@ -1045,6 +1063,7 @@ def _valid_tool_arguments(name: object, arguments: object) -> bool:
         return not required
     if not isinstance(arguments, dict):
         return False
+    arguments = _without_null_optionals(name, arguments)
     keys = set(arguments)
     if not keys.issuperset(required) or not keys.issubset(set(required) | set(optional)):
         return False
@@ -1078,20 +1097,23 @@ def _is_loopback(host: str) -> bool:
 
 _LIST_DESCRIPTION = (
     "List safe projections for this Grok Bot queue role. All arguments are optional: "
-    "state (one of {states}), include_all (boolean, default true; false hides terminal jobs), "
-    "limit (integer 1..{limit}, default {default}), and role (must be omitted or equal to this "
-    "listener's fixed role, {role}). The role is fixed server-side and no argument can widen it. "
-    "Any other argument is refused."
+    "state (one of {states}), include_all (boolean, default true; false hides terminal jobs, so it "
+    "cannot be combined with a terminal state), limit (integer 1..{limit}, default {default}), and "
+    "role (must be omitted or equal to this listener's fixed role, {role}). An optional argument "
+    "sent as null means the same as omitting it. The role is fixed server-side and no argument can "
+    "widen it. Any other argument is refused."
 )
 _CLAIM_DESCRIPTION = (
     "Claim one queued job for this listener's fixed worker identity. Arguments: job_id (required) "
-    "and lease_id (optional). When lease_id is omitted the listener mints one and returns it as "
-    "lease_id; carry that value on every later call for this job. The routine sequence is "
-    "grokbot_queue_list, grokbot_queue_claim, grokbot_queue_start, grokbot_queue_renew before the "
-    "lease expires, then grokbot_queue_complete or grokbot_queue_fail, and grokbot_queue_ack_cancel "
-    "when the operator requests cancellation. The role, worker identity, and lease duration are "
-    "fixed server-side and cannot be selected by arguments."
+    "and lease_id (optional, and null means omitted). When lease_id is omitted the listener mints "
+    "one and returns it as lease_id; carry that value on every later call for this job. The routine "
+    "sequence is grokbot_queue_list, grokbot_queue_claim, grokbot_queue_start, grokbot_queue_renew "
+    "before the lease expires, then grokbot_queue_complete or grokbot_queue_fail, and "
+    "grokbot_queue_ack_cancel when the operator requests cancellation. The role, worker identity, "
+    "and lease duration are fixed server-side and cannot be selected by arguments."
 )
+
+
 _TOOL_DESCRIPTIONS = {
     "grokbot_queue_list": _LIST_DESCRIPTION,
     "grokbot_queue_status": "Read one safe Grok Bot queue projection.",

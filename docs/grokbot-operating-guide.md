@@ -128,18 +128,24 @@ holder renews before expiry and within the job deadline. `expire` never
 requeues a job; it finalizes one whose deadline or lease has passed.
 
 `grokbot_queue_claim` takes `lease_id` as an optional argument. A Bot that has
-no lease to supply omits it, and the listener mints a uuid4 hex lease and
-returns it in the claim result as `lease_id`. That returned value is what the
-worker carries on start, renew, complete, fail, and ack-cancel for that job. A
-supplied `lease_id` is echoed back unchanged, and a malformed one is still
-refused before any queue mutation.
+no lease to supply omits it or sends `null`, and the listener mints a uuid4 hex
+lease and returns it in the claim result as `lease_id`. That returned value is
+what the worker carries on start, renew, complete, fail, and ack-cancel for that
+job. A supplied `lease_id` is echoed back unchanged, and a malformed one is
+still refused before any queue mutation.
 
 ### Queue tool arguments
 
 `grokbot_queue_list` accepts four optional arguments: `state` (one of the seven
 job states), `include_all` (boolean, default `true`; `false` hides terminal
-jobs), `limit` (integer 1 to 200, default 100), and `role`. The advertised
-`inputSchema` carries exactly those four.
+jobs), `limit` (integer 1 to 100, default 100), and `role`. The advertised
+`inputSchema` carries exactly those four. An optional argument sent as `null`
+means the same as omitting it.
+
+`state` and `include_all` intersect. A terminal `state` with `include_all` set
+to `false` can only answer with an empty list, so that pair is refused with
+`state <state> requires include_all` rather than returning the silence a Bot
+reads as a broken queue.
 
 The role is pinned server-side. `role` is accepted only when it equals this
 listener's own role, it never changes the projection, and no argument lets a

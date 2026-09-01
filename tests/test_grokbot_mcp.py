@@ -1,4 +1,14 @@
-"""Contract tests for the role-scoped Grok Bot Streamable HTTP adapter."""
+"""Contract tests for the role-scoped Grok Bot Streamable HTTP adapter.
+
+Tests that serve the ASGI app or read the advertised ``inputSchema`` need the
+optional ``grokbot`` extra (`pip install -e ".[grokbot]"`, which supplies `mcp`
+and `starlette`); they open with ``pytest.importorskip("mcp.server")`` and skip
+wherever only the ``dev`` extra is installed, including CI. Everything the
+adapter can answer without the SDK - the raw ``tools/call`` gate
+(``_tool_request_refusal``), ``list_options``, ``_lease_id``, ``call_tool``, and
+the journal line - is tested against those functions directly so the argument
+contract is covered on every install.
+"""
 
 from __future__ import annotations
 
@@ -1293,7 +1303,7 @@ def test_metadata_only_scout_completion_operator_report_is_public_validation(tmp
     }
 
 
-@pytest.mark.parametrize("report_text", [None, [], 42])
+@pytest.mark.parametrize("report_text", [[], 42])
 def test_direct_complete_rejects_present_non_string_report_text(tmp_path: Path, report_text: object):
     job_id = _running_scout_job(tmp_path)
     scout = _adapter(tmp_path, "repository-scout")
@@ -1310,6 +1320,21 @@ def test_direct_complete_rejects_present_non_string_report_text(tmp_path: Path, 
         )
 
     assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "running"
+
+
+def test_direct_complete_treats_a_null_report_text_as_an_omitted_one(tmp_path: Path):
+    job_id = _running_scout_job(tmp_path)
+    scout = _adapter(tmp_path, "repository-scout")
+    operator = _adapter(tmp_path, "operator")
+
+    completed = scout.call_tool(
+        "grokbot_queue_complete",
+        {"job_id": job_id, "lease_id": "lease-a", "artifact": _report_artifact(), "report_text": None},
+    )
+
+    assert completed["state"] == "completed"
+    with pytest.raises(grokbot_mcp.AdapterError):
+        operator.call_tool("grokbot_queue_report", {"job_id": job_id})
 
 
 def test_mcp_raw_schema_accepts_report_text_only_on_complete(tmp_path: Path):
@@ -1720,8 +1745,12 @@ def test_queue_list_limit_default_and_ceiling_stay_bounded(tmp_path: Path, monke
     ]
     monkeypatch.setattr(grokbot_jobs, "status", lambda _target, job_id=None: {"jobs": many})
 
+    assert grokbot_mcp.MAX_LIST_LIMIT == 100
     assert len(worker.call_tool("grokbot_queue_list", {})["jobs"]) == grokbot_mcp.MAX_LISTED_JOBS
-    assert len(worker.call_tool("grokbot_queue_list", {"limit": 200})["jobs"]) == grokbot_mcp.MAX_LIST_LIMIT
+    ceiling = grokbot_mcp.MAX_LIST_LIMIT
+    assert len(worker.call_tool("grokbot_queue_list", {"limit": ceiling})["jobs"]) == ceiling
+    with pytest.raises(grokbot_mcp.AdapterError):
+        worker.call_tool("grokbot_queue_list", {"limit": ceiling + 1})
 
 
 @pytest.mark.parametrize(
@@ -1729,10 +1758,11 @@ def test_queue_list_limit_default_and_ceiling_stay_bounded(tmp_path: Path, monke
     (
         ({"bot_id": "caller-selected"}, "include_all, limit, role, state", "caller-selected"),
         ({"state": "almost-queued"}, "queued", "almost-queued"),
-        ({"limit": 0}, "between 1 and 200", None),
-        ({"limit": 201}, "between 1 and 200", None),
-        ({"limit": True}, "between 1 and 200", None),
-        ({"limit": "10"}, "between 1 and 200", None),
+        ({"limit": 0}, "between 1 and 100", None),
+        ({"limit": 101}, "between 1 and 100", None),
+        ({"limit": True}, "between 1 and 100", None),
+        ({"limit": "10"}, "between 1 and 100", None),
+        ({"state": "completed", "include_all": False}, "state completed requires include_all", None),
         ({"include_all": "yes"}, "include_all must be a boolean", "yes"),
         ({"role": "repository-scout"}, "implementation-worker", "repository-scout"),
         ({"role": 7}, "implementation-worker", None),
@@ -1782,7 +1812,7 @@ def test_queue_claim_mints_a_lease_id_when_omitted_and_still_refuses_malformed(t
     assert worker.call_tool("grokbot_queue_start", {"job_id": job_id, "lease_id": lease_id})["state"] == "running"
 
     other = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "second-job")["job_id"]
-    for malformed in ("", "not a lease id", 7, None):
+    for malformed in ("", "not a lease id", 7, []):
         with pytest.raises(grokbot_mcp.AdapterError) as error:
             worker.call_tool("grokbot_queue_claim", {"job_id": other, "lease_id": malformed})
         assert error.value.public_error() == GENERIC_CLAIM_ERROR
@@ -1877,7 +1907,7 @@ def test_journal_configuration_is_idempotent_and_writes_message_only_lines():
         logger.setLevel(logging.NOTSET)
 
 
-def test_raw_gate_accepts_the_documented_list_filters_and_names_the_accepted_keys(tmp_path: Path):
+def test_advertised_input_schema_and_served_gate_accept_the_documented_list_filters(tmp_path: Path):
     pytest.importorskip("mcp.server", reason="requires the grokbot extra")
     TestClient = pytest.importorskip("starlette.testclient", reason="requires the grokbot extra").TestClient
 
@@ -1896,7 +1926,14 @@ def test_raw_gate_accepts_the_documented_list_filters_and_names_the_accepted_key
                 headers=headers,
             )
 
-        for accepted in ({"state": "queued"}, {"include_all": True}, {"limit": 10}, {"role": "implementation-worker"}):
+        accepted_arguments = (
+            {"state": "queued"},
+            {"include_all": True},
+            {"limit": 10},
+            {"role": "implementation-worker"},
+            {"state": None, "include_all": None, "limit": None, "role": None},
+        )
+        for accepted in accepted_arguments:
             response = call(accepted)
             assert response.status_code == 200
             assert response.json()["result"]["isError"] is False
@@ -1916,3 +1953,98 @@ def test_raw_gate_accepts_the_documented_list_filters_and_names_the_accepted_key
     assert set(tools["grokbot_queue_list"]["inputSchema"]["properties"]) == {"state", "include_all", "limit", "role"}
     assert set(tools["grokbot_queue_claim"]["inputSchema"].get("required", [])) == {"job_id"}
     assert set(tools["grokbot_queue_claim"]["inputSchema"]["properties"]) == {"job_id", "lease_id"}
+
+
+def _raw_tool_call(name: str, arguments: object) -> bytes:
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
+    return json.dumps(request).encode("utf-8")
+
+
+def test_raw_gate_admits_the_documented_list_filters_without_the_mcp_sdk(tmp_path: Path):
+    worker = _adapter(tmp_path)
+
+    for accepted in ({}, {"state": "queued"}, {"include_all": True}, {"limit": 10}, {"role": "implementation-worker"}):
+        assert grokbot_mcp._tool_request_refusal(_raw_tool_call("grokbot_queue_list", accepted), worker) is None
+
+    unknown = grokbot_mcp._tool_request_refusal(
+        _raw_tool_call("grokbot_queue_list", {"bot_id": "caller-selected"}), worker
+    )
+    assert unknown is not None
+    assert "include_all, limit, role, state" in unknown
+    assert "caller-selected" not in unknown
+
+
+def test_an_explicit_null_optional_argument_is_treated_as_absent_everywhere(tmp_path: Path):
+    queued, failed = _queued_and_failed_worker_jobs(tmp_path)
+    worker = _adapter(tmp_path)
+    omitted = grokbot_mcp.list_options({}, "implementation-worker")
+
+    for nulled in (
+        {"state": None},
+        {"include_all": None},
+        {"limit": None},
+        {"role": None},
+        {"state": None, "include_all": None, "limit": None, "role": None},
+    ):
+        assert grokbot_mcp.list_options(nulled, "implementation-worker") == omitted
+        assert grokbot_mcp._valid_tool_arguments("grokbot_queue_list", nulled) is True
+        assert grokbot_mcp._tool_request_refusal(_raw_tool_call("grokbot_queue_list", nulled), worker) is None
+        listed = {job["job_id"] for job in worker.call_tool("grokbot_queue_list", nulled)["jobs"]}
+        assert listed == {queued, failed}
+
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "null-lease-job")["job_id"]
+    assert grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": job_id, "lease_id": None}) is True
+    assert grokbot_mcp._tool_request_refusal(_raw_tool_call("grokbot_queue_claim", {"job_id": job_id}), worker) is None
+    claimed = worker.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": None})
+    assert len(claimed["lease_id"]) == 32 and int(claimed["lease_id"], 16) >= 0
+    assert worker.call_tool("grokbot_queue_start", {"job_id": job_id, "lease_id": claimed["lease_id"]})["state"] == (
+        "running"
+    )
+    assert len(grokbot_mcp._lease_id({"lease_id": None}, mint=True)) == 32
+    with pytest.raises(grokbot_mcp.AdapterError):
+        grokbot_mcp._lease_id({"lease_id": None})
+
+
+def test_a_non_null_wrong_type_on_an_optional_argument_is_still_refused(tmp_path: Path):
+    worker = _adapter(tmp_path)
+
+    for wrong in ({"state": 7}, {"include_all": "yes"}, {"limit": "10"}, {"limit": True}, {"role": 7}):
+        assert grokbot_mcp._valid_tool_arguments("grokbot_queue_list", wrong) is False
+        assert grokbot_mcp._tool_request_refusal(_raw_tool_call("grokbot_queue_list", wrong), worker) is not None
+        with pytest.raises(grokbot_mcp.AdapterError):
+            worker.call_tool("grokbot_queue_list", wrong)
+
+    assert grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": "grokbot-a", "lease_id": 7}) is False
+    assert grokbot_mcp._valid_tool_arguments("grokbot_queue_renew", {"job_id": "grokbot-a", "lease_id": None}) is False
+
+
+def test_a_terminal_state_filter_with_include_all_false_is_refused_not_silently_empty(tmp_path: Path):
+    queued, failed = _queued_and_failed_worker_jobs(tmp_path)
+    worker = _adapter(tmp_path)
+
+    for terminal in sorted(grokbot_jobs.TERMINAL_STATES):
+        arguments = {"state": terminal, "include_all": False}
+        with pytest.raises(grokbot_mcp.AdapterError) as error:
+            worker.call_tool("grokbot_queue_list", arguments)
+        message = error.value.public_error()["error"]["message"]
+        assert message == f"state {terminal} requires include_all"
+        assert grokbot_mcp._tool_request_refusal(_raw_tool_call("grokbot_queue_list", arguments), worker) == message
+
+    assert {job["job_id"] for job in worker.call_tool("grokbot_queue_list", {"state": "queued"})["jobs"]} == {queued}
+    live = worker.call_tool("grokbot_queue_list", {"state": "queued", "include_all": False})["jobs"]
+    assert {job["job_id"] for job in live} == {queued}
+    terminal_jobs = worker.call_tool("grokbot_queue_list", {"state": "failed", "include_all": True})["jobs"]
+    assert {job["job_id"] for job in terminal_jobs} == {failed}
+
+
+def test_consecutive_minted_lease_ids_differ(tmp_path: Path):
+    worker = _adapter(tmp_path)
+    first = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "first-job")["job_id"]
+    second = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "second-job")["job_id"]
+
+    minted = [
+        worker.call_tool("grokbot_queue_claim", {"job_id": first})["lease_id"],
+        worker.call_tool("grokbot_queue_claim", {"job_id": second})["lease_id"],
+    ]
+    assert minted[0] != minted[1]
+    assert len({grokbot_mcp._lease_id({}, mint=True) for _ in range(8)}) == 8
