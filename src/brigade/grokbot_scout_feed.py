@@ -189,24 +189,27 @@ def _selection(
         "created_today": created_today,
         "known": 0,
         "terminal_retry_candidates": 0,
+        "retry_exhausted": 0,
     }
     if not numbers:
         return {**result, "reason": "no-approved-issues"}, None
     survey = [(number, *_next_attempt(target, repository, number, listing)) for number in numbers]
+    exhausted = sum(1 for _, _, status in survey if status == "exhausted")
     result = {
         **result,
-        "known": sum(1 for _, revision, _ in survey if revision is None),
-        "terminal_retry_candidates": sum(1 for _, revision, dead in survey if revision is not None and dead),
+        "known": sum(1 for _, _, status in survey if status == "known"),
+        "terminal_retry_candidates": sum(1 for _, _, status in survey if status == "retry"),
+        "retry_exhausted": exhausted,
     }
     if any(_is_active_scout(record) for record in records):
         return {**result, "reason": "active-scout"}, None
     if created_today >= daily_limit:
         return {**result, "reason": "daily-limit-reached"}, None
-    for number, revision, _dead in survey:
+    for number, revision, _status in survey:
         if revision is None:
             continue
         return {**result, "issue_number": number}, _scout_key(repository, number, revision)
-    return {**result, "reason": "all-known"}, None
+    return {**result, "reason": "retry-exhausted" if exhausted else "all-known"}, None
 
 
 def _queue_view(target: Path, *, live: bool) -> tuple[list[dict[str, Any]], dict[str, str] | None]:
@@ -236,22 +239,24 @@ def _next_attempt(
     repository: str,
     issue_number: int,
     listing: dict[str, str] | None,
-) -> tuple[int | None, bool]:
-    """Return the revision the next attempt needs, or ``None`` when known.
+) -> tuple[int | None, str]:
+    """Return the revision the next attempt needs and how the issue reads.
 
     A scout whose only evidence is a job the queue reports as ``expired``,
     ``failed``, or ``canceled`` was never delivered, so the issue stays
-    selectable and the next attempt moves to a fresh key. The second element is
-    true when at least one earlier attempt died that way. Revisions stop at
-    ``MAX_RETRY_REVISIONS`` so a repeatedly dying issue cannot hold the feed.
+    selectable and the next attempt moves to a fresh key. The second element
+    names why: ``unattempted``, ``retry`` (a fresh revision after at least one
+    dead attempt), ``known``, or ``exhausted``. Revisions stop at
+    ``MAX_RETRY_REVISIONS`` so a repeatedly dying issue cannot hold the feed,
+    and an exhausted issue is reported apart from a genuinely known one.
     """
     for revision in range(MAX_RETRY_REVISIONS):
         status = _attempt_status(target, _scout_key(repository, issue_number, revision), listing)
         if status == "absent":
-            return revision, revision > 0
+            return revision, "retry" if revision else "unattempted"
         if status == "known":
-            return None, revision > 0
-    return None, True
+            return None, "known"
+    return None, "exhausted"
 
 
 def _attempt_status(target: Path, key: str, listing: dict[str, str] | None) -> str:
@@ -262,8 +267,9 @@ def _attempt_status(target: Path, key: str, listing: dict[str, str] | None) -> s
     granted listing omits, and a job in a terminal non-completed state, are both
     weaker than the record that named them, so the issue reads as not known. A
     caller holding no listing at all (preview under hub authority) treats the
-    same evidence as absent, so it never reports ``ready`` for work that apply
-    will refuse, or ``all-known`` for a job it cannot see.
+    same evidence as absent, so it never reports ``all-known`` for a job it
+    cannot see. It may still report ``ready`` for an issue whose live or
+    completed hub job only apply can list; apply is the check that settles that.
     """
     job_id = _known_job_id(target, key)
     if job_id is None or listing is None:
@@ -272,6 +278,33 @@ def _attempt_status(target: Path, key: str, listing: dict[str, str] | None) -> s
     if state is None:
         return "absent"
     return "dead" if state in RETRY_STATES else "known"
+
+
+def completed_scout_job_id(
+    target: Path,
+    repository: str,
+    issue_number: int,
+    listing: dict[str, str] | None = None,
+) -> str | None:
+    """Name the completed scout attempt for one issue, whichever revision made it.
+
+    A scout that only succeeded after an earlier attempt expired, failed, or was
+    canceled landed under a later idempotency revision, so revision 0 alone does
+    not answer the question. The retrievable report artifact is the evidence of
+    completion; a caller holding the queue listing may also require that the
+    listing still reports the job ``completed``.
+    """
+    from . import grokbot_build_feed
+
+    for revision in range(MAX_RETRY_REVISIONS):
+        job_id = _known_job_id(target, _scout_key(repository, issue_number, revision))
+        if job_id is None:
+            continue
+        if listing is not None and listing.get(job_id) != "completed":
+            continue
+        if grokbot_build_feed._report_snapshot_exists(target, job_id):
+            return job_id
+    return None
 
 
 def _known_job_id(target: Path, key: str) -> str | None:
