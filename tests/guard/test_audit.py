@@ -184,6 +184,51 @@ class AuditCliTests(unittest.TestCase):
         # Even though there are blocking findings, audit is non-blocking by default.
         self.assertTrue(payload["summary"]["blocked"])
 
+    def test_audit_suppresses_findings_recorded_in_the_baseline(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_repo(repo)
+            (repo / "legacy.md").write_text("Service runs on 192.168.99.10.\n")
+            subprocess.run(["git", "add", "legacy.md"], cwd=repo, check=True)
+            baseline = repo / "baseline.json"
+            init = self._baseline_init(repo, str(repo), "--output", str(baseline))
+            self.assertEqual(init.returncode, 0, msg=init.stdout + init.stderr)
+
+            proc = self._audit(repo, str(repo), "--baseline", str(baseline), "--strict", "--json")
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["summary"]["total_findings"], 0)
+
+    def test_audit_still_reports_a_finding_absent_from_the_baseline(self) -> None:
+        """The ratchet: baselined noise is silent, new leakage still fails."""
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_repo(repo)
+            (repo / "legacy.md").write_text("Service runs on 192.168.99.10.\n")
+            subprocess.run(["git", "add", "legacy.md"], cwd=repo, check=True)
+            baseline = repo / "baseline.json"
+            self._baseline_init(repo, str(repo), "--output", str(baseline))
+
+            (repo / "fresh.md").write_text("New host is 192.168.99.77.\n")
+            subprocess.run(["git", "add", "fresh.md"], cwd=repo, check=True)
+
+            proc = self._audit(repo, str(repo), "--baseline", str(baseline), "--strict", "--json")
+
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)
+        offenders = {entry["path"] for entry in payload["top_offenders"]}
+        self.assertEqual(offenders, {"fresh.md"})
+
+    def _baseline_init(self, cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "brigade.guard", "baseline", "init", *args],
+            cwd=cwd,
+            env={"PYTHONPATH": str(ROOT / "src")},
+            capture_output=True,
+            text=True,
+        )
+
     def _init_repo(self, repo: Path) -> None:
         subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
         subprocess.run(["git", "config", "user.name", "Example User"], cwd=repo, check=True)

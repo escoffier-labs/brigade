@@ -114,12 +114,17 @@ def init_baseline(
 ) -> Baseline:
     """Scan ``target_dir`` and capture all current findings as a baseline.
 
-    ``scope`` is accepted for future compatibility with the planned
-    ``--scope tracked|tree|staged|diff`` flag. Only ``tree`` is implemented
-    here; the scope arg is stored implicitly via the entries we capture.
+    ``scope`` selects the file set: ``tracked`` enumerates via ``git ls-files``
+    and ``tree`` walks the filesystem. Both share the enumeration ``audit``
+    uses, so a baseline covers exactly the files an audit will scan. The legacy
+    markdown-only walk is gone: it silently missed findings in every other file
+    type, which made a baseline useless as an audit gate.
     """
-    if scope != "tree":
-        raise ValueError(f"baseline scope {scope!r} not yet supported (only 'tree')")
+    if scope not in {"tracked", "tree"}:
+        raise ValueError(f"unknown baseline scope: {scope!r} (expected 'tracked' or 'tree')")
+
+    # Deferred: audit imports this module, so a module-level import would cycle.
+    from .audit import DEFAULT_EXCLUDE_DIR_NAMES, _enumerate
 
     active_policy = policy or Policy()
     entries: list[BaselineEntry] = []
@@ -128,7 +133,7 @@ def init_baseline(
     if target_dir.is_file():
         files = [target_dir]
     else:
-        files = sorted(target_dir.rglob("*.md"))
+        files = _enumerate(target_dir, scope=scope, exclude_dirs=frozenset(DEFAULT_EXCLUDE_DIR_NAMES))
 
     for file_path in files:
         if _DEFAULT_EXCLUDE_DIR_NAMES.intersection(file_path.parts):

@@ -425,3 +425,38 @@ class BaselineCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BaselineScopeTests(unittest.TestCase):
+    """A baseline must cover the same files an audit scans, not just markdown."""
+
+    def test_init_baseline_captures_findings_in_tracked_non_markdown_files(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "user@example"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Example User"], cwd=repo, check=True)
+            (repo / "fixture.json").write_text('{"host": "192.168.99.10"}\n')
+            (repo / "notes.md").write_text("Host is 192.168.99.11.\n")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+
+            baseline = init_baseline(repo, policy=Policy(), scope="tracked")
+
+        paths = {entry.path for entry in baseline.entries}
+        self.assertIn("fixture.json", paths)
+        self.assertIn("notes.md", paths)
+
+    def test_init_baseline_skips_untracked_local_state_under_tracked_scope(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "user@example"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Example User"], cwd=repo, check=True)
+            (repo / "tracked.md").write_text("Host is 192.168.99.10.\n")
+            subprocess.run(["git", "add", "tracked.md"], cwd=repo, check=True, capture_output=True)
+            (repo / "local.md").write_text("Host is 192.168.99.99.\n")
+
+            baseline = init_baseline(repo, policy=Policy(), scope="tracked")
+
+        paths = {entry.path for entry in baseline.entries}
+        self.assertEqual(paths, {"tracked.md"})

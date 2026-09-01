@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from .baseline import Baseline, filter_findings
 from .engine import scan_text
 from .git_scan import _read_text, _tracked_paths
 from .policy import Policy
@@ -100,6 +101,7 @@ def run_audit(
     scope: str = "tracked",
     options: ScanOptions | None = None,
     exclude_dirs: Iterable[str] = DEFAULT_EXCLUDE_DIR_NAMES,
+    baseline: Baseline | None = None,
 ) -> AuditReport:
     """Walk `target` per `scope`, scan each text file, and aggregate."""
 
@@ -122,6 +124,12 @@ def run_audit(
             continue
 
         result = scan_text(text, policy=policy, options=options)
+        if baseline is not None:
+            result = GuardResult(
+                text=result.text,
+                redacted_text=result.redacted_text,
+                findings=filter_findings(result.findings, baseline, _relative(path, target)),
+            )
         report.files_scanned += 1
         _record(report, path, result, target=target)
 
@@ -148,13 +156,17 @@ def _enumerate(target: Path, *, scope: str, exclude_dirs: frozenset[str]) -> lis
     return paths
 
 
+def _relative(path: Path, target: Path) -> str:
+    """Path as recorded in a baseline: relative to the audit target when possible."""
+    try:
+        return str(path.relative_to(target))
+    except ValueError:
+        return str(path)
+
+
 def _record(report: AuditReport, path: Path, result: GuardResult, *, target: Path) -> None:
     findings = result.findings
-    try:
-        rel = path.relative_to(target)
-        path_str = str(rel)
-    except ValueError:
-        path_str = str(path)
+    path_str = _relative(path, target)
 
     report.file_audits.append(FileAudit(path=path_str, findings=len(findings), blocked=result.blocked))
 

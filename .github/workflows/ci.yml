@@ -374,21 +374,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: brigade
-      - uses: actions/checkout@v7
-        with:
-          repository: solomonneas/content-guard
-          ref: v0.1.1
-          path: content-guard
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # Scans with the guard this repo ships, not a pinned copy of the retired
+      # standalone repo. Brigade has no runtime dependencies, so PYTHONPATH is
+      # enough and no install step is needed. --baseline accepts the findings
+      # recorded in .content-guard-baseline.json (synthetic fixtures, example
+      # hosts) so the gate fails on NEW leakage only.
       - name: Scan
         run: |
-          cd brigade
-          PYTHONPATH=../content-guard/src python -m content_guard scan . \
-            --policy ../content-guard/policies/public-repo.json
+          PYTHONPATH=src python -m brigade.guard audit . \
+            --scope tracked \
+            --strict \
+            --baseline .content-guard-baseline.json
 
   repo-metadata:
     runs-on: ubuntu-latest

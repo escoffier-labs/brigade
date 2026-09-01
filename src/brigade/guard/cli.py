@@ -96,6 +96,10 @@ def build_parser() -> argparse.ArgumentParser:
     audit_cmd.add_argument("target", help="directory to audit")
     audit_cmd.add_argument("--policy", help="JSON policy file (default: built-in public-repo policy)")
     audit_cmd.add_argument(
+        "--baseline",
+        help="path to a baseline file; findings already in the baseline are suppressed",
+    )
+    audit_cmd.add_argument(
         "--scope",
         choices=("tracked", "tree"),
         default="tracked",
@@ -130,6 +134,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baseline_init.add_argument("target", help="directory to scan")
     baseline_init.add_argument("--policy", help="JSON policy file")
+    baseline_init.add_argument(
+        "--scope",
+        choices=("tracked", "tree"),
+        default="tree",
+        help="enumerate via 'git ls-files' (tracked) or a filesystem walk (tree, default)",
+    )
     baseline_init.add_argument(
         "--output",
         help=(f"output path for the baseline file (default: <target>/{DEFAULT_BASELINE_FILENAME})"),
@@ -313,7 +323,9 @@ def _audit(args: argparse.Namespace) -> int:
     policy = load_policy(args.policy) if args.policy else _default_repo_policy()
     options = _options(args)
 
-    report = run_audit(target, policy=policy, scope=args.scope, options=options)
+    baseline = load_baseline(Path(args.baseline)) if getattr(args, "baseline", None) else None
+
+    report = run_audit(target, policy=policy, scope=args.scope, options=options, baseline=baseline)
 
     if args.json:
         print(json.dumps(report.to_payload(), indent=2, sort_keys=True))
@@ -338,8 +350,8 @@ def _baseline(args: argparse.Namespace) -> int:
         print(f"baseline target must be a directory: {target}", file=sys.stderr)
         return 2
 
-    policy = load_policy(args.policy) if args.policy else None
-    baseline = init_baseline(target, policy=policy, scope="tree")
+    policy = load_policy(args.policy) if args.policy else _default_repo_policy()
+    baseline = init_baseline(target, policy=policy, scope=args.scope)
 
     out_path = Path(args.output) if args.output else target / DEFAULT_BASELINE_FILENAME
     out_path.parent.mkdir(parents=True, exist_ok=True)
