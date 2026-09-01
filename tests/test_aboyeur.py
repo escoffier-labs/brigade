@@ -2151,13 +2151,15 @@ def test_run_direct_grok_progress_only_output_fails_with_honest_artifacts(monkey
     assert (output_dir / "final.txt").read_text().strip() == ""
 
 
-def test_run_direct_grok_structured_final_succeeds_with_honest_artifacts(monkeypatch, tmp_path):
+# grok <=1.0.12 emitted "EndTurn"; 1.0.13 emits "end_turn" (#1345).
+@pytest.mark.parametrize("stop_reason", ["EndTurn", "end_turn"])
+def test_run_direct_grok_structured_final_succeeds_with_honest_artifacts(monkeypatch, tmp_path, stop_reason):
     answer = "No actionable findings."
     structured = {"kind": "answer", "answer": answer}
     stdout = json.dumps(
         {
             "text": json.dumps(structured),
-            "stopReason": "EndTurn",
+            "stopReason": stop_reason,
             "sessionId": _GROK_SESSION_ID,
             "requestId": "00000000-0000-4000-8000-000000000001",
             "structuredOutput": structured,

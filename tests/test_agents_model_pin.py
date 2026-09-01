@@ -19,6 +19,8 @@ def test_pins_model_for_grok():
         "-p",
         "P",
         "--always-approve",
+        "--output-format",
+        "json",
     ]
     read_only = agents.build_argv("grok", "P", read_only=True, model="grok-composer-2.5-fast")
     assert read_only == [

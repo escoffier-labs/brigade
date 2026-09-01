@@ -40,7 +40,14 @@ def test_build_argv_for_known_clis():
     assert agents.build_argv("kimi", "hi") == ["kimi", "-p", "hi"]
     assert agents.build_argv("adal", "hi") == ["adal", "-q", "hi"]
     assert agents.build_argv("openhands", "hi") == ["openhands", "--headless", "-t", "hi"]
-    assert agents.build_argv("grok", "hi") == ["grok", "-p", "hi", "--always-approve"]
+    assert agents.build_argv("grok", "hi") == [
+        "grok",
+        "-p",
+        "hi",
+        "--always-approve",
+        "--output-format",
+        "json",
+    ]
     assert agents.build_argv("amp", "hi") == ["amp", "-x", "hi"]
     assert agents.build_argv("crush", "hi") == ["crush", "run", "hi"]
     assert agents.build_argv("ollama:llama3.3", "hi") == ["ollama", "run", "llama3.3", "hi"]
@@ -1009,7 +1016,10 @@ def test_run_agent_maps_codex_stdin_hang_banner(monkeypatch):
         ("codex", ["codex", "exec", "-c", 'model_reasoning_effort="xhigh"', "-"]),
         ("opencode", ["opencode", "run", "--variant", "xhigh", "hi"]),
         ("pi", ["pi", "--thinking", "xhigh", "-p", "hi"]),
-        ("grok", ["grok", "--reasoning-effort", "xhigh", "-p", "hi", "--always-approve"]),
+        (
+            "grok",
+            ["grok", "--reasoning-effort", "xhigh", "-p", "hi", "--always-approve", "--output-format", "json"],
+        ),
     ],
 )
 def test_build_argv_applies_reasoning(cli_ref, expected):
@@ -1215,6 +1225,99 @@ def _grok_json_output(
             "structuredOutputError": None if structured else "model did not produce structured output",
         }
     )
+
+
+def _grok_write_envelope(
+    text: str,
+    *,
+    stop_reason: str = "end_turn",
+    session_id: str = "019f0000-0000-7000-8000-000000000001",
+) -> str:
+    """Write-mode grok envelope: --output-format json without a --json-schema."""
+    return json.dumps(
+        {
+            "text": text,
+            "stopReason": stop_reason,
+            "sessionId": session_id,
+            "requestId": "00000000-0000-4000-8000-000000000001",
+        }
+    )
+
+
+def test_run_agent_accepts_grok_snake_case_end_turn_stop_reason(monkeypatch):
+    stdout = _grok_json_output("PONG", stop_reason="end_turn")
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+
+    result = agents.run_agent("grok", "reply with PONG", read_only=True, model="grok-4.5")
+
+    assert result.ok is True
+    assert result.text == "PONG"
+    assert result.stop_reason == "end_turn"
+
+
+@pytest.mark.parametrize("stop_reason", ["Cancelled", "endturn", "END_TURN", "end turn"])
+def test_run_agent_still_rejects_unknown_grok_stop_reasons(monkeypatch, stop_reason):
+    stdout = _grok_json_output("No actionable findings.", stop_reason=stop_reason)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is False
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "malformed-final-output"
+    assert result.stop_reason == stop_reason
+
+
+def test_run_agent_accepts_grok_write_mode_envelope_text(monkeypatch):
+    answer = "Implemented the requested change."
+    stdout = _grok_write_envelope(answer)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+
+    result = agents.run_agent("grok", "implement it", read_only=False, model="grok-4.5")
+
+    assert result.ok is True
+    assert result.text == answer
+    assert result.stop_reason == "end_turn"
+    assert result.session_id == "019f0000-0000-7000-8000-000000000001"
+    assert result.request_id == "00000000-0000-4000-8000-000000000001"
+
+
+def test_run_agent_write_mode_does_not_request_a_json_schema(monkeypatch):
+    stdout = _grok_write_envelope("Implemented the requested change.")
+    seen = {}
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return agents.proc.Result(0, stdout + "\n", "")
+
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    result = agents.run_agent("grok", "implement it", read_only=False, model="grok-4.5")
+
+    assert result.ok is True
+    assert seen["argv"][-2:] == ["--output-format", "json"]
+    assert "--json-schema" not in seen["argv"]
+    assert "--sandbox" not in seen["argv"]
+    assert "--permission-mode" not in seen["argv"]
+
+
+def test_run_agent_rejects_grok_write_mode_progress_without_end_turn(monkeypatch):
+    stdout = _grok_write_envelope("Gathering the diffs first.", stop_reason="max_turns")
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+
+    result = agents.run_agent("grok", "implement it", read_only=False, model="grok-4.5")
+
+    assert result.ok is False
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "malformed-final-output"
+    assert result.detail == "grok exited 0 without a structured final response (stopReason=max_turns)"
+    assert result.text == "Gathering the diffs first."
+    assert result.stop_reason == "max_turns"
 
 
 def test_run_agent_rejects_grok_progress_without_structured_final_output(monkeypatch):
@@ -1477,15 +1580,56 @@ def test_run_agent_keeps_permission_mode_prompt_separate_from_grok_flags(monkeyp
     ]
 
 
-def test_run_agent_keeps_writable_grok_plain_output(monkeypatch):
+def test_run_agent_rejects_writable_grok_plain_output(monkeypatch):
+    # An older grok build that ignores --output-format json emits bare text.
+    # Surface that as a diagnosable failure naming the envelope, not a silent
+    # pass and not the generic "no structured final response" detail.
     output = "Implemented the requested change."
     monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
 
     result = agents.run_agent("grok", "implement it", read_only=False, model="grok-4.5")
 
-    assert result.ok is True
+    assert result.ok is False
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "malformed-final-output"
+    assert result.detail == (
+        "grok did not emit an --output-format json envelope; check the grok CLI version "
+        "(need a build that supports --output-format json)"
+    )
     assert result.text == output
+    assert result.stdout == output + "\n"
+
+
+def test_run_agent_read_only_plain_output_keeps_generic_final_detail(monkeypatch):
+    # Read-only dispatch pins --json-schema, so bare text there is a missing
+    # structured final, not CLI version skew. Keep the original detail.
+    output = "Implemented the requested change."
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is False
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "malformed-final-output"
+    assert result.detail == "grok exited 0 without a structured final response"
+    assert result.text == output
+
+
+@pytest.mark.parametrize("stop_reason", ["end_turn", "max_turns"])
+def test_run_agent_grok_write_mode_uses_one_final_answer_rule(monkeypatch, stop_reason):
+    # Success and failure paths share one extraction rule: the answer is the
+    # envelope's "text", never a re-parse of a JSON-looking payload inside it.
+    nested = json.dumps({"kind": "answer", "answer": "unwrapped"})
+    stdout = _grok_write_envelope(nested, stop_reason=stop_reason)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+
+    result = agents.run_agent("grok", "implement it", read_only=False, model="grok-4.5")
+
+    assert result.ok is (stop_reason == "end_turn")
+    assert result.text == nested
 
 
 def test_run_agent_reports_invalid_internal_grok_read_only_argv(monkeypatch):

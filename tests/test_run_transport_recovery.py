@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 
 import pytest
@@ -217,6 +218,35 @@ def _dispatch_recovery(
 
 def test_direct_grok_first_attempt_success_is_selected(monkeypatch, tmp_path):
     result, direct_calls, fallback_calls = _dispatch_recovery(monkeypatch, tmp_path, [_successful_final()])
+
+    assert result.ok is True
+    assert result.text == "No actionable findings."
+    assert len(direct_calls) == 1
+    assert fallback_calls == []
+    assert [attempt.kind for attempt in result.attempts] == ["initial"]
+    assert [attempt.selected for attempt in result.attempts] == [True]
+
+
+def test_grok_continuation_is_not_triggered_for_end_turn_finals(monkeypatch, tmp_path):
+    # #1345: grok 1.0.13 reports snake_case "end_turn". Run the real adapter so
+    # the transport sees exactly what the parser produces, not a hand-built result.
+    structured = {"kind": "answer", "answer": "No actionable findings."}
+    stdout = json.dumps(
+        {
+            "text": json.dumps(structured),
+            "stopReason": "end_turn",
+            "sessionId": "019f0000-0000-7000-8000-000000000001",
+            "requestId": "00000000-0000-4000-8000-000000000001",
+            "structuredOutput": structured,
+            "structuredOutputError": None,
+        }
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+    direct_final = agents.run_agent("grok", "Review the diff.", read_only=True, model="grok-4.5")
+    assert direct_final.ok is True
+
+    result, direct_calls, fallback_calls = _dispatch_recovery(monkeypatch, tmp_path, [direct_final])
 
     assert result.ok is True
     assert result.text == "No actionable findings."
