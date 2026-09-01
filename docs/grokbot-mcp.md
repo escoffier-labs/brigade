@@ -224,10 +224,8 @@ the local queue only, so under hub authority it cannot show the daily limit at
 all: `created_today` is always 0 there and the count arrives with apply.
 Selection takes the lowest open issue number carrying the label that has no
 queue record yet. Apply is what makes that hold: it re-lists at the hub, so a
-repeated apply does not re-enqueue an issue that already has a job. Preview
-reads the local queue only, so under hub authority it cannot see live jobs and
-may keep naming an issue that already has one; apply is the command that
-resolves it.
+repeated apply does not re-enqueue an issue that already has a job. Preview,
+seeing no live hub jobs, may keep naming an issue that already has one.
 
 When a completed Repository Scout report snapshot for the same issue is already
 on the queue target, the build job names that report's job id and tells the

@@ -85,10 +85,6 @@ ACTIVE_LIFECYCLE_STATES = frozenset({"queued", "claimed", "running"})
 # Enqueue refusals that mean the hub already recorded this key or operation, so
 # the derived job id is the hub's and its private snapshot must survive.
 HUB_DUPLICATE_REFUSALS = frozenset({"idempotency-conflict", "operation-mismatch"})
-# The only bounded refusal that proves the hub holds no such job. The hub
-# answers an unknown job id with 400 job-not-found, which the client bounds to
-# invalid-request; every other refusal leaves the answer unknown.
-HUB_ABSENT_REFUSALS = frozenset({"invalid-request"})
 
 
 @dataclass(frozen=True)
@@ -1598,24 +1594,27 @@ def _store_task_snapshot(target: Path, job_id: str, envelope: dict[str, Any], ke
 def _hub_holds_job(job_id: str) -> bool | None:
     """Report whether the hub still holds ``job_id``; ``None`` when unknown.
 
-    Only a bounded read through the ordinary status path under the caller's own
-    identity is used. The hub answers an unknown job id with a bounded
-    ``invalid-request`` refusal, so that is the single reason that proves
-    absence. Every other refusal, including ``auth-failed`` for a job outside
-    this actor's queue and ``hub-unavailable`` for an unreachable hub, is
-    unknown rather than absent.
+    The proof is one granted listing under the caller's own identity. Every
+    actor that may enqueue holds ``list`` but not ``status``, and the hub scopes
+    a listing to that actor's own queue, so the probe passes no role filter and
+    a granted listing that omits the derived job id proves absence. Any refused
+    or failed listing, including ``auth-failed`` and ``hub-unavailable``, leaves
+    the answer unknown and so keeps the snapshot.
+
+    The client offers no per-call deadline, so this probe adds one hub round
+    trip bounded by ``GROKBOT_TIMEOUT_SECONDS`` to a failed enqueue. Only
+    ``Exception`` is caught: a ``KeyboardInterrupt`` raised during the probe
+    propagates instead of being answered as unknown.
     """
     from . import fleet_client_grokbot
 
     try:
-        decision = fleet_client_grokbot.status(job_id)
-    except BaseException:
+        decision = fleet_client_grokbot.list_jobs(include_all=True)
+    except Exception:
         return None
-    if decision.granted and decision.job is not None:
-        return True
-    if decision.reason in HUB_ABSENT_REFUSALS:
-        return False
-    return None
+    if not decision.granted or decision.jobs is None:
+        return None
+    return any(job.get("job_id") == job_id for job in decision.jobs)
 
 
 def _discard_unheld_task_snapshot(target: Path, job_id: str, key_hash: str) -> None:
@@ -1625,7 +1624,9 @@ def _discard_unheld_task_snapshot(target: Path, job_id: str, key_hash: str) -> N
     the same key, both reach this path while the hub already holds the job. A
     snapshot deleted there would strand the live job: ``claim`` with an
     execution context and the hub report completion both need it, and the
-    active-job guard blocks the re-apply that would rewrite it.
+    active-job guard blocks the re-apply that would rewrite it. Proof is a
+    granted queue listing that does not carry the derived job id; anything less
+    keeps the snapshot.
     """
     if _hub_holds_job(job_id) is not False:
         return
