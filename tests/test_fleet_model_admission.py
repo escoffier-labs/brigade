@@ -366,6 +366,9 @@ def test_admitted_none_reasoning_is_not_applied_as_a_pin():
     assert resolution.roster.agents["chef"].reasoning is None
     admission = next(item for item in resolution.receipt["admissions"] if item["seat"] == "chef")
     assert admission["reasoning"] == "none"
+    decision = next(item for item in resolution.receipt["decisions"] if item["seat"] == "chef")
+    assert decision["reasoning_applied"] is False
+    assert decision["detail"] == "exact seat/provider/model/reasoning/binding entry is enabled"
 
 
 def test_admitted_reasoning_is_dropped_for_adapters_without_reasoning_support():
@@ -380,6 +383,12 @@ def test_admitted_reasoning_is_dropped_for_adapters_without_reasoning_support():
     assert resolution.roster.agents["chef"].reasoning is None
     decision = next(item for item in resolution.receipt["decisions"] if item["seat"] == "chef")
     assert decision["outcome"] == "enabled"
+    assert decision["reasoning_applied"] is False
+    assert decision["detail"] == (
+        "exact seat/provider/model/reasoning/binding entry is enabled; reasoning pin not supported by claude"
+    )
+    admission = next(item for item in resolution.receipt["admissions"] if item["seat"] == "chef")
+    assert admission["reasoning"] == "high"
 
 
 def _reasoning_adapter_roster() -> Roster:
@@ -403,6 +412,30 @@ def test_admitted_reasoning_is_preserved_for_reasoning_adapters():
 
     assert resolution.error is None
     assert resolution.roster.agents["coder"].reasoning == "high"
+    decision = next(item for item in resolution.receipt["decisions"] if item["seat"] == "coder")
+    assert decision["reasoning_applied"] is True
+    assert decision["detail"] == "exact seat/provider/model/reasoning/binding entry is enabled"
+    admission = next(item for item in resolution.receipt["admissions"] if item["seat"] == "coder")
+    assert admission["reasoning"] == "high"
+
+
+def test_admitted_blank_reasoning_is_not_applied_as_a_pin():
+    resolution = aboyeur.resolve_fleet_model_policy(
+        _reasoning_adapter_roster(),
+        worker="coder",
+        snapshot=_versioned_snapshot(
+            _versioned_seat("coder", "openai", "gpt-5.6-terra", reasoning="   ", instance_id="codex"),
+        ),
+    )
+
+    assert resolution.error is None
+    assert resolution.roster.agents["coder"].reasoning is None
+    decision = next(item for item in resolution.receipt["decisions"] if item["seat"] == "coder")
+    assert decision["outcome"] == "enabled"
+    assert decision["reasoning_applied"] is False
+    assert decision["detail"] == "exact seat/provider/model/reasoning/binding entry is enabled"
+    admission = next(item for item in resolution.receipt["admissions"] if item["seat"] == "coder")
+    assert admission["reasoning"] == "   "
 
 
 def test_admitted_none_reasoning_is_dropped_for_reasoning_adapters_too():

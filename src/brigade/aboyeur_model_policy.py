@@ -80,14 +80,25 @@ _NO_REASONING_SENTINEL = "none"
 
 
 def _effective_reasoning(aboyeur: Any, cli_ref: str, policy_reasoning: str) -> str | None:
-    """Hub reasoning is a required column: ``"none"`` is its placeholder, and only
-    some adapters accept a pin at all. Either case leaves the launch spec unpinned;
-    the admission receipt still carries the Hub's exact value."""
-    if policy_reasoning.strip().lower() == _NO_REASONING_SENTINEL:
+    """Hub reasoning is a required column: ``"none"`` is its placeholder, a blank
+    string pins nothing, and only some adapters accept a pin at all. Each case
+    leaves the launch spec unpinned; the admission receipt still carries the Hub's
+    exact value, so the decision records whether the pin was applied."""
+    if not _is_reasoning_pin(policy_reasoning):
         return None
     if not aboyeur.agents.supports_reasoning(cli_ref):
         return None
     return policy_reasoning
+
+
+def _is_reasoning_pin(policy_reasoning: str) -> bool:
+    stripped = policy_reasoning.strip()
+    return bool(stripped) and stripped.lower() != _NO_REASONING_SENTINEL
+
+
+def _reasoning_pin_unsupported(aboyeur: Any, cli_ref: str, policy_reasoning: str) -> bool:
+    """True when a real Hub pin was dropped because the bound adapter takes none."""
+    return _is_reasoning_pin(policy_reasoning) and not aboyeur.agents.supports_reasoning(cli_ref)
 
 
 def _cli_from_binding(aboyeur: Any, instance_id: str) -> str | None:
@@ -437,12 +448,16 @@ def _resolve_versioned(
                 else:
                     outcome = "enabled"
                     detail = "exact seat/provider/model/reasoning/binding entry is enabled"
+                    effective_reasoning = _effective_reasoning(aboyeur, resolved_cli, policy_reasoning)
+                    decision["reasoning_applied"] = effective_reasoning is not None
+                    if _reasoning_pin_unsupported(aboyeur, resolved_cli, policy_reasoning):
+                        detail = f"{detail}; reasoning pin not supported by {resolved_cli}"
                     keep_env = _local_cli_matches_hub_binding(aboyeur, agent, binding)
                     kept_agents[seat] = replace(
                         agent,
                         cli=resolved_cli,
                         model=policy_model,
-                        reasoning=_effective_reasoning(aboyeur, resolved_cli, policy_reasoning),
+                        reasoning=effective_reasoning,
                         command=None,
                         env=agent.env if keep_env else None,
                     )
