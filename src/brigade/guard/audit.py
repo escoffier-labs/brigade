@@ -102,6 +102,7 @@ def run_audit(
     options: ScanOptions | None = None,
     exclude_dirs: Iterable[str] = DEFAULT_EXCLUDE_DIR_NAMES,
     baseline: Baseline | None = None,
+    baseline_path: Path | None = None,
 ) -> AuditReport:
     """Walk `target` per `scope`, scan each text file, and aggregate."""
 
@@ -117,8 +118,13 @@ def run_audit(
     options = options or ScanOptions()
     report = AuditReport(target=str(target), scope=scope)
     paths = _enumerate(target, scope=scope, exclude_dirs=frozenset(exclude_dirs))
+    # A baseline file records the literals it accepts, so scanning it would
+    # rediscover every one of them as an unbaselined finding.
+    skip = baseline_path.resolve() if baseline_path else None
 
     for path in paths:
+        if skip is not None and path.resolve() == skip:
+            continue
         text = _read_text(path)
         if text is None:
             continue

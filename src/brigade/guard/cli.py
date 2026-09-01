@@ -323,9 +323,17 @@ def _audit(args: argparse.Namespace) -> int:
     policy = load_policy(args.policy) if args.policy else _default_repo_policy()
     options = _options(args)
 
-    baseline = load_baseline(Path(args.baseline)) if getattr(args, "baseline", None) else None
+    baseline_path = Path(args.baseline) if getattr(args, "baseline", None) else None
+    baseline = load_baseline(baseline_path) if baseline_path else None
 
-    report = run_audit(target, policy=policy, scope=args.scope, options=options, baseline=baseline)
+    report = run_audit(
+        target,
+        policy=policy,
+        scope=args.scope,
+        options=options,
+        baseline=baseline,
+        baseline_path=baseline_path,
+    )
 
     if args.json:
         print(json.dumps(report.to_payload(), indent=2, sort_keys=True))

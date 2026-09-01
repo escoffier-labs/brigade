@@ -220,6 +220,33 @@ class AuditCliTests(unittest.TestCase):
         offenders = {entry["path"] for entry in payload["top_offenders"]}
         self.assertEqual(offenders, {"fresh.md"})
 
+    def test_audit_does_not_scan_the_baseline_file_itself(self) -> None:
+        """A baseline records the literals it accepts, so scanning it re-finds them."""
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_repo(repo)
+            (repo / "legacy.md").write_text("Service runs on 192.168.99.10.\n")
+            subprocess.run(["git", "add", "legacy.md"], cwd=repo, check=True)
+            baseline = repo / ".content-guard-baseline.json"
+            self._baseline_init(repo, str(repo), "--scope", "tracked", "--output", str(baseline))
+            subprocess.run(["git", "add", "-f", ".content-guard-baseline.json"], cwd=repo, check=True)
+
+            proc = self._audit(
+                repo,
+                str(repo),
+                "--scope",
+                "tracked",
+                "--baseline",
+                str(baseline),
+                "--strict",
+                "--json",
+            )
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)
+        offenders = {entry["path"] for entry in payload["top_offenders"]}
+        self.assertNotIn(".content-guard-baseline.json", offenders)
+
     def _baseline_init(self, cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, "-m", "brigade.guard", "baseline", "init", *args],
