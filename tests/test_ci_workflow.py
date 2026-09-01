@@ -241,7 +241,14 @@ def test_ci_workflow_does_not_skip_docs_only_content_guard():
 
     assert "paths-ignore:" not in text
     assert "content-guard:" in text
-    assert "python -m content_guard scan" in text
+    # Scans with the guard this repo ships. The retired standalone repo is
+    # archived, so a pinned checkout of it could never receive a fix.
+    assert "python -m brigade.guard audit" in text
+    assert "python -m content_guard scan" not in text
+    # Without --strict the job cannot fail; without --baseline it fails on the
+    # existing synthetic corpus. Both are load-bearing.
+    assert "--strict" in text
+    assert "--baseline .content-guard-baseline.json" in text
 
 
 def test_repo_metadata_command_inventory_failure_is_actionable_and_preserves_status():
