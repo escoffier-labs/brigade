@@ -151,6 +151,46 @@ services. Old sidecar coexistence stays in place; PR4 owns cutover.
 5. Remove the supported-user dependency on `grokbot-dispatch-mcp` and archive
    it after the soak period.
 
+## Retirement and rollback window
+
+Cutover completed 2026-08-30 through PR #1340. The supported-user dependency on
+`grokbot-dispatch-mcp` is removed: every component installs from `brigade-cli`.
+
+Cutover evidence receipts:
+
+| Check | Receipt |
+|---|---|
+| operator doctor | `20260830-232314-work-verify-ba4e0a` |
+| operator canary | `20260830-232323-work-verify-eebaaa` |
+| scout canary | `20260830-232349-work-verify-406202` |
+| worker canary | `20260830-232355-work-verify-daf610` |
+| fleet canary | `20260830-232406-work-verify-6b5d73` |
+| cerebro doctor | `20260830-232548-work-verify-08ca1e` |
+| cerebro canary | `20260830-232553-work-verify-f4c8a7` |
+| authenticated edge inventory | `20260830-232823-work-verify-755850` |
+
+The legacy dispatch, Cerebro, and Fleet services are stopped and disabled. Their
+unit files are retained so the operator can roll back inside the window without
+rebuilding them.
+
+Soak blockers. These must close before the window ends:
+
+- #1343: hub-side feed and control authorization, plus the feed-authority
+  doctor check. Until it lands, acceptance item 2 is false for the Repository
+  Scout lane under hub authority, and a refused feed lane reports a green
+  doctor while the queue stays empty.
+- #1345: Grok stop-reason casing, which reports a finished run as an
+  output-validation failure.
+- #1346: hub model admission applied the "none" reasoning placeholder as a real
+  pin, which made claude seats un-dispatchable.
+
+Window end: 2026-09-14 (operator to confirm). Closing the window requires every
+pack doctor and canary green across the soak period, no rollback invoked, and
+all three blockers closed. Delete the retained unit files only after that.
+
+Archiving the `grokbot-dispatch-mcp` repository is an out-of-repo operator
+action taken after the window closes. Brigade adds no tooling for it.
+
 ## Compatibility
 
 - Current Grok Bot connector URLs remain stable during the migration.
@@ -196,6 +236,9 @@ services. Old sidecar coexistence stays in place; PR4 owns cutover.
    canary.
 5. One AutomationFinding reaches the owner's review inbox exactly once with a
    delivery receipt. Report text does not enter Fleet Hub or Brigade receipts.
+   The `operations-relay` connector and its `submit_automation_finding` tool
+   are the supported ingress for a generic Bot result, alongside the existing
+   CLI manifest path.
 6. Rocinante receives the handoff through the normal memory path without a
    manual request to Grok Bot.
 7. Disabling the old sidecar does not break supported Brigade functionality.

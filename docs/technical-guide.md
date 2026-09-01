@@ -120,7 +120,7 @@ Jules Cloud uses the alpha `https://jules.googleapis.com/v1alpha` API with `X-Go
 
 ### Grok Bot local job queue
 
-`brigade run cloud grokbot` creates a private local queue contract. It does not call a live provider, commission Grok Bot, or add a synchronous roster seat. The Brigade package now includes a role-scoped MCP listener for that queue. It runs as its own process while queue authority remains in the selected local Brigade target. See [Grok Bot MCP listener](grokbot-mcp.md) for installation, operations, Cloudflare boundaries, and migration from `grokbot-dispatch-mcp`.
+`brigade run cloud grokbot` creates a private local queue contract. It does not call a live provider, commission Grok Bot, or add a synchronous roster seat. The Brigade package now includes a role-scoped MCP listener for that queue. It runs as its own process while queue authority remains in the selected local Brigade target. See [Grok Bot MCP listener](grokbot-mcp.md) for installation, operations, and Cloudflare boundaries, and [Grok Bot operating guide](grokbot-operating-guide.md) for the pack reference, queue actor authorization, lifecycle semantics, finding delivery, and Bot configuration.
 
 Queue data lives below `.brigade/cloud/grokbot/` with private file permissions. Submit a complete task envelope from a JSON file with `enqueue --spec`; do not put task instructions, verification commands, credentials, headers, environment values, or artifact bodies on the command line. The envelope identifies a bounded role, repository, base ref, owned paths, artifact kind, and timeout. Completion reads a second JSON file with `complete --artifact`; it accepts artifact references only, such as a GitHub draft-PR URL and branch, a branch and commit, or a report path and SHA-256.
 
