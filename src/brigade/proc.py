@@ -612,7 +612,9 @@ class ByteBudget:
             return not self.overflowed
         with self._lock:
             self.observed += n
-            if self.used + n > self.max_bytes:
+            # Latch: once the ceiling is crossed this never reports True again,
+            # or a later small write would wave the reader past an overflow.
+            if self.overflowed or self.used + n > self.max_bytes:
                 self.overflowed = True
                 return False
             self.used += n

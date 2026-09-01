@@ -637,11 +637,15 @@ class CodexThread:
         raw = delta.encode("utf-8")
         taken = self._server.capture_budget(self.thread_id).accept(len(raw))
         if taken < len(raw):
-            # Budget spent: the head is already retained in ``deltas``, so the
-            # rest rolls through the shared tail. The final answer lives at the
-            # end of the stream and must survive.
-            deltas.setdefault(item_id, [])
-            self._append_tail(delta)
+            # Budget exhausted mid-delta. Retain the prefix the budget was
+            # charged for, then roll the remainder through the shared tail; the
+            # final answer lives at the end of the stream and must survive.
+            chunks = deltas.setdefault(item_id, [])
+            if taken > 0:
+                chunks.append(raw[:taken].decode("utf-8", errors="ignore"))
+                self._append_tail(raw[taken:].decode("utf-8", errors="ignore"))
+            else:
+                self._append_tail(delta)
             return True
         deltas.setdefault(item_id, []).append(delta)
         return True
@@ -662,6 +666,12 @@ class CodexThread:
         observed = None
         if turn_id and callable(consume):
             observed = consume(self.thread_id, turn_id)
+        stream_budget = getattr(self._server, "_stream_budget", None)
+        stream_observed = (
+            stream_budget.observed
+            if stream_budget is not None
+            else self._server.capture_budget(self.thread_id).observed
+        )
         return TurnResult(
             text=proc_mod.bound_text_ends(self._salvage(deltas, completed_texts)),
             ok=False,
@@ -670,8 +680,12 @@ class CodexThread:
             detail=f"combined output exceeded {proc_mod.MAX_STREAM_BYTES} stream byte limit"[:200],
             output_limit_exceeded=True,
             completed_observed=observed == "completed",
-            output_bytes=self._server.capture_budget(self.thread_id).observed,
-            output_cap_bytes=proc_mod.MAX_CAPTURE_BYTES,
+            # This path is reached because the *stream* ceiling tripped, so the
+            # receipt must report the stream volume against the stream ceiling.
+            # Reporting the per-thread retention budget here made the run record
+            # describe a limit that was not the one that fired.
+            output_bytes=stream_observed,
+            output_cap_bytes=proc_mod.MAX_STREAM_BYTES,
         )
 
     def _finish(self, completed, deltas: dict, completed_texts: list[str]) -> TurnResult:
@@ -749,4 +763,3 @@ class CodexThread:
         if not head:
             return tail
         return proc_mod.bound_text(head, proc_mod.MAX_CAPTURE_BYTES // 2) + proc_mod.TRUNCATION_MARKER + tail
-        return ""
