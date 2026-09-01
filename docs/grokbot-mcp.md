@@ -180,6 +180,61 @@ An operator may run the apply command hourly with systemd. Replace the executabl
 systemd-run --user --on-calendar=hourly --unit=brigade-grokbot-scout-feed --collect /usr/local/bin/brigade run cloud grokbot scout-feed --target /srv/brigade --policy /etc/brigade/grokbot-scout-feed.json --apply
 ```
 
+## Approved build selector
+
+`build-feed` is the worker-side twin of `scout-feed`. It finds one open GitHub
+issue for an implementation-worker job whose only artifact is a draft pull
+request. A second GitHub approval label is the operator gate, so approving a
+scout never approves a build. The command does not read issue titles, bodies, or
+comments into queue state or command output: the queue sees the issue number,
+the issue URL, and the constraints in the private policy.
+
+Store the policy as a regular file owned by the current user and readable only
+by that owner. Do not use a symlink. `approval_label` defaults to
+`grokbot-build-approved` and `require_scout_report` defaults to `false`:
+
+```json
+{
+  "schema": "brigade.grokbot.build-feed.v1",
+  "approved": true,
+  "repository": "example/brigade",
+  "approval_label": "grokbot-build-approved",
+  "base_ref": "main",
+  "ownership_paths": ["src/brigade", "tests"],
+  "verification_commands": [".venv/bin/pytest -q tests/test_grokbot_build_feed.py"],
+  "timeout_seconds": 7200,
+  "daily_limit": 3,
+  "require_scout_report": false
+}
+```
+
+```bash
+chmod 600 /etc/brigade/grokbot-build-feed.json
+brigade run cloud grokbot build-feed --target . --policy /etc/brigade/grokbot-build-feed.json
+brigade run cloud grokbot build-feed --target . --policy /etc/brigade/grokbot-build-feed.json --apply
+```
+
+The first command is preview-only. `--apply` may create at most one job per
+invocation. `daily_limit` includes every implementation-worker job created that
+UTC day, including failed and expired attempts; preview counts the local queue,
+and apply counts the hub queue under hub authority. Selection takes the lowest
+open issue number carrying the label that has no queue record yet, so a repeated
+run does not re-enqueue an issue that already has a job.
+
+When a completed Repository Scout report snapshot for the same issue is already
+on the queue target, the build job names that report's job id and tells the
+worker to retrieve it through the operator report path. Report text is never
+copied into the job. Set `require_scout_report` to `true` to hold every issue
+that has no such report; the selector then reports `scout-report-missing`
+instead of queueing blind work.
+
+An operator may run the apply command hourly with systemd. Replace the
+executable and policy paths with the local approved locations:
+
+```bash
+systemd-run --user --on-calendar=hourly --unit=brigade-grokbot-build-feed --collect /usr/local/bin/brigade run cloud grokbot build-feed --target /srv/brigade --policy /etc/brigade/grokbot-build-feed.json --apply
+```
+
 ## Report reconciliation
 
 Completed Repository Scout reports stay in the private queue snapshot until an operator asks Brigade to turn them into Memory Handoff drafts for canonical-owner review. The command never edits canonical memory, `MEMORY.md`, or memory cards.
