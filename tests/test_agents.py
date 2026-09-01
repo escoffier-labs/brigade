@@ -2283,3 +2283,9 @@ def test_missing_cloudflare_ai_gateway_env_vars_empty_string_counts_as_missing()
             "CLOUDFLARE_GATEWAY_ID": "fake-gateway-id-for-test",
         }
     ) == ["CLOUDFLARE_ACCOUNT_ID"]
+
+
+def test_build_argv_rejects_reasoning_pin_for_claude():
+    with pytest.raises(ValueError) as excinfo:
+        agents.build_argv("claude", "hi", read_only=True, reasoning="high")
+    assert "does not support reasoning pins (supported: codex, grok, opencode, pi)" in str(excinfo.value)
