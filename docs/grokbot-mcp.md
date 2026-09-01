@@ -174,6 +174,10 @@ brigade run cloud grokbot scout-feed --target . --policy /etc/brigade/grokbot-sc
 
 The first command is preview-only. `--apply` may create at most one job per invocation. `daily_limit` includes every Repository Scout job created that UTC day, including failed and expired attempts. The adapter cannot infer the remaining Grok Bot quota percentage.
 
+An issue counts as known only while the queue still holds a job for it. Apply is the check that counts: it re-lists at the hub under hub authority, and reads the local queue under local authority, then confirms the job named by the local idempotency record or task snapshot against that listing. A job the granted listing omits, and a job the queue reports as `expired`, `failed`, or `canceled`, are both weaker than the local record that named them, so the issue stays selectable. A `completed` job keeps its issue known until the approval label is removed. Each retry moves to a fresh idempotency key, so the queue's own idempotency cannot answer a retry with the dead job it replaced; the retry still counts against `daily_limit` for that UTC day. Retries stop after ten revisions for one issue.
+
+Preview reads the local queue only, so under hub authority it holds no listing and cannot see live jobs. It reports evidence it cannot confirm as not yet known, which is what keeps it from naming an issue that apply then refuses. It may still name an issue that already has a live or completed hub job; apply is what settles that. Both results carry a `known` count and a `terminal_retry_candidates` count over the approved open issues. `all-known` means every one of them has a job the queue still stands behind.
+
 An operator may run the apply command hourly with systemd. Replace the executable and policy paths with the local approved locations:
 
 ```bash
