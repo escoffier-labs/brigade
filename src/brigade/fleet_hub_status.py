@@ -95,14 +95,10 @@ def clamp_board_offset(raw: object) -> int:
     return min(value, BOARD_OFFSET_MAX)
 
 
-def clamp_board_limit(raw: object, *, default: int = BOARD_LIMIT) -> int:
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
+def clamp_board_limit(raw: int, *, default: int = BOARD_LIMIT) -> int:
+    if raw < 1:
         return default
-    if value < 1:
-        return default
-    return min(value, BOARD_LIMIT)
+    return min(raw, BOARD_LIMIT)
 
 
 def latest_status(
