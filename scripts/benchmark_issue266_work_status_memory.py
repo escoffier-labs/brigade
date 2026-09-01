@@ -211,10 +211,7 @@ def main() -> int:
             "peak_rss_mib_max": args.daily_status_peak_rss_mib_max,
         },
     }
-    budget_results = [
-        _budget_result(name, commands[name], budgets[name])
-        for name in ("work_brief", "daily_status")
-    ]
+    budget_results = [_budget_result(name, commands[name], budgets[name]) for name in ("work_brief", "daily_status")]
     payload = {
         "issue": 266,
         "phase": args.phase,
