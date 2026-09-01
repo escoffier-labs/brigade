@@ -466,6 +466,57 @@ def _finish_resume_receipt(
     return 0
 
 
+def _finish_direct_worker_resume_receipt(
+    run_dir: Path,
+    run_meta: dict,
+    final: agents.AgentResult,
+    *,
+    worker: str,
+) -> int:
+    """Terminalize a resumed ``--worker`` result without chef synthesis labels.
+
+    A failed direct worker is still the user-visible result: write ``final.txt``,
+    type ``failure_phase`` from the worker (or ``dispatch``), and attribute the
+    seat to the worker. Reusing ``_finish_resume_receipt`` would mislabel this
+    as a chef synthesis failure.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    run_meta.setdefault("resumed_at", []).append(now)
+    (run_dir / "final.txt").write_text(final.text + "\n")
+    if not final.ok:
+        bounded_detail = (final.detail or "worker failed")[:2000]
+        failure_phase = final.failure_phase or "dispatch"
+        _archive_failure(run_meta)
+        run_meta["status"] = "failed"
+        run_meta["error"] = bounded_detail
+        run_meta["failure_phase"] = failure_phase
+        run_meta["failure"] = {
+            "phase": failure_phase,
+            "kind": final.failure_kind or "agent-error",
+            "detail": bounded_detail,
+            "seat": worker,
+        }
+        _refresh_run_timing(run_meta)
+        try:
+            aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
+        except run_lifecycle.LifecycleJournalError as exc:
+            raise runguard.RetainRunLockError(f"failed to write failed-worker run receipt: {exc}") from exc
+        print(f"error: worker failed: {final.detail}", file=sys.stderr)
+        if final.text:
+            print(final.text)
+        return 2
+    run_meta["status"] = "ok"
+    run_meta.pop("error", None)
+    _archive_failure(run_meta)
+    _refresh_run_timing(run_meta)
+    try:
+        aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
+    except run_lifecycle.LifecycleJournalError as exc:
+        raise runguard.RetainRunLockError(f"failed to write successful-worker run receipt: {exc}") from exc
+    print(final.text)
+    return 0
+
+
 def resume(run_dir: Path) -> int:
     run_dir = run_dir.expanduser().resolve()
     run_meta = _load_json(run_dir, "run.json")
@@ -750,6 +801,9 @@ def _resume_locked(
             # observed byte count, the configured cap, and the output-limit
             # classification for every resumed run.
             failure_kind=r.get("failure_kind"),
+            failure_phase=(
+                r.get("failure_phase") if not r.get("ok") and isinstance(r.get("failure_phase"), str) else None
+            ),
             output_truncated=bool(r.get("output_truncated")),
             output_bytes=int(r.get("output_bytes") or 0),
             output_cap_bytes=int(r.get("output_cap_bytes") or 0),
@@ -781,17 +835,28 @@ def _resume_locked(
                 text="",
                 ok=False,
                 detail="direct worker produced no result",
+                failure_phase="dispatch",
             )
         )
         final = agent_result_from_worker(direct_result)
+        synthesis_result: dict[str, object] = {"ok": final.ok, "detail": final.detail, "text": final.text}
+        if final.failure_phase is not None:
+            synthesis_result["failure_phase"] = final.failure_phase
+        if final.failure_kind is not None:
+            synthesis_result["failure_kind"] = final.failure_kind
         synthesis_payload = receipt_schema.synthesis_document(
             mode="direct-worker",
             worker=run_meta.get("worker") if isinstance(run_meta.get("worker"), str) else None,
-            result={"ok": final.ok, "detail": final.detail, "text": final.text},
+            result=synthesis_result,
             ground_truth=ground_truth,
         )
         aboyeur.write_sidecar_revision(run_dir, "synthesis.json", synthesis_payload)
-        return _finish_resume_receipt(run_dir, run_meta, final, seat=roster.orchestrator)
+        return _finish_direct_worker_resume_receipt(
+            run_dir,
+            run_meta,
+            final,
+            worker=str(run_meta.get("worker") or direct_result.worker),
+        )
     synth_prompt = aboyeur.build_synth_prompt(
         task,
         worker_results,

@@ -1206,6 +1206,10 @@ def _interrupted_resume_run(
 class _SandboxRecordingServer:
     def __init__(self, *a, **k):
         self.resumed = []
+        self.turn_ok = True
+        self.turn_text = "finished now"
+        self.turn_detail = ""
+        self.turn_status = "complete"
 
     def start(self):
         pass
@@ -1217,6 +1221,7 @@ class _SandboxRecordingServer:
         from brigade import codex_appserver
 
         self.resumed.append({"thread_id": thread_id, "sandbox": sandbox, "model": model})
+        owner = self
 
         class _Thread:
             def __init__(self, thread_id):
@@ -1224,9 +1229,10 @@ class _SandboxRecordingServer:
 
             def run_turn(self, prompt, *, timeout, on_event=None):  # noqa: ARG002
                 return codex_appserver.TurnResult(
-                    text="finished now",
-                    ok=True,
-                    status="complete",
+                    text=owner.turn_text,
+                    ok=owner.turn_ok,
+                    status=owner.turn_status,
+                    detail=owner.turn_detail,
                     thread_id=self.thread_id,
                 )
 
@@ -1279,6 +1285,42 @@ def test_direct_worker_resume_skips_chef_and_keeps_worker_result(tmp_path, monke
     assert synthesis["result"]["text"] == "finished now"
     assert (run_dir / "final.txt").read_text().strip() == "finished now"
     assert json.loads((run_dir / "run.json").read_text())["status"] == "ok"
+
+
+def test_direct_worker_resume_failed_worker_keeps_worker_failure_typing(tmp_path, monkeypatch, capsys):
+    from brigade import run_resume
+
+    run_dir = _interrupted_resume_run(tmp_path, worker="coder", direct_worker=True)
+    server = _SandboxRecordingServer()
+    server.turn_ok = False
+    server.turn_text = "partial worker output"
+    server.turn_detail = "provider hung up"
+    server.turn_status = "failed"
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", lambda *a, **k: server)
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        raise AssertionError("direct-worker resume must not invoke chef")
+
+    monkeypatch.setattr(run_resume.agents, "run_agent", fake_run_agent)
+    assert run_resume.resume(run_dir) == 2
+    captured = capsys.readouterr()
+    assert "error: worker failed: provider hung up" in captured.err
+    assert "orchestrator failed during synthesis" not in captured.err
+    assert captured.out.strip() == "partial worker output"
+    assert (run_dir / "final.txt").read_text().strip() == "partial worker output"
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure_phase"] == "dispatch"
+    assert run_meta["failure"] == {
+        "phase": "dispatch",
+        "kind": "agent-error",
+        "detail": "provider hung up",
+        "seat": "coder",
+    }
+    synthesis = json.loads((run_dir / "synthesis.json").read_text())
+    assert synthesis["mode"] == "direct-worker"
+    assert synthesis["result"]["ok"] is False
+    assert synthesis["result"]["text"] == "partial worker output"
 
 
 def test_resume_read_only_sandbox_never_becomes_a_write(tmp_path, monkeypatch):
