@@ -1060,6 +1060,153 @@ def test_hub_snapshot_conflict_preserves_existing_bytes(tmp_path: Path, monkeypa
     assert snapshot.read_bytes() == original
 
 
+def _hub_snapshot_dir(tmp_path: Path) -> Path:
+    return tmp_path / ".brigade" / "cloud" / "grokbot" / "snapshots"
+
+
+def _derived_hub_job_id(key: str) -> str:
+    return f"grokbot-{grokbot_jobs._idempotency_key_hash(key).removeprefix('sha256:')[:24]}"
+
+
+def _hub_listing(*job_ids: str) -> fleet_client_grokbot.GrokbotHubDecision:
+    jobs = [{"job_id": job_id, "state": "queued"} for job_id in job_ids]
+    return fleet_client_grokbot.GrokbotHubDecision(True, "ok", jobs=jobs)
+
+
+def _hub_enqueue_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    outcome,
+    listing,
+) -> list[dict[str, object]]:
+    """Wire one hub-authority enqueue and record every listing probe it makes."""
+    probes: list[dict[str, object]] = []
+    monkeypatch.setattr(fleet_client_grokbot, "hub_configured", lambda: True)
+
+    def enqueue(**_fields: object):
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    def probe(**fields: object):
+        probes.append(fields)
+        if isinstance(listing, BaseException):
+            raise listing
+        return listing
+
+    monkeypatch.setattr(fleet_client_grokbot, "enqueue", enqueue)
+    monkeypatch.setattr(fleet_client_grokbot, "list_jobs", probe)
+    return probes
+
+
+def test_a_hub_enqueue_that_times_out_after_the_commit_keeps_the_snapshot(tmp_path: Path, monkeypatch):
+    job_id = _derived_hub_job_id("in-doubt")
+    probes = _hub_enqueue_probe(
+        monkeypatch,
+        outcome=TimeoutError("client gave up after the hub committed"),
+        listing=_hub_listing(job_id),
+    )
+
+    with pytest.raises(TimeoutError):
+        grokbot_jobs.enqueue(tmp_path, _spec(), "in-doubt", now=NOW)
+
+    # An enqueueing actor holds `list`, not `status`, and the hub scopes the
+    # listing to its queue, so the probe passes no role filter.
+    assert probes == [{"include_all": True}]
+    assert (_hub_snapshot_dir(tmp_path) / f"{job_id}.json").is_file()
+
+
+def test_a_hub_enqueue_failure_keeps_the_snapshot_when_the_hub_cannot_answer(tmp_path: Path, monkeypatch):
+    job_id = _derived_hub_job_id("unavailable")
+    probes = _hub_enqueue_probe(
+        monkeypatch,
+        outcome=fleet_client_grokbot.GrokbotHubDecision(False, "refused"),
+        listing=fleet_client_grokbot.GrokbotHubDecision(False, "hub-unavailable"),
+    )
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^refused$"):
+        grokbot_jobs.enqueue(tmp_path, _spec(), "unavailable", now=NOW)
+
+    assert probes == [{"include_all": True}]
+    assert (_hub_snapshot_dir(tmp_path) / f"{job_id}.json").is_file()
+
+
+def test_a_hub_enqueue_failure_keeps_the_snapshot_when_the_listing_is_refused(tmp_path: Path, monkeypatch):
+    job_id = _derived_hub_job_id("auth-refused")
+    probes = _hub_enqueue_probe(
+        monkeypatch,
+        outcome=fleet_client_grokbot.GrokbotHubDecision(False, "refused"),
+        listing=fleet_client_grokbot.GrokbotHubDecision(False, "auth-failed"),
+    )
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^refused$"):
+        grokbot_jobs.enqueue(tmp_path, _spec(), "auth-refused", now=NOW)
+
+    assert probes == [{"include_all": True}]
+    assert (_hub_snapshot_dir(tmp_path) / f"{job_id}.json").is_file()
+
+
+def test_a_hub_enqueue_failure_keeps_the_snapshot_when_the_probe_raises(tmp_path: Path, monkeypatch):
+    job_id = _derived_hub_job_id("probe-raises")
+    probes = _hub_enqueue_probe(
+        monkeypatch,
+        outcome=TimeoutError("client gave up after the hub committed"),
+        listing=RuntimeError("the listing itself failed"),
+    )
+
+    with pytest.raises(TimeoutError):
+        grokbot_jobs.enqueue(tmp_path, _spec(), "probe-raises", now=NOW)
+
+    assert probes == [{"include_all": True}]
+    assert (_hub_snapshot_dir(tmp_path) / f"{job_id}.json").is_file()
+
+
+@pytest.mark.parametrize("reason", ["idempotency-conflict", "operation-mismatch"])
+def test_a_duplicate_key_refusal_keeps_the_snapshot_without_probing_the_hub(tmp_path: Path, monkeypatch, reason: str):
+    job_id = _derived_hub_job_id(f"duplicate-{reason}")
+    probes = _hub_enqueue_probe(
+        monkeypatch,
+        outcome=fleet_client_grokbot.GrokbotHubDecision(False, reason),
+        listing=_hub_listing(),
+    )
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match=f"^{reason}$"):
+        grokbot_jobs.enqueue(tmp_path, _spec(), f"duplicate-{reason}", now=NOW)
+
+    assert probes == []
+    assert (_hub_snapshot_dir(tmp_path) / f"{job_id}.json").is_file()
+
+
+def test_a_plain_refusal_removes_the_snapshot_when_the_hub_holds_no_such_job(tmp_path: Path, monkeypatch):
+    job_id = _derived_hub_job_id("refused")
+    probes = _hub_enqueue_probe(
+        monkeypatch,
+        outcome=fleet_client_grokbot.GrokbotHubDecision(False, "invalid-request"),
+        listing=_hub_listing("grokbot-someone-elses-job"),
+    )
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-request$"):
+        grokbot_jobs.enqueue(tmp_path, _spec(), "refused", now=NOW)
+
+    assert probes == [{"include_all": True}]
+    assert not (_hub_snapshot_dir(tmp_path) / f"{job_id}.json").exists()
+
+
+def test_a_refusal_keeps_the_snapshot_when_the_hub_still_holds_the_job(tmp_path: Path, monkeypatch):
+    job_id = _derived_hub_job_id("held")
+    probes = _hub_enqueue_probe(
+        monkeypatch,
+        outcome=fleet_client_grokbot.GrokbotHubDecision(False, "refused"),
+        listing=_hub_listing("grokbot-someone-elses-job", job_id),
+    )
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^refused$"):
+        grokbot_jobs.enqueue(tmp_path, _spec(), "held", now=NOW)
+
+    assert probes == [{"include_all": True}]
+    assert (_hub_snapshot_dir(tmp_path) / f"{job_id}.json").is_file()
+
+
 def test_configured_hub_enqueue_is_fail_closed_and_local_only_without_hub(tmp_path: Path, monkeypatch):
     handle = grokbot_jobs.enqueue(tmp_path, _spec(), "local-only", now=NOW)
     assert handle["state"] == "queued"

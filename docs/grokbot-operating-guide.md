@@ -102,6 +102,25 @@ the fixed hub before you rely on a feed lane that reads the queue. A worker's
 role is fixed by its enrolled policy: a worker that asks for a different role
 is refused, and so is a job outside its queue or role.
 
+### Approval labels
+
+Work enters the queue through GitHub labels, one label per role. Labelling an
+issue for a scout does not approve a build, and a build never starts from an
+issue that was only scout-approved:
+
+| Approval label | Selector | What it produces |
+|---|---|---|
+| `grokbot-scout-approved` | `brigade run cloud grokbot scout-feed` | one read-only Repository Scout report |
+| `grokbot-build-approved` | `brigade run cloud grokbot build-feed` | one implementation-worker draft pull request |
+
+Both labels are named in their own private policy file, so an operator can
+rename either one without touching the other. The intended flow is scout first,
+then build: when the scout's report snapshot for that issue is still on the
+queue target, `build-feed` names it in the worker job so the build starts from
+the report instead of re-reading the repository from scratch. Setting
+`require_scout_report` to `true` in the build policy makes that ordering
+mandatory.
+
 ### Leases
 
 A lease runs from 30 seconds to 3600 seconds and defaults to 300 seconds. The

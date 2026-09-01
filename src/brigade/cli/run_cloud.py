@@ -179,6 +179,10 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     p_scout_feed.add_argument("--policy", type=Path, required=True, help="Path to the approved private scout policy.")
     p_scout_feed.add_argument("--apply", action="store_true", help="Enqueue after selection. Default is preview only.")
 
+    from . import run_cloud_build_feed
+
+    run_cloud_build_feed.register(grokbot_sub, add_target)
+
     p_reconcile = grokbot_sub.add_parser(
         "reconcile-reports",
         help="Preview or draft canonical-owner Memory Handoffs from completed scout reports.",
@@ -990,6 +994,10 @@ def _dispatch_grokbot(args, target: Path) -> int:
         return _dispatch_grokbot_feed(args, target)
     if command == "scout-feed":
         return _dispatch_grokbot_scout_feed(args, target)
+    if command == "build-feed":
+        from . import run_cloud_build_feed
+
+        return run_cloud_build_feed.dispatch(args, target)
     if command == "reconcile-reports":
         return _dispatch_grokbot_reconcile(args, target)
     if command == "reconcile-findings":

@@ -58,8 +58,8 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade roadmap` (extras): 4 command path(s)
 - `brigade roster`: 4 command path(s)
 - `brigade route`: 1 command path(s)
-- `brigade run`: 44 command path(s)
-- `brigade run-cloud` (deprecated; use `brigade run cloud`): 43 command path(s)
+- `brigade run`: 45 command path(s)
+- `brigade run-cloud` (deprecated; use `brigade run cloud`): 44 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
 - `brigade runs`: 19 command path(s)
 - `brigade scrub`: 1 command path(s)
@@ -490,6 +490,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade run cloud compact`
 - `brigade run cloud doctor`
 - `brigade run cloud grokbot ack-cancel`
+- `brigade run cloud grokbot build-feed`
 - `brigade run cloud grokbot canary`
 - `brigade run cloud grokbot cancel`
 - `brigade run cloud grokbot claim`
@@ -533,6 +534,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade run-cloud compact` (deprecated; use `brigade run cloud compact`)
 - `brigade run-cloud doctor` (deprecated; use `brigade run cloud doctor`)
 - `brigade run-cloud grokbot ack-cancel` (deprecated; use `brigade run cloud grokbot ack-cancel`)
+- `brigade run-cloud grokbot build-feed` (deprecated; use `brigade run cloud grokbot build-feed`)
 - `brigade run-cloud grokbot canary` (deprecated; use `brigade run cloud grokbot canary`)
 - `brigade run-cloud grokbot cancel` (deprecated; use `brigade run cloud grokbot cancel`)
 - `brigade run-cloud grokbot claim` (deprecated; use `brigade run cloud grokbot claim`)
