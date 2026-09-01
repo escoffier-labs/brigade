@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -1098,3 +1099,153 @@ def test_apply_relists_the_hub_daily_limit_before_it_enqueues(tmp_path: Path, mo
         "handle": None,
     }
     assert listings == []
+
+
+def _gh_number_sequence(monkeypatch: pytest.MonkeyPatch, listings: list[list[int]]) -> None:
+    """Answer each `gh` issue listing with the next approved set, one per apply."""
+    pending = list(listings)
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self) -> None:
+            self.stdout = json.dumps([{"number": number} for number in pending.pop(0)])
+
+    monkeypatch.setattr(grokbot_scout_feed.shutil, "which", lambda name: "/usr/bin/gh")
+    monkeypatch.setattr(grokbot_scout_feed.subprocess, "run", lambda *args, **kwargs: Result())
+
+
+def test_concurrent_applies_for_distinct_issues_admit_one_job_under_the_local_daily_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Two applies that both selected against an empty queue create one job, not two."""
+    policy = _write_policy(tmp_path / "policy.json", _policy(daily_limit=1))
+    _gh_number_sequence(monkeypatch, [[7], [42]])
+    monkeypatch.setattr(grokbot_build_feed, "_worker_records", lambda _target: [])
+
+    first = grokbot_build_feed.apply(tmp_path, policy, now=NOW)
+    grokbot_jobs.claim(tmp_path, first["handle"]["job_id"], "bot-a", "lease-a", 30, now=NOW)
+    grokbot_jobs.transition(
+        tmp_path, first["handle"]["job_id"], "bot-a", "lease-a", "failed", now=NOW + timedelta(seconds=1)
+    )
+    second = grokbot_build_feed.apply(tmp_path, policy, now=NOW + timedelta(seconds=2))
+
+    assert first["created"] == 1
+    assert first["issue_number"] == 7
+    assert second == {
+        "created": 0,
+        "reason": "daily-limit-reached",
+        "issue_number": None,
+        "daily_limit": 1,
+        "created_today": 1,
+        "scout_report": None,
+        "handle": None,
+    }
+    job_files = list((tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs").glob("*.json"))
+    assert len(job_files) == 1
+    keys = {
+        grokbot_build_feed._build_key("example/brigade", 7),
+        grokbot_build_feed._build_key("example/brigade", 42),
+    }
+    assert len(keys) == 2
+    assert grokbot_build_feed._known_job_id(tmp_path, grokbot_build_feed._build_key("example/brigade", 42)) is None
+
+
+def test_concurrent_applies_for_distinct_issues_admit_one_job_under_the_hub_daily_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The hub relist, not the stale selection read, decides the second distinct issue."""
+    policy = _write_policy(tmp_path / "policy.json", _policy(daily_limit=1))
+    _gh_number_sequence(monkeypatch, [[7], [42]])
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    monkeypatch.setattr(grokbot_build_feed, "_worker_records", lambda _target: [])
+    hub_jobs: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "list_jobs",
+        lambda **_kwargs: _hub_decision(granted=True, reason="ok", jobs=list(hub_jobs)),
+    )
+    attempts: list[str] = []
+
+    def enqueue(**fields: object):
+        job_id = fields["job_id"]
+        assert isinstance(job_id, str)
+        attempts.append(job_id)
+        job = {
+            "job_id": job_id,
+            "role": fields["role"],
+            "state": "queued",
+            "created_at": "2026-08-31T12:00:00Z",
+        }
+        hub_jobs.append(job)
+        return _hub_decision(granted=True, reason="ok", job=job)
+
+    monkeypatch.setattr(fleet_client_grokbot, "enqueue", enqueue)
+
+    first = grokbot_build_feed.apply(tmp_path, policy, now=NOW)
+    hub_jobs[0]["state"] = "failed"
+    second = grokbot_build_feed.apply(tmp_path, policy, now=NOW + timedelta(seconds=2))
+
+    assert first["created"] == 1
+    assert first["issue_number"] == 7
+    assert second == {
+        "created": 0,
+        "reason": "daily-limit-reached",
+        "issue_number": None,
+        "daily_limit": 1,
+        "created_today": 1,
+        "scout_report": None,
+        "handle": None,
+    }
+    assert attempts == [_derived_job_id(grokbot_build_feed._build_key("example/brigade", 7))]
+    assert len(hub_jobs) == 1
+
+
+class _NonPosixOs:
+    """Report a non-POSIX platform while every other `os` attribute stays real."""
+
+    name = "nt"
+
+    def __getattr__(self, attribute: str) -> object:
+        return getattr(os, attribute)
+
+
+def _force_non_posix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Take the descriptor-free branch without breaking pathlib's own platform check."""
+    monkeypatch.setattr(grokbot_build_feed, "os", _NonPosixOs())
+
+
+def test_the_non_posix_queue_walk_refuses_a_symlinked_queue_component(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Without descriptors, each queue component is still lstat-checked, not followed."""
+    (tmp_path / ".brigade" / "cloud").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "snapshots").mkdir(parents=True)
+    (tmp_path / ".brigade" / "cloud" / "grokbot").symlink_to(elsewhere, target_is_directory=True)
+    _force_non_posix(monkeypatch)
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^unsafe-storage$"):
+        grokbot_build_feed._snapshot_job_id(tmp_path, grokbot_build_feed._build_key("example/brigade", 7))
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^unsafe-storage$"):
+        grokbot_build_feed._report_snapshot_exists(tmp_path, "grokbot-" + "a" * 24)
+
+
+def test_the_non_posix_queue_walk_reports_a_missing_component_as_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A queue that was never created reads as absent, and a real one still reads."""
+    key = grokbot_build_feed._build_key("example/brigade", 7)
+    (tmp_path / ".brigade" / "cloud").mkdir(parents=True)
+    _force_non_posix(monkeypatch)
+
+    assert grokbot_build_feed._snapshot_job_id(tmp_path, key) is None
+    assert grokbot_build_feed._report_snapshot_exists(tmp_path, "grokbot-" + "a" * 24) is False
+
+    monkeypatch.undo()
+    derived = _derived_job_id(key)
+    grokbot_jobs._store_task_snapshot(
+        tmp_path, derived, grokbot_jobs._validate_spec(_worker_spec()), grokbot_jobs._idempotency_key_hash(key)
+    )
+    _force_non_posix(monkeypatch)
+
+    assert grokbot_build_feed._snapshot_job_id(tmp_path, key) == derived

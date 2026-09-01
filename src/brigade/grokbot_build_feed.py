@@ -374,8 +374,8 @@ def _report_snapshot_exists(target: Path, job_id: str) -> bool:
 def _queue_directory(target: Path, name: str) -> Iterator[grokbot_jobs._Directory | None]:
     """Open one existing queue subdirectory without creating it or following links."""
     path = Path(target).expanduser() / ".brigade" / "cloud" / "grokbot" / name
-    if os.name != "posix":  # pragma: no cover - exercised on Windows.
-        yield grokbot_jobs._Directory(path, None) if path.is_dir() else None
+    if os.name != "posix":
+        yield _walk_queue_directory(Path(target).expanduser(), name)
         return
     descriptor: int | None = None
     try:
@@ -401,3 +401,26 @@ def _queue_directory(target: Path, name: str) -> Iterator[grokbot_jobs._Director
                 os.close(descriptor)
             except OSError as exc:
                 raise grokbot_jobs.GrokbotJobError("unsafe-storage") from exc
+
+
+def _walk_queue_directory(base: Path, name: str) -> grokbot_jobs._Directory | None:
+    """Resolve the queue subdirectory one component at a time, without descriptors.
+
+    Mirrors the non-POSIX branch of
+    :func:`brigade.grokbot_findings._open_queue_child_readonly`: every component
+    is checked with ``lstat``, so a symlinked or non-directory ``.brigade``,
+    ``cloud``, ``grokbot``, or leaf component is refused instead of followed.
+    A missing component means the queue is simply absent.
+    """
+    current = base
+    for component in (".brigade", "cloud", "grokbot", name):
+        current = current / component
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise grokbot_jobs.GrokbotJobError("unsafe-storage") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise grokbot_jobs.GrokbotJobError("unsafe-storage")
+    return grokbot_jobs._Directory(current, None)
