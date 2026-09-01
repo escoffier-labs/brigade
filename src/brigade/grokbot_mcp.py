@@ -975,8 +975,15 @@ def journal_tool_call(name: object, arguments: object, decision: str, reason: st
 
 
 def configure_journal() -> None:
-    """Send this module's per-call journal lines to stderr at INFO, once."""
+    """Send this module's per-call journal lines to stderr at INFO, once.
+
+    Propagation is switched off so an ancestor handler (root logging under a
+    server framework, for example) cannot emit the same line a second time;
+    the one-line-per-call contract holds regardless of the host's logging
+    configuration.
+    """
     _JOURNAL.setLevel(logging.INFO)
+    _JOURNAL.propagate = False
     if any(getattr(handler, "name", None) == _JOURNAL_HANDLER_NAME for handler in _JOURNAL.handlers):
         return
     handler = logging.StreamHandler()

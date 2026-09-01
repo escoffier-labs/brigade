@@ -2048,3 +2048,32 @@ def test_consecutive_minted_lease_ids_differ(tmp_path: Path):
     ]
     assert minted[0] != minted[1]
     assert len({grokbot_mcp._lease_id({}, mint=True) for _ in range(8)}) == 8
+
+
+def test_journal_lines_do_not_propagate_to_ancestor_handlers(capsys):
+    """A root handler must not duplicate the one-line-per-call journal."""
+    import io
+    import logging
+
+    root = logging.getLogger()
+    sink = io.StringIO()
+    ancestor = logging.StreamHandler(sink)
+    ancestor.setLevel(logging.INFO)
+    previous_level = root.level
+    journal = grokbot_mcp._JOURNAL
+    previous_handlers, previous_propagate = list(journal.handlers), journal.propagate
+    root.addHandler(ancestor)
+    root.setLevel(logging.INFO)
+    try:
+        grokbot_mcp.configure_journal()
+        grokbot_mcp.journal_tool_call("grokbot_queue_list", {}, decision="ok", reason="ok")
+        assert journal.propagate is False
+        captured = capsys.readouterr().err
+    finally:
+        root.removeHandler(ancestor)
+        root.setLevel(previous_level)
+        journal.handlers, journal.propagate = previous_handlers, previous_propagate
+        journal.setLevel(logging.NOTSET)
+    assert previous_propagate is not None
+    assert sink.getvalue() == ""
+    assert captured.count("tool=grokbot_queue_list") == 1
