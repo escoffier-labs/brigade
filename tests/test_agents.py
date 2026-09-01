@@ -1582,7 +1582,8 @@ def test_run_agent_keeps_permission_mode_prompt_separate_from_grok_flags(monkeyp
 
 def test_run_agent_rejects_writable_grok_plain_output(monkeypatch):
     # An older grok build that ignores --output-format json emits bare text.
-    # Surface that as a diagnosable failure, not a silent pass.
+    # Surface that as a diagnosable failure naming the envelope, not a silent
+    # pass and not the generic "no structured final response" detail.
     output = "Implemented the requested change."
     monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
@@ -1592,9 +1593,43 @@ def test_run_agent_rejects_writable_grok_plain_output(monkeypatch):
     assert result.ok is False
     assert result.failure_phase == "output-validation"
     assert result.failure_kind == "malformed-final-output"
-    assert result.detail == "grok exited 0 without a structured final response"
+    assert result.detail == (
+        "grok did not emit an --output-format json envelope; check the grok CLI version "
+        "(need a build that supports --output-format json)"
+    )
     assert result.text == output
     assert result.stdout == output + "\n"
+
+
+def test_run_agent_read_only_plain_output_keeps_generic_final_detail(monkeypatch):
+    # Read-only dispatch pins --json-schema, so bare text there is a missing
+    # structured final, not CLI version skew. Keep the original detail.
+    output = "Implemented the requested change."
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is False
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "malformed-final-output"
+    assert result.detail == "grok exited 0 without a structured final response"
+    assert result.text == output
+
+
+@pytest.mark.parametrize("stop_reason", ["end_turn", "max_turns"])
+def test_run_agent_grok_write_mode_uses_one_final_answer_rule(monkeypatch, stop_reason):
+    # Success and failure paths share one extraction rule: the answer is the
+    # envelope's "text", never a re-parse of a JSON-looking payload inside it.
+    nested = json.dumps({"kind": "answer", "answer": "unwrapped"})
+    stdout = _grok_write_envelope(nested, stop_reason=stop_reason)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+
+    result = agents.run_agent("grok", "implement it", read_only=False, model="grok-4.5")
+
+    assert result.ok is (stop_reason == "end_turn")
+    assert result.text == nested
 
 
 def test_run_agent_reports_invalid_internal_grok_read_only_argv(monkeypatch):

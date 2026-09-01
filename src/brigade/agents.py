@@ -65,6 +65,13 @@ _GROK_RESULT_SCHEMA = json.dumps(
 # than pinning one CLI build. Keep this an explicit set: normalizing by case and
 # underscore would silently admit "endturn", "END_TURN", and future tokens.
 _GROK_SUCCESS_STOP_REASONS = frozenset({"EndTurn", "end_turn"})
+# Write mode only asks for --output-format json, so stdout that does not parse
+# as an envelope is almost always CLI version skew, not a malformed final.
+# Name the envelope so the operator does not read it as a model failure.
+_GROK_MISSING_ENVELOPE_ERROR = (
+    "grok did not emit an --output-format json envelope; check the grok CLI version "
+    "(need a build that supports --output-format json)"
+)
 _GROK_SESSION_RESERVED_ARGUMENTS = ("--resume", "--session-id")
 
 
@@ -390,6 +397,20 @@ def direct_cursor_read_only_limitation(model: str | None) -> str | None:
     return None
 
 
+def _grok_write_final_text(display_text: object, raw: str) -> str:
+    """Write mode's single definition of the final answer.
+
+    The envelope's ``text`` is the answer whenever it is present, on the success
+    path and on every error path alike. Raw stdout only stands in when ``text``
+    is absent or empty, so a run stays diagnosable without a second extraction
+    rule. Unwrapping a nested ``{"kind": "answer"}`` payload belongs to the
+    schema-constrained read-only path, which asks for that shape.
+    """
+    if isinstance(display_text, str) and display_text.strip():
+        return display_text.strip()
+    return raw
+
+
 def _parse_grok_final_output(stdout: str, *, schema_required: bool = True) -> _GrokFinal:
     """Extract a final answer from Grok's JSON envelope.
 
@@ -404,12 +425,16 @@ def _parse_grok_final_output(stdout: str, *, schema_required: bool = True) -> _G
         # A silent exit is not an envelope problem. Leave it to run_agent's
         # empty-output classifier so the trust/permissions hint survives.
         return _GrokFinal(text="", error="")
+    # Read-only dispatch pins --json-schema, so a non-envelope there really is a
+    # missing structured final. Write mode keeps result.text as the raw stdout
+    # either way so the run stays diagnosable.
+    missing_envelope = base_error if schema_required else _GROK_MISSING_ENVELOPE_ERROR
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        return _GrokFinal(text=raw, error=base_error)
+        return _GrokFinal(text=raw, error=missing_envelope)
     if not isinstance(payload, dict):
-        return _GrokFinal(text=raw, error=base_error)
+        return _GrokFinal(text=raw, error=missing_envelope)
 
     diagnostic_parts: list[str] = []
     stop_reason = payload.get("stopReason")
@@ -424,21 +449,13 @@ def _parse_grok_final_output(stdout: str, *, schema_required: bool = True) -> _G
             diagnostic_parts.append("structuredOutputError was present")
 
     display_text = payload.get("text")
-    fallback = display_text.strip() if isinstance(display_text, str) else raw
-    if isinstance(display_text, str):
-        try:
-            nested = json.loads(display_text)
-        except json.JSONDecodeError:
-            nested = None
-        if isinstance(nested, dict) and isinstance(nested.get("answer"), str):
-            fallback = nested["answer"].strip()
-
     successful_stop = stop_reason in _GROK_SUCCESS_STOP_REASONS
     if not schema_required:
+        final_text = _grok_write_final_text(display_text, raw)
         if not successful_stop or structured_error_present:
             detail = f"{base_error} ({'; '.join(diagnostic_parts)})" if diagnostic_parts else base_error
             return _GrokFinal(
-                text=fallback,
+                text=final_text,
                 error=detail,
                 diagnostic=(structured_output_error if isinstance(structured_output_error, str) else ""),
                 session_id=payload.get("sessionId") if isinstance(payload.get("sessionId"), str) else None,
@@ -447,19 +464,28 @@ def _parse_grok_final_output(stdout: str, *, schema_required: bool = True) -> _G
             )
         if not isinstance(display_text, str) or not display_text.strip():
             return _GrokFinal(
-                text=fallback,
+                text=final_text,
                 error=base_error,
                 session_id=payload.get("sessionId") if isinstance(payload.get("sessionId"), str) else None,
                 request_id=payload.get("requestId") if isinstance(payload.get("requestId"), str) else None,
                 stop_reason=stop_reason if isinstance(stop_reason, str) else None,
             )
         return _GrokFinal(
-            text=display_text.strip(),
+            text=final_text,
             error="",
             session_id=payload.get("sessionId") if isinstance(payload.get("sessionId"), str) else None,
             request_id=payload.get("requestId") if isinstance(payload.get("requestId"), str) else None,
             stop_reason=stop_reason if isinstance(stop_reason, str) else None,
         )
+
+    fallback = display_text.strip() if isinstance(display_text, str) else raw
+    if isinstance(display_text, str):
+        try:
+            nested = json.loads(display_text)
+        except json.JSONDecodeError:
+            nested = None
+        if isinstance(nested, dict) and isinstance(nested.get("answer"), str):
+            fallback = nested["answer"].strip()
 
     structured = payload.get("structuredOutput")
     answer = structured.get("answer") if isinstance(structured, dict) else None
