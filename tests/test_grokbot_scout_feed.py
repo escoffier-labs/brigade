@@ -1089,9 +1089,7 @@ def test_scout_apply_wake_notify_non_200_does_not_fail_enqueue(tmp_path: Path, m
         server.server_close()
 
 
-def test_scout_apply_wake_notify_timeout_does_not_fail_enqueue(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_scout_apply_wake_notify_timeout_does_not_fail_enqueue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     recorder = _WakeRecorder()
     recorder.delay = 1.0
     server = _start_wake_server(recorder)
