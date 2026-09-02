@@ -292,6 +292,44 @@ class TestHubScopes:
         no_fence.pop("holder")
         assert _post(url, token, no_fence)[0] == 400
 
+    def test_token_less_release_409_uses_in_transaction_prior(self, tmp_path, monkeypatch):
+        """A fenced-out token-less release's 409 owner is the row seen
+        inside the write transaction, not a row that appears after commit.
+
+        #1160 item 2: the failure branch used to re-read after ``commit()``,
+        so a concurrent replace could make the payload describe a different
+        owner than the one that caused the refusal.
+        """
+        db = tmp_path / "hub.db"
+        conn = fleet_hub.init_db(db)
+        try:
+            status, granted = fleet_hub.handle_claim(conn, _claim(holder="h1", conductor="chef"))
+            assert status == 200 and granted["granted"] is True
+            stale = "1999-01-01T00:00:00+00:00"
+            real_fetch = fleet_hub._fetch_claim
+            fetches: list = []
+
+            def fetch_then_lie(c: sqlite3.Connection, target: str):
+                row = real_fetch(c, target)
+                fetches.append(row)
+                # A post-commit re-read that sees a replaced owner. The
+                # in-transaction ``prior`` (first fetch) stays NODE_A/chef.
+                if len(fetches) >= 2 and row is not None:
+                    return (target, NODE_B, "intruder", *row[3:])
+                return row
+
+            monkeypatch.setattr(fleet_hub, "_fetch_claim", fetch_then_lie)
+            body = _claim("release", scope="node", acquired_at=stale)
+            body.pop("holder")
+            status, payload = fleet_hub.handle_claim(conn, body)
+            assert status == 409 and payload["released"] is False
+            assert payload["owner"]["owner_node"] == NODE_A
+            assert payload["owner"]["owner_conductor"] == "chef"
+            assert "re-acquired" in payload["error"]
+            assert f"now acquired {payload['owner']['acquired_at']}" in payload["error"]
+        finally:
+            conn.close()
+
     def test_v2_claim_rows_survive_the_lease_column_upgrade(self, tmp_path):
         db = tmp_path / "hub.db"
         conn = sqlite3.connect(str(db))
@@ -678,6 +716,53 @@ class TestReleaseCli:
         assert json.loads(capsys.readouterr().out)["forced"] is True
         assert fleet_client.fetch_claims() == []
 
+    def test_release_path_proves_deadness_when_claim_has_no_run_dir(self, hub, tmp_path, monkeypatch, capsys):
+        """#1160 item 1: a claim with no recorded ``lock_run_dir``
+        (``--no-artifacts``, or a row predating the lease columns) can be
+        released without ``--force`` when ``--path`` points at the workspace
+        whose own ``run.lock`` is dead.
+        """
+        from brigade import cli, runguard
+
+        url, token, _db = hub
+        _env(monkeypatch, url, token)
+        _bound_find_workspace_to_tmp(monkeypatch, tmp_path)
+        ws = tmp_path / "api"
+        ws.mkdir()
+        _post(url, token, _claim(target="api", holder="bare"))
+        inspect = _claim("inspect", target="api")
+        inspect.pop("holder")
+        probed = _post(url, token, inspect)[1]
+        assert probed["owned"] is True
+        assert probed.get("lock_run_dir") in (None, "")
+        lock = runguard.lock_path(ws)
+        lock.mkdir(parents=True)
+        (lock / "pid").write_text(f"{os.getpid()}\n")
+        assert cli.main(["fleet", "claims", "--release", str(ws), "--path"]) == 1
+        err = capsys.readouterr().err
+        assert "run owner is still alive" in err and str(ws) in err and "--force" in err
+        assert [c["target"] for c in fleet_client.fetch_claims()] == ["api"]
+        (lock / "pid").write_text(f"{DEAD_PID}\n")
+        assert cli.main(["fleet", "claims", "--release", str(ws), "--path", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["released"] is True and payload["forced"] is False
+        assert payload["target"] == "api"
+        assert fleet_client.fetch_claims() == []
+        # Absent lock is also dead enough: no --force required.
+        _post(url, token, _claim(target="api", holder="bare2"))
+        import shutil
+
+        shutil.rmtree(lock)
+        assert cli.main(["fleet", "claims", "--release", str(ws), "--path"]) == 0
+        assert "released claim on 'api'" in capsys.readouterr().out
+        assert fleet_client.fetch_claims() == []
+        # Bare-key mode still cannot prove a NULL run_dir row.
+        _post(url, token, _claim(target="api", holder="bare3"))
+        assert cli.main(["fleet", "claims", "--release", "api"]) == 1
+        err = capsys.readouterr().err
+        assert "cannot verify" in err and "records no run directory" in err and "--force" in err
+        assert [c["target"] for c in fleet_client.fetch_claims()] == ["api"]
+
     def test_release_path_uses_the_workspace_itself(self, hub, tmp_path, monkeypatch, capsys):
         from brigade import cli, node as node_mod
 
@@ -751,7 +836,10 @@ class TestReleaseCli:
             assert "require --release" in capsys.readouterr().err
         monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: "unknown")
         assert cli.main(["fleet", "claims", "--release", "repo-a"]) == 1
-        assert "no usable fleet node identity" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "no usable fleet node identity" in err
+        assert "brigade node --machine" in err
+        assert "or pass --node" not in err
         monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
         monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: NODE_A)
         assert cli.main(["fleet", "claims", "--release", "repo-a"]) == 1
