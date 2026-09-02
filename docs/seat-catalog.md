@@ -17,7 +17,7 @@ Assign every seat one job. Mixed-purpose seats make outcome capture useless beca
 
 ## Lane recipes
 
-Model IDs drift. Every ID below was verified answering on 2026-07-17, with Gemini 3.7 Flash re-verified on both Antigravity and Cursor on 2026-08-13. Confirm against your harness's live inventory before wiring (see the validation pattern at the end, and issue #299 for making that check automatic).
+Model IDs drift. Every ID below was verified answering on 2026-07-17, with Gemini 3.7 Flash re-verified on both Antigravity and Cursor on 2026-08-13. Antigravity 1.1.24 listed Gemini 3.8 Flash effort variants on 2026-09-02 (`gemini-3.8-flash-low` / `Gemini 3.8 Flash (Low)`); confirm against your harness's live inventory before wiring (see the validation pattern at the end, and issue #299 for making that check automatic).
 
 ### Codex / ChatGPT subscription
 
@@ -105,7 +105,7 @@ Often the most idle capacity an operator owns: two accounts can sit at 0-1% of w
 ```toml
 [agents.flash]
 cli = "antigravity"
-model = "Gemini 3.7 Flash (Low)"
+model = "Gemini 3.8 Flash (Low)"
 role = "Fast worker for research, summaries, scans, and small code changes; retain a stronger independent reviewer for security-sensitive or cross-file decisions."
 
 [agents.reviewer2]
@@ -113,6 +113,8 @@ cli = "antigravity"
 model = "Claude Sonnet 4.6 (Thinking)"
 role = "Cross-model reviewer on the Google lane; verify claims without spending the Claude subscription."
 ```
+
+Pin the display name or the effort slug (`gemini-3.8-flash-low`). The published API id `gemini-3.8-flash` is recognized by agy but requires `--effort`; Brigade maps that bare id to the low-effort slug so `brigade run --model gemini-3.8-flash` reaches the same seat.
 
 Harness filters can change the result before inference. In August 2026 author receipts, Antigravity served a Gemini 3.7 Flash security canary that Cursor rejected at the provider boundary. Record provider refusals separately from model output.
 

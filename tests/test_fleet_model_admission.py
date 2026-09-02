@@ -259,6 +259,7 @@ def _assert_admission_provenance(
 def test_model_policy_model_slugifies_display_names_deterministically():
     assert agents.model_policy_model("antigravity", "Gemini 3.7 Flash (Low)") == "gemini-3.7-flash-low"
     assert agents.model_policy_model("antigravity", "  Gemini   3.7 / Flash ((Low))  ") == "gemini-3.7-flash-low"
+    assert agents.model_policy_model("antigravity", "Gemini 3.8 Flash (Low)") == "gemini-3.8-flash-low"
 
 
 def test_model_policy_model_preserves_valid_ids_exactly():
