@@ -535,6 +535,7 @@ def run(
                 scheduler=scheduler,
                 verification_contract_payload=verification_contract_payload,
                 run_budget_payload=run_budget_payload,
+                handoff_inbox=handoff_inbox,
             )
         if output_dir is not None and (output_dir / "run.json").is_file():
             artifacts.record_run_termination(
@@ -581,6 +582,8 @@ def run(
         scheduler_resolution["fallback_reason"] = fallback_reason
 
     def _payload(**kwargs: Any) -> dict[str, object]:
+        if "handoff_inbox" not in kwargs and handoff_inbox is not None:
+            kwargs["handoff_inbox"] = handoff_inbox
         if "skill_route_policy" not in kwargs and skill_policy is not None:
             kwargs["skill_route_policy"] = skill_policy
         if "retry_decisions" not in kwargs and quarantine_state.retry_decisions:
@@ -640,6 +643,8 @@ def run(
                         kwargs["run_budget_payload"] = dict(existing["run_budget"])
                     if "kind" not in kwargs and isinstance(existing.get("kind"), str) and existing["kind"].strip():
                         kwargs["kind"] = existing["kind"].strip()
+                    if "handoff_inbox" not in kwargs and isinstance(existing.get("handoff_inbox"), str):
+                        kwargs["handoff_inbox"] = existing["handoff_inbox"]
                     if "causal_receipt_payload" not in kwargs and isinstance(existing.get("causal_receipt"), dict):
                         kwargs["causal_receipt_payload"] = dict(existing["causal_receipt"])
                     existing_retry = existing.get("retry_decisions")
@@ -754,6 +759,7 @@ def run(
             scheduler=scheduler,
             verification_contract_payload=verification_contract_payload,
             run_budget_payload=run_budget_payload,
+            handoff_inbox=handoff_inbox,
         )
         run_io._write_json(output_dir / "roster.json", _roster_with_admission(roster, model_policy.receipt))
     if code_graph is None:
