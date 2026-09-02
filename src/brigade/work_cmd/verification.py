@@ -31,6 +31,7 @@ from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
 from . import verify_ranking
+from .verify_scoreability import _print_graph_impact, _print_scoreability_notice, _scoreability_notice
 
 
 def _verification_is_windows() -> bool:
@@ -1971,77 +1972,6 @@ def verify_plan(
             print(f"  - {blocker}")
     print(f"run: {payload['suggested_command']}")
     return 0 if not blockers else 1
-
-
-def _print_graph_impact(ranking: object) -> None:
-    if not isinstance(ranking, dict):
-        return
-    if ranking.get("degraded") is True:
-        reason = ranking.get("degraded_reason") or "graphtrail unavailable"
-        print(f"graph_impact: degraded ({reason})")
-        return
-    candidates = ranking.get("candidates") if isinstance(ranking.get("candidates"), list) else []
-    changed = ranking.get("changed_files") if isinstance(ranking.get("changed_files"), list) else []
-    print(f"graph_impact: {len(candidates)} candidate(s) from {len(changed)} changed file(s)")
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        confidence = item.get("confidence") if isinstance(item.get("confidence"), dict) else {}
-        band = confidence.get("band") or "unknown"
-        score = confidence.get("score")
-        hops = confidence.get("min_hops")
-        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
-        via = evidence.get("via") if isinstance(evidence.get("via"), list) else []
-        via_text = ",".join(str(symbol) for symbol in via[:3]) if via else "-"
-        print(f"- [{band} score={score} hops={hops} via={via_text}] {item.get('command')}")
-    note = ranking.get("attribution")
-    if isinstance(note, str) and note.strip() and candidates:
-        print(f"graph_impact_note: {note.strip()}")
-
-
-_ADHOC_SCOREABILITY_REMEDIATION = (
-    "ad-hoc --command/--argv-json receipts are audit-only evidence and never score an artifact; "
-    "run `brigade work verify run --manifest <id>` against a manifest tracked under "
-    "verify/manifests/ to produce a scoreable receipt"
-)
-
-
-def _scoreability_notice(target: Path, receipt: dict[str, Any]) -> dict[str, Any]:
-    """Project whether this receipt can score its ``--capture`` artifact (#1378).
-
-    Eligibility used to be visible only in an aggregate ``work brief`` field, so a
-    session could run dozens of green ``--command --capture`` checks and feed the
-    ratchet nothing while every immediate indicator said otherwise. Project the
-    verdict on the run that produced the receipt instead.
-    """
-    run_dir_value = receipt.get("path")
-    patch_path = (
-        Path(str(run_dir_value)) / "changes.patch" if isinstance(run_dir_value, str) and run_dir_value else None
-    )
-    projection = verify_trial.project_trial(receipt, target=target, patch_path=patch_path)
-    notice: dict[str, Any] = {
-        "eligible": projection.eligible,
-        "reason": projection.reason,
-        "attributed": projection.attributed,
-    }
-    if projection.eligible:
-        return notice
-    notice["registered_manifest_ids"] = verify_manifest.registered_manifest_ids(target)
-    notice["remediation"] = _ADHOC_SCOREABILITY_REMEDIATION
-    return notice
-
-
-def _print_scoreability_notice(notice: dict[str, Any]) -> None:
-    if notice.get("eligible"):
-        print("scoreable: yes")
-        return
-    print(f"warning: scoreable: no (reason={notice.get('reason')}); this receipt cannot score the captured artifact")
-    print(f"  {notice.get('remediation')}")
-    manifest_ids = notice.get("registered_manifest_ids")
-    if isinstance(manifest_ids, list) and manifest_ids:
-        print(f"  registered manifests: {', '.join(manifest_ids)}")
-    else:
-        print("  registered manifests: none tracked under verify/manifests/ in this target")
 
 
 def _attach_miseledger_indexing(
