@@ -843,3 +843,54 @@ def test_cli_feed_apply_omits_wake_key_from_output(tmp_path: Path, capsys):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_worker_instructions_carry_the_five_swarm_contract_rules():
+    """One helper renders the contract, so no feed can drift away from it."""
+    instructions = grokbot_feed.worker_instructions(
+        header="Repository: example/brigade\nIssue number: 7\n",
+        issue_number=7,
+        base_ref="main",
+        verification_commands=[SECRET_VERIFY],
+    )
+
+    assert instructions.startswith("Repository: example/brigade\nIssue number: 7\n\n")
+    assert grokbot_feed.UNTRUSTED_CONTEXT_SENTENCE in instructions
+    assert grokbot_feed.NO_MERGE_SENTENCE in instructions
+
+    coordinator = instructions.index("Coordinator rule: do not write code in your own context.")
+    contract = instructions.index("Job contract:")
+    lease = instructions.index("Lease rule: renew the lease at least every 5 minutes.")
+    cap = instructions.index("Time cap: stop within 60 minutes of claiming this job")
+    proof = instructions.index("Proof rule: run exactly the verification commands named above")
+    assert coordinator < contract < lease < cap < proof
+
+    assert "Spawn one cloud agent for this job" in instructions
+    assert "Prefer a token-efficient worker model" in instructions
+    assert "Keep your own context for planning, lease renewal, reading the worker's proof, and the pull request" in (
+        instructions
+    )
+    assert "Done predicate: the acceptance criteria in the issue's Acceptance or Done section" in instructions
+    assert "otherwise: Implement only the approved issue." in instructions
+    assert "a branch cut from main named cursor/issue-7-<slug>" in instructions
+    assert f"- Verification commands, exactly these:\n  - {SECRET_VERIFY}\n" in instructions
+    assert "Final report: exactly one of PASS, ISSUES, or BLOCKED, with the evidence behind it." in instructions
+    assert "A lease-expired or job-expired answer is a stop signal" in instructions
+    assert "never run the full suite unless it is named there" in instructions
+    assert "Open exactly one draft pull request against the base ref whose body carries Fixes #7" in instructions
+    assert "each verification command with its exit code, and the receipt id" in instructions
+    assert "Complete the job with the pull request URL." in instructions
+    assert "push the branch and fail the job with the exact failing command" in instructions
+
+
+def test_worker_instructions_name_every_verification_command():
+    instructions = grokbot_feed.worker_instructions(
+        header="Repository: example/brigade\n",
+        issue_number=12,
+        base_ref="release/2.0",
+        verification_commands=["ruff check .", "pytest -q tests/test_one.py"],
+    )
+
+    assert "  - ruff check .\n  - pytest -q tests/test_one.py\n" in instructions
+    assert "a branch cut from release/2.0 named cursor/issue-12-<slug>" in instructions
+    assert "Fixes #12" in instructions
