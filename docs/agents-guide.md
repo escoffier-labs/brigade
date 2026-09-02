@@ -117,10 +117,12 @@ From then on, every repo the agent opens gets the work brief injected at session
 Once doctor is healthy, **you** (the coding agent) should prefer:
 
 ```bash
-brigade work verify run --target . --command "<real check>" --capture brigade-work
+brigade work verify run --manifest <path> --capture <id>
 brigade code impact <symbol>    # when a change has blast radius
 brigade evidence search "<query>"  # when you need prior runs or claims
 ```
+
+`--command` and `--argv-json` receipts are audit-only. When dirty paths match a tracked manifest under `verify/manifests/`, `suggested_command` should name that manifest. See [outcome scoring](outcome-scoring.md).
 
 Do not claim tests passed without a real exit code. Prefer Brigade-wrapped verify over raw test commands when the project wires the work loop.
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -414,15 +416,57 @@ def registered_manifest_ids(target: Path) -> list[str]:
     return sorted(set(ids))
 
 
+def _normalize_repo_path(path: str) -> str:
+    return path.replace("\\", "/").lstrip("./")
+
+
+def _workspace_manifest_file_from_selector(target: Path, selector: str) -> Path | None:
+    raw = selector.strip()
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = target / candidate
+    try:
+        resolved = candidate.resolve()
+        workspace_root = _workspace_manifests_root(target).resolve()
+        resolved.relative_to(workspace_root)
+    except (OSError, ValueError):
+        return None
+    if resolved.suffix != ".json" or not resolved.is_file():
+        return None
+    return resolved
+
+
+def _load_tracked_workspace_manifest(
+    target: Path, path: Path, *, selector: str
+) -> tuple[VerifyManifest | None, str | None]:
+    payload = _load_manifest_file(path)
+    manifest_label = selector
+    if isinstance(payload, dict):
+        named = payload.get("manifest_id")
+        if isinstance(named, str) and named.strip():
+            manifest_label = named
+    if not _is_git_tracked(target, path):
+        return None, f"verify manifest not tracked: {manifest_label}"
+    if not isinstance(payload, dict):
+        return None, f"verify manifest not found: {selector}"
+    try:
+        return manifest_from_payload(payload, path=path), None
+    except ValueError as exc:
+        return None, str(exc)
+
+
 def resolve_manifest(target: Path, manifest_id: str) -> tuple[VerifyManifest | None, str | None]:
     target = target.expanduser().resolve()
+    selector = str(manifest_id).strip()
     matches: list[VerifyManifest] = []
     untracked_workspace_match = False
     for path in _discover_manifest_files(target):
         payload = _load_manifest_file(path)
         if not isinstance(payload, dict):
             continue
-        if str(payload.get("manifest_id") or "") != manifest_id:
+        if str(payload.get("manifest_id") or "") != selector:
             continue
         if not _is_builtin_manifest(path) and not _is_git_tracked(target, path):
             untracked_workspace_match = True
@@ -431,13 +475,85 @@ def resolve_manifest(target: Path, manifest_id: str) -> tuple[VerifyManifest | N
             matches.append(manifest_from_payload(payload, path=path))
         except ValueError as exc:
             return None, str(exc)
+    if matches:
+        if len(matches) > 1:
+            return None, f"verify manifest id is ambiguous: {selector}"
+        return matches[0], None
+    path = _workspace_manifest_file_from_selector(target, selector)
+    if path is not None:
+        return _load_tracked_workspace_manifest(target, path, selector=selector)
+    if untracked_workspace_match:
+        return None, f"verify manifest not tracked: {selector}"
+    return None, f"verify manifest not found: {selector}"
+
+
+def _path_matches_subject(subject_path: str | None, candidate: str) -> bool:
+    if not subject_path:
+        return False
+    subject = _normalize_repo_path(subject_path)
+    path = _normalize_repo_path(candidate)
+    if not subject or not path:
+        return False
+    if path == subject:
+        return True
+    return path.startswith(f"{subject.rstrip('/')}/")
+
+
+def _path_matches_scope_glob(pattern: str, candidate: str) -> bool:
+    path = _normalize_repo_path(candidate)
+    glob = pattern.replace("\\", "/")
+    if not path or not glob:
+        return False
+    if fnmatch(path, glob):
+        return True
+    if glob.endswith("/**"):
+        prefix = glob[:-3].rstrip("/")
+        return bool(prefix) and (path == prefix or path.startswith(f"{prefix}/"))
+    return False
+
+
+def manifests_matching_paths(target: Path, paths: Sequence[str]) -> list[VerifyManifest]:
+    """Return tracked workspace manifests whose subject_path or scope_globs cover any path."""
+    target = target.expanduser().resolve()
+    candidates = [str(item).strip() for item in paths if str(item).strip()]
+    if not candidates:
+        return []
+    matches: list[VerifyManifest] = []
+    seen: set[str] = set()
+    for path in _discover_workspace_manifest_files(target, tracked_only=True):
+        payload = _load_manifest_file(path)
+        if not isinstance(payload, dict):
+            continue
+        try:
+            manifest = manifest_from_payload(payload, path=path)
+        except ValueError:
+            continue
+        if manifest.manifest_id in seen:
+            continue
+        if any(
+            _path_matches_subject(manifest.subject_path, item)
+            or any(_path_matches_scope_glob(glob, item) for glob in manifest.scope_globs)
+            for item in candidates
+        ):
+            seen.add(manifest.manifest_id)
+            matches.append(manifest)
+    return matches
+
+
+def suggested_manifest_command(
+    target: Path,
+    paths: Sequence[str],
+    *,
+    capture: str | None = None,
+) -> str | None:
+    """Return a scoreable verify command when a tracked manifest matches dirty paths."""
+    matches = manifests_matching_paths(target, paths)
     if not matches:
-        if untracked_workspace_match:
-            return None, f"verify manifest not tracked: {manifest_id}"
-        return None, f"verify manifest not found: {manifest_id}"
-    if len(matches) > 1:
-        return None, f"verify manifest id is ambiguous: {manifest_id}"
-    return matches[0], None
+        return None
+    manifest = matches[0]
+    source = manifest_source_path(target, manifest) or manifest.manifest_id
+    artifact = capture or manifest.artifact_id
+    return f'brigade work verify run --manifest "{source}" --capture {artifact}'
 
 
 def resolve_subject_fingerprint(target: Path, manifest: VerifyManifest) -> str | None:

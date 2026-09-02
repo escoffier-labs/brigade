@@ -1,0 +1,25 @@
+{
+  "schema": "brigade.verify_manifest.v1",
+  "schema_version": 1,
+  "manifest_id": "fleet-claims",
+  "binding_mode": "patch_backed",
+  "verifier_id": "brigade.verify.pytest",
+  "patch_source": "worktree",
+  "subject": {
+    "artifact_kind": "skill",
+    "artifact_id": "brigade-work",
+    "subject_path": "src/brigade/fleet_hub.py"
+  },
+  "scope_globs": [
+    "src/brigade/fleet_hub.py",
+    "tests/test_fleet_claims.py",
+    "tests/test_fleet_claim_release.py"
+  ],
+  "checks": [
+    {
+      "check_id": "pytest.fleet-claims",
+      "check_role": "effectiveness",
+      "command": "PYTHONPATH=src python3 -m pytest -q tests/test_fleet_claims.py tests/test_fleet_claim_release.py"
+    }
+  ]
+}
