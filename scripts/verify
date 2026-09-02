@@ -15,6 +15,7 @@ if [ -z "${BRIGADE_VERIFY_LOCK_HELD:-}" ]; then
 fi
 
 PY=${PY:-.venv/bin}
+"$PY/python" scripts/verify_env.py
 "$PY/ruff" check .
 "$PY/ruff" format --check .
 "$PY/mypy"

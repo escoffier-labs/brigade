@@ -142,6 +142,7 @@ def test_verify_full_gate_does_not_invoke_external_flock(tmp_path, monkeypatch):
     )
     assert completed.returncode == 0
     assert log_path.read_text().splitlines() == [
+        "python\tscripts/verify_env.py",
         "ruff\tcheck\t.",
         "ruff\tformat\t--check\t.",
         "mypy",
@@ -254,3 +255,44 @@ def test_agents_md_requires_focused_development_and_reserved_full_gate():
     assert "75" in text
     assert "must not be retried" in text
     assert "larger timeout" in text
+
+
+def _run_env_guard(tmp_path: Path, package_root: Path) -> subprocess.CompletedProcess:
+    """Run the guard with `brigade` resolving to package_root."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(package_root)
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts/verify_env.py")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env=env,
+    )
+
+
+def test_verify_env_guard_rejects_an_interpreter_from_another_checkout(tmp_path):
+    foreign = tmp_path / "other-checkout" / "src"
+    (foreign / "brigade").mkdir(parents=True)
+    (foreign / "brigade" / "__init__.py").write_text("")
+
+    result = _run_env_guard(tmp_path, foreign)
+
+    assert result.returncode != 0
+    assert str(foreign / "brigade") in result.stderr
+    assert str(ROOT / "src" / "brigade") in result.stderr
+    assert "pip install -e" in result.stderr
+
+
+def test_verify_env_guard_accepts_this_checkout(tmp_path):
+    result = _run_env_guard(tmp_path, ROOT / "src")
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("script", ["verify", "verify-fast", "verify-focused"])
+def test_verify_scripts_run_the_env_guard_before_linting(script):
+    text = (ROOT / "scripts" / script).read_text()
+
+    guard = '"$PY/python" scripts/verify_env.py'
+    assert guard in text
+    assert text.index(guard) < text.index('"$PY/ruff"')
