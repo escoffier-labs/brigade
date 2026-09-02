@@ -211,7 +211,7 @@ def test_agent_activity_view_uses_state_words_and_keeps_ids_in_details():
                     "provider": "brigade",
                     "harness": "brigade-run",
                     "kind": "run",
-                    "host": "rocinante",
+                    "host": "alpha",
                     "label": "Brigade run",
                     "task_label": "Build activity view",
                     "model": "gpt-5.6-terra",
@@ -228,7 +228,7 @@ def test_agent_activity_view_uses_state_words_and_keeps_ids_in_details():
     )
 
     assert 'class="machine-card"' in fragment
-    assert 'data-host="rocinante"' in fragment
+    assert 'data-host="alpha"' in fragment
     assert 'class="agent-tile"' in fragment
     assert "● running" in fragment
     assert "Build activity view" in fragment
@@ -248,7 +248,7 @@ def test_agent_activity_view_groups_hosts_nests_children_and_collapses_old_compl
         "provider": "brigade",
         "harness": "brigade-run",
         "kind": "run",
-        "host": "rocinante",
+        "host": "alpha",
         "label": "Brigade run",
         "task_label": "Parent task",
         "model": None,
@@ -284,6 +284,9 @@ def test_agent_activity_view_groups_hosts_nests_children_and_collapses_old_compl
             "agent_activity_summary": [],
             "agent_activity": [parent, child, old_done],
             "completed_window_seconds": 3600,
+            "default_hosts": ["alpha", "beta", "gamma"],
+            "host_kinds": {"alpha": "workstation", "beta": "gpu", "gamma": "desktop", "cloud": "cloud"},
+            "local_host": "alpha",
         },
         "test-nonce",
     )
@@ -296,7 +299,7 @@ def test_agent_activity_view_groups_hosts_nests_children_and_collapses_old_compl
     assert "#890" in fragment
     assert 'data-mark="cursor"' in fragment
     assert "<svg" in fragment
-    for host in ("rocinante", "shadowfax", "gandalf", "cloud"):
+    for host in ("alpha", "beta", "gamma", "cloud"):
         assert f'data-host="{host}"' in fragment
 
 
@@ -343,7 +346,7 @@ def test_codex_session_extracts_task_label_from_cwd_folder(tmp_path, capsys, mon
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     _write_json(
         tmp_path / ".brigade" / "center" / "agent-activity-sources.json",
-        {"local_host": "rocinante"},
+        {"local_host": "workbench"},
     )
 
     assert center_cmd.activity(target=tmp_path, json_output=True) == 0
@@ -352,7 +355,7 @@ def test_codex_session_extracts_task_label_from_cwd_folder(tmp_path, capsys, mon
 
     assert codex_row["task_label"] == "you are a fresh frontier conductor"
     assert codex_row["model"] == "gpt-5.6-terra"
-    assert codex_row["host"] == "rocinante"
+    assert codex_row["host"] == "workbench"
     assert "secret private prompt body" not in json.dumps(records)
     assert "/tmp/" not in json.dumps(records)
 
@@ -388,7 +391,7 @@ def test_external_sources_redact_journal_text_and_missing_local_sources_are_stal
         json.dumps(
             {
                 "label": "private prompt TOKEN=secret",
-                "task_label": "/home/private/project",
+                "task_label": "/home/private/project",  # content-guard: allow home-path
                 "parent_activity_id": "private-parent",
                 "state": "running",
                 "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -424,18 +427,18 @@ def test_agent_activity_view_docstring_answers_operator_question():
 def test_agent_activity_view_summary_strip_counts_states_and_blocked_hosts():
     now = datetime.now(timezone.utc).isoformat()
     records = [
-        _view_record(activity_id="a1", state="running", host="rocinante", last_updated_at=now, started_at=now),
-        _view_record(activity_id="a2", state="running", host="shadowfax", last_updated_at=now, started_at=now),
-        _view_record(activity_id="a3", state="blocked", host="shadowfax", last_updated_at=now, started_at=now),
-        _view_record(activity_id="a4", state="totally-bogus", host="gandalf", last_updated_at=now, started_at=now),
-        _view_record(activity_id="a5", state=None, host="gandalf", last_updated_at=now, started_at=now),
+        _view_record(activity_id="a1", state="running", host="alpha", last_updated_at=now, started_at=now),
+        _view_record(activity_id="a2", state="running", host="beta", last_updated_at=now, started_at=now),
+        _view_record(activity_id="a3", state="blocked", host="beta", last_updated_at=now, started_at=now),
+        _view_record(activity_id="a4", state="totally-bogus", host="gamma", last_updated_at=now, started_at=now),
+        _view_record(activity_id="a5", state=None, host="gamma", last_updated_at=now, started_at=now),
     ]
     fragment = agent_activity.render({"agent_activity": records}, "test-nonce")
 
     strip = fragment.split('class="page-summary"', 1)[1].split("</div>", 1)[0]
     assert "5 agents tracked" in strip
     assert "2 running" in strip
-    assert "1 blocked on shadowfax" in strip
+    assert "1 blocked on beta" in strip
     assert "2 unknown" in strip
     board_index = fragment.index('class="machine-board"')
     summary_index = fragment.index('class="page-summary"')
@@ -495,7 +498,7 @@ def _view_record(**overrides):
         "provider": "brigade",
         "harness": "brigade-run",
         "kind": "run",
-        "host": "rocinante",
+        "host": "alpha",
         "label": "Brigade run",
         "task_label": "Demo task",
         "model": "gpt-5.6-terra",
@@ -732,3 +735,37 @@ def test_heartbeat_over_two_hours_is_stale_even_with_live_lock(tmp_path, monkeyp
     records = activity_records.collect(tmp_path, now=now)
     run_record = next(record for record in records if record["kind"] == "run")
     assert run_record["state"] == "stale"
+
+
+def test_agent_activity_view_dedupes_cloud_when_in_default_hosts():
+    now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    record = {
+        "activity_id": "brigade:run:cloudy",
+        "parent_activity_id": None,
+        "provider": "brigade",
+        "harness": "brigade-run",
+        "kind": "run",
+        "host": "cloud",
+        "label": "Brigade run",
+        "task_label": "Cloud task",
+        "model": None,
+        "state": "running",
+        "started_at": now.isoformat(),
+        "last_updated_at": now.isoformat(),
+        "elapsed_seconds": 30,
+        "source": {"name": "brigade-run-journal", "authority": "authoritative"},
+        "links": {},
+    }
+    fragment = agent_activity.render(
+        {
+            "agent_activity_summary": [],
+            "agent_activity": [record],
+            "completed_window_seconds": 3600,
+            "default_hosts": ["cloud"],
+            "host_kinds": {"cloud": "cloud"},
+            "local_host": "workbench",
+        },
+        "test-nonce",
+    )
+
+    assert fragment.count('data-host="cloud"') == 1
