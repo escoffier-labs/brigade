@@ -79,6 +79,9 @@ def prune_worktrees(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
+    if older_than_days < 0:
+        print(f"error: --older-than must be non-negative: {older_than_days}", file=sys.stderr)
+        return 2
     try:
         repo_root = runguard.git_root(target)
     except runguard.RunGuardError as exc:

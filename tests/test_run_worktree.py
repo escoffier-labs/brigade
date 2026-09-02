@@ -194,6 +194,31 @@ class TestRunWorktreeLifecycle:
         assert f"worktree kept for recovery: {checkout} (detached HEAD with unreachable commits)" in err
         assert "worktree_removal" not in json.loads((output_dir / "run.json").read_text())
 
+    def test_removal_failure_keeps_worktree_and_does_not_record_removal(self, tmp_path, monkeypatch, capsys):
+        repo = _git_repo(tmp_path)
+        output_dir = tmp_path / "run"
+
+        def fake_run(task: str, loaded_roster: Any, **kwargs: Any) -> int:
+            _write_successful_worktree_run(kwargs["output_dir"], kwargs["cwd"])
+            return 0
+
+        def failing_remove(repo_root: Path, path: Path, *, force: bool = False) -> None:
+            raise runguard.RunGuardError("simulated removal failure")
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        monkeypatch.setattr(aboyeur, "run", fake_run)
+        monkeypatch.setattr(runguard, "remove_worktree", failing_remove)
+
+        rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
+
+        checkout = _checkout_path(tmp_path, repo, output_dir)
+        err = capsys.readouterr().err
+        assert rc == 0
+        assert checkout.exists()
+        assert f"worktree kept for recovery: {checkout}" in err
+        assert "removal failed: simulated removal failure" in err
+        assert "worktree_removal" not in json.loads((output_dir / "run.json").read_text())
+
 
 class TestRunsPruneWorktrees:
     def _create_brigade_worktree(self, repo: Path, root: Path, name: str) -> Path:
@@ -268,3 +293,10 @@ class TestRunsPruneWorktrees:
         rc = cli.main(["runs", "prune-worktrees", "--target", str(target)])
         assert rc == 2
         assert "not a git worktree" in capsys.readouterr().err
+
+    def test_rejects_negative_older_than(self, tmp_path, capsys):
+        target = tmp_path / "not-a-repo"
+        target.mkdir()
+        rc = cli.main(["runs", "prune-worktrees", "--target", str(target), "--older-than", "-1"])
+        assert rc == 2
+        assert "--older-than must be non-negative" in capsys.readouterr().err

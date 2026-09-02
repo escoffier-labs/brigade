@@ -564,6 +564,7 @@ def dispatch(args) -> int:
     worktree_cwd = None
     effective_cwd = run_cwd
     keep_worktree = False
+    worktree_removed = False
     lifecycle_seat = args.worker or loaded_roster.orchestrator
     # Set when the fleet heartbeat reports a mid-run credential refusal
     # (#1161): the outer KeyboardInterrupt handler turns the resulting
@@ -915,12 +916,26 @@ def dispatch(args) -> int:
                             file=sys.stderr,
                         )
                     else:
-                        aboyeur_mod.record_worktree_removal(
-                            output_dir,
-                            path=effective_cwd,
-                            reason="clean and branch-backed",
-                        )
-                        print(f"worktree removed: {worktree_cwd}", file=sys.stderr)
+                        try:
+                            runguard.remove_worktree(run_cwd, worktree_cwd)
+                        except (runguard.RunGuardError, OSError) as exc:
+                            keep_reasons.append(f"removal failed: {exc}")
+                        if worktree_cwd.exists():
+                            keep_reasons.append("removal failed: directory still exists")
+                        keep_worktree = bool(keep_reasons)
+                        if keep_worktree:
+                            print(
+                                f"worktree kept for recovery: {worktree_cwd} ({', '.join(keep_reasons)})",
+                                file=sys.stderr,
+                            )
+                        else:
+                            worktree_removed = True
+                            aboyeur_mod.record_worktree_removal(
+                                output_dir,
+                                path=effective_cwd,
+                                reason="clean and branch-backed",
+                            )
+                            print(f"worktree removed: {worktree_cwd}", file=sys.stderr)
     except KeyboardInterrupt:
         if fleet_credential_failure:
             # The interrupt came from the fleet heartbeat's credential-failure
@@ -959,7 +974,7 @@ def dispatch(args) -> int:
             print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
         return 2
     finally:
-        if worktree_cwd is not None and not keep_worktree:
+        if worktree_cwd is not None and not keep_worktree and not worktree_removed:
             runguard.remove_worktree(run_cwd, worktree_cwd)
     if output_dir is not None:
         print(f"artifacts: {output_dir}", file=sys.stderr)

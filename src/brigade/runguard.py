@@ -1274,9 +1274,10 @@ def remove_worktree(repo: Path, worktree_path: Path, *, force: bool = False) -> 
     if not worktree_path.exists():
         return
     root = git_root(repo)
-    args = ["worktree", "remove", str(worktree_path)]
+    args = ["worktree", "remove"]
     if force:
         args.append("--force")
+    args.append(str(worktree_path))
     result = _git(root, *args, timeout=120.0)
     if result.code != 0:
         shutil.rmtree(worktree_path, ignore_errors=True)
@@ -1287,10 +1288,9 @@ def brigade_worktree_root() -> Path:
 
 
 def is_brigade_created_worktree(path: Path, repo_root: Path) -> bool:
-    path = path.expanduser().resolve()
     root = brigade_worktree_root()
     try:
-        resolved = path.resolve()
+        resolved = path.expanduser().resolve()
         return resolved.parent == root and resolved.name.startswith(f"{repo_root.name}-")
     except OSError:
         return False
