@@ -120,7 +120,8 @@ def _terminalize_scout(target: Path, job_id: str, state: str, *, created: dateti
     deadline, and can only be claimed before it.
     """
     if state == "expired":
-        grokbot_jobs.expire(target, job_id, now=created + timedelta(seconds=7201))
+        stale = created + timedelta(seconds=grokbot_jobs.DEFAULT_QUEUE_TTL_SECONDS + 1)
+        grokbot_jobs.expire(target, job_id, now=stale)
     elif state == "canceled":
         grokbot_jobs.cancel(target, job_id, now=created + timedelta(seconds=60))
     else:
@@ -296,7 +297,7 @@ def test_preflight_and_apply_enforce_the_utc_daily_limit_including_failed_and_ex
     grokbot_jobs.claim(tmp_path, failed, "bot-a", "lease-a", 30, now=NOW)
     grokbot_jobs.transition(tmp_path, failed, "bot-a", "lease-a", "failed", now=NOW + timedelta(seconds=1))
     expired = _enqueue_scout(tmp_path, issue_number=2)
-    grokbot_jobs.expire(tmp_path, expired, now=NOW + timedelta(seconds=7200))
+    grokbot_jobs.expire(tmp_path, expired, now=NOW + timedelta(seconds=grokbot_jobs.DEFAULT_QUEUE_TTL_SECONDS))
     third = _enqueue_scout(tmp_path, issue_number=3)
     grokbot_jobs.claim(tmp_path, third, "bot-b", "lease-b", 30, now=NOW)
     grokbot_jobs.transition(tmp_path, third, "bot-b", "lease-b", "failed", now=NOW + timedelta(seconds=1))
@@ -389,7 +390,8 @@ def test_a_second_expired_attempt_moves_to_the_next_revision(tmp_path: Path, mon
             grokbot_scout_feed._scout_key("example/brigade", 7, revision),
             now=created,
         )["job_id"]
-        grokbot_jobs.expire(tmp_path, job_id, now=created + timedelta(seconds=7201))
+        stale = created + timedelta(seconds=grokbot_jobs.DEFAULT_QUEUE_TTL_SECONDS + 1)
+        grokbot_jobs.expire(tmp_path, job_id, now=stale)
 
     preview = grokbot_scout_feed.preflight(tmp_path, policy, now=NOW)
     result = grokbot_scout_feed.apply(tmp_path, policy, now=NOW)

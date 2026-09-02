@@ -18,7 +18,7 @@ import re
 import stat
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -587,22 +587,47 @@ class GrokbotAdapter:
         granted = {**result, "lease_seconds": lease_seconds}
         if lease_id is not None:
             granted["lease_id"] = lease_id
-        journal_lease(tool, lease_seconds, granted.get("lease_expires_at"))
+        journal_lease(tool, lease_seconds, granted.get("lease_expires_at"), _job_deadline(result))
         return granted
 
     def _lease_call(self, job_id: str, operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        """Run one lease-holder mutation, naming an expired lease as such.
+        """Run one lease-holder mutation, naming an expired lease or job as such.
 
         A lapsed lease is an ordinary, recoverable state, not a malformed
         request. Folding it into the generic validation error is what makes a
-        Bot read the listener as a broken adapter (issue #1383).
+        Bot read the listener as a broken adapter (issue #1383). A job whose
+        execution budget ran out is bounded the same way, as ``job-expired``
+        (#1403): the Bot pushes its branch and stops instead of retrying.
         """
         try:
             return operation(*args, **kwargs)
         except grokbot_jobs.GrokbotJobError as exc:
+            if self._budget_spent(job_id, exc.reason):
+                raise AdapterError("job-expired") from None
             if self._lease_lapsed(job_id, exc.reason):
                 raise AdapterError("lease-expired") from None
             raise
+
+    def _budget_spent(self, job_id: str, reason: str | None) -> bool:
+        """True when the queue refused because this job's execution budget ran out.
+
+        A read on the way into the call can terminalize the row first, so the
+        holder sees ``terminal-state`` rather than ``job-expired``. Confirming
+        the expiry against ``claimed_at`` plus ``timeout_seconds`` keeps the
+        answer the deadline's, not the read's ordering (#1403).
+        """
+        if reason == "job-expired":
+            return True
+        if reason != "terminal-state":
+            return False
+        try:
+            job = grokbot_jobs.get_job(self.config.target, job_id)
+        except Exception:
+            return False
+        if job.get("state") != "expired":
+            return False
+        deadline = _job_deadline(job)
+        return deadline is not None and _parse_deadline(deadline) <= datetime.now(timezone.utc)
 
     def _lease_lapsed(self, job_id: str, reason: str | None) -> bool:
         """True when the queue refused because this job's lease deadline passed.
@@ -1112,18 +1137,36 @@ def journal_tool_call(name: object, arguments: object, decision: str, reason: st
     )
 
 
-def journal_lease(tool: str, lease_seconds: int, deadline: object) -> None:
-    """Journal the lease window a claim or renew opened, never the job or lease.
+def journal_lease(tool: str, lease_seconds: int, deadline: object, job_deadline: object = None) -> None:
+    """Journal both deadlines a claim or renew opened, never the job or lease.
 
-    The deadline is the queue's own answer, so a lapsed lease can be read out
-    of the journal instead of inferred from a later refusal.
+    The deadlines are the queue's own answer, so a lapsed lease or a spent
+    execution budget can be read out of the journal instead of inferred from a
+    later refusal. ``job_deadline`` is ``claimed_at`` plus the job's
+    ``timeout_seconds`` (#1403), which is what a renew is clamped to.
     """
     _JOURNAL.info(
-        "grokbot tool=%s lease_seconds=%d deadline=%s",
+        "grokbot tool=%s lease_seconds=%d deadline=%s job_deadline=%s",
         tool if tool in _TOOL_ARGUMENT_TYPES else "unknown",
         lease_seconds,
         deadline if isinstance(deadline, str) else "-",
+        job_deadline if isinstance(job_deadline, str) else "-",
     )
+
+
+def _job_deadline(result: object) -> str | None:
+    """The execution deadline implied by one claim or renew projection."""
+    if not isinstance(result, Mapping):
+        return None
+    claimed_at = result.get("claimed_at")
+    timeout = result.get("timeout_seconds")
+    if not isinstance(claimed_at, str) or type(timeout) is not int:
+        return None
+    try:
+        claimed = _parse_deadline(claimed_at)
+    except Exception:
+        return None
+    return (claimed + timedelta(seconds=timeout)).isoformat().replace("+00:00", "Z")
 
 
 def configure_journal() -> None:

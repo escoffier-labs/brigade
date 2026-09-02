@@ -691,7 +691,8 @@ def test_rejected_claims_return_generic_error_and_hide_execution_context(tmp_pat
         grokbot_jobs.claim(tmp_path, job_id, bot_id, "lease-a", 300, now=now)
         grokbot_jobs.transition(tmp_path, job_id, bot_id, "lease-a", "failed", now=now)
     elif kind == "expired":
-        grokbot_jobs.expire(tmp_path, job_id, now=now + timedelta(seconds=901))
+        stale = now + timedelta(seconds=grokbot_jobs.DEFAULT_QUEUE_TTL_SECONDS + 1)
+        grokbot_jobs.expire(tmp_path, job_id, now=stale)
         arguments = {"job_id": job_id, "lease_id": "lease-a"}
     elif kind == "conflicting":
         worker.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
@@ -2196,8 +2197,8 @@ def test_renew_and_fail_after_expiry_answer_lease_expired(tmp_path: Path):
         assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "claimed"
 
 
-def test_renew_and_fail_past_the_job_deadline_still_answer_lease_expired(tmp_path: Path):
-    """#1353 expiry composed with #1383: the row ends, the answer stays actionable."""
+def test_renew_and_fail_past_the_execution_deadline_answer_job_expired(tmp_path: Path):
+    """#1403: the listener names the spent budget instead of answering invalid-request."""
     for tool in ("grokbot_queue_renew", "grokbot_queue_fail"):
         spec = {**_long_spec(), "timeout_seconds": 60}
         job_id = grokbot_jobs.enqueue(tmp_path, spec, f"deadline-job-{tool}")["job_id"]
@@ -2208,20 +2209,37 @@ def test_renew_and_fail_past_the_job_deadline_still_answer_lease_expired(tmp_pat
         with pytest.raises(grokbot_mcp.AdapterError) as refusal:
             adapter.call_tool(tool, {"job_id": job_id, "lease_id": "lease-late"})
 
-        assert refusal.value.reason == "lease-expired"
+        assert refusal.value.reason == "job-expired"
+        assert refusal.value.public_error()["error"]["message"] == "job-expired"
         assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "expired"
 
 
-def test_claim_past_the_job_deadline_is_refused_and_expires_the_job(tmp_path: Path):
+def test_a_late_claim_is_granted_and_expires_only_past_the_queue_ttl(tmp_path: Path):
     spec = {**_long_spec(), "timeout_seconds": 60}
     job_id = grokbot_jobs.enqueue(tmp_path, spec, "deadline-claim")["job_id"]
-    _backdate_deadline(tmp_path, job_id)
+    _backdate_queue_wait(tmp_path, job_id, seconds=3600)
     adapter = _adapter(tmp_path)
 
-    with pytest.raises(grokbot_mcp.AdapterError):
-        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-late"})
+    claimed = adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-late"})
+    assert claimed["state"] == "claimed"
 
-    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "expired"
+    stale_id = grokbot_jobs.enqueue(tmp_path, spec, "queue-ttl-claim")["job_id"]
+    _backdate_queue_wait(tmp_path, stale_id, seconds=grokbot_jobs.DEFAULT_QUEUE_TTL_SECONDS + 60)
+
+    with pytest.raises(grokbot_mcp.AdapterError):
+        adapter.call_tool("grokbot_queue_claim", {"job_id": stale_id, "lease_id": "lease-stale"})
+
+    assert grokbot_jobs.get_job(tmp_path, stale_id)["state"] == "expired"
+
+
+def _backdate_queue_wait(target: Path, job_id: str, *, seconds: int) -> None:
+    """Age one queued job's wait without moving the code's clock."""
+    path = target / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{job_id}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    stamp = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
+    for field in ("created_at", "queued_at", "updated_at"):
+        record[field] = stamp
+    path.write_text(json.dumps(record), encoding="utf-8")
 
 
 def _backdate_deadline(target: Path, job_id: str) -> None:
@@ -2261,9 +2279,13 @@ def test_claim_and_renew_journal_the_lease_deadline(tmp_path: Path, caplog):
 
     lines = [record.getMessage() for record in caplog.records if record.name == "brigade.grokbot_mcp"]
     lease_lines = [line for line in lines if " lease_seconds=" in line]
+    job_deadline = grokbot_mcp._job_deadline(claimed)
+    assert job_deadline is not None
     assert lease_lines == [
-        f"grokbot tool=grokbot_queue_claim lease_seconds=900 deadline={claimed['lease_expires_at']}",
-        f"grokbot tool=grokbot_queue_renew lease_seconds=900 deadline={renewed['lease_expires_at']}",
+        f"grokbot tool=grokbot_queue_claim lease_seconds=900 "
+        f"deadline={claimed['lease_expires_at']} job_deadline={job_deadline}",
+        f"grokbot tool=grokbot_queue_renew lease_seconds=900 "
+        f"deadline={renewed['lease_expires_at']} job_deadline={job_deadline}",
     ]
     assert job_id not in "\n".join(lease_lines)
     assert "lease-journal" not in "\n".join(lease_lines)

@@ -94,6 +94,17 @@ def _backdate(conn: sqlite3.Connection, job_id: str = JOB_ID, *, seconds: int = 
     conn.commit()
 
 
+def _backdate_claim(conn: sqlite3.Connection, job_id: str = JOB_ID, *, seconds: int = TIMEOUT_SECONDS + 60) -> None:
+    """Move a claimed job's execution clock past its budget without touching the code's."""
+    claimed_at = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    stamp = claimed_at.isoformat().replace("+00:00", "Z")
+    conn.execute(
+        "UPDATE grokbot_jobs SET claimed_at=?, lease_expires_at=? WHERE job_id=?",
+        (stamp, stamp, job_id),
+    )
+    conn.commit()
+
+
 def _operations(conn: sqlite3.Connection, job_id: str = JOB_ID) -> list[tuple[str, str, str]]:
     return [
         (row[0], row[1], row[2])
@@ -111,7 +122,7 @@ def _state(conn: sqlite3.Connection, job_id: str = JOB_ID) -> str:
 
 def test_status_expires_a_queued_job_past_its_deadline(conn):
     _enqueue(conn)
-    _backdate(conn)
+    _backdate(conn, seconds=fleet_hub_grokbot.DEFAULT_QUEUE_TTL_SECONDS + 60)
 
     status, payload = fleet_hub_grokbot.handle_grokbot(
         conn, {"action": "status", "job_id": JOB_ID}, caller_node=OPERATOR_NODE
@@ -125,7 +136,7 @@ def test_status_expires_a_queued_job_past_its_deadline(conn):
 
 def test_list_expires_a_queued_job_and_records_an_expire_operation(conn):
     _enqueue(conn)
-    _backdate(conn)
+    _backdate(conn, seconds=fleet_hub_grokbot.DEFAULT_QUEUE_TTL_SECONDS + 60)
 
     status, payload = fleet_hub_grokbot.handle_grokbot(conn, {"action": "list"}, caller_node=OPERATOR_NODE)
 
@@ -140,7 +151,7 @@ def test_list_expires_a_queued_job_and_records_an_expire_operation(conn):
 
 def test_claim_of_a_job_past_its_deadline_is_refused_as_job_expired(conn):
     _enqueue(conn)
-    _backdate(conn)
+    _backdate(conn, seconds=fleet_hub_grokbot.DEFAULT_QUEUE_TTL_SECONDS + 60)
 
     status, payload = fleet_hub_grokbot.handle_grokbot(conn, _claim_body(), caller_node=WORKER_NODE)
 
@@ -155,7 +166,7 @@ def test_renew_past_the_deadline_expires_the_running_job(conn):
     assert claimed[0] == 200, claimed[1]
     generation = claimed[1]["lease_generation"]
     revision = claimed[1]["job"]["item_revision"]
-    _backdate(conn)
+    _backdate_claim(conn)
 
     status, payload = fleet_hub_grokbot.handle_grokbot(
         conn,
@@ -172,14 +183,14 @@ def test_renew_past_the_deadline_expires_the_running_job(conn):
     )
 
     assert status == 409
-    assert payload["renewed"] is False
+    assert payload == {"renewed": False, "error": "job-expired"}
     assert _state(conn) == "expired"
     assert [op for op in _operations(conn) if op[0] == "expire"], _operations(conn)
 
 
 def test_sweep_expires_a_queued_job_with_no_request_at_all(conn):
     _enqueue(conn)
-    _backdate(conn)
+    _backdate(conn, seconds=fleet_hub_grokbot.DEFAULT_QUEUE_TTL_SECONDS + 60)
 
     assert fleet_hub_grokbot.sweep_expired_jobs(conn) == [JOB_ID]
     assert _state(conn) == "expired"
@@ -198,7 +209,7 @@ def test_sweep_leaves_a_job_inside_its_timeout_alone(conn):
 def test_sweep_reuses_an_existing_transaction(conn):
     """A caller already inside a transaction must not get a nested-tx error."""
     _enqueue(conn)
-    _backdate(conn)
+    _backdate(conn, seconds=fleet_hub_grokbot.DEFAULT_QUEUE_TTL_SECONDS + 60)
 
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -214,7 +225,7 @@ def test_periodic_sweeper_thread_expires_without_any_hub_traffic(tmp_path):
     try:
         _enroll(connection)
         _enqueue(connection)
-        _backdate(connection)
+        _backdate(connection, seconds=fleet_hub_grokbot.DEFAULT_QUEUE_TTL_SECONDS + 60)
     finally:
         connection.close()
 
@@ -240,7 +251,7 @@ def test_periodic_sweeper_thread_expires_without_any_hub_traffic(tmp_path):
 
 def test_operator_expire_still_records_exactly_one_operation(conn):
     _enqueue(conn)
-    _backdate(conn)
+    _backdate(conn, seconds=fleet_hub_grokbot.DEFAULT_QUEUE_TTL_SECONDS + 60)
 
     status, payload = fleet_hub_grokbot.handle_grokbot(
         conn,
@@ -253,3 +264,77 @@ def test_operator_expire_still_records_exactly_one_operation(conn):
     assert status == 200
     assert payload["job"]["state"] == "expired"
     assert [op[1] for op in _operations(conn) if op[0] == "expire"] == ["op-expire-1"]
+
+
+def test_a_late_claim_gets_its_whole_execution_budget(conn):
+    """#1403: queue wait must not be charged against ``timeout_seconds``."""
+    _enqueue(conn)
+    _backdate(conn, seconds=TIMEOUT_SECONDS * 4)
+
+    status, payload = fleet_hub_grokbot.handle_grokbot(conn, _claim_body(), caller_node=WORKER_NODE)
+
+    assert status == 200, payload
+    assert payload["claimed"] is True
+    assert _state(conn) == "claimed"
+    job = payload["job"]
+    claimed_at = datetime.fromisoformat(str(job["claimed_at"]).replace("Z", "+00:00"))
+    lease_expires = datetime.fromisoformat(str(job["lease_expires_at"]).replace("Z", "+00:00"))
+    # The whole 300s lease is granted: the budget now runs from the claim.
+    assert lease_expires - claimed_at == timedelta(seconds=300)
+
+
+def test_an_unclaimed_job_expires_at_its_queue_ttl(conn):
+    _enqueue(conn)
+    _backdate(conn, seconds=fleet_hub_grokbot.DEFAULT_QUEUE_TTL_SECONDS - 60)
+    assert fleet_hub_grokbot.sweep_expired_jobs(conn) == []
+    assert _state(conn) == "queued"
+
+    _backdate(conn, seconds=fleet_hub_grokbot.DEFAULT_QUEUE_TTL_SECONDS + 60)
+
+    assert fleet_hub_grokbot.sweep_expired_jobs(conn) == [JOB_ID]
+    assert _state(conn) == "expired"
+
+
+def test_enqueue_bounds_and_defaults_the_queue_ttl(conn):
+    job = _enqueue(conn)
+
+    assert job["queue_ttl_seconds"] == fleet_hub_grokbot.DEFAULT_QUEUE_TTL_SECONDS
+    for invalid in (fleet_hub_grokbot.QUEUE_TTL_SECONDS_MIN - 1, fleet_hub_grokbot.QUEUE_TTL_SECONDS_MAX + 1, True):
+        body = {
+            "action": "enqueue",
+            "job_id": "grokbot-" + "c" * 24,
+            "role": "implementation-worker",
+            "repository": "example/brigade",
+            "label": "safe label",
+            "task_digest": "c" * 64,
+            "idempotency_key_hash": "c" * 64,
+            "timeout_seconds": TIMEOUT_SECONDS,
+            "queue_ttl_seconds": invalid,
+            "artifact_kind": "draft-pr",
+            "operation_id": "op-enqueue-ttl",
+        }
+        with pytest.raises(fleet_hub.FleetHubError):
+            fleet_hub_grokbot.handle_grokbot(conn, body, caller_node=FEED_NODE)
+
+
+def test_fail_after_the_execution_deadline_answers_job_expired(conn):
+    _enqueue(conn)
+    claimed = fleet_hub_grokbot.handle_grokbot(conn, _claim_body(), caller_node=WORKER_NODE)
+    assert claimed[0] == 200, claimed[1]
+    _backdate_claim(conn)
+
+    status, payload = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        {
+            "action": "fail",
+            "job_id": JOB_ID,
+            "lease_id": "lease-a",
+            "expected_item_revision": claimed[1]["job"]["item_revision"],
+            "lease_generation": claimed[1]["lease_generation"],
+            "operation_id": "op-fail-1",
+        },
+        caller_node=WORKER_NODE,
+    )
+
+    assert status == 409
+    assert payload == {"failed": False, "error": "job-expired"}

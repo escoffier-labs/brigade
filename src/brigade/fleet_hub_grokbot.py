@@ -102,6 +102,7 @@ SAFE_JOB_FIELDS = (
     "updated_at",
     "queued_at",
     "timeout_seconds",
+    "queue_ttl_seconds",
     "artifact_kind",
     "private_snapshot_id",
     "claimed_at",
@@ -131,6 +132,7 @@ JOB_FIELDS = (
     "updated_at",
     "queued_at",
     "timeout_seconds",
+    "queue_ttl_seconds",
     "artifact_kind",
     "private_snapshot_id",
     "claimed_at",
@@ -152,6 +154,9 @@ DEFAULT_SWEEP_INTERVAL_SECONDS = 60.0
 LEASE_SECONDS_MIN = 30
 LEASE_SECONDS_MAX = 3600
 DEFAULT_LEASE_SECONDS = 300
+QUEUE_TTL_SECONDS_MIN = 60
+QUEUE_TTL_SECONDS_MAX = 604800
+DEFAULT_QUEUE_TTL_SECONDS = 86400
 _CLOUD_HOLDER_DOMAIN = b"brigade.grokbot.cloud-holder"
 _ACTOR_KIND_ACTIONS = {
     "feed": FEED_ACTIONS,
@@ -176,6 +181,7 @@ CREATE TABLE IF NOT EXISTS grokbot_jobs (
     updated_at TEXT NOT NULL,
     queued_at TEXT NOT NULL,
     timeout_seconds INTEGER NOT NULL,
+    queue_ttl_seconds INTEGER,
     artifact_kind TEXT NOT NULL,
     private_snapshot_id TEXT,
     claimed_at TEXT,
@@ -218,6 +224,7 @@ CREATE TABLE IF NOT EXISTS grokbot_operations (
 );
 """
 _JOB_ADDITIVE_COLUMNS = {
+    "queue_ttl_seconds": "INTEGER",
     "lease_token_digest": "TEXT",
     "lease_generation": "INTEGER",
     "queue_id": "TEXT",
@@ -326,11 +333,12 @@ def handle_grokbot(
             return 200, replayed
         if action != "enqueue":
             current = _scoped_job(conn, request["job_id"], policy)
-            if action == "claim" and current["state"] == "expired":
+            expired = _expired_answer(action, current)
+            if expired is not None:
                 # The deadline sweep above already bumped the revision, so the
-                # generic revision check below would hide why the claim failed.
+                # generic revision check below would hide why the call failed.
                 conn.rollback()
-                return 409, {"claimed": False, "error": "job-expired"}
+                return 409, expired
             if int(current["item_revision"]) != request["expected_item_revision"]:
                 conn.rollback()
                 return 409, {_result_flag(action): False, "error": "revision-conflict"}
@@ -551,9 +559,9 @@ def _enqueue(conn: sqlite3.Connection, request: dict[str, Any], policy: dict[str
     conn.execute(
         "INSERT INTO grokbot_jobs ("
         "job_id, role, repository, label, task_digest, idempotency_key_hash, state, item_revision, "
-        "sequence, created_at, updated_at, queued_at, timeout_seconds, artifact_kind, private_snapshot_id, "
-        "owner_node, queue_id"
-        ") VALUES (?, ?, ?, ?, ?, ?, 'queued', 1, 1, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "sequence, created_at, updated_at, queued_at, timeout_seconds, queue_ttl_seconds, artifact_kind, "
+        "private_snapshot_id, owner_node, queue_id"
+        ") VALUES (?, ?, ?, ?, ?, ?, 'queued', 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             request["job_id"],
             request["role"],
@@ -565,6 +573,7 @@ def _enqueue(conn: sqlite3.Connection, request: dict[str, Any], policy: dict[str
             now,
             now,
             request["timeout_seconds"],
+            request["queue_ttl_seconds"],
             request["artifact_kind"],
             request.get("private_snapshot_id") or request["job_id"],
             policy["queue_owner_node_id"],
@@ -595,7 +604,7 @@ def _claim(
         return 409, {"claimed": False, "error": "lease-expired"}
     if job["state"] != "queued":
         return 409, {"claimed": False, "error": "invalid-state"}
-    if instant >= _deadline(job):
+    if instant >= _queue_deadline(job):
         # A refusal rolls this transaction back, so the deadline sweep that ran
         # before it (and the periodic sweeper) own the transition to expired.
         return 409, {"claimed": False, "error": "job-expired"}
@@ -603,13 +612,16 @@ def _claim(
     admitted, error = _admit_capacity(conn, job, request, policy, presented, config)
     if not admitted:
         return 409, {"claimed": False, "error": error}
-    expires = min(instant + timedelta(seconds=request["lease_seconds"]), _deadline(job))
+    # The execution budget starts here, not when the job was queued, so a job
+    # that waited hours behind other jobs still gets its whole timeout (#1403).
+    deadline = instant + timedelta(seconds=int(job["timeout_seconds"]))
+    expires = min(instant + timedelta(seconds=request["lease_seconds"]), deadline)
     updated = _mutate(
         conn,
         job,
         {
             "state": "claimed",
-            "claimed_at": _now_iso(),
+            "claimed_at": _format_ts(instant),
             "lease_token_digest": presented,
             "lease_generation": generation,
             "lease_expires_at": _format_ts(expires),
@@ -644,7 +656,7 @@ def _renew(
 ) -> tuple[int, dict[str, Any]]:
     job = _require_live_holder(conn, request, policy)
     if job is None:
-        return 409, {"renewed": False, "error": "lease-conflict"}
+        return _holder_refusal(conn, request, policy, "renewed")
     instant = datetime.now(timezone.utc)
     expires = min(instant + timedelta(seconds=request["lease_seconds"]), _deadline(job))
     updated = _mutate(conn, job, {"lease_expires_at": _format_ts(expires)})
@@ -696,7 +708,7 @@ def _fail(
 ) -> tuple[int, dict[str, Any]]:
     job = _require_live_holder(conn, request, policy)
     if job is None:
-        return 409, {"failed": False, "error": "lease-conflict"}
+        return _holder_refusal(conn, request, policy, "failed")
     if job["state"] not in {"claimed", "running"}:
         return 409, {"failed": False, "error": "invalid-state"}
     updated = _mutate(conn, job, {"state": "failed"})
@@ -759,6 +771,46 @@ def _ack_cancel(
     _release_capacity(conn, updated, config, state="canceled")
     _record_event(conn, updated, "cancel-acknowledged")
     return 200, {"acknowledged": True, "job": _job_payload(updated)}
+
+
+def _expired_answer(action: str, job: dict[str, Any]) -> dict[str, Any] | None:
+    """The bounded refusal for a call that arrived after the job already ended.
+
+    A claim on an expired row is ``job-expired`` however the row ended. A renew
+    or fail is only ``job-expired`` when the execution budget is what ran out
+    (#1403); a row expired for a lapsed lease stays a lease matter.
+    """
+    if job["state"] != "expired":
+        return None
+    if action == "claim":
+        return {"claimed": False, "error": "job-expired"}
+    if action in {"renew", "fail"} and _execution_elapsed(job):
+        return {_result_flag(action): False, "error": "job-expired"}
+    return None
+
+
+def _holder_refusal(
+    conn: sqlite3.Connection,
+    request: dict[str, Any],
+    policy: dict[str, Any],
+    flag: str,
+) -> tuple[int, dict[str, Any]]:
+    """Name why this holder call was refused: a spent budget, or a lease conflict.
+
+    A renew or fail sent after the execution deadline is a job that ran out of
+    time, not a malformed or racing call, so it answers the bounded
+    ``job-expired`` reason the Bot can act on (#1403, mirroring the
+    ``lease-expired`` contract from #1386).
+    """
+    try:
+        job = _scoped_job(conn, request["job_id"], policy)
+    except FleetHubError:
+        return 409, {flag: False, "error": "lease-conflict"}
+    if not _digests_match(job.get("lease_token_digest"), _lease_digest(request["lease_id"])):
+        return 409, {flag: False, "error": "lease-conflict"}
+    if _execution_elapsed(job):
+        return 409, {flag: False, "error": "job-expired"}
+    return 409, {flag: False, "error": "lease-conflict"}
 
 
 def _mark_expired(
@@ -851,7 +903,7 @@ def _expire_stale_jobs(
             continue
         deadline = _deadline(job)
         if job["state"] == "queued":
-            if now >= deadline:
+            if now >= _queue_deadline(job):
                 _mark_expired(conn, job, config)
                 expired.append(job["job_id"])
             continue
@@ -1108,8 +1160,42 @@ def _lease_live(job: dict[str, Any], instant: datetime) -> bool:
 
 
 def _deadline(job: dict[str, Any]) -> datetime:
-    start = _parse_ts(job.get("queued_at") or job.get("created_at")) or datetime.now(timezone.utc)
+    """The instant this job ends: its execution budget once claimed, its queue TTL before.
+
+    ``timeout_seconds`` is an execution budget counted from ``claimed_at``
+    (#1403). Counting it from ``queued_at`` charged a job for the hours it sat
+    behind other jobs, so a job claimed late expired mid-run. Queue wait has
+    its own, longer bound in ``queue_ttl_seconds``.
+    """
+    return _execution_deadline(job) or _queue_deadline(job)
+
+
+def _execution_deadline(job: dict[str, Any]) -> datetime | None:
+    """When the claimant's execution budget runs out, or None while unclaimed."""
+    start = _parse_ts(job.get("claimed_at"))
+    if start is None:
+        return None
     return start + timedelta(seconds=int(job["timeout_seconds"]))
+
+
+def _queue_deadline(job: dict[str, Any]) -> datetime:
+    """When an unclaimed job stops being worth claiming."""
+    start = _parse_ts(job.get("queued_at") or job.get("created_at")) or datetime.now(timezone.utc)
+    return start + timedelta(seconds=_queue_ttl_seconds(job))
+
+
+def _queue_ttl_seconds(job: dict[str, Any]) -> int:
+    """The job's queue TTL, defaulted for rows written before the column existed."""
+    value = job.get("queue_ttl_seconds")
+    if type(value) is int and QUEUE_TTL_SECONDS_MIN <= value <= QUEUE_TTL_SECONDS_MAX:
+        return value
+    return DEFAULT_QUEUE_TTL_SECONDS
+
+
+def _execution_elapsed(job: dict[str, Any], instant: datetime | None = None) -> bool:
+    """True when this job's execution budget has run out."""
+    deadline = _execution_deadline(job)
+    return deadline is not None and (instant or datetime.now(timezone.utc)) >= deadline
 
 
 def _job_dict(row: tuple[Any, ...]) -> dict[str, Any]:
@@ -1226,6 +1312,9 @@ def _validate_enqueue(raw: dict[str, Any], request: dict[str, Any]) -> dict[str,
     timeout = raw.get("timeout_seconds")
     if type(timeout) is not int or not 60 <= timeout <= 14400:
         raise FleetHubError("grokbot field 'timeout_seconds' is invalid")
+    queue_ttl = raw.get("queue_ttl_seconds", DEFAULT_QUEUE_TTL_SECONDS)
+    if type(queue_ttl) is not int or not QUEUE_TTL_SECONDS_MIN <= queue_ttl <= QUEUE_TTL_SECONDS_MAX:
+        raise FleetHubError("grokbot field 'queue_ttl_seconds' is invalid")
     kind = raw.get("artifact_kind")
     if kind not in ARTIFACT_KINDS:
         raise FleetHubError("grokbot field 'artifact_kind' is invalid")
@@ -1241,6 +1330,7 @@ def _validate_enqueue(raw: dict[str, Any], request: dict[str, Any]) -> dict[str,
             "task_digest": digest,
             "idempotency_key_hash": key_hash,
             "timeout_seconds": timeout,
+            "queue_ttl_seconds": queue_ttl,
             "artifact_kind": kind,
             "private_snapshot_id": snapshot,
         }
