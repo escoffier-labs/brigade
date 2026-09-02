@@ -55,19 +55,22 @@ def _scoreability_notice(target: Path, receipt: dict[str, Any]) -> dict[str, Any
     verdict on the run that produced the receipt instead.
     """
     run_dir_value = receipt.get("path")
-    patch_path = (
-        Path(str(run_dir_value)) / "changes.patch" if isinstance(run_dir_value, str) and run_dir_value else None
-    )
+    patch_path = None
+    if isinstance(run_dir_value, str) and run_dir_value:
+        candidate = Path(run_dir_value) / "changes.patch"
+        if candidate.is_file():
+            patch_path = candidate
     projection = verify_trial.project_trial(receipt, target=target, patch_path=patch_path)
     notice: dict[str, Any] = {
         "eligible": projection.eligible,
         "reason": projection.reason,
         "attributed": projection.attributed,
+        "registered_manifest_ids": [],
+        "remediation": None,
     }
-    if projection.eligible:
-        return notice
-    notice["registered_manifest_ids"] = verify_manifest.registered_manifest_ids(target)
-    notice["remediation"] = _ADHOC_SCOREABILITY_REMEDIATION
+    if not projection.eligible:
+        notice["registered_manifest_ids"] = verify_manifest.registered_manifest_ids(target)
+        notice["remediation"] = _ADHOC_SCOREABILITY_REMEDIATION
     return notice
 
 
@@ -76,7 +79,9 @@ def _print_scoreability_notice(notice: dict[str, Any]) -> None:
         print("scoreable: yes")
         return
     print(f"warning: scoreable: no (reason={notice.get('reason')}); this receipt cannot score the captured artifact")
-    print(f"  {notice.get('remediation')}")
+    remediation = notice.get("remediation")
+    if remediation:
+        print(f"  {remediation}")
     manifest_ids = notice.get("registered_manifest_ids")
     if isinstance(manifest_ids, list) and manifest_ids:
         print(f"  registered manifests: {', '.join(manifest_ids)}")

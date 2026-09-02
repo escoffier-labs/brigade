@@ -3676,6 +3676,29 @@ def test_manifest_capture_run_reports_an_eligible_attributed_receipt(tmp_target,
     assert [audit.eligible for audit in audits] == [True]
 
 
+def test_manifest_capture_run_prints_scoreable_yes_on_stdout(tmp_target, monkeypatch, capsys):
+    """#1378: the non-JSON eligible path must print the scoreability verdict too."""
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    manifest_id = _register_tracked_verify_manifest(tmp_target)
+    assert work_cmd.start(target=tmp_target, title="demo") == 0
+    (tmp_target / "skills" / "demo" / "SKILL.md").write_text("# demo skill\nchanged\n")
+    capsys.readouterr()
+
+    rc = verification.verify_run(
+        target=tmp_target,
+        manifest_id=manifest_id,
+        timeout=60,
+        capture="demo",
+        json_output=False,
+    )
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "scoreable: yes" in captured.out
+
+
 def test_outcome_health_names_registered_manifest_ids_for_remediation(tmp_target, monkeypatch, capsys):
     """#1378: `work brief` remediation must be actionable without reading the source."""
     from brigade import outcome_cmd
