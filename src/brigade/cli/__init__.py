@@ -227,6 +227,12 @@ def _peel_passthrough_engine_args(argv: list[str]) -> tuple[list[str], list[str]
 
 def main(argv=None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    # Usage is not a verification run. Resolve --help/-h before any pre-parse
+    # atomic-capture policy so the flag list stays discoverable.
+    if _work_group.work_verify_run_help_requested(raw_argv):
+        parser = _build_parser()
+        parser.parse_args(raw_argv)
+        return 0
     parse_argv, engine_args = _peel_passthrough_engine_args(raw_argv)
     parser = _build_parser()
     if not parse_argv:

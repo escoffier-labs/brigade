@@ -12,6 +12,17 @@ from ...dogfood_cmd import DEFAULT_TIMEOUT_SECONDS
 from ...work_cmd import TASK_PRIORITIES, TASK_TYPES
 from .. import extras as _extras_cli
 
+_HELP_FLAGS = frozenset({"-h", "--help"})
+
+
+def work_verify_run_help_requested(argv: list[str]) -> bool:
+    """True when argv is ``work verify run`` plus ``--help`` or ``-h``.
+
+    Usage is not a verification run. Any pre-parse atomic-capture policy must
+    short-circuit here so argparse can print the flag list and exit 0.
+    """
+    return len(argv) >= 3 and argv[:3] == ["work", "verify", "run"] and any(token in _HELP_FLAGS for token in argv)
+
 
 def dispatch(args) -> int:
     from ...work_cmd.ledger import guard_task_ledger_dispatch
