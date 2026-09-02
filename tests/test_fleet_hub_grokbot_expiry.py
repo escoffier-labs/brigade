@@ -195,6 +195,19 @@ def test_sweep_leaves_a_job_inside_its_timeout_alone(conn):
     assert _state(conn) == "queued"
 
 
+def test_sweep_reuses_an_existing_transaction(conn):
+    """A caller already inside a transaction must not get a nested-tx error."""
+    _enqueue(conn)
+    _backdate(conn)
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        assert fleet_hub_grokbot.sweep_expired_jobs(conn) == [JOB_ID]
+        assert _state(conn) == "expired"
+    finally:
+        conn.commit()
+
+
 def test_periodic_sweeper_thread_expires_without_any_hub_traffic(tmp_path):
     db_path = tmp_path / "fleet.db"
     connection = fleet_hub.init_db(db_path)

@@ -355,12 +355,13 @@ def status(target: Path, job_id: str | None = None, now: datetime | None = None)
     if hub_authority(target):
         return {"jobs": _hub_jobs(include_all=True)}
     with _storage_paths(target) as storage, _queue_lock(storage):
+        jobs: list[dict[str, Any]] = []
         for name in _list_names(storage.jobs, prefix="grokbot-", suffix=".json"):
             record = _read_json_file(storage.jobs, name)
             if record is None:
                 raise GrokbotJobError("corrupt-storage")
-            _expire_if_elapsed(storage, _validate_record(record), now)
-        return _status_from_storage(storage)
+            jobs.append(_projection(_expire_if_elapsed(storage, _validate_record(record), now)))
+        return {"jobs": jobs}
 
 
 def _expire_if_elapsed(storage: _Storage, record: dict[str, Any], now: datetime | None) -> dict[str, Any]:

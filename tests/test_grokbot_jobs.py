@@ -633,6 +633,26 @@ def test_status_expires_a_job_past_its_timeout_without_an_operator_sweep(tmp_pat
     assert grokbot_jobs.status(tmp_path)["jobs"][0]["state"] == "expired"
 
 
+def test_status_reads_each_job_file_once(tmp_path: Path, monkeypatch):
+    """All jobs are expired and projected in a single traversal."""
+    first = _enqueue(tmp_path)
+    second_id = grokbot_jobs.enqueue(tmp_path, _spec(), "request-2", now=NOW)["job_id"]
+
+    original_read = grokbot_jobs._read_json_file
+    reads: list[str] = []
+
+    def _counting_read(directory, name, *, missing_ok=False):
+        reads.append(name)
+        return original_read(directory, name, missing_ok=missing_ok)
+
+    monkeypatch.setattr(grokbot_jobs, "_read_json_file", _counting_read)
+    result = grokbot_jobs.status(tmp_path, now=NOW)
+
+    assert {job["job_id"] for job in result["jobs"]} == {first, second_id}
+    assert len(reads) == 2
+    assert len(set(reads)) == 2
+
+
 def test_status_leaves_a_job_inside_its_timeout_queued(tmp_path: Path):
     job_id = _enqueue(tmp_path)
 

@@ -654,6 +654,28 @@ class TestNodesCli:
         )
         assert "admin writes allowed" in capsys.readouterr().out
 
+    def test_serve_joins_expiry_sweeper_on_shutdown(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", ADMIN)
+        from brigade import fleet_hub_grokbot
+
+        captured_threads: list[threading.Thread] = []
+        original_start = fleet_hub_grokbot.start_expiry_sweeper
+
+        def _start_and_capture(*args, **kwargs):
+            thread = original_start(*args, **kwargs)
+            captured_threads.append(thread)
+            return thread
+
+        monkeypatch.setattr(fleet_hub_grokbot, "start_expiry_sweeper", _start_and_capture)
+
+        def _serve_forever(self):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(fleet_hub.ThreadingHTTPServer, "serve_forever", _serve_forever)
+        assert fleet_hub.run(host="127.0.0.1", port=0, db_path=tmp_path / "x.db", token_file=None) == 0
+        assert captured_threads
+        assert not captured_threads[-1].is_alive()
+
 
 class TestServerStartupMigration:
     """#1161: schema creation/migration happens exactly once at server

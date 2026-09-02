@@ -407,13 +407,22 @@ def sweep_expired_jobs(conn: sqlite3.Connection, config: fleet_command_deck.Deck
     still has to expire: a job enqueued with ``timeout_seconds`` 7200 that no
     worker ever claims must not sit ``queued`` forever waiting for an operator
     to run ``expire`` by hand (#1353).
+
+    Transaction-aware: if the caller already has an open transaction, the
+    sweep piggybacks on it so it can be used from request handlers that are
+    already inside a SQLite transaction.
     """
-    conn.execute("BEGIN IMMEDIATE")
+    opened = False
+    if conn.in_transaction is False:
+        conn.execute("BEGIN IMMEDIATE")
+        opened = True
     try:
         expired = _expire_stale_jobs(conn, fleet_hub._now_epoch(), config or fleet_command_deck.DeckConfig())
-        conn.commit()
+        if opened:
+            conn.commit()
     except BaseException:
-        conn.rollback()
+        if opened:
+            conn.rollback()
         raise
     return expired
 
