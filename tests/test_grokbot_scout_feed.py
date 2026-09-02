@@ -9,7 +9,16 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, fleet_client_grokbot, grokbot_jobs, grokbot_scout_feed
+from brigade import cli, fleet_client_grokbot, grokbot_feed, grokbot_jobs, grokbot_scout_feed
+from tests.test_grokbot_feed import (
+    SECRET_WAKE_KEY,
+    _WakeRecorder,
+    _assert_wake_secret_absent,
+    _notify_log_text,
+    _start_wake_server,
+    _write_wake_config,
+    _write_wake_key,
+)
 
 
 NOW = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
@@ -1021,3 +1030,100 @@ def test_cli_scout_feed_redacts_queue_errors(tmp_path: Path, monkeypatch: pytest
     assert captured.out == ""
     assert captured.err == "error: queue-error\n"
     assert "PRIVATE" not in captured.err
+
+
+def test_scout_apply_wake_notify_posts_bounded_body_on_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    recorder = _WakeRecorder()
+    server = _start_wake_server(recorder)
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/wake"
+        _write_wake_config(tmp_path, url, _write_wake_key(tmp_path / "wake.key"))
+        policy = _write_policy(tmp_path / "policy.json", _policy())
+        _gh_numbers(monkeypatch, [7])
+
+        result = grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+
+        assert result["created"] == 1
+        assert result["reason"] == "created"
+        assert len(recorder.requests) == 1
+        request = recorder.requests[0]
+        assert request["authorization"] == f"Bearer {SECRET_WAKE_KEY}"
+        assert request["automation_key"] == SECRET_WAKE_KEY
+        body = json.loads(request["body"])
+        handle = result["handle"]
+        assert isinstance(handle, dict)
+        assert body == {
+            "job_id": handle["job_id"],
+            "label": "Repository Scout",
+            "repository": "example/brigade",
+            "role": "repository-scout",
+        }
+        log = _notify_log_text(tmp_path)
+        assert json.loads(log.strip()) == {"status": 200}
+        _assert_wake_secret_absent(result, log)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_scout_apply_wake_notify_non_200_does_not_fail_enqueue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    recorder = _WakeRecorder()
+    recorder.status = 500
+    server = _start_wake_server(recorder)
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/wake"
+        _write_wake_config(tmp_path, url, _write_wake_key(tmp_path / "wake.key"))
+        policy = _write_policy(tmp_path / "policy.json", _policy())
+        _gh_numbers(monkeypatch, [7])
+
+        result = grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+
+        assert result["created"] == 1
+        handle = result["handle"]
+        assert isinstance(handle, dict)
+        assert handle["state"] == "queued"
+        assert json.loads(_notify_log_text(tmp_path).strip()) == {"status": 500}
+        _assert_wake_secret_absent(result, _notify_log_text(tmp_path))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_scout_apply_wake_notify_timeout_does_not_fail_enqueue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    recorder = _WakeRecorder()
+    recorder.delay = 1.0
+    server = _start_wake_server(recorder)
+    try:
+        monkeypatch.setattr(grokbot_feed, "WAKE_TIMEOUT_SECONDS", 0.2)
+        url = f"http://127.0.0.1:{server.server_address[1]}/wake"
+        _write_wake_config(tmp_path, url, _write_wake_key(tmp_path / "wake.key"))
+        policy = _write_policy(tmp_path / "policy.json", _policy())
+        _gh_numbers(monkeypatch, [7])
+
+        result = grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+
+        assert result["created"] == 1
+        assert json.loads(_notify_log_text(tmp_path).strip()) == {"status": 0}
+        _assert_wake_secret_absent(result, _notify_log_text(tmp_path))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_scout_apply_wake_notify_missing_config_skips_post(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    recorder = _WakeRecorder()
+    server = _start_wake_server(recorder)
+    try:
+        policy = _write_policy(tmp_path / "policy.json", _policy())
+        _gh_numbers(monkeypatch, [7])
+
+        result = grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+
+        assert result["created"] == 1
+        assert recorder.requests == []
+        assert not grokbot_feed.wake_notify_log_path(tmp_path).exists()
+    finally:
+        server.shutdown()
+        server.server_close()
