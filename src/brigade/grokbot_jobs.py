@@ -13,10 +13,13 @@ import secrets
 import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
+from .grokbot_job_clock import format_timestamp as _format_timestamp
+from .grokbot_job_clock import parse_timestamp as _parse_timestamp
+from .grokbot_job_clock import timestamp as _timestamp
 from .grokbot_job_validation import (
     JOB_ID_RE,
     LOWER_HEX_64_RE as LOWER_HEX_64_RE,
@@ -332,22 +335,53 @@ def _is_active_role_record(record: dict[str, Any]) -> bool:
     )
 
 
-def get_job(target: Path, job_id: str) -> dict[str, Any]:
-    """Return the safe projection for one job, never its private envelope."""
+def get_job(target: Path, job_id: str, now: datetime | None = None) -> dict[str, Any]:
+    """Return the safe projection for one job, never its private envelope.
+
+    A read is also a deadline check (#1353): an elapsed job is terminalized
+    here, not reported as still queued or running.
+    """
     if hub_authority(target):
         return _hub_job(job_id)
-    with _storage_paths(target) as storage:
-        return _projection(_load_record(storage.jobs, _validate_job_id(job_id)))
+    job_id = _validate_job_id(job_id)
+    with _storage_paths(target) as storage, _queue_lock(storage):
+        return _projection(_expire_if_elapsed(storage, _load_record(storage.jobs, job_id), now))
 
 
-def status(target: Path, job_id: str | None = None) -> dict[str, Any]:
+def status(target: Path, job_id: str | None = None, now: datetime | None = None) -> dict[str, Any]:
     """Return one job projection or all safe projections in deterministic order."""
     if job_id is not None:
-        return get_job(target, job_id)
+        return get_job(target, job_id, now)
     if hub_authority(target):
         return {"jobs": _hub_jobs(include_all=True)}
-    with _storage_paths(target) as storage:
+    with _storage_paths(target) as storage, _queue_lock(storage):
+        for name in _list_names(storage.jobs, prefix="grokbot-", suffix=".json"):
+            record = _read_json_file(storage.jobs, name)
+            if record is None:
+                raise GrokbotJobError("corrupt-storage")
+            _expire_if_elapsed(storage, _validate_record(record), now)
         return _status_from_storage(storage)
+
+
+def _expire_if_elapsed(storage: _Storage, record: dict[str, Any], now: datetime | None) -> dict[str, Any]:
+    """Terminalize one loaded record whose deadline or current lease elapsed.
+
+    One rule for reads, claims, and :func:`expire`, matching the hub sweep in
+    ``fleet_hub_grokbot`` (#1353).
+    """
+    if record["state"] in TERMINAL_STATES:
+        return record
+    stamp, instant = _timestamp(now)
+    deadline = _deadline(record)
+    expires_at = (
+        deadline if record["state"] == "queued" else min(_parse_timestamp(record["lease_expires_at"]), deadline)
+    )
+    if instant < expires_at:
+        return record
+    record["state"] = "expired"
+    _discard_orphan_report_snapshot(storage, record)
+    _commit_mutation(storage.jobs, record, stamp)
+    return record
 
 
 def _status_from_storage(storage: _Storage) -> dict[str, Any]:
@@ -476,6 +510,7 @@ def _claim_job(
             _reject_nonqueued_claim(record)
         deadline = _deadline(record)
         if instant >= deadline:
+            _expire_if_elapsed(storage, record, instant)
             raise GrokbotJobError("job-expired")
         record.update(
             {
@@ -688,22 +723,11 @@ def expire(target: Path, job_id: str, now: datetime | None = None) -> dict[str, 
                 operation_id=f"expire:{job_id}:{current['item_revision']}",
             )
         )
-    timestamp, instant = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
-        if record["state"] in {"completed", "failed", "expired", "canceled"}:
+        if record["state"] in TERMINAL_STATES:
             _discard_orphan_report_snapshot(storage, record)
-            return _projection(record)
-        deadline = _deadline(record)
-        expires_at = (
-            deadline if record["state"] == "queued" else min(_parse_timestamp(record["lease_expires_at"]), deadline)
-        )
-        if instant < expires_at:
-            return _projection(record)
-        record["state"] = "expired"
-        _discard_orphan_report_snapshot(storage, record)
-        _commit_mutation(storage.jobs, record, timestamp)
-        return _projection(record)
+        return _projection(_expire_if_elapsed(storage, record, now))
 
 
 @contextmanager
@@ -1368,7 +1392,9 @@ def _commit_mutation(jobs_dir: _Directory, record: dict[str, Any], timestamp: st
 
 
 def _reject_nonqueued_claim(record: dict[str, Any]) -> None:
-    if record["state"] in {"completed", "failed", "expired", "canceled"}:
+    if record["state"] == "expired":
+        raise GrokbotJobError("job-expired")
+    if record["state"] in {"completed", "failed", "canceled"}:
         raise GrokbotJobError("terminal-state")
     raise GrokbotJobError("invalid-state")
 
@@ -1525,30 +1551,6 @@ def _idempotency_key_hash(key: str) -> str:
 
 def _now_iso(now: datetime | None) -> str:
     return _timestamp(now)[0]
-
-
-def _timestamp(now: datetime | None) -> tuple[str, datetime]:
-    value = now or datetime.now(timezone.utc)
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    value = value.astimezone(timezone.utc)
-    return _format_timestamp(value), value
-
-
-def _format_timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _parse_timestamp(value: object) -> datetime:
-    if not isinstance(value, str) or not value.endswith("Z"):
-        raise GrokbotJobError("corrupt-storage")
-    try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
-    except ValueError as exc:
-        raise GrokbotJobError("corrupt-storage") from exc
-    if parsed.tzinfo is None or _format_timestamp(parsed) != value:
-        raise GrokbotJobError("corrupt-storage")
-    return parsed.astimezone(timezone.utc)
 
 
 def _verified_report(job_id: str, data: bytes, expected: object) -> dict[str, Any]:

@@ -1883,10 +1883,15 @@ def run(
     print(
         f"brigade fleet hub listening on {bound_host}:{bound_port} (db {Path(db_path).expanduser()}; {mode}; {tailscale_mode})"
     )
+    from . import fleet_hub_grokbot
+
+    sweeper_stop = threading.Event()
+    fleet_hub_grokbot.start_expiry_sweeper(Path(db_path).expanduser(), stop=sweeper_stop)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        sweeper_stop.set()
         server.server_close()
     return 0
