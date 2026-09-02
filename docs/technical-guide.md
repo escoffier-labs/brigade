@@ -1811,7 +1811,7 @@ The normal exception is your own configured tooling:
 A few commands sit outside the daily loop:
 
 - `brigade reconfigure --target <path>` adjusts an existing install to a new Selection. Pass `--depth`, `--harnesses`, `--owner`, or repeatable `--include`, and add `--prune` to remove files for harnesses you no longer select.
-- `brigade scrub --target <path>` runs the embedded content guard against a target, defaulting to the `public-repo` policy. Use `--policy <name-or-path>` to pick another policy and `--dry-run` to preview. Set `CONTENT_GUARD_DIR` only when an older standalone checkout must remain in use.
+- `brigade scrub --target <path>` runs the embedded content guard against a target, defaulting to the `public-repo` policy. Use `--policy <name-or-path>` to pick another policy and `--dry-run` to preview. Set `CONTENT_GUARD_DIR` only when an older standalone checkout must remain in use. File-scoped `content-guard: allow … file` markers count only in a comment or directive position, never inside a string literal; see [`docs/content-guard-allow-markers.md`](content-guard-allow-markers.md).
 - `brigade handoff-template` prints the handoff `TEMPLATE.md`; `--target` prefers a target's installed template when present.
 - `brigade openclaw-fragments --out <dir>` writes OpenClaw config fragments for manual review.
 - `brigade hermes-fragments --out <dir>` writes Hermes adapter fragments (experimental).
@@ -1832,6 +1832,7 @@ Each subsystem has a companion doc under [`docs/`]() with the full local contrac
 - [`docs/execution-model.md`](execution-model.md) - explicit-invocation boundary and external-scheduler ownership
 - [`docs/scheduled-care.md`](scheduled-care.md) - operator-owned cron, systemd, and CI recipes plus `brigade care` scaffold for the memory-care loop
 - [`docs/security.md`](security.md) - the agent workspace security scanner and evidence bundles
+- [`docs/content-guard-allow-markers.md`](content-guard-allow-markers.md) - inline and file-scoped content-guard allow comments
 - [`docs/inspiration-patterns.md`](inspiration-patterns.md) - neutral pattern families and source-pattern decisions
 - [`docs/roadmap-completion-plan.md`](roadmap-completion-plan.md) - the large-roadmap completion plan and phase boundaries
 
