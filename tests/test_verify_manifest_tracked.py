@@ -97,9 +97,7 @@ def test_suggested_manifest_command_names_matching_tracked_manifest(scoreable_ta
         scoreable_target,
         ["skills/brigade-work/SKILL.md"],
     )
-    assert command == (
-        'brigade work verify run --manifest "verify/manifests/local-patch.json" --capture brigade-work'
-    )
+    assert command == ('brigade work verify run --manifest "verify/manifests/local-patch.json" --capture brigade-work')
 
 
 def test_suggested_manifest_command_matches_scope_glob_prefix(scoreable_target):
@@ -130,7 +128,5 @@ def test_suggested_manifest_command_matches_scope_glob_prefix(scoreable_target):
         ["src/brigade/work_cmd/helpers.py"],
         capture="brigade-work",
     )
-    assert command == (
-        'brigade work verify run --manifest "verify/manifests/scoped-patch.json" --capture brigade-work'
-    )
+    assert command == ('brigade work verify run --manifest "verify/manifests/scoped-patch.json" --capture brigade-work')
     assert verify_manifest.suggested_manifest_command(scoreable_target, ["docs/readme.md"]) is None
