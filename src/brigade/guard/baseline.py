@@ -114,12 +114,18 @@ def init_baseline(
 ) -> Baseline:
     """Scan ``target_dir`` and capture all current findings as a baseline.
 
-    ``scope`` is accepted for future compatibility with the planned
-    ``--scope tracked|tree|staged|diff`` flag. Only ``tree`` is implemented
-    here; the scope arg is stored implicitly via the entries we capture.
+    ``scope`` selects the file set: ``tracked`` enumerates via ``git ls-files``
+    and ``tree`` walks the filesystem. Both share the enumeration ``audit``
+    uses, so a baseline covers exactly the files an audit will scan. The legacy
+    markdown-only walk is gone: it silently missed findings in every other file
+    type, which made a baseline useless as an audit gate.
     """
-    if scope != "tree":
-        raise ValueError(f"baseline scope {scope!r} not yet supported (only 'tree')")
+    if scope not in {"tracked", "tree"}:
+        raise ValueError(f"unknown baseline scope: {scope!r} (expected 'tracked' or 'tree')")
+
+    # Deferred: audit imports this module, so a module-level import would cycle.
+    from .audit import DEFAULT_EXCLUDE_DIR_NAMES, _enumerate
+    from .git_scan import _read_text
 
     active_policy = policy or Policy()
     entries: list[BaselineEntry] = []
@@ -128,14 +134,13 @@ def init_baseline(
     if target_dir.is_file():
         files = [target_dir]
     else:
-        files = sorted(target_dir.rglob("*.md"))
+        files = _enumerate(target_dir, scope=scope, exclude_dirs=frozenset(DEFAULT_EXCLUDE_DIR_NAMES))
 
     for file_path in files:
         if _DEFAULT_EXCLUDE_DIR_NAMES.intersection(file_path.parts):
             continue
-        try:
-            text = file_path.read_text()
-        except (OSError, UnicodeDecodeError):
+        text = _read_text(file_path)
+        if text is None:
             continue
 
         result = scan_text(text, policy=active_policy)
@@ -220,14 +225,19 @@ def filter_findings(
     findings: list[Finding],
     baseline: Baseline,
     file_path: str,
+    index: dict[tuple[str, str, str], BaselineEntry] | None = None,
 ) -> list[Finding]:
     """Return findings NOT present in the baseline for ``file_path``.
 
     Matches by (path, rule_id, fingerprint). A finding with the same rule_id
     but different match content (different fingerprint) is treated as NEW
     even if it lives in a baselined file.
+
+    Pass ``index`` to reuse a precomputed baseline index across many files;
+    otherwise one is built on every call.
     """
-    index = baseline._index()
+    if index is None:
+        index = baseline._index()
     kept: list[Finding] = []
     for finding in findings:
         key = (file_path, finding.rule_id, fingerprint_for(finding.rule_id, finding.match))

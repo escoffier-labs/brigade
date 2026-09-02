@@ -8,9 +8,53 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+from brigade.guard.audit import run_audit
+from brigade.guard.baseline import Baseline, BaselineEntry, fingerprint_for
+from brigade.guard.policy import Policy
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+class AuditModuleTests(unittest.TestCase):
+    """Unit tests for the audit module internals."""
+
+    def test_audit_builds_baseline_index_once(self) -> None:
+        # When a baseline is supplied, the index must be built once per run
+        # and reused for every file, not recomputed inside filter_findings.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.md").write_text("Service runs on 192.168.99.10.\n")
+            (root / "b.md").write_text("Host is 192.168.99.20.\n")
+
+            baseline = Baseline(
+                entries=[
+                    BaselineEntry(
+                        path="a.md",
+                        rule_id="private-ipv4",
+                        match="192.168.99.10",
+                        line=1,
+                        fingerprint=fingerprint_for("private-ipv4", "192.168.99.10"),
+                    )
+                ],
+                created_at="2026-09-01T00:00:00+00:00",
+            )
+
+            index_calls = 0
+            real_index = baseline._index()
+
+            def counted_index() -> dict:
+                nonlocal index_calls
+                index_calls += 1
+                return real_index
+
+            with patch.object(baseline, "_index", side_effect=counted_index):
+                report = run_audit(root, policy=Policy(), scope="tree", baseline=baseline)
+
+            self.assertEqual(index_calls, 1)
+            self.assertEqual(report.files_scanned, 2)
 
 
 class AuditCliTests(unittest.TestCase):
@@ -183,6 +227,78 @@ class AuditCliTests(unittest.TestCase):
         payload = json.loads(proc.stdout)
         # Even though there are blocking findings, audit is non-blocking by default.
         self.assertTrue(payload["summary"]["blocked"])
+
+    def test_audit_suppresses_findings_recorded_in_the_baseline(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_repo(repo)
+            (repo / "legacy.md").write_text("Service runs on 192.168.99.10.\n")
+            subprocess.run(["git", "add", "legacy.md"], cwd=repo, check=True)
+            baseline = repo / "baseline.json"
+            init = self._baseline_init(repo, str(repo), "--output", str(baseline))
+            self.assertEqual(init.returncode, 0, msg=init.stdout + init.stderr)
+
+            proc = self._audit(repo, str(repo), "--baseline", str(baseline), "--strict", "--json")
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["summary"]["total_findings"], 0)
+
+    def test_audit_still_reports_a_finding_absent_from_the_baseline(self) -> None:
+        """The ratchet: baselined noise is silent, new leakage still fails."""
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_repo(repo)
+            (repo / "legacy.md").write_text("Service runs on 192.168.99.10.\n")
+            subprocess.run(["git", "add", "legacy.md"], cwd=repo, check=True)
+            baseline = repo / "baseline.json"
+            self._baseline_init(repo, str(repo), "--output", str(baseline))
+
+            (repo / "fresh.md").write_text("New host is 192.168.99.77.\n")
+            subprocess.run(["git", "add", "fresh.md"], cwd=repo, check=True)
+
+            proc = self._audit(repo, str(repo), "--baseline", str(baseline), "--strict", "--json")
+
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)
+        offenders = {entry["path"] for entry in payload["top_offenders"]}
+        self.assertEqual(offenders, {"fresh.md"})
+
+    def test_audit_does_not_scan_the_baseline_file_itself(self) -> None:
+        """A baseline records the literals it accepts, so scanning it re-finds them."""
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_repo(repo)
+            (repo / "legacy.md").write_text("Service runs on 192.168.99.10.\n")
+            subprocess.run(["git", "add", "legacy.md"], cwd=repo, check=True)
+            baseline = repo / ".content-guard-baseline.json"
+            self._baseline_init(repo, str(repo), "--scope", "tracked", "--output", str(baseline))
+            subprocess.run(["git", "add", "-f", ".content-guard-baseline.json"], cwd=repo, check=True)
+
+            proc = self._audit(
+                repo,
+                str(repo),
+                "--scope",
+                "tracked",
+                "--baseline",
+                str(baseline),
+                "--strict",
+                "--json",
+            )
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)
+        offenders = {entry["path"] for entry in payload["top_offenders"]}
+        self.assertNotIn(".content-guard-baseline.json", offenders)
+
+    def _baseline_init(self, cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "brigade.guard", "baseline", "init", *args],
+            cwd=cwd,
+            env={"PYTHONPATH": str(ROOT / "src")},
+            capture_output=True,
+            text=True,
+        )
 
     def _init_repo(self, repo: Path) -> None:
         subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
