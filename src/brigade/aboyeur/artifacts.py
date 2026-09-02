@@ -648,6 +648,7 @@ def _run_payload(
     finished_at: datetime | None = None,
     output_dir: Path | None = None,
     handoff_path: Path | None = None,
+    handoff_inbox: Path | str | None = None,
     error: str | None = None,
     failure_phase: str | None = None,
     failure_kind: str | None = None,
@@ -751,6 +752,8 @@ def _run_payload(
         payload["artifacts"] = str(output_dir)
     if handoff_path is not None:
         payload["handoff"] = str(handoff_path)
+    if handoff_inbox is not None:
+        payload["handoff_inbox"] = str(handoff_inbox)
     if error is not None:
         payload["error"] = error
         if failure_phase is not None or failure_kind is not None:
@@ -822,6 +825,7 @@ def record_run_start(
     verification_contract_payload: Mapping[str, Any] | None = None,
     run_budget_payload: Mapping[str, Any] | None = None,
     kind: str = "work",
+    handoff_inbox: Path | None = None,
 ) -> bool:
     """Write the minimal typed receipt needed before optional or blocking work.
 
@@ -930,6 +934,7 @@ def record_run_start(
                     else (causal_receipt.recorded_run(run_id=output_dir.name) if new_run else None)
                 ),
                 retry_decisions=existing_retry_decisions,
+                handoff_inbox=handoff_inbox,
             ),
         )
     except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:

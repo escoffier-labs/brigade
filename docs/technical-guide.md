@@ -522,7 +522,13 @@ greater than 1 cannot be salvaged this way when earlier-stage worker results
 were never persisted. Resume fails closed before provider construction instead
 of synthesizing from partial stage output. A successful resume refreshes
 `finished_at` and `duration_seconds` to the post-resume completion time rather
-than retaining the pre-resume owner-exit timestamp.
+than retaining the pre-resume owner-exit timestamp. When the original run
+requested `--handoff`, resume writes the Memory Handoff through the same
+`write_run_handoff` path the orchestrator uses and records the path on
+`run.json`. A timed-out direct worker finishes as `status: timeout` and an
+interrupted one as `status: canceled`, matching the orchestrator finish path.
+Resume clears each worker's prior `failure_phase` before the retry so a new
+failure is not labeled with the earlier phase.
 
 If the approved action completed but the process exited before recording
 `approval.consumed` and `run.resumed`, run `brigade runs resume <run>` again.
