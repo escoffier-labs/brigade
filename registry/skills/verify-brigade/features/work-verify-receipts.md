@@ -81,6 +81,14 @@ Observed: helper exit 3, `"status": "failed"`, and a receipt written anyway at
 - `--capture` is mandatory in this repo's hook policy. A raw
   `brigade work verify run` without `--capture brigade-work` is refused before
   it runs, and no receipt exists to point at.
+- `--capture` does not make a receipt *scoreable*. `--command` and `--argv-json`
+  receipts are audit-only: they carry no verifier-authored `subject_binding`, so
+  `outcome rank` and the promotion ratchet never count them. Only
+  `--manifest <id>`, against a manifest tracked under `verify/manifests/`, yields
+  an eligible receipt. Each `--capture` run prints its verdict
+  (`scoreable: yes` / `warning: scoreable: no (reason=...)`) and `--json` carries
+  it as `outcome_scoreability`. Read `docs/outcome-scoring.md` before treating a
+  green receipt as a fed loop.
 - Passing receipts are reused when the tree fingerprint is unchanged, so a
   second identical run can return the earlier `run_id`. That is correct
   behavior, not a stale result. `--no-reuse` forces execution - but never pass

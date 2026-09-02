@@ -31,6 +31,7 @@ from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
 from . import verify_ranking
+from .verify_scoreability import _print_graph_impact, _print_scoreability_notice, _scoreability_notice
 
 
 def _verification_is_windows() -> bool:
@@ -1973,32 +1974,6 @@ def verify_plan(
     return 0 if not blockers else 1
 
 
-def _print_graph_impact(ranking: object) -> None:
-    if not isinstance(ranking, dict):
-        return
-    if ranking.get("degraded") is True:
-        reason = ranking.get("degraded_reason") or "graphtrail unavailable"
-        print(f"graph_impact: degraded ({reason})")
-        return
-    candidates = ranking.get("candidates") if isinstance(ranking.get("candidates"), list) else []
-    changed = ranking.get("changed_files") if isinstance(ranking.get("changed_files"), list) else []
-    print(f"graph_impact: {len(candidates)} candidate(s) from {len(changed)} changed file(s)")
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        confidence = item.get("confidence") if isinstance(item.get("confidence"), dict) else {}
-        band = confidence.get("band") or "unknown"
-        score = confidence.get("score")
-        hops = confidence.get("min_hops")
-        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
-        via = evidence.get("via") if isinstance(evidence.get("via"), list) else []
-        via_text = ",".join(str(symbol) for symbol in via[:3]) if via else "-"
-        print(f"- [{band} score={score} hops={hops} via={via_text}] {item.get('command')}")
-    note = ranking.get("attribution")
-    if isinstance(note, str) and note.strip() and candidates:
-        print(f"graph_impact_note: {note.strip()}")
-
-
 def _attach_miseledger_indexing(
     receipt: dict[str, object],
     *,
@@ -2113,6 +2088,7 @@ def verify_run(
 
             from .. import outcome_cmd
 
+            scoreability = _scoreability_notice(target, receipt)
             sink = io.StringIO()
             with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
                 outcome_cmd.capture(
@@ -2122,6 +2098,7 @@ def verify_run(
                     run_id=receipt["run_id"],
                     json_output=False,
                 )
+            receipt["outcome_scoreability"] = scoreability
             _attach_miseledger_indexing(receipt, target=target, json_output=True)
         print(json.dumps(receipt, indent=2, sort_keys=True))
         return rc
@@ -2136,6 +2113,7 @@ def verify_run(
     if capture:
         from .. import outcome_cmd
 
+        scoreability = _scoreability_notice(target, receipt)
         outcome_cmd.capture(
             target=target,
             artifact_id=capture,
@@ -2143,7 +2121,9 @@ def verify_run(
             run_id=receipt["run_id"],
             json_output=False,
         )
+        receipt["outcome_scoreability"] = scoreability
         _attach_miseledger_indexing(receipt, target=target, json_output=False)
+        _print_scoreability_notice(scoreability)
     return rc
 
 
