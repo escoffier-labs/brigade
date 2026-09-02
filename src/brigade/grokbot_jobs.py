@@ -13,10 +13,13 @@ import secrets
 import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
+from .grokbot_job_clock import format_timestamp as _format_timestamp
+from .grokbot_job_clock import parse_timestamp as _parse_timestamp
+from .grokbot_job_clock import timestamp as _timestamp
 from .grokbot_job_validation import (
     JOB_ID_RE,
     LOWER_HEX_64_RE as LOWER_HEX_64_RE,
@@ -332,22 +335,33 @@ def _is_active_role_record(record: dict[str, Any]) -> bool:
     )
 
 
-def get_job(target: Path, job_id: str) -> dict[str, Any]:
-    """Return the safe projection for one job, never its private envelope."""
+def get_job(target: Path, job_id: str, now: datetime | None = None) -> dict[str, Any]:
+    """Return the safe projection for one job, never its private envelope.
+
+    A read is also a deadline check (#1353): an elapsed job is terminalized
+    here, not reported as still queued or running.
+    """
     if hub_authority(target):
         return _hub_job(job_id)
-    with _storage_paths(target) as storage:
-        return _projection(_load_record(storage.jobs, _validate_job_id(job_id)))
+    job_id = _validate_job_id(job_id)
+    with _storage_paths(target) as storage, _queue_lock(storage):
+        return _projection(_expire_if_elapsed(storage, _load_record(storage.jobs, job_id), now))
 
 
-def status(target: Path, job_id: str | None = None) -> dict[str, Any]:
+def status(target: Path, job_id: str | None = None, now: datetime | None = None) -> dict[str, Any]:
     """Return one job projection or all safe projections in deterministic order."""
     if job_id is not None:
-        return get_job(target, job_id)
+        return get_job(target, job_id, now)
     if hub_authority(target):
         return {"jobs": _hub_jobs(include_all=True)}
-    with _storage_paths(target) as storage:
-        return _status_from_storage(storage)
+    with _storage_paths(target) as storage, _queue_lock(storage):
+        jobs: list[dict[str, Any]] = []
+        for name in _list_names(storage.jobs, prefix="grokbot-", suffix=".json"):
+            record = _read_json_file(storage.jobs, name)
+            if record is None:
+                raise GrokbotJobError("corrupt-storage")
+            jobs.append(_projection(_expire_if_elapsed(storage, _validate_record(record), now)))
+        return {"jobs": jobs}
 
 
 def _status_from_storage(storage: _Storage) -> dict[str, Any]:
@@ -476,6 +490,7 @@ def _claim_job(
             _reject_nonqueued_claim(record)
         deadline = _deadline(record)
         if instant >= deadline:
+            _expire_if_elapsed(storage, record, instant)
             raise GrokbotJobError("job-expired")
         record.update(
             {
@@ -508,7 +523,7 @@ def renew(
     timestamp, instant = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
-        _require_current_lease(record, bot_id, lease_id, instant)
+        _require_live_lease_or_expire(storage, record, bot_id, lease_id, now, instant)
         record["lease_expires_at"] = _format_timestamp(
             min(instant + timedelta(seconds=lease_seconds), _deadline(record))
         )
@@ -537,7 +552,7 @@ def transition(
     timestamp, instant = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
-        _require_current_lease(record, bot_id, lease_id, instant)
+        _require_live_lease_or_expire(storage, record, bot_id, lease_id, now, instant)
         current = record["state"]
         if state == "running":
             if current != "claimed" or artifact is not None:
@@ -575,7 +590,7 @@ def complete_report(
     timestamp, instant = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
-        _require_current_lease(record, bot_id, lease_id, instant)
+        _require_live_lease_or_expire(storage, record, bot_id, lease_id, now, instant)
         _require_report_job(record)
         validated = _validated_completion(record, artifact)
         if hashlib.sha256(report_bytes).hexdigest() != validated["sha256"]:
@@ -666,41 +681,10 @@ def acknowledge_cancel(
     timestamp, instant = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
-        _require_current_lease(record, bot_id, lease_id, instant)
+        _require_live_lease_or_expire(storage, record, bot_id, lease_id, now, instant)
         if "cancel_requested_at" not in record:
             raise GrokbotJobError("cancellation-not-requested")
         record["state"] = "canceled"
-        _discard_orphan_report_snapshot(storage, record)
-        _commit_mutation(storage.jobs, record, timestamp)
-        return _projection(record)
-
-
-def expire(target: Path, job_id: str, now: datetime | None = None) -> dict[str, Any]:
-    """Terminalize jobs whose deadline or current lease has elapsed, never requeue."""
-    job_id = _validate_job_id(job_id)
-    if hub_authority(target):
-        current = _hub_job(job_id)
-        return _hub_projection(
-            _require_hub(
-                "expire",
-                job_id,
-                expected_item_revision=current["item_revision"],
-                operation_id=f"expire:{job_id}:{current['item_revision']}",
-            )
-        )
-    timestamp, instant = _timestamp(now)
-    with _storage_paths(target) as storage, _queue_lock(storage):
-        record = _load_record(storage.jobs, job_id)
-        if record["state"] in {"completed", "failed", "expired", "canceled"}:
-            _discard_orphan_report_snapshot(storage, record)
-            return _projection(record)
-        deadline = _deadline(record)
-        expires_at = (
-            deadline if record["state"] == "queued" else min(_parse_timestamp(record["lease_expires_at"]), deadline)
-        )
-        if instant < expires_at:
-            return _projection(record)
-        record["state"] = "expired"
         _discard_orphan_report_snapshot(storage, record)
         _commit_mutation(storage.jobs, record, timestamp)
         return _projection(record)
@@ -1368,24 +1352,11 @@ def _commit_mutation(jobs_dir: _Directory, record: dict[str, Any], timestamp: st
 
 
 def _reject_nonqueued_claim(record: dict[str, Any]) -> None:
-    if record["state"] in {"completed", "failed", "expired", "canceled"}:
+    if record["state"] == "expired":
+        raise GrokbotJobError("job-expired")
+    if record["state"] in {"completed", "failed", "canceled"}:
         raise GrokbotJobError("terminal-state")
     raise GrokbotJobError("invalid-state")
-
-
-def _require_current_lease(record: dict[str, Any], bot_id: str, lease_id: str, instant: datetime) -> None:
-    if record["state"] in {"completed", "failed", "expired", "canceled"}:
-        raise GrokbotJobError("terminal-state")
-    if record["state"] not in {"claimed", "running"}:
-        raise GrokbotJobError("invalid-state")
-    if record["bot_id"] != bot_id or record["lease_id"] != lease_id:
-        raise GrokbotJobError("lease-conflict")
-    _require_live_lease(record, instant)
-
-
-def _require_live_lease(record: dict[str, Any], instant: datetime) -> None:
-    if instant >= min(_parse_timestamp(record["lease_expires_at"]), _deadline(record)):
-        raise GrokbotJobError("lease-expired")
 
 
 def _report_bytes(report_text: object) -> bytes:
@@ -1416,60 +1387,6 @@ def _validated_completion(record: dict[str, Any], artifact: object) -> dict[str,
     if "cancel_requested_at" in record:
         raise GrokbotJobError("cancel-requested")
     return _validate_completion_artifact(artifact, record["spec"])
-
-
-def _deadline(record: dict[str, Any]) -> datetime:
-    return _parse_timestamp(record["created_at"]) + timedelta(seconds=record["timeout_seconds"])
-
-
-def _handle(record: dict[str, Any], *, idempotent: bool) -> dict[str, Any]:
-    return {"job_id": record["job_id"], "state": record["state"], "idempotent": idempotent}
-
-
-def _projection(record: dict[str, Any]) -> dict[str, Any]:
-    spec = record["spec"]
-    assert isinstance(spec, dict)
-    projection = {
-        "job_id": record["job_id"],
-        "label": spec["label"],
-        "role": spec["role"],
-        "repository": spec["repository"],
-        "task_hash": record["task_hash"],
-        "state": record["state"],
-        "created_at": record["created_at"],
-        "updated_at": record["updated_at"],
-        "queued_at": record["queued_at"],
-        "timeout_seconds": record["timeout_seconds"],
-        "item_revision": record["item_revision"],
-        "artifact": spec["artifact"],
-    }
-    for key in ("claimed_at", "lease_expires_at", "cancel_requested_at"):
-        if key in record:
-            projection[key] = record[key]
-    return projection
-
-
-def _claim_result(record: dict[str, Any], *, include_context: bool) -> dict[str, Any]:
-    result = _projection(record)
-    if include_context:
-        result["execution_context"] = _execution_context(record)
-    return result
-
-
-def _execution_context(record: dict[str, Any]) -> dict[str, Any]:
-    spec = record["spec"]
-    assert isinstance(spec, dict)
-    return {
-        "label": spec["label"],
-        "role": spec["role"],
-        "repository": spec["repository"],
-        "base_ref": spec["base_ref"],
-        "ownership_paths": list(spec["ownership_paths"]),
-        "instructions": spec["instructions"],
-        "verification_commands": list(spec["verification_commands"]),
-        "artifact": dict(spec["artifact"]),
-        "timeout_seconds": record["timeout_seconds"],
-    }
 
 
 def _validate_spec(spec: object) -> dict[str, Any]:
@@ -1525,30 +1442,6 @@ def _idempotency_key_hash(key: str) -> str:
 
 def _now_iso(now: datetime | None) -> str:
     return _timestamp(now)[0]
-
-
-def _timestamp(now: datetime | None) -> tuple[str, datetime]:
-    value = now or datetime.now(timezone.utc)
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    value = value.astimezone(timezone.utc)
-    return _format_timestamp(value), value
-
-
-def _format_timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _parse_timestamp(value: object) -> datetime:
-    if not isinstance(value, str) or not value.endswith("Z"):
-        raise GrokbotJobError("corrupt-storage")
-    try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
-    except ValueError as exc:
-        raise GrokbotJobError("corrupt-storage") from exc
-    if parsed.tzinfo is None or _format_timestamp(parsed) != value:
-        raise GrokbotJobError("corrupt-storage")
-    return parsed.astimezone(timezone.utc)
 
 
 def _verified_report(job_id: str, data: bytes, expected: object) -> dict[str, Any]:
@@ -1995,3 +1888,19 @@ def _safe_artifact_metadata(artifact: dict[str, Any], job: dict[str, Any]) -> di
 def load_task_snapshot(target: Path, job_id: str) -> dict[str, Any]:
     """Return the immutable private envelope for a hub-authoritative job."""
     return _load_task_snapshot(target, _validate_job_id(job_id))
+
+
+# Keep the established public import surface in this module. The job state,
+# deadline, and lease-expiry helpers live separately from storage primitives.
+from .grokbot_jobs_expiry import (  # noqa: E402, F401
+    _claim_result,
+    _deadline,
+    _execution_context,
+    _expire_if_elapsed,
+    _handle,
+    _projection,
+    _require_current_lease,
+    _require_live_lease,
+    _require_live_lease_or_expire,
+    expire,
+)

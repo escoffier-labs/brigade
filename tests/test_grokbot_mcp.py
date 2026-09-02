@@ -2196,6 +2196,48 @@ def test_renew_and_fail_after_expiry_answer_lease_expired(tmp_path: Path):
         assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "claimed"
 
 
+def test_renew_and_fail_past_the_job_deadline_still_answer_lease_expired(tmp_path: Path):
+    """#1353 expiry composed with #1383: the row ends, the answer stays actionable."""
+    for tool in ("grokbot_queue_renew", "grokbot_queue_fail"):
+        spec = {**_long_spec(), "timeout_seconds": 60}
+        job_id = grokbot_jobs.enqueue(tmp_path, spec, f"deadline-job-{tool}")["job_id"]
+        adapter = _adapter(tmp_path)
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-late"})
+        _backdate_deadline(tmp_path, job_id)
+
+        with pytest.raises(grokbot_mcp.AdapterError) as refusal:
+            adapter.call_tool(tool, {"job_id": job_id, "lease_id": "lease-late"})
+
+        assert refusal.value.reason == "lease-expired"
+        assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "expired"
+
+
+def test_claim_past_the_job_deadline_is_refused_and_expires_the_job(tmp_path: Path):
+    spec = {**_long_spec(), "timeout_seconds": 60}
+    job_id = grokbot_jobs.enqueue(tmp_path, spec, "deadline-claim")["job_id"]
+    _backdate_deadline(tmp_path, job_id)
+    adapter = _adapter(tmp_path)
+
+    with pytest.raises(grokbot_mcp.AdapterError):
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-late"})
+
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "expired"
+
+
+def _backdate_deadline(target: Path, job_id: str) -> None:
+    """Move one job's own clock past its ``timeout_seconds`` without moving the code's."""
+    path = target / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{job_id}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    stamp = (datetime.now(timezone.utc) - timedelta(seconds=record["timeout_seconds"] + 60)).isoformat()
+    stamp = stamp.replace("+00:00", "Z")
+    # A granted lease is always clamped to the job's deadline, so the lease
+    # moves with it: past its own deadline a job never has a live lease.
+    for field in ("created_at", "queued_at", "updated_at", "claimed_at", "lease_expires_at"):
+        if field in record:
+            record[field] = stamp
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+
 def test_a_live_lease_conflict_is_still_not_reported_as_expiry(tmp_path: Path):
     job_id = grokbot_jobs.enqueue(tmp_path, _long_spec(), "implementation-job")["job_id"]
     adapter = _adapter(tmp_path)

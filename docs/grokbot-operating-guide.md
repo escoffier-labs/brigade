@@ -127,6 +127,40 @@ A lease runs from 30 seconds to 3600 seconds and defaults to 300 seconds. The
 holder renews before expiry and within the job deadline. `expire` never
 requeues a job; it finalizes one whose deadline or lease has passed.
 
+### Job deadlines
+
+A job's deadline is `queued_at` plus its `timeout_seconds`. The deadline is the
+hub's, not an operator's: nobody has to call `expire` for a job to end.
+
+- Every `list`, `status`, `claim`, `renew`, and other mutating request sweeps
+  past-deadline jobs to `expired` before it answers, so a read never reports a
+  job that is already over as `queued` or `running`.
+- The hub also sweeps on a timer (`start_expiry_sweeper`, every 60 seconds by
+  default) for the life of the process, so a queue that nobody polls still
+  expires. A job enqueued with `timeout_seconds` 7200 that no worker ever claims
+  is `expired` about 7200 seconds later with no request involved.
+- Each automatic expiry writes an `expire` row to `grokbot_operations` with an
+  `expire:deadline:<job_id>:<revision>` operation id and a NULL `actor_node_id`:
+  the deadline asked for it, not an actor. An operator `expire` still writes its
+  own operation id, and the two ids can never collide.
+- Claiming a job that is already past its deadline is refused with `job-expired`
+  rather than a state or revision error, so a Bot can tell "too late" apart from
+  "you raced another worker".
+
+The local (no-hub) queue in `grokbot_jobs.py` follows the same rule: `status`
+and `get_job` terminalize an elapsed job before projecting it, and a claim past
+the deadline expires the job and fails with `job-expired`.
+
+A lapsed lease is not a lapsed job. A read keys on the job's own deadline only,
+so a claimed job whose lease ran out stays `claimed` and can be picked up again;
+the holder's `renew`, `start`, `fail`, `complete`, and `ack_cancel` are refused
+with `lease-expired`. When the job's own deadline is what passed, the row is
+expired and the operation recorded, and the holder still hears `lease-expired`
+rather than `job-expired`: a granted lease is always clamped to the deadline, so
+the lease is genuinely gone, and that is the reason a Bot can act on.
+`job-expired` stays the claim-side answer, which is what tells a Bot not to
+start work at all.
+
 `grokbot_queue_claim` takes `lease_id` as an optional argument. A Bot that has
 no lease to supply omits it or sends `null`, and the listener mints a uuid4 hex
 lease and returns it in the claim result as `lease_id`. That returned value is
