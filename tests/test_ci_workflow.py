@@ -379,6 +379,8 @@ def test_ci_workflow_test_shards_asserts_grokbot_mcp_tests_run_without_skips():
 
     assert "if: matrix.python == '3.12'" in step
     assert "tests/test_grokbot_mcp.py" in step
+    assert "pytest_exit=$?" in step
+    assert "[ $pytest_exit -ne 0 ]" in step
     assert "grep -q 'skipped'" in step
     assert "grokbot MCP tests were skipped" in step
     assert "exit 1" in step
