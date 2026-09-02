@@ -48,7 +48,6 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_attestation.add_argument("--run-id", metavar="<id|latest>", required=True, help="Verify run id or 'latest'.")
     p_attestation.add_argument("--out", metavar="PATH|-", default=None, help="Output path, or '-' for stdout.")
     p_attestation.add_argument("--key", metavar="PATH", type=Path, default=None, help="Path to SSH private key.")
-    p_attestation.add_argument("--principal", metavar="NAME", default=None, help="Signer principal name.")
     p_attestation.add_argument("--force", action="store_true", help="Overwrite an existing attestation file.")
     p_attestation.set_defaults(func=dispatch)
     for projection in ("otel-genai", "openinference"):
@@ -70,6 +69,9 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--allowed-signers", metavar="PATH", type=Path, default=None, help="Path to OpenSSH allowed_signers file."
     )
     p_verify_att.add_argument("--principal", metavar="NAME", default=None, help="Expected signer principal name.")
+    p_verify_att.add_argument(
+        "--revoked-keys", metavar="PATH", type=Path, default=None, help="Path to OpenSSH key revocation list (KRL)."
+    )
     p_verify_att.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_verify_att.set_defaults(func=dispatch)
 
@@ -95,7 +97,6 @@ def dispatch(args) -> int:
             run_id=args.run_id,
             out=args.out,
             key=args.key,
-            principal=args.principal,
             force=args.force,
         )
     if args.receipts_command == "export" and args.receipts_export_command == "miseledger":
@@ -124,6 +125,7 @@ def dispatch(args) -> int:
             target=args.target,
             allowed_signers=args.allowed_signers,
             principal=args.principal,
+            krl_path=args.revoked_keys,
             json_output=args.json,
         )
     if args.receipts_command == "attestation-keygen":

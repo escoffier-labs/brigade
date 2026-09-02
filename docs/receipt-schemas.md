@@ -1125,7 +1125,20 @@ Trust is evaluated offline via standard OpenSSH `allowed_signers` files:
 - Key file: `.brigade/attestation/signing-key` (Ed25519, mode 0600).
 - Key revocation list (optional): `.brigade/attestation/revoked_keys`.
 - Allowed signers entry format: `<principal> namespaces="attestation@brigade.dev" <key-type> <base64-key>`.
-- Verification executes `ssh-keygen -Y verify -f <allowed_signers> -I <principal> -n attestation@brigade.dev -s <sigfile>` over the recomputed DSSE PAE. When `--target` is specified, it also re-derives the in-toto Statement from the local verify receipt to confirm `SUBJECT-MISMATCH` integrity.
+- Verification executes `ssh-keygen -Y verify -f <allowed_signers> -I <principal> -n attestation@brigade.dev -s <sigfile>` over the recomputed DSSE PAE. Re-derivation of the in-toto Statement from the local verify receipt, and therefore the `SUBJECT-MISMATCH` check, only runs when `--target` is given and the run directory referenced by the receipt exists.
+
+### `brigade.attestation_verify_result.v1`
+
+Machine-readable result printed by `brigade receipts verify-attestation --json`:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schema` | string | Always `brigade.attestation_verify_result.v1` |
+| `status` | string | One of `SIGNED-OK`, `SIGNATURE-MISMATCH`, `UNTRUSTED-KEY`, `UNVERIFIABLE-SIGNATURE`, `SUBJECT-MISMATCH` |
+| `principal` | string \| null | Verified signer principal when status is `SIGNED-OK` |
+| `keyid` | string \| null | `SHA256:...` fingerprint of the signing key when known |
+| `subject` | array of object | Reproduced in-toto Statement subjects |
+| `run_id` | string \| null | Run id recovered from the statement `predicate.url` when it is safe |
 
 ---
 

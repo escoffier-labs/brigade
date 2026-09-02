@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import base64
 import getpass
-import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -16,6 +16,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from . import localio
 
 IN_TOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 IN_TOTO_TEST_RESULT_PREDICATE_TYPE = "https://in-toto.io/attestation/test-result/v0.1"
@@ -69,6 +71,7 @@ class AttestationVerifyResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema": "brigade.attestation_verify_result.v1",
             "status": self.status,
             "principal": self.principal,
             "keyid": self.keyid,
@@ -189,7 +192,16 @@ def keygen(
     signers_path.parent.mkdir(parents=True, exist_ok=True)
 
     pub_path = Path(f"{key_path}.pub")
-    if force:
+    old_key_data: str | None = None
+    if force and pub_path.is_file():
+        old_pub_line = pub_path.read_text(encoding="utf-8").strip()
+        old_parts = old_pub_line.split()
+        if len(old_parts) >= 2:
+            old_key_data = old_parts[1]
+        if key_path.exists():
+            key_path.unlink()
+        pub_path.unlink()
+    elif force:
         if key_path.exists():
             key_path.unlink()
         if pub_path.exists():
@@ -221,6 +233,16 @@ def keygen(
         raise AttestationError(f"malformed public key file: {pub_path}")
     key_type, key_data = parts[0], parts[1]
 
+    if force and old_key_data is not None and signers_path.is_file():
+        existing_lines = signers_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        filtered: list[str] = []
+        for line in existing_lines:
+            parts = line.strip().split()
+            if len(parts) >= 4 and parts[3] == old_key_data:
+                continue
+            filtered.append(line)
+        signers_path.write_text("".join(filtered), encoding="utf-8")
+
     entry = f'{resolved_principal} namespaces="{ATTESTATION_NAMESPACE}" {key_type} {key_data}\n'
     with open(signers_path, "a", encoding="utf-8") as f:
         f.write(entry)
@@ -248,9 +270,40 @@ def find_principals(
 
 
 def _compute_receipt_sha256(receipt: Mapping[str, Any]) -> str:
-    cleaned = {k: v for k, v in receipt.items() if k != "digests"}
-    rendered = json.dumps(cleaned, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+    return localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+
+
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _test_name(cmd: Mapping[str, Any]) -> str:
+    """Derive a safe test name from a command record, dropping env vars and paths."""
+    check_id = cmd.get("check_id")
+    if check_id:
+        return str(check_id).strip()
+
+    argv = cmd.get("argv")
+    if isinstance(argv, list) and argv:
+        tokens = [str(t) for t in argv]
+    else:
+        raw = str(cmd.get("command") or "")
+        tokens = shlex.split(raw)
+
+    cleaned: list[str] = []
+    for token in tokens:
+        if _ENV_ASSIGNMENT_RE.match(token):
+            continue
+        cleaned.append(token)
+
+    if not cleaned:
+        return "command"
+
+    cleaned[0] = Path(cleaned[0]).name
+    for i in range(1, len(cleaned)):
+        if os.path.sep in cleaned[i] or "/" in cleaned[i]:
+            cleaned[i] = Path(cleaned[i]).name
+
+    return " ".join(cleaned)
 
 
 def build_statement(receipt: Mapping[str, Any]) -> dict[str, Any]:
@@ -280,7 +333,7 @@ def build_statement(receipt: Mapping[str, Any]) -> dict[str, Any]:
         for cmd in commands:
             if not isinstance(cmd, Mapping):
                 continue
-            test_name = str(cmd.get("check_id") or cmd.get("command") or "").strip()
+            test_name = _test_name(cmd)
             exit_code = cmd.get("exit_code")
             if exit_code == 0:
                 passed_tests.append(test_name)
@@ -421,7 +474,10 @@ def write_attestation_file(
     if target.exists() and not force:
         raise FileExistsError(f"attestation file already exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(envelope, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if force:
+        localio.write_json(target, dict(envelope))
+    else:
+        localio.write_json_exclusive(target, dict(envelope))
     return target
 
 
@@ -476,12 +532,14 @@ def verify_attestation(
     payload_type = envelope.get("payloadType")
     payload_b64 = envelope.get("payload")
     signatures = envelope.get("signatures")
+    brigade_meta = envelope.get("brigade")
 
     if (
         not isinstance(payload_type, str)
         or not isinstance(payload_b64, str)
         or not isinstance(signatures, list)
-        or len(signatures) == 0
+        or len(signatures) != 1
+        or not isinstance(brigade_meta, Mapping)
     ):
         return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE)
 
@@ -495,6 +553,15 @@ def verify_attestation(
     if not isinstance(statement, Mapping):
         return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE)
 
+    if (
+        payload_type != DSSE_PAYLOAD_TYPE
+        or statement.get("_type") != IN_TOTO_STATEMENT_TYPE
+        or statement.get("predicateType") != IN_TOTO_TEST_RESULT_PREDICATE_TYPE
+        or brigade_meta.get("profile") != ATTESTATION_PROFILE
+        or brigade_meta.get("namespace") != namespace
+    ):
+        return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE)
+
     subject_raw = statement.get("subject")
     subject: list[dict[str, Any]] = (
         [dict(s) for s in subject_raw if isinstance(s, Mapping)] if isinstance(subject_raw, list) else []
@@ -505,7 +572,9 @@ def verify_attestation(
     if isinstance(pred, Mapping):
         url = pred.get("url")
         if isinstance(url, str) and url.startswith("urn:brigade:verify:"):
-            run_id = url.removeprefix("urn:brigade:verify:")
+            candidate = url.removeprefix("urn:brigade:verify:")
+            if re.match(r"^[A-Za-z0-9._-]+$", candidate):
+                run_id = candidate
 
     # 3. Recompute DSSE PAE
     pae_bytes = dsse_pae(payload_type, payload_bytes)
@@ -554,8 +623,12 @@ def verify_attestation(
         # Signature is cryptographically valid over PAE bytes.
         # Extract actual signing key fingerprint.
         actual_keyid: str | None = None
-        out_text = res_check.stdout.decode("utf-8", errors="replace")
-        match = re.search(r"SHA256:[A-Za-z0-9+/=]+", out_text)
+        combined_text = (
+            res_check.stdout.decode("utf-8", errors="replace")
+            + "\n"
+            + res_check.stderr.decode("utf-8", errors="replace")
+        )
+        match = re.search(r"SHA256:[A-Za-z0-9+/=]+", combined_text)
         if match:
             actual_keyid = match.group(0)
         else:

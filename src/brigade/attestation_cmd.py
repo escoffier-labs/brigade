@@ -17,7 +17,6 @@ def export_attestation(
     run_id: str,
     out: str | None = None,
     key: Path | None = None,
-    principal: str | None = None,
     force: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
@@ -90,16 +89,24 @@ def verify_attestation(
     target: Path | None = None,
     allowed_signers: Path | None = None,
     principal: str | None = None,
+    krl_path: Path | None = None,
     json_output: bool = False,
 ) -> int:
+    effective_krl = krl_path
+    if effective_krl is None and target is not None:
+        default_krl = attestation.default_revoked_keys_path(target)
+        if default_krl.is_file():
+            effective_krl = default_krl
+
     result = attestation.verify_attestation(
         attestation_path,
         allowed_signers_path=allowed_signers,
         principal=principal,
         target=target,
+        krl_path=effective_krl,
     )
     if json_output:
-        print(json.dumps(result.to_dict(), indent=2))
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     else:
         print(result.status)
     return 0 if result.status == attestation.STATUS_SIGNED_OK else 1

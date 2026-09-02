@@ -29,7 +29,7 @@ def _sample_receipt(
     producer_run_id: str | None = "run-orch-001",
     include_env: bool = True,
 ) -> dict[str, Any]:
-    run_id = "20260902-120000-work-verify-abcdef12"
+    run_id = "20260902-120000-work-verify-xyz12345"
     run_dir = tmp_path / ".brigade" / "work" / "verify-runs" / run_id
     return {
         "schema_version": 2,
@@ -139,6 +139,39 @@ def test_export_from_completed_receipt_produces_identical_payload_without_leakag
     }
 
 
+def test_ad_hoc_command_name_drops_env_vars_and_paths(tmp_path: Path) -> None:
+    key_path, _signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    receipt = _sample_receipt(tmp_path)
+    receipt["commands"][0]["check_id"] = None
+    receipt["commands"][0]["command"] = "SECRET=abc /tmp/x/bin/pytest -q /tmp/x/tests"
+    receipt["commands"][0]["argv"] = None
+
+    envelope = attestation.export_attestation(receipt, key_path=key_path)
+    payload_bytes = base64.b64decode(envelope["payload"])
+    statement = json.loads(payload_bytes)
+    pred = statement["predicate"]
+    assert pred["passedTests"] == ["pytest -q tests"]
+    assert pred["failedTests"] == []
+
+    envelope_json = json.dumps(envelope)
+    payload_json = payload_bytes.decode("utf-8")
+    for secret in ("SECRET", "abc", "/tmp/x"):
+        assert secret not in envelope_json
+        assert secret not in payload_json
+
+
+def test_ad_hoc_command_name_prefers_argv_over_command(tmp_path: Path) -> None:
+    key_path, _signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    receipt = _sample_receipt(tmp_path)
+    receipt["commands"][0]["check_id"] = None
+    receipt["commands"][0]["command"] = "SHOULD=ignore /old/path/bin/pytest /old/path/tests"
+    receipt["commands"][0]["argv"] = ["TOKEN=xyz", "/new/bin/pytest", "-k", "/new/path/test_x.py"]
+
+    envelope = attestation.export_attestation(receipt, key_path=key_path)
+    statement = json.loads(base64.b64decode(envelope["payload"]))
+    assert statement["predicate"]["passedTests"] == ["pytest -k test_x.py"]
+
+
 def test_export_refuses_receipt_with_null_tree_fingerprint(tmp_path: Path) -> None:
     receipt_null_tree = _sample_receipt(tmp_path, tree_fingerprint=None)
     with pytest.raises(attestation.AttestationExportError) as exc_info:
@@ -170,6 +203,27 @@ def test_receipt_with_nonzero_or_null_exit_code_yields_failed(tmp_path: Path) ->
     assert stmt_status_failed["predicate"]["result"] == "FAILED"
     assert stmt_status_failed["predicate"]["passedTests"] == ["unit-tests"]
     assert stmt_status_failed["predicate"]["failedTests"] == []
+
+
+def test_verify_rejects_unexpected_types_and_missing_brigade_metadata(tmp_path: Path) -> None:
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    receipt = _sample_receipt(tmp_path)
+    envelope = attestation.export_attestation(receipt, key_path=key_path)
+
+    # Swap predicateType to a SLSA URI
+    statement = json.loads(base64.b64decode(envelope["payload"]))
+    statement["predicateType"] = "https://slsa.dev/provenance/v1"
+    envelope["payload"] = base64.b64encode(
+        json.dumps(statement, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    res = attestation.verify_attestation(envelope, allowed_signers_path=signers_path)
+    assert res.status == attestation.STATUS_UNVERIFIABLE_SIGNATURE
+
+    # Delete brigade metadata
+    envelope2 = attestation.export_attestation(receipt, key_path=key_path)
+    del envelope2["brigade"]
+    res2 = attestation.verify_attestation(envelope2, allowed_signers_path=signers_path)
+    assert res2.status == attestation.STATUS_UNVERIFIABLE_SIGNATURE
 
 
 def test_verify_on_second_tmp_path_reports_signed_ok(tmp_path: Path) -> None:
@@ -252,6 +306,17 @@ def test_ssh_keygen_verify_by_hand_on_extracted_pae_and_sig(tmp_path: Path) -> N
     assert f'Good "{attestation.ATTESTATION_NAMESPACE}" signature' in combined
 
 
+def test_verify_rejects_unsafe_run_id_in_predicate_url(tmp_path: Path) -> None:
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    receipt = _sample_receipt(tmp_path)
+    statement = attestation.build_statement(receipt)
+    statement["predicate"]["url"] = "urn:brigade:verify:../../etc/passwd"
+    envelope = attestation.create_envelope(statement, key_path=key_path)
+    res = attestation.verify_attestation(envelope, allowed_signers_path=signers_path)
+    assert res.status == attestation.STATUS_SIGNED_OK
+    assert res.run_id is None
+
+
 def test_subject_mismatch_detected_when_target_receipt_differs(tmp_path: Path) -> None:
     key_path, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
     receipt = _sample_receipt(tmp_path)
@@ -281,6 +346,21 @@ def _write_receipt_to_disk(receipt: dict[str, Any]) -> None:
     run_dir = Path(receipt["path"])
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+
+def test_keygen_force_rotates_allowed_signers_without_trusting_old_key(tmp_path: Path) -> None:
+    key_path1, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    receipt = _sample_receipt(tmp_path)
+    envelope = attestation.export_attestation(receipt, key_path=key_path1)
+
+    key_path2, _signers_path2 = attestation.keygen(tmp_path, principal="alice@example.com", force=True)
+    assert key_path2 == key_path1
+
+    lines = signers_path.read_text("utf-8").splitlines()
+    assert len(lines) == 1
+
+    res = attestation.verify_attestation(envelope, allowed_signers_path=signers_path)
+    assert res.status == attestation.STATUS_UNTRUSTED_KEY
 
 
 def test_cli_attestation_keygen_writes_key_and_refuses_without_force(tmp_path, capsys):
@@ -382,6 +462,36 @@ def test_cli_export_attestation_run_id_latest(tmp_path):
     assert envelope["payloadType"] == attestation.DSSE_PAYLOAD_TYPE
 
 
+def test_cli_verify_attestation_with_revoked_keys_fails(tmp_path, capsys):
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    receipt = _sample_receipt(tmp_path)
+    _write_receipt_to_disk(receipt)
+
+    run_id = receipt["run_id"]
+    rc_export = cli.main(["receipts", "export", "attestation", "--target", str(tmp_path), "--run-id", run_id])
+    assert rc_export == 0
+    attestation_path = Path(receipt["path"]) / "attestation.json"
+
+    pub_path = Path(f"{key_path}.pub")
+    krl_path = tmp_path / ".brigade" / "attestation" / "revoked_keys"
+    subprocess.run(["ssh-keygen", "-k", "-f", str(krl_path), str(pub_path)], check=True, capture_output=True)
+
+    rc = cli.main(
+        [
+            "receipts",
+            "verify-attestation",
+            str(attestation_path),
+            "--allowed-signers",
+            str(signers_path),
+            "--revoked-keys",
+            str(krl_path),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert captured.out.strip() != attestation.STATUS_SIGNED_OK
+
+
 def test_cli_verify_attestation_exit_and_json_shape(tmp_path, capsys):
     key_path, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
     receipt = _sample_receipt(tmp_path)
@@ -418,6 +528,7 @@ def test_cli_verify_attestation_exit_and_json_shape(tmp_path, capsys):
     captured_json = capsys.readouterr()
     assert rc_json == 0
     out = json.loads(captured_json.out)
+    assert out["schema"] == "brigade.attestation_verify_result.v1"
     assert out["status"] == attestation.STATUS_SIGNED_OK
     assert out["principal"] == "alice@example.com"
     assert out["keyid"].startswith("SHA256:")
