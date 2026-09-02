@@ -722,7 +722,9 @@ def _hub_job_id(key: str) -> str:
     return f"grokbot-{grokbot_jobs._idempotency_key_hash(key).removeprefix('sha256:')[:24]}"
 
 
-def _store_hub_scout(queue: Path, *, key: str = "hub-scout-1", text: str = REPORT_TEXT) -> tuple[str, dict[str, object]]:
+def _store_hub_scout(
+    queue: Path, *, key: str = "hub-scout-1", text: str = REPORT_TEXT
+) -> tuple[str, dict[str, object]]:
     """Write the snapshot and artifact a hub-authority scout completion leaves locally."""
     spec = grokbot_jobs._validate_spec(_spec())
     job_id = _hub_job_id(key)
@@ -890,7 +892,7 @@ def test_cli_reconcile_preview_binds_operator_identity_for_hub_listing(
     queue.mkdir()
     owner.mkdir()
     job_id, hub_job = _store_hub_scout(queue)
-    token = "operator-reconcile-token"
+    token = "operator-reconcile-token"  # content-guard: allow api-key-assignment
     token_file = tmp_path / "operator.hub-token"
     token_file.write_text(token + "\n", encoding="utf-8")
     token_file.chmod(0o600)
@@ -923,7 +925,7 @@ def test_cli_reconcile_preview_binds_feed_identity_when_operator_token_absent(
     queue.mkdir()
     owner.mkdir()
     job_id, hub_job = _store_hub_scout(queue)
-    token = "feed-reconcile-token"
+    token = "feed-reconcile-token"  # content-guard: allow api-key-assignment
     token_file = tmp_path / "feed.hub-token"
     token_file.write_text(token + "\n", encoding="utf-8")
     token_file.chmod(0o600)
