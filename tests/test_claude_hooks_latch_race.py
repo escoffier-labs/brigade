@@ -670,7 +670,7 @@ def test_timeout_followup_does_not_hide_latch_behind_log_stall(tmp_path: Path, m
     # The follow-up publishes the latch only after the session-state write
     # (two fsyncs plus the announce claim). Keep the budget far above that
     # cost: a 50ms budget raced the state write and returned 'degraded'.
-    monkeypatch.setattr(runtime, "_TIMEOUT_FOLLOWUP_SECONDS", 1.0)
+    monkeypatch.setattr(runtime, "_TIMEOUT_FOLLOWUP_SECONDS", 0.5)
 
     try:
         outcome = runtime._bounded_timeout_followup(
