@@ -146,7 +146,8 @@ def _machine_cards_html(
     for name in sorted(by_host):
         if name not in hosts and name != "cloud":
             hosts.append(name)
-    hosts.append("cloud")
+    if "cloud" not in hosts:
+        hosts.append("cloud")
     cards = [_machine_card(host, by_host.get(host, []), window, now, kinds) for host in hosts]
     return f'<section class="machine-board" aria-label="{html.esc(TITLE)}">{"".join(cards)}</section>'
 

@@ -158,7 +158,7 @@ For a remote T3 controller journal already available locally, configure an alias
 }
 ```
 
-`hosts` lists the machine cards the board always renders, and `host_kinds` picks each card's glyph (`workstation`, `gpu`, `desktop`, `server`, `cloud`). Both are optional: with no `hosts` entry the board shows one card for this machine, named by `local_host` or the system hostname, plus a card per host that actually appears in the records.
+`hosts` lists the machine cards the board always renders, and `host_kinds` picks each card's glyph (`workstation`, `gpu`, `desktop`, `server`, `cloud`). Both are optional: with no `hosts` entry the board shows one card for this machine, named by `local_host` or the system hostname, plus a card per host that actually appears in the records and an always-present `cloud` card (with a placeholder when cloud tracking is not wired).
 
 Each journal row may provide `state`, `started_at`, and `last_updated_at`. Center uses generic provider and task labels for controller data, so untrusted journal text cannot appear in the payload. It never follows that path outside the selected workspace, and it does not attempt network discovery or control remote agents.
 

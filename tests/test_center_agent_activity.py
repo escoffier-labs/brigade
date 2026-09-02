@@ -735,3 +735,37 @@ def test_heartbeat_over_two_hours_is_stale_even_with_live_lock(tmp_path, monkeyp
     records = activity_records.collect(tmp_path, now=now)
     run_record = next(record for record in records if record["kind"] == "run")
     assert run_record["state"] == "stale"
+
+
+def test_agent_activity_view_dedupes_cloud_when_in_default_hosts():
+    now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    record = {
+        "activity_id": "brigade:run:cloudy",
+        "parent_activity_id": None,
+        "provider": "brigade",
+        "harness": "brigade-run",
+        "kind": "run",
+        "host": "cloud",
+        "label": "Brigade run",
+        "task_label": "Cloud task",
+        "model": None,
+        "state": "running",
+        "started_at": now.isoformat(),
+        "last_updated_at": now.isoformat(),
+        "elapsed_seconds": 30,
+        "source": {"name": "brigade-run-journal", "authority": "authoritative"},
+        "links": {},
+    }
+    fragment = agent_activity.render(
+        {
+            "agent_activity_summary": [],
+            "agent_activity": [record],
+            "completed_window_seconds": 3600,
+            "default_hosts": ["cloud"],
+            "host_kinds": {"cloud": "cloud"},
+            "local_host": "workbench",
+        },
+        "test-nonce",
+    )
+
+    assert fragment.count('data-host="cloud"') == 1
