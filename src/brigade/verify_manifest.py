@@ -479,9 +479,9 @@ def resolve_manifest(target: Path, manifest_id: str) -> tuple[VerifyManifest | N
         if len(matches) > 1:
             return None, f"verify manifest id is ambiguous: {selector}"
         return matches[0], None
-    path = _workspace_manifest_file_from_selector(target, selector)
-    if path is not None:
-        return _load_tracked_workspace_manifest(target, path, selector=selector)
+    source_path = _workspace_manifest_file_from_selector(target, selector)
+    if source_path is not None:
+        return _load_tracked_workspace_manifest(target, source_path, selector=selector)
     if untracked_workspace_match:
         return None, f"verify manifest not tracked: {selector}"
     return None, f"verify manifest not found: {selector}"
