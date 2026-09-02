@@ -136,6 +136,52 @@ def test_pins_model_for_antigravity():
     ]
 
 
+def test_pins_gemini_38_flash_display_name_for_antigravity():
+    assert agents.build_argv("antigravity", "P", model="Gemini 3.8 Flash (Low)") == [
+        "agy",
+        "--model",
+        "Gemini 3.8 Flash (Low)",
+        "--add-dir",
+        str(Path.cwd().resolve()),
+        "--dangerously-skip-permissions",
+        "--print",
+        "P",
+    ]
+    assert agents.build_argv("antigravity", "P", read_only=True, model="gemini-3.8-flash-low") == [
+        "agy",
+        "--model",
+        "gemini-3.8-flash-low",
+        "--sandbox",
+        "--print",
+        "P",
+    ]
+
+
+def test_antigravity_maps_gemini_api_id_to_low_effort_slug():
+    # agy accepts Gemini 3.8 Flash as gemini-3.8-flash-low/medium/high or the
+    # matching display name. The published API id gemini-3.8-flash requires
+    # --effort; Brigade maps the bare id to the low-effort slug so brigade run
+    # can pin it without a separate effort flag.
+    assert agents.build_argv("antigravity", "P", model="gemini-3.8-flash") == [
+        "agy",
+        "--model",
+        "gemini-3.8-flash-low",
+        "--add-dir",
+        str(Path.cwd().resolve()),
+        "--dangerously-skip-permissions",
+        "--print",
+        "P",
+    ]
+    assert agents.build_argv("antigravity", "P", read_only=True, model="gemini-3.1-pro") == [
+        "agy",
+        "--model",
+        "gemini-3.1-pro-low",
+        "--sandbox",
+        "--print",
+        "P",
+    ]
+
+
 def test_ollama_cloud_ref_keeps_full_model_name():
     # A cloud model id carries its own colon; only the `ollama:` prefix is stripped.
     assert agents.build_argv("ollama:qwen3-coder-next:cloud", "P") == [

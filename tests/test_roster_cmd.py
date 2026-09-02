@@ -834,7 +834,7 @@ def test_roster_suggest_prints_every_seat_resolution_when_roots_satisfiable(tmp_
     resolved = roster.load_roster(resolved_path)
     assert resolved.orchestrator == "chef"
     flash = resolved.agents["reviewer_flash"]
-    assert flash.model == "Gemini 3.7 Flash (Low)"
+    assert flash.model == "Gemini 3.8 Flash (Low)"
     assert flash.role == (
         "Fast routine review and summary lane; route security-sensitive or "
         "cross-file decisions to the reviewer or reviewer_codex seat."

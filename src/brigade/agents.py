@@ -754,12 +754,28 @@ def _with_reasoning(cli_ref: str, argv: List[str], reasoning: str) -> List[str]:
     raise ValueError(f"{cli_ref!r} does not support reasoning pins (supported: {supported})")
 
 
+# agy lists Gemini models as effort-suffixed slugs (gemini-3.8-flash-low). The
+# published API id (gemini-3.8-flash) is recognized but requires --effort.
+_ANTIGRAVITY_GEMINI_BASE_RE = re.compile(r"^gemini-\d+(?:\.\d+)?-(?:flash|pro)$")
+_ANTIGRAVITY_DEFAULT_EFFORT = "low"
+
+
+def _antigravity_model_pin(model: str) -> str:
+    """Map a Gemini API id to the agy slug that already includes effort."""
+    stripped = model.strip()
+    if _ANTIGRAVITY_GEMINI_BASE_RE.fullmatch(stripped):
+        return f"{stripped}-{_ANTIGRAVITY_DEFAULT_EFFORT}"
+    return stripped
+
+
 def _with_model(cli_ref: str, argv: List[str], model: str) -> List[str]:
     entry = _MODEL_PIN.get(cli_ref)
     if entry is None:
         supported = ", ".join(sorted(_MODEL_PIN))
         raise ValueError(f"{cli_ref!r} does not support model pinning (supported: {supported})")
     flag, placer = entry
+    if cli_ref == "antigravity":
+        model = _antigravity_model_pin(model)
     return placer(argv, flag, model)
 
 
