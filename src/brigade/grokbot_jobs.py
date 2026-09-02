@@ -644,6 +644,33 @@ def _read_report_from_storage(storage: _Storage, job_id: str) -> dict[str, Any]:
     return _verified_report(job_id, data, record["result_artifact"]["sha256"])
 
 
+def _read_hub_report_from_storage(storage: _Storage, job: dict[str, Any]) -> dict[str, Any]:
+    """Verify one hub-listed report against its local artifact bytes."""
+    job_id = _validate_job_id(job["job_id"])
+    expected = job.get("artifact_digest")
+    if not isinstance(expected, str) or not expected:
+        raise GrokbotJobError("missing-digest")
+    data = _read_bytes_file(
+        storage.artifacts, f"{job_id}.md", maximum=MAX_REPORT_BYTES, missing_reason="report-missing"
+    )
+    return _verified_report(job_id, data, expected)
+
+
+def _snapshots_by_task_hash(storage: _Storage) -> dict[str, dict[str, Any]]:
+    """Index private task snapshots by task_hash for hub-authority pairing."""
+    if storage.snapshots is None:
+        return {}
+    index: dict[str, dict[str, Any]] = {}
+    for name in _list_names(storage.snapshots, prefix="grokbot-", suffix=".json"):
+        payload = _read_json_file(storage.snapshots, name, missing_ok=True)
+        if not isinstance(payload, dict) or payload.get("schema") != SNAPSHOT_SCHEMA:
+            continue
+        task_hash = payload.get("task_hash")
+        if isinstance(task_hash, str) and TASK_HASH_RE.fullmatch(task_hash):
+            index[task_hash] = payload
+    return index
+
+
 def cancel(target: Path, job_id: str, now: datetime | None = None) -> dict[str, Any]:
     """Cancel a queued job or request cooperative cancellation of a live lease."""
     job_id = _validate_job_id(job_id)
@@ -774,15 +801,27 @@ def _storage_paths_readonly(target: Path) -> Iterator[_Storage]:
             jobs = root / "jobs"
             idempotency = root / "idempotency"
             artifacts = root / "artifacts"
+            snapshots = root / "snapshots"
             for path in (root, jobs, idempotency, artifacts):
                 current = path.lstat()
                 if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode):
                     raise GrokbotJobError("unsafe-storage")
+            snapshot_dir: _Directory | None = None
+            snapshot_info: os.stat_result | None
+            try:
+                snapshot_info = snapshots.lstat()
+            except FileNotFoundError:
+                snapshot_info = None
+            if snapshot_info is not None:
+                if stat.S_ISLNK(snapshot_info.st_mode) or not stat.S_ISDIR(snapshot_info.st_mode):
+                    raise GrokbotJobError("unsafe-storage")
+                snapshot_dir = _Directory(snapshots, None)
             yield _Storage(
                 _Directory(root, None),
                 _Directory(jobs, None),
                 _Directory(idempotency, None),
                 _Directory(artifacts, None),
+                snapshot_dir,
             )
             return
 
@@ -800,12 +839,20 @@ def _storage_paths_readonly(target: Path) -> Iterator[_Storage]:
         descriptors.append(idempotency_fd)
         artifacts_fd = _open_existing_directory(root_fd, "artifacts")
         descriptors.append(artifacts_fd)
+        snapshots_fd: int | None = None
+        try:
+            snapshots_fd = _open_existing_directory(root_fd, "snapshots")
+        except FileNotFoundError:
+            snapshots_fd = None
+        if snapshots_fd is not None:
+            descriptors.append(snapshots_fd)
         root = Path(target) / ".brigade" / "cloud" / "grokbot"
         yield _Storage(
             _Directory(root, root_fd),
             _Directory(root / "jobs", jobs_fd),
             _Directory(root / "idempotency", idempotency_fd),
             _Directory(root / "artifacts", artifacts_fd),
+            _Directory(root / "snapshots", snapshots_fd) if snapshots_fd is not None else None,
         )
     except GrokbotJobError:
         raise

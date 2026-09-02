@@ -1288,18 +1288,43 @@ def _print_scout_feed_result(result: dict) -> None:
         print(f"job {handle['job_id']} state={handle['state']}")
 
 
+def _reconcile_hub_identity(target: Path) -> _FeedIdentity:
+    """Bind the operator or feed actor for hub-authority report listing."""
+    from .. import fleet_client_grokbot, grokbot_jobs, grokbot_mcp
+
+    if not grokbot_jobs.hub_authority(target):
+        return _FeedIdentity(nullcontext(), None)
+    token = grokbot_mcp.load_hub_token(instance="operator")
+    actor = "operator"
+    if token is None:
+        token = grokbot_mcp.load_feed_hub_token()
+        actor = "feed"
+    if token is None:
+        token = grokbot_mcp.load_direct_queue_listener_token()
+        actor = "operator"
+    if token is None:
+        return _FeedIdentity(nullcontext(), None)
+    return _FeedIdentity(fleet_client_grokbot.listener_identity(token), actor)
+
+
 def _dispatch_grokbot_reconcile(args, target: Path) -> int:
     """Preview or draft canonical-owner handoffs without printing report text."""
     # Reconciliation reads completed report bytes and writes the owner inbox.
-    # The control actor has only enqueue/whoami authority, so it cannot safely
-    # stand in for this local canonical-owner path.
-    from .. import grokbot_reconcile
+    # Under hub authority the operator or feed identity lists completed scout
+    # jobs with include_all; the control actor has only enqueue/whoami and
+    # cannot stand in for that listing.
+    from .. import grokbot_mcp, grokbot_reconcile
 
     try:
-        if args.apply:
-            result = grokbot_reconcile.apply(target, args.owner, inbox=args.inbox, limit=args.limit)
-        else:
-            result = grokbot_reconcile.preview(target, args.owner, inbox=args.inbox, limit=args.limit)
+        identity = _reconcile_hub_identity(target)
+        with identity.context:
+            if args.apply:
+                result = grokbot_reconcile.apply(target, args.owner, inbox=args.inbox, limit=args.limit)
+            else:
+                result = grokbot_reconcile.preview(target, args.owner, inbox=args.inbox, limit=args.limit)
+    except grokbot_mcp.ConfigurationError:
+        print("error: Grok Bot hub configuration is invalid", file=sys.stderr)
+        return 2
     except grokbot_reconcile.ReconcileError as exc:
         print(f"error: {exc.reason}", file=sys.stderr)
         return 2
@@ -1421,6 +1446,9 @@ def _print_reconcile_result(result: dict) -> None:
     ]
     if "skipped" in result:
         parts.insert(3, f"skipped={result['skipped']}")
+    reasons = result.get("unavailable_reasons") or {}
+    for reason, count in sorted(reasons.items()):
+        parts.append(f"{reason}={count}")
     print("grokbot reconcile-reports: " + " ".join(parts))
     for job in result.get("jobs", []):
         print(f"job {job['job_id']} state={job['state']}")

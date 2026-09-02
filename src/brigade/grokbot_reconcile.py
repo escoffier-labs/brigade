@@ -32,6 +32,8 @@ HANDOFF_MAX_BYTES = grokbot_jobs.MAX_REPORT_BYTES + 16_384
 HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 TASK_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SECURE_OWNER_WRITE_AVAILABLE = os.name == "posix"
+UNAVAILABLE_ARTIFACT_MISSING = "artifact-missing"
+UNAVAILABLE_REPORT_MISSING = "report-missing"
 
 
 class ReconcileError(ValueError):
@@ -53,24 +55,11 @@ def preview(
     owner_path = _validate_owner(owner)
     _resolve_inbox(owner_path, inbox)
     limit = _validate_limit(limit)
-    if not _queue_root(target).is_dir():
-        eligible: list[dict[str, Any]] = []
-        known: list[dict[str, Any]] = []
-        unavailable: list[dict[str, Any]] = []
-    else:
-        try:
-            with grokbot_jobs._storage_paths_readonly(target) as storage:
-                eligible, known, unavailable = _scan(target, storage)
-        except grokbot_jobs.GrokbotJobError as exc:
-            raise ReconcileError(exc.reason) from exc
-    return {
-        "eligible": len(eligible),
-        "known": len(known),
-        "unavailable": len(unavailable),
-        "created": 0,
-        "limit": limit,
-        "jobs": [_handle(job) for job in eligible[:limit]],
-    }
+    try:
+        eligible, known, unavailable = _preview_scan(target)
+    except grokbot_jobs.GrokbotJobError as exc:
+        raise ReconcileError(exc.reason) from exc
+    return _preview_result(eligible, known, unavailable, limit)
 
 
 def apply(
@@ -86,17 +75,12 @@ def apply(
     limit = _validate_limit(limit)
     created: list[dict[str, str]] = []
     recovered = 0
-    if not _queue_root(target).is_dir():
-        return {
-            "eligible": 0,
-            "known": 0,
-            "unavailable": 0,
-            "created": 0,
-            "skipped": 0,
-            "limit": limit,
-            "jobs": [],
-        }
+    if not grokbot_jobs.hub_authority(target) and not _queue_root(target).is_dir():
+        return _apply_result([], [], [], created, recovered, limit)
     try:
+        if not _queue_root(target).is_dir():
+            eligible, known, unavailable = _scan_hub(target, None)
+            return _apply_result(eligible, known, unavailable, created, recovered, limit)
         with grokbot_jobs._storage_paths(target) as storage, grokbot_jobs._queue_lock(storage):
             eligible, known, unavailable = _scan(target, storage)
             for job in eligible:
@@ -109,15 +93,7 @@ def apply(
                     recovered += 1
     except grokbot_jobs.GrokbotJobError as exc:
         raise ReconcileError(exc.reason) from exc
-    return {
-        "eligible": len(eligible),
-        "known": len(known),
-        "unavailable": len(unavailable),
-        "created": len(created),
-        "skipped": len(known) + recovered,
-        "limit": limit,
-        "jobs": created,
-    }
+    return _apply_result(eligible, known, unavailable, created, recovered, limit)
 
 
 def _validate_owner(owner: Path) -> Path:
@@ -153,15 +129,132 @@ def _queue_root(target: Path) -> Path:
     return Path(target).expanduser() / ".brigade" / "cloud" / "grokbot"
 
 
+def _unavailable_reasons(unavailable: list[dict[str, Any]]) -> dict[str, int]:
+    reasons: dict[str, int] = {}
+    for job in unavailable:
+        reason = job.get("reason")
+        if isinstance(reason, str) and reason:
+            reasons[reason] = reasons.get(reason, 0) + 1
+    return reasons
+
+
+def _with_unavailable_reasons(result: dict[str, Any], unavailable: list[dict[str, Any]]) -> dict[str, Any]:
+    reasons = _unavailable_reasons(unavailable)
+    if reasons:
+        result["unavailable_reasons"] = reasons
+    return result
+
+
+def _preview_result(
+    eligible: list[dict[str, Any]],
+    known: list[dict[str, Any]],
+    unavailable: list[dict[str, Any]],
+    limit: int,
+) -> dict[str, Any]:
+    return _with_unavailable_reasons(
+        {
+            "eligible": len(eligible),
+            "known": len(known),
+            "unavailable": len(unavailable),
+            "created": 0,
+            "limit": limit,
+            "jobs": [_handle(job) for job in eligible[:limit]],
+        },
+        unavailable,
+    )
+
+
+def _apply_result(
+    eligible: list[dict[str, Any]],
+    known: list[dict[str, Any]],
+    unavailable: list[dict[str, Any]],
+    created: list[dict[str, str]],
+    recovered: int,
+    limit: int,
+) -> dict[str, Any]:
+    return _with_unavailable_reasons(
+        {
+            "eligible": len(eligible),
+            "known": len(known),
+            "unavailable": len(unavailable),
+            "created": len(created),
+            "skipped": len(known) + recovered,
+            "limit": limit,
+            "jobs": created,
+        },
+        unavailable,
+    )
+
+
+def _preview_scan(
+    target: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    if grokbot_jobs.hub_authority(target):
+        if not _queue_root(target).is_dir():
+            return _scan_hub(target, None)
+        with grokbot_jobs._storage_paths_readonly(target) as storage:
+            return _scan(target, storage)
+    if not _queue_root(target).is_dir():
+        return [], [], []
+    with grokbot_jobs._storage_paths_readonly(target) as storage:
+        return _scan(target, storage)
+
+
 def _scan(
     target: Path,
+    storage: grokbot_jobs._Storage,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    if grokbot_jobs.hub_authority(target):
+        return _scan_hub(target, storage)
+    return _scan_local(storage)
+
+
+def _scan_hub(
+    _target: Path,
+    storage: grokbot_jobs._Storage | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """List completed scout reports from the hub and pair local artifacts by task_hash."""
+    eligible: list[dict[str, Any]] = []
+    known: list[dict[str, Any]] = []
+    unavailable: list[dict[str, Any]] = []
+    try:
+        jobs = grokbot_jobs._hub_jobs(role="repository-scout", include_all=True)
+    except grokbot_jobs.GrokbotJobError as exc:
+        raise ReconcileError(exc.reason) from exc
+    snapshots = grokbot_jobs._snapshots_by_task_hash(storage) if storage is not None else {}
+    for job in jobs:
+        if not _is_completed_report(job):
+            continue
+        task_hash = job.get("task_hash")
+        snapshot = snapshots.get(task_hash) if isinstance(task_hash, str) else None
+        if snapshot is not None and snapshot.get("job_id") != job.get("job_id"):
+            raise ReconcileError("snapshot-mismatch")
+        if storage is None:
+            unavailable.append({**job, "reason": UNAVAILABLE_ARTIFACT_MISSING})
+            continue
+        marker = _read_marker(storage, job["job_id"])
+        try:
+            report = grokbot_jobs._read_hub_report_from_storage(storage, job)
+        except grokbot_jobs.GrokbotJobError as exc:
+            if exc.reason == "report-missing":
+                unavailable.append({**job, "reason": UNAVAILABLE_ARTIFACT_MISSING})
+                continue
+            raise ReconcileError(exc.reason) from exc
+        if marker is None:
+            eligible.append(job)
+            continue
+        if marker.get("sha256") != report["sha256"] or marker.get("task_hash") != job.get("task_hash"):
+            raise ReconcileError("marker-conflict")
+        known.append(job)
+    return eligible, known, unavailable
+
+
+def _scan_local(
     storage: grokbot_jobs._Storage,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     eligible: list[dict[str, Any]] = []
     known: list[dict[str, Any]] = []
     unavailable: list[dict[str, Any]] = []
-    if not _queue_root(target).is_dir():
-        return eligible, known, unavailable
     try:
         jobs = grokbot_jobs._status_from_storage(storage).get("jobs", [])
     except grokbot_jobs.GrokbotJobError as exc:
@@ -174,7 +267,7 @@ def _scan(
             report = grokbot_jobs._read_report_from_storage(storage, job["job_id"])
         except grokbot_jobs.GrokbotJobError as exc:
             if exc.reason == "report-missing":
-                unavailable.append(job)
+                unavailable.append({**job, "reason": UNAVAILABLE_REPORT_MISSING})
                 continue
             raise ReconcileError(exc.reason) from exc
         if marker is None:
@@ -262,7 +355,10 @@ def _reconcile_one(
     inbox_rel: Path,
 ) -> tuple[dict[str, str], str]:
     try:
-        report = grokbot_jobs._read_report_from_storage(storage, job["job_id"])
+        if grokbot_jobs.hub_authority(target):
+            report = grokbot_jobs._read_hub_report_from_storage(storage, job)
+        else:
+            report = grokbot_jobs._read_report_from_storage(storage, job["job_id"])
     except grokbot_jobs.GrokbotJobError as exc:
         raise ReconcileError(exc.reason) from exc
     text = _render_handoff(job, report)
