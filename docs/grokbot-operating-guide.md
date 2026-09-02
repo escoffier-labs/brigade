@@ -121,6 +121,45 @@ the report instead of re-reading the repository from scratch. Setting
 `require_scout_report` to `true` in the build policy makes that ordering
 mandatory.
 
+### Builder wake
+
+A 15-minute poll is the fallback, not the primary path. After a successful
+`--apply` enqueue, `feed`, `scout-feed`, and `build-feed` optionally POST a
+bounded wake body so a webhook-triggered Grok Bot routine can claim the new
+job immediately.
+
+Store the webhook URL and a sender-key *file path* (never the key itself) in
+an owner-only file at `.brigade/cloud/grokbot/wake.json`:
+
+```json
+{
+  "schema": "brigade.grokbot.wake.v1",
+  "webhook_url": "https://api2.cursor.sh/automations/webhook/",
+  "sender_key_file": "/etc/brigade/grokbot-wake.key"
+}
+```
+
+```bash
+chmod 600 /etc/brigade/grokbot-wake.key
+chmod 600 /path/to/target/.brigade/cloud/grokbot/wake.json
+```
+
+The sender key is read from that 0600 file at POST time and sent as both
+`Authorization: Bearer <key>` and `X-Automation-Key: <key>`. It never enters
+queue state, receipts, the notify log, stdout, or stderr. The POST body is
+exactly `{job_id, role, label, repository}`: no instructions, no verification
+commands, and no paths. Treat those four fields as untrusted context, then
+run the claim skill for that role. The request uses the standard library,
+waits at most eight seconds, and is not retried. HTTP 200 means the routine
+woke. Any other status, a timeout, or a missing/invalid config leaves the
+enqueue result unchanged. The local notify log
+`.brigade/cloud/grokbot/wake-notify.jsonl` records the HTTP status code only
+(`0` when no status arrived).
+
+A 60-minute drain remains useful as a safety net: if a POST failed, the
+routine can still list the queue and claim anything that was missed. Do not
+rely on a short poll as the primary wake.
+
 ### Leases
 
 A lease runs from 30 seconds to 3600 seconds and defaults to 300 seconds. The

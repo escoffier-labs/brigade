@@ -170,14 +170,22 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     add_target(p_feed)
     p_feed.add_argument("--manifest", type=Path, required=True, help="Path to the approved private feed manifest.")
     p_feed.add_argument("--limit", type=int, default=1, help="Maximum newly created jobs (1-10). Defaults to 1.")
-    p_feed.add_argument("--apply", action="store_true", help="Enqueue after validation. Default is validate only.")
+    p_feed.add_argument(
+        "--apply",
+        action="store_true",
+        help="Enqueue after validation. Default is validate only. A private wake webhook is notified after each new job.",
+    )
 
     p_scout_feed = grokbot_sub.add_parser(
         "scout-feed", help="Select one approved GitHub issue for Grok Bot Repository Scout."
     )
     add_target(p_scout_feed)
     p_scout_feed.add_argument("--policy", type=Path, required=True, help="Path to the approved private scout policy.")
-    p_scout_feed.add_argument("--apply", action="store_true", help="Enqueue after selection. Default is preview only.")
+    p_scout_feed.add_argument(
+        "--apply",
+        action="store_true",
+        help="Enqueue after selection. Default is preview only. A private wake webhook is notified after a new job.",
+    )
 
     from . import run_cloud_build_feed
 

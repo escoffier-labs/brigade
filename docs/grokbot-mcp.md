@@ -180,7 +180,7 @@ brigade run cloud grokbot feed --target . --manifest /path/to/approved-feed.json
 brigade run cloud grokbot feed --target . --manifest /path/to/approved-feed.json --apply --limit 1
 ```
 
-The first command validates only and writes no queue state. `--apply` is required to enqueue. `--limit` bounds newly created jobs from 1 through 10 and defaults to 1. Known idempotency records do not consume the limit. The feed stops on the first invalid entry and performs no enqueue when validation fails. Output is counts and safe job projections only.
+The first command validates only and writes no queue state. `--apply` is required to enqueue. `--limit` bounds newly created jobs from 1 through 10 and defaults to 1. Known idempotency records do not consume the limit. The feed stops on the first invalid entry and performs no enqueue when validation fails. Output is counts and safe job projections only. After each newly created job, `--apply` optionally POSTs `{job_id, role, label, repository}` to the webhook named in `.brigade/cloud/grokbot/wake.json`. See [Builder wake](grokbot-operating-guide.md#builder-wake).
 
 The command does not schedule itself. systemd, cron, OpenClaw, or another operator may run an approved manifest later. Repeated runs are safe through the existing idempotency store.
 
@@ -210,16 +210,18 @@ brigade run cloud grokbot scout-feed --target . --policy /etc/brigade/grokbot-sc
 brigade run cloud grokbot scout-feed --target . --policy /etc/brigade/grokbot-scout-feed.json --apply
 ```
 
-The first command is preview-only. `--apply` may create at most one job per invocation. `daily_limit` includes every Repository Scout job created that UTC day, including failed and expired attempts. The adapter cannot infer the remaining Grok Bot quota percentage.
+The first command is preview-only. `--apply` may create at most one job per invocation. `daily_limit` includes every Repository Scout job created that UTC day, including failed and expired attempts. The adapter cannot infer the remaining Grok Bot quota percentage. A newly created job optionally wakes the scout routine through the private wake webhook; see [Builder wake](grokbot-operating-guide.md#builder-wake).
 
 An issue counts as known only while the queue still holds a job for it. Apply is the check that counts: it re-lists at the hub under hub authority, and reads the local queue under local authority, then confirms the job named by the local idempotency record or task snapshot against that listing. A job the granted listing omits, and a job the queue reports as `expired`, `failed`, or `canceled`, are both weaker than the local record that named them, so the issue stays selectable. A `completed` job keeps its issue known until the approval label is removed. Each retry moves to a fresh idempotency key, so the queue's own idempotency cannot answer a retry with the dead job it replaced; the retry still counts against `daily_limit` for that UTC day. Retries stop after ten revisions for one issue; an issue that has burnt all ten is reported as `retry-exhausted`, not as known.
 
 Preview reads the local queue only, so under hub authority it holds no listing and cannot see live jobs. It reports evidence it cannot confirm as not yet known, so it never answers `all-known` for a job it cannot see. It may still report `ready` for an issue that already has a live or completed hub job, which apply then refuses; apply is what settles that. Both results carry `known`, `terminal_retry_candidates`, and `retry_exhausted` counts over the approved open issues, in the text output as well as `--json`. `all-known` means every one of them has a job the queue still stands behind. `retry-exhausted` means no issue is selectable and at least one has used all ten revisions without landing such a job.
 
-An operator may run the apply command hourly with systemd. Replace the executable and policy paths with the local approved locations:
+Wake the scout routine from the enqueue POST when `wake.json` is present. A
+60-minute drain remains useful as a fallback if a POST failed. Replace the
+executable and policy paths with the local approved locations:
 
 ```bash
-systemd-run --user --on-calendar=hourly --unit=brigade-grokbot-scout-feed --collect /usr/local/bin/brigade run cloud grokbot scout-feed --target /srv/brigade --policy /etc/brigade/grokbot-scout-feed.json --apply
+systemd-run --user --on-calendar='*:0/60' --unit=brigade-grokbot-scout-feed --collect /usr/local/bin/brigade run cloud grokbot scout-feed --target /srv/brigade --policy /etc/brigade/grokbot-scout-feed.json --apply
 ```
 
 ## Approved build selector
@@ -257,7 +259,9 @@ brigade run cloud grokbot build-feed --target . --policy /etc/brigade/grokbot-bu
 ```
 
 The first command is preview-only. `--apply` may create at most one job per
-invocation. `daily_limit` includes every implementation-worker job created that
+invocation. A newly created job optionally wakes the builder routine through
+the private wake webhook; see [Builder wake](grokbot-operating-guide.md#builder-wake).
+`daily_limit` includes every implementation-worker job created that
 UTC day, including failed and expired attempts. Apply is the check that counts:
 it recounts under the queue lock on a local-authority target and re-lists at the
 hub under hub authority, at enqueue time, and it also refuses while an earlier
@@ -278,11 +282,12 @@ job. Set `require_scout_report` to `true` to hold every issue that has no such
 report; the selector then reports `scout-report-missing` instead of queueing
 blind work.
 
-An operator may run the apply command hourly with systemd. Replace the
+Wake the builder routine from the enqueue POST when `wake.json` is present. A
+60-minute drain remains useful as a fallback if a POST failed. Replace the
 executable and policy paths with the local approved locations:
 
 ```bash
-systemd-run --user --on-calendar=hourly --unit=brigade-grokbot-build-feed --collect /usr/local/bin/brigade run cloud grokbot build-feed --target /srv/brigade --policy /etc/brigade/grokbot-build-feed.json --apply
+systemd-run --user --on-calendar='*:0/60' --unit=brigade-grokbot-build-feed --collect /usr/local/bin/brigade run cloud grokbot build-feed --target /srv/brigade --policy /etc/brigade/grokbot-build-feed.json --apply
 ```
 
 ## Report reconciliation

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -14,6 +17,7 @@ from brigade import cli, fleet_client_grokbot, fleet_hub, fleet_hub_grokbot, gro
 SECRET_INSTRUCTIONS = "SECRET_INSTRUCTION_DO_NOT_PRINT"
 SECRET_VERIFY = "SECRET_VERIFY_CMD"
 SECRET_OWNERSHIP = "SECRET_OWNERSHIP_PATH/file.py"
+SECRET_WAKE_KEY = "SECRET_WAKE_SENDER_KEY_DO_NOT_PRINT"
 
 
 def _spec(*, label: str = "Approved worker task") -> dict[str, object]:
@@ -652,3 +656,190 @@ def test_cli_feed_rejects_invalid_limit(tmp_path: Path, capsys):
     assert captured.out == ""
     assert captured.err.strip() == "error: invalid-limit"
     assert not _queue_root(tmp_path).exists()
+
+
+class _WakeRecorder:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, object]] = []
+        self.status = 200
+        self.delay = 0.0
+
+
+def _start_wake_server(recorder: _WakeRecorder) -> ThreadingHTTPServer:
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            if recorder.delay:
+                time.sleep(recorder.delay)
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length)
+            recorder.requests.append(
+                {
+                    "path": self.path,
+                    "authorization": self.headers.get("Authorization"),
+                    "automation_key": self.headers.get("X-Automation-Key"),
+                    "content_type": self.headers.get("Content-Type"),
+                    "body": body,
+                }
+            )
+            self.send_response(recorder.status)
+            self.end_headers()
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def _write_wake_key(path: Path, value: str = SECRET_WAKE_KEY) -> Path:
+    path.write_text(value, encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
+def _write_wake_config(target: Path, url: str, key_file: Path) -> Path:
+    root = _queue_root(target)
+    root.mkdir(parents=True, exist_ok=True)
+    path = grokbot_feed.wake_config_path(target)
+    path.write_text(
+        json.dumps(
+            {
+                "schema": grokbot_feed.WAKE_SCHEMA,
+                "webhook_url": url,
+                "sender_key_file": str(key_file),
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    return path
+
+
+def _notify_log_text(target: Path) -> str:
+    path = grokbot_feed.wake_notify_log_path(target)
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
+def _assert_wake_secret_absent(*payloads: object) -> None:
+    for payload in payloads:
+        text = payload if isinstance(payload, str) else json.dumps(payload)
+        assert SECRET_WAKE_KEY not in text
+        assert "X-Automation-Key" not in text
+        assert "Authorization" not in text
+
+
+def test_apply_wake_notify_posts_bounded_body_on_success(tmp_path: Path):
+    recorder = _WakeRecorder()
+    server = _start_wake_server(recorder)
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/wake"
+        key_file = _write_wake_key(tmp_path / "wake.key")
+        _write_wake_config(tmp_path, url, key_file)
+        manifest = _write_manifest(tmp_path / "feed.json", _manifest(_entry("task-a", _spec(label="First"))))
+
+        result = grokbot_feed.apply(tmp_path, manifest, limit=1)
+
+        assert result["created"] == 1
+        assert len(recorder.requests) == 1
+        request = recorder.requests[0]
+        assert request["authorization"] == f"Bearer {SECRET_WAKE_KEY}"
+        assert request["automation_key"] == SECRET_WAKE_KEY
+        assert request["content_type"] == "application/json"
+        body = json.loads(request["body"])
+        assert body == {
+            "job_id": result["jobs"][0]["job_id"],
+            "label": "First",
+            "repository": "example/brigade",
+            "role": "implementation-worker",
+        }
+        log = _notify_log_text(tmp_path)
+        assert json.loads(log.strip()) == {"status": 200}
+        _assert_wake_secret_absent(result, log)
+        _assert_redacted(result)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_apply_wake_notify_non_200_does_not_fail_enqueue(tmp_path: Path):
+    recorder = _WakeRecorder()
+    recorder.status = 503
+    server = _start_wake_server(recorder)
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/wake"
+        _write_wake_config(tmp_path, url, _write_wake_key(tmp_path / "wake.key"))
+        manifest = _write_manifest(tmp_path / "feed.json", _manifest(_entry("task-a")))
+
+        result = grokbot_feed.apply(tmp_path, manifest, limit=1)
+
+        assert result["created"] == 1
+        assert result["jobs"][0]["state"] == "queued"
+        assert len(_job_files(tmp_path)) == 1
+        assert len(recorder.requests) == 1
+        log = _notify_log_text(tmp_path)
+        assert json.loads(log.strip()) == {"status": 503}
+        _assert_wake_secret_absent(result, log)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_apply_wake_notify_timeout_does_not_fail_enqueue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    recorder = _WakeRecorder()
+    recorder.delay = 1.0
+    server = _start_wake_server(recorder)
+    try:
+        monkeypatch.setattr(grokbot_feed, "WAKE_TIMEOUT_SECONDS", 0.2)
+        url = f"http://127.0.0.1:{server.server_address[1]}/wake"
+        _write_wake_config(tmp_path, url, _write_wake_key(tmp_path / "wake.key"))
+        manifest = _write_manifest(tmp_path / "feed.json", _manifest(_entry("task-a")))
+
+        result = grokbot_feed.apply(tmp_path, manifest, limit=1)
+
+        assert result["created"] == 1
+        assert result["jobs"][0]["state"] == "queued"
+        log = _notify_log_text(tmp_path)
+        assert json.loads(log.strip()) == {"status": 0}
+        _assert_wake_secret_absent(result, log)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_apply_wake_notify_missing_config_skips_post(tmp_path: Path):
+    recorder = _WakeRecorder()
+    server = _start_wake_server(recorder)
+    try:
+        manifest = _write_manifest(tmp_path / "feed.json", _manifest(_entry("task-a")))
+
+        result = grokbot_feed.apply(tmp_path, manifest, limit=1)
+
+        assert result["created"] == 1
+        assert recorder.requests == []
+        assert _notify_log_text(tmp_path) == ""
+        assert not grokbot_feed.wake_notify_log_path(tmp_path).exists()
+        _assert_redacted(result)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_cli_feed_apply_omits_wake_key_from_output(tmp_path: Path, capsys):
+    recorder = _WakeRecorder()
+    server = _start_wake_server(recorder)
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/wake"
+        _write_wake_config(tmp_path, url, _write_wake_key(tmp_path / "wake.key"))
+        manifest = _write_manifest(tmp_path / "feed.json", _manifest(_entry("task-a")))
+
+        assert _run_feed(tmp_path, "--manifest", str(manifest), "--apply") == 0
+        captured = capsys.readouterr()
+        assert "created=1" in captured.out
+        _assert_wake_secret_absent(captured.out, captured.err, _notify_log_text(tmp_path))
+    finally:
+        server.shutdown()
+        server.server_close()
