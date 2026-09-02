@@ -1584,6 +1584,29 @@ def test_work_verify_run_rejects_shell_interpreter_with_remedy(tmp_path, capsys,
     assert "--argv-json" not in summary
 
 
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_work_verify_run_help_prints_flag_list_and_exits_0(capsys, flag):
+    # Usage is not a verification run. --help/-h must reach argparse and list
+    # the capture/argv-json flags instead of being refused by a pre-parse gate.
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["work", "verify", "run", flag])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "usage:" in out
+    assert "--capture" in out
+    assert "--argv-json" in out
+
+
+def test_work_verify_run_help_is_recognized_before_capture_policy():
+    from brigade.cli.work.dispatching import work_verify_run_help_requested
+
+    assert work_verify_run_help_requested(["work", "verify", "run", "--help"])
+    assert work_verify_run_help_requested(["work", "verify", "run", "-h"])
+    assert work_verify_run_help_requested(["work", "verify", "run", "--target", ".", "--help"])
+    assert not work_verify_run_help_requested(["work", "verify", "run", "--command", "true"])
+    assert not work_verify_run_help_requested(["work", "verify", "plan", "--help"])
+
+
 def test_work_verify_run_command_and_argv_json_are_mutually_exclusive(tmp_path, capsys):
     with pytest.raises(SystemExit) as exc:
         cli.main(
