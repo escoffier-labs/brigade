@@ -32,6 +32,7 @@ from . import (
 from .aboyeur.planning import resolve_run_sandbox
 from .roster import Agent, Roster, _as_bool, _as_capabilities, _as_command, _as_env
 from .run_receipts import agent_result_from_worker
+from .run_transport import Assignment
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
 _NONTERMINAL_RUN_STATUSES = frozenset(
@@ -467,7 +468,7 @@ def _assignments_from_plan(run_dir: Path) -> list:
             continue
         stage = item.get("stage", 1)
         assignments.append(
-            aboyeur.Assignment(
+            Assignment(
                 worker=worker,
                 task=task,
                 stage=stage if isinstance(stage, int) and not isinstance(stage, bool) else 1,
