@@ -151,6 +151,16 @@ The local (no-hub) queue in `grokbot_jobs.py` follows the same rule: `status`
 and `get_job` terminalize an elapsed job before projecting it, and a claim past
 the deadline expires the job and fails with `job-expired`.
 
+A lapsed lease is not a lapsed job. A read keys on the job's own deadline only,
+so a claimed job whose lease ran out stays `claimed` and can be picked up again;
+the holder's `renew`, `start`, `fail`, `complete`, and `ack_cancel` are refused
+with `lease-expired`. When the job's own deadline is what passed, the row is
+expired and the operation recorded, and the holder still hears `lease-expired`
+rather than `job-expired`: a granted lease is always clamped to the deadline, so
+the lease is genuinely gone, and that is the reason a Bot can act on.
+`job-expired` stays the claim-side answer, which is what tells a Bot not to
+start work at all.
+
 `grokbot_queue_claim` takes `lease_id` as an optional argument. A Bot that has
 no lease to supply omits it or sends `null`, and the listener mints a uuid4 hex
 lease and returns it in the claim result as `lease_id`. That returned value is

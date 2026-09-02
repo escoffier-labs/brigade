@@ -659,12 +659,43 @@ def test_status_leaves_a_job_inside_its_timeout_queued(tmp_path: Path):
     assert grokbot_jobs.status(tmp_path, job_id, now=NOW + timedelta(seconds=899))["state"] == "queued"
 
 
-def test_status_expires_a_running_job_whose_lease_and_deadline_elapsed(tmp_path: Path):
+def test_status_expires_a_running_job_past_its_own_deadline(tmp_path: Path):
     job_id = _enqueue(tmp_path)
     grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 30, now=NOW)
     grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "running", now=NOW)
 
-    assert grokbot_jobs.status(tmp_path, job_id, now=NOW + timedelta(seconds=31))["state"] == "expired"
+    assert grokbot_jobs.status(tmp_path, job_id, now=NOW + timedelta(seconds=901))["state"] == "expired"
+
+
+def test_a_read_does_not_end_a_job_whose_lease_alone_lapsed(tmp_path: Path):
+    """#1383 composed with #1353: a dead lease is not a dead job."""
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 30, now=NOW)
+    lapsed = NOW + timedelta(seconds=31)
+
+    assert grokbot_jobs.status(tmp_path, job_id, now=lapsed)["state"] == "claimed"
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^lease-expired$"):
+        grokbot_jobs.renew(tmp_path, job_id, "bot-a", "lease-a", 60, now=lapsed)
+    assert grokbot_jobs.get_job(tmp_path, job_id, now=lapsed)["state"] == "claimed"
+
+
+def test_a_lease_call_past_the_job_deadline_expires_and_still_says_lease_expired(tmp_path: Path):
+    """The row is terminalized, but the holder hears the reason it can act on."""
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 300, now=NOW)
+    late = NOW + timedelta(seconds=901)
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^lease-expired$"):
+        grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "failed", now=late)
+    assert grokbot_jobs.get_job(tmp_path, job_id, now=late)["state"] == "expired"
+
+
+def test_expire_still_terminalizes_a_job_whose_lease_alone_lapsed(tmp_path: Path):
+    """An explicit expire keeps its own contract: a lost lease ends the job."""
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 30, now=NOW)
+
+    assert grokbot_jobs.expire(tmp_path, job_id, now=NOW + timedelta(seconds=31))["state"] == "expired"
 
 
 def test_claim_past_the_deadline_expires_the_job_and_stays_job_expired(tmp_path: Path):

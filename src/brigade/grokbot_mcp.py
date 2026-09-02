@@ -611,16 +611,26 @@ class GrokbotAdapter:
         an expiry is confirmed against the job's own deadline rather than by
         widening the hub's error contract. A job another worker has since
         re-claimed carries a live deadline and stays a conflict.
+
+        ``terminal-state`` counts only when the queue terminalized the job on
+        its own ``timeout_seconds`` (#1353). A granted lease is always clamped
+        to that deadline, so the holder's lease is lapsed too and
+        ``lease-expired`` is both true and the reason the Bot can act on. A
+        completed, failed, or canceled job is not a lease matter and stays
+        generic.
         """
         if reason == "lease-expired":
             return True
-        if reason != "lease-conflict":
+        if reason not in {"lease-conflict", "terminal-state"}:
             return False
         try:
-            deadline = grokbot_jobs.get_job(self.config.target, job_id).get("lease_expires_at")
-            return isinstance(deadline, str) and _parse_deadline(deadline) <= datetime.now(timezone.utc)
+            job = grokbot_jobs.get_job(self.config.target, job_id)
         except Exception:
             return False
+        if reason == "terminal-state" and job.get("state") != "expired":
+            return False
+        deadline = job.get("lease_expires_at")
+        return isinstance(deadline, str) and _parse_deadline(deadline) <= datetime.now(timezone.utc)
 
     def _admit_hub_lease_decision(
         self, job: Mapping[str, Any], holder: str, lease_seconds: int | None = None

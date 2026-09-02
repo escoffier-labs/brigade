@@ -364,25 +364,48 @@ def status(target: Path, job_id: str | None = None, now: datetime | None = None)
         return {"jobs": jobs}
 
 
-def _expire_if_elapsed(storage: _Storage, record: dict[str, Any], now: datetime | None) -> dict[str, Any]:
-    """Terminalize one loaded record whose deadline or current lease elapsed.
+def _expire_if_elapsed(
+    storage: _Storage, record: dict[str, Any], now: datetime | None, *, lease_counts: bool = False
+) -> dict[str, Any]:
+    """Terminalize one loaded record whose expiry instant passed.
 
-    One rule for reads, claims, and :func:`expire`, matching the hub sweep in
-    ``fleet_hub_grokbot`` (#1353).
+    Reads and claims key on the job's own deadline only (#1353). A lapsed
+    lease is a lease matter, not the end of the job: the holder hears
+    ``lease-expired`` and the row stays claimed so it can be picked up again
+    (#1383). Only an explicit :func:`expire` counts a lapsed lease, which is
+    the contract that call has always had.
     """
     if record["state"] in TERMINAL_STATES:
         return record
     stamp, instant = _timestamp(now)
-    deadline = _deadline(record)
-    expires_at = (
-        deadline if record["state"] == "queued" else min(_parse_timestamp(record["lease_expires_at"]), deadline)
-    )
+    expires_at = _deadline(record)
+    if lease_counts and record["state"] != "queued":
+        expires_at = min(_parse_timestamp(record["lease_expires_at"]), expires_at)
     if instant < expires_at:
         return record
     record["state"] = "expired"
     _discard_orphan_report_snapshot(storage, record)
     _commit_mutation(storage.jobs, record, stamp)
     return record
+
+
+def _require_live_lease_or_expire(
+    storage: _Storage, record: dict[str, Any], bot_id: str, lease_id: str, now: datetime | None, instant: datetime
+) -> None:
+    """Guard one lease-holder mutation, expiring a job whose deadline passed.
+
+    Both refusals answer ``lease-expired``: that is the reason the Bot acts on,
+    and it is true either way, since a granted lease is always clamped to the
+    job's own deadline. When the deadline is what lapsed the row is
+    terminalized here too, so the queue does not need an operator sweep to
+    agree with the answer it just gave (#1353 composed with #1383).
+    """
+    try:
+        _require_current_lease(record, bot_id, lease_id, instant)
+    except GrokbotJobError as exc:
+        if exc.reason == "lease-expired":
+            _expire_if_elapsed(storage, record, now)
+        raise
 
 
 def _status_from_storage(storage: _Storage) -> dict[str, Any]:
@@ -544,7 +567,7 @@ def renew(
     timestamp, instant = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
-        _require_current_lease(record, bot_id, lease_id, instant)
+        _require_live_lease_or_expire(storage, record, bot_id, lease_id, now, instant)
         record["lease_expires_at"] = _format_timestamp(
             min(instant + timedelta(seconds=lease_seconds), _deadline(record))
         )
@@ -573,7 +596,7 @@ def transition(
     timestamp, instant = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
-        _require_current_lease(record, bot_id, lease_id, instant)
+        _require_live_lease_or_expire(storage, record, bot_id, lease_id, now, instant)
         current = record["state"]
         if state == "running":
             if current != "claimed" or artifact is not None:
@@ -611,7 +634,7 @@ def complete_report(
     timestamp, instant = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
-        _require_current_lease(record, bot_id, lease_id, instant)
+        _require_live_lease_or_expire(storage, record, bot_id, lease_id, now, instant)
         _require_report_job(record)
         validated = _validated_completion(record, artifact)
         if hashlib.sha256(report_bytes).hexdigest() != validated["sha256"]:
@@ -702,7 +725,7 @@ def acknowledge_cancel(
     timestamp, instant = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
-        _require_current_lease(record, bot_id, lease_id, instant)
+        _require_live_lease_or_expire(storage, record, bot_id, lease_id, now, instant)
         if "cancel_requested_at" not in record:
             raise GrokbotJobError("cancellation-not-requested")
         record["state"] = "canceled"
@@ -728,7 +751,7 @@ def expire(target: Path, job_id: str, now: datetime | None = None) -> dict[str, 
         record = _load_record(storage.jobs, job_id)
         if record["state"] in TERMINAL_STATES:
             _discard_orphan_report_snapshot(storage, record)
-        return _projection(_expire_if_elapsed(storage, record, now))
+        return _projection(_expire_if_elapsed(storage, record, now, lease_counts=True))
 
 
 @contextmanager
