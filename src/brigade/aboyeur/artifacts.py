@@ -184,6 +184,33 @@ def record_artifact_collection(
         raise runguard.RetainRunLockError(f"failed to update run receipt after artifact collection: {exc}") from exc
 
 
+def record_worktree_removal(
+    output_dir: Path,
+    *,
+    path: Path,
+    reason: str | None = None,
+) -> None:
+    """Record a successful worktree removal in the run receipt."""
+    run_path = output_dir / "run.json"
+    try:
+        payload = json.loads(run_path.read_text())
+    except OSError as exc:
+        raise runguard.RetainRunLockError(f"failed to read run receipt during worktree removal: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise runguard.RetainRunLockError(f"run receipt is invalid during worktree removal: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise runguard.RetainRunLockError("run receipt must contain an object during worktree removal")
+
+    removal: dict[str, object] = {"status": "removed", "path": str(path)}
+    if reason is not None:
+        removal["reason"] = reason
+    payload["worktree_removal"] = removal
+    try:
+        run_io._write_json(run_path, receipt_schema.stamp_run_receipt(payload))
+    except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
+        raise runguard.RetainRunLockError(f"failed to update run receipt after worktree removal: {exc}") from exc
+
+
 def record_run_termination(
     output_dir: Path,
     *,

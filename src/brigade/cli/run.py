@@ -564,6 +564,7 @@ def dispatch(args) -> int:
     worktree_cwd = None
     effective_cwd = run_cwd
     keep_worktree = False
+    worktree_removed = False
     lifecycle_seat = args.worker or loaded_roster.orchestrator
     # Set when the fleet heartbeat reports a mid-run credential refusal
     # (#1161): the outer KeyboardInterrupt handler turns the resulting
@@ -887,7 +888,21 @@ def dispatch(args) -> int:
                         tracked_count=summary.tracked_count,
                         untracked_count=summary.untracked_count,
                     )
-                    keep_worktree = rc != 0 and summary.changed
+                    keep_reasons: list[str] = []
+                    if rc != 0:
+                        keep_reasons.append("run failed")
+                    else:
+                        try:
+                            if not runguard.worktree_is_clean(effective_cwd):
+                                keep_reasons.append("dirty")
+                        except runguard.RunGuardError:
+                            keep_reasons.append("dirty")
+                        try:
+                            if not runguard.worktree_head_is_branch_backed(effective_cwd):
+                                keep_reasons.append("detached HEAD with unreachable commits")
+                        except runguard.RunGuardError:
+                            keep_reasons.append("detached HEAD with unreachable commits")
+                    keep_worktree = bool(keep_reasons)
                     if summary.changed:
                         print(
                             f"changes: {summary.path} ({summary.tracked_count + summary.untracked_count} file(s))",
@@ -896,10 +911,31 @@ def dispatch(args) -> int:
                     else:
                         print(f"changes: none ({summary.path})", file=sys.stderr)
                     if keep_worktree:
-                        print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
-                    elif rc == 0:
-                        for pruned in _prune_retained_worktrees(runguard.git_root(run_cwd), effective_cwd):
-                            print(f"worktree pruned: {pruned}", file=sys.stderr)
+                        print(
+                            f"worktree kept for recovery: {worktree_cwd} ({', '.join(keep_reasons)})",
+                            file=sys.stderr,
+                        )
+                    else:
+                        try:
+                            runguard.remove_worktree(run_cwd, worktree_cwd)
+                        except (runguard.RunGuardError, OSError) as exc:
+                            keep_reasons.append(f"removal failed: {exc}")
+                        if worktree_cwd.exists():
+                            keep_reasons.append("removal failed: directory still exists")
+                        keep_worktree = bool(keep_reasons)
+                        if keep_worktree:
+                            print(
+                                f"worktree kept for recovery: {worktree_cwd} ({', '.join(keep_reasons)})",
+                                file=sys.stderr,
+                            )
+                        else:
+                            worktree_removed = True
+                            aboyeur_mod.record_worktree_removal(
+                                output_dir,
+                                path=effective_cwd,
+                                reason="clean and branch-backed",
+                            )
+                            print(f"worktree removed: {worktree_cwd}", file=sys.stderr)
     except KeyboardInterrupt:
         if fleet_credential_failure:
             # The interrupt came from the fleet heartbeat's credential-failure
@@ -938,7 +974,7 @@ def dispatch(args) -> int:
             print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
         return 2
     finally:
-        if worktree_cwd is not None and not keep_worktree:
+        if worktree_cwd is not None and not keep_worktree and not worktree_removed:
             runguard.remove_worktree(run_cwd, worktree_cwd)
     if output_dir is not None:
         print(f"artifacts: {output_dir}", file=sys.stderr)
@@ -1196,39 +1232,6 @@ def _poll_detached_start(proc: Popen, output_dir: Path, *, initial_receipt: byte
             return exit_code, False
         time.sleep(_DETACH_POLL_INTERVAL_SECONDS)
     return None, False
-
-
-def _prune_retained_worktrees(repo_root: Path, current_worktree: Path) -> list[Path]:
-    from .. import proc
-    from .. import runguard
-
-    repo_root = repo_root.expanduser().resolve()
-    current_worktree = current_worktree.expanduser().resolve()
-    cache_parent = current_worktree.parent
-    prefix = f"{repo_root.name}-"
-
-    result = proc.run(["git", "worktree", "list", "--porcelain"], cwd=repo_root)
-    if result.code != 0:
-        return []
-
-    candidates: list[Path] = []
-    for line in result.stdout.splitlines():
-        if not line.startswith("worktree "):
-            continue
-        path = Path(line.removeprefix("worktree ").strip()).expanduser().resolve()
-        if path == current_worktree:
-            continue
-        if path.parent != cache_parent:
-            continue
-        if not path.name.startswith(prefix):
-            continue
-        candidates.append(path)
-
-    pruned: list[Path] = []
-    for path in candidates:
-        runguard.remove_worktree(repo_root, path)
-        pruned.append(path)
-    return pruned
 
 
 def _worktree_checkout_path(repo_root: Path, output_dir: Path) -> Path:

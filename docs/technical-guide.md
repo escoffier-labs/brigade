@@ -502,6 +502,14 @@ status --all` ages silent nonterminal rows to display-only `run.stale` after
 24h, separate from the 30-minute live-status window. `brigade work brief`
 lists orphaned runs and the recorded dirty count.
 
+Use `brigade runs prune-worktrees --target /path/to/repo` to list Brigade-created
+detached worktrees that are safe to remove: clean, branch-backed, and older
+than the `--older-than` threshold (default 14 days). The command is a dry run
+by default; pass `--apply` to actually delete them. Worktrees that are dirty,
+have a detached HEAD with unreachable commits, or are too young are reported as
+kept with their reasons. Non-Brigade worktrees under the same directory are
+ignored and never touched.
+
 `brigade runs resume <run>` also handles an app-server run whose owner exited
 after dispatch began but before `worker-results.json` was aggregated. After it
 acquires the normal run lock, Brigade reconstructs only the active-stage worker
