@@ -512,11 +512,13 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
   inside a workspace is refused, never resolved upward). Without `--force`,
   both modes run the same proof that the run which took the claim is dead:
   `POST /claims` `inspect` returns the recorded run directory to the owner
-  node only, the CLI maps it to a workspace on this machine (`run.json`
-  `lock_workspace` / `cwd`, or the `.brigade/runs/<id>` layout; with
-  `--path` it must be the workspace given) and refuses while that
-  `run.lock` has a live owner or is malformed, or when it cannot resolve
-  the run at all, or when the probe finds no claim owned by this node.
+  node only, the CLI maps it to a workspace on this machine through
+  `runguard.resolve_run_lock_workspace` (`run.json` `lock_workspace`, the
+  `.brigade/runs/<id>` layout, then `cwd`; a resolved path that is not a
+  directory here is refused; with `--path` it must be the workspace given)
+  and refuses while that `run.lock` has a live owner or is malformed, or
+  when it cannot resolve the run at all, or when the probe finds no claim
+  owned by this node.
   When the row records no run directory (`--no-artifacts`, or a claim
   predating the lease columns), `--path` proves deadness via the
   pointed-at workspace's own `run.lock` instead of requiring `--force`;

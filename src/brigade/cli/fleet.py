@@ -802,11 +802,17 @@ def _dispatch_preference_pull(args: argparse.Namespace) -> int:
 
 
 def _workspace_from_run_dir(raw_run_dir: str | None) -> tuple[Path | None, str]:
-    """(workspace, reason) for a claim's recorded run directory: the workspace
-    it belongs to when that directory is on this machine — ``run.json``'s
-    ``lock_workspace`` / ``cwd``, else the ``<workspace>/.brigade/runs/<id>``
-    layout — or ``None`` and why not."""
+    """(workspace, reason) for a claim's recorded run directory.
+
+    Resolution is ``runguard.resolve_run_lock_workspace`` so this CLI path
+    cannot drift from every other run-lock caller (#1159). Existence on
+    this machine is CLI-only: a missing run directory or a resolved path
+    that is not a directory is ``None`` and a refusal reason, never a
+    guessed ancestor.
+    """
     import json as _json
+
+    from .. import runguard
 
     if not raw_run_dir:
         return None, "the claim records no run directory"
@@ -817,13 +823,11 @@ def _workspace_from_run_dir(raw_run_dir: str | None) -> tuple[Path | None, str]:
         meta = _json.loads((run_dir / "run.json").read_text())
     except (OSError, ValueError):
         meta = None
-    if isinstance(meta, dict):
-        for key in ("lock_workspace", "cwd"):
-            value = meta.get(key)
-            if isinstance(value, str) and value and Path(value).expanduser().is_dir():
-                return Path(value).expanduser().resolve(), "ok"
-    if run_dir.parent.name == "runs" and run_dir.parent.parent.name == ".brigade":
-        return run_dir.parent.parent.parent.resolve(), "ok"
+    resolved = runguard.resolve_run_lock_workspace(meta if isinstance(meta, dict) else {}, run_dir)
+    if resolved is not None and resolved.is_dir():
+        return resolved, "ok"
+    if resolved is not None:
+        return None, f"its recorded workspace {resolved} does not exist on this machine"
     return None, (
         f"its run directory {raw_run_dir} has no readable run.json naming its workspace and is not under a "
         "<workspace>/.brigade/runs layout"
