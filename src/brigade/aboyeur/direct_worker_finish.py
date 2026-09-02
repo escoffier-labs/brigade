@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping
 
 from .. import agents
 from .. import receipt_schema
@@ -80,17 +80,18 @@ def synthesis_document_payload(
     final: agents.AgentResult,
     ground_truth: Mapping[str, Any],
     run_id: str,
-    worker_results: Sequence[WorkerResult],
+    worker_results: list[WorkerResult],
     synth_captured: Any | None,
 ) -> dict[str, object]:
     result = _agent_result_payload(final)
     workers = _worker_payload(worker_results)
+    truth = dict(ground_truth)
     if direct_worker:
         payload = receipt_schema.synthesis_document(
             mode="direct-worker",
             worker=worker,
             result=result,
-            ground_truth=ground_truth,
+            ground_truth=truth,
             run_id=run_id,
             worker_results=workers,
         )
@@ -98,7 +99,7 @@ def synthesis_document_payload(
         payload = receipt_schema.synthesis_document(
             orchestrator=roster.orchestrator,
             result=result,
-            ground_truth=ground_truth,
+            ground_truth=truth,
             run_id=run_id,
             worker_results=workers,
         )
@@ -141,16 +142,17 @@ def write_completed_run_receipt(
     write_json: JsonWriter,
     payload: PayloadBuilder,
     final: agents.AgentResult,
-    worker_results: Sequence[WorkerResult],
+    worker_results: list[WorkerResult],
     direct_worker: bool,
     workers_ok: bool,
     defer_artifact_collection: bool,
     pending_handoff: bool,
-    transport_warning: str | None,
+    transport_warning: dict[str, object] | None,
     base: Mapping[str, Any],
     extra: Mapping[str, Any],
 ) -> None:
     failed_seats = [result.worker for result in worker_results if not result.ok]
+    finished_at: datetime | None
     if not workers_ok:
         run_status = "incomplete"
         finished_at = datetime.now(timezone.utc)
