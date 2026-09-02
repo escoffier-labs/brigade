@@ -71,13 +71,25 @@ An optional argument sent as `null` means the same as omitting it, in the advert
 
 The role stays pinned server-side. A worker listener still lists only its own role's jobs, an operator listener still lists every role, and no argument widens either. A refused list call returns a bounded reason that names the accepted keys, states, or role instead of the generic validation message, so a Bot can correct the call itself. The reason never repeats the value that was sent.
 
-`grokbot_queue_claim` takes a required `job_id` and an optional `lease_id`. When `lease_id` is omitted or sent as `null` the listener mints a uuid4 hex lease and returns it in the claim result as `lease_id`. Carry that value on `grokbot_queue_start`, `grokbot_queue_renew`, `grokbot_queue_complete`, `grokbot_queue_fail`, and `grokbot_queue_ack_cancel` for that job. A supplied `lease_id` is echoed back unchanged, and a malformed one is still refused with the generic validation error before any queue mutation. Lease duration, worker identity, and role remain deployment-fixed.
+`grokbot_queue_claim` takes a required `job_id` and the optional `lease_id` and `lease_seconds`. When `lease_id` is omitted or sent as `null` the listener mints a uuid4 hex lease and returns it in the claim result as `lease_id`. Carry that value on `grokbot_queue_start`, `grokbot_queue_renew`, `grokbot_queue_complete`, `grokbot_queue_fail`, and `grokbot_queue_ack_cancel` for that job. A supplied `lease_id` is echoed back unchanged, and a malformed one is still refused with the generic validation error before any queue mutation. Worker identity and role remain deployment-fixed.
+
+The lease is a per-listener setting. `lease_seconds` defaults to 900, an interval chosen so one cloud-agent step fits inside a single lease: the previous fixed 300 lapsed mid-step, and the refusal that followed read as a broken adapter rather than an expired lease. Set it per instance with `BRIGADE_GROKBOT_<INSTANCE>_LEASE_SECONDS` (for example `BRIGADE_GROKBOT_IMPLEMENTATION_WORKER_LEASE_SECONDS`), or for every role on the host with `BRIGADE_GROKBOT_LEASE_SECONDS`. `build_listener_config` also accepts `lease_seconds` directly. The bound is the queue's own, 30 to 3600 seconds, and it is the same bound the Fleet Hub enforces server-side; a value outside it fails listener configuration rather than being silently clamped.
+
+A claim may request its own `lease_seconds` inside that bound. An out-of-bound or non-integer request is refused with the bounded reason `lease_seconds must be an integer between 30 and 3600`, before any queue mutation. Every claim answers with the granted `lease_seconds` and the `lease_expires_at` deadline. The job's own deadline still wins: a lease is clamped to it, so read `lease_expires_at` rather than adding the granted seconds to the current time. `grokbot_queue_renew` extends the lease by the listener's configured length and returns the same two fields.
+
+A `grokbot_queue_renew` or `grokbot_queue_fail` that arrives after `lease_expires_at` is refused with the bounded reason `lease-expired` instead of the generic validation message. That reason means the lease lapsed and the call was well formed. Under hub authority the hub answers a holder refusal with `lease-conflict`; the listener confirms an elapsed deadline against the job itself before naming it `lease-expired`, so a job another worker has re-claimed stays a conflict.
 
 The listener writes one INFO line per tool call to its journal:
 
 ```text
 grokbot tool=grokbot_queue_list args=limit,state unknown=0 decision=ok reason=-
 grokbot tool=grokbot_queue_list args=- unknown=1 decision=refused reason=grokbot_queue_list accepts only these arguments: include_all, limit, role, state
+```
+
+A claim or renew that granted a lease adds a second line for the window it opened, so a lapsed lease can be read out of the journal instead of inferred from a later refusal:
+
+```text
+grokbot tool=grokbot_queue_claim lease_seconds=900 deadline=2026-09-02T02:32:15.812112Z
 ```
 
 The line carries the tool name, the accepted argument keys that were present, a count of unrecognized keys, the decision, and the bounded reason. It never carries argument values, job payloads, lease values, or bearer material. Unrecognized key names are counted rather than printed. Raw requests refused at the HTTP edge are journaled the same way, so a reported "input validation" failure can be read from `journalctl` instead of reproduced by hand.
