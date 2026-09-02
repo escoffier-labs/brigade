@@ -376,42 +376,42 @@
       "fingerprint": "7ec2c62c0fb035a0",
       "line": 14,
       "match": "port 3774",
-      "path": "docs/runbooks/fleet-hub-hogwarts.md",
+      "path": "docs/runbooks/fleet-hub-proxmox.md",
       "rule_id": "port-reference"
     },
     {
       "fingerprint": "7ec2c62c0fb035a0",
       "line": 164,
       "match": "port 3774",
-      "path": "docs/runbooks/fleet-hub-hogwarts.md",
+      "path": "docs/runbooks/fleet-hub-proxmox.md",
       "rule_id": "port-reference"
     },
     {
       "fingerprint": "46697159baa0723a",
       "line": 349,
       "match": "127.0.0.1",
-      "path": "docs/runbooks/fleet-hub-hogwarts.md",
+      "path": "docs/runbooks/fleet-hub-proxmox.md",
       "rule_id": "loopback-ipv4"
     },
     {
       "fingerprint": "46697159baa0723a",
       "line": 361,
       "match": "127.0.0.1",
-      "path": "docs/runbooks/fleet-hub-hogwarts.md",
+      "path": "docs/runbooks/fleet-hub-proxmox.md",
       "rule_id": "loopback-ipv4"
     },
     {
       "fingerprint": "7ec2c62c0fb035a0",
       "line": 361,
       "match": "port 3774",
-      "path": "docs/runbooks/fleet-hub-hogwarts.md",
+      "path": "docs/runbooks/fleet-hub-proxmox.md",
       "rule_id": "port-reference"
     },
     {
       "fingerprint": "46697159baa0723a",
       "line": 364,
       "match": "127.0.0.1",
-      "path": "docs/runbooks/fleet-hub-hogwarts.md",
+      "path": "docs/runbooks/fleet-hub-proxmox.md",
       "rule_id": "loopback-ipv4"
     },
     {

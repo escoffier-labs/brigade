@@ -16,7 +16,7 @@ is the only owner of `import_batch` and `list_items`.
 
 ## Integration precondition
 
-`docs/runbooks/fleet-hub-hogwarts.md` already uses "Phase 2" for the
+`docs/runbooks/fleet-hub-proxmox.md` already uses "Phase 2" for the
 shipped hub. `src/brigade/fleet_hub.py:1-2` documents issue #1123 as that
 shipped phase. Do not block on an unnamed "active Fleet Hub phase 2
 branch".

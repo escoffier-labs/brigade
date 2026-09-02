@@ -897,7 +897,7 @@ def test_station_order_labels_capacity_and_timeline_bounds(tmp_path):
 
 def test_collision_markers_and_observers_and_expired_claims(tmp_path):
     with _start_hub(tmp_path, CONFIG) as (hub, _db):
-        for node_id, label in ((NODE_A, "Rocinante"), (NODE_B, "Shadowfax")):
+        for node_id, label in ((NODE_A, "Alpha"), (NODE_B, "Beta")):
             status, _headers, text = _request(
                 hub,
                 "POST",
@@ -916,7 +916,7 @@ def test_collision_markers_and_observers_and_expired_claims(tmp_path):
         assert deck_body.count("! collision") >= 1
         assert "collision" in deck_body.split('id="rail"')[1].split("</section>")[0]
         rail = deck_body.split('id="rail"')[1].split("</section>")[0]
-        assert "shared" in rail and "held by Rocinante" in rail
+        assert "shared" in rail and "held by Alpha" in rail
         assert f"held by {NODE_A}" not in rail
         _status, _headers, repos_body = _request(hub, "GET", "/deck/repos", headers=_bearer())
         first_row = repos_body.split("<tbody>")[1].split("<tr>")[1]

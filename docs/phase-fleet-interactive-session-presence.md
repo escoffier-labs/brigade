@@ -249,7 +249,7 @@ already broad schema and request surface.
 1. Merge and run the full Brigade verification gate once.
 2. Back up the Hub database and deploy the Hub first so schema 14 and the new
    routes are available.
-3. Deploy Rocinante, Shadowfax, and Gandalf clients without copying identities
+3. Deploy the workstation, GPU box, and desktop clients without copying identities
    or tokens.
 4. Update managed Claude and Cursor hooks through their normal merge-safe
    installers. Update the Codex/T3 work-loop hook only through its managed user

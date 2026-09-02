@@ -287,7 +287,7 @@ brigade fleet nodes add <NODE_ID> --label <HOSTNAME>
 
 A revoked token is refused with HTTP 401 immediately; events the machine produces in between stay in its local spool and are delivered by the next report or `brigade fleet flush` once the new token is in place.
 
-### Windows client (Gandalf)
+### Windows client
 
 Use the same `[fleet]` keys on the Windows machine. The client expands `~` in `node_token_file`, so the same config shape works for a native Windows user profile:
 

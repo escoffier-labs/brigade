@@ -37,8 +37,8 @@ contained only a virtual environment, the Codex client-version gate, or an
 OpenCode isolation escape. Those incidents are therefore labeled as operator
 reports below, not independently verified receipts.
 
-The example Rocinante run `20260726-052351` was not readable from this host.
-The most recent failed Shadowfax run inspected during this planning pass,
+The example workstation run `20260726-052351` was not readable from this host.
+The most recent failed GPU-box run inspected during this planning pass,
 `20260726-210233-ac64f883`, failed with a typed run-level
 `run-isolation/branch-head-drift` receipt. That failure is useful as a boundary
 example: it belongs to the run guard, not the worker taxonomy.

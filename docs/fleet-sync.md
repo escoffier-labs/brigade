@@ -3,8 +3,8 @@
 (Tracked home for the former local `docs/plans/fleet-sync-design.md`; `docs/plans/` is gitignored.)
 
 Tracking doc for epic #1121: one answer to "what work is running where, by
-which agent/harness, at what status" across rocinante, shadowfax, and
-gandalf. The full problem statement, prior art, and the hub-vs-coordinator-free
+which agent/harness, at what status" across the workstation, GPU box, and
+desktop. The full problem statement, prior art, and the hub-vs-coordinator-free
 decision live on the epic; this page records the shape we are building and the
 status of each phase.
 
@@ -13,7 +13,7 @@ status of each phase.
 - Each machine's **local run journal stays the source of truth**
   (`.brigade/runs/<run>/events/*.jsonl`, digest-chained). A machine never
   depends on the hub to do its own work.
-- A **single small hub** (`brigade fleet serve`) runs on a dedicated hogwarts
+- A **single small hub** (`brigade fleet serve`) runs on a dedicated Proxmox
   LXC CT, bound to its Tailscale IP, bearer-token auth, one SQLite file in WAL
   mode. It is an aggregator (and, from Phase 4, a claim arbiter), not the
   source of truth.
@@ -68,7 +68,7 @@ ever logged or rendered:
 
 | Question | Decision |
 | --- | --- |
-| Hub host | hogwarts, dedicated LXC CT (isolated from the working box) |
+| Hub host | dedicated Proxmox LXC CT (isolated from the working box) |
 | Token source | dedicated secrets via env (`BRIGADE_FLEET_TOKEN`, `BRIGADE_FLEET_NODE_TOKEN`) or file paths (`token_file`, `node_token_file`); never a config value |
 | Caller identity | per-node credentials (#1150): the hub binds `node_id` to the node token; the shared bearer is the admin token |
 | Git-ref journal backup per machine | no; local journal + hub is enough |
@@ -79,7 +79,7 @@ ever logged or rendered:
 | Phase | Issue | Status |
 | --- | --- | --- |
 | 1. Machine identity, namespaced run ids, lease reaper | #1122 | shipped (#1129) |
-| 2. Fleet hub (`brigade fleet serve`), event POST, store-and-forward, `brigade fleet status` | #1123 | **built, hub CT pending** — code, tests, and CLI are in; the hogwarts CT that hosts `brigade fleet serve` is not provisioned yet |
+| 2. Fleet hub (`brigade fleet serve`), event POST, store-and-forward, `brigade fleet status` | #1123 | **built, hub CT pending** — code, tests, and CLI are in; the Proxmox CT that hosts `brigade fleet serve` is not provisioned yet |
 | 3. Web dashboard served by the hub | #1124 | shipped |
 | 4. Server-arbitrated claims with TTL | #1125 | shipped (#1140); crash self-lockout recovery #1141 |
 | 5. Export and Dolt sink for versioned history (optional) | #1127 | built |
