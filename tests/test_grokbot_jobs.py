@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from multiprocessing import Pipe, Process
 from pathlib import Path
@@ -31,6 +33,21 @@ def _spec() -> dict[str, object]:
         "artifact": {"kind": "draft-pr"},
         "timeout_seconds": 900,
     }
+
+
+def test_grokbot_jobs_expiry_imports_before_grokbot_jobs():
+    """Regression for the circular import introduced by PR #1387."""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import brigade.grokbot_jobs_expiry; import brigade.grokbot_jobs;",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def _claim_in_process(target: str, job_id: str, lease_id: str, connection) -> None:
