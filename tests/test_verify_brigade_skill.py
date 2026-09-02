@@ -322,6 +322,43 @@ def test_skill_doc_states_what_the_helper_enforces():
     assert "--manifest" in doc, "the one flag outside the target contract must be documented"
 
 
+def test_skill_doc_includes_checkout_verification_map():
+    """SKILL.md keeps the helper contract and adds the checkout verification map."""
+    doc = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    features = (SKILL_DIR / "features" / "README.md").read_text(encoding="utf-8")
+    for heading in ("## Launch", "## Doctor", "## Drive", "## Evidence", "## Cleanup", "## Feature map"):
+        assert heading in doc, heading
+    assert 'python3 -m venv .venv' in doc
+    assert 'pip install -e ".[dev,grokbot]"' in doc
+    assert "brigade doctor --target ." in doc
+    assert "brigade status --target ." in doc
+    assert "./scripts/verify-focused" in doc
+    assert "ruff check src/brigade" in doc
+    assert "ruff format --check src/brigade" in doc
+    assert ".venv/bin/mypy" in doc
+    assert "brigade work verify run --target ." in doc
+    assert "--argv-json" in doc
+    assert "--capture brigade-work" in doc
+    assert ".brigade/work/verify-runs/<run-id>/receipt.json" in doc
+    assert "work-verify receipt:" in doc
+    assert '"status": "completed"' in doc
+    assert "Never commit `.brigade/`" in doc or "Never commit `.brigade/" in doc
+    assert ".venv/" in doc
+    for surface in ("brigade run", "brigade work verify", "brigade fleet", "brigade run cloud grokbot", "brigade guard"):
+        assert surface in doc, surface
+        assert surface in features, surface
+    for path in (
+        "tests/test_run_cli.py",
+        "tests/test_work_cmd_verification.py",
+        "tests/test_fleet_claims.py",
+        "tests/test_grokbot_ops.py",
+        "tests/guard/test_cli.py",
+        "tests/test_scrub.py",
+    ):
+        assert path in doc, path
+        assert path in features, path
+
+
 def test_failed_brigade_init_leaves_no_target(tmp_path):
     root = tmp_path / "state"
     failing = shlex.join([sys.executable, "-c", "raise SystemExit(1)"])
