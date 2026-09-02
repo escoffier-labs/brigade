@@ -2815,6 +2815,13 @@ def test_lkg_enforces_independent_ttl_windows(tmp_path, monkeypatch):
         assert aged.reason == "lkg-expired"
 
 
+def _lkg_body(raw: bytes) -> dict:
+    """LKG record without the cache timestamp, which refreshes on every write."""
+    record = json.loads(raw.decode("ascii"))
+    record.pop("cached_at", None)
+    return record
+
+
 def test_admit_malformed_and_client_errors_never_use_lkg(tmp_path, monkeypatch):
     from brigade import fleet_model_admission
 
@@ -2849,7 +2856,10 @@ def test_admit_malformed_and_client_errors_never_use_lkg(tmp_path, monkeypatch):
         assert oversized.ok is False
         assert oversized.exit_code == 1
         assert oversized.payload.get("source") != "lkg"
-        assert fleet_model_admission.lkg_path().read_bytes() == before
+        # admit_model re-fetches the roster, so the cache is legitimately
+        # rewritten with a fresh second-granularity ``cached_at``. Compare the
+        # cached content instead of raw bytes.
+        assert _lkg_body(fleet_model_admission.lkg_path().read_bytes()) == _lkg_body(before)
 
         monkeypatch.setattr(
             fleet_client,

@@ -72,6 +72,26 @@ class BaselineModuleTests(unittest.TestCase):
         paths = {e.path for e in baseline.entries}
         self.assertEqual(paths, {"real.md"})
 
+    def test_init_baseline_and_audit_skip_files_with_nul_byte(self) -> None:
+        # Baseline generation and audit scanning must agree on readable files.
+        # A file containing a NUL byte is treated as binary by _read_text and
+        # skipped by both paths.
+        from brigade.guard.audit import run_audit
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "leak.md").write_text("Host: 192.168.99.10.\n")
+            (root / "binary.bin").write_bytes(b"Hello \x00 world\n")
+
+            baseline = init_baseline(root, policy=Policy(), scope="tree")
+            baseline_paths = {e.path for e in baseline.entries}
+            self.assertIn("leak.md", baseline_paths)
+            self.assertNotIn("binary.bin", baseline_paths)
+
+            report = run_audit(root, policy=Policy(), scope="tree")
+            self.assertEqual(report.files_scanned, 1)
+            self.assertNotIn("binary.bin", {fa.path for fa in report.file_audits})
+
     def test_baseline_save_and_load_round_trip(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -425,3 +445,38 @@ class BaselineCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BaselineScopeTests(unittest.TestCase):
+    """A baseline must cover the same files an audit scans, not just markdown."""
+
+    def test_init_baseline_captures_findings_in_tracked_non_markdown_files(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "user@example"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Example User"], cwd=repo, check=True)
+            (repo / "fixture.json").write_text('{"host": "192.168.99.10"}\n')
+            (repo / "notes.md").write_text("Host is 192.168.99.11.\n")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+
+            baseline = init_baseline(repo, policy=Policy(), scope="tracked")
+
+        paths = {entry.path for entry in baseline.entries}
+        self.assertIn("fixture.json", paths)
+        self.assertIn("notes.md", paths)
+
+    def test_init_baseline_skips_untracked_local_state_under_tracked_scope(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "user@example"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Example User"], cwd=repo, check=True)
+            (repo / "tracked.md").write_text("Host is 192.168.99.10.\n")
+            subprocess.run(["git", "add", "tracked.md"], cwd=repo, check=True, capture_output=True)
+            (repo / "local.md").write_text("Host is 192.168.99.99.\n")
+
+            baseline = init_baseline(repo, policy=Policy(), scope="tracked")
+
+        paths = {entry.path for entry in baseline.entries}
+        self.assertEqual(paths, {"tracked.md"})

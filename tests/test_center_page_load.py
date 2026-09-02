@@ -150,7 +150,7 @@ def test_session_scan_skips_old_files_and_oversized_reads(tmp_path, monkeypatch)
 
     monkeypatch.setattr(activity_records, "_head_json_objects", tracked_head)
     records = activity_records._session_file_records(
-        root.parent.parent, "codex", "codex-cli", "Codex session", now, "rocinante"
+        root.parent.parent, "codex", "codex-cli", "Codex session", now, "alpha"
     )
     labels = {record["task_label"] for record in records}
     assert any("recent" in label.lower() or label != activity_records._UNKNOWN_TASK for label in labels) or records

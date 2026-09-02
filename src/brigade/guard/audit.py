@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from .baseline import Baseline, filter_findings
 from .engine import scan_text
 from .git_scan import _read_text, _tracked_paths
 from .policy import Policy
@@ -100,6 +101,8 @@ def run_audit(
     scope: str = "tracked",
     options: ScanOptions | None = None,
     exclude_dirs: Iterable[str] = DEFAULT_EXCLUDE_DIR_NAMES,
+    baseline: Baseline | None = None,
+    baseline_path: Path | None = None,
 ) -> AuditReport:
     """Walk `target` per `scope`, scan each text file, and aggregate."""
 
@@ -115,13 +118,25 @@ def run_audit(
     options = options or ScanOptions()
     report = AuditReport(target=str(target), scope=scope)
     paths = _enumerate(target, scope=scope, exclude_dirs=frozenset(exclude_dirs))
+    # A baseline file records the literals it accepts, so scanning it would
+    # rediscover every one of them as an unbaselined finding.
+    skip = baseline_path.resolve() if baseline_path else None
 
+    baseline_index = baseline._index() if baseline is not None else None
     for path in paths:
+        if skip is not None and path.resolve() == skip:
+            continue
         text = _read_text(path)
         if text is None:
             continue
 
         result = scan_text(text, policy=policy, options=options)
+        if baseline is not None and baseline_index is not None:
+            result = GuardResult(
+                text=result.text,
+                redacted_text=result.redacted_text,
+                findings=filter_findings(result.findings, baseline, _relative(path, target), baseline_index),
+            )
         report.files_scanned += 1
         _record(report, path, result, target=target)
 
@@ -148,13 +163,17 @@ def _enumerate(target: Path, *, scope: str, exclude_dirs: frozenset[str]) -> lis
     return paths
 
 
+def _relative(path: Path, target: Path) -> str:
+    """Path as recorded in a baseline: relative to the audit target when possible."""
+    try:
+        return str(path.relative_to(target))
+    except ValueError:
+        return str(path)
+
+
 def _record(report: AuditReport, path: Path, result: GuardResult, *, target: Path) -> None:
     findings = result.findings
-    try:
-        rel = path.relative_to(target)
-        path_str = str(rel)
-    except ValueError:
-        path_str = str(path)
+    path_str = _relative(path, target)
 
     report.file_audits.append(FileAudit(path=path_str, findings=len(findings), blocked=result.blocked))
 

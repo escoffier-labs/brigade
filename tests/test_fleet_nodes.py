@@ -131,7 +131,7 @@ class TestHubNodeCredentials:
 
     def test_matching_node_token_accepted(self, hub):
         url, db = hub
-        token_a = _enroll(url, NODE_A, "shadowfax")
+        token_a = _enroll(url, NODE_A, "beta")
         status, payload = _request(url, "/events", token_a, _event(NODE_A))
         assert (status, payload) == (200, {"accepted": 1, "duplicate": 0})
         status, payload = _request(url, "/claims", token_a, _claim(node=NODE_A))
@@ -557,7 +557,7 @@ class TestNodesCli:
 
         url, _db = hub
         self._config(url)
-        assert cli.main(["fleet", "nodes", "add", NODE_A, "--label", "shadowfax"]) == 0
+        assert cli.main(["fleet", "nodes", "add", NODE_A, "--label", "beta"]) == 0
         out = capsys.readouterr().out
         assert f"enrolled node {NODE_A}" in out and "shown once" in out
         token_a = out.strip().splitlines()[-1]
@@ -567,7 +567,7 @@ class TestNodesCli:
 
         assert cli.main(["fleet", "nodes", "list"]) == 0
         table = capsys.readouterr().out
-        assert NODE_A in table and "shadowfax" in table and "active" in table
+        assert NODE_A in table and "beta" in table and "active" in table
         assert token_a not in table
         assert cli.main(["fleet", "nodes", "list", "--json"]) == 0
         listed = json.loads(capsys.readouterr().out)["nodes"]
@@ -653,6 +653,28 @@ class TestNodesCli:
             == 0
         )
         assert "admin writes allowed" in capsys.readouterr().out
+
+    def test_serve_joins_expiry_sweeper_on_shutdown(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", ADMIN)
+        from brigade import fleet_hub_grokbot
+
+        captured_threads: list[threading.Thread] = []
+        original_start = fleet_hub_grokbot.start_expiry_sweeper
+
+        def _start_and_capture(*args, **kwargs):
+            thread = original_start(*args, **kwargs)
+            captured_threads.append(thread)
+            return thread
+
+        monkeypatch.setattr(fleet_hub_grokbot, "start_expiry_sweeper", _start_and_capture)
+
+        def _serve_forever(self):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(fleet_hub.ThreadingHTTPServer, "serve_forever", _serve_forever)
+        assert fleet_hub.run(host="127.0.0.1", port=0, db_path=tmp_path / "x.db", token_file=None) == 0
+        assert captured_threads
+        assert not captured_threads[-1].is_alive()
 
 
 class TestServerStartupMigration:

@@ -17,6 +17,10 @@ GITHUB_PULL_URL_RE = re.compile(
 LOWER_HEX_40_RE = re.compile(r"^[0-9a-f]{40}$")
 LOWER_HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 ARTIFACT_KINDS = frozenset({"draft-pr", "branch", "report"})
+# The one queue-side bound on a lease. Callers that offer a configurable or
+# caller-requested lease read these instead of restating the numbers.
+LEASE_SECONDS_MIN = 30
+LEASE_SECONDS_MAX = 3600
 
 
 class GrokbotJobError(ValueError):
@@ -104,7 +108,7 @@ def validate_opaque_id(value: object, reason: str) -> str:
 
 
 def validate_lease_seconds(value: object) -> int:
-    if type(value) is not int or not 30 <= value <= 3600:
+    if type(value) is not int or not LEASE_SECONDS_MIN <= value <= LEASE_SECONDS_MAX:
         raise GrokbotJobError("invalid-lease-seconds")
     return value
 

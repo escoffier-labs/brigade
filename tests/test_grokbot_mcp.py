@@ -56,7 +56,7 @@ def _report_artifact(text: str = REPORT_TEXT, path: str = "artifacts/report.md")
 
 def _running_scout_job(tmp_path: Path) -> str:
     job_id = grokbot_jobs.enqueue(tmp_path, _spec("repository-scout"), "scout-job")["job_id"]
-    grokbot_jobs.claim(tmp_path, job_id, "grokbot-repository-scout", "lease-a", grokbot_mcp.LEASE_SECONDS)
+    grokbot_jobs.claim(tmp_path, job_id, "grokbot-repository-scout", "lease-a", grokbot_mcp.DEFAULT_LEASE_SECONDS)
     grokbot_jobs.transition(tmp_path, job_id, "grokbot-repository-scout", "lease-a", "running")
     return job_id
 
@@ -630,7 +630,7 @@ def test_workers_cannot_retrieve_reports_and_operator_can(tmp_path: Path):
     job_id = grokbot_jobs.enqueue(tmp_path, spec, "scout-report")["job_id"]
     worker = _adapter(tmp_path, "repository-scout")
     operator = _adapter(tmp_path, "operator")
-    grokbot_jobs.claim(tmp_path, job_id, worker.config.bot_id, "lease-a", grokbot_mcp.LEASE_SECONDS)
+    grokbot_jobs.claim(tmp_path, job_id, worker.config.bot_id, "lease-a", grokbot_mcp.DEFAULT_LEASE_SECONDS)
     grokbot_jobs.transition(tmp_path, job_id, worker.config.bot_id, "lease-a", "running")
     report = "Scout findings stay private."
     digest = __import__("hashlib").sha256(report.encode()).hexdigest()
@@ -751,7 +751,7 @@ def test_claim_is_admitted_before_queue_mutation_and_binds_the_deterministic_hub
         "label": f"grokbot-cloud:example/brigade@{claimed['task_hash'].removeprefix('sha256:')[:12]}",
         "prompt_hash": claimed["task_hash"].removeprefix("sha256:"),
         "conductor": "implementation-worker",
-        "ttl_seconds": grokbot_mcp.LEASE_SECONDS,
+        "ttl_seconds": grokbot_mcp.DEFAULT_LEASE_SECONDS,
         "lease_id": job_id,
         "holder": "lease-a",
     }
@@ -804,7 +804,7 @@ def test_claim_releases_an_admitted_hub_lease_when_the_local_claim_fails(tmp_pat
 def test_renew_reconciles_a_legacy_running_job_and_normal_renewals_refresh_the_hub(tmp_path: Path, monkeypatch):
     job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
     adapter = _adapter(tmp_path)
-    grokbot_jobs.claim(tmp_path, job_id, adapter.config.bot_id, "lease-a", grokbot_mcp.LEASE_SECONDS)
+    grokbot_jobs.claim(tmp_path, job_id, adapter.config.bot_id, "lease-a", grokbot_mcp.DEFAULT_LEASE_SECONDS)
     grokbot_jobs.transition(tmp_path, job_id, adapter.config.bot_id, "lease-a", "running")
     calls: list[tuple[str, dict[str, object]]] = []
 
@@ -828,7 +828,7 @@ def test_renew_reconciles_a_legacy_running_job_and_normal_renewals_refresh_the_h
 
     assert renewed["state"] == "running"
     assert [name for name, _ in calls] == ["renew", "admit", "bind"]
-    assert calls[0][1] == {"lease_id": job_id, "ttl_seconds": grokbot_mcp.LEASE_SECONDS, "holder": "lease-a"}
+    assert calls[0][1] == {"lease_id": job_id, "ttl_seconds": grokbot_mcp.DEFAULT_LEASE_SECONDS, "holder": "lease-a"}
     assert calls[-1][1] == {"lease_id": job_id, "provider_task_id": job_id, "holder": "lease-a"}
 
     calls.clear()
@@ -846,7 +846,7 @@ def test_renew_reconciles_a_legacy_running_job_and_normal_renewals_refresh_the_h
 def test_start_reconciles_a_missing_hub_lease_without_rolling_back_the_local_transition(tmp_path: Path, monkeypatch):
     job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
     adapter = _adapter(tmp_path)
-    grokbot_jobs.claim(tmp_path, job_id, adapter.config.bot_id, "lease-a", grokbot_mcp.LEASE_SECONDS)
+    grokbot_jobs.claim(tmp_path, job_id, adapter.config.bot_id, "lease-a", grokbot_mcp.DEFAULT_LEASE_SECONDS)
     calls: list[str] = []
     monkeypatch.setattr(
         fleet_client,
@@ -896,7 +896,7 @@ def test_terminal_worker_transitions_release_hub_leases(
 ):
     job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
     adapter = _adapter(tmp_path)
-    grokbot_jobs.claim(tmp_path, job_id, adapter.config.bot_id, "lease-a", grokbot_mcp.LEASE_SECONDS)
+    grokbot_jobs.claim(tmp_path, job_id, adapter.config.bot_id, "lease-a", grokbot_mcp.DEFAULT_LEASE_SECONDS)
     if prepare == "running":
         grokbot_jobs.transition(tmp_path, job_id, adapter.config.bot_id, "lease-a", "running")
     elif prepare == "cancel":
@@ -921,7 +921,7 @@ def test_hub_mirror_failures_do_not_undo_a_local_terminal_transition_or_leak_pri
 ):
     job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
     adapter = _adapter(tmp_path)
-    grokbot_jobs.claim(tmp_path, job_id, adapter.config.bot_id, "lease-a", grokbot_mcp.LEASE_SECONDS)
+    grokbot_jobs.claim(tmp_path, job_id, adapter.config.bot_id, "lease-a", grokbot_mcp.DEFAULT_LEASE_SECONDS)
     monkeypatch.setattr(
         fleet_client,
         "release_cloud",
@@ -1713,7 +1713,7 @@ def test_mismatched_hub_actor_credential_refuses_listener_service(tmp_path: Path
 def _queued_and_failed_worker_jobs(tmp_path: Path) -> tuple[str, str]:
     queued = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "queued-job")["job_id"]
     failed = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "failed-job")["job_id"]
-    grokbot_jobs.claim(tmp_path, failed, "grokbot-implementation-worker", "lease-a", grokbot_mcp.LEASE_SECONDS)
+    grokbot_jobs.claim(tmp_path, failed, "grokbot-implementation-worker", "lease-a", grokbot_mcp.DEFAULT_LEASE_SECONDS)
     grokbot_jobs.transition(tmp_path, failed, "grokbot-implementation-worker", "lease-a", "failed")
     return queued, failed
 
@@ -1856,9 +1856,10 @@ def test_registered_tool_signatures_advertise_exactly_the_accepted_arguments(tmp
     assert all(parameter.default is None for parameter in listing.parameters.values())
 
     claim = inspect.signature(grokbot_mcp._tool_handler(worker, "grokbot_queue_claim"))
-    assert list(claim.parameters) == ["job_id", "lease_id"]
+    assert list(claim.parameters) == ["job_id", "lease_id", "lease_seconds"]
     assert claim.parameters["job_id"].default is inspect.Parameter.empty
     assert claim.parameters["lease_id"].default is None
+    assert claim.parameters["lease_seconds"].default is None
 
 
 def test_one_bounded_journal_line_per_tool_call_never_holds_an_argument_value(tmp_path: Path, caplog):
@@ -1952,7 +1953,7 @@ def test_advertised_input_schema_and_served_gate_accept_the_documented_list_filt
     tools = {tool["name"]: tool for tool in listing.json()["result"]["tools"]}
     assert set(tools["grokbot_queue_list"]["inputSchema"]["properties"]) == {"state", "include_all", "limit", "role"}
     assert set(tools["grokbot_queue_claim"]["inputSchema"].get("required", [])) == {"job_id"}
-    assert set(tools["grokbot_queue_claim"]["inputSchema"]["properties"]) == {"job_id", "lease_id"}
+    assert set(tools["grokbot_queue_claim"]["inputSchema"]["properties"]) == {"job_id", "lease_id", "lease_seconds"}
 
 
 def _raw_tool_call(name: str, arguments: object) -> bytes:
@@ -2077,3 +2078,192 @@ def test_journal_lines_do_not_propagate_to_ancestor_handlers(capsys):
     assert previous_propagate is not None
     assert sink.getvalue() == ""
     assert captured.count("tool=grokbot_queue_list") == 1
+
+
+def _long_spec(role: str = "implementation-worker") -> dict[str, object]:
+    """A job whose own deadline is wide enough not to clamp the lease under test."""
+    return {**_spec(role), "timeout_seconds": 3600}
+
+
+def _expire_lease(target: Path, job_id: str) -> None:
+    """Rewind one claimed job's lease deadline to the instant it was claimed."""
+    path = target / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{job_id}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["lease_expires_at"] = record["claimed_at"]
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+
+def test_listener_lease_defaults_to_fifteen_minutes_and_is_a_per_instance_setting(tmp_path: Path, monkeypatch):
+    assert grokbot_mcp.DEFAULT_LEASE_SECONDS == 900
+    assert grokbot_mcp.MIN_LEASE_SECONDS <= 900 <= grokbot_mcp.MAX_LEASE_SECONDS
+    assert _adapter(tmp_path).config.lease_seconds == 900
+
+    monkeypatch.delenv("BRIGADE_GROKBOT_LEASE_SECONDS", raising=False)
+    monkeypatch.setenv("BRIGADE_GROKBOT_IMPLEMENTATION_WORKER_LEASE_SECONDS", "1200")
+    monkeypatch.setenv("BRIGADE_GROKBOT_REPOSITORY_SCOUT_LEASE_SECONDS", "600")
+    assert grokbot_mcp.load_lease_seconds(instance="implementation-worker") == 1200
+    assert grokbot_mcp.load_lease_seconds(instance="repository-scout") == 600
+    assert grokbot_mcp.load_lease_seconds(instance="operator") == 900
+
+    monkeypatch.setenv("BRIGADE_GROKBOT_LEASE_SECONDS", "1500")
+    assert grokbot_mcp.load_lease_seconds(instance="operator") == 1500
+    monkeypatch.setenv("BRIGADE_GROKBOT_LEASE_SECONDS", "5")
+    with pytest.raises(grokbot_mcp.ConfigurationError):
+        grokbot_mcp.load_lease_seconds(instance="operator")
+    monkeypatch.setenv("BRIGADE_GROKBOT_LEASE_SECONDS", "not-a-number")
+    with pytest.raises(grokbot_mcp.ConfigurationError):
+        grokbot_mcp.load_lease_seconds(instance="operator")
+
+
+def test_out_of_bound_listener_lease_is_refused_by_configuration(tmp_path: Path):
+    for seconds in (grokbot_mcp.MIN_LEASE_SECONDS - 1, grokbot_mcp.MAX_LEASE_SECONDS + 1, True, 900.0):
+        config = grokbot_mcp.ListenerConfig(
+            target=tmp_path,
+            instance="implementation-worker",
+            bind_host="127.0.0.1",
+            bind_port=8766,
+            allowed_hosts=(),
+            allowed_origins=(),
+            bearer="not-a-real-token",
+            lease_seconds=seconds,  # type: ignore[arg-type]
+        )
+        with pytest.raises(grokbot_mcp.ConfigurationError):
+            config.validate()
+
+
+def test_claim_grants_the_configured_lease_and_returns_its_deadline(tmp_path: Path):
+    job_id = grokbot_jobs.enqueue(tmp_path, _long_spec(), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+
+    claimed = adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-default"})
+
+    assert claimed["lease_seconds"] == grokbot_mcp.DEFAULT_LEASE_SECONDS
+    granted = datetime.fromisoformat(claimed["lease_expires_at"].replace("Z", "+00:00"))
+    assert timedelta(seconds=870) <= granted - datetime.now(timezone.utc) <= timedelta(seconds=900)
+
+
+def test_claim_accepts_a_requested_lease_within_the_bound(tmp_path: Path):
+    job_id = grokbot_jobs.enqueue(tmp_path, _long_spec(), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+
+    claimed = adapter.call_tool(
+        "grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-long", "lease_seconds": 1800}
+    )
+
+    assert claimed["lease_seconds"] == 1800
+    granted = datetime.fromisoformat(claimed["lease_expires_at"].replace("Z", "+00:00"))
+    assert timedelta(seconds=1770) <= granted - datetime.now(timezone.utc) <= timedelta(seconds=1800)
+
+
+@pytest.mark.parametrize("requested", [10, 7200, True, "900", 900.0])
+def test_claim_refuses_a_requested_lease_outside_the_bound(tmp_path: Path, requested: object):
+    job_id = grokbot_jobs.enqueue(tmp_path, _long_spec(), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+
+    with pytest.raises(grokbot_mcp.AdapterError) as refusal:
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_seconds": requested})
+
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "queued"
+    if isinstance(requested, int) and not isinstance(requested, bool):
+        assert refusal.value.reason == (
+            f"lease_seconds must be an integer between {grokbot_mcp.MIN_LEASE_SECONDS} "
+            f"and {grokbot_mcp.MAX_LEASE_SECONDS}"
+        )
+
+
+def test_claim_advertises_the_optional_lease_seconds_argument(tmp_path: Path):
+    required, optional = grokbot_mcp._TOOL_ARGUMENT_TYPES["grokbot_queue_claim"]
+
+    assert "lease_seconds" not in required
+    assert optional["lease_seconds"] is int
+    assert grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": "grokbot-a", "lease_seconds": 900})
+    assert grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": "grokbot-a", "lease_seconds": None})
+    assert not grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": "grokbot-a", "lease_seconds": "900"})
+
+
+def test_renew_and_fail_after_expiry_answer_lease_expired(tmp_path: Path):
+    for tool in ("grokbot_queue_renew", "grokbot_queue_fail"):
+        job_id = grokbot_jobs.enqueue(tmp_path, _long_spec(), f"implementation-job-{tool}")["job_id"]
+        adapter = _adapter(tmp_path)
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-lapsed"})
+        _expire_lease(tmp_path, job_id)
+
+        with pytest.raises(grokbot_mcp.AdapterError) as refusal:
+            adapter.call_tool(tool, {"job_id": job_id, "lease_id": "lease-lapsed"})
+
+        assert refusal.value.reason == "lease-expired"
+        assert refusal.value.public_error()["error"]["message"] == "lease-expired"
+        assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "claimed"
+
+
+def test_renew_and_fail_past_the_job_deadline_still_answer_lease_expired(tmp_path: Path):
+    """#1353 expiry composed with #1383: the row ends, the answer stays actionable."""
+    for tool in ("grokbot_queue_renew", "grokbot_queue_fail"):
+        spec = {**_long_spec(), "timeout_seconds": 60}
+        job_id = grokbot_jobs.enqueue(tmp_path, spec, f"deadline-job-{tool}")["job_id"]
+        adapter = _adapter(tmp_path)
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-late"})
+        _backdate_deadline(tmp_path, job_id)
+
+        with pytest.raises(grokbot_mcp.AdapterError) as refusal:
+            adapter.call_tool(tool, {"job_id": job_id, "lease_id": "lease-late"})
+
+        assert refusal.value.reason == "lease-expired"
+        assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "expired"
+
+
+def test_claim_past_the_job_deadline_is_refused_and_expires_the_job(tmp_path: Path):
+    spec = {**_long_spec(), "timeout_seconds": 60}
+    job_id = grokbot_jobs.enqueue(tmp_path, spec, "deadline-claim")["job_id"]
+    _backdate_deadline(tmp_path, job_id)
+    adapter = _adapter(tmp_path)
+
+    with pytest.raises(grokbot_mcp.AdapterError):
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-late"})
+
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "expired"
+
+
+def _backdate_deadline(target: Path, job_id: str) -> None:
+    """Move one job's own clock past its ``timeout_seconds`` without moving the code's."""
+    path = target / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{job_id}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    stamp = (datetime.now(timezone.utc) - timedelta(seconds=record["timeout_seconds"] + 60)).isoformat()
+    stamp = stamp.replace("+00:00", "Z")
+    # A granted lease is always clamped to the job's deadline, so the lease
+    # moves with it: past its own deadline a job never has a live lease.
+    for field in ("created_at", "queued_at", "updated_at", "claimed_at", "lease_expires_at"):
+        if field in record:
+            record[field] = stamp
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+
+def test_a_live_lease_conflict_is_still_not_reported_as_expiry(tmp_path: Path):
+    job_id = grokbot_jobs.enqueue(tmp_path, _long_spec(), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-held"})
+
+    with pytest.raises(grokbot_mcp.AdapterError) as refusal:
+        adapter.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": "lease-other"})
+
+    assert refusal.value.reason is None
+
+
+def test_claim_and_renew_journal_the_lease_deadline(tmp_path: Path, caplog):
+    import logging
+
+    job_id = grokbot_jobs.enqueue(tmp_path, _long_spec(), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="brigade.grokbot_mcp"):
+        claimed = adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-journal"})
+        renewed = adapter.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": "lease-journal"})
+
+    lines = [record.getMessage() for record in caplog.records if record.name == "brigade.grokbot_mcp"]
+    lease_lines = [line for line in lines if " lease_seconds=" in line]
+    assert lease_lines == [
+        f"grokbot tool=grokbot_queue_claim lease_seconds=900 deadline={claimed['lease_expires_at']}",
+        f"grokbot tool=grokbot_queue_renew lease_seconds=900 deadline={renewed['lease_expires_at']}",
+    ]
+    assert job_id not in "\n".join(lease_lines)
+    assert "lease-journal" not in "\n".join(lease_lines)

@@ -121,6 +121,7 @@ record_dispatch_stage
 record_result_processing
 record_run_start
 record_run_termination
+record_worktree_removal
 resolve_fleet_model_policy
 resolve_orchestrator_health_routing
 run

@@ -488,7 +488,7 @@ canary fails until that evidence path exists.
    cache, audit, doctor, and Brigade run integration.
 2. Seed the permanent retired rows and current fleet seats, consumer defaults,
    reasoning values, and consumer bindings.
-3. Run Brigade doctor on Rocinante, Shadowfax, and Gandalf.
+3. Run Brigade doctor on the workstation, GPU box, and desktop.
 4. Rebase the pending `t3-fleet` guard branch onto the final CLI contract.
 5. Run target-side no-mutation denial tests, then the exact-model canary.
 6. Keep the T3 project default visible as drift. Do not use it as rollback.

@@ -2671,7 +2671,7 @@ def _write_terminal_failed_worktree_run(
     (output_dir / "final.txt").write_text(final + "\n")
 
 
-def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path, monkeypatch):
+def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path, monkeypatch, capsys):
     repo = _git_repo_with_roster(tmp_path)
     output_dir = tmp_path / "run"
     seen = {}
@@ -2717,17 +2717,21 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
 
     assert rc == 0
     assert seen["output_dir"] == output_dir
-    expected_checkout = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
+    expected_checkout = (
+        tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
+    ).resolve()
     assert seen["cwd"] == expected_checkout
     assert seen["lock_workspace"] == repo.resolve()
     assert seen["defer_artifact_collection"] is True
-    assert not expected_checkout.exists()
+    assert expected_checkout.exists()
     assert (repo / "tracked.txt").read_text() == "base\n"
     patch = (output_dir / "changes.patch").read_text()
     assert "tracked.txt" in patch
     assert "created.txt" in patch
     assert "+changed in worktree" in patch
     assert "+created" in patch
+    err = capsys.readouterr().err
+    assert f"worktree kept for recovery: {expected_checkout} (dirty)" in err
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["status"] == "ok"
     assert run_meta["artifact_collection"] == {
@@ -2737,6 +2741,7 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
         "tracked_count": 1,
         "untracked_count": 1,
     }
+    assert "worktree_removal" not in run_meta
     assert json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]["patch_ref"] == "changes.patch"
     assert json.loads((output_dir / "synthesis.json").read_text())["ground_truth"]["patch_ref"] == "changes.patch"
 
@@ -2767,7 +2772,7 @@ def test_run_cli_worktree_retains_failed_checkout_with_changes(tmp_path, monkeyp
     assert f"worktree kept for recovery: {checkout}" in err
 
 
-def test_run_cli_worktree_prunes_failed_checkout_without_changes(tmp_path, monkeypatch, capsys):
+def test_run_cli_worktree_keeps_failed_checkout_without_changes(tmp_path, monkeypatch, capsys):
     repo = _git_repo_with_roster(tmp_path)
     output_dir = tmp_path / "run"
 
@@ -2781,21 +2786,25 @@ def test_run_cli_worktree_prunes_failed_checkout_without_changes(tmp_path, monke
     rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
 
     err = capsys.readouterr().err
-    checkout = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
+    checkout = (tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}").resolve()
     patch_path = output_dir / "changes.patch"
     assert rc == 2
-    assert not checkout.exists()
+    assert checkout.exists()
     assert patch_path.read_text() == ""
     assert f"changes: none ({patch_path})" in err
-    assert "worktree kept for recovery" not in err
+    assert f"worktree kept for recovery: {checkout} (run failed)" in err
 
 
-def test_run_cli_success_prunes_retained_worktree_for_same_target(tmp_path, monkeypatch, capsys):
+def test_run_cli_success_removes_its_own_worktree_but_keeps_failed_sibling(tmp_path, monkeypatch, capsys):
     repo = _git_repo_with_roster(tmp_path)
     output_dir_failed = tmp_path / "run-failed"
     output_dir_success = tmp_path / "run-success"
-    checkout_failed = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir_failed.name}"
-    checkout_success = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir_success.name}"
+    checkout_failed = (
+        tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir_failed.name}"
+    ).resolve()
+    checkout_success = (
+        tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir_success.name}"
+    ).resolve()
 
     def fake_run(task, loaded_roster, **kwargs):
         cwd = kwargs["cwd"]
@@ -2823,20 +2832,26 @@ def test_run_cli_success_prunes_retained_worktree_for_same_target(tmp_path, monk
     assert cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir_success), "--worktree"]) == 0
 
     err = capsys.readouterr().err
-    assert not checkout_failed.exists()
+    assert checkout_failed.exists()
     assert not checkout_success.exists()
-    assert f"worktree pruned: {checkout_failed}" in err
+    assert f"worktree kept for recovery: {checkout_failed} (run failed)" in err
+    assert f"worktree removed: {checkout_success}" in err
+    assert "worktree pruned" not in err
 
 
-def test_run_cli_success_prunes_retained_worktree_for_same_target_from_subdirectory(tmp_path, monkeypatch, capsys):
+def test_run_cli_success_removes_its_worktree_but_keeps_failed_sibling_from_subdirectory(tmp_path, monkeypatch, capsys):
     repo = _git_repo_with_roster(tmp_path)
     repo_src = repo / "src"
     repo_src.mkdir()
     roster_path = repo / ".brigade" / "roster.toml"
     output_dir_failed = tmp_path / "run-failed"
     output_dir_success = tmp_path / "run-success"
-    checkout_failed = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir_failed.name}"
-    checkout_success = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir_success.name}"
+    checkout_failed = (
+        tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir_failed.name}"
+    ).resolve()
+    checkout_success = (
+        tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir_success.name}"
+    ).resolve()
 
     def fake_run(task, loaded_roster, **kwargs):
         cwd = kwargs["cwd"]
@@ -2874,9 +2889,11 @@ def test_run_cli_success_prunes_retained_worktree_for_same_target_from_subdirect
     assert cli.main([*run_args, "--output-dir", str(output_dir_success)]) == 0
 
     err = capsys.readouterr().err
-    assert not checkout_failed.exists()
+    assert checkout_failed.exists()
     assert not checkout_success.exists()
-    assert f"worktree pruned: {checkout_failed}" in err
+    assert f"worktree kept for recovery: {checkout_failed} (run failed)" in err
+    assert f"worktree removed: {checkout_success}" in err
+    assert "worktree pruned" not in err
 
 
 def test_run_cli_worktree_warns_on_empty_changes_patch_noop(tmp_path, monkeypatch, capsys):
@@ -2931,15 +2948,25 @@ def test_run_cli_worktree_warns_on_empty_changes_patch_noop(tmp_path, monkeypatc
     rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
 
     captured = capsys.readouterr()
+    expected_checkout = (
+        tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
+    ).resolve()
     assert rc == 0
+    assert not expected_checkout.exists()
     assert (output_dir / "changes.patch").read_text() == ""
-    assert json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]["patch_ref"] == "changes.patch"
-    assert json.loads((output_dir / "run.json").read_text())["artifact_collection"] == {
+    assert f"worktree removed: {expected_checkout}" in captured.err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["artifact_collection"] == {
         "status": "ok",
         "patch_ref": "changes.patch",
         "changed": False,
         "tracked_count": 0,
         "untracked_count": 0,
+    }
+    assert run_meta["worktree_removal"] == {
+        "status": "removed",
+        "path": str(expected_checkout),
+        "reason": "clean and branch-backed",
     }
     assert "changes: none" in captured.err
     assert "changes.patch" in captured.err

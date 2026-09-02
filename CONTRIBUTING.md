@@ -100,6 +100,12 @@ Then install dev dependencies:
 pip install -e ".[dev]"
 ```
 
+`tests/test_grokbot_mcp.py` contains MCP-server tests that require the optional `grokbot` extra (which pulls in `mcp`, and therefore `starlette` transitively). To run the full test suite locally, install with the extra included:
+
+```bash
+pip install -e ".[dev,grokbot]"
+```
+
 On PEP 668-managed Python (many Linux distributions), installing into the system interpreter fails; a virtual environment avoids that.
 
 **Docs-only changes:** CI runs the `content-guard` job on the repo. Locally, scan each edited markdown file before you push (one path per invocation):

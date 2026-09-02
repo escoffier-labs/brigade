@@ -33,7 +33,7 @@ The Fleet Hub stays private and is never mounted behind a public connector.
 ## State and trust boundaries
 
 The canonical owner reviews all durable findings before memory ingestion.
-Rocinante remains the canonical memory owner.
+One machine remains the canonical memory owner.
 
 An automation producer may emit a bounded finding descriptor. The private
 producer manifest (`brigade.grokbot.findings.v1`) carries routing metadata,
@@ -144,7 +144,7 @@ services. Old sidecar coexistence stays in place; PR4 owns cutover.
 
 1. Preview and apply a reversible state migration to Brigade-owned paths.
 2. Run local and public edge parity canaries for each component.
-3. Prove that one Grok Bot finding reaches Rocinante's review inbox exactly
+3. Prove that one Grok Bot finding reaches the canonical owner's review inbox exactly
    once and follows normal memory ingestion.
 4. Disable legacy services after parity passes and retain a time-bounded
    rollback path.
@@ -239,7 +239,7 @@ action taken after the window closes. Brigade adds no tooling for it.
    The `operations-relay` connector and its `submit_automation_finding` tool
    are the supported ingress for a generic Bot result, alongside the existing
    CLI manifest path.
-6. Rocinante receives the handoff through the normal memory path without a
+6. The canonical owner receives the handoff through the normal memory path without a
    manual request to Grok Bot.
 7. Disabling the old sidecar does not break supported Brigade functionality.
 

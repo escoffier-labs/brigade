@@ -290,9 +290,15 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install
+        if: matrix.python != '3.12'
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
+      - name: Install with grokbot extra
+        if: matrix.python == '3.12'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,grokbot]"
       - name: Pytest shard
         if: matrix.python != '3.12'
         run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q
@@ -301,6 +307,20 @@ jobs:
         env:
           COVERAGE_FILE: .coverage.${{ matrix.python }}.${{ matrix.shard }}
         run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q --cov=brigade --cov-report=
+      - name: Assert grokbot MCP tests run without skips
+        if: matrix.python == '3.12'
+        run: |
+          output=$(python -m pytest tests/test_grokbot_mcp.py -q --no-header -p no:cacheprovider 2>&1)
+          pytest_exit=$?
+          echo "$output"
+          if [ $pytest_exit -ne 0 ]; then
+            echo "ERROR: grokbot MCP tests failed"
+            exit 1
+          fi
+          if grep -q 'skipped' <<< "$output"; then
+            echo "ERROR: grokbot MCP tests were skipped; install the grokbot extra"
+            exit 1
+          fi
       - name: Upload coverage data
         if: matrix.python == '3.12'
         uses: actions/upload-artifact@v7
@@ -374,21 +394,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: brigade
-      - uses: actions/checkout@v7
-        with:
-          repository: solomonneas/content-guard
-          ref: v0.1.1
-          path: content-guard
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # Scans with the guard this repo ships, not a pinned copy of the retired
+      # standalone repo. Brigade has no runtime dependencies, so PYTHONPATH is
+      # enough and no install step is needed. --baseline accepts the findings
+      # recorded in .content-guard-baseline.json (synthetic fixtures, example
+      # hosts) so the gate fails on NEW leakage only.
       - name: Scan
         run: |
-          cd brigade
-          PYTHONPATH=../content-guard/src python -m content_guard scan . \
-            --policy ../content-guard/policies/public-repo.json
+          PYTHONPATH=src python -m brigade.guard audit . \
+            --scope tracked \
+            --strict \
+            --baseline .content-guard-baseline.json
 
   repo-metadata:
     runs-on: ubuntu-latest

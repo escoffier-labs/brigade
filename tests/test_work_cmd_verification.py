@@ -3575,3 +3575,142 @@ def test_distinct_skill_captures_accumulate_separate_rank_signals(tmp_target, mo
     assert by_id["taste"]["helped"] == 1
     assert by_id["refire"]["helped"] == 1
     assert "brigade-work" not in by_id or by_id.get("brigade-work", {}).get("helped", 0) == 0
+
+
+def _register_tracked_verify_manifest(target, *, manifest_id="demo-verify"):
+    """Track a patch-backed manifest so a --manifest run can be scoreable (#1378)."""
+    skill_dir = target / "skills" / "demo"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("# demo skill\n")
+    manifest_dir = target / "verify" / "manifests"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        manifest_dir / f"{manifest_id}.json",
+        {
+            "schema": "brigade.verify_manifest.v1",
+            "schema_version": 1,
+            "manifest_id": manifest_id,
+            "binding_mode": "patch_backed",
+            "verifier_id": "demo-verifier",
+            "subject": {
+                "artifact_kind": "skill",
+                "artifact_id": "demo",
+                "subject_path": "skills/demo/SKILL.md",
+                "content_fingerprint": "sha256:demo",
+            },
+            "checks": [{"check_id": "eff-1", "check_role": "effectiveness", "command": "true"}],
+        },
+    )
+    subprocess.run(["git", "add", "-A"], cwd=target, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "-c", "user.name=Test User", "-c", "user.email=test@example.invalid", "commit", "-m", "manifest"],
+        cwd=target,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    return manifest_id
+
+
+def test_command_capture_run_warns_that_receipt_is_not_scoreable(tmp_target, monkeypatch, capsys):
+    """#1378: the documented --command --capture loop must say the receipt cannot score."""
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    assert verification.verify_run(target=tmp_target, commands=["true"], timeout=60, capture="brigade-work") == 0
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "scoreable: no" in combined
+    assert "unattributed" in combined
+    assert "--manifest" in combined
+    assert "verify/manifests" in combined
+
+
+def test_argv_json_capture_run_warns_and_still_writes_a_receipt(tmp_target, monkeypatch, capsys):
+    """#1378: --argv-json keeps working and carries the same scoreability verdict."""
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    rc = verification.verify_run(
+        target=tmp_target,
+        commands=[[sys.executable, "-c", "print(1)"]],
+        timeout=60,
+        capture="brigade-work",
+        json_output=True,
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["outcome_scoreability"]["eligible"] is False
+    assert payload["outcome_scoreability"]["reason"] == "unattributed"
+    assert payload["outcome_scoreability"]["registered_manifest_ids"] == []
+    assert payload["commands"][0]["exit_code"] == 0
+
+
+def test_manifest_capture_run_reports_an_eligible_attributed_receipt(tmp_target, monkeypatch, capsys):
+    """#1378: the scoreable path stays scoreable and now says so on the run."""
+    from brigade import scorecard
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    manifest_id = _register_tracked_verify_manifest(tmp_target)
+    assert work_cmd.start(target=tmp_target, title="demo") == 0
+    (tmp_target / "skills" / "demo" / "SKILL.md").write_text("# demo skill\nchanged\n")
+    capsys.readouterr()
+
+    rc = verification.verify_run(
+        target=tmp_target,
+        manifest_id=manifest_id,
+        timeout=60,
+        capture="demo",
+        json_output=True,
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["outcome_scoreability"]["eligible"] is True
+    assert payload["outcome_scoreability"]["attributed"] is True
+    audits = scorecard.audit_all_verify_receipts(tmp_target)
+    assert [audit.eligible for audit in audits] == [True]
+
+
+def test_manifest_capture_run_prints_scoreable_yes_on_stdout(tmp_target, monkeypatch, capsys):
+    """#1378: the non-JSON eligible path must print the scoreability verdict too."""
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    manifest_id = _register_tracked_verify_manifest(tmp_target)
+    assert work_cmd.start(target=tmp_target, title="demo") == 0
+    (tmp_target / "skills" / "demo" / "SKILL.md").write_text("# demo skill\nchanged\n")
+    capsys.readouterr()
+
+    rc = verification.verify_run(
+        target=tmp_target,
+        manifest_id=manifest_id,
+        timeout=60,
+        capture="demo",
+        json_output=False,
+    )
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "scoreable: yes" in captured.out
+
+
+def test_outcome_health_names_registered_manifest_ids_for_remediation(tmp_target, monkeypatch, capsys):
+    """#1378: `work brief` remediation must be actionable without reading the source."""
+    from brigade import outcome_cmd
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    manifest_id = _register_tracked_verify_manifest(tmp_target)
+    assert verification.verify_run(target=tmp_target, commands=["true"], timeout=60, capture="brigade-work") == 0
+    capsys.readouterr()
+
+    health = outcome_cmd.health(tmp_target)
+    assert health["registered_verify_manifest_ids"] == [manifest_id]
+    assert health["top_issue"]["name"] == "outcome_loop_half_fed"
+    assert manifest_id in health["top_issue"]["detail"]

@@ -435,6 +435,28 @@ def register(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Emit the versioned brigade.runs-reap.v1 JSON contract.",
     )
+    p_runs_prune_worktrees = runs_sub.add_parser(
+        "prune-worktrees",
+        help="List or remove Brigade-created worktrees that are safe to delete.",
+    )
+    p_runs_prune_worktrees.add_argument(
+        "--target",
+        type=Path,
+        default=Path("."),
+        help="Repository or workspace root to inspect.",
+    )
+    p_runs_prune_worktrees.add_argument(
+        "--older-than",
+        type=int,
+        default=14,
+        help="Only consider worktrees older than this many days (default 14).",
+    )
+    p_runs_prune_worktrees.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually remove removable worktrees; default is a dry run.",
+    )
+    p_runs_prune_worktrees.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     p_runs_validate_archive = runs_sub.add_parser(
         "validate-archive",
         help="Validate a brigade.work-run archive manifest, digests, and export privacy rules.",
@@ -574,6 +596,15 @@ def dispatch(args) -> int:
             cwd=args.cwd,
             runs_dir=args.runs_dir,
             older_than=args.older_than,
+            json_output=args.json,
+        )
+    if args.runs_command == "prune-worktrees":
+        from .. import runs_cmd_worktrees as _worktrees_cmd
+
+        return _worktrees_cmd.prune_worktrees(
+            cwd=args.target,
+            older_than_days=args.older_than,
+            apply=args.apply,
             json_output=args.json,
         )
     if args.runs_command == "validate-archive":

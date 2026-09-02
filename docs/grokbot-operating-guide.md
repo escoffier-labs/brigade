@@ -121,11 +121,84 @@ the report instead of re-reading the repository from scratch. Setting
 `require_scout_report` to `true` in the build policy makes that ordering
 mandatory.
 
+### Builder wake
+
+A 15-minute poll is the fallback, not the primary path. After a successful
+`--apply` enqueue, `feed`, `scout-feed`, and `build-feed` optionally POST a
+bounded wake body so a webhook-triggered Grok Bot routine can claim the new
+job immediately.
+
+Store the webhook URL and a sender-key *file path* (never the key itself) in
+an owner-only file at `.brigade/cloud/grokbot/wake.json`:
+
+```json
+{
+  "schema": "brigade.grokbot.wake.v1",
+  "webhook_url": "https://api2.cursor.sh/automations/webhook/",
+  "sender_key_file": "/etc/brigade/grokbot-wake.key"
+}
+```
+
+```bash
+chmod 600 /etc/brigade/grokbot-wake.key
+chmod 600 /path/to/target/.brigade/cloud/grokbot/wake.json
+```
+
+The sender key is read from that 0600 file at POST time and sent as both
+`Authorization: Bearer <key>` and `X-Automation-Key: <key>`. It never enters
+queue state, receipts, the notify log, stdout, or stderr. The POST body is
+exactly `{job_id, role, label, repository}`: no instructions, no verification
+commands, and no paths. Treat those four fields as untrusted context, then
+run the claim skill for that role. The request uses the standard library,
+waits at most eight seconds, and is not retried. HTTP 200 means the routine
+woke. Any other status, a timeout, or a missing/invalid config leaves the
+enqueue result unchanged. The local notify log
+`.brigade/cloud/grokbot/wake-notify.jsonl` records the HTTP status code only
+(`0` when no status arrived).
+
+A 60-minute drain remains useful as a safety net: if a POST failed, the
+routine can still list the queue and claim anything that was missed. Do not
+rely on a short poll as the primary wake.
+
 ### Leases
 
 A lease runs from 30 seconds to 3600 seconds and defaults to 300 seconds. The
 holder renews before expiry and within the job deadline. `expire` never
 requeues a job; it finalizes one whose deadline or lease has passed.
+
+### Job deadlines
+
+A job's deadline is `queued_at` plus its `timeout_seconds`. The deadline is the
+hub's, not an operator's: nobody has to call `expire` for a job to end.
+
+- Every `list`, `status`, `claim`, `renew`, and other mutating request sweeps
+  past-deadline jobs to `expired` before it answers, so a read never reports a
+  job that is already over as `queued` or `running`.
+- The hub also sweeps on a timer (`start_expiry_sweeper`, every 60 seconds by
+  default) for the life of the process, so a queue that nobody polls still
+  expires. A job enqueued with `timeout_seconds` 7200 that no worker ever claims
+  is `expired` about 7200 seconds later with no request involved.
+- Each automatic expiry writes an `expire` row to `grokbot_operations` with an
+  `expire:deadline:<job_id>:<revision>` operation id and a NULL `actor_node_id`:
+  the deadline asked for it, not an actor. An operator `expire` still writes its
+  own operation id, and the two ids can never collide.
+- Claiming a job that is already past its deadline is refused with `job-expired`
+  rather than a state or revision error, so a Bot can tell "too late" apart from
+  "you raced another worker".
+
+The local (no-hub) queue in `grokbot_jobs.py` follows the same rule: `status`
+and `get_job` terminalize an elapsed job before projecting it, and a claim past
+the deadline expires the job and fails with `job-expired`.
+
+A lapsed lease is not a lapsed job. A read keys on the job's own deadline only,
+so a claimed job whose lease ran out stays `claimed` and can be picked up again;
+the holder's `renew`, `start`, `fail`, `complete`, and `ack_cancel` are refused
+with `lease-expired`. When the job's own deadline is what passed, the row is
+expired and the operation recorded, and the holder still hears `lease-expired`
+rather than `job-expired`: a granted lease is always clamped to the deadline, so
+the lease is genuinely gone, and that is the reason a Bot can act on.
+`job-expired` stays the claim-side answer, which is what tells a Bot not to
+start work at all.
 
 `grokbot_queue_claim` takes `lease_id` as an optional argument. A Bot that has
 no lease to supply omits it or sends `null`, and the listener mints a uuid4 hex

@@ -71,13 +71,25 @@ An optional argument sent as `null` means the same as omitting it, in the advert
 
 The role stays pinned server-side. A worker listener still lists only its own role's jobs, an operator listener still lists every role, and no argument widens either. A refused list call returns a bounded reason that names the accepted keys, states, or role instead of the generic validation message, so a Bot can correct the call itself. The reason never repeats the value that was sent.
 
-`grokbot_queue_claim` takes a required `job_id` and an optional `lease_id`. When `lease_id` is omitted or sent as `null` the listener mints a uuid4 hex lease and returns it in the claim result as `lease_id`. Carry that value on `grokbot_queue_start`, `grokbot_queue_renew`, `grokbot_queue_complete`, `grokbot_queue_fail`, and `grokbot_queue_ack_cancel` for that job. A supplied `lease_id` is echoed back unchanged, and a malformed one is still refused with the generic validation error before any queue mutation. Lease duration, worker identity, and role remain deployment-fixed.
+`grokbot_queue_claim` takes a required `job_id` and the optional `lease_id` and `lease_seconds`. When `lease_id` is omitted or sent as `null` the listener mints a uuid4 hex lease and returns it in the claim result as `lease_id`. Carry that value on `grokbot_queue_start`, `grokbot_queue_renew`, `grokbot_queue_complete`, `grokbot_queue_fail`, and `grokbot_queue_ack_cancel` for that job. A supplied `lease_id` is echoed back unchanged, and a malformed one is still refused with the generic validation error before any queue mutation. Worker identity and role remain deployment-fixed.
+
+The lease is a per-listener setting. `lease_seconds` defaults to 900, an interval chosen so one cloud-agent step fits inside a single lease: the previous fixed 300 lapsed mid-step, and the refusal that followed read as a broken adapter rather than an expired lease. Set it per instance with `BRIGADE_GROKBOT_<INSTANCE>_LEASE_SECONDS` (for example `BRIGADE_GROKBOT_IMPLEMENTATION_WORKER_LEASE_SECONDS`), or for every role on the host with `BRIGADE_GROKBOT_LEASE_SECONDS`. `build_listener_config` also accepts `lease_seconds` directly. The bound is the queue's own, 30 to 3600 seconds, and it is the same bound the Fleet Hub enforces server-side; a value outside it fails listener configuration rather than being silently clamped.
+
+A claim may request its own `lease_seconds` inside that bound. An out-of-bound or non-integer request is refused with the bounded reason `lease_seconds must be an integer between 30 and 3600`, before any queue mutation. Every claim answers with the granted `lease_seconds` and the `lease_expires_at` deadline. The job's own deadline still wins: a lease is clamped to it, so read `lease_expires_at` rather than adding the granted seconds to the current time. `grokbot_queue_renew` extends the lease by the listener's configured length and returns the same two fields.
+
+A `grokbot_queue_renew` or `grokbot_queue_fail` that arrives after `lease_expires_at` is refused with the bounded reason `lease-expired` instead of the generic validation message. That reason means the lease lapsed and the call was well formed. Under hub authority the hub answers a holder refusal with `lease-conflict`; the listener confirms an elapsed deadline against the job itself before naming it `lease-expired`, so a job another worker has re-claimed stays a conflict.
 
 The listener writes one INFO line per tool call to its journal:
 
 ```text
 grokbot tool=grokbot_queue_list args=limit,state unknown=0 decision=ok reason=-
 grokbot tool=grokbot_queue_list args=- unknown=1 decision=refused reason=grokbot_queue_list accepts only these arguments: include_all, limit, role, state
+```
+
+A claim or renew that granted a lease adds a second line for the window it opened, so a lapsed lease can be read out of the journal instead of inferred from a later refusal:
+
+```text
+grokbot tool=grokbot_queue_claim lease_seconds=900 deadline=2026-09-02T02:32:15.812112Z
 ```
 
 The line carries the tool name, the accepted argument keys that were present, a count of unrecognized keys, the decision, and the bounded reason. It never carries argument values, job payloads, lease values, or bearer material. Unrecognized key names are counted rather than printed. Raw requests refused at the HTTP edge are journaled the same way, so a reported "input validation" failure can be read from `journalctl` instead of reproduced by hand.
@@ -168,7 +180,7 @@ brigade run cloud grokbot feed --target . --manifest /path/to/approved-feed.json
 brigade run cloud grokbot feed --target . --manifest /path/to/approved-feed.json --apply --limit 1
 ```
 
-The first command validates only and writes no queue state. `--apply` is required to enqueue. `--limit` bounds newly created jobs from 1 through 10 and defaults to 1. Known idempotency records do not consume the limit. The feed stops on the first invalid entry and performs no enqueue when validation fails. Output is counts and safe job projections only.
+The first command validates only and writes no queue state. `--apply` is required to enqueue. `--limit` bounds newly created jobs from 1 through 10 and defaults to 1. Known idempotency records do not consume the limit. The feed stops on the first invalid entry and performs no enqueue when validation fails. Output is counts and safe job projections only. After each newly created job, `--apply` optionally POSTs `{job_id, role, label, repository}` to the webhook named in `.brigade/cloud/grokbot/wake.json`. See [Builder wake](grokbot-operating-guide.md#builder-wake).
 
 The command does not schedule itself. systemd, cron, OpenClaw, or another operator may run an approved manifest later. Repeated runs are safe through the existing idempotency store.
 
@@ -198,16 +210,18 @@ brigade run cloud grokbot scout-feed --target . --policy /etc/brigade/grokbot-sc
 brigade run cloud grokbot scout-feed --target . --policy /etc/brigade/grokbot-scout-feed.json --apply
 ```
 
-The first command is preview-only. `--apply` may create at most one job per invocation. `daily_limit` includes every Repository Scout job created that UTC day, including failed and expired attempts. The adapter cannot infer the remaining Grok Bot quota percentage.
+The first command is preview-only. `--apply` may create at most one job per invocation. `daily_limit` includes every Repository Scout job created that UTC day, including failed and expired attempts. The adapter cannot infer the remaining Grok Bot quota percentage. A newly created job optionally wakes the scout routine through the private wake webhook; see [Builder wake](grokbot-operating-guide.md#builder-wake).
 
 An issue counts as known only while the queue still holds a job for it. Apply is the check that counts: it re-lists at the hub under hub authority, and reads the local queue under local authority, then confirms the job named by the local idempotency record or task snapshot against that listing. A job the granted listing omits, and a job the queue reports as `expired`, `failed`, or `canceled`, are both weaker than the local record that named them, so the issue stays selectable. A `completed` job keeps its issue known until the approval label is removed. Each retry moves to a fresh idempotency key, so the queue's own idempotency cannot answer a retry with the dead job it replaced; the retry still counts against `daily_limit` for that UTC day. Retries stop after ten revisions for one issue; an issue that has burnt all ten is reported as `retry-exhausted`, not as known.
 
 Preview reads the local queue only, so under hub authority it holds no listing and cannot see live jobs. It reports evidence it cannot confirm as not yet known, so it never answers `all-known` for a job it cannot see. It may still report `ready` for an issue that already has a live or completed hub job, which apply then refuses; apply is what settles that. Both results carry `known`, `terminal_retry_candidates`, and `retry_exhausted` counts over the approved open issues, in the text output as well as `--json`. `all-known` means every one of them has a job the queue still stands behind. `retry-exhausted` means no issue is selectable and at least one has used all ten revisions without landing such a job.
 
-An operator may run the apply command hourly with systemd. Replace the executable and policy paths with the local approved locations:
+Wake the scout routine from the enqueue POST when `wake.json` is present. A
+60-minute drain remains useful as a fallback if a POST failed. Replace the
+executable and policy paths with the local approved locations:
 
 ```bash
-systemd-run --user --on-calendar=hourly --unit=brigade-grokbot-scout-feed --collect /usr/local/bin/brigade run cloud grokbot scout-feed --target /srv/brigade --policy /etc/brigade/grokbot-scout-feed.json --apply
+systemd-run --user --on-calendar='*:0/60' --unit=brigade-grokbot-scout-feed --collect /usr/local/bin/brigade run cloud grokbot scout-feed --target /srv/brigade --policy /etc/brigade/grokbot-scout-feed.json --apply
 ```
 
 ## Approved build selector
@@ -245,7 +259,9 @@ brigade run cloud grokbot build-feed --target . --policy /etc/brigade/grokbot-bu
 ```
 
 The first command is preview-only. `--apply` may create at most one job per
-invocation. `daily_limit` includes every implementation-worker job created that
+invocation. A newly created job optionally wakes the builder routine through
+the private wake webhook; see [Builder wake](grokbot-operating-guide.md#builder-wake).
+`daily_limit` includes every implementation-worker job created that
 UTC day, including failed and expired attempts. Apply is the check that counts:
 it recounts under the queue lock on a local-authority target and re-lists at the
 hub under hub authority, at enqueue time, and it also refuses while an earlier
@@ -266,11 +282,12 @@ job. Set `require_scout_report` to `true` to hold every issue that has no such
 report; the selector then reports `scout-report-missing` instead of queueing
 blind work.
 
-An operator may run the apply command hourly with systemd. Replace the
+Wake the builder routine from the enqueue POST when `wake.json` is present. A
+60-minute drain remains useful as a fallback if a POST failed. Replace the
 executable and policy paths with the local approved locations:
 
 ```bash
-systemd-run --user --on-calendar=hourly --unit=brigade-grokbot-build-feed --collect /usr/local/bin/brigade run cloud grokbot build-feed --target /srv/brigade --policy /etc/brigade/grokbot-build-feed.json --apply
+systemd-run --user --on-calendar='*:0/60' --unit=brigade-grokbot-build-feed --collect /usr/local/bin/brigade run cloud grokbot build-feed --target /srv/brigade --policy /etc/brigade/grokbot-build-feed.json --apply
 ```
 
 ## Report reconciliation
@@ -293,7 +310,7 @@ The command does not schedule itself and does not add a tool to any MCP inventor
 Generic one-shot finding delivery stays out of the listener. A producer writes a private manifest. Two commands share that manifest and never edit canonical memory, `MEMORY.md`, or memory cards:
 
 - `reconcile-findings` is memory-only. It writes owner-review drafts and queue markers. It does not create a Fleet outbox and does not call Fleet Hub.
-- `relay-findings` is the Fleet + Rocinante path. Preview writes nothing. Apply preflights every entry, then selects, spools, and delivers one bounded batch under the Grok Bot queue lock. It calls unchanged `fleet_client.report_event` only for durable outbox records marked ready after draft and marker delivery.
+- `relay-findings` is the Fleet + canonical memory owner path. Preview writes nothing. Apply preflights every entry, then selects, spools, and delivers one bounded batch under the Grok Bot queue lock. It calls unchanged `fleet_client.report_event` only for durable outbox records marked ready after draft and marker delivery.
 
 The manifest is a regular file owned by the current user, mode `0600`, and not a symlink. Schema `brigade.grokbot.findings.v1` requires an `entries` array. Each entry has exactly `producer`, `finding_id`, `revision`, `observed_at`, `severity`, `title`, `body`, `source_ref`, `source_digest`, and `content_digest`. Unexpected fields, including secret-shaped keys, are rejected. Identity is `producer` plus `finding_id`. Severity is `info`, `low`, `medium`, `warning`, `high`, `critical`, or `unknown`. `observed_at` is either an empty string for a legacy unknown time or a timezone-aware ISO timestamp. `source_digest` is a `sha256:` lowercase hex digest and is not required to hash the body, so a live revision digest can be represented unchanged. `content_digest` must equal `sha256` of canonical UTF-8 title + NUL + body. `source_ref` is an opaque bounded reference: length and control characters are checked, and consecutive dots are allowed. `adapt_live_finding` converts a live fleet or backup normalized record (extra `trust` / `delivery` labels and a raw 64-hex `source_digest`) into this exact-key shape without rewriting live severity, time, digest, or body values. Live `reason` / `summary` values may be up to 16,384 UTF-8 bytes. The adapter derives `title` as `[UNTRUSTED] {producer} {finding_id}` sliced to 120 characters, matching the live relay `proposalTitle` rule, and preserves the full body. The private manifest may contain title and body. `reconcile-findings` output prints counts and identity handles. `relay-findings` output prints counts and irreversible relay IDs only. Delivery markers, the Fleet outbox, Brigade receipts, and Fleet Hub events must not contain title, body, `source_ref`, producer, finding ID, path, address, command, or credential.
 

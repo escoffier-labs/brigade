@@ -13,7 +13,9 @@ import hmac
 import json
 import re
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from . import fleet_command_deck, fleet_hub
@@ -145,6 +147,8 @@ JOB_FIELDS = (
     "queue_id",
 )
 _JOB_COLUMNS = ", ".join(JOB_FIELDS)
+SWEEP_OPERATION_PREFIX = "expire:deadline"
+DEFAULT_SWEEP_INTERVAL_SECONDS = 60.0
 LEASE_SECONDS_MIN = 30
 LEASE_SECONDS_MAX = 3600
 DEFAULT_LEASE_SECONDS = 300
@@ -280,6 +284,7 @@ def handle_grokbot(
             )
         }
     if action in {"status", "report-metadata"}:
+        _commit_stale_sweep(conn, config)
         job = _scoped_job(conn, request["job_id"], policy)
         payload = _job_payload(job)
         if action == "report-metadata":
@@ -321,6 +326,11 @@ def handle_grokbot(
             return 200, replayed
         if action != "enqueue":
             current = _scoped_job(conn, request["job_id"], policy)
+            if action == "claim" and current["state"] == "expired":
+                # The deadline sweep above already bumped the revision, so the
+                # generic revision check below would hide why the claim failed.
+                conn.rollback()
+                return 409, {"claimed": False, "error": "job-expired"}
             if int(current["item_revision"]) != request["expected_item_revision"]:
                 conn.rollback()
                 return 409, {_result_flag(action): False, "error": "revision-conflict"}
@@ -388,6 +398,68 @@ def list_jobs(
         if opened:
             conn.rollback()
         raise
+
+
+def sweep_expired_jobs(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig | None = None) -> list[str]:
+    """Expire every job past its own deadline and return the ids that moved.
+
+    Read and write paths sweep before they answer, but a queue nobody polls
+    still has to expire: a job enqueued with ``timeout_seconds`` 7200 that no
+    worker ever claims must not sit ``queued`` forever waiting for an operator
+    to run ``expire`` by hand (#1353).
+
+    Transaction-aware: if the caller already has an open transaction, the
+    sweep piggybacks on it so it can be used from request handlers that are
+    already inside a SQLite transaction.
+    """
+    opened = False
+    if conn.in_transaction is False:
+        conn.execute("BEGIN IMMEDIATE")
+        opened = True
+    try:
+        expired = _expire_stale_jobs(conn, fleet_hub._now_epoch(), config or fleet_command_deck.DeckConfig())
+        if opened:
+            conn.commit()
+    except BaseException:
+        if opened:
+            conn.rollback()
+        raise
+    return expired
+
+
+def start_expiry_sweeper(
+    db_path: Path,
+    *,
+    interval: float = DEFAULT_SWEEP_INTERVAL_SECONDS,
+    stop: threading.Event | None = None,
+    config: fleet_command_deck.DeckConfig | None = None,
+) -> threading.Thread:
+    """Run :func:`sweep_expired_jobs` on a timer for the life of the hub.
+
+    Each pass opens and closes its own connection, so the sweeper never holds
+    a handle across a sleep and never shares one across threads. A locked or
+    transiently unreadable database is left for the next tick rather than
+    killing the thread.
+    """
+    stop_event = stop or threading.Event()
+    resolved = Path(db_path)
+
+    def _loop() -> None:
+        while not stop_event.wait(interval):
+            try:
+                conn = fleet_hub.open_db(resolved)
+            except (sqlite3.Error, FleetHubError):
+                continue
+            try:
+                sweep_expired_jobs(conn, config)
+            except (sqlite3.Error, FleetHubError):
+                pass
+            finally:
+                conn.close()
+
+    thread = threading.Thread(target=_loop, name="grokbot-expiry-sweeper", daemon=True)
+    thread.start()
+    return thread
 
 
 def deck_projection(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
@@ -524,7 +596,8 @@ def _claim(
     if job["state"] != "queued":
         return 409, {"claimed": False, "error": "invalid-state"}
     if instant >= _deadline(job):
-        _mark_expired(conn, job, config)
+        # A refusal rolls this transaction back, so the deadline sweep that ran
+        # before it (and the periodic sweeper) own the transition to expired.
         return 409, {"claimed": False, "error": "job-expired"}
     generation = int(job["lease_generation"] or 0) + 1
     admitted, error = _admit_capacity(conn, job, request, policy, presented, config)
@@ -667,7 +740,7 @@ def _expire(
     expires_at = deadline if job["state"] == "queued" else min(_parse_ts(job["lease_expires_at"]) or deadline, deadline)
     if instant < expires_at:
         return 200, {"expired": False, "job": _job_payload(job)}
-    updated = _mark_expired(conn, job, config)
+    updated = _mark_expired(conn, job, config, record_operation=False)
     return 200, {"expired": True, "job": _job_payload(updated)}
 
 
@@ -689,12 +762,54 @@ def _ack_cancel(
 
 
 def _mark_expired(
-    conn: sqlite3.Connection, job: dict[str, Any], config: fleet_command_deck.DeckConfig
+    conn: sqlite3.Connection,
+    job: dict[str, Any],
+    config: fleet_command_deck.DeckConfig,
+    *,
+    record_operation: bool = True,
 ) -> dict[str, Any]:
     updated = _mutate(conn, job, {"state": "expired"})
     _release_capacity(conn, updated, config, state="expired")
     _record_event(conn, updated, "expired")
+    if record_operation:
+        _record_deadline_expire_operation(conn, job, updated)
     return updated
+
+
+def _record_deadline_expire_operation(conn: sqlite3.Connection, job: dict[str, Any], updated: dict[str, Any]) -> None:
+    """Leave the audit row an operator ``expire`` would have left.
+
+    The operation id is namespaced so it can never collide with an operator or
+    CLI ``expire:<job_id>:<revision>`` id and turn a later replay into a
+    spurious ``operation-mismatch``. ``actor_node_id`` stays NULL: no actor
+    asked for this, the deadline did.
+    """
+    operation_id = f"{SWEEP_OPERATION_PREFIX}:{job['job_id']}:{int(job['item_revision'])}"
+    payload = {"expired": True, "job": _job_payload(updated)}
+    digest_source = {
+        "action": "expire",
+        "job_id": job["job_id"],
+        "operation_id": operation_id,
+        "expected_item_revision": int(job["item_revision"]),
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO grokbot_operations "
+        "(job_id, operation_id, action, request_digest, result_revision, result_state, result_json, timestamp, "
+        "actor_node_id, queue_id, queue_owner_node_id) "
+        "VALUES (?, ?, 'expire', ?, ?, 'expired', ?, ?, NULL, ?, ?)",
+        (
+            job["job_id"],
+            operation_id,
+            hashlib.sha256(
+                json.dumps(digest_source, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            updated["item_revision"],
+            json.dumps(payload, sort_keys=True, separators=(",", ":")),
+            _now_iso(),
+            job.get("queue_id"),
+            job.get("owner_node"),
+        ),
+    )
 
 
 def _refuse_unscoped_jobs(conn: sqlite3.Connection) -> None:
@@ -724,11 +839,12 @@ def _expire_stale_jobs(
     config: fleet_command_deck.DeckConfig,
     *,
     skip_job_id: str | None = None,
-) -> None:
+) -> list[str]:
     now = datetime.fromtimestamp(now_epoch, tz=timezone.utc)
     rows = conn.execute(
         f"SELECT {_JOB_COLUMNS} FROM grokbot_jobs WHERE state IN ('queued', 'claimed', 'running')"
     ).fetchall()
+    expired: list[str] = []
     for row in rows:
         job = _job_dict(row)
         if skip_job_id is not None and job["job_id"] == skip_job_id:
@@ -737,10 +853,13 @@ def _expire_stale_jobs(
         if job["state"] == "queued":
             if now >= deadline:
                 _mark_expired(conn, job, config)
+                expired.append(job["job_id"])
             continue
         expires = min(_parse_ts(job["lease_expires_at"]) or deadline, deadline)
         if now >= expires:
             _mark_expired(conn, job, config)
+            expired.append(job["job_id"])
+    return expired
 
 
 def _admit_capacity(

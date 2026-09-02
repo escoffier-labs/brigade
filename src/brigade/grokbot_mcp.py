@@ -2,7 +2,8 @@
 
 The adapter deliberately delegates all queue authority to :mod:`grokbot_jobs`.
 It contains no queue persistence and never accepts a caller-selected worker
-identity, target, role, or lease duration.
+identity, target, or role. A claim may request a lease length, but only inside
+the queue's own bound, and the listener's configured lease is the default.
 """
 
 from __future__ import annotations
@@ -17,15 +18,23 @@ import re
 import stat
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from . import cloud_tracker, fleet_client, grokbot_jobs
+from . import cloud_tracker, fleet_client, grokbot_job_validation, grokbot_jobs
 
 
 DEFAULT_BIND = "127.0.0.1:8766"
 MAX_REQUEST_BYTES = 80_000
-LEASE_SECONDS = 300
+# A Grok Bot routine that spawns a cloud agent routinely goes minutes between
+# tool calls, so the default lease has to outlast one agent step (issue #1383).
+# The bound is the queue's own, so a listener can never hand out a lease the
+# queue or the hub would refuse.
+DEFAULT_LEASE_SECONDS = 900
+MIN_LEASE_SECONDS = grokbot_job_validation.LEASE_SECONDS_MIN
+MAX_LEASE_SECONDS = grokbot_job_validation.LEASE_SECONDS_MAX
+LEASE_SECONDS_ENV = "BRIGADE_GROKBOT_LEASE_SECONDS"
 MAX_LISTED_JOBS = 100
 MAX_LIST_LIMIT = 100
 LIST_ARGUMENT_KEYS = ("include_all", "limit", "role", "state")
@@ -101,9 +110,12 @@ class ListenerConfig:
     allowed_origins: tuple[str, ...]
     bearer: str
     hub_token: str | None = None
+    lease_seconds: int = DEFAULT_LEASE_SECONDS
 
     def validate(self) -> None:
         if self.instance not in INSTANCES or not self.target.is_dir():
+            raise ConfigurationError("invalid")
+        if not _within_lease_bound(self.lease_seconds):
             raise ConfigurationError("invalid")
         if not isinstance(self.bearer, str):
             raise ConfigurationError("invalid")
@@ -175,6 +187,29 @@ def load_hub_token(*, instance: str) -> str | None:
     if path_text is None:
         return None
     return _read_mode600_secret(Path(path_text))
+
+
+def load_lease_seconds(*, instance: str) -> int:
+    """Resolve one listener's lease length, per instance and then fleet-wide.
+
+    ``BRIGADE_GROKBOT_<INSTANCE>_LEASE_SECONDS`` sets the length for a single
+    packaged role; ``BRIGADE_GROKBOT_LEASE_SECONDS`` sets it for every role on
+    the host. An unset pair means the 15-minute default, and anything outside
+    the queue's own bound is a configuration failure rather than a clamp.
+    """
+    names = (f"BRIGADE_GROKBOT_{instance.replace('-', '_').upper()}_LEASE_SECONDS", LEASE_SECONDS_ENV)
+    text = next((os.environ[name] for name in names if os.environ.get(name)), None)
+    if text is None:
+        return DEFAULT_LEASE_SECONDS
+    seconds = int(text) if text.strip().isdecimal() else None
+    if seconds is None or not _within_lease_bound(seconds):
+        raise ConfigurationError("invalid")
+    return seconds
+
+
+def _within_lease_bound(value: object) -> bool:
+    """The listener never widens the queue's own lease bound."""
+    return type(value) is int and MIN_LEASE_SECONDS <= value <= MAX_LEASE_SECONDS
 
 
 def load_direct_queue_listener_token() -> str | None:
@@ -291,7 +326,7 @@ class GrokbotAdapter:
 
     def tool_inventory(self) -> list[dict[str, str]]:
         return [
-            {"name": name, "description": tool_description(name, self.config.instance)}
+            {"name": name, "description": tool_description(name, self.config.instance, self.config.lease_seconds)}
             for name in sorted(self._tools())
         ]
 
@@ -357,31 +392,34 @@ class GrokbotAdapter:
             job_id = _job_id(arguments)
             return grokbot_jobs.read_report(self.config.target, job_id)
         if name == "grokbot_queue_claim":
-            job = self._eligible_job(arguments, allowed={"job_id"}, optional={"lease_id"})
+            job = self._eligible_job(arguments, allowed={"job_id"}, optional={"lease_id", "lease_seconds"})
             lease_id = _lease_id(arguments, mint=True)
+            lease_seconds = self._requested_lease_seconds(arguments)
             if grokbot_jobs.hub_authority(self.config.target):
-                return _with_lease_id(
+                return self._granted_lease(
+                    name,
                     self._hub_lifecycle(
                         grokbot_jobs.claim_execution_context,
                         job["job_id"],
                         self.config.bot_id,
                         lease_id,
-                        LEASE_SECONDS,
+                        lease_seconds,
                     ),
                     lease_id,
+                    lease_seconds,
                 )
             holder, session = fleet_holder(job["job_id"], lease_id), fleet_session(job["job_id"], lease_id)
-            cloud_decision = self._admit_hub_lease_decision(job, lease_id)
+            cloud_decision = self._admit_hub_lease_decision(job, lease_id, lease_seconds)
             if _cloud_refused(cloud_decision):
                 raise AdapterError()
-            decision = self._fleet_acquire(job["job_id"], holder, session)
+            decision = self._fleet_acquire(job["job_id"], holder, session, lease_seconds)
             if _fleet_refused(decision):
                 if cloud_decision is not None and cloud_decision.granted:
                     self._release_hub_lease(job["job_id"], lease_id, "released")
                 raise AdapterError()
             try:
                 result = grokbot_jobs.claim_execution_context(
-                    self.config.target, job["job_id"], self.config.bot_id, lease_id, LEASE_SECONDS
+                    self.config.target, job["job_id"], self.config.bot_id, lease_id, lease_seconds
                 )
             except Exception:
                 self._release_hub_lease(job["job_id"], lease_id, "released")
@@ -390,35 +428,59 @@ class GrokbotAdapter:
                 raise
             self._bind_hub_lease(job["job_id"], lease_id)
             self._fleet_event(job["job_id"], session, "external.claimed")
-            return _with_lease_id(result, lease_id)
+            return self._granted_lease(name, result, lease_id, lease_seconds)
         if name == "grokbot_queue_renew":
             job = self._eligible_job(arguments, allowed={"job_id", "lease_id"})
             lease_id = _lease_id(arguments)
             job_id = job["job_id"]
+            lease_seconds = self.config.lease_seconds
             if grokbot_jobs.hub_authority(self.config.target):
-                return self._hub_lifecycle(grokbot_jobs.renew, job_id, self.config.bot_id, lease_id, LEASE_SECONDS)
+                return self._granted_lease(
+                    name,
+                    self._lease_call(
+                        job_id,
+                        self._hub_lifecycle,
+                        grokbot_jobs.renew,
+                        job_id,
+                        self.config.bot_id,
+                        lease_id,
+                        lease_seconds,
+                    ),
+                    None,
+                    lease_seconds,
+                )
             holder, session = fleet_holder(job_id, lease_id), fleet_session(job_id, lease_id)
-            decision = self._fleet_renew(holder)
+            decision = self._fleet_renew(holder, lease_seconds)
             if not decision.granted and decision.reason == "missing":
-                decision = self._fleet_acquire(job_id, holder, session)
+                decision = self._fleet_acquire(job_id, holder, session, lease_seconds)
             if _fleet_refused(decision):
                 raise AdapterError()
             try:
-                result = grokbot_jobs.renew(self.config.target, job_id, self.config.bot_id, lease_id, LEASE_SECONDS)
+                result = self._lease_call(
+                    job_id, grokbot_jobs.renew, self.config.target, job_id, self.config.bot_id, lease_id, lease_seconds
+                )
             except Exception:
                 if decision.granted:
                     self._fleet_release(holder)
                 raise
             self._renew_or_reconcile_hub_lease(result, lease_id)
             self._fleet_event(job_id, session, "external.heartbeat")
-            return result
+            return self._granted_lease(name, result, None, lease_seconds)
         if name in {"grokbot_queue_start", "grokbot_queue_fail", "grokbot_queue_ack_cancel"}:
             job_id, lease_id = _job_id(arguments, {"job_id", "lease_id"}), _lease_id(arguments)
             if grokbot_jobs.hub_authority(self.config.target):
                 if name.endswith("start"):
                     return self._hub_lifecycle(grokbot_jobs.transition, job_id, self.config.bot_id, lease_id, "running")
                 if name.endswith("fail"):
-                    return self._hub_lifecycle(grokbot_jobs.transition, job_id, self.config.bot_id, lease_id, "failed")
+                    return self._lease_call(
+                        job_id,
+                        self._hub_lifecycle,
+                        grokbot_jobs.transition,
+                        job_id,
+                        self.config.bot_id,
+                        lease_id,
+                        "failed",
+                    )
                 return self._hub_lifecycle(grokbot_jobs.acknowledge_cancel, job_id, self.config.bot_id, lease_id)
             holder, session = fleet_holder(job_id, lease_id), fleet_session(job_id, lease_id)
             if name.endswith("start"):
@@ -427,7 +489,15 @@ class GrokbotAdapter:
                 self._fleet_event(job_id, session, "external.running")
                 return result
             if name.endswith("fail"):
-                result = grokbot_jobs.transition(self.config.target, job_id, self.config.bot_id, lease_id, "failed")
+                result = self._lease_call(
+                    job_id,
+                    grokbot_jobs.transition,
+                    self.config.target,
+                    job_id,
+                    self.config.bot_id,
+                    lease_id,
+                    "failed",
+                )
                 self._fleet_release(holder)
                 self._fleet_event(job_id, session, "external.failed")
                 self._release_hub_lease(job_id, lease_id, result["state"])
@@ -500,7 +570,71 @@ class GrokbotAdapter:
         """Run one hub-authoritative queue mutation with this listener's node token."""
         return operation(self.config.target, *args, **kwargs)
 
-    def _admit_hub_lease_decision(self, job: Mapping[str, Any], holder: str) -> fleet_client.CloudDecision | None:
+    def _requested_lease_seconds(self, arguments: Mapping[str, Any]) -> int:
+        """Grant the caller's requested lease, or this listener's configured one."""
+        requested = arguments.get("lease_seconds")
+        if requested is None:
+            return self.config.lease_seconds
+        if not _within_lease_bound(requested):
+            raise AdapterError(f"lease_seconds must be an integer between {MIN_LEASE_SECONDS} and {MAX_LEASE_SECONDS}")
+        assert isinstance(requested, int)
+        return requested
+
+    def _granted_lease(
+        self, tool: str, result: dict[str, Any], lease_id: str | None, lease_seconds: int
+    ) -> dict[str, Any]:
+        """Answer with the granted lease and journal the window it opened."""
+        granted = {**result, "lease_seconds": lease_seconds}
+        if lease_id is not None:
+            granted["lease_id"] = lease_id
+        journal_lease(tool, lease_seconds, granted.get("lease_expires_at"))
+        return granted
+
+    def _lease_call(self, job_id: str, operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Run one lease-holder mutation, naming an expired lease as such.
+
+        A lapsed lease is an ordinary, recoverable state, not a malformed
+        request. Folding it into the generic validation error is what makes a
+        Bot read the listener as a broken adapter (issue #1383).
+        """
+        try:
+            return operation(*args, **kwargs)
+        except grokbot_jobs.GrokbotJobError as exc:
+            if self._lease_lapsed(job_id, exc.reason):
+                raise AdapterError("lease-expired") from None
+            raise
+
+    def _lease_lapsed(self, job_id: str, reason: str | None) -> bool:
+        """True when the queue refused because this job's lease deadline passed.
+
+        Hub authority answers every holder refusal with ``lease-conflict``, so
+        an expiry is confirmed against the job's own deadline rather than by
+        widening the hub's error contract. A job another worker has since
+        re-claimed carries a live deadline and stays a conflict.
+
+        ``terminal-state`` counts only when the queue terminalized the job on
+        its own ``timeout_seconds`` (#1353). A granted lease is always clamped
+        to that deadline, so the holder's lease is lapsed too and
+        ``lease-expired`` is both true and the reason the Bot can act on. A
+        completed, failed, or canceled job is not a lease matter and stays
+        generic.
+        """
+        if reason == "lease-expired":
+            return True
+        if reason not in {"lease-conflict", "terminal-state"}:
+            return False
+        try:
+            job = grokbot_jobs.get_job(self.config.target, job_id)
+        except Exception:
+            return False
+        if reason == "terminal-state" and job.get("state") != "expired":
+            return False
+        deadline = job.get("lease_expires_at")
+        return isinstance(deadline, str) and _parse_deadline(deadline) <= datetime.now(timezone.utc)
+
+    def _admit_hub_lease_decision(
+        self, job: Mapping[str, Any], holder: str, lease_seconds: int | None = None
+    ) -> fleet_client.CloudDecision | None:
         """Ask the hub for one deterministic GrokBot cloud lease."""
         task_hash = job.get("task_hash")
         repository = job.get("repository")
@@ -515,14 +649,14 @@ class GrokbotAdapter:
             label=cloud_tracker.lease_label("grokbot-cloud", repository, prompt_hash),
             prompt_hash=prompt_hash,
             conductor=self.config.instance,
-            ttl_seconds=LEASE_SECONDS,
+            ttl_seconds=lease_seconds if lease_seconds is not None else self.config.lease_seconds,
             lease_id=job_id,
             holder=holder,
         )
 
     def _admit_hub_lease(self, job: Mapping[str, Any], holder: str) -> bool:
         """True only when the hub granted the separate GrokBot cloud lease."""
-        decision = self._admit_hub_lease_decision(job, holder)
+        decision = self._admit_hub_lease_decision(job, holder, self.config.lease_seconds)
         return bool(decision is not None and decision.granted)
 
     def _bind_hub_lease(self, job_id: str, holder: str) -> None:
@@ -534,7 +668,9 @@ class GrokbotAdapter:
         job_id = job.get("job_id")
         if not isinstance(job_id, str):
             return
-        decision = self._hub_call(fleet_client.renew_cloud, job_id, ttl_seconds=LEASE_SECONDS, holder=holder)
+        decision = self._hub_call(
+            fleet_client.renew_cloud, job_id, ttl_seconds=self.config.lease_seconds, holder=holder
+        )
         if decision is None or decision.granted or decision.reason != "refused":
             return
         if self._admit_hub_lease(job, holder):
@@ -556,12 +692,14 @@ class GrokbotAdapter:
     def _fleet_target(self) -> str:
         return fleet_client.resolve_claim_target(self.config.target)
 
-    def _fleet_acquire(self, job_id: str, holder: str, session: str) -> fleet_client.ClaimDecision:
+    def _fleet_acquire(
+        self, job_id: str, holder: str, session: str, lease_seconds: int | None = None
+    ) -> fleet_client.ClaimDecision:
         try:
             return fleet_client.acquire_claim(
                 self._fleet_target(),
                 holder=holder,
-                ttl_seconds=LEASE_SECONDS,
+                ttl_seconds=lease_seconds if lease_seconds is not None else self.config.lease_seconds,
                 harness="grokbot",
                 role=self.config.instance,
                 job=job_id,
@@ -570,9 +708,10 @@ class GrokbotAdapter:
         except Exception:
             return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder)
 
-    def _fleet_renew(self, holder: str) -> fleet_client.ClaimDecision:
+    def _fleet_renew(self, holder: str, lease_seconds: int | None = None) -> fleet_client.ClaimDecision:
         try:
-            return fleet_client.renew_claim(self._fleet_target(), holder=holder, ttl_seconds=LEASE_SECONDS)
+            ttl = lease_seconds if lease_seconds is not None else self.config.lease_seconds
+            return fleet_client.renew_claim(self._fleet_target(), holder=holder, ttl_seconds=ttl)
         except Exception:
             return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder)
 
@@ -646,6 +785,7 @@ def build_listener_config(
     allowed_origins: list[str],
     bearer_file: Path | None,
     bearer_env: str | None,
+    lease_seconds: int | None = None,
 ) -> ListenerConfig:
     host, port = parse_bind(bind)
     config = ListenerConfig(
@@ -657,6 +797,7 @@ def build_listener_config(
         allowed_origins=tuple(allowed_origins),
         bearer=load_bearer(bearer_file=bearer_file, bearer_env=bearer_env),
         hub_token=load_hub_token(instance=instance),
+        lease_seconds=lease_seconds if lease_seconds is not None else load_lease_seconds(instance=instance),
     )
     config.validate()
     return config
@@ -707,7 +848,7 @@ def _register_tool(server: Any, adapter: GrokbotAdapter, name: str) -> None:
 
 def _tool_handler(adapter: GrokbotAdapter, name: str) -> Callable[..., Any]:
     """Build the typed wrapper whose signature becomes the advertised inputSchema."""
-    description = tool_description(name, adapter.config.instance)
+    description = tool_description(name, adapter.config.instance, adapter.config.lease_seconds)
 
     if name == "grokbot_queue_list":
 
@@ -723,10 +864,12 @@ def _tool_handler(adapter: GrokbotAdapter, name: str) -> Callable[..., Any]:
         handler: Callable[..., Any] = invoke_list
     elif name == "grokbot_queue_claim":
 
-        def invoke_claim(job_id: str, lease_id: str | None = None) -> dict[str, Any]:
+        def invoke_claim(job_id: str, lease_id: str | None = None, lease_seconds: int | None = None) -> dict[str, Any]:
             payload: dict[str, Any] = {"job_id": job_id}
             if lease_id is not None:
                 payload["lease_id"] = lease_id
+            if lease_seconds is not None:
+                payload["lease_seconds"] = lease_seconds
             return _invoke_adapter(adapter, name, payload)
 
         handler = invoke_claim
@@ -916,11 +1059,6 @@ def _lease_id(arguments: dict[str, Any], *, mint: bool = False) -> str:
     return lease_id
 
 
-def _with_lease_id(result: dict[str, Any], lease_id: str) -> dict[str, Any]:
-    """Echo the claim's own lease so a minted lease can carry the next call."""
-    return {**result, "lease_id": lease_id}
-
-
 @dataclass(frozen=True)
 class ListOptions:
     """The validated, role-pinned projection filters for one list call."""
@@ -971,6 +1109,20 @@ def journal_tool_call(name: object, arguments: object, decision: str, reason: st
         sum(1 for key in keys if key not in accepted),
         decision,
         reason or ("-" if decision == "ok" else "invalid-request"),
+    )
+
+
+def journal_lease(tool: str, lease_seconds: int, deadline: object) -> None:
+    """Journal the lease window a claim or renew opened, never the job or lease.
+
+    The deadline is the queue's own answer, so a lapsed lease can be read out
+    of the journal instead of inferred from a later refusal.
+    """
+    _JOURNAL.info(
+        "grokbot tool=%s lease_seconds=%d deadline=%s",
+        tool if tool in _TOOL_ARGUMENT_TYPES else "unknown",
+        lease_seconds,
+        deadline if isinstance(deadline, str) else "-",
     )
 
 
@@ -1035,7 +1187,7 @@ _TOOL_ARGUMENT_TYPES: dict[str, tuple[dict[str, type[object]], dict[str, type[ob
     "grokbot_queue_cancel": ({"job_id": str}, {}),
     "grokbot_queue_expire": ({"job_id": str}, {}),
     "grokbot_queue_report": ({"job_id": str}, {}),
-    "grokbot_queue_claim": ({"job_id": str}, {"lease_id": str}),
+    "grokbot_queue_claim": ({"job_id": str}, {"lease_id": str, "lease_seconds": int}),
     "grokbot_queue_renew": ({"job_id": str, "lease_id": str}, {}),
     "grokbot_queue_start": ({"job_id": str, "lease_id": str}, {}),
     "grokbot_queue_complete": ({"job_id": str, "lease_id": str, "artifact": dict}, {"report_text": str}),
@@ -1085,6 +1237,11 @@ def _transport_allowed_hosts(config: ListenerConfig) -> list[str]:
     return list(config.allowed_hosts)
 
 
+def _parse_deadline(value: str) -> datetime:
+    """Read one queue timestamp as an aware instant."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def _valid_host(value: str) -> bool:
     return isinstance(value, str) and bool(value) and len(value) <= 253 and all(part for part in value.split("."))
 
@@ -1111,13 +1268,17 @@ _LIST_DESCRIPTION = (
     "widen it. Any other argument is refused."
 )
 _CLAIM_DESCRIPTION = (
-    "Claim one queued job for this listener's fixed worker identity. Arguments: job_id (required) "
-    "and lease_id (optional, and null means omitted). When lease_id is omitted the listener mints "
-    "one and returns it as lease_id; carry that value on every later call for this job. The routine "
-    "sequence is grokbot_queue_list, grokbot_queue_claim, grokbot_queue_start, grokbot_queue_renew "
-    "before the lease expires, then grokbot_queue_complete or grokbot_queue_fail, and "
-    "grokbot_queue_ack_cancel when the operator requests cancellation. The role, worker identity, "
-    "and lease duration are fixed server-side and cannot be selected by arguments."
+    "Claim one queued job for this listener's fixed worker identity. Arguments: job_id (required), "
+    "lease_id (optional), and lease_seconds (optional, integer {lease_min}..{lease_max}); null means "
+    "omitted for either optional. When lease_id is omitted the listener mints one and returns it as "
+    "lease_id; carry that value on every later call for this job. When lease_seconds is omitted the "
+    "listener grants its configured lease ({lease_default} seconds here). The result carries the "
+    "granted lease_seconds and the lease_expires_at deadline; the job's own deadline can shorten it. "
+    "The routine sequence is grokbot_queue_list, grokbot_queue_claim, grokbot_queue_start, "
+    "grokbot_queue_renew before lease_expires_at, then grokbot_queue_complete or grokbot_queue_fail, "
+    "and grokbot_queue_ack_cancel when the operator requests cancellation. A renew or fail sent after "
+    "the deadline is refused with lease-expired, which means the lease lapsed, not that the call was "
+    "malformed. The role and worker identity are fixed server-side."
 )
 
 
@@ -1136,11 +1297,14 @@ _TOOL_DESCRIPTIONS = {
 }
 
 
-def tool_description(name: str, instance: str) -> str:
-    """Describe one tool for a listener whose role is already fixed."""
+def tool_description(name: str, instance: str, lease_seconds: int | None = None) -> str:
+    """Describe one tool for a listener whose role and lease are already fixed."""
     return _TOOL_DESCRIPTIONS[name].format(
         states=", ".join(sorted(grokbot_jobs.JOB_STATES)),
         limit=MAX_LIST_LIMIT,
         default=MAX_LISTED_JOBS,
         role=instance,
+        lease_min=MIN_LEASE_SECONDS,
+        lease_max=MAX_LEASE_SECONDS,
+        lease_default=lease_seconds if lease_seconds is not None else DEFAULT_LEASE_SECONDS,
     )

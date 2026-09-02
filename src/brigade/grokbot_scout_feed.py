@@ -91,9 +91,10 @@ def apply(target: Path, policy_path: Path, *, now: datetime | None = None) -> di
         assert isinstance(issue_number, int)
         assert isinstance(key, str)
         assert isinstance(daily_limit, int)
+        spec = _scout_spec(policy, issue_number)
         admission = grokbot_jobs.enqueue_repository_scout(
             target,
-            _scout_spec(policy, issue_number),
+            spec,
             key,
             daily_limit=daily_limit,
             now=instant,
@@ -109,7 +110,19 @@ def apply(target: Path, policy_path: Path, *, now: datetime | None = None) -> di
             "created_today": admission["created_today"],
             "handle": admission["handle"],
         }
-    return {**selection, "created": 1, "reason": "created", "handle": admission["handle"]}
+    handle = admission["handle"]
+    assert isinstance(handle, dict)
+    role = spec["role"]
+    label = spec["label"]
+    repository = spec["repository"]
+    job_id = handle["job_id"]
+    assert isinstance(job_id, str)
+    assert isinstance(role, str) and isinstance(label, str) and isinstance(repository, str)
+    grokbot_feed.notify_enqueue(
+        target,
+        {"job_id": job_id, "role": role, "label": label, "repository": repository},
+    )
+    return {**selection, "created": 1, "reason": "created", "handle": handle}
 
 
 def load_policy(path: Path) -> dict[str, object]:

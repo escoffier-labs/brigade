@@ -1270,13 +1270,60 @@ def create_detached_worktree(repo: Path, worktree_path: Path) -> Path:
     return worktree_path
 
 
-def remove_worktree(repo: Path, worktree_path: Path) -> None:
+def remove_worktree(repo: Path, worktree_path: Path, *, force: bool = False) -> None:
     if not worktree_path.exists():
         return
     root = git_root(repo)
-    result = _git(root, "worktree", "remove", "--force", str(worktree_path), timeout=120.0)
+    args = ["worktree", "remove"]
+    if force:
+        args.append("--force")
+    args.append(str(worktree_path))
+    result = _git(root, *args, timeout=120.0)
     if result.code != 0:
         shutil.rmtree(worktree_path, ignore_errors=True)
+
+
+def brigade_worktree_root() -> Path:
+    return Path.home() / ".cache" / "brigade" / "worktrees"
+
+
+def is_brigade_created_worktree(path: Path, repo_root: Path) -> bool:
+    root = brigade_worktree_root()
+    try:
+        resolved = path.expanduser().resolve()
+        return resolved.parent == root and resolved.name.startswith(f"{repo_root.name}-")
+    except OSError:
+        return False
+
+
+def brigade_worktrees_for_repo(repo_root: Path) -> list[Path]:
+    root = brigade_worktree_root()
+    prefix = f"{repo_root.name}-"
+    if not root.is_dir():
+        return []
+    return sorted(path for path in root.iterdir() if path.is_dir() and path.name.startswith(prefix))
+
+
+def worktree_is_clean(cwd: Path) -> bool:
+    result = _git(cwd, "status", "--porcelain")
+    if result.code != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        suffix = f": {detail}" if detail else ""
+        raise RunGuardError(f"not a git worktree: {cwd}{suffix}")
+    return result.stdout.strip() == ""
+
+
+def worktree_head_is_branch_backed(cwd: Path) -> bool:
+    result = _git(cwd, "branch", "--all", "--format=%(refname)", "--contains", "HEAD")
+    if result.code != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        suffix = f": {detail}" if detail else ""
+        raise RunGuardError(f"not a git worktree: {cwd}{suffix}")
+    return any(line.strip().startswith(("refs/heads/", "refs/remotes/")) for line in result.stdout.splitlines())
+
+
+def worktree_mtime(cwd: Path) -> datetime:
+    return datetime.fromtimestamp(cwd.stat().st_mtime, tz=timezone.utc)
 
 
 def is_primary_checkout(cwd: Path) -> bool:

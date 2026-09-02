@@ -1,0 +1,6607 @@
+{
+  "created_at": "2026-09-01T15:26:23+00:00",
+  "entries": [
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 13,
+      "match": "127.0.0.1",
+      "path": "CHANGELOG.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 14,
+      "match": "127.0.0.1",
+      "path": "CHANGELOG.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "7ec2c62c0fb035a0",
+      "line": 91,
+      "match": "port 3774",
+      "path": "CHANGELOG.md",
+      "rule_id": "port-reference"
+    },
+    {
+      "fingerprint": "e2ab7821c84a4253",
+      "line": 160,
+      "match": "/home/you/agent-kitchen",
+      "path": "QUICKSTART.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "777e031342e0dedb",
+      "line": 162,
+      "match": "/home/you/agent-kitchen/AGENTS.md",
+      "path": "QUICKSTART.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "56164eb71be0f216",
+      "line": 163,
+      "match": "/home/you/agent-kitchen/.claude/memory-handoffs",
+      "path": "QUICKSTART.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "58736fcb32a59abb",
+      "line": 164,
+      "match": "/home/you/agent-kitchen/.codex/memory-handoffs",
+      "path": "QUICKSTART.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "6e7ee7d18a63bca5",
+      "line": 165,
+      "match": "/home/you/.openclaw/openclaw.json",
+      "path": "QUICKSTART.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 243,
+      "match": "127.0.0.1",
+      "path": "QUICKSTART.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "7ec2c62c0fb035a0",
+      "line": 114,
+      "match": "port 3774",
+      "path": "docs/fleet-sync.md",
+      "rule_id": "port-reference"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 22,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 25,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 34,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 37,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 46,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 49,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 102,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 103,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 128,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 128,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 128,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 128,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 128,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 128,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 128,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 128,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 128,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 128,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-mcp.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 5,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-n8n-operator.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 45,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-operating-guide.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 46,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-operating-guide.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 47,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-operating-guide.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 48,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-operating-guide.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 49,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-operating-guide.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 50,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-operating-guide.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 51,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-operating-guide.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 52,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-operating-guide.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 53,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-operating-guide.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 54,
+      "match": "127.0.0.1",
+      "path": "docs/grokbot-operating-guide.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 541,
+      "match": "127.0.0.1",
+      "path": "docs/overview.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "80ebe4791a5ea122",
+      "line": 405,
+      "match": "/home/alice",
+      "path": "docs/phase-355-pinned-component-setup.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "00fedbeb67624790",
+      "line": 2013,
+      "match": "/home/alice/.config/browser",
+      "path": "docs/phase-first-class-multi-lane-research-implementation.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 120,
+      "match": "127.0.0.1",
+      "path": "docs/phase-grokbot-one-repository-distribution.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 121,
+      "match": "127.0.0.1",
+      "path": "docs/phase-grokbot-one-repository-distribution.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 124,
+      "match": "127.0.0.1",
+      "path": "docs/phase-grokbot-one-repository-distribution.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 128,
+      "match": "127.0.0.1",
+      "path": "docs/phase-grokbot-one-repository-distribution.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "88538c210ba99634",
+      "line": 131,
+      "match": "port 8005",
+      "path": "docs/phase-worklore-opsdeck-plan.md",
+      "rule_id": "port-reference"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 303,
+      "match": "127.0.0.1",
+      "path": "docs/phase-worklore-opsdeck-plan.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 306,
+      "match": "127.0.0.1",
+      "path": "docs/phase-worklore-opsdeck-plan.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 318,
+      "match": "127.0.0.1",
+      "path": "docs/phase-worklore-opsdeck-plan.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 327,
+      "match": "127.0.0.1",
+      "path": "docs/phase-worklore-opsdeck-plan.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 432,
+      "match": "127.0.0.1",
+      "path": "docs/phase-worklore-opsdeck-plan.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "96b820603f347dc8",
+      "line": 18,
+      "match": "cold-start@example.invalid",
+      "path": "docs/runbooks/cold-start-gate.sh",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "7ec2c62c0fb035a0",
+      "line": 14,
+      "match": "port 3774",
+      "path": "docs/runbooks/fleet-hub-proxmox.md",
+      "rule_id": "port-reference"
+    },
+    {
+      "fingerprint": "7ec2c62c0fb035a0",
+      "line": 164,
+      "match": "port 3774",
+      "path": "docs/runbooks/fleet-hub-proxmox.md",
+      "rule_id": "port-reference"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 349,
+      "match": "127.0.0.1",
+      "path": "docs/runbooks/fleet-hub-proxmox.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 361,
+      "match": "127.0.0.1",
+      "path": "docs/runbooks/fleet-hub-proxmox.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "7ec2c62c0fb035a0",
+      "line": 361,
+      "match": "port 3774",
+      "path": "docs/runbooks/fleet-hub-proxmox.md",
+      "rule_id": "port-reference"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 364,
+      "match": "127.0.0.1",
+      "path": "docs/runbooks/fleet-hub-proxmox.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "4d22d8a1f7c89117",
+      "line": 98,
+      "match": "/home/you/.local/bin",
+      "path": "docs/scheduled-care.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4d22d8a1f7c89117",
+      "line": 104,
+      "match": "/home/you/.local/bin",
+      "path": "docs/scheduled-care.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "fa49105f84958609",
+      "line": 107,
+      "match": "/home/you",
+      "path": "docs/scheduled-care.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4d22d8a1f7c89117",
+      "line": 195,
+      "match": "/home/you/.local/bin",
+      "path": "docs/scheduled-care.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4d22d8a1f7c89117",
+      "line": 210,
+      "match": "/home/you/.local/bin",
+      "path": "docs/scheduled-care.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4d22d8a1f7c89117",
+      "line": 283,
+      "match": "/home/you/.local/bin",
+      "path": "docs/scheduled-care.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4d22d8a1f7c89117",
+      "line": 298,
+      "match": "/home/you/.local/bin",
+      "path": "docs/scheduled-care.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4d22d8a1f7c89117",
+      "line": 373,
+      "match": "/home/you/.local/bin",
+      "path": "docs/scheduled-care.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4d22d8a1f7c89117",
+      "line": 395,
+      "match": "/home/you/.local/bin",
+      "path": "docs/scheduled-care.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4d22d8a1f7c89117",
+      "line": 422,
+      "match": "/home/you/.local/bin",
+      "path": "docs/scheduled-care.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4d22d8a1f7c89117",
+      "line": 525,
+      "match": "/home/you/.local/bin",
+      "path": "docs/scheduled-care.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4d22d8a1f7c89117",
+      "line": 540,
+      "match": "/home/you/.local/bin",
+      "path": "docs/scheduled-care.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4d22d8a1f7c89117",
+      "line": 627,
+      "match": "/home/you/.local/bin",
+      "path": "docs/scheduled-care.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4d22d8a1f7c89117",
+      "line": 642,
+      "match": "/home/you/.local/bin",
+      "path": "docs/scheduled-care.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "ae66c633e43396de",
+      "line": 153,
+      "match": "/home/operator/.claude-lanes",
+      "path": "docs/seat-catalog.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 118,
+      "match": "127.0.0.1",
+      "path": "docs/superpowers/plans/2026-06-01-pantry-station-agentpantry.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 417,
+      "match": "127.0.0.1",
+      "path": "docs/superpowers/plans/2026-06-01-pantry-station-agentpantry.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "2f4eae26b68eb0a8",
+      "line": 96,
+      "match": "/home/you/.local/bin/miseledger",
+      "path": "docs/wiring-graphtrail-miseledger.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "6134dc64bd597abd",
+      "line": 160,
+      "match": "/home/you/.local/share/miseledger/miseledger.db",
+      "path": "docs/wiring-graphtrail-miseledger.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 209,
+      "match": "localhost:5204",
+      "path": "engines/code-graph/README.md",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "27b2479bba97c891",
+      "line": 162,
+      "match": "corpus@example.invalid",
+      "path": "engines/code-graph/benchmarks/cross-tool/run.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 88,
+      "match": "localhost:5204",
+      "path": "engines/code-graph/src/adapters/codesearch.rs",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 454,
+      "match": "127.0.0.1",
+      "path": "engines/code-graph/src/adapters/codesearch.rs",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "07d9dafe2755c253",
+      "line": 159,
+      "match": "/home/someone",
+      "path": "engines/code-graph/src/store/repo_policy.rs",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "07d9dafe2755c253",
+      "line": 168,
+      "match": "/home/someone",
+      "path": "engines/code-graph/src/store/repo_policy.rs",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "924c80a49ea46fb8",
+      "line": 170,
+      "match": "/home/someone/repos/project",
+      "path": "engines/code-graph/src/store/repo_policy.rs",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 569,
+      "match": "127.0.0.1",
+      "path": "engines/code-graph/tests/mcp.rs",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 577,
+      "match": "127.0.0.1",
+      "path": "engines/code-graph/tests/mcp.rs",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 637,
+      "match": "127.0.0.1",
+      "path": "engines/code-graph/tests/mcp.rs",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1025,
+      "match": "127.0.0.1",
+      "path": "engines/code-graph/tests/mcp.rs",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 36,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/AGENTS.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 196,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/CHANGELOG.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 451,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/README.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 452,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/README.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 462,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/README.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 463,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/README.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 464,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/README.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 465,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/README.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 469,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/README.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 470,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/README.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 29,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/docs/BRIGADE_INTEGRATION.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "2f4eae26b68eb0a8",
+      "line": 65,
+      "match": "/home/you/.local/bin/miseledger",
+      "path": "engines/evidence-ledger/docs/MCP.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 220,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/docs/QUICKSTART.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 221,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/docs/QUICKSTART.md",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 19,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/internal/app/serve_lifecycle_test.go",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 55,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/internal/app/serve_lifecycle_test.go",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 31,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/internal/app/server.go",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 35,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/internal/app/server.go",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 71,
+      "match": "localhost",
+      "path": "engines/evidence-ledger/internal/app/server.go",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "f2f45c84ca9d2137",
+      "line": 198,
+      "match": "/home/user/secret",
+      "path": "engines/evidence-ledger/internal/provenance/envelope_test.go",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "f2f45c84ca9d2137",
+      "line": 201,
+      "match": "/home/user/secret",
+      "path": "engines/evidence-ledger/internal/provenance/envelope_test.go",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "2f11bcd5d8645b3b",
+      "line": 63,
+      "match": "/home/u/repo",
+      "path": "engines/evidence-ledger/internal/sources/cursor/cursor_test.go",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "bb05ae14a4ff9771",
+      "line": 334,
+      "match": "/Users/demo/conversation-search.db",
+      "path": "engines/evidence-ledger/internal/sources/cursor/cursor_test.go",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "b618ddf75feafa71",
+      "line": 217,
+      "match": "/home/demo/private",
+      "path": "engines/evidence-ledger/internal/sources/opencode/opencode_test.go",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "80235189dcee65a7",
+      "line": 217,
+      "match": "demo@example.com",
+      "path": "engines/evidence-ledger/internal/sources/opencode/opencode_test.go",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "80235189dcee65a7",
+      "line": 224,
+      "match": "demo@example.com",
+      "path": "engines/evidence-ledger/internal/sources/opencode/opencode_test.go",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "b618ddf75feafa71",
+      "line": 224,
+      "match": "/home/demo/private",
+      "path": "engines/evidence-ledger/internal/sources/opencode/opencode_test.go",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "80235189dcee65a7",
+      "line": 12,
+      "match": "demo@example.com",
+      "path": "engines/evidence-ledger/internal/sources/redaction_test.go",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "80235189dcee65a7",
+      "line": 14,
+      "match": "demo@example.com",
+      "path": "engines/evidence-ledger/internal/sources/redaction_test.go",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "eb9b211e58cb632e",
+      "line": 23,
+      "match": "/home/demo/project",
+      "path": "engines/evidence-ledger/internal/sources/redaction_test.go",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "80235189dcee65a7",
+      "line": 25,
+      "match": "demo@example.com",
+      "path": "engines/evidence-ledger/internal/sources/redaction_test.go",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "eb9b211e58cb632e",
+      "line": 26,
+      "match": "/home/demo/project",
+      "path": "engines/evidence-ledger/internal/sources/redaction_test.go",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "5f4c1de89fde1b2c",
+      "line": 28,
+      "match": "/home/demo/project/session.json",
+      "path": "engines/evidence-ledger/internal/sources/redaction_test.go",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "7718e6f9d5611202",
+      "line": 30,
+      "match": "/home/demo/project/file.txt",
+      "path": "engines/evidence-ledger/internal/sources/redaction_test.go",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "eb9b211e58cb632e",
+      "line": 33,
+      "match": "/home/demo/project",
+      "path": "engines/evidence-ledger/internal/sources/redaction_test.go",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "80235189dcee65a7",
+      "line": 40,
+      "match": "demo@example.com",
+      "path": "engines/evidence-ledger/internal/sources/redaction_test.go",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "eb9b211e58cb632e",
+      "line": 41,
+      "match": "/home/demo/project",
+      "path": "engines/evidence-ledger/internal/sources/redaction_test.go",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "80235189dcee65a7",
+      "line": 43,
+      "match": "demo@example.com",
+      "path": "engines/evidence-ledger/internal/sources/redaction_test.go",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "80235189dcee65a7",
+      "line": 44,
+      "match": "demo@example.com",
+      "path": "engines/evidence-ledger/internal/sources/redaction_test.go",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "eb9b211e58cb632e",
+      "line": 55,
+      "match": "/home/demo/project",
+      "path": "engines/evidence-ledger/internal/sources/redaction_test.go",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "80235189dcee65a7",
+      "line": 55,
+      "match": "demo@example.com",
+      "path": "engines/evidence-ledger/internal/sources/redaction_test.go",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 509,
+      "match": "localhost",
+      "path": "engines/evidence-ledger/internal/sources/source.go",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 22,
+      "match": "127.0.0.1",
+      "path": "engines/evidence-ledger/scripts/smoke_http.sh",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "dd5c2271bb79e6f8",
+      "line": 5,
+      "match": "/home/user/demo-project",
+      "path": "engines/evidence-ledger/testdata/harnesses/cursor-config.fixture/acp-sessions/demo-acp-002/meta.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "dd5c2271bb79e6f8",
+      "line": 5,
+      "match": "/home/user/demo-project",
+      "path": "engines/evidence-ledger/testdata/harnesses/cursor-config.fixture/chats/demo-chat-001/meta.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "fc9e36de63abace6",
+      "line": 7,
+      "match": "qa@example.com",
+      "path": "engines/evidence-ledger/testdata/harnesses/cursor-config.fixture/chats/demo-chat-001/meta.json",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "fc9e36de63abace6",
+      "line": 2,
+      "match": "qa@example.com",
+      "path": "engines/evidence-ledger/testdata/harnesses/cursor-config.fixture/prompt_history.json",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "dd5c2271bb79e6f8",
+      "line": 3,
+      "match": "/home/user/demo-project",
+      "path": "engines/evidence-ledger/testdata/harnesses/cursor-config.fixture/prompt_history.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "eb9b211e58cb632e",
+      "line": 5,
+      "match": "/home/demo/project",
+      "path": "engines/evidence-ledger/testdata/harnesses/opencode-export.fixture.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "eb9b211e58cb632e",
+      "line": 6,
+      "match": "/home/demo/project",
+      "path": "engines/evidence-ledger/testdata/harnesses/opencode-export.fixture.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "8a91baa4043d7fd8",
+      "line": 520,
+      "match": "synth@example.invalid",
+      "path": "scripts/measure_work_store.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "8a91baa4043d7fd8",
+      "line": 532,
+      "match": "synth@example.invalid",
+      "path": "scripts/measure_work_store.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "8a91baa4043d7fd8",
+      "line": 1356,
+      "match": "synth@example.invalid",
+      "path": "scripts/measure_work_store.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "8a91baa4043d7fd8",
+      "line": 1379,
+      "match": "synth@example.invalid",
+      "path": "scripts/measure_work_store.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 68,
+      "match": "127.0.0.1",
+      "path": "src/brigade/add.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 49,
+      "match": "localhost",
+      "path": "src/brigade/center_cmd/serve.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 294,
+      "match": "127.0.0.1",
+      "path": "src/brigade/center_cmd/serve.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 327,
+      "match": "127.0.0.1",
+      "path": "src/brigade/center_cmd/serve.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 331,
+      "match": "127.0.0.1",
+      "path": "src/brigade/center_cmd/serve.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 331,
+      "match": "localhost",
+      "path": "src/brigade/center_cmd/serve.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 345,
+      "match": "127.0.0.1",
+      "path": "src/brigade/center_cmd/serve.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 228,
+      "match": "127.0.0.1",
+      "path": "src/brigade/cli/center.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 41,
+      "match": "127.0.0.1",
+      "path": "src/brigade/cli/pantry.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 319,
+      "match": "127.0.0.1",
+      "path": "src/brigade/cli/run_cloud.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1087,
+      "match": "127.0.0.1",
+      "path": "src/brigade/cli/run_cloud.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "48ad2e5bfd5156ea",
+      "line": 87,
+      "match": "/home/ubuntu/secret",
+      "path": "src/brigade/fixtures/causal-receipt.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "a3e49318b4c3cd6d",
+      "line": 48,
+      "match": "/home/example-user/.ssh/id_rsa",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "84937a3f3351738f",
+      "line": 49,
+      "match": "/home/example-user/project",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "35dedae48521c9be",
+      "line": 88,
+      "match": "token=sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 127,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 174,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "84937a3f3351738f",
+      "line": 178,
+      "match": "/home/example-user/project",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "863c952aa6f7683e",
+      "line": 180,
+      "match": "/home/example-user",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 184,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "35dedae48521c9be",
+      "line": 223,
+      "match": "token=sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "35dedae48521c9be",
+      "line": 262,
+      "match": "token=sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "35dedae48521c9be",
+      "line": 307,
+      "match": "token=sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 308,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 310,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "84937a3f3351738f",
+      "line": 311,
+      "match": "/home/example-user/project",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "84937a3f3351738f",
+      "line": 314,
+      "match": "/home/example-user/project",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 392,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "84937a3f3351738f",
+      "line": 393,
+      "match": "/home/example-user/project",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 397,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "84937a3f3351738f",
+      "line": 398,
+      "match": "/home/example-user/project",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "35dedae48521c9be",
+      "line": 445,
+      "match": "token=sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "35dedae48521c9be",
+      "line": 481,
+      "match": "token=sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 517,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "84937a3f3351738f",
+      "line": 518,
+      "match": "/home/example-user/project",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "01bbdd07d6eff7aa",
+      "line": 559,
+      "match": "/home/example-user/project/.ssh/id_rsa",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 595,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "84937a3f3351738f",
+      "line": 596,
+      "match": "/home/example-user/project",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 600,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "84937a3f3351738f",
+      "line": 601,
+      "match": "/home/example-user/project",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 606,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "84937a3f3351738f",
+      "line": 609,
+      "match": "/home/example-user/project",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "35dedae48521c9be",
+      "line": 611,
+      "match": "token=sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "35dedae48521c9be",
+      "line": 654,
+      "match": "token=sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "35dedae48521c9be",
+      "line": 689,
+      "match": "token=sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "35dedae48521c9be",
+      "line": 691,
+      "match": "token=sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "35dedae48521c9be",
+      "line": 727,
+      "match": "token=sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "35dedae48521c9be",
+      "line": 764,
+      "match": "token=sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "35dedae48521c9be",
+      "line": 766,
+      "match": "token=sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "a3e49318b4c3cd6d",
+      "line": 870,
+      "match": "/home/example-user/.ssh/id_rsa",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "84937a3f3351738f",
+      "line": 871,
+      "match": "/home/example-user/project",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "35dedae48521c9be",
+      "line": 888,
+      "match": "token=sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 904,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 925,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "84937a3f3351738f",
+      "line": 929,
+      "match": "/home/example-user/project",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "863c952aa6f7683e",
+      "line": 931,
+      "match": "/home/example-user",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 935,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "src/brigade/fixtures/worker-events-appserver.v1.golden.json",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 356,
+      "match": "localhost",
+      "path": "src/brigade/fleet_client.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "300993443a2d2d0d",
+      "line": 597,
+      "match": "brigade@localhost",
+      "path": "src/brigade/fleet_export.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 9,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_backup/contracts.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 544,
+      "match": "localhost",
+      "path": "src/brigade/grokbot_backup/lifecycle.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 544,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_backup/lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 312,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_backup/runtime_config.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 27,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_cerebro.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 760,
+      "match": "localhost",
+      "path": "src/brigade/grokbot_cerebro.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 760,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_cerebro.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 9,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_fleet/contracts.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 619,
+      "match": "localhost",
+      "path": "src/brigade/grokbot_fleet/lifecycle.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 619,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_fleet/lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 239,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_fleet/runtime_config.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 26,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 35,
+      "match": "localhost",
+      "path": "src/brigade/grokbot_mcp.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 35,
+      "match": "localhost",
+      "path": "src/brigade/grokbot_mcp.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 35,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 35,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 635,
+      "match": "localhost",
+      "path": "src/brigade/grokbot_mcp.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 635,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 1097,
+      "match": "localhost",
+      "path": "src/brigade/grokbot_mcp.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 9,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_n8n/contracts.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 494,
+      "match": "localhost",
+      "path": "src/brigade/grokbot_n8n/lifecycle.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 494,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_n8n/lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 16,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_n8n/runtime_config.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 16,
+      "match": "localhost",
+      "path": "src/brigade/grokbot_n8n/runtime_config.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 12,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_obsidian/contracts.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 688,
+      "match": "localhost",
+      "path": "src/brigade/grokbot_obsidian/lifecycle.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 688,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_obsidian/lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 378,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_obsidian/runtime_config.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 396,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_obsidian/runtime_config.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 18,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_operations_relay.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 598,
+      "match": "localhost",
+      "path": "src/brigade/grokbot_operations_relay.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 598,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_operations_relay.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 557,
+      "match": "localhost",
+      "path": "src/brigade/grokbot_ops.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 558,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 48,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 49,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 50,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 53,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 54,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 55,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 56,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 57,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 58,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 59,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 9,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_wazuh/contracts.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 541,
+      "match": "localhost",
+      "path": "src/brigade/grokbot_wazuh/lifecycle.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 541,
+      "match": "127.0.0.1",
+      "path": "src/brigade/grokbot_wazuh/lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "0f96de26da6c6190",
+      "line": 5,
+      "match": "reviewer@example.test",
+      "path": "src/brigade/guard/examples/n8n-validation/warn-review-email.json",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 6,
+      "match": "localhost",
+      "path": "src/brigade/guard/policies/public-repo.json",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 42,
+      "match": "localhost",
+      "path": "src/brigade/guard/rules.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 148,
+      "match": "localhost",
+      "path": "src/brigade/jules_cloud.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 148,
+      "match": "127.0.0.1",
+      "path": "src/brigade/jules_cloud.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 248,
+      "match": "localhost:5204",
+      "path": "src/brigade/managed.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "80ebe4791a5ea122",
+      "line": 32,
+      "match": "/home/alice",
+      "path": "src/brigade/memory_doctor/paths.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 61,
+      "match": "127.0.0.1",
+      "path": "src/brigade/pantry_cmd.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 108,
+      "match": "127.0.0.1",
+      "path": "src/brigade/pantry_cmd.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 22,
+      "match": "127.0.0.1",
+      "path": "src/brigade/run_control.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 74,
+      "match": "127.0.0.1",
+      "path": "src/brigade/run_control.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 22,
+      "match": "127.0.0.1",
+      "path": "src/brigade/runs_serve.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 43,
+      "match": "localhost",
+      "path": "src/brigade/runs_serve.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 43,
+      "match": "127.0.0.1",
+      "path": "src/brigade/runs_serve.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 114,
+      "match": "127.0.0.1",
+      "path": "src/brigade/runs_serve.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 385,
+      "match": "localhost",
+      "path": "src/brigade/runs_serve.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 605,
+      "match": "localhost",
+      "path": "src/brigade/security_cmd/models.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 496,
+      "match": "localhost",
+      "path": "src/brigade/security_cmd/scan_detectors.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 496,
+      "match": "127.0.0.1",
+      "path": "src/brigade/security_cmd/scan_detectors.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "6b5d01ad2d8fd708",
+      "line": 151,
+      "match": "+15551234567",
+      "path": "stations/notify/cmd/agent-notify/main_test.go",
+      "rule_id": "example-phone-555"
+    },
+    {
+      "fingerprint": "a62c88e7e12f831d",
+      "line": 152,
+      "match": "+15557654321",
+      "path": "stations/notify/cmd/agent-notify/main_test.go",
+      "rule_id": "example-phone-555"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 842,
+      "match": "127.0.0.1",
+      "path": "stations/notify/cmd/agent-notify/main_test.go",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1,
+      "match": "127.0.0.1",
+      "path": "stations/notify/docs/assets/agent-notify-send.svg",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "a6f354ab269f2613",
+      "line": 139,
+      "match": "+15550001111",
+      "path": "stations/notify/internal/channels/channel_test.go",
+      "rule_id": "example-phone-555"
+    },
+    {
+      "fingerprint": "a6f354ab269f2613",
+      "line": 173,
+      "match": "+15550001111",
+      "path": "stations/notify/internal/channels/channel_test.go",
+      "rule_id": "example-phone-555"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 145,
+      "match": "127.0.0.1",
+      "path": "stations/notify/internal/channels/limits_test.go",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "a6f354ab269f2613",
+      "line": 173,
+      "match": "+15550001111",
+      "path": "stations/notify/internal/channels/limits_test.go",
+      "rule_id": "example-phone-555"
+    },
+    {
+      "fingerprint": "53de51aaa9782c2d",
+      "line": 37,
+      "match": "+15551112222",
+      "path": "stations/notify/internal/channels/signal_test.go",
+      "rule_id": "example-phone-555"
+    },
+    {
+      "fingerprint": "53de51aaa9782c2d",
+      "line": 47,
+      "match": "+15551112222",
+      "path": "stations/notify/internal/channels/signal_test.go",
+      "rule_id": "example-phone-555"
+    },
+    {
+      "fingerprint": "53de51aaa9782c2d",
+      "line": 48,
+      "match": "+15551112222",
+      "path": "stations/notify/internal/channels/signal_test.go",
+      "rule_id": "example-phone-555"
+    },
+    {
+      "fingerprint": "53de51aaa9782c2d",
+      "line": 47,
+      "match": "+15551112222",
+      "path": "stations/notify/internal/config/config_test.go",
+      "rule_id": "example-phone-555"
+    },
+    {
+      "fingerprint": "1ebabd819f2e948d",
+      "line": 6,
+      "match": "/home/example-user/work/private-repo",
+      "path": "tests/guard/fixtures/real_world/pr_draft_leak.md",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "ffabd24b9cbd40b4",
+      "line": 32,
+      "match": "git@github.com",
+      "path": "tests/guard/test_allow_cli.py",
+      "rule_id": "email"
+    },
+    {
+      "fingerprint": "ffabd24b9cbd40b4",
+      "line": 36,
+      "match": "git@github.com",
+      "path": "tests/guard/test_allow_cli.py",
+      "rule_id": "email"
+    },
+    {
+      "fingerprint": "ffabd24b9cbd40b4",
+      "line": 39,
+      "match": "git@github.com",
+      "path": "tests/guard/test_allow_cli.py",
+      "rule_id": "email"
+    },
+    {
+      "fingerprint": "612417f708b0bd03",
+      "line": 101,
+      "match": "localhost:11434",
+      "path": "tests/guard/test_allow_values.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "612417f708b0bd03",
+      "line": 103,
+      "match": "localhost:11434",
+      "path": "tests/guard/test_allow_values.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "612417f708b0bd03",
+      "line": 119,
+      "match": "localhost:11434",
+      "path": "tests/guard/test_allow_values.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "612417f708b0bd03",
+      "line": 121,
+      "match": "localhost:11434",
+      "path": "tests/guard/test_allow_values.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 100,
+      "match": "localhost:5204",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 102,
+      "match": "localhost:5204",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 126,
+      "match": "localhost:5204",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 128,
+      "match": "localhost:5204",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 142,
+      "match": "localhost",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 149,
+      "match": "localhost:5204",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "a959b3fa35365e5e",
+      "line": 149,
+      "match": "localhost:9999",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 156,
+      "match": "localhost:5204",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 158,
+      "match": "localhost:5204",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "a959b3fa35365e5e",
+      "line": 166,
+      "match": "localhost:9999",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 179,
+      "match": "localhost:5204",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 181,
+      "match": "localhost:5204",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 192,
+      "match": "localhost:5204",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 193,
+      "match": "localhost:5204",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "a5b85d8a48c1162e",
+      "line": 194,
+      "match": "localhost:5205",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 195,
+      "match": "localhost:5204",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "a959b3fa35365e5e",
+      "line": 422,
+      "match": "localhost:9999",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "8e9f684908457ffa",
+      "line": 423,
+      "match": "localhost:5204",
+      "path": "tests/guard/test_baseline.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 131,
+      "match": "127.0.0.1",
+      "path": "tests/guard/test_rules.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "612417f708b0bd03",
+      "line": 132,
+      "match": "localhost:11434",
+      "path": "tests/guard/test_rules.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "f9fd75dfc65c0ca5",
+      "line": 28,
+      "match": "dev@example.invalid",
+      "path": "tests/issue266_fixture.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 265,
+      "match": "test@example.invalid",
+      "path": "tests/test_aboyeur.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 5764,
+      "match": "test@example.invalid",
+      "path": "tests/test_aboyeur.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 5816,
+      "match": "test@example.invalid",
+      "path": "tests/test_aboyeur.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 6289,
+      "match": "test@example.invalid",
+      "path": "tests/test_aboyeur.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 6389,
+      "match": "test@example.invalid",
+      "path": "tests/test_aboyeur.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "f70a283c928dc6f8",
+      "line": 138,
+      "match": "person@example.test",
+      "path": "tests/test_acpx_adapter.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "f70a283c928dc6f8",
+      "line": 158,
+      "match": "person@example.test",
+      "path": "tests/test_acpx_adapter.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "f70a283c928dc6f8",
+      "line": 178,
+      "match": "person@example.test",
+      "path": "tests/test_acpx_adapter.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "c68a8f15f5caf547",
+      "line": 227,
+      "match": "bearer password=raw-password",
+      "path": "tests/test_acpx_adapter.py",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "795ba76f5b72cb40",
+      "line": 1867,
+      "match": "token = \"runtime-token-value-for-test\"",
+      "path": "tests/test_agents.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "776849af6842c7a0",
+      "line": 1935,
+      "match": "token = \"parent-token-value-for-test\"",
+      "path": "tests/test_agents.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "bbd06b51cf4dd626",
+      "line": 1957,
+      "match": "token = \"lane-token-value-for-test\"",
+      "path": "tests/test_agents.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "bbd06b51cf4dd626",
+      "line": 1989,
+      "match": "token = \"lane-token-value-for-test\"",
+      "path": "tests/test_agents.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "bbd06b51cf4dd626",
+      "line": 2237,
+      "match": "token = \"lane-token-value-for-test\"",
+      "path": "tests/test_agents.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "4d22d8a1f7c89117",
+      "line": 90,
+      "match": "/home/you/.local/bin",
+      "path": "tests/test_care_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "f2f45c84ca9d2137",
+      "line": 627,
+      "match": "/home/user/secret",
+      "path": "tests/test_causal_receipt.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "f9fd75dfc65c0ca5",
+      "line": 59,
+      "match": "dev@example.invalid",
+      "path": "tests/test_center_actions_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "7282e94b115be196",
+      "line": 391,
+      "match": "/home/private/project",
+      "path": "tests/test_center_agent_activity.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 19,
+      "match": "127.0.0.1",
+      "path": "tests/test_center_dashboard.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 254,
+      "match": "127.0.0.1",
+      "path": "tests/test_center_dashboard.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 192,
+      "match": "127.0.0.1",
+      "path": "tests/test_center_page_load.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "f9fd75dfc65c0ca5",
+      "line": 56,
+      "match": "dev@example.invalid",
+      "path": "tests/test_center_report_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 68,
+      "match": "127.0.0.1",
+      "path": "tests/test_center_serve.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 84,
+      "match": "127.0.0.1",
+      "path": "tests/test_center_serve.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 129,
+      "match": "127.0.0.1",
+      "path": "tests/test_center_serve.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 130,
+      "match": "localhost",
+      "path": "tests/test_center_serve.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 203,
+      "match": "localhost",
+      "path": "tests/test_center_serve.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 203,
+      "match": "127.0.0.1",
+      "path": "tests/test_center_serve.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 205,
+      "match": "localhost",
+      "path": "tests/test_center_serve.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "1935dbde6472db15",
+      "line": 21,
+      "match": "/home/user/repo",
+      "path": "tests/test_claude_cloud.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e1085966609308c8",
+      "line": 27,
+      "match": "/home/user/other",
+      "path": "tests/test_claude_cloud.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "1935dbde6472db15",
+      "line": 35,
+      "match": "/home/user/repo",
+      "path": "tests/test_claude_cloud.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e1085966609308c8",
+      "line": 43,
+      "match": "/home/user/other",
+      "path": "tests/test_claude_cloud.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "1935dbde6472db15",
+      "line": 68,
+      "match": "/home/user/repo",
+      "path": "tests/test_claude_cloud.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e1085966609308c8",
+      "line": 70,
+      "match": "/home/user/other",
+      "path": "tests/test_claude_cloud.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "dbf861bd0d4ff905",
+      "line": 37,
+      "match": "test@example.com",
+      "path": "tests/test_claude_hooks_runtime.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 94,
+      "match": "127.0.0.1",
+      "path": "tests/test_claude_hooks_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 2451,
+      "match": "test@example.invalid",
+      "path": "tests/test_claude_hooks_runtime.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "1cf2406018c1f4c1",
+      "line": 398,
+      "match": "/home/u/.claude/hooks/brigade-work-loop.py",
+      "path": "tests/test_claude_hooks_settings_merge.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "f2f45c84ca9d2137",
+      "line": 1125,
+      "match": "/home/user/secret",
+      "path": "tests/test_cloud_tracker.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "f2f45c84ca9d2137",
+      "line": 1154,
+      "match": "/home/user/secret",
+      "path": "tests/test_cloud_tracker.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "80ebe4791a5ea122",
+      "line": 15,
+      "match": "/home/alice",
+      "path": "tests/test_component_paths.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "80ebe4791a5ea122",
+      "line": 29,
+      "match": "/home/alice",
+      "path": "tests/test_component_paths.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "7424df8eccadfaf8",
+      "line": 33,
+      "match": "/home/alice/.local/share",
+      "path": "tests/test_component_paths.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "6ea656a8bd0de08b",
+      "line": 34,
+      "match": "/home/alice/.cache",
+      "path": "tests/test_component_paths.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "41461f95b2233444",
+      "line": 35,
+      "match": "/home/alice/.config",
+      "path": "tests/test_component_paths.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "80ebe4791a5ea122",
+      "line": 40,
+      "match": "/home/alice",
+      "path": "tests/test_component_paths.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "d5f503a34d14c6c5",
+      "line": 51,
+      "match": "/Users/alice",
+      "path": "tests/test_component_paths.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "638e619e7335147e",
+      "line": 54,
+      "match": "/Users/alice/Library/Application",
+      "path": "tests/test_component_paths.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "007e1bc01bce95fd",
+      "line": 55,
+      "match": "/Users/alice/Library/Caches",
+      "path": "tests/test_component_paths.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "d5f503a34d14c6c5",
+      "line": 60,
+      "match": "/Users/alice",
+      "path": "tests/test_component_paths.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "638e619e7335147e",
+      "line": 63,
+      "match": "/Users/alice/Library/Application",
+      "path": "tests/test_component_paths.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "007e1bc01bce95fd",
+      "line": 64,
+      "match": "/Users/alice/Library/Caches",
+      "path": "tests/test_component_paths.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "80ebe4791a5ea122",
+      "line": 115,
+      "match": "/home/alice",
+      "path": "tests/test_component_paths.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "f9fd75dfc65c0ca5",
+      "line": 27,
+      "match": "dev@example.invalid",
+      "path": "tests/test_context_learning_closeout_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "975371db4ea97076",
+      "line": 372,
+      "match": "planted-user@example.com",
+      "path": "tests/test_cursor_user_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 417,
+      "match": "127.0.0.1",
+      "path": "tests/test_cursor_user_cmd.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 466,
+      "match": "127.0.0.1",
+      "path": "tests/test_cursor_user_cmd.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "772f6cb6cf028565",
+      "line": 552,
+      "match": "dev@example.com",
+      "path": "tests/test_cursor_user_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 558,
+      "match": "127.0.0.1",
+      "path": "tests/test_cursor_user_cmd.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 223,
+      "match": "127.0.0.1",
+      "path": "tests/test_dashboard_code_graph.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 158,
+      "match": "test@example.invalid",
+      "path": "tests/test_error_refusal_copy.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "f9fd75dfc65c0ca5",
+      "line": 22,
+      "match": "dev@example.invalid",
+      "path": "tests/test_fleet_action_dispatch_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 38,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_claim_release.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 41,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_claim_release.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 407,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_claim_release.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 755,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_claim_release.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 30,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_claims.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 33,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_claims.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 151,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_claims.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 206,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_claims.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 569,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_claims.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 598,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_claims.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1598,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_claims.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1728,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_claims.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 25,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_client_hardening.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 43,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_client_hardening.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 48,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_client_hardening.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 49,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_client_hardening.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 50,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_client_hardening.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 51,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_client_hardening.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 284,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_cloud.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 752,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_command_deck.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 854,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_command_deck.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1136,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_command_deck.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 25,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_dashboard.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 28,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_dashboard.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 541,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_dashboard.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 551,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_dashboard.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "f6e29425c5ecef35",
+      "line": 592,
+      "match": "tailscale-user@example.invalid",
+      "path": "tests/test_fleet_dashboard.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 598,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_dashboard.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 601,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_dashboard.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 680,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_dashboard.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 686,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_dashboard.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "e711b37fba33af70",
+      "line": 689,
+      "match": "192.168.1.1",
+      "path": "tests/test_fleet_dashboard.py",
+      "rule_id": "private-ipv4"
+    },
+    {
+      "fingerprint": "e711b37fba33af70",
+      "line": 690,
+      "match": "192.168.1.1",
+      "path": "tests/test_fleet_dashboard.py",
+      "rule_id": "private-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 694,
+      "match": "localhost",
+      "path": "tests/test_fleet_dashboard.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 718,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_dashboard.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 728,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_dashboard.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 734,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_dashboard.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 429,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_export.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "300993443a2d2d0d",
+      "line": 510,
+      "match": "brigade@localhost",
+      "path": "tests/test_fleet_export.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1538,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_model_admission.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 2307,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_model_admission.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 116,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_model_roster.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 27,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_nodes.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 37,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_nodes.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 46,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_nodes.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 381,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_nodes.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 384,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_nodes.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 388,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_nodes.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 649,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_nodes.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 652,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_nodes.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 686,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_nodes.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 713,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_nodes.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 731,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_nodes.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 735,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_nodes.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 748,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_nodes.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 752,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_nodes.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 818,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_nodes.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "772f6cb6cf028565",
+      "line": 31,
+      "match": "dev@example.com",
+      "path": "tests/test_fleet_session_presence.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 303,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_session_presence.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 57,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 60,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 300,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 309,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 330,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 346,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 362,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 463,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 504,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 552,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 625,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 643,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 655,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 733,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 735,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 738,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 740,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 813,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 858,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 870,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 971,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1022,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1026,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1091,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1094,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1104,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1123,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1152,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1278,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1281,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1387,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1390,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1478,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1548,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1568,
+      "match": "127.0.0.1",
+      "path": "tests/test_fleet_sync.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 90,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_backup_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 236,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_backup_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 124,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_backup_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 132,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_backup_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 173,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_backup_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "7ad8664be6df440a",
+      "line": 806,
+      "match": "token = \"dedicated-build-feed-token\"",
+      "path": "tests/test_grokbot_build_feed.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "7ad8664be6df440a",
+      "line": 837,
+      "match": "token = \"dedicated-build-feed-token\"",
+      "path": "tests/test_grokbot_build_feed.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "8857b059f2a8dc73",
+      "line": 23,
+      "match": "/home/secret-cerebro",
+      "path": "tests/test_grokbot_cerebro.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 692,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_cerebro.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "b7c7653f8f2bca2c",
+      "line": 507,
+      "match": "token = \"dedicated-feed-token\"",
+      "path": "tests/test_grokbot_feed.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "9d681d53bf4768b0",
+      "line": 533,
+      "match": "token = \"dedicated-feed-token-must-not-leak\"",
+      "path": "tests/test_grokbot_feed.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 621,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_findings_relay.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 625,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_findings_relay.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 22,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_fleet_app.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 24,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_fleet_app.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 40,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_fleet_app.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 92,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_fleet_app.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 168,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_fleet_app.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 184,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_fleet_app.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 81,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_fleet_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "15b92b44f360ece1",
+      "line": 23,
+      "match": "pass@example.invalid",
+      "path": "tests/test_grokbot_fleet_normalize.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 48,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_fleet_runtime_config.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 102,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_fleet_runtime_config.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "a16f2f503b353732",
+      "line": 702,
+      "match": "token = \"direct-queue-listener-token\"",
+      "path": "tests/test_grokbot_jobs.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "f3c6861bd5984944",
+      "line": 737,
+      "match": "token = \"direct-queue-token-must-not-leak\"",
+      "path": "tests/test_grokbot_jobs.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "a43afc88e7ab1100",
+      "line": 767,
+      "match": "token = \"role-checked-listener-token\"",
+      "path": "tests/test_grokbot_jobs.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 71,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 965,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 974,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 974,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 999,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1003,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1007,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1008,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1025,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1068,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1110,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1144,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 1160,
+      "match": "localhost",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 1161,
+      "match": "localhost",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1162,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1163,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1169,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1193,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1362,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1442,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1505,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1671,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1703,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1915,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_mcp.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 66,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_client.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 75,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_client.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 114,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_client.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 189,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_client.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 193,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_client.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 194,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_client.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 32,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_contracts.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 56,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 58,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 59,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 134,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 184,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 195,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 196,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 197,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 198,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 199,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 200,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 215,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 241,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 31,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 31,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 32,
+      "match": "localhost",
+      "path": "tests/test_grokbot_n8n_runtime.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 32,
+      "match": "localhost",
+      "path": "tests/test_grokbot_n8n_runtime.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "e879f10e8d05bb39",
+      "line": 36,
+      "match": "pass@n8n.example.invalid",
+      "path": "tests/test_grokbot_n8n_runtime.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 124,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 124,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 136,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 137,
+      "match": "localhost",
+      "path": "tests/test_grokbot_n8n_runtime.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 138,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "7755630ff6eeb685",
+      "line": 138,
+      "match": "80@n8n.example.invalid",
+      "path": "tests/test_grokbot_n8n_runtime.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 155,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_n8n_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 14,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_client.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 28,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 142,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 228,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 280,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 345,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 399,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 424,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 74,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 114,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 145,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 146,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 156,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 158,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 169,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 170,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 232,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 244,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 299,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 300,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af4ffcb9f97b039f",
+      "line": 301,
+      "match": "localhost",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "localhost-bare"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 327,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 328,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 346,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 436,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_obsidian_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 155,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_operations_relay.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 162,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_operations_relay.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 177,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_operations_relay.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 327,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_operations_relay.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 335,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_operations_relay.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 336,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_operations_relay.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 337,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_operations_relay.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 490,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_operations_relay.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 102,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 190,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 201,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 532,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 649,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 656,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 662,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 667,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 807,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 828,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 849,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 877,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 903,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 927,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 943,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 963,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1021,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1057,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1119,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "af9401992aa25e15",
+      "line": 1198,
+      "match": "/home/secret/.config/systemd/user/brigade-grokbot-operator.service",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4aec1a04a5a081f6",
+      "line": 1209,
+      "match": "/home/secret",
+      "path": "tests/test_grokbot_ops.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 132,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 137,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 142,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 147,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 152,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 157,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 163,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 178,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 186,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 196,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 204,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 210,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 244,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 276,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 296,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 299,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 300,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 306,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 308,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 315,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 318,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 326,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 327,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 328,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 330,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 338,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 345,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 356,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 406,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 445,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 470,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 523,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 706,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 711,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 731,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 742,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 753,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 764,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 783,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 809,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 847,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 857,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 860,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 883,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 914,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 960,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1024,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1032,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1041,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1055,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1064,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1072,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1080,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1088,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1092,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1105,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1148,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1149,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1150,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1151,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1152,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1153,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1168,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1171,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1197,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1232,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1241,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1259,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1287,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1327,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1335,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1335,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1335,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1335,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1349,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1352,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_packs.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "54a19fb8784b27dd",
+      "line": 900,
+      "match": "token = \"dedicated-scout-feed-token\"",
+      "path": "tests/test_grokbot_scout_feed.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "54a19fb8784b27dd",
+      "line": 931,
+      "match": "token = \"dedicated-scout-feed-token\"",
+      "path": "tests/test_grokbot_scout_feed.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 64,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_wazuh_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 83,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_wazuh_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 108,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_wazuh_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 108,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_wazuh_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 108,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_wazuh_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 108,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_wazuh_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 108,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_wazuh_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 139,
+      "match": "127.0.0.1",
+      "path": "tests/test_grokbot_wazuh_lifecycle.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "0b6adb77ed76e6fe",
+      "line": 16,
+      "match": "SECRET = \"ghp_exampleNotARealToken0000000000000001\"",
+      "path": "tests/test_grokbot_wazuh_tools.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "1a7e355a64fbce93",
+      "line": 194,
+      "match": "/home/example/.config",
+      "path": "tests/test_harness_conformance_probe.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "3227633ec7a3d179",
+      "line": 198,
+      "match": "/home/example",
+      "path": "tests/test_harness_conformance_probe.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "3227633ec7a3d179",
+      "line": 201,
+      "match": "/home/example",
+      "path": "tests/test_harness_conformance_probe.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "04a935e262a89718",
+      "line": 263,
+      "match": "/Users/name/.ssh/id_rsa",
+      "path": "tests/test_harness_conformance_probe.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "145dbb737724766e",
+      "line": 268,
+      "match": "/Users/name",
+      "path": "tests/test_harness_conformance_probe.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "c383f08ae6eb07ca",
+      "line": 279,
+      "match": "/Users/Jane",
+      "path": "tests/test_harness_conformance_probe.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "60c391bdafa47435",
+      "line": 1065,
+      "match": "secret = \"fake-credential-value\"",
+      "path": "tests/test_harness_conformance_probe.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 338,
+      "match": "127.0.0.1",
+      "path": "tests/test_jules_cloud.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 339,
+      "match": "127.0.0.1",
+      "path": "tests/test_jules_cloud.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 673,
+      "match": "127.0.0.1",
+      "path": "tests/test_managed.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 747,
+      "match": "127.0.0.1",
+      "path": "tests/test_managed.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "725a30909ad1c2ab",
+      "line": 872,
+      "match": "secret = \"AKIA-DEADFAKE-SECRET-KEY-DO-NOT-LEAK\"",
+      "path": "tests/test_managed.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 901,
+      "match": "127.0.0.1",
+      "path": "tests/test_managed.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 926,
+      "match": "127.0.0.1",
+      "path": "tests/test_managed.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 319,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_adapters.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 320,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_adapters.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 336,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_adapters.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 338,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_adapters.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 381,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_adapters.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 383,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_adapters.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 329,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 333,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 413,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 416,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_runtime.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "953d02577a4923e1",
+      "line": 600,
+      "match": "secret = \"do-not-write-this-value\"",
+      "path": "tests/test_mcp_runtime.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 25,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_url_only_import.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 27,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_url_only_import.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 35,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_url_only_import.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 38,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_url_only_import.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 45,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_url_only_import.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 47,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_url_only_import.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 53,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_url_only_import.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 56,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_url_only_import.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 61,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_url_only_import.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 63,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_url_only_import.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 97,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_url_only_import.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 124,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_url_only_import.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 131,
+      "match": "127.0.0.1",
+      "path": "tests/test_mcp_url_only_import.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "5914af6a66cf1df0",
+      "line": 672,
+      "match": "t@example.invalid",
+      "path": "tests/test_memory_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "5914af6a66cf1df0",
+      "line": 720,
+      "match": "t@example.invalid",
+      "path": "tests/test_memory_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "f0991cfc69b8a30b",
+      "line": 743,
+      "match": "/home/secret/refresh.sh",
+      "path": "tests/test_memory_inventory_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4aec1a04a5a081f6",
+      "line": 774,
+      "match": "/home/secret",
+      "path": "tests/test_memory_inventory_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4aec1a04a5a081f6",
+      "line": 867,
+      "match": "/home/secret",
+      "path": "tests/test_memory_inventory_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4aec1a04a5a081f6",
+      "line": 883,
+      "match": "/home/secret",
+      "path": "tests/test_memory_inventory_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "fd07fd60cfbdb8c8",
+      "line": 928,
+      "match": "/home/leak/action",
+      "path": "tests/test_memory_inventory_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4d235ea4995dfb30",
+      "line": 938,
+      "match": "/home/leak",
+      "path": "tests/test_memory_inventory_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "2e61bc7362182b13",
+      "line": 853,
+      "match": "/home/operator/.secret-adapter/memory-handoffs",
+      "path": "tests/test_memory_topology_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "41db8477f2f3121a",
+      "line": 1688,
+      "match": "/home/operator/.secret-a/memory-handoffs",
+      "path": "tests/test_memory_topology_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "41db8477f2f3121a",
+      "line": 1703,
+      "match": "/home/operator/.secret-a/memory-handoffs",
+      "path": "tests/test_memory_topology_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 29,
+      "match": "127.0.0.1",
+      "path": "tests/test_pantry_cmd.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 67,
+      "match": "127.0.0.1",
+      "path": "tests/test_pantry_cmd.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 101,
+      "match": "127.0.0.1",
+      "path": "tests/test_pantry_cmd.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "725a30909ad1c2ab",
+      "line": 331,
+      "match": "secret = \"AKIA-DEADFAKE-SECRET-KEY-DO-NOT-LEAK\"",
+      "path": "tests/test_pantry_cmd.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 376,
+      "match": "127.0.0.1",
+      "path": "tests/test_pantry_cmd.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "725a30909ad1c2ab",
+      "line": 144,
+      "match": "secret = \"AKIA-DEADFAKE-SECRET-KEY-DO-NOT-LEAK\"",
+      "path": "tests/test_pantry_compat.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "51c7fdc47610f6a6",
+      "line": 156,
+      "match": "/home/user/private",
+      "path": "tests/test_pantry_compat.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "51c7fdc47610f6a6",
+      "line": 162,
+      "match": "/home/user/private",
+      "path": "tests/test_pantry_compat.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "51c7fdc47610f6a6",
+      "line": 163,
+      "match": "/home/user/private",
+      "path": "tests/test_pantry_compat.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "51c7fdc47610f6a6",
+      "line": 173,
+      "match": "/home/user/private",
+      "path": "tests/test_pantry_compat.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "51c7fdc47610f6a6",
+      "line": 181,
+      "match": "/home/user/private",
+      "path": "tests/test_pantry_compat.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "51c7fdc47610f6a6",
+      "line": 182,
+      "match": "/home/user/private",
+      "path": "tests/test_pantry_compat.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "51c7fdc47610f6a6",
+      "line": 266,
+      "match": "/home/user/private",
+      "path": "tests/test_pantry_compat.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "51c7fdc47610f6a6",
+      "line": 274,
+      "match": "/home/user/private",
+      "path": "tests/test_pantry_compat.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "51c7fdc47610f6a6",
+      "line": 275,
+      "match": "/home/user/private",
+      "path": "tests/test_pantry_compat.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 203,
+      "match": "127.0.0.1",
+      "path": "tests/test_pi_mcp_bridge.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 207,
+      "match": "127.0.0.1",
+      "path": "tests/test_pi_mcp_bridge.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "ab65dfb386a5f57b",
+      "line": 89,
+      "match": "t@example.com",
+      "path": "tests/test_pre_push_hook.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "ab65dfb386a5f57b",
+      "line": 91,
+      "match": "t@example.com",
+      "path": "tests/test_pre_push_hook.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "ab65dfb386a5f57b",
+      "line": 168,
+      "match": "t@example.com",
+      "path": "tests/test_pre_push_hook.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "ab65dfb386a5f57b",
+      "line": 434,
+      "match": "t@example.com",
+      "path": "tests/test_pre_push_hook.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "f9fd75dfc65c0ca5",
+      "line": 23,
+      "match": "dev@example.invalid",
+      "path": "tests/test_privacy_regression.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "772f6cb6cf028565",
+      "line": 208,
+      "match": "dev@example.com",
+      "path": "tests/test_producer_run_id.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "32f96832e73454f3",
+      "line": 307,
+      "match": "Bearer tok_live_secret_value",
+      "path": "tests/test_projection_kernel.py",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "f2f45c84ca9d2137",
+      "line": 299,
+      "match": "/home/user/secret",
+      "path": "tests/test_provenance_envelope.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "f2f45c84ca9d2137",
+      "line": 302,
+      "match": "/home/user/secret",
+      "path": "tests/test_provenance_envelope.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "9f432e1d89461280",
+      "line": 376,
+      "match": "ops@example.test",
+      "path": "tests/test_provenance_envelope.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "95d95eb9e204068d",
+      "line": 138,
+      "match": "Bearer ghs_example_token_value",
+      "path": "tests/test_published_artifact_acceptance.py",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "95d95eb9e204068d",
+      "line": 147,
+      "match": "Bearer ghs_example_token_value",
+      "path": "tests/test_published_artifact_acceptance.py",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 172,
+      "match": "127.0.0.1",
+      "path": "tests/test_published_artifact_acceptance.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 187,
+      "match": "127.0.0.1",
+      "path": "tests/test_published_artifact_acceptance.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 193,
+      "match": "127.0.0.1",
+      "path": "tests/test_published_artifact_acceptance.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "95d95eb9e204068d",
+      "line": 194,
+      "match": "Bearer ghs_example_token_value",
+      "path": "tests/test_published_artifact_acceptance.py",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "be80ada6f8654924",
+      "line": 304,
+      "match": "secret = \"ghs_super_secret_example_token\"",
+      "path": "tests/test_published_artifact_acceptance.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "dbf861bd0d4ff905",
+      "line": 21,
+      "match": "test@example.com",
+      "path": "tests/test_receipt_schema_audit.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 18,
+      "match": "test@example.invalid",
+      "path": "tests/test_receipts_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "4722cd09fe0b3abd",
+      "line": 25,
+      "match": "/home/private/repo",
+      "path": "tests/test_release_ci_health_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e40b3cf0cd8662b4",
+      "line": 36,
+      "match": "/home/private",
+      "path": "tests/test_release_ci_health_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "f9fd75dfc65c0ca5",
+      "line": 47,
+      "match": "dev@example.invalid",
+      "path": "tests/test_release_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "0e31fd325dc20fc0",
+      "line": 166,
+      "match": "192.168.99.10",
+      "path": "tests/test_release_cmd.py",
+      "rule_id": "private-ipv4"
+    },
+    {
+      "fingerprint": "31bc3d47367fa0f2",
+      "line": 886,
+      "match": "codex@openai.com",
+      "path": "tests/test_release_cmd.py",
+      "rule_id": "email"
+    },
+    {
+      "fingerprint": "31bc3d47367fa0f2",
+      "line": 909,
+      "match": "codex@openai.com",
+      "path": "tests/test_release_cmd.py",
+      "rule_id": "email"
+    },
+    {
+      "fingerprint": "31bc3d47367fa0f2",
+      "line": 938,
+      "match": "codex@openai.com",
+      "path": "tests/test_release_cmd.py",
+      "rule_id": "email"
+    },
+    {
+      "fingerprint": "f9fd75dfc65c0ca5",
+      "line": 23,
+      "match": "dev@example.invalid",
+      "path": "tests/test_release_train_evidence_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "f9fd75dfc65c0ca5",
+      "line": 48,
+      "match": "dev@example.invalid",
+      "path": "tests/test_report_review_closeout_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "f9fd75dfc65c0ca5",
+      "line": 22,
+      "match": "dev@example.invalid",
+      "path": "tests/test_repos_actions_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "f9fd75dfc65c0ca5",
+      "line": 11,
+      "match": "dev@example.invalid",
+      "path": "tests/test_repos_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "f9fd75dfc65c0ca5",
+      "line": 22,
+      "match": "dev@example.invalid",
+      "path": "tests/test_repos_release_train_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "f9fd75dfc65c0ca5",
+      "line": 25,
+      "match": "dev@example.invalid",
+      "path": "tests/test_repos_sweep_health_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "31f201e6fde9ffa7",
+      "line": 28,
+      "match": "/home/oracle-user/.config/browser",
+      "path": "tests/test_research_acceptance.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "f63f5b94b31a2ba3",
+      "line": 283,
+      "match": "/home/oracle-user",
+      "path": "tests/test_research_acceptance.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "f63f5b94b31a2ba3",
+      "line": 284,
+      "match": "/home/oracle-user",
+      "path": "tests/test_research_acceptance.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "31f201e6fde9ffa7",
+      "line": 285,
+      "match": "/home/oracle-user/.config/browser",
+      "path": "tests/test_research_acceptance.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "5b2766b40b68f208",
+      "line": 1997,
+      "match": "/home/alice/.mozilla/firefox/research",
+      "path": "tests/test_research_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e7baca90d14702b3",
+      "line": 2003,
+      "match": "/home/alice/project",
+      "path": "tests/test_research_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "80ebe4791a5ea122",
+      "line": 2038,
+      "match": "/home/alice",
+      "path": "tests/test_research_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "80ebe4791a5ea122",
+      "line": 2090,
+      "match": "/home/alice",
+      "path": "tests/test_research_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "aa92ab53d4d5c326",
+      "line": 3302,
+      "match": "/home/alice/creds.",
+      "path": "tests/test_research_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "85a39defe15259c7",
+      "line": 3328,
+      "match": "hunter2@api.example.com",
+      "path": "tests/test_research_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "80ebe4791a5ea122",
+      "line": 3444,
+      "match": "/home/alice",
+      "path": "tests/test_research_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "00fedbeb67624790",
+      "line": 78,
+      "match": "/home/alice/.config/browser",
+      "path": "tests/test_research_doctor.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "f0692579fcd91307",
+      "line": 396,
+      "match": "/home/alice/.mozilla/profiles/research",
+      "path": "tests/test_research_doctor.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "faba185d0e14259a",
+      "line": 399,
+      "match": "/home/alice/bin/codex",
+      "path": "tests/test_research_doctor.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "80ebe4791a5ea122",
+      "line": 408,
+      "match": "/home/alice",
+      "path": "tests/test_research_doctor.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "00fedbeb67624790",
+      "line": 550,
+      "match": "/home/alice/.config/browser",
+      "path": "tests/test_research_doctor.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "95db1946e5e4ffee",
+      "line": 363,
+      "match": "secret = \"SUPER-SECRET-PROMPT-BODY-do-not-leak\"",
+      "path": "tests/test_run_audit.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 1313,
+      "match": "test@example.invalid",
+      "path": "tests/test_run_cli.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 577,
+      "match": "127.0.0.1",
+      "path": "tests/test_run_control.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "1f22ebd2e6d4d22e",
+      "line": 566,
+      "match": "secret = \"super-secret-steering-instructions\"",
+      "path": "tests/test_run_events_cursor_control.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "0f8b99480afa0031",
+      "line": 698,
+      "match": "secret = \"provider-secret-body-7f3a9c\"",
+      "path": "tests/test_run_events_cursor_control.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 54,
+      "match": "test@example.invalid",
+      "path": "tests/test_run_lifecycle.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "36fc4a4444197e25",
+      "line": 22,
+      "match": "/home/operator/roster.toml",
+      "path": "tests/test_run_preference.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 55,
+      "match": "test@example.invalid",
+      "path": "tests/test_run_reap.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "4a032530a327ab73",
+      "line": 20,
+      "match": "SECRET = \"secret-value-that-must-not-survive\"",
+      "path": "tests/test_run_redaction.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 42,
+      "match": "test@example.invalid",
+      "path": "tests/test_run_shadow.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "bbd06b51cf4dd626",
+      "line": 72,
+      "match": "token = \"lane-token-value-for-test\"",
+      "path": "tests/test_run_transport_env.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 28,
+      "match": "test@example.invalid",
+      "path": "tests/test_runguard.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "c41a71284979bdf0",
+      "line": 1141,
+      "match": "secret = \"sk-super-secret-value-do-not-leak\"",
+      "path": "tests/test_runguard.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "c41a71284979bdf0",
+      "line": 1422,
+      "match": "secret = \"sk-super-secret-value-do-not-leak\"",
+      "path": "tests/test_runguard.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "c8db51f0ae090b1f",
+      "line": 107,
+      "match": "/home/someuser/project/graphtrail-before.db",
+      "path": "tests/test_runs_diff.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4517b81a739d4cdf",
+      "line": 108,
+      "match": "/home/someuser/project/.graphtrail/graphtrail.db",
+      "path": "tests/test_runs_diff.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "2134deafbcccdbdd",
+      "line": 441,
+      "match": "/home/someuser",
+      "path": "tests/test_runs_diff.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "870d2a96e05b1b05",
+      "line": 21,
+      "match": "/home/example-user/.config/brigade/secret.env",
+      "path": "tests/test_runs_json_contracts.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "2134deafbcccdbdd",
+      "line": 22,
+      "match": "/home/someuser",
+      "path": "tests/test_runs_json_contracts.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e92b0961cd887a84",
+      "line": 24,
+      "match": "/Users/win-user",
+      "path": "tests/test_runs_json_contracts.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "a03bc91308ad8519",
+      "line": 26,
+      "match": "/Users/John",
+      "path": "tests/test_runs_json_contracts.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "4cdc7794f10bc15a",
+      "line": 27,
+      "match": "/home/o",
+      "path": "tests/test_runs_json_contracts.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 371,
+      "match": "127.0.0.1",
+      "path": "tests/test_runs_serve.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 373,
+      "match": "127.0.0.1",
+      "path": "tests/test_runs_serve.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 400,
+      "match": "127.0.0.1",
+      "path": "tests/test_runs_serve.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 39,
+      "match": "test@example.invalid",
+      "path": "tests/test_scorecard_reconcile.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "23b79f836ede07f5",
+      "line": 97,
+      "match": "pass@example.test",
+      "path": "tests/test_seat_health.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "ea543bd8987be144",
+      "line": 161,
+      "match": "api_key = \"sk-live-abcd1234efgh5678\"",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "c5f0317b4e84b5a4",
+      "line": 163,
+      "match": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "jwt-token"
+    },
+    {
+      "fingerprint": "7e25071ed92fce98",
+      "line": 165,
+      "match": "token=abc123abc123abc123abc123abc123",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "16eb83303f62e5e6",
+      "line": 183,
+      "match": "api_key = \"os.environ.sk-live-abcd1234efgh5678\"",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "8e0b405d26cec1f5",
+      "line": 184,
+      "match": "token = 'secrets.token_hex_abcd1234efgh5678'",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "f6e047b21d9d7ceb",
+      "line": 192,
+      "match": "api_key=\"sk-live-abcd1234efgh5678\"",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "ea543bd8987be144",
+      "line": 193,
+      "match": "api_key = \"sk-live-abcd1234efgh5678\"",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "7e25071ed92fce98",
+      "line": 200,
+      "match": "token=abc123abc123abc123abc123abc123",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "ea543bd8987be144",
+      "line": 326,
+      "match": "api_key = \"sk-live-abcd1234efgh5678\"",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "3882aa95f795cb96",
+      "line": 370,
+      "match": "TOKEN=abc123abc123abc123abc123abc123",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "3882aa95f795cb96",
+      "line": 410,
+      "match": "TOKEN=abc123abc123abc123abc123abc123",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "45e995744d9a55f8",
+      "line": 681,
+      "match": "/home/operator/private-handoffs",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e7cd8eafc58c4124",
+      "line": 701,
+      "match": "/Users/operator/brigade",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "612417f708b0bd03",
+      "line": 746,
+      "match": "localhost:11434",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "localhost-port"
+    },
+    {
+      "fingerprint": "e7cd8eafc58c4124",
+      "line": 811,
+      "match": "/Users/operator/brigade",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "0fdff83c9c55c144",
+      "line": 834,
+      "match": "/Users/operator/private",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "59bc03a599e12f26",
+      "line": 853,
+      "match": "/Users/operator/lockfile-root",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e7cd8eafc58c4124",
+      "line": 861,
+      "match": "/Users/operator/brigade",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "bd4593e1906b1d68",
+      "line": 882,
+      "match": "/Users/operator/private-worktree",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "6fc2174f5c5a7607",
+      "line": 3110,
+      "match": "token = \"ghp_abcdefghijklmnopqrstuvwxyz0123456789\"",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "938c64a4d36794de",
+      "line": 3111,
+      "match": "/home/privateuser/.openclaw/workspace/secrets.env",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "f9fd75dfc65c0ca5",
+      "line": 3206,
+      "match": "dev@example.invalid",
+      "path": "tests/test_security_cmd.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "b79dad0e8ef07603",
+      "line": 34,
+      "match": "/home/private/operator",
+      "path": "tests/test_security_template_audit_cmd.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "99a92ab4857fbb57",
+      "line": 16,
+      "match": "size-ratchet@example.invalid",
+      "path": "tests/test_size_ratchet_baseline.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "99a92ab4857fbb57",
+      "line": 18,
+      "match": "size-ratchet@example.invalid",
+      "path": "tests/test_size_ratchet_baseline.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "e28b49f1ef3638ec",
+      "line": 198,
+      "match": "/home/example/private",
+      "path": "tests/test_telemetry_export.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "3227633ec7a3d179",
+      "line": 210,
+      "match": "/home/example",
+      "path": "tests/test_telemetry_export.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "b5cb012b77768832",
+      "line": 268,
+      "match": "Bearer github-token-example",
+      "path": "tests/test_update_cmd.py",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "3482bd7c9cb47b49",
+      "line": 286,
+      "match": "secret = \"rejected-token-example\"",
+      "path": "tests/test_update_cmd.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "3482bd7c9cb47b49",
+      "line": 306,
+      "match": "secret = \"rejected-token-example\"",
+      "path": "tests/test_update_cmd.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 24,
+      "match": "test@example.invalid",
+      "path": "tests/test_verify_trial.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 40,
+      "match": "test@example.invalid",
+      "path": "tests/test_verify_trial.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 192,
+      "match": "test@example.invalid",
+      "path": "tests/test_verify_trial.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "9f432e1d89461280",
+      "line": 3884,
+      "match": "ops@example.test",
+      "path": "tests/test_work_cmd_imports.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 1369,
+      "match": "test@example.invalid",
+      "path": "tests/test_work_cmd_services.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 1962,
+      "match": "127.0.0.1",
+      "path": "tests/test_work_cmd_session.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 2005,
+      "match": "127.0.0.1",
+      "path": "tests/test_work_cmd_session.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 2032,
+      "match": "127.0.0.1",
+      "path": "tests/test_work_cmd_session.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 2117,
+      "match": "127.0.0.1",
+      "path": "tests/test_work_cmd_session.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 2130,
+      "match": "127.0.0.1",
+      "path": "tests/test_work_cmd_session.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 2148,
+      "match": "127.0.0.1",
+      "path": "tests/test_work_cmd_session.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 33,
+      "match": "test@example.invalid",
+      "path": "tests/test_work_cmd_verification.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 141,
+      "match": "127.0.0.1",
+      "path": "tests/test_work_cmd_verification.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 153,
+      "match": "127.0.0.1",
+      "path": "tests/test_work_cmd_verification.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 157,
+      "match": "127.0.0.1",
+      "path": "tests/test_work_cmd_verification.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 1209,
+      "match": "test@example.invalid",
+      "path": "tests/test_work_cmd_verification.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 2927,
+      "match": "test@example.invalid",
+      "path": "tests/test_work_cmd_verification.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "85d92623d42740bd",
+      "line": 191,
+      "match": "test@example.invalid",
+      "path": "tests/test_work_cmd_verify_ranking.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "9b19125f5ca55ad2",
+      "line": 1073,
+      "match": "/home/operator/private/repo",
+      "path": "tests/test_work_import_provenance_stamp.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "9b19125f5ca55ad2",
+      "line": 1074,
+      "match": "/home/operator/private/repo",
+      "path": "tests/test_work_import_provenance_stamp.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "68070c551a4a101b",
+      "line": 2094,
+      "match": "/home/operator/private.md",
+      "path": "tests/test_work_import_provenance_stamp.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "68070c551a4a101b",
+      "line": 2095,
+      "match": "/home/operator/private.md",
+      "path": "tests/test_work_import_provenance_stamp.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "863c952aa6f7683e",
+      "line": 445,
+      "match": "/home/example-user",
+      "path": "tests/test_work_run_archive.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "863c952aa6f7683e",
+      "line": 460,
+      "match": "/home/example-user",
+      "path": "tests/test_work_run_archive.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "08e4444ea4c2f33b",
+      "line": 498,
+      "match": "/home/demo/.ssh/id_rsa",
+      "path": "tests/test_work_run_archive.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "863c952aa6f7683e",
+      "line": 584,
+      "match": "/home/example-user",
+      "path": "tests/test_work_run_archive.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "863c952aa6f7683e",
+      "line": 600,
+      "match": "/home/example-user",
+      "path": "tests/test_work_run_archive.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 630,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "tests/test_work_run_archive.py",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "84937a3f3351738f",
+      "line": 631,
+      "match": "/home/example-user/project",
+      "path": "tests/test_work_run_archive.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 659,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "tests/test_work_run_archive.py",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "84937a3f3351738f",
+      "line": 660,
+      "match": "/home/example-user/project",
+      "path": "tests/test_work_run_archive.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 725,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "tests/test_work_run_archive.py",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "84937a3f3351738f",
+      "line": 727,
+      "match": "/home/example-user/project",
+      "path": "tests/test_work_run_archive.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 758,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "tests/test_work_run_archive.py",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 820,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "tests/test_work_run_archive.py",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "863c952aa6f7683e",
+      "line": 153,
+      "match": "/home/example-user",
+      "path": "tests/test_worker_events.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "e5735c04f59ca226",
+      "line": 289,
+      "match": "Bearer sk-live-EXAMPLESECRETVALUE99",
+      "path": "tests/test_worker_events.py",
+      "rule_id": "bearer-token"
+    },
+    {
+      "fingerprint": "392c0e5446def541",
+      "line": 241,
+      "match": "fake-password@fake.example.test",
+      "path": "tests/test_worker_failure.py",
+      "rule_id": "example-email-reserved"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 23,
+      "match": "127.0.0.1",
+      "path": "tests/test_worklore_client.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 241,
+      "match": "127.0.0.1",
+      "path": "tests/test_worklore_client.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 316,
+      "match": "127.0.0.1",
+      "path": "tests/test_worklore_client.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "46697159baa0723a",
+      "line": 489,
+      "match": "127.0.0.1",
+      "path": "tests/test_worklore_client.py",
+      "rule_id": "loopback-ipv4"
+    },
+    {
+      "fingerprint": "77dedaf3aac106e7",
+      "line": 489,
+      "match": "localhost:8787",
+      "path": "tests/test_worklore_client.py",
+      "rule_id": "localhost-port"
+    }
+  ],
+  "version": 1
+}

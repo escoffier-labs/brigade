@@ -142,7 +142,7 @@ def test_apply_writes_one_quoted_handoff_and_a_private_marker(tmp_path: Path):
     assert "report_text" not in payload
 
 
-def test_default_apply_delivers_directly_to_rocinante_review_inbox(tmp_path: Path):
+def test_default_apply_delivers_directly_to_owner_review_inbox(tmp_path: Path):
     queue = tmp_path / "queue"
     owner = tmp_path / "owner"
     queue.mkdir()

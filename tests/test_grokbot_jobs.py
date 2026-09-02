@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from multiprocessing import Pipe, Process
 from pathlib import Path
@@ -31,6 +33,21 @@ def _spec() -> dict[str, object]:
         "artifact": {"kind": "draft-pr"},
         "timeout_seconds": 900,
     }
+
+
+def test_grokbot_jobs_expiry_imports_before_grokbot_jobs():
+    """Regression for the circular import introduced by PR #1387."""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import brigade.grokbot_jobs_expiry; import brigade.grokbot_jobs;",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def _claim_in_process(target: str, job_id: str, lease_id: str, connection) -> None:
@@ -110,7 +127,7 @@ def _leave_orphan_report_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         with pytest.raises(grokbot_jobs.GrokbotJobError, match="^unsafe-storage$"):
             grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
     assert _snapshot_path(tmp_path, job_id).is_file()
-    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "running"
+    assert grokbot_jobs.get_job(tmp_path, job_id, now=NOW)["state"] == "running"
     return job_id
 
 
@@ -119,7 +136,7 @@ def _job_json(tmp_path: Path, job_id: str) -> str:
 
 
 def _assert_surfaces_omit_report_text(tmp_path: Path, job_id: str, text: str = REPORT_TEXT) -> None:
-    dumped_status = json.dumps(grokbot_jobs.status(tmp_path, job_id), sort_keys=True)
+    dumped_status = json.dumps(grokbot_jobs.status(tmp_path, job_id, now=NOW), sort_keys=True)
     dumped_tracker = json.dumps(grokbot_jobs.tracker_rows(tmp_path), sort_keys=True)
     raw_job = _job_json(tmp_path, job_id)
     assert text not in dumped_status
@@ -137,7 +154,7 @@ def test_enqueue_returns_opaque_handle_and_private_projection(tmp_path: Path):
     assert handle["job_id"].startswith("grokbot-")
     assert len(handle["job_id"]) == len("grokbot-") + 24
 
-    job = grokbot_jobs.get_job(tmp_path, handle["job_id"])
+    job = grokbot_jobs.get_job(tmp_path, handle["job_id"], now=NOW)
     assert job["job_id"] == handle["job_id"]
     assert job["label"] == "Add queue foundation"
     assert job["role"] == "implementation-worker"
@@ -198,7 +215,7 @@ def test_status_returns_only_safe_projections(tmp_path: Path):
     scout.update({"label": "Scout", "role": "repository-scout", "artifact": {"kind": "report"}})
     second = grokbot_jobs.enqueue(tmp_path, scout, "request-2", now=NOW)
 
-    result = grokbot_jobs.status(tmp_path)
+    result = grokbot_jobs.status(tmp_path, now=NOW)
 
     assert [job["job_id"] for job in result["jobs"]] == sorted([first["job_id"], second["job_id"]])
     for job in result["jobs"]:
@@ -622,6 +639,91 @@ def test_posix_storage_write_stays_anchored_when_visible_directory_is_replaced(t
 
     assert json.loads((moved / "probe.json").read_text()) == {"anchored": True}
     assert not (outside / "probe.json").exists()
+
+
+def test_status_expires_a_job_past_its_timeout_without_an_operator_sweep(tmp_path: Path):
+    """#1353: a read is a deadline check, on the hub and on local storage alike."""
+    job_id = _enqueue(tmp_path)
+    late = NOW + timedelta(seconds=901)
+
+    assert grokbot_jobs.status(tmp_path, job_id, now=late)["state"] == "expired"
+    assert grokbot_jobs.status(tmp_path)["jobs"][0]["state"] == "expired"
+
+
+def test_status_reads_each_job_file_once(tmp_path: Path, monkeypatch):
+    """All jobs are expired and projected in a single traversal."""
+    first = _enqueue(tmp_path)
+    second_id = grokbot_jobs.enqueue(tmp_path, _spec(), "request-2", now=NOW)["job_id"]
+
+    original_read = grokbot_jobs._read_json_file
+    reads: list[str] = []
+
+    def _counting_read(directory, name, *, missing_ok=False):
+        reads.append(name)
+        return original_read(directory, name, missing_ok=missing_ok)
+
+    monkeypatch.setattr(grokbot_jobs, "_read_json_file", _counting_read)
+    result = grokbot_jobs.status(tmp_path, now=NOW)
+
+    assert {job["job_id"] for job in result["jobs"]} == {first, second_id}
+    assert len(reads) == 2
+    assert len(set(reads)) == 2
+
+
+def test_status_leaves_a_job_inside_its_timeout_queued(tmp_path: Path):
+    job_id = _enqueue(tmp_path)
+
+    assert grokbot_jobs.status(tmp_path, job_id, now=NOW + timedelta(seconds=899))["state"] == "queued"
+
+
+def test_status_expires_a_running_job_past_its_own_deadline(tmp_path: Path):
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 30, now=NOW)
+    grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "running", now=NOW)
+
+    assert grokbot_jobs.status(tmp_path, job_id, now=NOW + timedelta(seconds=901))["state"] == "expired"
+
+
+def test_a_read_does_not_end_a_job_whose_lease_alone_lapsed(tmp_path: Path):
+    """#1383 composed with #1353: a dead lease is not a dead job."""
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 30, now=NOW)
+    lapsed = NOW + timedelta(seconds=31)
+
+    assert grokbot_jobs.status(tmp_path, job_id, now=lapsed)["state"] == "claimed"
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^lease-expired$"):
+        grokbot_jobs.renew(tmp_path, job_id, "bot-a", "lease-a", 60, now=lapsed)
+    assert grokbot_jobs.get_job(tmp_path, job_id, now=lapsed)["state"] == "claimed"
+
+
+def test_a_lease_call_past_the_job_deadline_expires_and_still_says_lease_expired(tmp_path: Path):
+    """The row is terminalized, but the holder hears the reason it can act on."""
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 300, now=NOW)
+    late = NOW + timedelta(seconds=901)
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^lease-expired$"):
+        grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "failed", now=late)
+    assert grokbot_jobs.get_job(tmp_path, job_id, now=late)["state"] == "expired"
+
+
+def test_expire_still_terminalizes_a_job_whose_lease_alone_lapsed(tmp_path: Path):
+    """An explicit expire keeps its own contract: a lost lease ends the job."""
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 30, now=NOW)
+
+    assert grokbot_jobs.expire(tmp_path, job_id, now=NOW + timedelta(seconds=31))["state"] == "expired"
+
+
+def test_claim_past_the_deadline_expires_the_job_and_stays_job_expired(tmp_path: Path):
+    job_id = _enqueue(tmp_path)
+    late = NOW + timedelta(seconds=901)
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^job-expired$"):
+        grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=late)
+    assert grokbot_jobs.get_job(tmp_path, job_id, now=late)["state"] == "expired"
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^job-expired$"):
+        grokbot_jobs.claim(tmp_path, job_id, "bot-b", "lease-b", 60, now=late)
 
 
 def test_expiry_never_requeues_and_late_completion_is_rejected(tmp_path: Path):
@@ -1508,7 +1610,7 @@ def test_complete_report_writes_snapshot_before_the_terminal_record(tmp_path: Pa
 
     assert REPORT_TEXT not in str(exc.value)
     assert _snapshot_path(tmp_path, job_id).read_text(encoding="utf-8") == REPORT_TEXT
-    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "running"
+    assert grokbot_jobs.get_job(tmp_path, job_id, now=NOW)["state"] == "running"
 
 
 def test_complete_report_rejects_digest_mismatch_without_writing(tmp_path: Path):
@@ -1522,7 +1624,7 @@ def test_complete_report_rejects_digest_mismatch_without_writing(tmp_path: Path)
     assert exc.value.reason == "digest-mismatch"
     assert REPORT_TEXT not in str(exc.value)
     assert not _snapshot_path(tmp_path, job_id).exists()
-    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "running"
+    assert grokbot_jobs.get_job(tmp_path, job_id, now=NOW)["state"] == "running"
     _assert_surfaces_omit_report_text(tmp_path, job_id)
 
 
@@ -1546,7 +1648,7 @@ def test_complete_report_rejects_empty_and_oversize_utf8(tmp_path: Path, text: s
     if text:
         assert text not in str(exc.value)
     assert not _snapshot_path(tmp_path, job_id).exists()
-    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "running"
+    assert grokbot_jobs.get_job(tmp_path, job_id, now=NOW)["state"] == "running"
 
 
 def test_complete_report_accepts_max_utf8_bytes(tmp_path: Path):
@@ -1776,7 +1878,7 @@ def test_orphan_cleanup_failure_does_not_terminalize_job(tmp_path: Path, monkeyp
     with pytest.raises(grokbot_jobs.GrokbotJobError, match="^unsafe-storage$"):
         grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "failed", now=NOW)
 
-    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "running"
+    assert grokbot_jobs.get_job(tmp_path, job_id, now=NOW)["state"] == "running"
     assert _snapshot_path(tmp_path, job_id).is_file()
 
 

@@ -7,7 +7,12 @@ This is outcome-based skill scoring, promotion, and rollback from verification e
 ## Workflow
 
 ```bash
+# audit-only evidence: a receipt a human can read, never a scoreable trial
 brigade work verify run --target . --command "pytest -q" --capture brigade-work
+
+# scoreable evidence: verifier-owned checks bound to one artifact
+brigade work verify run --target . --manifest <manifest-id> --capture <artifact-id>
+
 # or, after a verify without --capture:
 brigade outcome capture brigade-work --run-id latest --kind skill
 
@@ -27,6 +32,28 @@ brigade outcome explain <skill-or-card-id> --target .
 | `outcome explain` | Print the signal trail behind a score or reconcile decision |
 
 Capture against an id that actually guided the work. Invented skill names pollute the ranking. Capture failures too: a `-1` is how a bad skill gets rolled back. Ledger files live under `memory/outcome/` as plain JSON and markdown.
+
+## Which receipts are scoreable
+
+`--capture` does not make a receipt scoreable. Scorecard eligibility is projected only from a verifier-authored `subject_binding`, and only a tracked manifest under `verify/manifests/` can author one. Ad-hoc `--command` and `--argv-json` runs are audit-only: real evidence for a human reader, never a trial for `outcome rank` or the promotion ratchet. The artifact id passed to `--capture` is caller-supplied and is deliberately not trusted as the scored subject (`docs/proposals/skill-scorecards.md`, core contract 2 and 3).
+
+Every `--capture` run now prints its verdict, so an ineligible receipt is visible on the run that produced it rather than only in `brigade work brief`:
+
+```
+scoreable: yes
+```
+
+```
+warning: scoreable: no (reason=unattributed); this receipt cannot score the captured artifact
+  ad-hoc --command/--argv-json receipts are audit-only evidence and never score an artifact; run
+  `brigade work verify run --manifest <id>` against a manifest tracked under verify/manifests/ to
+  produce a scoreable receipt
+  registered manifests: none tracked under verify/manifests/ in this target
+```
+
+`--json` carries the same verdict as `outcome_scoreability` on the printed payload. `brigade work brief` lists the ids this target has as `outcome_verify_manifests`, and the `outcome_loop_half_fed` warning names them inline.
+
+A repo with no tracked manifest cannot produce an eligible receipt at all. That is the expected state until someone declares one; `ineligibility_rate=1.0` there means "nothing has been declared scoreable yet", not "the checks were untrustworthy".
 
 ## Read-time recomputation
 

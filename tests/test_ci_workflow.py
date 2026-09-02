@@ -14,6 +14,15 @@ def _workflow_job_section(text: str, job_name: str) -> str:
     return text[start:end]
 
 
+def _workflow_step_section(text: str, job_name: str, step_name: str) -> str:
+    job = _workflow_job_section(text, job_name)
+    marker = f"      - name: {step_name}"
+    start = job.index(marker)
+    next_step = job.find("\n      - name:", start + len(marker))
+    end = next_step if next_step != -1 else len(job)
+    return job[start:end]
+
+
 def test_ci_workflow_path_filter_has_valid_structure_and_engine_paths():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     changes = _workflow_job_section(text, "changes")
@@ -241,7 +250,14 @@ def test_ci_workflow_does_not_skip_docs_only_content_guard():
 
     assert "paths-ignore:" not in text
     assert "content-guard:" in text
-    assert "python -m content_guard scan" in text
+    # Scans with the guard this repo ships. The retired standalone repo is
+    # archived, so a pinned checkout of it could never receive a fix.
+    assert "python -m brigade.guard audit" in text
+    assert "python -m content_guard scan" not in text
+    # Without --strict the job cannot fail; without --baseline it fails on the
+    # existing synthetic corpus. Both are load-bearing.
+    assert "--strict" in text
+    assert "--baseline .content-guard-baseline.json" in text
 
 
 def test_repo_metadata_command_inventory_failure_is_actionable_and_preserves_status():
@@ -340,6 +356,34 @@ def test_ci_workflow_caches_pip_for_jobs_that_install_dev_extras():
         section = _workflow_job_section(text, job_name)
         assert "cache: pip" in section
         assert "cache-dependency-path: pyproject.toml" in section
+
+
+def test_ci_workflow_test_shards_installs_grokbot_extra_on_python312():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    section = _workflow_job_section(text, "test-shards")
+
+    grokbot_step = _workflow_step_section(text, "test-shards", "Install with grokbot extra")
+    assert "if: matrix.python == '3.12'" in grokbot_step
+    assert 'python -m pip install -e ".[dev,grokbot]"' in grokbot_step
+
+    default_step = _workflow_step_section(text, "test-shards", "Install")
+    assert "if: matrix.python != '3.12'" in default_step
+    assert 'python -m pip install -e ".[dev]"' in default_step
+
+    assert section.index("      - name: Install\n") < section.index("      - name: Install with grokbot extra\n")
+
+
+def test_ci_workflow_test_shards_asserts_grokbot_mcp_tests_run_without_skips():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    step = _workflow_step_section(text, "test-shards", "Assert grokbot MCP tests run without skips")
+
+    assert "if: matrix.python == '3.12'" in step
+    assert "tests/test_grokbot_mcp.py" in step
+    assert "pytest_exit=$?" in step
+    assert "[ $pytest_exit -ne 0 ]" in step
+    assert "grep -q 'skipped'" in step
+    assert "grokbot MCP tests were skipped" in step
+    assert "exit 1" in step
 
 
 def test_agents_doc_names_ci_only_jobs_outside_local_verify():
