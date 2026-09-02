@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from brigade import attestation
+from brigade import attestation, cli
 from tests.support import PRIVATE_FILE_MODE, assert_private_mode
 
 if not shutil.which("ssh-keygen"):
@@ -275,3 +275,230 @@ def test_subject_mismatch_detected_when_target_receipt_differs(tmp_path: Path) -
     # Now verify with target reports SUBJECT-MISMATCH
     res_mismatch = attestation.verify_attestation(envelope, target=tmp_path, allowed_signers_path=signers_path)
     assert res_mismatch.status == attestation.STATUS_SUBJECT_MISMATCH
+
+
+def _write_receipt_to_disk(receipt: dict[str, Any]) -> None:
+    run_dir = Path(receipt["path"])
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+
+def test_cli_attestation_keygen_writes_key_and_refuses_without_force(tmp_path, capsys):
+    rc = cli.main(["receipts", "attestation-keygen", "--target", str(tmp_path), "--principal", "alice@example.com"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    key_path = tmp_path / ".brigade" / "attestation" / "signing-key"
+    signers_path = tmp_path / ".brigade" / "attestation" / "allowed_signers"
+    assert key_path.is_file()
+    assert_private_mode(key_path, PRIVATE_FILE_MODE)
+    assert signers_path.is_file()
+    assert "attestation signing key" in captured.out
+
+    rc2 = cli.main(["receipts", "attestation-keygen", "--target", str(tmp_path)])
+    captured2 = capsys.readouterr()
+    assert rc2 == 1
+    assert "already exists" in captured2.err
+    assert "--force" in captured2.err
+
+    rc3 = cli.main(["receipts", "attestation-keygen", "--target", str(tmp_path), "--force"])
+    assert rc3 == 0
+    assert_private_mode(key_path, PRIVATE_FILE_MODE)
+
+
+def test_cli_export_attestation_to_default_path(tmp_path):
+    key_path, _signers = attestation.keygen(tmp_path, principal="alice@example.com")
+    receipt = _sample_receipt(tmp_path)
+    _write_receipt_to_disk(receipt)
+
+    run_id = receipt["run_id"]
+    rc = cli.main(["receipts", "export", "attestation", "--target", str(tmp_path), "--run-id", run_id])
+    assert rc == 0
+
+    attestation_path = Path(receipt["path"]) / "attestation.json"
+    assert attestation_path.is_file()
+    envelope = json.loads(attestation_path.read_text(encoding="utf-8"))
+    assert envelope["payloadType"] == attestation.DSSE_PAYLOAD_TYPE
+    assert envelope["brigade"]["profile"] == attestation.ATTESTATION_PROFILE
+    assert envelope["brigade"]["namespace"] == attestation.ATTESTATION_NAMESPACE
+
+
+def test_cli_export_attestation_to_stdout(tmp_path, capsys):
+    key_path, _signers = attestation.keygen(tmp_path, principal="alice@example.com")
+    receipt = _sample_receipt(tmp_path)
+    _write_receipt_to_disk(receipt)
+
+    run_id = receipt["run_id"]
+    rc = cli.main(
+        [
+            "receipts",
+            "export",
+            "attestation",
+            "--target",
+            str(tmp_path),
+            "--run-id",
+            run_id,
+            "--out",
+            "-",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    envelope = json.loads(captured.out)
+    assert envelope["payloadType"] == attestation.DSSE_PAYLOAD_TYPE
+    assert envelope["brigade"]["profile"] == attestation.ATTESTATION_PROFILE
+
+
+def test_cli_export_attestation_refuses_overwrite_without_force(tmp_path, capsys):
+    key_path, _signers = attestation.keygen(tmp_path, principal="alice@example.com")
+    receipt = _sample_receipt(tmp_path)
+    _write_receipt_to_disk(receipt)
+
+    run_id = receipt["run_id"]
+    rc1 = cli.main(["receipts", "export", "attestation", "--target", str(tmp_path), "--run-id", run_id])
+    assert rc1 == 0
+
+    rc2 = cli.main(["receipts", "export", "attestation", "--target", str(tmp_path), "--run-id", run_id])
+    captured = capsys.readouterr()
+    assert rc2 == 1
+    assert "already exists" in captured.err
+    assert "use --force" in captured.err
+
+    rc3 = cli.main(["receipts", "export", "attestation", "--target", str(tmp_path), "--run-id", run_id, "--force"])
+    assert rc3 == 0
+
+
+def test_cli_export_attestation_run_id_latest(tmp_path):
+    key_path, _signers = attestation.keygen(tmp_path, principal="alice@example.com")
+    receipt = _sample_receipt(tmp_path)
+    _write_receipt_to_disk(receipt)
+
+    rc = cli.main(["receipts", "export", "attestation", "--target", str(tmp_path), "--run-id", "latest"])
+    assert rc == 0
+
+    attestation_path = Path(receipt["path"]) / "attestation.json"
+    assert attestation_path.is_file()
+    envelope = json.loads(attestation_path.read_text(encoding="utf-8"))
+    assert envelope["payloadType"] == attestation.DSSE_PAYLOAD_TYPE
+
+
+def test_cli_verify_attestation_exit_and_json_shape(tmp_path, capsys):
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    receipt = _sample_receipt(tmp_path)
+    _write_receipt_to_disk(receipt)
+
+    run_id = receipt["run_id"]
+    rc_export = cli.main(["receipts", "export", "attestation", "--target", str(tmp_path), "--run-id", run_id])
+    assert rc_export == 0
+    attestation_path = Path(receipt["path"]) / "attestation.json"
+
+    rc = cli.main(
+        [
+            "receipts",
+            "verify-attestation",
+            str(attestation_path),
+            "--allowed-signers",
+            str(signers_path),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out.strip() == attestation.STATUS_SIGNED_OK
+
+    rc_json = cli.main(
+        [
+            "receipts",
+            "verify-attestation",
+            str(attestation_path),
+            "--allowed-signers",
+            str(signers_path),
+            "--json",
+        ]
+    )
+    captured_json = capsys.readouterr()
+    assert rc_json == 0
+    out = json.loads(captured_json.out)
+    assert out["status"] == attestation.STATUS_SIGNED_OK
+    assert out["principal"] == "alice@example.com"
+    assert out["keyid"].startswith("SHA256:")
+    assert out["run_id"] == run_id
+    assert isinstance(out["subject"], list)
+    assert len(out["subject"]) == 2
+
+    envelope = json.loads(attestation_path.read_text(encoding="utf-8"))
+    payload_bytes = base64.b64decode(envelope["payload"])
+    tampered_bytes = payload_bytes.replace(b"PASSED", b"FAILED")
+    envelope["payload"] = base64.b64encode(tampered_bytes).decode("ascii")
+    attestation_path.write_text(json.dumps(envelope), encoding="utf-8")
+
+    rc_bad = cli.main(
+        [
+            "receipts",
+            "verify-attestation",
+            str(attestation_path),
+            "--allowed-signers",
+            str(signers_path),
+        ]
+    )
+    captured_bad = capsys.readouterr()
+    assert rc_bad != 0
+    assert captured_bad.out.strip() == attestation.STATUS_SIGNATURE_MISMATCH
+
+
+def test_cli_cross_machine_verify_attestation_and_ssh_keygen(tmp_path):
+    path_a = tmp_path / "a"
+    path_b = tmp_path / "b"
+
+    key_path, signers_path = attestation.keygen(path_a, principal="alice@example.com")
+    receipt = _sample_receipt(path_a)
+    _write_receipt_to_disk(receipt)
+
+    run_id = receipt["run_id"]
+    rc_export = cli.main(["receipts", "export", "attestation", "--target", str(path_a), "--run-id", run_id])
+    assert rc_export == 0
+    attestation_path_a = Path(receipt["path"]) / "attestation.json"
+
+    attestation_path_b = path_b / "attestation.json"
+    signers_path_b = path_b / ".brigade" / "attestation" / "allowed_signers"
+    pub_path_b = path_b / ".brigade" / "attestation" / "signing-key.pub"
+    signers_path_b.parent.mkdir(parents=True)
+    attestation_path_b.write_text(attestation_path_a.read_text(encoding="utf-8"), encoding="utf-8")
+    signers_path_b.write_text(signers_path.read_text(encoding="utf-8"), encoding="utf-8")
+    pub_path_b.write_text(key_path.with_suffix(".pub").read_text(encoding="utf-8"), encoding="utf-8")
+
+    rc = cli.main(
+        [
+            "receipts",
+            "verify-attestation",
+            str(attestation_path_b),
+            "--target",
+            str(path_b),
+        ]
+    )
+    assert rc == 0
+
+    envelope = json.loads(attestation_path_b.read_text(encoding="utf-8"))
+    payload_bytes = base64.b64decode(envelope["payload"])
+    pae_bytes = attestation.dsse_pae(envelope["payloadType"], payload_bytes)
+    sig_b64 = envelope["signatures"][0]["sig"]
+    armored_sig = base64.b64decode(sig_b64)
+
+    sig_file = tmp_path / "extracted.sig"
+    sig_file.write_bytes(armored_sig)
+    cmd = [
+        "ssh-keygen",
+        "-Y",
+        "verify",
+        "-f",
+        str(signers_path_b),
+        "-I",
+        "alice@example.com",
+        "-n",
+        attestation.ATTESTATION_NAMESPACE,
+        "-s",
+        str(sig_file),
+    ]
+    proc = subprocess.run(cmd, input=pae_bytes, capture_output=True)
+    assert proc.returncode == 0
+    combined = (proc.stdout + proc.stderr).decode("utf-8", errors="replace")
+    assert f'Good "{attestation.ATTESTATION_NAMESPACE}" signature' in combined
