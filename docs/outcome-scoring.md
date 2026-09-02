@@ -7,11 +7,11 @@ This is outcome-based skill scoring, promotion, and rollback from verification e
 ## Workflow
 
 ```bash
+# scoreable evidence: a git-tracked manifest under verify/manifests/ authors subject_binding
+brigade work verify run --manifest verify/manifests/work-cmd-verification.json --capture brigade-work
+
 # audit-only evidence: a receipt a human can read, never a scoreable trial
 brigade work verify run --target . --command "pytest -q" --capture brigade-work
-
-# scoreable evidence: verifier-owned checks bound to one artifact
-brigade work verify run --target . --manifest <manifest-id> --capture <artifact-id>
 
 # or, after a verify without --capture:
 brigade outcome capture brigade-work --run-id latest --kind skill
@@ -54,6 +54,40 @@ warning: scoreable: no (reason=unattributed); this receipt cannot score the capt
 `--json` carries the same verdict as `outcome_scoreability` on the printed payload. `brigade work brief` lists the ids this target has as `outcome_verify_manifests`, and the `outcome_loop_half_fed` warning names them inline.
 
 A repo with no tracked manifest cannot produce an eligible receipt at all. That is the expected state until someone declares one; `ineligibility_rate=1.0` there means "nothing has been declared scoreable yet", not "the checks were untrustworthy".
+
+## Tracked manifests in this checkout
+
+The work loop should call:
+
+```bash
+brigade work verify run --manifest <path> --capture <id>
+```
+
+`--manifest` accepts a registered `manifest_id` or the workspace source path (`verify/manifests/<id>.json`). Both resolve through `verify_manifest.resolve_manifest`. Untracked files under that directory are refused.
+
+This checkout ships patch-backed manifests for the focused suites agents actually run here. Each binds the file `subject_hash` can read (a concrete module, not a directory) and uses `scope_globs` for the package or sibling files the suite covers:
+
+| Manifest | Tests | `subject_path` |
+| --- | --- | --- |
+| `verify/manifests/work-cmd-verification.json` | `tests/test_work_cmd_verification.py` | `src/brigade/work_cmd/verification.py` |
+| `verify/manifests/guard.json` | `tests/guard` | `src/brigade/guard/engine.py` |
+| `verify/manifests/grokbot-feed.json` | `tests/test_grokbot_feed.py` | `src/brigade/grokbot_feed.py` |
+| `verify/manifests/grokbot-reconcile.json` | `tests/test_grokbot_reconcile.py` | `src/brigade/grokbot_reconcile.py` |
+| `verify/manifests/fleet-claims.json` | `tests/test_fleet_claims.py`, `tests/test_fleet_claim_release.py` | `src/brigade/fleet_hub.py` |
+| `verify/manifests/run-resume.json` | `tests/test_run_resume.py` | `src/brigade/run_resume.py` |
+| `verify/manifests/verify-manifest.json` | `tests/test_verify_manifest_tracked.py` | `src/brigade/verify_manifest.py` |
+
+Every `*.json` under `verify/manifests/` must resolve through `verify_manifest.resolve_manifest` by id and by source path. `tests/test_verify_manifest_tracked.py` walks that directory and asserts both lookups.
+
+Write check commands as the argv the receipt will record. Do not prefix `PYTHONPATH=src`: receipts store env assignments separately, and a plan mismatch makes the trial `verifier_manifest_mismatch`.
+
+When dirty paths match a tracked manifest's `subject_path` or `scope_globs`, `suggested_command` should name that manifest instead of an ad-hoc `--command`:
+
+```text
+brigade work verify run --manifest "verify/manifests/<id>.json" --capture <artifact-id>
+```
+
+`verify_manifest.suggested_manifest_command` returns that string from dirty paths so `brigade work verify plan` and `brigade work brief` can surface it.
 
 ## Read-time recomputation
 
