@@ -328,7 +328,7 @@ def test_skill_doc_includes_checkout_verification_map():
     features = (SKILL_DIR / "features" / "README.md").read_text(encoding="utf-8")
     for heading in ("## Launch", "## Doctor", "## Drive", "## Evidence", "## Cleanup", "## Feature map"):
         assert heading in doc, heading
-    assert 'python3 -m venv .venv' in doc
+    assert "python3 -m venv .venv" in doc
     assert 'pip install -e ".[dev,grokbot]"' in doc
     assert "brigade doctor --target ." in doc
     assert "brigade status --target ." in doc
@@ -344,7 +344,13 @@ def test_skill_doc_includes_checkout_verification_map():
     assert '"status": "completed"' in doc
     assert "Never commit `.brigade/`" in doc or "Never commit `.brigade/" in doc
     assert ".venv/" in doc
-    for surface in ("brigade run", "brigade work verify", "brigade fleet", "brigade run cloud grokbot", "brigade guard"):
+    for surface in (
+        "brigade run",
+        "brigade work verify",
+        "brigade fleet",
+        "brigade run cloud grokbot",
+        "brigade guard",
+    ):
         assert surface in doc, surface
         assert surface in features, surface
     for path in (
