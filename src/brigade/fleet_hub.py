@@ -984,7 +984,8 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
     must carry the ``acquired_at`` of the row the caller inspected (400
     without it): the delete is fenced to that exact row, so a claim
     re-acquired between the caller's inspect and its release is never
-    deleted (409 with the current row). Only ``force`` deletes unfenced.
+    deleted (409 with the row seen inside the write transaction). Only
+    ``force`` deletes unfenced.
     """
     request = _validate_claim_request(raw)
     if caller_node is not None and request["node_id"] != caller_node:
@@ -1152,13 +1153,14 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
         if prior is not None:
             released["claim"] = _claim_payload(prior)
         return 200, released
-    row = _fetch_claim(conn, target)
-    if row is not None:
-        if scope != "force" and row[1] != node:
-            error = f"target {target!r} is held by {row[1]}, not {node}"
+    # Reuse the in-transaction ``prior`` for the 409 payload. A post-commit
+    # re-read can describe a row that landed after this refusal (#1160).
+    if prior is not None:
+        if scope != "force" and prior[1] != node:
+            error = f"target {target!r} is held by {prior[1]}, not {node}"
         else:
-            error = f"target {target!r} was re-acquired since it was inspected (now acquired {row[7]})"
-        return 409, {"released": False, "error": error, "owner": _claim_payload(row)}
+            error = f"target {target!r} was re-acquired since it was inspected (now acquired {prior[7]})"
+        return 409, {"released": False, "error": error, "owner": _claim_payload(prior)}
     return 200, {"released": False}
 
 
