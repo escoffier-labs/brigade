@@ -535,6 +535,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
             "attributed_ineligible_receipt_count": outcome_health["attributed_ineligible_receipt_count"],
             "ineligibility_rate": outcome_health["ineligibility_rate"],
             "leading_ineligibility_reason": outcome_health["leading_ineligibility_reason"],
+            "registered_verify_manifest_ids": outcome_health["registered_verify_manifest_ids"],
             "exploration_bands": outcome_health["exploration_bands"],
             "latest_receipt_window": outcome_health["latest_receipt_window"],
             "issue_count": outcome_health["issue_count"],
@@ -712,6 +713,10 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             f"ineligibility_rate={outcome_loop.get('ineligibility_rate')} "
             f"promoted={outcome_loop.get('promoted_count')}"
         )
+        manifest_ids = outcome_loop.get("registered_verify_manifest_ids")
+        if isinstance(manifest_ids, list):
+            listed = ", ".join(str(item) for item in manifest_ids) if manifest_ids else "none"
+            print(f"outcome_verify_manifests: {listed}")
         bands = outcome_loop.get("exploration_bands") if isinstance(outcome_loop.get("exploration_bands"), dict) else {}
         if bands:
             print(

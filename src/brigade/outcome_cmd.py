@@ -2668,17 +2668,28 @@ def health(target: Path) -> dict:
     promoted_count = sum(1 for entry in load_status(target).values() if entry.get("status") == "promoted")
     receipt_audit = scorecard_mod.receipt_scorecard_audit(target)
 
+    from . import verify_manifest
+
+    registered_manifest_ids = verify_manifest.registered_manifest_ids(target)
+
     issues: list[dict] = []
     if verify_run_count > 0 and receipt_audit["eligible"] == 0:
+        # Name the manifests this target actually has (#1378): "use --manifest <id>"
+        # is not actionable when the reader has no way to learn the available ids.
+        if registered_manifest_ids:
+            available = "registered manifest ids: " + ", ".join(registered_manifest_ids)
+        else:
+            available = "no verify manifests are tracked under verify/manifests/ in this target yet"
         issues.append(
             {
                 "status": "warn",
                 "name": "outcome_loop_half_fed",
                 "detail": (
                     f"{verify_run_count} verify run(s) but 0 eligible receipt(s); "
-                    "run `brigade work verify run --target . --manifest <id>` "
+                    "ad-hoc --command/--argv-json receipts are audit-only and never score. "
+                    "Run `brigade work verify run --target . --manifest <id>` "
                     "with a tracked manifest under verify/manifests/ so receipts "
-                    "carry verifier-authored subject_binding and check_role"
+                    f"carry verifier-authored subject_binding and check_role ({available})"
                 ),
             }
         )
@@ -2707,6 +2718,7 @@ def health(target: Path) -> dict:
         "attributed_ineligible_receipt_count": receipt_audit["attributed_ineligible"],
         "ineligibility_rate": receipt_audit["ineligibility_rate"],
         "leading_ineligibility_reason": receipt_audit["leading_ineligibility_reason"],
+        "registered_verify_manifest_ids": registered_manifest_ids,
         "exploration_bands": receipt_audit["exploration_bands"],
         "latest_receipt_window": receipt_audit["latest_receipt_window"],
         "issue_count": len(issues),

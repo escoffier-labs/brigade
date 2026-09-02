@@ -1999,6 +1999,51 @@ def _print_graph_impact(ranking: object) -> None:
         print(f"graph_impact_note: {note.strip()}")
 
 
+_ADHOC_SCOREABILITY_REMEDIATION = (
+    "ad-hoc --command/--argv-json receipts are audit-only evidence and never score an artifact; "
+    "run `brigade work verify run --manifest <id>` against a manifest tracked under "
+    "verify/manifests/ to produce a scoreable receipt"
+)
+
+
+def _scoreability_notice(target: Path, receipt: dict[str, Any]) -> dict[str, Any]:
+    """Project whether this receipt can score its ``--capture`` artifact (#1378).
+
+    Eligibility used to be visible only in an aggregate ``work brief`` field, so a
+    session could run dozens of green ``--command --capture`` checks and feed the
+    ratchet nothing while every immediate indicator said otherwise. Project the
+    verdict on the run that produced the receipt instead.
+    """
+    run_dir_value = receipt.get("path")
+    patch_path = (
+        Path(str(run_dir_value)) / "changes.patch" if isinstance(run_dir_value, str) and run_dir_value else None
+    )
+    projection = verify_trial.project_trial(receipt, target=target, patch_path=patch_path)
+    notice: dict[str, Any] = {
+        "eligible": projection.eligible,
+        "reason": projection.reason,
+        "attributed": projection.attributed,
+    }
+    if projection.eligible:
+        return notice
+    notice["registered_manifest_ids"] = verify_manifest.registered_manifest_ids(target)
+    notice["remediation"] = _ADHOC_SCOREABILITY_REMEDIATION
+    return notice
+
+
+def _print_scoreability_notice(notice: dict[str, Any]) -> None:
+    if notice.get("eligible"):
+        print("scoreable: yes")
+        return
+    print(f"warning: scoreable: no (reason={notice.get('reason')}); this receipt cannot score the captured artifact")
+    print(f"  {notice.get('remediation')}")
+    manifest_ids = notice.get("registered_manifest_ids")
+    if isinstance(manifest_ids, list) and manifest_ids:
+        print(f"  registered manifests: {', '.join(manifest_ids)}")
+    else:
+        print("  registered manifests: none tracked under verify/manifests/ in this target")
+
+
 def _attach_miseledger_indexing(
     receipt: dict[str, object],
     *,
@@ -2113,6 +2158,7 @@ def verify_run(
 
             from .. import outcome_cmd
 
+            scoreability = _scoreability_notice(target, receipt)
             sink = io.StringIO()
             with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
                 outcome_cmd.capture(
@@ -2122,6 +2168,7 @@ def verify_run(
                     run_id=receipt["run_id"],
                     json_output=False,
                 )
+            receipt["outcome_scoreability"] = scoreability
             _attach_miseledger_indexing(receipt, target=target, json_output=True)
         print(json.dumps(receipt, indent=2, sort_keys=True))
         return rc
@@ -2136,6 +2183,7 @@ def verify_run(
     if capture:
         from .. import outcome_cmd
 
+        scoreability = _scoreability_notice(target, receipt)
         outcome_cmd.capture(
             target=target,
             artifact_id=capture,
@@ -2143,7 +2191,9 @@ def verify_run(
             run_id=receipt["run_id"],
             json_output=False,
         )
+        receipt["outcome_scoreability"] = scoreability
         _attach_miseledger_indexing(receipt, target=target, json_output=False)
+        _print_scoreability_notice(scoreability)
     return rc
 
 

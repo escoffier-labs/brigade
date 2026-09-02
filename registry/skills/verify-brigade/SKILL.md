@@ -248,3 +248,8 @@ brigade work verify run --target . \
 ```
 
 Then paste the `run_id`, the status, and the `evidence_dir` from this skill.
+
+That receipt is proof for a human reader, not a scored trial. `--command` and
+`--argv-json` receipts are audit-only; only `--manifest <id>` produces a receipt
+the outcome ratchet can score. Each `--capture` run prints which one it was.
+See `docs/outcome-scoring.md`.
