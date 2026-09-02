@@ -19,7 +19,7 @@
     {
       "check_id": "pytest.fleet-claims",
       "check_role": "effectiveness",
-      "command": "PYTHONPATH=src python3 -m pytest -q tests/test_fleet_claims.py tests/test_fleet_claim_release.py"
+      "command": "python3 -m pytest -q tests/test_fleet_claims.py tests/test_fleet_claim_release.py"
     }
   ]
 }

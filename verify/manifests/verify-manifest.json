@@ -19,7 +19,7 @@
     {
       "check_id": "pytest.verify-manifest-tracked",
       "check_role": "effectiveness",
-      "command": "PYTHONPATH=src python3 -m pytest -q tests/test_verify_manifest_tracked.py"
+      "command": "python3 -m pytest -q tests/test_verify_manifest_tracked.py"
     }
   ]
 }

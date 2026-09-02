@@ -546,7 +546,10 @@ def suggested_manifest_command(
     *,
     capture: str | None = None,
 ) -> str | None:
-    """Return a scoreable verify command when a tracked manifest matches dirty paths."""
+    """Return a scoreable ``--manifest`` command when a tracked manifest matches dirty paths.
+
+    ``suggested_command`` should name this string instead of an ad-hoc ``--command``.
+    """
     matches = manifests_matching_paths(target, paths)
     if not matches:
         return None

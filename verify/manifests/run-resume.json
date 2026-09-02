@@ -18,7 +18,7 @@
     {
       "check_id": "pytest.run-resume",
       "check_role": "effectiveness",
-      "command": "PYTHONPATH=src python3 -m pytest -q tests/test_run_resume.py"
+      "command": "python3 -m pytest -q tests/test_run_resume.py"
     }
   ]
 }

@@ -18,7 +18,7 @@
     {
       "check_id": "pytest.guard",
       "check_role": "effectiveness",
-      "command": "PYTHONPATH=src python3 -m pytest -q tests/guard"
+      "command": "python3 -m pytest -q tests/guard"
     }
   ]
 }

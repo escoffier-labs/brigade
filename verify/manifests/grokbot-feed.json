@@ -18,7 +18,7 @@
     {
       "check_id": "pytest.grokbot-feed",
       "check_role": "effectiveness",
-      "command": "PYTHONPATH=src python3 -m pytest -q tests/test_grokbot_feed.py"
+      "command": "python3 -m pytest -q tests/test_grokbot_feed.py"
     }
   ]
 }
