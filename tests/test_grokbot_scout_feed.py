@@ -1125,3 +1125,21 @@ def test_scout_apply_wake_notify_missing_config_skips_post(tmp_path: Path, monke
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_scout_envelope_shares_the_untrusted_sentence_and_omits_the_worker_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A scout writes nothing, so it gets the shared sentence but no swarm contract."""
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+
+    result = grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+
+    record = json.loads(
+        (tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{result['handle']['job_id']}.json").read_text()
+    )
+    instructions = record["spec"]["instructions"]
+    assert grokbot_feed.UNTRUSTED_CONTEXT_SENTENCE in instructions
+    for absent in ("Coordinator rule:", "Job contract:", "Lease rule:", "Time cap:", "Proof rule:"):
+        assert absent not in instructions
