@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+# This file embeds leak examples as scan_text() inputs. A real file-scoped
+# allow comment exempts the file from content-guard's own pre-push self-scan.
+# Markers inside the scanned string literals must not do that; see
+# FileScopedAllowStringLiteralTests.
+# content-guard: allow all file
+
 from importlib import resources
 import unittest
 from pathlib import Path
@@ -270,6 +276,161 @@ class FileScopedAllowTests(unittest.TestCase):
         self.assertIn(("private-ipv4", "allow"), rule_actions)
         # api-key-assignment still blocks
         self.assertTrue(any(f.action == "block" for f in result.findings))
+
+
+class FileScopedAllowStringLiteralTests(unittest.TestCase):
+    """A whole-file allow inside a string is data, not a directive (issue #1366)."""
+
+    REPRO_TEXT = (
+        "# A real infrastructure leak that SHOULD be reported:\n"
+        'INTERNAL_HOST = "192.168.77.31"\n'
+        "\n"
+        "def test_marker_is_only_test_data():\n"
+        "    # This marker is test data inside a string literal, not a directive.\n"
+        '    text = "<!-- content-guard: allow all file -->\\npayload"\n'
+        "    assert text\n"
+    )
+
+    def test_allow_all_file_inside_string_does_not_exempt_private_ipv4(self) -> None:
+        result = scan_text(self.REPRO_TEXT)
+
+        ipv4 = [f for f in result.findings if f.rule_id == "private-ipv4"]
+        self.assertEqual(len(ipv4), 1)
+        self.assertEqual(ipv4[0].action, "block")
+        self.assertEqual(ipv4[0].line, 2)
+        self.assertEqual(ipv4[0].match, "192.168.77.31")
+        self.assertIsNone(ipv4[0].allowed_by)
+        self.assertTrue(result.blocked)
+
+    def test_allow_all_file_inside_string_emits_ignored_warning(self) -> None:
+        result = scan_text(self.REPRO_TEXT)
+
+        ignored = [f for f in result.findings if f.rule_id == "ignored-file-allow"]
+        self.assertEqual(len(ignored), 1)
+        self.assertEqual(ignored[0].action, "warn")
+        self.assertEqual(ignored[0].category, "tooling")
+        self.assertEqual(ignored[0].source, "allow-comment")
+        self.assertIn("string literal", ignored[0].message.lower())
+        self.assertIn("content-guard: allow all file", ignored[0].match)
+        self.assertFalse(ignored[0].blocks)
+        self.assertTrue(result.blocked)
+
+    def test_single_quoted_allow_all_file_does_not_exempt_file(self) -> None:
+        text = "INTERNAL_HOST = \"192.168.77.31\"\nmarker = 'content-guard: allow all file'\n"
+        result = scan_text(text)
+
+        ipv4 = [f for f in result.findings if f.rule_id == "private-ipv4"]
+        self.assertEqual(len(ipv4), 1)
+        self.assertEqual(ipv4[0].action, "block")
+        self.assertTrue(result.blocked)
+        ignored = [f for f in result.findings if f.rule_id == "ignored-file-allow"]
+        self.assertEqual(len(ignored), 1)
+        self.assertEqual(ignored[0].action, "warn")
+
+    def test_triple_quoted_allow_all_file_does_not_exempt_file(self) -> None:
+        text = 'INTERNAL_HOST = "192.168.77.31"\nmarker = """content-guard: allow all file"""\n'
+        result = scan_text(text)
+
+        ipv4 = [f for f in result.findings if f.rule_id == "private-ipv4"]
+        self.assertEqual(len(ipv4), 1)
+        self.assertEqual(ipv4[0].action, "block")
+        self.assertTrue(result.blocked)
+
+    def test_multiline_string_allow_all_file_does_not_exempt_file(self) -> None:
+        text = 'INTERNAL_HOST = "192.168.77.31"\nmarker = """\ncontent-guard: allow all file\n"""\n'
+        result = scan_text(text)
+
+        ipv4 = [f for f in result.findings if f.rule_id == "private-ipv4"]
+        self.assertEqual(len(ipv4), 1)
+        self.assertEqual(ipv4[0].action, "block")
+        self.assertTrue(result.blocked)
+        ignored = [f for f in result.findings if f.rule_id == "ignored-file-allow"]
+        self.assertEqual(len(ignored), 1)
+        self.assertIn("string literal", ignored[0].message.lower())
+
+    def test_hash_comment_file_allow_still_exempts(self) -> None:
+        text = 'INTERNAL_HOST = "192.168.77.31"\n# content-guard: allow all file\n'
+        result = scan_text(text)
+
+        ipv4 = [f for f in result.findings if f.rule_id == "private-ipv4"]
+        self.assertEqual(len(ipv4), 1)
+        self.assertEqual(ipv4[0].action, "allow")
+        self.assertEqual(ipv4[0].allowed_by, "all")
+        self.assertFalse(result.blocked)
+        self.assertFalse(any(f.rule_id == "ignored-file-allow" for f in result.findings))
+
+    def test_trailing_hash_comment_file_allow_still_exempts(self) -> None:
+        # The marker line itself is skipped from regex matching; the leak is
+        # on a different line so the file-scoped trailing comment can apply.
+        text = 'INTERNAL_HOST = "192.168.77.31"\ncount = 1  # content-guard: allow all file\n'
+        result = scan_text(text)
+
+        ipv4 = [f for f in result.findings if f.rule_id == "private-ipv4"]
+        self.assertEqual(len(ipv4), 1)
+        self.assertEqual(ipv4[0].action, "allow")
+        self.assertFalse(result.blocked)
+
+    def test_line_leading_file_allow_still_exempts(self) -> None:
+        text = 'content-guard: allow all file\nINTERNAL_HOST = "192.168.77.31"\n'
+        result = scan_text(text)
+
+        ipv4 = [f for f in result.findings if f.rule_id == "private-ipv4"]
+        self.assertEqual(len(ipv4), 1)
+        self.assertEqual(ipv4[0].action, "allow")
+        self.assertFalse(result.blocked)
+
+    def test_slash_slash_comment_file_allow_still_exempts(self) -> None:
+        text = '// content-guard: allow all file\nINTERNAL_HOST = "192.168.77.31"\n'
+        result = scan_text(text)
+
+        ipv4 = [f for f in result.findings if f.rule_id == "private-ipv4"]
+        self.assertEqual(len(ipv4), 1)
+        self.assertEqual(ipv4[0].action, "allow")
+        self.assertFalse(result.blocked)
+
+    def test_html_comment_on_own_line_still_exempts(self) -> None:
+        text = '<!-- content-guard: allow all file -->\nINTERNAL_HOST = "192.168.77.31"\n'
+        result = scan_text(text)
+
+        ipv4 = [f for f in result.findings if f.rule_id == "private-ipv4"]
+        self.assertEqual(len(ipv4), 1)
+        self.assertEqual(ipv4[0].action, "allow")
+        self.assertFalse(result.blocked)
+
+    def test_real_comment_and_string_marker_honors_comment_and_warns(self) -> None:
+        text = (
+            "# content-guard: allow all file\n"
+            'INTERNAL_HOST = "192.168.77.31"\n'
+            'marker = "<!-- content-guard: allow all file -->"\n'
+        )
+        result = scan_text(text)
+
+        ipv4 = [f for f in result.findings if f.rule_id == "private-ipv4"]
+        self.assertEqual(len(ipv4), 1)
+        self.assertEqual(ipv4[0].action, "allow")
+        self.assertFalse(result.blocked)
+        ignored = [f for f in result.findings if f.rule_id == "ignored-file-allow"]
+        self.assertEqual(len(ignored), 1)
+        self.assertEqual(ignored[0].action, "warn")
+
+    def test_specific_file_allow_inside_string_does_not_exempt(self) -> None:
+        text = 'INTERNAL_HOST = "192.168.77.31"\nmarker = "<!-- content-guard: allow private-ipv4 file -->"\n'
+        result = scan_text(text)
+
+        ipv4 = [f for f in result.findings if f.rule_id == "private-ipv4"]
+        self.assertEqual(len(ipv4), 1)
+        self.assertEqual(ipv4[0].action, "block")
+        self.assertTrue(result.blocked)
+        ignored = [f for f in result.findings if f.rule_id == "ignored-file-allow"]
+        self.assertEqual(len(ignored), 1)
+
+    def test_ignored_string_marker_not_emitted_when_allow_comments_disabled(self) -> None:
+        result = scan_text(self.REPRO_TEXT, options=ScanOptions(honor_allow_comments=False))
+
+        self.assertFalse(any(f.rule_id == "ignored-file-allow" for f in result.findings))
+        ipv4 = [f for f in result.findings if f.rule_id == "private-ipv4"]
+        self.assertEqual(len(ipv4), 1)
+        self.assertEqual(ipv4[0].action, "block")
 
 
 class ExamplePatternDowngradeTests(unittest.TestCase):

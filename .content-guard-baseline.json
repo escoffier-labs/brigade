@@ -2879,6 +2879,76 @@
       "rule_id": "example-email-reserved"
     },
     {
+      "fingerprint": "4ed6b9348cc9d793",
+      "line": 17,
+      "match": "planted.canary9931@probe-corp-canary.com",
+      "path": "tests/test_evidence_redaction.py",
+      "rule_id": "email"
+    },
+    {
+      "fingerprint": "5ac227cac36b9a83",
+      "line": 18,
+      "match": "192.168.99.70",
+      "path": "tests/test_evidence_redaction.py",
+      "rule_id": "private-ipv4"
+    },
+    {
+      "fingerprint": "de34299ae378ad7d",
+      "line": 21,
+      "match": "api_key=\"sk-test-abcdefghijklmnopqrstuv\"",
+      "path": "tests/test_evidence_redaction.py",
+      "rule_id": "api-key-assignment"
+    },
+    {
+      "fingerprint": "be73785b44d7f2be",
+      "line": 22,
+      "match": "operator@contoso.example",
+      "path": "tests/test_evidence_redaction.py",
+      "rule_id": "email"
+    },
+    {
+      "fingerprint": "348756f863590280",
+      "line": 23,
+      "match": "10.0.0.1",
+      "path": "tests/test_evidence_redaction.py",
+      "rule_id": "private-ipv4"
+    },
+    {
+      "fingerprint": "0fe58e118625d278",
+      "line": 422,
+      "match": "/Users/example-user/docs",
+      "path": "tests/test_evidence_redaction.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "424123850d19c743",
+      "line": 422,
+      "match": "/home/example-user/work/repo",
+      "path": "tests/test_evidence_redaction.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "863c952aa6f7683e",
+      "line": 425,
+      "match": "/home/example-user",
+      "path": "tests/test_evidence_redaction.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "46c4b4581513fc1a",
+      "line": 426,
+      "match": "/Users/example-user",
+      "path": "tests/test_evidence_redaction.py",
+      "rule_id": "home-path"
+    },
+    {
+      "fingerprint": "863c952aa6f7683e",
+      "line": 429,
+      "match": "/home/example-user",
+      "path": "tests/test_evidence_redaction.py",
+      "rule_id": "home-path"
+    },
+    {
       "fingerprint": "f9fd75dfc65c0ca5",
       "line": 22,
       "match": "dev@example.invalid",
