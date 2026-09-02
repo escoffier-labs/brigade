@@ -29,6 +29,11 @@ from . import (
     verification_contract,
     worker_events,
 )
+from .aboyeur.direct_worker_finish import (
+    terminal_failure_kind as _resume_terminal_failure_kind,
+    terminal_failure_phase as _resume_terminal_failure_phase,
+    terminal_run_status as _resume_terminal_status,
+)
 from .aboyeur.planning import resolve_run_sandbox
 from .roster import Agent, Roster, _as_bool, _as_capabilities, _as_command, _as_env
 from .run_receipts import agent_result_from_worker
@@ -424,33 +429,6 @@ def _continuation_prompt(task: str) -> str:
         f"{task}\n\n"
         "Finish the sub-task and return a concise, complete final result."
     )
-
-
-def _resume_terminal_status(final: agents.AgentResult) -> str:
-    """Map a failed worker/orchestrator result the way the orchestrator finish path does."""
-    if final.timed_out:
-        return "timeout"
-    if final.status == "interrupted":
-        return "canceled"
-    return "failed"
-
-
-def _resume_terminal_failure_kind(final: agents.AgentResult) -> str:
-    if final.timed_out:
-        return "timeout"
-    if final.failure_kind:
-        return final.failure_kind
-    if final.status == "interrupted":
-        return "interrupted"
-    return "agent-error"
-
-
-def _resume_terminal_failure_phase(final: agents.AgentResult, *, direct_worker: bool) -> str:
-    if final.failure_phase:
-        return final.failure_phase
-    if final.timed_out:
-        return "inference"
-    return "dispatch" if direct_worker else "synthesis"
 
 
 def _assignments_from_plan(run_dir: Path) -> list:

@@ -61,6 +61,7 @@ from ..route_policy import (
 )
 
 from . import briefs, run_io, planning, prompts, artifacts, model_admission
+from . import direct_worker_finish
 
 
 @dataclass(frozen=True)
@@ -1669,13 +1670,7 @@ def run(
         direct_result = (
             worker_results[0]
             if worker_results
-            else WorkerResult(
-                worker=worker or "",
-                task=task,
-                text="",
-                ok=False,
-                detail="direct worker produced no result",
-            )
+            else direct_worker_finish.missing_direct_worker_result(worker=worker or "", task=task)
         )
         final = _agent_result_from_worker(direct_result)
     else:
@@ -1775,29 +1770,42 @@ def run(
     drift_rc = _drift_failure_rc()
     if drift_rc is not None:
         return drift_rc
+    finish_base: dict[str, Any] = {
+        "task": task,
+        "cwd": cwd,
+        "roster": roster,
+        "dry_run": dry_run,
+        "read_only": read_only,
+        "started_at": started_at,
+        "output_dir": output_dir,
+        "code_graph": code_graph,
+        "drift_impact": drift_impact,
+        "evidence": evidence,
+        "brief_set": brief_set,
+        "codex_transport": transport_for_payload,
+        "route": route,
+        "code_graph_delta": code_graph_delta,
+        "context_eval_payload": context_eval_payload,
+        "suspected_noop": suspected_noop,
+        "worker": worker,
+    }
+    finish_extra: dict[str, Any] = {
+        "control_socket": control_socket,
+        "control_transport": control_transport,
+    }
     if output_dir is not None:
         if not direct_worker:
             final = _write_agent_logs(output_dir, "synthesis", final)
-        synthesis_payload = (
-            receipt_schema.synthesis_document(
-                mode="direct-worker",
-                worker=worker,
-                result=_agent_result_payload(final),
-                ground_truth=ground_truth,
-                run_id=output_dir.name,
-                worker_results=_worker_payload(worker_results),
-            )
-            if direct_worker
-            else receipt_schema.synthesis_document(
-                orchestrator=roster.orchestrator,
-                result=_agent_result_payload(final),
-                ground_truth=ground_truth,
-                run_id=output_dir.name,
-                worker_results=_worker_payload(worker_results),
-            )
+        synthesis_payload = direct_worker_finish.synthesis_document_payload(
+            direct_worker=direct_worker,
+            worker=worker,
+            roster=roster,
+            final=final,
+            ground_truth=ground_truth,
+            run_id=output_dir.name,
+            worker_results=worker_results,
+            synth_captured=synth_captured,
         )
-        if synth_captured is not None:
-            synthesis_payload["provenance"] = synth_captured.envelope
         causal_receipt.write_synthesis_lineage_artifacts(
             output_dir,
             synthesis_payload,
@@ -1806,52 +1814,17 @@ def run(
         )
     if not final.ok:
         if output_dir is not None:
-            finished_at = datetime.now(timezone.utc)
-            interrupted = final.status == "interrupted"
-            if direct_worker:
-                (output_dir / "final.txt").write_text(final.text + "\n")
-            run_io._write_json(
-                output_dir / "run.json",
-                _payload(
-                    task=task,
-                    cwd=cwd,
-                    roster=roster,
-                    dry_run=dry_run,
-                    read_only=read_only,
-                    status="timeout" if final.timed_out else "canceled" if interrupted else "failed",
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    output_dir=output_dir,
-                    error=final.detail,
-                    failure_phase=(
-                        final.failure_phase
-                        or ("inference" if final.timed_out else "dispatch" if direct_worker else "synthesis")
-                    ),
-                    failure_kind=(
-                        "timeout"
-                        if final.timed_out
-                        else final.failure_kind or ("interrupted" if interrupted else "agent-error")
-                    ),
-                    failure_seat=worker if direct_worker else roster.orchestrator,
-                    code_graph=code_graph,
-                    drift_impact=drift_impact,
-                    evidence=evidence,
-                    brief_set=brief_set,
-                    codex_transport=transport_for_payload,
-                    route=route,
-                    code_graph_delta=code_graph_delta,
-                    context_eval_payload=context_eval_payload,
-                    suspected_noop=suspected_noop,
-                    worker=worker,
-                    transport_warning=final.transport_warning,
-                ),
+            direct_worker_finish.write_failed_run_receipt(
+                output_dir,
+                write_json=run_io._write_json,
+                payload=_payload,
+                final=final,
+                direct_worker=direct_worker,
+                worker=worker,
+                roster=roster,
+                base=finish_base,
             )
-        if direct_worker:
-            print(f"error: worker failed: {final.detail}", file=sys.stderr)
-            if final.text:
-                print(final.text)
-        else:
-            print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
+        direct_worker_finish.report_terminal_failure(final, direct_worker=direct_worker)
         return 2
     # Drift checkpoint: immediately before finalization. The final ok receipt
     # must not be written on top of state a concurrent commit moved out from
@@ -1860,55 +1833,20 @@ def run(
     if drift_rc is not None:
         return drift_rc
     workers_ok = direct_worker or all(result.ok for result in worker_results)
-    failed_seats = [result.worker for result in worker_results if not result.ok]
     if output_dir is not None:
-        pending_handoff = handoff_inbox is not None
-        if not workers_ok:
-            final_status = "incomplete"
-            finished_at = datetime.now(timezone.utc)
-            run_status = "incomplete"
-        else:
-            final_status = "artifact-collection" if defer_artifact_collection else "ok"
-            finished_at = None if defer_artifact_collection or pending_handoff else datetime.now(timezone.utc)
-            run_status = "handoff" if pending_handoff else final_status
-        (output_dir / "final.txt").write_text(final.text + "\n")
-        run_io._write_json(
-            output_dir / "run.json",
-            _payload(
-                task=task,
-                cwd=cwd,
-                roster=roster,
-                dry_run=dry_run,
-                read_only=read_only,
-                status=run_status,
-                started_at=started_at,
-                finished_at=finished_at,
-                output_dir=output_dir,
-                error=(
-                    f"{len(failed_seats)} worker(s) failed or were skipped: {', '.join(failed_seats)}"
-                    if not workers_ok
-                    else None
-                ),
-                failure_phase="workers" if not workers_ok else None,
-                failure_kind="worker-failure" if not workers_ok else None,
-                failure_seat=",".join(failed_seats) if not workers_ok else None,
-                code_graph=code_graph,
-                drift_impact=drift_impact,
-                evidence=evidence,
-                brief_set=brief_set,
-                codex_transport=transport_for_payload,
-                route=route,
-                control_socket=control_socket,
-                control_transport=control_transport,
-                code_graph_delta=code_graph_delta,
-                context_eval_payload=context_eval_payload,
-                suspected_noop=suspected_noop,
-                worker=worker,
-                transport_warning=direct_result.transport_warning if direct_worker else None,
-                worker_failure_summary=(
-                    seat_health_policy.worker_failure_summary(worker_results) if not workers_ok else None
-                ),
-            ),
+        direct_worker_finish.write_completed_run_receipt(
+            output_dir,
+            write_json=run_io._write_json,
+            payload=_payload,
+            final=final,
+            worker_results=worker_results,
+            direct_worker=direct_worker,
+            workers_ok=workers_ok,
+            defer_artifact_collection=defer_artifact_collection,
+            pending_handoff=handoff_inbox is not None,
+            transport_warning=direct_result.transport_warning if direct_worker else None,
+            base=finish_base,
+            extra=finish_extra,
         )
     if handoff_inbox is not None and workers_ok:
         try:
@@ -1925,69 +1863,28 @@ def run(
         except OSError as exc:
             detail = f"handoff failed: {exc}"
             if output_dir is not None:
-                finished_at = datetime.now(timezone.utc)
-                run_io._write_json(
-                    output_dir / "run.json",
-                    _payload(
-                        task=task,
-                        cwd=cwd,
-                        roster=roster,
-                        dry_run=dry_run,
-                        read_only=read_only,
-                        status="failed",
-                        started_at=started_at,
-                        finished_at=finished_at,
-                        output_dir=output_dir,
-                        error=detail,
-                        failure_phase="handoff",
-                        failure_kind="handoff-write-error",
-                        failure_seat=roster.orchestrator,
-                        code_graph=code_graph,
-                        drift_impact=drift_impact,
-                        evidence=evidence,
-                        brief_set=brief_set,
-                        codex_transport=transport_for_payload,
-                        route=route,
-                        control_socket=control_socket,
-                        control_transport=control_transport,
-                        code_graph_delta=code_graph_delta,
-                        context_eval_payload=context_eval_payload,
-                        suspected_noop=suspected_noop,
-                        worker=worker,
-                    ),
+                direct_worker_finish.write_handoff_failure_receipt(
+                    output_dir,
+                    write_json=run_io._write_json,
+                    payload=_payload,
+                    detail=detail,
+                    roster=roster,
+                    base=finish_base,
+                    extra=finish_extra,
                 )
             print(f"error: {detail}", file=sys.stderr)
             print(final.text)
             return 2
         print(f"handoff: {handoff}", file=sys.stderr)
         if output_dir is not None:
-            finished_at = None if defer_artifact_collection else datetime.now(timezone.utc)
-            run_io._write_json(
-                output_dir / "run.json",
-                _payload(
-                    task=task,
-                    cwd=cwd,
-                    roster=roster,
-                    dry_run=dry_run,
-                    read_only=read_only,
-                    status="artifact-collection" if defer_artifact_collection else "ok",
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    output_dir=output_dir,
-                    handoff_path=handoff,
-                    code_graph=code_graph,
-                    drift_impact=drift_impact,
-                    evidence=evidence,
-                    brief_set=brief_set,
-                    codex_transport=transport_for_payload,
-                    route=route,
-                    control_socket=control_socket,
-                    control_transport=control_transport,
-                    code_graph_delta=code_graph_delta,
-                    context_eval_payload=context_eval_payload,
-                    suspected_noop=suspected_noop,
-                    worker=worker,
-                ),
+            direct_worker_finish.write_ok_after_handoff_receipt(
+                output_dir,
+                write_json=run_io._write_json,
+                payload=_payload,
+                handoff=handoff,
+                defer_artifact_collection=defer_artifact_collection,
+                base=finish_base,
+                extra=finish_extra,
             )
     reroute_summary = seat_health_policy.format_reroute_summary(roster.seat_routing)
     if reroute_summary is not None:

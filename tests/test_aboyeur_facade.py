@@ -98,3 +98,26 @@ def test_facade_shared_import_assignment_reads_back(monkeypatch: pytest.MonkeyPa
     import sys as real_sys
 
     assert aboyeur.sys is real_sys
+
+
+def test_direct_worker_finish_imports_first_without_orchestrator_cycle() -> None:
+    import ast
+    import subprocess
+    import sys
+
+    module_path = Path(aboyeur.__file__).resolve().parent / "direct_worker_finish.py"
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    imported: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.append("." * node.level + (node.module or ""))
+    assert not any("orchestrator" in name for name in imported)
+    probe = (
+        "import brigade.aboyeur.direct_worker_finish as finish; "
+        "from brigade.agents import AgentResult; "
+        "assert finish.terminal_run_status(AgentResult(text='', ok=False, timed_out=True)) == 'timeout'"
+    )
+    completed = subprocess.run([sys.executable, "-c", probe], check=False, capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr
