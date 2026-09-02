@@ -316,7 +316,7 @@ class FileScopedAllowStringLiteralTests(unittest.TestCase):
         self.assertTrue(result.blocked)
 
     def test_single_quoted_allow_all_file_does_not_exempt_file(self) -> None:
-        text = 'INTERNAL_HOST = "192.168.77.31"\nmarker = \'content-guard: allow all file\'\n'
+        text = "INTERNAL_HOST = \"192.168.77.31\"\nmarker = 'content-guard: allow all file'\n"
         result = scan_text(text)
 
         ipv4 = [f for f in result.findings if f.rule_id == "private-ipv4"]
@@ -414,10 +414,7 @@ class FileScopedAllowStringLiteralTests(unittest.TestCase):
         self.assertEqual(ignored[0].action, "warn")
 
     def test_specific_file_allow_inside_string_does_not_exempt(self) -> None:
-        text = (
-            'INTERNAL_HOST = "192.168.77.31"\n'
-            'marker = "<!-- content-guard: allow private-ipv4 file -->"\n'
-        )
+        text = 'INTERNAL_HOST = "192.168.77.31"\nmarker = "<!-- content-guard: allow private-ipv4 file -->"\n'
         result = scan_text(text)
 
         ipv4 = [f for f in result.findings if f.rule_id == "private-ipv4"]

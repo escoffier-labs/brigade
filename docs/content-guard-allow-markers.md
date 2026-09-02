@@ -44,12 +44,14 @@ enforcing other findings in that file and emits a `tooling/ignored-file-allow`
 warning so the ignored marker is visible:
 
 ```python
-INTERNAL_HOST = "192.168.77.31"
+INTERNAL_HOST = "192.0.2.31"
 text = "<!-- content-guard: allow all file -->\npayload"
 ```
 
-The private IPv4 still `BLOCK`s. The string on the later line does not switch
-the file off. Test files that mention the marker as data must use a real
-comment if they intend a whole-file exemption.
+A private IPv4 in that first-line position still `BLOCK`s. The committed
+example uses RFC 5737 TEST-NET-1 (`192.0.2.31`) so the documentation itself
+is not a leak. The string on the later line does not switch the file off.
+Test files that mention the marker as data must use a real comment if they
+intend a whole-file exemption.
 
 `--no-allow-comments` disables both honoring and the ignored-marker warning.
