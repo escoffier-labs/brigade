@@ -2,7 +2,7 @@
 
 You are a coding agent. **You** install, set up, verify, and leave handoffs. The human usually does not type these commands. They point you at this repo (or paste a short prompt) and expect files and a doctor result on disk.
 
-Developing Brigade itself? Start from root `AGENTS.md`, then `CONTRIBUTING.md`. That file is for contributors, not for wiring a user workspace.
+Developing Brigade itself? Start from root `AGENTS.md`, then `CONTRIBUTING.md`. That file is for contributors, not for wiring a user workspace. To prove a change by driving the CLI, follow [`registry/skills/verify-brigade/SKILL.md`](../registry/skills/verify-brigade/SKILL.md) (Launch / Doctor / Drive / Evidence / Cleanup / Feature map).
 
 ## What Brigade is for
 

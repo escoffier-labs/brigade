@@ -49,9 +49,17 @@ There is no long-running process. "Launch" means: have a Brigade CLI, and have
 a fresh target to drive it against.
 
 ```bash
-# once per checkout, if .venv/ is missing
-python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
+# fresh checkout (this repo). Quote the extras so the shell does not glob them.
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev,grokbot]"
 ```
+
+Observed on this checkout: that install printed
+`Successfully installed ... brigade-cli-0.27.0 ... mcp-2.1.1 ...`, and
+`.venv/bin/brigade --version` then printed `brigade 0.27.0`. The `grokbot`
+extra pulls the optional `mcp` package (`pyproject.toml`:
+`grokbot = ["mcp>=2,<3"]`). The `[dev]` extra alone is enough for pytest /
+ruff / mypy; add `grokbot` when the change touches the listener.
 
 Create the target:
 
@@ -110,6 +118,21 @@ registry/skills/verify-brigade/control-brigade.py doctor-target --target "$TARGE
 are normal on a fresh target - memory-care, security, and backups are not
 initialized yet.
 
+Against this checkout itself (the development tree, not a temp target):
+
+```bash
+.venv/bin/brigade doctor --target .
+.venv/bin/brigade status --target .
+```
+
+Observed here, both exit 0. Doctor printed
+`summary: 43 checks, 0 failed, 0 manual` and a list of `warn` rows
+(missing operator bootstrap files, unwired memory-care / security). Status
+printed group rows (`core`, `skills`, `memory`, `guard`, ...) with `0 fail`
+on every group; several groups were `[degraded]` or `[not-installed]` because
+this tree is not an initialized operator workspace. Healthy for a Brigade
+source checkout is **exit 0 and 0 failed**, not zero warnings.
+
 ## Drive
 
 Real commands from this repo, one per mapped feature. The full map is in
@@ -155,6 +178,32 @@ normalizes (`run_id`, `status`, `summary.failed`, `checks[].status`, `valid`,
 `$TARGET/.brigade/work/verify-runs/<run-id>/`. Do not grep the human prose;
 it changes.
 
+Checkout-level focused gates for a change in this repo (no full suite).
+`./scripts/verify-focused` itself runs ruff, ruff format `--check`, mypy,
+version-sync, the managed and template-profile snapshots, then the named
+pytest selectors. The three lint/type pieces can also be run alone:
+
+```bash
+./scripts/verify-focused tests/test_skills_cmd.py tests/test_ci_workflow.py
+.venv/bin/ruff check src/brigade
+.venv/bin/ruff format --check src/brigade
+.venv/bin/mypy
+```
+
+Receipted form — same focused command, recorded as a work-verify receipt
+(`brigade work verify run --help` lists `--argv-json`, `--capture`, and
+`--json`; `--help` itself exits 0):
+
+```bash
+.venv/bin/brigade work verify run --target . \
+  --argv-json '["./scripts/verify-focused","tests/test_skills_cmd.py","tests/test_ci_workflow.py"]' \
+  --capture brigade-work
+```
+
+`--command` and `--argv-json` receipts are audit-only. Do not pass
+`--no-reuse` to the full `./scripts/verify` gate. Do not run
+`./scripts/verify-fast` or the full suite from this skill.
+
 ## Evidence
 
 ```bash
@@ -185,6 +234,13 @@ Proof standards for this repo:
   genuinely absent is a running Grok Bot listener, and the skill reads its
   absence as data rather than faking it.
 
+Checkout `work verify` receipts live at
+`.brigade/work/verify-runs/<run-id>/receipt.json`. Cite the `run_id` in the
+PR body (`work-verify receipt: <run-id>`). A passing receipt has
+`"status": "completed"` and `commands[].exit_code` of `0`. See
+`docs/receipt-schemas.md` and the citation paragraph at the end of this
+skill.
+
 ## Cleanup
 
 ```bash
@@ -203,6 +259,32 @@ After cleanup, confirm the proof survived:
 ```bash
 ls .brigade/verification-evidence/<stamp>-<label>/manifest.json
 ```
+
+`.venv/` is gitignored (`.gitignore` line `.venv/`). Never commit `.brigade/`
+— the root `.gitignore` lists `.brigade/` and `.brigade/work/` among the
+ignored paths. Evidence under `.brigade/verification-evidence/` is also
+gitignored; copy a receipt id into the PR body instead of adding the
+directory. After a checkout-level verify, leave `.venv/` in place for the
+next drive; remove it only when you are done with the tree
+(`rm -rf .venv`). Do not `git add` either tree.
+
+## Feature map
+
+CLI surfaces in this repo and the tests that cover them. Drive the helper
+feature your change actually touched (`features/README.md`); use the
+pytest selectors here when the proof is a focused gate. Names confirmed
+present under `tests/` on this checkout.
+
+| Surface | Command | Tests |
+|---|---|---|
+| run | `brigade run` | `tests/test_run_cli.py`, `tests/test_run_lifecycle.py`, `tests/test_run_events.py`, `tests/test_run_control.py`, `tests/test_run_resume.py`, `tests/test_run_receipts.py` (32 `tests/test_run_*.py` / `tests/test_runs_*.py` files) |
+| work verify | `brigade work verify` | `tests/test_work_cmd_verification.py`, `tests/test_work_cmd_verify_ranking.py`, `tests/test_verify_trial.py`, `tests/test_verification_contract.py`, `tests/test_verify_brigade_skill.py` |
+| fleet | `brigade fleet` | `tests/test_fleet_claims.py`, `tests/test_fleet_claim_release.py`, `tests/test_fleet_nodes.py`, `tests/test_fleet_sync.py`, `tests/test_fleet_cloud.py`, `tests/test_fleet_command_deck.py` (14 `tests/test_fleet_*.py` files) |
+| grokbot listener | `brigade run cloud grokbot` (`serve`, `setup`, `doctor`, `canary`, queue verbs) | `tests/test_grokbot_ops.py`, `tests/test_grokbot_jobs.py`, `tests/test_grokbot_mcp.py`, `tests/test_grokbot_feed.py`, `tests/test_grokbot_packs.py` |
+| guard | `brigade guard` / `brigade scrub` | `tests/guard/test_cli.py`, `tests/guard/test_engine.py`, `tests/guard/test_rules.py`, `tests/test_scrub.py`, `tests/test_runguard.py` |
+
+Doctor and status for the checkout itself: `tests/test_doctor.py`,
+`tests/test_status.py`.
 
 ## Helpers
 
@@ -253,3 +335,19 @@ That receipt is proof for a human reader, not a scored trial. `--command` and
 `--argv-json` receipts are audit-only; only `--manifest <id>` produces a receipt
 the outcome ratchet can score. Each `--capture` run prints which one it was.
 See `docs/outcome-scoring.md`.
+
+Checkout receipts from `brigade work verify run --target .` land at:
+
+```
+.brigade/work/verify-runs/<run-id>/receipt.json
+```
+
+Cite the `run_id` in the PR body as a single line, for example
+`work-verify receipt: <run-id>`. Read it back with
+`brigade work verify show <run-id> --json`. A passing receipt
+(`docs/receipt-schemas.md`, `brigade.work_verify_receipt` schema_version 2)
+has `"status": "completed"`, a `run_id` shaped
+`<YYYYMMDD>-<HHMMSS>-work-verify-<hex>`, `commands[].exit_code` of `0`,
+and the identity tuple `baseline_commit` / `tree_fingerprint` /
+`changes_patch_sha256`. Failures still write a receipt (`"status": "failed"`);
+that is the ledger signal, not a missing file.
