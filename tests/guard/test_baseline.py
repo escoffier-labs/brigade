@@ -72,6 +72,26 @@ class BaselineModuleTests(unittest.TestCase):
         paths = {e.path for e in baseline.entries}
         self.assertEqual(paths, {"real.md"})
 
+    def test_init_baseline_and_audit_skip_files_with_nul_byte(self) -> None:
+        # Baseline generation and audit scanning must agree on readable files.
+        # A file containing a NUL byte is treated as binary by _read_text and
+        # skipped by both paths.
+        from brigade.guard.audit import run_audit
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "leak.md").write_text("Host: 192.168.99.10.\n")
+            (root / "binary.bin").write_bytes(b"Hello \x00 world\n")
+
+            baseline = init_baseline(root, policy=Policy(), scope="tree")
+            baseline_paths = {e.path for e in baseline.entries}
+            self.assertIn("leak.md", baseline_paths)
+            self.assertNotIn("binary.bin", baseline_paths)
+
+            report = run_audit(root, policy=Policy(), scope="tree")
+            self.assertEqual(report.files_scanned, 1)
+            self.assertNotIn("binary.bin", {fa.path for fa in report.file_audits})
+
     def test_baseline_save_and_load_round_trip(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

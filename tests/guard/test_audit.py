@@ -8,9 +8,53 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+from brigade.guard.audit import run_audit
+from brigade.guard.baseline import Baseline, BaselineEntry, fingerprint_for
+from brigade.guard.policy import Policy
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+class AuditModuleTests(unittest.TestCase):
+    """Unit tests for the audit module internals."""
+
+    def test_audit_builds_baseline_index_once(self) -> None:
+        # When a baseline is supplied, the index must be built once per run
+        # and reused for every file, not recomputed inside filter_findings.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.md").write_text("Service runs on 192.168.99.10.\n")
+            (root / "b.md").write_text("Host is 192.168.99.20.\n")
+
+            baseline = Baseline(
+                entries=[
+                    BaselineEntry(
+                        path="a.md",
+                        rule_id="private-ipv4",
+                        match="192.168.99.10",
+                        line=1,
+                        fingerprint=fingerprint_for("private-ipv4", "192.168.99.10"),
+                    )
+                ],
+                created_at="2026-09-01T00:00:00+00:00",
+            )
+
+            index_calls = 0
+            real_index = baseline._index()
+
+            def counted_index() -> dict:
+                nonlocal index_calls
+                index_calls += 1
+                return real_index
+
+            with patch.object(baseline, "_index", side_effect=counted_index):
+                report = run_audit(root, policy=Policy(), scope="tree", baseline=baseline)
+
+            self.assertEqual(index_calls, 1)
+            self.assertEqual(report.files_scanned, 2)
 
 
 class AuditCliTests(unittest.TestCase):

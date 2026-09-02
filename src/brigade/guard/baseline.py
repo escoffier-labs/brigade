@@ -125,6 +125,7 @@ def init_baseline(
 
     # Deferred: audit imports this module, so a module-level import would cycle.
     from .audit import DEFAULT_EXCLUDE_DIR_NAMES, _enumerate
+    from .git_scan import _read_text
 
     active_policy = policy or Policy()
     entries: list[BaselineEntry] = []
@@ -138,9 +139,8 @@ def init_baseline(
     for file_path in files:
         if _DEFAULT_EXCLUDE_DIR_NAMES.intersection(file_path.parts):
             continue
-        try:
-            text = file_path.read_text()
-        except (OSError, UnicodeDecodeError):
+        text = _read_text(file_path)
+        if text is None:
             continue
 
         result = scan_text(text, policy=active_policy)
@@ -225,14 +225,19 @@ def filter_findings(
     findings: list[Finding],
     baseline: Baseline,
     file_path: str,
+    index: dict[tuple[str, str, str], BaselineEntry] | None = None,
 ) -> list[Finding]:
     """Return findings NOT present in the baseline for ``file_path``.
 
     Matches by (path, rule_id, fingerprint). A finding with the same rule_id
     but different match content (different fingerprint) is treated as NEW
     even if it lives in a baselined file.
+
+    Pass ``index`` to reuse a precomputed baseline index across many files;
+    otherwise one is built on every call.
     """
-    index = baseline._index()
+    if index is None:
+        index = baseline._index()
     kept: list[Finding] = []
     for finding in findings:
         key = (file_path, finding.rule_id, fingerprint_for(finding.rule_id, finding.match))

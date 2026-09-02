@@ -122,6 +122,7 @@ def run_audit(
     # rediscover every one of them as an unbaselined finding.
     skip = baseline_path.resolve() if baseline_path else None
 
+    baseline_index = baseline._index() if baseline is not None else None
     for path in paths:
         if skip is not None and path.resolve() == skip:
             continue
@@ -130,11 +131,11 @@ def run_audit(
             continue
 
         result = scan_text(text, policy=policy, options=options)
-        if baseline is not None:
+        if baseline is not None and baseline_index is not None:
             result = GuardResult(
                 text=result.text,
                 redacted_text=result.redacted_text,
-                findings=filter_findings(result.findings, baseline, _relative(path, target)),
+                findings=filter_findings(result.findings, baseline, _relative(path, target), baseline_index),
             )
         report.files_scanned += 1
         _record(report, path, result, target=target)
