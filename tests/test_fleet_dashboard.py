@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from brigade import fleet_dashboard, fleet_hub, fleet_hub_sessions
+from brigade import fleet_dashboard, fleet_hub, fleet_hub_sessions, fleet_hub_status
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
@@ -25,14 +25,14 @@ def hub(tmp_path):
     server = fleet_hub.make_server("127.0.0.1", 0, db, TOKEN, allow_admin_writes=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    yield ("127.0.0.1", server.server_address[1])
+    yield ("127.0.0.1", server.server_address[1], db)
     server.shutdown()
     server.server_close()
 
 
 def _request(hub, method: str, path: str, *, headers: dict | None = None, body=None):
     """Raw request so redirects are not followed and Set-Cookie is visible."""
-    host, port = hub
+    host, port = hub[0], hub[1]
     conn = http.client.HTTPConnection(host, port, timeout=5)
     data = json.dumps(body).encode() if body is not None else None
     conn.request(method, path, body=data, headers=headers or {})
@@ -352,7 +352,7 @@ class TestNoSecretsInHtml:
 
 def _asset_request(hub, path: str):
     """Raw bytes request for binary assets; does not decode as text."""
-    host, port = hub
+    host, port = hub[0], hub[1]
     conn = http.client.HTTPConnection(host, port, timeout=5)
     conn.request("GET", path, headers={})
     response = conn.getresponse()
@@ -734,3 +734,191 @@ def test_cli_serve_trust_tailscale_identity_defaults_off():
     args = cli._build_parser().parse_args(["fleet", "serve", "--host", "127.0.0.1"])
 
     assert args.trust_tailscale_identity is False
+
+
+def _insert_event(
+    conn,
+    node: str,
+    run_id: str,
+    seq: int,
+    state: str,
+    received_at: str,
+    *,
+    repo: str = "repo",
+    harness: str = "claude",
+) -> None:
+    conn.execute(
+        "INSERT INTO events (node_id, run_id, sequence, digest, repo, seat, harness, state, ts, received_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (node, run_id, seq, f"{run_id}-{seq}", repo, "worker", harness, state, received_at, received_at),
+    )
+
+
+class TestBoardBounds:
+    def test_board_sql_shape_is_windowed_or_paginated(self):
+        windowed = fleet_hub_status.board_latest_sql(windowed=True)
+        assert "received_at >=" in windowed
+        assert "LIMIT ? OFFSET ?" in windowed
+        assert "ROW_NUMBER()" in windowed
+        history = fleet_hub_status.board_latest_sql(windowed=False)
+        assert "received_at >=" not in history
+        assert "LIMIT ? OFFSET ?" in history
+        assert "ROW_NUMBER()" in history
+
+    def test_events_received_at_index_exists(self, tmp_path):
+        conn = fleet_hub.init_db(tmp_path / "fleet.db")
+        try:
+            names = {row[1] for row in conn.execute("PRAGMA index_list(events)")}
+        finally:
+            conn.close()
+        assert "events_received_at" in names
+        assert "events_run_seq" in names
+
+    def test_node_summary_uses_rendered_runs_not_the_journal(self):
+        runs = [
+            {"node_id": NODE_A, "received_at": "2026-08-01T00:00:00+00:00"},
+            {"node_id": NODE_A, "received_at": "2026-08-02T00:00:00+00:00"},
+            {"node_id": NODE_B, "received_at": "2026-08-01T12:00:00+00:00"},
+        ]
+        assert fleet_hub.node_summary(runs) == [
+            {"node_id": NODE_A, "last_received_at": "2026-08-02T00:00:00+00:00", "events": 2},
+            {"node_id": NODE_B, "last_received_at": "2026-08-01T12:00:00+00:00", "events": 1},
+        ]
+
+    def test_run_started_at_looks_up_only_rendered_keys(self, tmp_path):
+        conn = fleet_hub.init_db(tmp_path / "fleet.db")
+        try:
+            now = datetime(2026, 8, 23, 12, tzinfo=timezone.utc)
+            old = (now - timedelta(hours=48)).isoformat()
+            recent = now.isoformat()
+            _insert_event(conn, NODE_A, "kept", 1, "run.created", old)
+            _insert_event(conn, NODE_A, "kept", 2, "run.dispatch.observed", recent)
+            _insert_event(conn, NODE_A, "ignored", 1, "run.created", old)
+            conn.commit()
+            started = fleet_hub.run_started_at(conn, [(NODE_A, "kept", "claude")])
+            assert started == {(NODE_A, "kept"): old}
+        finally:
+            conn.close()
+
+    def test_board_status_windows_terminals_and_keeps_latest_per_run(self, tmp_path):
+        conn = fleet_hub.init_db(tmp_path / "fleet.db")
+        try:
+            now = datetime(2026, 8, 23, 12, tzinfo=timezone.utc)
+            old = (now - timedelta(hours=48)).isoformat()
+            recent = (now - timedelta(hours=2)).isoformat()
+            live = now.isoformat()
+            _insert_event(conn, NODE_A, "ancient", 1, "run.created", old, repo="repo-old")
+            _insert_event(conn, NODE_A, "ancient", 2, "run.completed", old, repo="repo-old")
+            _insert_event(conn, NODE_A, "recent-done", 1, "run.created", recent, repo="repo-new")
+            _insert_event(conn, NODE_A, "recent-done", 2, "run.completed", recent, repo="repo-new")
+            _insert_event(conn, NODE_A, "live", 1, "run.created", live, repo="repo-live")
+            _insert_event(conn, NODE_A, "live", 2, "run.dispatch.observed", live, repo="repo-live")
+            conn.commit()
+            default = fleet_hub.board_status(conn, now=now)
+            default_ids = {row["run_id"] for row in default.runs}
+            assert default_ids == {"recent-done", "live"}
+            assert default.more is False
+            history = fleet_hub.board_status(conn, include_all=True, now=now)
+            assert {row["run_id"] for row in history.runs} == {"ancient", "recent-done", "live"}
+            live_row = next(row for row in default.runs if row["run_id"] == "live")
+            assert live_row["state"] == "run.dispatch.observed"
+            assert live_row["sequence"] == 2
+        finally:
+            conn.close()
+
+    def test_board_status_all_is_paginated(self, tmp_path):
+        conn = fleet_hub.init_db(tmp_path / "fleet.db")
+        try:
+            now = datetime(2026, 8, 23, 12, tzinfo=timezone.utc)
+            for index in range(5):
+                stamp = (now - timedelta(minutes=5 - index)).isoformat()
+                _insert_event(conn, NODE_A, f"done-{index}", 1, "run.completed", stamp, repo=f"repo-{index}")
+            conn.commit()
+            first = fleet_hub.board_status(conn, include_all=True, now=now, limit=3, offset=0)
+            assert [row["run_id"] for row in first.runs] == ["done-4", "done-3", "done-2"]
+            assert first.more is True
+            assert first.limit == 3
+            second = fleet_hub.board_status(conn, include_all=True, now=now, limit=3, offset=3)
+            assert [row["run_id"] for row in second.runs] == ["done-1", "done-0"]
+            assert second.more is False
+        finally:
+            conn.close()
+
+    def test_board_status_does_not_delete_events(self, tmp_path):
+        conn = fleet_hub.init_db(tmp_path / "fleet.db")
+        try:
+            now = datetime(2026, 8, 23, 12, tzinfo=timezone.utc)
+            _insert_event(conn, NODE_A, "r", 1, "run.completed", now.isoformat())
+            conn.commit()
+            fleet_hub.board_status(conn, include_all=True, now=now)
+            assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+        finally:
+            conn.close()
+
+    def test_render_page_emits_more_link_from_owned_http_flag(self):
+        page = fleet_dashboard.render_page(
+            view="machines",
+            query_string="all=1",
+            runs=[],
+            claims=[],
+            nodes=[],
+            started_at={},
+            nonce="abc",
+            more_href="/view/machines?all=1&offset=200",
+        )
+        assert 'class="fleet-more"' in page
+        assert 'href="/view/machines?all=1&amp;offset=200"' in page
+        assert ">more<" in page
+
+    def test_default_board_omits_old_terminal_outcome_all_keeps_it(self, hub):
+        now = datetime.now(timezone.utc)
+        old = (now - timedelta(hours=48)).isoformat()
+        recent = now.isoformat()
+        events = [
+            _event(NODE_A, "old-done", 1, "run.completed", repo="repo-old", harness="claude", ts=old),
+            _event(NODE_A, "new-done", 1, "run.completed", repo="repo-new", harness="claude", ts=recent),
+            _event(NODE_A, "live-run", 1, "run.dispatch.observed", repo="repo-live", harness="claude", ts=recent),
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            conn.execute("UPDATE events SET received_at = ? WHERE run_id = ?", (old, "old-done"))
+            conn.commit()
+        finally:
+            conn.close()
+        _status, _headers, machines = _request(hub, "GET", "/view/machines", headers=_bearer())
+        assert "live-run" in machines
+        assert "old-done" not in machines
+        assert "new-done" not in machines
+        _status, _headers, repos = _request(hub, "GET", "/view/repos", headers=_bearer())
+        assert "repo-live" in repos
+        assert "repo-new" in repos
+        assert "repo-old" not in repos
+        _status, _headers, all_machines = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
+        assert "old-done" in all_machines
+        assert "new-done" in all_machines
+        _status, _headers, all_repos = _request(hub, "GET", "/view/repos?all=1", headers=_bearer())
+        assert "repo-old" in all_repos
+
+    def test_all_board_paginates_with_more_link(self, hub):
+        now = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(NODE_A, f"page-{index}", 1, "run.completed", repo=f"repo-{index}", harness="claude", ts=now)
+            for index in range(fleet_hub.BOARD_LIMIT + 1)
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        _status, _headers, first = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
+        assert 'class="fleet-more"' in first
+        assert "offset=200" in first
+        first_ids = {f"page-{index}" for index in range(fleet_hub.BOARD_LIMIT + 1) if f'title="page-{index}"' in first}
+        assert len(first_ids) == fleet_hub.BOARD_LIMIT
+        _status, _headers, second = _request(hub, "GET", "/view/machines?all=1&offset=200", headers=_bearer())
+        assert 'class="fleet-more"' not in second
+        second_ids = {
+            f"page-{index}" for index in range(fleet_hub.BOARD_LIMIT + 1) if f'title="page-{index}"' in second
+        }
+        assert len(second_ids) == 1
+        assert first_ids.isdisjoint(second_ids)
+        assert len(first_ids | second_ids) == fleet_hub.BOARD_LIMIT + 1

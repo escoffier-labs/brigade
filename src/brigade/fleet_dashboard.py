@@ -689,8 +689,13 @@ def render_page(
     started_at: dict[tuple[str, str], str],
     nonce: str,
     now: datetime | None = None,
+    more_href: str | None = None,
 ) -> str:
-    """Render the full dashboard document for one board."""
+    """Render the full dashboard document for one board.
+
+    ``more_href`` is supplied by the hub when the bounded latest-state page
+    has another LIMIT page. The renderer does not query the journal.
+    """
     current = now or datetime.now(timezone.utc)
     query = parse_query(query_string, view=view)
     all_rows = build_rows(runs, started_at, now=current)
@@ -709,12 +714,13 @@ def render_page(
         f'<p class="center-freshness">{esc(f"data as of {stamp}, refreshes every {REFRESH_SECONDS}s")}, '
         f'<a href="{esc(_href(query))}">{esc("refresh")}</a></p>'
     )
+    more = f'<p class="fleet-more"><a href="{esc(more_href)}">{esc("more")}</a></p>' if more_href else ""
     body = (
         f'<h1 class="page-title">{esc(title)}</h1>'
         f"{freshness}{_summary(all_rows, node_ids, claim_rows)}{_legend()}{_controls(query)}"
         f'<label class="fleet-quick-filter">{esc("filter rows")} '
         f'<input type="search" data-filter-all="1" placeholder="{esc("type to narrow (needs JS)")}"></label>'
-        f"{board}"
+        f"{board}{more}"
     )
     return _document(f"{title} - Brigade Fleet", nonce, _nav(query), body)
 
@@ -855,6 +861,7 @@ table.data-table th {{ background: #f0f0f0; }}
 .fleet-state-stale {{ border-style: dashed; border-color: #8b0000; }}
 .fleet-state-queued, .fleet-state-interrupted {{ border-style: dashed; }}
 .machine-empty {{ margin: 0; color: #333; font-size: 0.9rem; }}
+.fleet-more {{ margin: 1rem 0 0; font-size: 0.9rem; }}
 </style>
 </head>
 <body>
