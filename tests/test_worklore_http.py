@@ -446,19 +446,17 @@ def test_existing_claim_and_dashboard_routes_stay_unchanged(tmp_path):
 def test_operator_nodes_reads_toml_and_bounded_env(tmp_path):
     config = tmp_path / "fleet.toml"
     assert worklore_http.operator_nodes(environ={}, config_path=config) == ()
-    config.write_text(
-        '[fleet.worklore]\noperator_nodes = ["rocinante", "unknown", "bad id", "rocinante", "shadowfax"]\n'
-    )
-    assert worklore_http.operator_nodes(environ={}, config_path=config) == ("rocinante", "shadowfax")
-    config.write_text('[fleet.worklore]\noperator_nodes = "rocinante"\n')
+    config.write_text('[fleet.worklore]\noperator_nodes = ["alpha", "unknown", "bad id", "alpha", "beta"]\n')
+    assert worklore_http.operator_nodes(environ={}, config_path=config) == ("alpha", "beta")
+    config.write_text('[fleet.worklore]\noperator_nodes = "alpha"\n')
     assert worklore_http.operator_nodes(environ={}, config_path=config) == ()
-    env = {"BRIGADE_WORKLORE_OPERATOR_NODES": "gandalf, unknown, n1"}
-    config.write_text('[fleet.worklore]\noperator_nodes = ["rocinante"]\n')
-    assert worklore_http.operator_nodes(environ=env, config_path=config) == ("gandalf", "n1")
+    env = {"BRIGADE_WORKLORE_OPERATOR_NODES": "gamma, unknown, n1"}
+    config.write_text('[fleet.worklore]\noperator_nodes = ["alpha"]\n')
+    assert worklore_http.operator_nodes(environ=env, config_path=config) == ("gamma", "n1")
     assert worklore_http.operator_nodes(environ={"BRIGADE_WORKLORE_OPERATOR_NODES": ""}, config_path=config) == ()
     too_long = "a" * 129
-    env = {"BRIGADE_WORKLORE_OPERATOR_NODES": f"rocinante,{too_long},shadowfax"}
-    assert worklore_http.operator_nodes(environ=env, config_path=config) == ("rocinante", "shadowfax")
+    env = {"BRIGADE_WORKLORE_OPERATOR_NODES": f"alpha,{too_long},beta"}
+    assert worklore_http.operator_nodes(environ=env, config_path=config) == ("alpha", "beta")
     many = ",".join(f"n{index}" for index in range(40))
     nodes = worklore_http.operator_nodes(environ={"BRIGADE_WORKLORE_OPERATOR_NODES": many}, config_path=config)
     assert len(nodes) == 32
