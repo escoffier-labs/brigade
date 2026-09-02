@@ -38,6 +38,17 @@ from .grokbot_job_validation import (
     validate_ownership_paths as _validate_ownership_paths,
     validate_repository as _validate_repository,
 )
+from .grokbot_jobs_hub import (
+    _hub_job,
+    _hub_jobs,
+    _hub_projection,
+    _hub_projection_job as _hub_projection_job,
+    _hub_tracker_artifact,
+    _hub_unavailable_row,
+    _read_hub_report_from_storage as _read_hub_report_from_storage,
+    _require_hub,
+    _snapshots_by_task_hash as _snapshots_by_task_hash,
+)
 
 try:  # pragma: no cover - Windows does not provide fcntl.
     import fcntl
@@ -642,33 +653,6 @@ def _read_report_from_storage(storage: _Storage, job_id: str) -> dict[str, Any]:
         storage.artifacts, f"{job_id}.md", maximum=MAX_REPORT_BYTES, missing_reason="report-missing"
     )
     return _verified_report(job_id, data, record["result_artifact"]["sha256"])
-
-
-def _read_hub_report_from_storage(storage: _Storage, job: dict[str, Any]) -> dict[str, Any]:
-    """Verify one hub-listed report against its local artifact bytes."""
-    job_id = _validate_job_id(job["job_id"])
-    expected = job.get("artifact_digest")
-    if not isinstance(expected, str) or not expected:
-        raise GrokbotJobError("missing-digest")
-    data = _read_bytes_file(
-        storage.artifacts, f"{job_id}.md", maximum=MAX_REPORT_BYTES, missing_reason="report-missing"
-    )
-    return _verified_report(job_id, data, expected)
-
-
-def _snapshots_by_task_hash(storage: _Storage) -> dict[str, dict[str, Any]]:
-    """Index private task snapshots by task_hash for hub-authority pairing."""
-    if storage.snapshots is None:
-        return {}
-    index: dict[str, dict[str, Any]] = {}
-    for name in _list_names(storage.snapshots, prefix="grokbot-", suffix=".json"):
-        payload = _read_json_file(storage.snapshots, name, missing_ok=True)
-        if not isinstance(payload, dict) or payload.get("schema") != SNAPSHOT_SCHEMA:
-            continue
-        task_hash = payload.get("task_hash")
-        if isinstance(task_hash, str) and TASK_HASH_RE.fullmatch(task_hash):
-            index[task_hash] = payload
-    return index
 
 
 def cancel(target: Path, job_id: str, now: datetime | None = None) -> dict[str, Any]:
@@ -1688,56 +1672,6 @@ WORK_STATES = frozenset({"queued", "claimed", "running"})
 TERMINAL_STATES = frozenset({"completed", "failed", "expired", "canceled"})
 
 
-def _hub_unavailable_row() -> dict[str, Any]:
-    return {
-        "job_id": "grokbot-hub-unavailable",
-        "label": "Grok Bot hub unavailable",
-        "task_hash": None,
-        "state": "unavailable",
-        "created_at": None,
-        "updated_at": None,
-        "queued_at": None,
-        "artifact": {"kind": "report"},
-        "degraded": True,
-        "classification": "needs-investigation",
-        "source": "grokbot-hub",
-    }
-
-
-def _hub_tracker_artifact(job: dict[str, Any], kind: object) -> dict[str, Any]:
-    artifact: dict[str, Any] = {"kind": kind}
-    if kind == "draft-pr" and job.get("artifact_ref"):
-        artifact["url"] = job["artifact_ref"]
-    elif kind == "branch":
-        if job.get("artifact_ref"):
-            artifact["branch"] = job["artifact_ref"]
-        if job.get("artifact_digest"):
-            artifact["commit"] = job["artifact_digest"]
-    elif kind == "report":
-        if job.get("artifact_digest"):
-            artifact["sha256"] = job["artifact_digest"]
-        if job.get("artifact_size") is not None:
-            artifact["size"] = job["artifact_size"]
-        if job.get("private_snapshot_id"):
-            artifact["private_snapshot_id"] = job["private_snapshot_id"]
-    else:
-        return {}
-    return artifact if len(artifact) > 1 else {}
-
-
-def _hub_job(job_id: str) -> dict[str, Any]:
-    return _hub_projection(_require_hub("status", job_id=job_id))
-
-
-def _hub_jobs(*, role: str | None = None, include_all: bool = False) -> list[dict[str, Any]]:
-    from . import fleet_client_grokbot
-
-    decision = fleet_client_grokbot.list_jobs(role=role, include_all=include_all)
-    if not decision.granted or decision.jobs is None:
-        raise GrokbotJobError(decision.reason, action="list")
-    return [_hub_projection_job(job) for job in decision.jobs]
-
-
 def _claim_via_hub(
     target: Path, job_id: str, bot_id: str, lease_id: str, lease_seconds: int, *, include_context: bool
 ) -> dict[str, Any]:
@@ -1870,62 +1804,6 @@ def _hub_lease_op(action: str, job_id: str, bot_id: str, lease_id: str, **fields
             **fields,
         )
     )
-
-
-def _require_hub(action: str, job_id: str | None = None, **fields: Any) -> Any:
-    from . import fleet_client_grokbot
-
-    operation = getattr(fleet_client_grokbot, action)
-    decision = operation(job_id, **fields) if job_id is not None else operation(**fields)
-    if not decision.granted:
-        raise GrokbotJobError(decision.reason, action=action)
-    return decision
-
-
-def _hub_projection(decision: Any) -> dict[str, Any]:
-    if decision.job is None:
-        raise GrokbotJobError(decision.reason)
-    return _hub_projection_job(decision.job)
-
-
-def _hub_projection_job(job: dict[str, Any]) -> dict[str, Any]:
-    digest = job.get("task_digest")
-    projection = {
-        "job_id": job["job_id"],
-        "label": job.get("label"),
-        "role": job.get("role"),
-        "repository": job.get("repository"),
-        "task_hash": f"sha256:{digest}"
-        if isinstance(digest, str) and not str(digest).startswith("sha256:")
-        else digest,
-        "state": job["state"],
-        "created_at": job.get("created_at"),
-        "updated_at": job.get("updated_at"),
-        "queued_at": job.get("queued_at"),
-        "timeout_seconds": job.get("timeout_seconds"),
-        "queue_ttl_seconds": job.get("queue_ttl_seconds", DEFAULT_QUEUE_TTL_SECONDS),
-        "item_revision": job.get("item_revision"),
-        "sequence": job.get("sequence"),
-        "artifact": {"kind": job.get("artifact_kind")},
-        "artifact_kind": job.get("artifact_kind"),
-        "harness": "grokbot",
-    }
-    for key in (
-        "claimed_at",
-        "lease_expires_at",
-        "cancel_requested_at",
-        "private_snapshot_id",
-        "artifact_ref",
-        "artifact_digest",
-        "artifact_size",
-        "claimant_node",
-        "claimant_worker",
-        "lease_generation",
-        "queue_id",
-    ):
-        if key in job and job[key] is not None:
-            projection[key] = job[key]
-    return projection
 
 
 def _safe_artifact_metadata(artifact: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
