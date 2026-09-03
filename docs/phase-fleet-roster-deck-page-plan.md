@@ -1520,7 +1520,7 @@ def apply(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig, submi
 - Modify: `src/brigade/work_cmd/session/briefing.py:553` (payload), `:702` (print)
 - Test: `tests/test_work_cmd_session.py`
 
-- [ ] Append these tests to `tests/test_work_cmd_session.py`:
+- [x] Append these tests to `tests/test_work_cmd_session.py`:
 
 ```python
 def test_work_brief_fleet_routing_from_hub(tmp_path, monkeypatch, capsys):
@@ -1601,7 +1601,7 @@ def test_work_brief_fleet_routing_budget_and_unconfigured(tmp_path, monkeypatch,
     _init_git_repo(tmp_path)
     assert fleet_routing.fleet_routing_for_brief() is None  # conftest strips the hub
     assert work_cmd.brief(target=tmp_path, limit=2) == 0
-    assert "fleet_routing" not in capsys.readouterr().out
+    assert "fleet_routing:" not in capsys.readouterr().out  # tmp_path contains the test name
     monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "https://hub.example.test")
     monkeypatch.setattr(fleet_routing, "BUDGET_SECONDS", 0.2)
 
@@ -1618,10 +1618,10 @@ def test_work_brief_fleet_routing_budget_and_unconfigured(tmp_path, monkeypatch,
     assert payload["source"] == "unavailable"
 ```
 
-- [ ] Run, watch it fail:
+- [x] Run, watch it fail:
   `brigade work verify run --target . --command "python -m pytest -q tests/test_work_cmd_session.py -k fleet_routing" --capture brigade-work`
   Expect FAIL: `ImportError: cannot import name 'fleet_routing' from 'brigade.work_cmd.session'`.
-- [ ] Create `src/brigade/work_cmd/session/fleet_routing.py`:
+- [x] Create `src/brigade/work_cmd/session/fleet_routing.py`:
 
 ```python
 """``fleet_routing`` block for ``brigade work brief`` (hub roster page spec).
@@ -1720,7 +1720,7 @@ def print_fleet_routing(block: dict[str, Any]) -> None:
         print("fleet_routing_source: unavailable (hub unreachable, no cache)")
 ```
 
-- [ ] In `briefing.py`, add the payload key. At line 553 (inside the `_brief_payload` return dict, next to `"cloud_tracker": ...`) add:
+- [x] In `briefing.py`, add the payload key. At line 553 (inside the `_brief_payload` return dict, next to `"cloud_tracker": ...`) add:
 
 ```python
         "fleet_routing": _fleet_routing_for_brief(),
@@ -1738,7 +1738,7 @@ def _fleet_routing_for_brief() -> dict[str, Any] | None:
         return None
 ```
 
-- [ ] In `brief()`, immediately after the `else: print("latest_run: none")` block (line 702), add:
+- [x] In `brief()`, immediately after the `else: print("latest_run: none")` block (line 702), add:
 
 ```python
     routing = payload.get("fleet_routing")
@@ -1748,10 +1748,10 @@ def _fleet_routing_for_brief() -> dict[str, Any] | None:
         fleet_routing.print_fleet_routing(routing)
 ```
 
-- [ ] Run to green:
+- [x] Run to green:
   `brigade work verify run --target . --command "python -m pytest -q tests/test_work_cmd_session.py" --capture brigade-work`
   Expect PASS. `test_work_brief_json_compacts_heavy_report_and_fleet_health` must still pass; `fleet_routing` is `None` there because conftest strips the hub, and `json.dumps` handles `None`.
-- [ ] Commit: `git add -A && git commit -m "feat(work): print the fleet routing pin in the work brief"`
+- [x] Commit: `git add -A && git commit -m "feat(work): print the fleet routing pin in the work brief"`
 
 ### Task 7: docs, full verification, changelog
 
