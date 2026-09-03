@@ -187,3 +187,40 @@ def test_verify_commit_missing_target(capsys, tmp_path, monkeypatch):
     assert dispatch(args) == 1
     out, err = capsys.readouterr()
     assert "missing trailer" in out
+
+
+def test_verify_rejects_dotdot_run_id_and_never_touches_outside_runs(capsys, tmp_path, monkeypatch):
+    """Regression: a Brigade-Run trailer carrying a path-escaping run_id must be
+    rejected as an unknown run and must never open a receipt outside the target
+    .brigade/runs tree."""
+    target_repo = tmp_path / "target_repo"
+    target_repo.mkdir()
+    monkeypatch.chdir(target_repo)
+    subprocess.check_call(["git", "init"])
+
+    run_id = "escape-run-1"
+    # Place a matching receipt outside the target runs tree so traversal would succeed.
+    escaped_dir = tmp_path / "outside" / run_id
+    escaped_dir.mkdir(parents=True)
+    receipt = {
+        "schema": "brigade.causal_receipt.v1",
+        "schema_version": "1.0",
+        "subject": {"kind": "run", "id": run_id},
+        "parents": [],
+    }
+    with open(escaped_dir / "run.json", "w") as f:
+        json.dump(receipt, f)
+    digest = receipt_digest(receipt)
+
+    # Absolute path escapes the target runs tree entirely.
+    trailer_run_id = str(escaped_dir)
+    msg = f"Test commit\n\nBrigade-Run: {trailer_run_id}\nBrigade-Receipt: sha256:{digest}\n"
+    with open("test.txt", "w") as f:
+        f.write("test")
+    subprocess.check_call(["git", "add", "test.txt"])
+    subprocess.check_call(["git", "-c", "user.email=test.invalid", "-c", "user.name=Test User", "commit", "-m", msg])
+
+    args = DummyArgs("verify", commit="HEAD", target=target_repo)
+    assert dispatch(args) == 1
+    out, err = capsys.readouterr()
+    assert "unknown run" in out
