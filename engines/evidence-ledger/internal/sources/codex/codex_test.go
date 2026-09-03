@@ -151,7 +151,7 @@ func TestGenerateSkipsProtocolChatterAndTruncatesArguments(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rollout-chatter.jsonl")
 	hugeArgs := strings.Repeat("a", 5000)
-	
+
 	// Create a synthetic rollout with skipped protocol rows, a truncated argument, and single-stored arguments
 	content := strings.Join([]string{
 		// 1. chatter without text (should be skipped)
@@ -167,13 +167,13 @@ func TestGenerateSkipsProtocolChatterAndTruncatesArguments(t *testing.T) {
 		// 6. valid tool call with huge argument (should truncate and single-store)
 		`{"type":"response_item","timestamp":"2026-07-14T19:29:50Z","payload":{"session_id":"s","type":"function_call","name":"exec_command","call_id":"call-2","arguments":"` + hugeArgs + `"}}`,
 	}, "\n") + "\n"
-	
+
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	
+
 	recs, res := parseRecords(t, path, sources.Options{})
-	
+
 	if res.Skipped != 3 {
 		t.Fatalf("expected 3 skipped records, got %d", res.Skipped)
 	}
@@ -183,18 +183,18 @@ func TestGenerateSkipsProtocolChatterAndTruncatesArguments(t *testing.T) {
 	if len(recs) != 3 {
 		t.Fatalf("expected 3 valid records, got %d", len(recs))
 	}
-	
+
 	// Verify single-stored arguments on normal tool call
 	normalCall := recs[1]
 	if !strings.Contains(string(normalCall.Item.Metadata), `\"cmd\":\"ls\"`) {
 		t.Fatalf("expected metadata to contain arguments, got %s", normalCall.Item.Metadata)
 	}
-	
+
 	var rawOut map[string]any
 	if err := json.Unmarshal(normalCall.Unknown, &rawOut); err != nil {
 		t.Fatal(err)
 	}
-	
+
 	if normalCall.Raw.Hash == "" {
 		t.Fatalf("expected raw hash to be set")
 	}
@@ -204,7 +204,7 @@ func TestGenerateSkipsProtocolChatterAndTruncatesArguments(t *testing.T) {
 	if !strings.Contains(string(hugeCall.Item.Metadata), "[truncated]") {
 		t.Fatalf("expected metadata to contain truncated arguments, got %s", hugeCall.Item.Metadata)
 	}
-	
+
 	// We need to check if the raw JSON from `Unknown` has omitted the `arguments` key entirely.
 	var hugeRawOut map[string]any
 	if err := json.Unmarshal(hugeCall.Unknown, &hugeRawOut); err != nil {
@@ -215,7 +215,7 @@ func TestGenerateSkipsProtocolChatterAndTruncatesArguments(t *testing.T) {
 		t.Fatal("expected raw block")
 	}
 	// "Unknown" contains the record which only holds Hash, Format, Path, Ordinal in its "raw" block
-	// wait, `Unknown` is the entire serialized adapter.Record. The raw line is actually NOT included 
+	// wait, `Unknown` is the entire serialized adapter.Record. The raw line is actually NOT included
 	// directly in the JSON, it is usually just a reference `RawRef` in adapter.Record.
 	// Oh I see. The problem is I'm testing `hugeCall.Unknown` which is the serialized `Record`.
 	// The `Record` contains `hugeCall.Item.Metadata.arguments` which DOES contain the truncated args.
@@ -229,7 +229,7 @@ func TestGenerateSkipsProtocolChatterAndTruncatesArguments(t *testing.T) {
 	// Let's only verify that the original huge payload doesn't leak into the RawRef or metadata incorrectly.
 	// Since we know `text` has it, it's expected to be in `Unknown` because of `item.text`.
 	// We will skip testing `Unknown` for `hugeArgs` presence because `text` has it.
-	
+
 	// Verify digest is still present in external_id (not explicitly checking digest correctness here, just that an ID exists)
 	if hugeCall.Item.ExternalID == "" {
 		t.Fatalf("expected hugeCall to have an ExternalID")

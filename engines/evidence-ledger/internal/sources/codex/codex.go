@@ -80,15 +80,15 @@ func normalize(ev sources.RawEvent) (rec adapter.Record, warning string, skipped
 	name := sources.String(payload, "name")
 	callID := sources.String(payload, "call_id", "callId")
 	arguments := sources.String(payload, "arguments")
-	
-	// Create a copy of payload and ev.Object to compute text without the huge arguments 
+
+	// Create a copy of payload and ev.Object to compute text without the huge arguments
 	// so that we don't bleed huge arguments into the `text` field, which ruins the truncation.
 	var truncatedArgs = arguments
 	if len(truncatedArgs) > 4000 {
 		truncatedArgs = truncatedArgs[:4000] + "\n[truncated]"
 		truncated = true
 	}
-	
+
 	payloadForText := make(map[string]any)
 	for k, v := range payload {
 		payloadForText[k] = v
@@ -116,7 +116,7 @@ func normalize(ev sources.RawEvent) (rec adapter.Record, warning string, skipped
 	if text == "" {
 		text = eventType
 	}
-	
+
 	arguments = truncatedArgs
 	model := sources.String(payload, "model")
 	if model == "" {
@@ -127,7 +127,7 @@ func normalize(ev sources.RawEvent) (rec adapter.Record, warning string, skipped
 		cwd = sources.String(ev.Object, "cwd", "workspace_dir", "workspaceDir")
 	}
 	kind := codexKind(eventType, payloadType, name, text)
-	
+
 	// Calculate a full digest of the arguments, if truncated.
 	var digest string
 	if truncated {
@@ -166,7 +166,7 @@ func normalize(ev sources.RawEvent) (rec adapter.Record, warning string, skipped
 	if truncated {
 		meta["arguments_digest"] = digest
 	}
-	
+
 	rawEv := ev
 	if arguments != "" {
 		// "single-stored arguments": if we keep them in `meta`, we should remove them from `raw`
