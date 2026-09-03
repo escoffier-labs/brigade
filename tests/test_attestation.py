@@ -66,7 +66,7 @@ def _sample_receipt(
 
 
 def test_keygen_writes_private_key_and_allowed_signers_entry(tmp_path: Path) -> None:
-    key_path, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
 
     assert key_path.is_file()
     assert_private_mode(key_path, PRIVATE_FILE_MODE)
@@ -74,20 +74,20 @@ def test_keygen_writes_private_key_and_allowed_signers_entry(tmp_path: Path) -> 
 
     lines = signers_path.read_text("utf-8").splitlines()
     assert len(lines) == 1
-    assert lines[0].startswith(f'alice@example.com namespaces="{attestation.ATTESTATION_NAMESPACE}" ssh-ed25519 ')
+    assert lines[0].startswith(f'alice-signer namespaces="{attestation.ATTESTATION_NAMESPACE}" ssh-ed25519 ')
 
     with pytest.raises(FileExistsError):
-        attestation.keygen(tmp_path, principal="alice@example.com")
+        attestation.keygen(tmp_path, principal="alice-signer")
 
     old_key_bytes = key_path.read_bytes()
-    new_key_path, _ = attestation.keygen(tmp_path, principal="alice@example.com", force=True)
+    new_key_path, _ = attestation.keygen(tmp_path, principal="alice-signer", force=True)
     assert new_key_path == key_path
     assert key_path.read_bytes() != old_key_bytes
     assert_private_mode(key_path, PRIVATE_FILE_MODE)
 
 
 def test_export_from_completed_receipt_produces_identical_payload_without_leakage(tmp_path: Path) -> None:
-    key_path, _signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path, _signers_path = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
 
     envelope = attestation.export_attestation(receipt, key_path=key_path)
@@ -140,7 +140,7 @@ def test_export_from_completed_receipt_produces_identical_payload_without_leakag
 
 
 def test_ad_hoc_command_name_drops_env_vars_and_paths(tmp_path: Path) -> None:
-    key_path, _signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path, _signers_path = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
     receipt["commands"][0]["check_id"] = None
     receipt["commands"][0]["command"] = "SECRET=abc /tmp/x/bin/pytest -q /tmp/x/tests"
@@ -160,8 +160,23 @@ def test_ad_hoc_command_name_drops_env_vars_and_paths(tmp_path: Path) -> None:
         assert secret not in payload_json
 
 
+def test_ad_hoc_command_name_with_unbalanced_quote_still_exports(tmp_path: Path) -> None:
+    key_path, _signers_path = attestation.keygen(tmp_path, principal="alice-signer")
+    receipt = _sample_receipt(tmp_path)
+    receipt["commands"][0]["check_id"] = None
+    receipt["commands"][0]["command"] = "pytest -q tests/test_'foo"
+    receipt["commands"][0]["argv"] = None
+
+    envelope = attestation.export_attestation(receipt, key_path=key_path)
+    payload_bytes = base64.b64decode(envelope["payload"])
+    statement = json.loads(payload_bytes)
+    pred = statement["predicate"]
+    assert pred["passedTests"] == ["pytest -q test_'foo"]
+    assert pred["failedTests"] == []
+
+
 def test_ad_hoc_command_name_prefers_argv_over_command(tmp_path: Path) -> None:
-    key_path, _signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path, _signers_path = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
     receipt["commands"][0]["check_id"] = None
     receipt["commands"][0]["command"] = "SHOULD=ignore /old/path/bin/pytest /old/path/tests"
@@ -206,7 +221,7 @@ def test_receipt_with_nonzero_or_null_exit_code_yields_failed(tmp_path: Path) ->
 
 
 def test_verify_rejects_unexpected_types_and_missing_brigade_metadata(tmp_path: Path) -> None:
-    key_path, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
     envelope = attestation.export_attestation(receipt, key_path=key_path)
 
@@ -230,7 +245,7 @@ def test_verify_on_second_tmp_path_reports_signed_ok(tmp_path: Path) -> None:
     path_a = tmp_path / "a"
     path_b = tmp_path / "b"
 
-    key_a, signers_a = attestation.keygen(path_a, principal="alice@example.com")
+    key_a, signers_a = attestation.keygen(path_a, principal="alice-signer")
     receipt = _sample_receipt(path_a)
     envelope = attestation.export_attestation(receipt, key_path=key_a)
 
@@ -240,14 +255,14 @@ def test_verify_on_second_tmp_path_reports_signed_ok(tmp_path: Path) -> None:
 
     res = attestation.verify_attestation(envelope, allowed_signers_path=signers_b)
     assert res.status == attestation.STATUS_SIGNED_OK
-    assert res.principal == "alice@example.com"
+    assert res.principal == "alice-signer"
     assert res.keyid == envelope["signatures"][0]["keyid"]
     assert res.run_id == receipt["run_id"]
     assert len(res.subject) == 2
 
 
 def test_flipping_one_payload_byte_reports_signature_mismatch(tmp_path: Path) -> None:
-    key_path, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
     envelope = attestation.export_attestation(receipt, key_path=key_path)
 
@@ -264,8 +279,8 @@ def test_key_absent_from_allowed_signers_reports_untrusted_key(tmp_path: Path) -
     dir_alice = tmp_path / "alice"
     dir_mallory = tmp_path / "mallory"
 
-    key_alice, signers_alice = attestation.keygen(dir_alice, principal="alice@example.com")
-    key_mallory, _ = attestation.keygen(dir_mallory, principal="mallory@example.com")
+    key_alice, signers_alice = attestation.keygen(dir_alice, principal="alice-signer")
+    key_mallory, _ = attestation.keygen(dir_mallory, principal="mallory-signer")
 
     receipt = _sample_receipt(tmp_path)
     envelope_mallory = attestation.export_attestation(receipt, key_path=key_mallory)
@@ -275,7 +290,7 @@ def test_key_absent_from_allowed_signers_reports_untrusted_key(tmp_path: Path) -
 
 
 def test_ssh_keygen_verify_by_hand_on_extracted_pae_and_sig(tmp_path: Path) -> None:
-    key_path, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
     envelope = attestation.export_attestation(receipt, key_path=key_path)
 
@@ -294,7 +309,7 @@ def test_ssh_keygen_verify_by_hand_on_extracted_pae_and_sig(tmp_path: Path) -> N
         "-f",
         str(signers_path),
         "-I",
-        "alice@example.com",
+        "alice-signer",
         "-n",
         attestation.ATTESTATION_NAMESPACE,
         "-s",
@@ -307,7 +322,7 @@ def test_ssh_keygen_verify_by_hand_on_extracted_pae_and_sig(tmp_path: Path) -> N
 
 
 def test_verify_rejects_unsafe_run_id_in_predicate_url(tmp_path: Path) -> None:
-    key_path, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
     statement = attestation.build_statement(receipt)
     statement["predicate"]["url"] = "urn:brigade:verify:../../etc/passwd"
@@ -317,8 +332,24 @@ def test_verify_rejects_unsafe_run_id_in_predicate_url(tmp_path: Path) -> None:
     assert res.run_id is None
 
 
+def test_verify_rejects_dotdot_run_id_and_never_touches_target_work(tmp_path: Path) -> None:
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
+    receipt = _sample_receipt(tmp_path)
+    statement = attestation.build_statement(receipt)
+    statement["predicate"]["url"] = "urn:brigade:verify:.."
+    envelope = attestation.create_envelope(statement, key_path=key_path)
+
+    work_dir = tmp_path / ".brigade" / "work"
+    assert not work_dir.exists()
+
+    res = attestation.verify_attestation(envelope, target=tmp_path, allowed_signers_path=signers_path)
+    assert res.status == attestation.STATUS_SIGNED_OK
+    assert res.run_id is None
+    assert not work_dir.exists()
+
+
 def test_subject_mismatch_detected_when_target_receipt_differs(tmp_path: Path) -> None:
-    key_path, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
     envelope = attestation.export_attestation(receipt, key_path=key_path)
 
@@ -349,11 +380,11 @@ def _write_receipt_to_disk(receipt: dict[str, Any]) -> None:
 
 
 def test_keygen_force_rotates_allowed_signers_without_trusting_old_key(tmp_path: Path) -> None:
-    key_path1, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path1, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
     envelope = attestation.export_attestation(receipt, key_path=key_path1)
 
-    key_path2, _signers_path2 = attestation.keygen(tmp_path, principal="alice@example.com", force=True)
+    key_path2, _signers_path2 = attestation.keygen(tmp_path, principal="alice-signer", force=True)
     assert key_path2 == key_path1
 
     lines = signers_path.read_text("utf-8").splitlines()
@@ -363,8 +394,47 @@ def test_keygen_force_rotates_allowed_signers_without_trusting_old_key(tmp_path:
     assert res.status == attestation.STATUS_UNTRUSTED_KEY
 
 
+def test_keygen_force_removes_old_key_from_line_with_extra_options(tmp_path: Path) -> None:
+    key_path1, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
+    pub_path1 = Path(f"{key_path1}.pub")
+    pub_line = pub_path1.read_text(encoding="utf-8").strip()
+    pub_parts = pub_line.split()
+    assert len(pub_parts) >= 2
+
+    # Append an entry with an extra option before the key type.
+    signers_path.write_text(
+        f'alice-signer namespaces="{attestation.ATTESTATION_NAMESPACE}" valid-before="20261201" {pub_parts[0]} {pub_parts[1]}\n',
+        encoding="utf-8",
+    )
+
+    key_path2, _signers_path2 = attestation.keygen(tmp_path, principal="alice-signer", force=True)
+    assert key_path2 == key_path1
+
+    lines = signers_path.read_text("utf-8").splitlines()
+    assert len(lines) == 1
+    assert "valid-before" not in lines[0]
+    assert lines[0].startswith(f'alice-signer namespaces="{attestation.ATTESTATION_NAMESPACE}" ssh-ed25519 ')
+
+
+def test_keygen_force_without_old_public_key_refuses_rotation(tmp_path: Path) -> None:
+    key_path1, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
+    pub_path1 = Path(f"{key_path1}.pub")
+    pub_path1.unlink()
+
+    original_lines = signers_path.read_text(encoding="utf-8")
+    original_key_bytes = key_path1.read_bytes()
+
+    with pytest.raises(attestation.AttestationError) as exc_info:
+        attestation.keygen(tmp_path, principal="alice-signer", force=True)
+
+    assert "refusing rotation" in str(exc_info.value)
+    assert pub_path1.name in str(exc_info.value)
+    assert signers_path.read_text(encoding="utf-8") == original_lines
+    assert key_path1.read_bytes() == original_key_bytes
+
+
 def test_cli_attestation_keygen_writes_key_and_refuses_without_force(tmp_path, capsys):
-    rc = cli.main(["receipts", "attestation-keygen", "--target", str(tmp_path), "--principal", "alice@example.com"])
+    rc = cli.main(["receipts", "attestation-keygen", "--target", str(tmp_path), "--principal", "alice-signer"])
     captured = capsys.readouterr()
     assert rc == 0
 
@@ -387,7 +457,7 @@ def test_cli_attestation_keygen_writes_key_and_refuses_without_force(tmp_path, c
 
 
 def test_cli_export_attestation_to_default_path(tmp_path):
-    key_path, _signers = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path, _signers = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
     _write_receipt_to_disk(receipt)
 
@@ -404,7 +474,7 @@ def test_cli_export_attestation_to_default_path(tmp_path):
 
 
 def test_cli_export_attestation_to_stdout(tmp_path, capsys):
-    key_path, _signers = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path, _signers = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
     _write_receipt_to_disk(receipt)
 
@@ -430,7 +500,7 @@ def test_cli_export_attestation_to_stdout(tmp_path, capsys):
 
 
 def test_cli_export_attestation_refuses_overwrite_without_force(tmp_path, capsys):
-    key_path, _signers = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path, _signers = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
     _write_receipt_to_disk(receipt)
 
@@ -449,7 +519,7 @@ def test_cli_export_attestation_refuses_overwrite_without_force(tmp_path, capsys
 
 
 def test_cli_export_attestation_run_id_latest(tmp_path):
-    key_path, _signers = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path, _signers = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
     _write_receipt_to_disk(receipt)
 
@@ -463,7 +533,7 @@ def test_cli_export_attestation_run_id_latest(tmp_path):
 
 
 def test_cli_verify_attestation_with_revoked_keys_fails(tmp_path, capsys):
-    key_path, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
     _write_receipt_to_disk(receipt)
 
@@ -488,12 +558,38 @@ def test_cli_verify_attestation_with_revoked_keys_fails(tmp_path, capsys):
         ]
     )
     captured = capsys.readouterr()
-    assert rc != 0
-    assert captured.out.strip() != attestation.STATUS_SIGNED_OK
+    assert rc == 1
+    assert captured.out.strip() == attestation.STATUS_UNTRUSTED_KEY
+
+
+def test_cli_verify_attestation_with_missing_revoked_keys_returns_unverifiable(tmp_path, capsys):
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
+    receipt = _sample_receipt(tmp_path)
+    _write_receipt_to_disk(receipt)
+
+    run_id = receipt["run_id"]
+    rc_export = cli.main(["receipts", "export", "attestation", "--target", str(tmp_path), "--run-id", run_id])
+    assert rc_export == 0
+    attestation_path = Path(receipt["path"]) / "attestation.json"
+
+    rc = cli.main(
+        [
+            "receipts",
+            "verify-attestation",
+            str(attestation_path),
+            "--allowed-signers",
+            str(signers_path),
+            "--revoked-keys",
+            "/nonexistent",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.out.strip() == attestation.STATUS_UNVERIFIABLE_SIGNATURE
 
 
 def test_cli_verify_attestation_exit_and_json_shape(tmp_path, capsys):
-    key_path, signers_path = attestation.keygen(tmp_path, principal="alice@example.com")
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
     _write_receipt_to_disk(receipt)
 
@@ -530,7 +626,7 @@ def test_cli_verify_attestation_exit_and_json_shape(tmp_path, capsys):
     out = json.loads(captured_json.out)
     assert out["schema"] == "brigade.attestation_verify_result.v1"
     assert out["status"] == attestation.STATUS_SIGNED_OK
-    assert out["principal"] == "alice@example.com"
+    assert out["principal"] == "alice-signer"
     assert out["keyid"].startswith("SHA256:")
     assert out["run_id"] == run_id
     assert isinstance(out["subject"], list)
@@ -560,7 +656,7 @@ def test_cli_cross_machine_verify_attestation_and_ssh_keygen(tmp_path):
     path_a = tmp_path / "a"
     path_b = tmp_path / "b"
 
-    key_path, signers_path = attestation.keygen(path_a, principal="alice@example.com")
+    key_path, signers_path = attestation.keygen(path_a, principal="alice-signer")
     receipt = _sample_receipt(path_a)
     _write_receipt_to_disk(receipt)
 
@@ -603,7 +699,7 @@ def test_cli_cross_machine_verify_attestation_and_ssh_keygen(tmp_path):
         "-f",
         str(signers_path_b),
         "-I",
-        "alice@example.com",
+        "alice-signer",
         "-n",
         attestation.ATTESTATION_NAMESPACE,
         "-s",

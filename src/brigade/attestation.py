@@ -166,6 +166,19 @@ def extract_keyid_from_sshsig(armored_sig: str) -> str | None:
     return None
 
 
+def _allowed_signers_key_data(line: str) -> str | None:
+    """Return the key-data field of an OpenSSH allowed_signers line, or None if malformed."""
+    tokens = line.strip().split()
+    if len(tokens) < 2:
+        return None
+    idx = 1
+    while idx < len(tokens) and "=" in tokens[idx]:
+        idx += 1
+    if idx + 1 < len(tokens):
+        return tokens[idx + 1]
+    return None
+
+
 def keygen(
     target: Path,
     *,
@@ -193,13 +206,14 @@ def keygen(
 
     pub_path = Path(f"{key_path}.pub")
     old_key_data: str | None = None
-    if force and pub_path.is_file():
+    if force and key_path.exists():
+        if not pub_path.is_file():
+            raise AttestationError(f"refusing rotation: previous public key is missing: {pub_path}")
         old_pub_line = pub_path.read_text(encoding="utf-8").strip()
         old_parts = old_pub_line.split()
         if len(old_parts) >= 2:
             old_key_data = old_parts[1]
-        if key_path.exists():
-            key_path.unlink()
+        key_path.unlink()
         pub_path.unlink()
     elif force:
         if key_path.exists():
@@ -237,8 +251,7 @@ def keygen(
         existing_lines = signers_path.read_text(encoding="utf-8").splitlines(keepends=True)
         filtered: list[str] = []
         for line in existing_lines:
-            parts = line.strip().split()
-            if len(parts) >= 4 and parts[3] == old_key_data:
+            if _allowed_signers_key_data(line) == old_key_data:
                 continue
             filtered.append(line)
         signers_path.write_text("".join(filtered), encoding="utf-8")
@@ -287,7 +300,10 @@ def _test_name(cmd: Mapping[str, Any]) -> str:
         tokens = [str(t) for t in argv]
     else:
         raw = str(cmd.get("command") or "")
-        tokens = shlex.split(raw)
+        try:
+            tokens = shlex.split(raw)
+        except ValueError:
+            tokens = raw.split()
 
     cleaned: list[str] = []
     for token in tokens:
@@ -573,7 +589,7 @@ def verify_attestation(
         url = pred.get("url")
         if isinstance(url, str) and url.startswith("urn:brigade:verify:"):
             candidate = url.removeprefix("urn:brigade:verify:")
-            if re.match(r"^[A-Za-z0-9._-]+$", candidate):
+            if re.fullmatch(r"[A-Za-z0-9._-]+", candidate) and candidate not in (".", ".."):
                 run_id = candidate
 
     # 3. Recompute DSSE PAE
@@ -591,6 +607,9 @@ def verify_attestation(
 
     armored_sig = _decode_sig_armored(raw_sig_str)
     if not armored_sig:
+        return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE, subject=subject, run_id=run_id)
+
+    if krl_path is not None and not krl_path.expanduser().resolve().is_file():
         return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE, subject=subject, run_id=run_id)
 
     # 5. Check signature validity with ssh-keygen -Y check-novalidate
