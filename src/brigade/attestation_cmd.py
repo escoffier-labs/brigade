@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 from . import attestation
 from .work_cmd import verification as verify_mod
+
+
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def export_attestation(
@@ -19,6 +23,12 @@ def export_attestation(
     key: Path | None = None,
     force: bool = False,
 ) -> int:
+    if run_id != "latest" and (not _RUN_ID_RE.fullmatch(run_id) or run_id in {".", ".."}):
+        print(
+            "error: run id must be 'latest' or contain only letters, digits, dot, underscore, or hyphen",
+            file=sys.stderr,
+        )
+        return 1
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)

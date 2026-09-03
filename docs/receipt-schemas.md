@@ -34,6 +34,12 @@ JSON Schema files.
    per line).
 5. **Readers** must accept records **without** `schema_version` (pre-#506 storage).
 
+## `brigade.run_event.v1`: `schema_version: 2`
+
+Lifecycle journals that contain `approval`, `run.ship`, or `run.merge` events
+use schema version 2. Readers older than version 2 refuse these events with
+`unknown event_type` rather than replaying them under an older contract.
+
 ---
 
 ## `brigade.work_verify_receipt`: `schema_version: 2`
@@ -351,7 +357,30 @@ original file is missing, corrupt, or not an object.
 | `journal_last_sequence` | integer | no | Last event sequence applied to this snapshot |
 | `journal_last_event_digest` | string / null | no | Digest at `journal_last_sequence`. Null only at sequence zero |
 | `approval_reference` | object | no | Redacted approval identity, source, fingerprints, and decision state |
+| `approval` | object | no | Latest signed human decision: `{decision, scope, approver_principal, decided_at, expires_at, nonce, statement_sha256, sod}` |
 | `run_budget` | object | no | Optional projected `brigade.run_budget.v1` summary when a coordinator wrote one (#593). Journal events remain authoritative. |
+
+### Signed human approval (`brigade.run_event.v1` event type)
+
+An `approval` event records a separately signed human decision without changing
+the run lifecycle status. Its payload has exactly these keys:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `decision` | string | `allow`, `deny`, or `hold` |
+| `scope` | string | `run` or `merge` |
+| `approver_principal` | string | Principal verified through the target's OpenSSH `allowed_signers` policy |
+| `approver_keyid` | string | SHA-256 fingerprint of the approver's public key |
+| `subject_tree` | string | Final `tree_fingerprint` covered by the statement |
+| `nonce` | string | Random 32-character hexadecimal value |
+| `expires_at` | string | RFC 3339 UTC expiry |
+| `statement_sha256` | string | SHA-256 digest of the canonical in-toto Statement bytes |
+| `attestation_path` | string | Run-relative `approvals/<nonce>.json` envelope path |
+
+The projected `approval.sod` object has a `result` of `PASSED` or `FAILED` and
+a `checks` array. Each check contains its policy `id` and a `status` of
+`passed` or `failed`. The journal event and signed envelope remain the evidence.
+`run.json` is the latest compatibility projection.
 
 ### Run budget lifecycle (`brigade.run_event.v1` event types, #593)
 
@@ -1118,6 +1147,55 @@ The decoded payload is an in-toto Statement v1 with the Test Result v0.1 predica
 - `predicate.result`: `PASSED` only when receipt `status == "completed"` and every command has `exit_code == 0`. Otherwise `FAILED`. Commands with null or nonzero exit codes are recorded in `failedTests`.
 - `predicate.configuration`: references the verify receipt digest with annotations carrying `run_id`, `baseline_commit`, and `producer_run_id` when present.
 
+### Human approval predicate
+
+The same envelope profile also carries `https://brigade.dev/attestation/human-approval/v1`
+statements written under `<run-dir>/approvals/<nonce>.json`. The subject list
+binds the decision to the run's final tree and every verify receipt whose
+`producer_run_id` matches the run:
+
+```json
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    {"name": "git:tree", "digest": {"gitTree": "<tree_fingerprint>"}},
+    {"name": "verify:<verify-run-id>", "digest": {"sha256": "<receipt_sha256>"}}
+  ],
+  "predicateType": "https://brigade.dev/attestation/human-approval/v1",
+  "predicate": {
+    "schemaVersion": 1,
+    "run": {"id": "<run-id>", "journalChainHead": {"sha256": "<event digest before approval>"}},
+    "decision": "allow | deny | hold",
+    "scope": "run | merge",
+    "approver": {"principal": "<allowed_signers principal>", "keyid": "SHA256:...", "kind": "human"},
+    "decidedAt": "<RFC 3339 UTC>",
+    "expiresAt": "<RFC 3339 UTC>",
+    "nonce": "<32 hex characters>",
+    "reasonCode": "<bounded reason code>",
+    "reason": "<plain text, at most 500 characters>",
+    "policy": {"name": "brigade.sod.v1", "digest": {"sha256": "<policy text digest>"}}
+  }
+}
+```
+
+An `allow` statement requires at least one verify-receipt subject. `deny` and
+`hold` may have none. Verification recomputes all subjects and the
+`brigade.sod.v1` checks from local evidence. It reports `APPROVED`, `DENIED`,
+`HELD`, `UNAPPROVED`, `APPROVAL-INVALID`, `APPROVAL-STALE`, `SOD-VIOLATION`,
+or `APPROVAL-EXPIRED` for each run. `APPROVAL-STALE` means a valid approval no
+longer describes the live Git tree, or a signed verify-receipt subject is now
+missing. It does not change the command exit status. The signed receipt
+subjects need only be a subset of current evidence, so later receipts do not
+invalidate an approval. JSON output includes `live_tree` (`unavailable` when
+the tree cannot be computed) and earlier superseded decisions.
+
+Every approval event remains in the journal. Verification uses the latest one
+and reports prior decisions with their principal and recorded time. The SoD
+checks include `approver-key-not-workspace-key`: the approver key must not be
+the workspace's default attestation key. Projector version 7 makes existing
+`run.json` snapshots stale input for `run_shadow`; regenerate the shadow after
+the projection is refreshed.
+
 ### Trust Policy
 
 Trust is evaluated offline via standard OpenSSH `allowed_signers` files:
@@ -1145,6 +1223,7 @@ Machine-readable result printed by `brigade receipts verify-attestation --json`:
 ## Related commands
 
 - `brigade receipts verify`: digest chain checks for verify receipts and outcome rows
+- `brigade run approve`: record a signed human decision for a completed run
 - `brigade receipts export attestation`: export verify receipt as SSH-signed in-toto attestation
 - `brigade receipts verify-attestation`: offline verification of attestation against allowed_signers
 - `brigade receipts attestation-keygen`: generate Ed25519 attestation signing key and allowed_signers entry

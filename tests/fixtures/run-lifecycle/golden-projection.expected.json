@@ -60,9 +60,10 @@
     "head": "abc123"
   },
   "handoff": "/work/repo/.brigade/runs/20260727-153045-a1b2c3d4/handoff.md",
-  "journal_last_event_digest": "176259cd00408b637f1c13496fcdfafea7dd96753fb8a9e76dbea58817442fc7",
+  "journal_last_event_digest": "1d1af7652534d431ba9671e28492fffb44ab60f6665b2a7f3351b2ef8ae27262",
   "journal_last_sequence": 6,
   "journal_present": true,
+  "kind": "work",
   "lifecycle_journal_requested": true,
   "lock_workspace": "/work/repo",
   "orchestrator": "chef",
@@ -71,7 +72,7 @@
     "dirty": false,
     "head": "abc123"
   },
-  "projector_version": 1,
+  "projector_version": 7,
   "read_only": false,
   "recovery_history": [
     {

@@ -26,7 +26,7 @@ from typing import Any, Mapping, Sequence
 
 from brigade import run_checkpoint, run_events, run_journal
 
-PROJECTOR_VERSION: int = 6
+PROJECTOR_VERSION: int = 7
 
 # Field ownership over the run.json contract. Every current run.json key is
 # in exactly one of these two sets; see the ownership inventory in
@@ -61,6 +61,9 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "lifecycle_journal_requested",
         "run_journal_authority_requested",
         "approval_reference",
+        "approval",
+        "requester_principal",
+        "tree_fingerprint",
         "verification_contract",
         "run_budget",
         "run_budget_projection",
@@ -164,6 +167,9 @@ _STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
         "approval.rejected",
         "approval.held",
         "approval.consumed",
+        "approval",
+        "run.ship",
+        "run.merge",
         "run.redaction.recorded",
         # Live-control pairs advance the journal cursor only (issue #604).
         "control.requested",

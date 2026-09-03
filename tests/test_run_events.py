@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from brigade import run_events
+from brigade import run_events, run_journal, run_projector
 from brigade.receipt_schema import RUN_EVENT_SCHEMA, RUN_EVENT_SCHEMA_VERSION
 
 RUN_ID = "20260727-153045-a1b2c3d4"
@@ -30,7 +30,7 @@ _REQUEST_DIGEST = "3c8ed91a3781b4f7033bc1940ee95eaa50a88f33d453e2b9fb9142150b3f8
 # and event_id excluded. event_id embeds event_digest[:12], so including
 # event_id in the digest input would create an infeasible SHA-256 fixed point.
 # Excluding event_id is the only computable reading of the slice-1 binding.
-_EVENT_DIGEST = "6d43c3e25e4d4c8627166ab5b565622f98b0999218889b65ac8c84dcfac9301b"
+_EVENT_DIGEST = "6374bcd64ce77c9a778c6be3e9f6ab7343f1b1e3b11f0f68f9a1d1e111c0f655"
 _EVENT_ID = f"{RUN_ID}-000001-{_EVENT_DIGEST[:12]}"
 
 _FORBIDDEN_PAYLOAD_KEYS = (
@@ -63,9 +63,88 @@ def _sample_envelope(*, event_digest: str = _EVENT_DIGEST, event_id: str = _EVEN
 
 def test_schema_constants_are_registered_in_receipt_schema():
     assert RUN_EVENT_SCHEMA == "brigade.run_event.v1"
-    assert RUN_EVENT_SCHEMA_VERSION == 1
+    assert RUN_EVENT_SCHEMA_VERSION == 2
     assert run_events.SCHEMA == RUN_EVENT_SCHEMA
     assert run_events.SCHEMA_VERSION == RUN_EVENT_SCHEMA_VERSION
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        ("approval", {}),
+        ("approval", {"decision": "other"}),
+        ("run.ship", {}),
+        ("run.merge", {}),
+    ],
+)
+def test_required_approval_and_stage_payload_fields_are_rejected_by_both_paths(event_type, payload):
+    with pytest.raises(run_events.CanonicalizationError):
+        run_events.build_event(
+            run_id=RUN_ID,
+            sequence=1,
+            event_type=event_type,
+            payload=payload,
+            idempotency_key="required-fields",
+            recorded_at=RECORDED_AT,
+            previous_digest=None,
+        )
+
+    envelope = _sample_envelope()
+    envelope["event_type"] = event_type
+    envelope["payload"] = payload
+    envelope["request_digest"] = run_events.request_digest(
+        event_type=event_type, payload=payload, idempotency_key=envelope["idempotency_key"]
+    )
+    envelope["event_digest"] = run_events.compute_event_digest(envelope)
+    envelope["event_id"] = run_events.make_event_id(run_id=RUN_ID, sequence=1, event_digest=envelope["event_digest"])
+    assert run_events.validate_event(envelope)
+
+
+def test_schema_two_approval_and_stage_events_validate_and_project(tmp_path):
+    approval_payload = {
+        "decision": "allow",
+        "scope": "run",
+        "approver_principal": "alice",
+        "approver_keyid": "SHA256:alice",
+        "subject_tree": "a" * 40,
+        "nonce": "b" * 32,
+        "expires_at": RECORDED_AT,
+        "statement_sha256": "c" * 64,
+        "attestation_path": "approvals/" + "b" * 32 + ".json",
+    }
+    created = run_events.build_event(
+        run_id=RUN_ID,
+        sequence=1,
+        event_type="run.created",
+        payload={"status": "started"},
+        idempotency_key="created",
+        recorded_at=RECORDED_AT,
+        previous_digest=None,
+    )
+    approval = run_events.build_event(
+        run_id=RUN_ID,
+        sequence=2,
+        event_type="approval",
+        payload=approval_payload,
+        idempotency_key="approval",
+        recorded_at="2026-07-27T15:30:46.123456Z",
+        previous_digest=created["event_digest"],
+    )
+    ship = run_events.build_event(
+        run_id=RUN_ID,
+        sequence=3,
+        event_type="run.ship",
+        payload={"stage": "ship"},
+        idempotency_key="ship",
+        recorded_at="2026-07-27T15:30:47.123456Z",
+        previous_digest=approval["event_digest"],
+    )
+    journal = tmp_path / "lifecycle.jsonl"
+    journal.write_bytes(b"".join(run_events.canonical_bytes(event) + b"\n" for event in (created, approval, ship)))
+    report = run_journal.read_journal(journal)
+    assert report.chain_errors == []
+    projection = run_projector.project_run_snapshot({"status": "started"}, report.events, journal_present=True)
+    assert projection.last_sequence == 3
 
 
 def test_canonical_bytes_matches_exact_utf8_compact_sorted_form():

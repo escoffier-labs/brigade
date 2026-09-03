@@ -31,6 +31,8 @@ from brigade.receipt_schema import RUN_EVENT_SCHEMA, RUN_EVENT_SCHEMA_VERSION
 
 SCHEMA = RUN_EVENT_SCHEMA
 SCHEMA_VERSION = RUN_EVENT_SCHEMA_VERSION
+LEGACY_SCHEMA_VERSION = 1
+SUPPORTED_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, SCHEMA_VERSION})
 
 MAX_LINE_BYTES = 16384
 MAX_IDEMPOTENCY_KEY_LEN = 128
@@ -43,6 +45,7 @@ MIN_CANONICAL_INT = -(1 << 63)
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_HEX32 = re.compile(r"^[0-9a-f]{32}$")
 _RECORDED_AT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
 
 # Closed set of envelope keys. Any key outside this set fails closed.
@@ -89,11 +92,27 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
     "approval.rejected": frozenset({"approval_id", "decided_at", "decision_state"}),
     "approval.held": frozenset({"approval_id", "decided_at", "decision_state"}),
     "approval.consumed": frozenset({"approval_id", "consuming_run_id"}),
+    "approval": frozenset(
+        {
+            "decision",
+            "scope",
+            "approver_principal",
+            "approver_keyid",
+            "subject_tree",
+            "nonce",
+            "expires_at",
+            "statement_sha256",
+            "attestation_path",
+            "producer_keyids",
+        }
+    ),
     "run.recovery.started": frozenset({"detail"}),
     "run.recovery.completed": frozenset({"detail"}),
     "run.completed": frozenset({"status", "detail"}),
     "run.failed": frozenset({"status", "detail"}),
     "run.interrupted": frozenset({"status", "detail"}),
+    "run.ship": frozenset({"stage"}),
+    "run.merge": frozenset({"stage"}),
     "run.orphaned": frozenset({"status", "last_observed_status", "uncommitted_change_count"}),
     "run.snapshot.checkpointed": frozenset(
         {
@@ -164,6 +183,24 @@ APPROVAL_DECISION_EVENT_STATES = {
     "approval.granted": "approved",
     "approval.rejected": "rejected",
     "approval.held": "held",
+}
+_SCHEMA_V2_EVENT_TYPES = frozenset({"approval", "run.ship", "run.merge"})
+_REQUIRED_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
+    "approval": frozenset(
+        {
+            "decision",
+            "scope",
+            "approver_principal",
+            "approver_keyid",
+            "subject_tree",
+            "nonce",
+            "expires_at",
+            "statement_sha256",
+            "attestation_path",
+        }
+    ),
+    "run.ship": frozenset({"stage"}),
+    "run.merge": frozenset({"stage"}),
 }
 
 # Private-data exclusion list: these payload key names are never part of any
@@ -375,6 +412,9 @@ def _validate_payload(event_type: str, payload: Any) -> None:
         if forbidden:
             raise CanonicalizationError(_bound(f"forbidden private-data payload keys: {sorted(forbidden)}"))
         raise CanonicalizationError(_bound(f"unknown payload keys for {event_type}: {sorted(extra)}"))
+    missing = _REQUIRED_PAYLOAD_FIELDS.get(event_type, frozenset()) - set(payload.keys())
+    if missing:
+        raise CanonicalizationError(_bound(f"missing payload keys for {event_type}: {sorted(missing)}"))
     for key, value in payload.items():
         if value is None:
             continue
@@ -388,7 +428,25 @@ def _validate_payload(event_type: str, payload: Any) -> None:
             if len(value) > MAX_PAYLOAD_STR_LEN:
                 raise CanonicalizationError(_bound(f"payload {key!r} exceeds {MAX_PAYLOAD_STR_LEN} chars"))
             continue
+        if key == "producer_keyids" and isinstance(value, list):
+            if any(not isinstance(item, str) or not item or len(item) > MAX_PAYLOAD_STR_LEN for item in value):
+                raise CanonicalizationError("approval producer_keyids must be a list of bounded strings")
+            continue
         raise CanonicalizationError(_bound(f"payload {key!r} has unsupported type {type(value).__name__}"))
+    if event_type == "approval":
+        if payload.get("decision") not in {"allow", "deny", "hold"}:
+            raise CanonicalizationError("approval decision is invalid")
+        if payload.get("scope") not in {"run", "merge"}:
+            raise CanonicalizationError("approval scope is invalid")
+        for key in ("approver_principal", "approver_keyid", "subject_tree", "expires_at", "attestation_path"):
+            if not isinstance(payload.get(key), str) or not payload[key]:
+                raise CanonicalizationError(f"approval {key} is required")
+        if not isinstance(payload.get("nonce"), str) or not _HEX32.fullmatch(payload["nonce"]):
+            raise CanonicalizationError("approval nonce must be 32 lowercase hex characters")
+        if not isinstance(payload.get("statement_sha256"), str) or not _HEX64.fullmatch(payload["statement_sha256"]):
+            raise CanonicalizationError("approval statement_sha256 must be 64 lowercase hex characters")
+    if event_type in {"run.ship", "run.merge"} and (not isinstance(payload.get("stage"), str) or not payload["stage"]):
+        raise CanonicalizationError(f"{event_type} stage is required")
     expected_decision = APPROVAL_DECISION_EVENT_STATES.get(event_type)
     if expected_decision is not None and payload.get("decision_state") != expected_decision:
         raise CanonicalizationError(_bound(f"{event_type} requires decision_state {expected_decision!r}"))
@@ -417,8 +475,9 @@ def validate_event(env: Any) -> list[str]:
 
     if env.get("schema") != SCHEMA:
         errors.append(_bound(f"schema must be {SCHEMA!r}"))
-    if env.get("schema_version") != SCHEMA_VERSION:
-        errors.append(_bound(f"schema_version must be {SCHEMA_VERSION}"))
+    schema_version = env.get("schema_version")
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        errors.append(_bound(f"schema_version must be one of {sorted(SUPPORTED_SCHEMA_VERSIONS)}"))
 
     run_id = env.get("run_id")
     if not isinstance(run_id, str) or not _RUN_ID_RE.match(run_id):
@@ -431,6 +490,13 @@ def validate_event(env: Any) -> list[str]:
     event_type = env.get("event_type")
     if event_type not in EVENT_TYPES:
         errors.append(_bound(f"unknown event_type {event_type!r}"))
+    elif schema_version == LEGACY_SCHEMA_VERSION and event_type in _SCHEMA_V2_EVENT_TYPES:
+        errors.append(_bound(f"unknown event_type {event_type!r}"))
+    else:
+        try:
+            _validate_payload(event_type, env.get("payload"))
+        except CanonicalizationError as exc:
+            errors.append(_bound(str(exc)))
 
     recorded_at = env.get("recorded_at")
     if not is_valid_recorded_at(recorded_at):
@@ -463,36 +529,6 @@ def validate_event(env: Any) -> list[str]:
     event_id = env.get("event_id")
     if not isinstance(event_id, str) or not event_id:
         errors.append("event_id must be a non-empty string")
-
-    payload = env.get("payload")
-    if not isinstance(payload, Mapping):
-        errors.append("payload must be an object")
-    elif event_type in EVENT_TYPES:
-        allowed = EVENT_TYPES[event_type]
-        extra = set(payload.keys()) - allowed
-        if extra:
-            forbidden = extra & FORBIDDEN_PAYLOAD_KEYS
-            if forbidden:
-                errors.append(_bound(f"forbidden private-data payload keys: {sorted(forbidden)}"))
-            else:
-                errors.append(_bound(f"unknown payload keys for {event_type}: {sorted(extra)}"))
-        for key, value in payload.items():
-            if value is None:
-                continue
-            if isinstance(value, bool):
-                errors.append(_bound(f"payload {key!r} must not be boolean"))
-            elif isinstance(value, float):
-                errors.append(_bound(f"payload {key!r} must be integer, not float"))
-            elif isinstance(value, int):
-                continue
-            elif isinstance(value, str):
-                if len(value) > MAX_PAYLOAD_STR_LEN:
-                    errors.append(_bound(f"payload {key!r} exceeds {MAX_PAYLOAD_STR_LEN} chars"))
-            else:
-                errors.append(_bound(f"payload {key!r} has unsupported type"))
-        expected_decision = APPROVAL_DECISION_EVENT_STATES.get(str(event_type))
-        if expected_decision is not None and payload.get("decision_state") != expected_decision:
-            errors.append(_bound(f"{event_type} requires decision_state {expected_decision!r}"))
 
     if errors:
         return errors

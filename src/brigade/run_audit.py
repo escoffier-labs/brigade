@@ -132,6 +132,7 @@ _COORDINATOR_EVENT_TYPES = frozenset(
         "approval.rejected",
         "approval.held",
         "approval.consumed",
+        "approval",
     }
 )
 
@@ -142,6 +143,7 @@ _APPROVAL_EVENT_TYPES = frozenset(
         "approval.rejected",
         "approval.held",
         "approval.consumed",
+        "approval",
     }
 )
 
@@ -194,6 +196,7 @@ class AuditReport:
     normalized_events: list[dict[str, Any]] = field(default_factory=list)
     first_divergence: Divergence | None = None
     not_auditable_reason: str | None = None
+    approval: dict[str, Any] | None = None
     graphtrail_note: str = "GraphTrail deltas are timing-dependent and fail-open; absence is not coordinator divergence"
 
     def to_receipt(self) -> dict[str, Any]:
@@ -222,6 +225,8 @@ class AuditReport:
             }
         if self.not_auditable_reason is not None:
             receipt["not_auditable_reason"] = self.not_auditable_reason
+        if self.approval is not None:
+            receipt["approval"] = dict(self.approval)
         return receipt
 
     def normalized_events_bytes(self) -> bytes:
@@ -676,6 +681,39 @@ def _approval_state_drift(
             last_approval = event
     if last_approval is None:
         return None
+    if last_approval.event_type == "approval":
+        approval = run_meta.get("approval")
+        if not isinstance(approval, Mapping):
+            return Divergence(
+                divergence_class=CLASS_APPROVAL_STATE_DRIFT,
+                sequence=last_approval.sequence,
+                event_type=last_approval.event_type,
+                expected={"approval": "present"},
+                observed={"approval": None},
+                detail=_bound("signed approval event present but run.json approval projection missing"),
+            )
+        expected = {
+            "decision": last_approval.payload.get("decision"),
+            "scope": last_approval.payload.get("scope"),
+            "approver_principal": last_approval.payload.get("approver_principal"),
+            "approver_keyid": last_approval.payload.get("approver_keyid"),
+            "subject_tree": last_approval.payload.get("subject_tree"),
+            "expires_at": last_approval.payload.get("expires_at"),
+            "nonce": last_approval.payload.get("nonce"),
+            "statement_sha256": last_approval.payload.get("statement_sha256"),
+            "attestation_path": last_approval.payload.get("attestation_path"),
+        }
+        observed = {key: approval.get(key) for key in expected}
+        if expected != observed:
+            return Divergence(
+                divergence_class=CLASS_APPROVAL_STATE_DRIFT,
+                sequence=last_approval.sequence,
+                event_type=last_approval.event_type,
+                expected=expected,
+                observed=observed,
+                detail=_bound("signed approval event drift versus run.json approval projection"),
+            )
+        return None
     if not isinstance(reference, Mapping):
         return Divergence(
             divergence_class=CLASS_APPROVAL_STATE_DRIFT,
@@ -1059,7 +1097,14 @@ def audit_run(
         transport_coverage=coverage,
         normalized_events=normalized,
         first_divergence=divergence,
+        approval=_approval_audit_projection(run_meta),
     )
+
+
+def _approval_audit_projection(run_meta: Mapping[str, Any]) -> dict[str, Any] | None:
+    from brigade import approval
+
+    return approval.audit_projection(run_meta)
 
 
 def _chain_error_sequence(report: run_journal.JournalReport) -> int | None:

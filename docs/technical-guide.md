@@ -490,6 +490,18 @@ checkpoint before replacing `run.json`. If rollback leaves an older Brigade
 unable to interpret a journal event or projector version, stop that writer and
 roll forward. The append-only journal format is a one-way storage boundary.
 
+Record a final human decision with `brigade run approve <run-id> --decision
+allow|deny|hold`. Brigade signs the final tree and matching verify-receipt
+digests, appends the decision to the lifecycle journal, and shows the
+`brigade.sod.v1` segregation-of-duties checks. `brigade receipts verify` checks
+the signature, signed subjects against current evidence, expiry, approver and
+requester principal/keyid comparisons when recorded, the workspace-default-key
+comparison, and event ordering. It does not establish custody beyond those
+recorded comparisons. A valid signature proves possession of the trusted key,
+not that a person read every changed line or understood every verification
+result. Later verify receipts are allowed; missing signed receipts or a changed
+live tree are reported as non-exit-changing `APPROVAL-STALE`.
+
 Use `brigade runs reap --cwd /path/to/repo` to terminalize local runs whose
 recorded owner process is gone. Reap writes `status: orphaned` and a dirty-file
 count (filenames stay off the receipt) through the same run.json writer every

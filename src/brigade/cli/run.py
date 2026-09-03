@@ -342,6 +342,29 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     add_cloud_subcommands(p_cloud)
 
+    p_approve = run_sub.add_parser("approve", help="Record a signed human approval for a run.")
+    p_approve.add_argument("run_id", help="Run id under .brigade/runs.")
+    p_approve.add_argument("--decision", choices=("allow", "deny", "hold"), required=True)
+    p_approve.add_argument("--scope", choices=("run", "merge"), default="run")
+    p_approve.add_argument(
+        "--reason-code",
+        choices=(
+            "reviewed-diff",
+            "reviewed-tests",
+            "policy-exception",
+            "rejected-change",
+            "needs-rework",
+            "other",
+        ),
+        default="other",
+    )
+    p_approve.add_argument("--reason", default="", help="Plain-text decision reason, at most 500 characters.")
+    p_approve.add_argument("--key", type=Path, default=None, help="Path to the approver's SSH private key.")
+    p_approve.add_argument("--principal", default=None, help="Expected allowed_signers principal.")
+    p_approve.add_argument("--expires-in", default="24h", metavar="DURATION")
+    p_approve.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_approve.set_defaults(func=dispatch)
+
     task_parser = argparse.ArgumentParser(prog="brigade run", add_help=True)
     _add_run_arguments(task_parser)
 
@@ -349,7 +372,7 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     def parse_known_args(args=None, namespace=None):
         tokens = list(args if args is not None else [])
-        if tokens and tokens[0] == "cloud":
+        if tokens and tokens[0] in {"cloud", "approve"}:
             return orig(tokens, namespace)
         return task_parser.parse_known_args(tokens, namespace)
 
@@ -362,6 +385,21 @@ def _resolved_scheduler(args, roster) -> str:
 
 
 def dispatch(args) -> int:
+    if getattr(args, "run_subcommand", None) == "approve":
+        from .. import approval
+
+        return approval.approve_cli(
+            target=args.target,
+            run_id=args.run_id,
+            decision=args.decision,
+            scope=args.scope,
+            reason_code=args.reason_code,
+            reason=args.reason,
+            key=args.key,
+            principal=args.principal,
+            expires_in=args.expires_in,
+        )
+
     from .. import aboyeur as aboyeur_mod
     from .. import fleet_client
     from .. import run_budget

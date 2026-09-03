@@ -283,7 +283,7 @@ def find_principals(
 
 
 def _compute_receipt_sha256(receipt: Mapping[str, Any]) -> str:
-    return localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    return localio.canonical_json_digest(receipt, exclude_keys={"digests", "path"})
 
 
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -426,11 +426,15 @@ def sign_pae(
     if not key_path.is_file():
         raise FileNotFoundError(f"signing key not found: {key_path}")
 
-    res = subprocess.run(
-        [binary, "-Y", "sign", "-f", str(key_path), "-n", namespace],
-        input=pae,
-        capture_output=True,
-    )
+    try:
+        res = subprocess.run(
+            [binary, "-Y", "sign", "-f", str(key_path), "-n", namespace],
+            input=pae,
+            capture_output=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AttestationError("ssh-keygen -Y sign timed out after 30 seconds") from exc
     if res.returncode != 0:
         err = res.stderr.decode("utf-8", errors="replace").strip()
         raise AttestationError(f"ssh-keygen -Y sign failed (code {res.returncode}): {err}")
@@ -518,6 +522,7 @@ def verify_attestation(
     target: Path | None = None,
     krl_path: Path | None = None,
     namespace: str = ATTESTATION_NAMESPACE,
+    expected_predicate_type: str = IN_TOTO_TEST_RESULT_PREDICATE_TYPE,
 ) -> AttestationVerifyResult:
     """Verify an attestation envelope against OpenSSH allowed_signers policy."""
     binary = shutil.which("ssh-keygen")
@@ -572,7 +577,7 @@ def verify_attestation(
     if (
         payload_type != DSSE_PAYLOAD_TYPE
         or statement.get("_type") != IN_TOTO_STATEMENT_TYPE
-        or statement.get("predicateType") != IN_TOTO_TEST_RESULT_PREDICATE_TYPE
+        or statement.get("predicateType") != expected_predicate_type
         or brigade_meta.get("profile") != ATTESTATION_PROFILE
         or brigade_meta.get("namespace") != namespace
     ):
@@ -591,6 +596,11 @@ def verify_attestation(
             candidate = url.removeprefix("urn:brigade:verify:")
             if re.fullmatch(r"[A-Za-z0-9._-]+", candidate) and candidate not in (".", ".."):
                 run_id = candidate
+        run_ref = pred.get("run")
+        if run_id is None and isinstance(run_ref, Mapping):
+            run_id_candidate = run_ref.get("id")
+            if isinstance(run_id_candidate, str) and re.fullmatch(r"[A-Za-z0-9._-]+", run_id_candidate):
+                run_id = run_id_candidate
 
     # 3. Recompute DSSE PAE
     pae_bytes = dsse_pae(payload_type, payload_bytes)
@@ -753,7 +763,7 @@ def verify_attestation(
                 )
 
         # 7. Check target receipt re-derivation (step 4)
-        if target is not None and run_id:
+        if target is not None and run_id and expected_predicate_type == IN_TOTO_TEST_RESULT_PREDICATE_TYPE:
             resolved_target = target.expanduser().resolve()
             run_dir = resolved_target / ".brigade" / "work" / "verify-runs" / run_id
             receipt_file = run_dir / "receipt.json"

@@ -483,7 +483,12 @@ def dispatch(args) -> int:
             print(error, file=sys.stderr)
             return 2
         assert run_dir is not None
-        return runs_cmd.show(run_dir, json_output=args.json)
+        result = runs_cmd.show(run_dir, json_output=args.json)
+        if not args.json:
+            from .. import approval
+
+            approval.print_run_projection(run_dir)
+        return result
     if args.runs_command == "inspect":
         return runs_cmd.inspect(args.run, cwd=args.cwd, runs_dir=args.runs_dir)
     if args.runs_command == "child":
