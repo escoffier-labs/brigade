@@ -138,3 +138,42 @@ def test_verify_tampered_receipt(capsys, tmp_path, monkeypatch):
     assert dispatch(args) == 1
     out, err = capsys.readouterr()
     assert "digest mismatch" in out
+
+
+def test_verify_commit_with_target_outside_cwd(capsys, tmp_path, monkeypatch):
+    """Regression: `brigade receipts verify --commit SHA --target DIR` must work
+    even when the process CWD is outside the target repository."""
+    target_repo = tmp_path / "target_repo"
+    target_repo.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    monkeypatch.chdir(target_repo)
+    subprocess.check_call(["git", "init"])
+    subprocess.check_call(["git", "config", "user.email", "test.invalid"])
+    subprocess.check_call(["git", "config", "user.name", "Test User"])
+
+    run_id = "test-run-123"
+    run_dir = target_repo / ".brigade/runs" / run_id
+    run_dir.mkdir(parents=True)
+    receipt = {
+        "schema": "brigade.causal_receipt.v1",
+        "schema_version": "1.0",
+        "subject": {"kind": "run", "id": run_id},
+        "parents": [],
+    }
+    with open(run_dir / "run.json", "w") as f:
+        json.dump(receipt, f)
+    digest = receipt_digest(receipt)
+
+    msg = f"Test commit\n\nBrigade-Run: {run_id}\nBrigade-Receipt: sha256:{digest}\n"
+    with open("test.txt", "w") as f:
+        f.write("test")
+    subprocess.check_call(["git", "add", "test.txt"])
+    subprocess.check_call(["git", "commit", "-m", msg])
+
+    monkeypatch.chdir(outside)
+    args = DummyArgs("verify", commit="HEAD", target=target_repo)
+    assert dispatch(args) == 0
+    out, err = capsys.readouterr()
+    assert "ok" in out

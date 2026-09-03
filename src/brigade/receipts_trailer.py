@@ -25,11 +25,15 @@ def trailer(run_id: str) -> int:
     return 0
 
 
-def verify_commit(commit_sha: str) -> int:
+def verify_commit(commit_sha: str, target: Path = Path(".")) -> int:
     from .causal_receipt import receipt_digest
 
     try:
-        out = subprocess.check_output(["git", "log", "-1", "--format=%B", commit_sha], stderr=subprocess.STDOUT)
+        out = subprocess.check_output(
+            ["git", "log", "-1", "--format=%B", commit_sha],
+            stderr=subprocess.STDOUT,
+            cwd=str(target),
+        )
     except subprocess.CalledProcessError:
         print("missing trailer")
         return 1
@@ -48,7 +52,7 @@ def verify_commit(commit_sha: str) -> int:
         print("missing trailer")
         return 1
 
-    run_json = Path(".brigade/runs") / run_id / "run.json"
+    run_json = target / ".brigade/runs" / run_id / "run.json"
     if not run_json.is_file():
         print("unknown run")
         return 1

@@ -95,7 +95,7 @@ def dispatch(args) -> int:
         return receipts_trailer.trailer(run_id=args.run)
     if args.receipts_command == "verify":
         if getattr(args, "commit", None):
-            return receipts_trailer.verify_commit(args.commit)
+            return receipts_trailer.verify_commit(args.commit, target=args.target)
         return receipts_cmd.verify(target=args.target, json_output=args.json)
     if args.receipts_command == "keygen":
         return receipts_cmd.keygen(target=args.target, force=args.force)
