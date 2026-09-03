@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import shlex
 import shutil
 import stat
 import tempfile
@@ -1057,6 +1058,58 @@ def _wait_retry_after_acquire_error(path: Path) -> bool:
     return _lock_is_stale(path)
 
 
+def _retained_claim_wait_error(path: Path) -> RunLockError | None:
+    """Return the explicit-recovery error when one retained claim blocks a waiter."""
+    try:
+        lock_is_directory = _lock_path_is_directory(path)
+    except RunLockError:
+        return None
+    if lock_is_directory is not None and not _lock_is_stale(path):
+        return None
+    retained_prefix = f".{path.name}.retained-"
+    claims = _stale_claims(path)
+    retained = [claim for claim in claims if claim.name.startswith(retained_prefix)]
+    if len(claims) != 1 or len(retained) != 1:
+        return None
+    claim = retained[0]
+    try:
+        if _lock_path_is_directory(claim) is None:
+            return None
+    except RunLockError:
+        return None
+    owner = _read_lock_owner(claim)
+    if owner is None:
+        return None
+    pid = owner.get("pid")
+    run_dir = owner.get("run_dir")
+    if not isinstance(pid, int) or _pid_is_active(pid) or not isinstance(run_dir, str) or not run_dir:
+        return None
+    run_id = Path(run_dir).name
+    if not run_id:
+        return None
+    workspace = path.parent.parent.resolve()
+    return RunLockError(
+        "retained stale run lock claim requires explicit recovery: "
+        f"{claim}; owner run_dir {run_dir}; owner pid {pid} is dead; "
+        f"recover with: brigade runs recover --cwd {shlex.quote(str(workspace))} {shlex.quote(run_id)}"
+    )
+
+
+def _run_lock_wait_timeout_error(path: Path, wait_seconds: float) -> RunLockError:
+    """Describe the final owner observation for a timed-out run-lock wait."""
+    owner = _read_lock_owner(path) if _lock_path_is_directory(path) is not None else None
+    pid = owner.get("pid") if owner is not None else None
+    run_dir = owner.get("run_dir") if owner is not None else None
+    pid_alive = _pid_is_active(pid) if isinstance(pid, int) else None
+    shown_pid = str(pid) if isinstance(pid, int) else "unknown"
+    shown_run_dir = run_dir if isinstance(run_dir, str) and run_dir else "unknown"
+    shown_alive = "yes" if pid_alive else "no" if pid_alive is False else "unknown"
+    return RunLockError(
+        f"timed out after {wait_seconds:g}s waiting for run lock: {path}; "
+        f"owner pid {shown_pid}; owner run_dir {shown_run_dir}; pid alive at last check: {shown_alive}"
+    )
+
+
 def _wait_to_acquire_lock(
     path: Path,
     *,
@@ -1092,6 +1145,9 @@ def _wait_to_acquire_lock(
                 try:
                     return _acquire()
                 except RunLockError as exc:
+                    retained_error = _retained_claim_wait_error(path)
+                    if retained_error is not None:
+                        raise retained_error from exc
                     if _wait_retry_after_acquire_error(path):
                         immediately_retryable = True
                     else:
@@ -1100,7 +1156,7 @@ def _wait_to_acquire_lock(
                 if not unbounded:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise RunLockError(f"timed out after {wait_seconds:g}s waiting for run lock: {path}")
+                        raise _run_lock_wait_timeout_error(path, wait_seconds)
                 else:
                     time.sleep(poll_interval)
                 continue
@@ -1108,10 +1164,8 @@ def _wait_to_acquire_lock(
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     if timed_out_acquire_exc is not None:
-                        raise RunLockError(
-                            f"timed out after {wait_seconds:g}s waiting for run lock: {path}"
-                        ) from timed_out_acquire_exc
-                    raise RunLockError(f"timed out after {wait_seconds:g}s waiting for run lock: {path}")
+                        raise _run_lock_wait_timeout_error(path, wait_seconds) from timed_out_acquire_exc
+                    raise _run_lock_wait_timeout_error(path, wait_seconds)
                 time.sleep(min(poll_interval, remaining))
             else:
                 time.sleep(poll_interval)
