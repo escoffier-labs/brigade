@@ -3246,6 +3246,119 @@ def test_versioned_model_override_requires_exact_hub_match_and_never_discards():
     assert matched.receipt["model_override"] == "cursor-grok-4.6-high-fast"
 
 
+def test_versioned_model_override_denial_includes_set_command_and_list_hint():
+    snapshot = _versioned_snapshot(
+        _versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast", instance_id="cursor-agent"),
+        revision=11,
+    )
+    mismatch = aboyeur.resolve_fleet_model_policy(
+        _roster(),
+        worker="cursor_grok",
+        model_override="composer-2.5",
+        snapshot=snapshot,
+    )
+    assert mismatch.error is not None
+    assert "--model 'composer-2.5' does not match Hub model 'cursor-grok-4.6-high-fast'" in mismatch.error
+    assert "brigade fleet models set cursor cursor-grok-4.6-high-fast cursor_grok --enable" in mismatch.error
+    assert "--reasoning high" in mismatch.error
+    assert "--brigade-cli cursor-agent" in mismatch.error
+    assert "--expect-revision 11" in mismatch.error
+    assert "brigade fleet models list --seat cursor_grok" in mismatch.error
+
+
+def test_versioned_binding_missing_denial_includes_set_command_and_list_hint():
+    seat = _versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast", instance_id="cursor-agent")
+    del seat["bindings"]["brigade"]
+    snapshot = _versioned_snapshot(seat, revision=11)
+    resolution = aboyeur.resolve_fleet_model_policy(
+        _roster(),
+        worker="cursor_grok",
+        snapshot=snapshot,
+    )
+    assert resolution.error is not None
+    assert "registry entry is missing consumer binding" in resolution.error
+    assert "brigade fleet models set cursor cursor-grok-4.6-high-fast cursor_grok --enable" in resolution.error
+    assert "--brigade-cli" in resolution.error
+    assert "--expect-revision 11" in resolution.error
+    assert "brigade fleet models list --seat cursor_grok" in resolution.error
+
+
+def test_resolve_from_roster_t3_binding_missing_suggests_t3_instance_id_in_remediation():
+    from brigade import fleet_model_admission
+
+    seat = _versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast", instance_id="cursor-agent")
+    seat["bindings"] = {"brigade": {"cli": "cursor-agent"}}
+    roster = {
+        "revision": 11,
+        "document_sha256": "sha256:" + ("ab" * 32),
+        "expires_at": "2026-08-30T14:15:00Z",
+        "seats": [seat],
+        "consumer_defaults": {"t3-fleet": "cursor_grok"},
+        "retired_models": [],
+    }
+    decision = fleet_model_admission._resolve_from_roster(roster, consumer="t3-fleet", seat=None, source="hub")
+    assert not decision.ok
+    assert decision.reason == "binding-missing"
+    remediation = decision.payload.get("remediation")
+    assert isinstance(remediation, str)
+    assert "brigade fleet models set cursor cursor-grok-4.6-high-fast cursor_grok --enable" in remediation
+    assert "--t3-instance-id cursor-agent" in remediation
+    assert "--brigade-cli" not in remediation
+    assert "--expect-revision 11" in remediation
+    assert "brigade fleet models list --seat cursor_grok" in remediation
+
+
+def test_resolve_from_roster_brigade_run_binding_missing_suggests_brigade_cli_in_remediation():
+    from brigade import fleet_model_admission
+
+    seat = _versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast", instance_id="cursor-agent")
+    seat["bindings"] = {"t3_fleet": {"instance_id": "cursor-agent", "service_tier": "standard"}}
+    roster = {
+        "revision": 11,
+        "document_sha256": "sha256:" + ("ab" * 32),
+        "expires_at": "2026-08-30T14:15:00Z",
+        "seats": [seat],
+        "consumer_defaults": {"brigade-run": "cursor_grok"},
+        "retired_models": [],
+    }
+    decision = fleet_model_admission._resolve_from_roster(roster, consumer="brigade-run", seat=None, source="hub")
+    assert not decision.ok
+    assert decision.reason == "binding-missing"
+    remediation = decision.payload.get("remediation")
+    assert isinstance(remediation, str)
+    assert "brigade fleet models set cursor cursor-grok-4.6-high-fast cursor_grok --enable" in remediation
+    assert "--brigade-cli cursor-agent" in remediation
+    assert "--t3-instance-id" not in remediation
+    assert "--expect-revision 11" in remediation
+    assert "brigade fleet models list --seat cursor_grok" in remediation
+
+
+def test_resolve_from_roster_t3_binding_missing_includes_service_tier_when_present():
+    from brigade import fleet_model_admission
+
+    seat = _versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast", instance_id="cursor-agent")
+    seat["bindings"] = {
+        "brigade": {"cli": "cursor-agent"},
+        "t3_fleet": {"instance_id": "", "service_tier": "premium"},
+    }
+    roster = {
+        "revision": 11,
+        "document_sha256": "sha256:" + ("ab" * 32),
+        "expires_at": "2026-08-30T14:15:00Z",
+        "seats": [seat],
+        "consumer_defaults": {"t3-fleet": "cursor_grok"},
+        "retired_models": [],
+    }
+    decision = fleet_model_admission._resolve_from_roster(roster, consumer="t3-fleet", seat=None, source="hub")
+    assert not decision.ok
+    assert decision.reason == "binding-missing"
+    remediation = decision.payload.get("remediation")
+    assert isinstance(remediation, str)
+    assert "--t3-instance-id cursor-agent" in remediation
+    assert "--t3-service-tier premium" in remediation
+    assert "--brigade-cli" not in remediation
+
+
 def test_validate_roster_rows_requires_nonempty_reasoning_and_hub_lkg_schema_match():
     from brigade import fleet_model_admission
 

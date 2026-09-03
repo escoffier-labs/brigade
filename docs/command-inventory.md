@@ -28,7 +28,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 11 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 32 command path(s)
+- `brigade fleet`: 33 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade guard`: 1 command path(s)
 - `brigade handoff`: 17 command path(s)
@@ -197,6 +197,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet models admit`
 - `brigade fleet models default set`
 - `brigade fleet models doctor`
+- `brigade fleet models list`
 - `brigade fleet models reconcile`
 - `brigade fleet models retire`
 - `brigade fleet models set`

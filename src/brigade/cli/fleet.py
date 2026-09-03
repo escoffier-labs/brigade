@@ -193,6 +193,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_models.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
     p_models.set_defaults(func=_dispatch_models)
     models_sub = p_models.add_subparsers(dest="models_command", metavar="<models-command>")
+    p_models_list = models_sub.add_parser("list", help="List hub roster entries.")
+    p_models_list.add_argument("--consumer", default=None, help="brigade-run or t3-fleet (default brigade-run).")
+    p_models_list.add_argument("--seat", default=None, help="Filter to one seat.")
+    p_models_list.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
+    p_models_list.set_defaults(func=_dispatch_models_list)
     p_models_set = models_sub.add_parser("set", help="Set one provider/model/seat policy (admin token).")
     p_models_set.add_argument("provider", help="Lowercase provider identifier.")
     p_models_set.add_argument("model", help="Lowercase model identifier.")
@@ -1354,6 +1359,80 @@ def _dispatch_models(args: argparse.Namespace) -> int:
     return 0
 
 
+def _dispatch_models_list(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import fleet_model_admission, fleet_model_roster
+
+    consumer = args.consumer or "brigade-run"
+    if consumer not in fleet_model_roster.CONSUMERS:
+        print(f"error: unsupported consumer {consumer!r}", file=sys.stderr)
+        return 2
+    decision = fleet_model_admission.fetch_versioned_roster(allow_lkg=True, cache_write=False, inspect_only=True)
+    if not decision.ok:
+        print(f"error: {decision.reason}", file=sys.stderr)
+        return decision.exit_code
+    roster = decision.payload
+    revision = roster.get("revision")
+    if not isinstance(revision, int):
+        revision = roster.get("roster_revision")
+    cached = roster.get("source") == "lkg"
+    raw_seats = roster.get("seats")
+    seats = [dict(item) for item in raw_seats if isinstance(item, dict)] if isinstance(raw_seats, list) else []
+    selected_seat = args.seat
+    filtered: list[dict[str, object]] = []
+    for seat in seats:
+        seat_name = seat.get("seat")
+        if not isinstance(seat_name, str) or not seat_name:
+            continue
+        if selected_seat is not None and seat_name != selected_seat:
+            continue
+        binding = fleet_model_admission._binding_for(consumer, seat)
+        binding_value = binding.get("instance_id") if isinstance(binding, dict) else None
+        filtered.append(
+            {
+                "provider": seat.get("provider"),
+                "model": seat.get("model"),
+                "seat": seat_name,
+                "enabled": seat.get("enabled") is True,
+                "reasoning": seat.get("reasoning"),
+                "limit": seat.get("limit"),
+                "binding": binding_value,
+            }
+        )
+    if args.json:
+        print(
+            _json.dumps(
+                {"roster_revision": revision, "consumer": consumer, "seats": filtered}, indent=2, sort_keys=True
+            )
+        )
+        return 0
+    headers = ("provider", "model", "seat", "enabled", "reasoning", "limit", "binding")
+    rows = []
+    for item in filtered:
+        rows.append(
+            [
+                _safe_table_cell(str(item["provider"] or "-")),
+                _safe_table_cell(str(item["model"] or "-")),
+                _safe_table_cell(str(item["seat"])),
+                _safe_table_cell("yes" if item["enabled"] else "no"),
+                _safe_table_cell(str(item["reasoning"] or "-")),
+                _safe_table_cell(str(item["limit"] if item["limit"] is not None else "-")),
+                _safe_table_cell(str(item["binding"] or "-")),
+            ]
+        )
+    widths = [max(len(h), *(len(r[i]) for r in rows)) if rows else len(h) for i, h in enumerate(headers)]
+    print(f"roster revision {revision} (consumer {consumer})")
+    if cached:
+        print("note: roster served from cache; hub is unavailable")
+    print("  ".join(h.ljust(w) for h, w in zip(headers, widths, strict=True)))
+    for row in rows:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)))
+    if not rows:
+        print("(no matching roster entries)")
+    return 0
+
+
 def _dispatch_models_set(args: argparse.Namespace) -> int:
     import json as _json
 
@@ -1427,6 +1506,9 @@ def _dispatch_models_admit(args: argparse.Namespace) -> int:
             _print_admission_json(decision.payload, reason=decision.reason, include_error=True)
     elif not decision.ok:
         print(f"error: {decision.reason}", file=sys.stderr)
+        remediation = decision.payload.get("remediation")
+        if isinstance(remediation, str) and remediation:
+            print(remediation, file=sys.stderr)
     return decision.exit_code
 
 
