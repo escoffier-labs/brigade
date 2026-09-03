@@ -2192,3 +2192,129 @@ def test_work_brief_json_includes_bounded_publish_failure_reason(tmp_target, mon
     blob = json.dumps(payload["interactive_sessions"])
     assert "Bearer" not in blob
     assert "hub_unconfigured" in blob
+
+
+def test_work_brief_fleet_routing_from_hub(tmp_path, monkeypatch, capsys):
+    from brigade import run_preference
+    from brigade.work_cmd.session import fleet_routing
+
+    _init_git_repo(tmp_path)
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "https://hub.example.test")
+    monkeypatch.setattr(
+        "brigade.run_preference.refresh_cache",
+        lambda: run_preference.RunPreference(
+            impl="agy_flash", security="daybreak", notes="cursor via Other Models only"
+        ),
+    )
+    monkeypatch.setattr(
+        "brigade.fleet_client_cloud.load_model_policy_snapshot",
+        lambda: {
+            "state": "authoritative",
+            "source": "hub",
+            "revision": 16,
+            "seats": [
+                {"seat": "agy_flash", "enabled": True},
+                {"seat": "cursor_grok", "enabled": False},
+                {"seat": "coder", "enabled": False},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "brigade.fleet_client_cloud.fetch_cloud",
+        lambda: {
+            "policy": {"providers": [{"provider": "jules", "enabled": True}, {"provider": "codex", "enabled": False}]}
+        },
+    )
+    payload = fleet_routing.fleet_routing_for_brief()
+    assert payload["roles"] == {"impl": "agy_flash", "security": "daybreak"}
+    assert payload["disabled_seats"] == ["coder", "cursor_grok"]
+    assert payload["cloud_lanes"] == {"codex": False, "jules": True}
+    assert payload["source"] == "hub" and payload["revision"] == 16
+    assert work_cmd.brief(target=tmp_path, limit=2) == 0
+    out = capsys.readouterr().out
+    assert "fleet_routing: impl=agy_flash security=daybreak" in out
+    assert "fleet_routing_notes: cursor via Other Models only" in out
+    assert "fleet_disabled_seats: coder, cursor_grok" in out
+    assert "fleet_cloud_lanes: codex=off jules=on" in out
+    assert "fleet_routing_source: hub revision 16" in out
+    assert out.index("latest_run:") < out.index("fleet_routing:") < out.index("next_source:")
+
+
+def test_work_brief_fleet_routing_hub_down_uses_cache(tmp_path, monkeypatch, capsys):
+    from brigade import run_preference
+    from brigade.work_cmd.session import fleet_routing
+
+    _init_git_repo(tmp_path)
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "https://hub.example.test")
+    monkeypatch.setattr(
+        "brigade.run_preference.refresh_cache", lambda: run_preference.RunPreference(scout="cursor_scout")
+    )
+    monkeypatch.setattr(
+        "brigade.fleet_client_cloud.load_model_policy_snapshot",
+        lambda: {
+            "state": "authoritative",
+            "source": "lkg",
+            "revision": 15,
+            "seats": [{"seat": "coder", "enabled": False}],
+        },
+    )
+
+    def down():
+        raise fleet_client.FleetClientError("hub down")
+
+    monkeypatch.setattr("brigade.fleet_client_cloud.fetch_cloud", down)
+    monkeypatch.setattr("brigade.fleet_model_admission._load_lkg_record", lambda: {"cached_at": "2026-09-02T00:00:00Z"})
+    payload = fleet_routing.fleet_routing_for_brief()
+    assert payload["source"] == "lkg" and payload["cloud_lanes"] == {}
+    assert payload["cached_at"] == "2026-09-02T00:00:00Z"
+    assert work_cmd.brief(target=tmp_path, limit=2) == 0
+    out = capsys.readouterr().out
+    assert "fleet_routing: scout=cursor_scout" in out
+    assert "fleet_cloud_lanes: unknown (hub unreachable)" in out
+    assert "fleet_routing_source: cache revision 15 (hub unreachable, cached 2026-09-02T00:00:00Z)" in out
+
+
+def test_work_brief_fleet_routing_budget_and_unconfigured(tmp_path, monkeypatch, capsys):
+    import time
+
+    from brigade import run_preference
+    from brigade.work_cmd.session import fleet_routing
+
+    _init_git_repo(tmp_path)
+    assert fleet_routing.fleet_routing_for_brief() is None  # conftest strips the hub
+    assert work_cmd.brief(target=tmp_path, limit=2) == 0
+    assert "fleet_routing:" not in capsys.readouterr().out
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "https://hub.example.test")
+    monkeypatch.setattr(fleet_routing, "BUDGET_SECONDS", 0.2)
+
+    def slow():
+        time.sleep(2)
+        return {"state": "authoritative", "source": "hub", "revision": 1, "seats": []}
+
+    monkeypatch.setattr("brigade.run_preference.refresh_cache", lambda: run_preference.RunPreference())
+    monkeypatch.setattr("brigade.fleet_client_cloud.load_model_policy_snapshot", slow)
+    monkeypatch.setattr("brigade.fleet_client_cloud.fetch_cloud", lambda: {"policy": {"providers": []}})
+    monkeypatch.setattr(
+        "brigade.fleet_model_admission._load_lkg_record",
+        lambda: {
+            "cached_at": "2026-09-02T00:00:00Z",
+            "highest_revision": 15,
+            "roster": {"revision": 15, "seats": [{"seat": "coder", "enabled": False}]},
+        },
+    )
+    started = time.monotonic()
+    payload = fleet_routing.fleet_routing_for_brief()
+    assert time.monotonic() - started < 1.5
+    assert (
+        payload["source"] == "lkg"
+        and payload["revision"] == 15
+        and payload["disabled_seats"] == ["coder"]
+        and payload["cached_at"] == "2026-09-02T00:00:00Z"
+    )
+
+    def _no_cache():
+        raise RuntimeError("no cache")
+
+    monkeypatch.setattr("brigade.fleet_model_admission._load_lkg_record", _no_cache)
+    payload = fleet_routing.fleet_routing_for_brief()
+    assert payload["source"] == "unavailable"

@@ -24,6 +24,7 @@ The hub exposes these endpoints:
 - `POST /claims` (node token) and `GET /claims` (admin or node token), repo claims
 - `GET /nodes` and `POST /nodes`, admin-token-only node enrollment
 - `GET /` and `GET /view/{machines,repos}`, the Fleet dashboard (admin token or the dashboard cookie; see below)
+- `GET /deck/roster` and `POST /deck/roster`, the roster page (admin token or the dashboard cookie to save; see `docs/fleet-sync.md`)
 
 Events are deduplicated by `(node_id, run_id, sequence, digest)`. Reposting after a lost response is safe.
 
@@ -455,7 +456,7 @@ Fourteen days is a starting horizon, not a required policy. Keep at least the de
 
 ## Upgrade and rollback
 
-Before changing the Brigade ref, run a backup and save the current ref:
+Before changing the Brigade ref, run a backup and save the current ref (note that schema v19 adds columns to `run_preference` and the section 8 backup precedes the rollout):
 
 ```bash
 systemctl start brigade-fleet-backup.service

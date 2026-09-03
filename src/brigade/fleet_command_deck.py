@@ -941,6 +941,16 @@ th:nth-child(1) { width: 22%; } th:nth-child(2) { width: 20%; } th:nth-child(3) 
 .flag { color: var(--signal); font-weight: 800; }
 footer { margin-top: 18px; color: var(--faint); font-size: 12px; }
 footer a { margin-right: 12px; color: var(--muted); }
+.roster-form label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+.roster-form select, .roster-form textarea { width: 100%; padding: 6px; border: 1px solid var(--line); background: var(--surface-raised); color: var(--ink); font: inherit; }
+.roster-form textarea { margin-top: 10px; }
+.roster-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.roster-table th:nth-child(n) { width: auto; }
+.seat--off td { color: var(--faint); }
+.banner { margin: 12px 0 0; padding: 10px; border: 1px solid var(--signal); color: var(--ink); font-size: 12px; }
+.banner--error { border-color: #b0553a; }
+.roster-actions button { padding: 8px 18px; border: 1px solid var(--signal); background: var(--signal-quiet); color: var(--ink); font: inherit; font-weight: 700; cursor: pointer; }
+.panel + .panel { margin-top: 12px; }
 @media (max-width: 700px) {
   .stations { grid-template-columns: 1fr; }
   .tile { width: 100%; }
@@ -972,7 +982,7 @@ def render_deck(view: DeckView, *, nonce: str, now: datetime) -> str:
         '<header class="masthead"><div><p class="eyebrow">Fleet operations</p><h1>Command Deck</h1>',
         f'<p class="verdict">{_esc(verdict)}</p></div><p class="header-meta">'
         f"{total_busy}/{total_capacity} slots busy<br>{_esc(_stamp(now))}</p></header>",
-        '<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/view/machines">machines board</a></nav>',
+        '<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/deck/roster">roster</a> <a href="/view/machines">machines board</a></nav>',
     ]
     if not view.stations:
         parts.append(
@@ -1072,7 +1082,7 @@ def render_repos(view: DeckView, *, nonce: str, now: datetime) -> str:
         '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
         "<h1>Command Deck &middot; Repos</h1></div>"
         f'<p class="header-meta">{_esc(_stamp(now))}</p></header>'
-        '<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/view/machines">machines board</a></nav>'
+        '<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/roster">roster</a> <a href="/view/machines">machines board</a></nav>'
         '<section class="repo-panel" aria-label="Repository coordination">'
         + table
         + '</section><footer><a href="/view/machines">machines board</a> <a href="/view/repos">repos board</a></footer></main>'
@@ -1179,10 +1189,11 @@ def _esc(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
-def _document(body: str, *, nonce: str, now: datetime) -> str:
+def _document(body: str, *, nonce: str, now: datetime, title: str = "Command Deck", refresh: bool = True) -> str:
+    refresh_tag = '<meta http-equiv="refresh" content="10">' if refresh else ""
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
-        '<meta http-equiv="refresh" content="10">'
+        f"{refresh_tag}"
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         '<meta name="theme-color" content="#111617">'
         '<meta name="application-name" content="Fleet Hub">'
@@ -1191,7 +1202,7 @@ def _document(body: str, *, nonce: str, now: datetime) -> str:
         '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">'
         '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">'
         '<link rel="manifest" href="/site.webmanifest">'
-        "<title>Command Deck</title>"
+        f"<title>{_esc(title)}</title>"
         f'<style nonce="{_esc(nonce)}">{_STYLE}</style>'
         f'<script nonce="{_esc(nonce)}">{_SCRIPT}</script>'
         f'</head><body class="deck" data-as-of="{_esc(_stamp(now))}">{body}</body></html>'

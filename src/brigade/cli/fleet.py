@@ -375,6 +375,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_pref_set.add_argument("--impl", default=None, help="Default implementation seat name.")
     p_pref_set.add_argument("--review", default=None, help="Default review seat name.")
     p_pref_set.add_argument("--chef", default=None, help="Default chef/orchestrator seat name.")
+    p_pref_set.add_argument("--research", default=None, help="Default read-only research seat name.")
+    p_pref_set.add_argument("--security", default=None, help="Default security review seat name.")
+    p_pref_set.add_argument("--scout", default=None, help="Default fast repository scout seat name.")
     p_pref_set.add_argument("--notes", default=None, help="Optional operator note (no secrets or home paths).")
     p_pref_set.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     p_pref_set.set_defaults(func=_dispatch_preference_set)
@@ -718,25 +721,17 @@ def _preference_payload(preference: object) -> dict[str, str | None]:
     from .. import run_preference
 
     if isinstance(preference, run_preference.RunPreference):
-        return {
-            "impl": preference.impl,
-            "review": preference.review,
-            "chef": preference.chef,
-            "notes": preference.notes,
-        }
+        return {field: getattr(preference, field) for field in run_preference.ALLOWED_FIELDS}
     if isinstance(preference, dict):
-        return {
-            "impl": preference.get("impl"),
-            "review": preference.get("review"),
-            "chef": preference.get("chef"),
-            "notes": preference.get("notes"),
-        }
-    return {"impl": None, "review": None, "chef": None, "notes": None}
+        return {field: preference.get(field) for field in run_preference.ALLOWED_FIELDS}
+    return {field: None for field in run_preference.ALLOWED_FIELDS}
 
 
 def _print_preference(payload: dict[str, str | None], *, source: str) -> None:
+    from .. import run_preference
+
     print(f"run preference ({source})")
-    for key in ("impl", "review", "chef", "notes"):
+    for key in run_preference.ALLOWED_FIELDS:
         print(f"  {key}: {_safe_table_cell(payload.get(key) or '-')}")
 
 
@@ -765,9 +760,10 @@ def _dispatch_preference_set(args: argparse.Namespace) -> int:
 
     from .. import fleet_client, run_preference
 
-    raw = {key: getattr(args, key) for key in ("impl", "review", "chef", "notes") if getattr(args, key) is not None}
+    raw = {key: getattr(args, key) for key in run_preference.ALLOWED_FIELDS if getattr(args, key, None) is not None}
     if not raw:
-        print("error: set at least one of --impl, --review, --chef, or --notes", file=sys.stderr)
+        flags = ", ".join(f"--{key}" for key in run_preference.ALLOWED_FIELDS)
+        print(f"error: set at least one of {flags}", file=sys.stderr)
         return 2
     try:
         parsed = run_preference.parse_preference(raw)

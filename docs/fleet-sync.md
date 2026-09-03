@@ -46,7 +46,9 @@ ever logged or rendered:
 - **The admin token is the control plane.** The one shared bearer from
   before (`BRIGADE_FLEET_TOKEN` / `--token-file` on the hub, `token_file`
   on a client) manages `/nodes`, reads `/status` and `/claims`, and enrols
-  the dashboard cookie. It may post events or claims under *any* `node_id`
+  the dashboard cookie. The cookie derived from the admin token reads the
+  dashboards and edits the roster page, and rotating the hub token revokes it.
+  It may post events or claims under *any* `node_id`
   only when the hub runs with `brigade fleet serve --allow-admin-writes`
   (off by default), which is the explicit switch for a fleet that is still
   on the shared token. A client with `token_file` but no `node_token_file`
@@ -100,17 +102,28 @@ Hub (`src/brigade/fleet_hub.py`):
   terminal event that omitted `seat` keeps the last non-empty seat from
   earlier events on that run.
 - `GET /preference` — admin or node token; the one-row fleet run preference
-  pin (`impl`, `review`, `chef`, `notes`). This is a routing overlay, not
-  roster sync. `--worker` and a spoken seat name always win.
+  pin (`impl`, `review`, `chef`, `research`, `security`, `scout`, `notes`).
+  This is a routing overlay, not roster sync. `--worker` and a spoken seat
+  name always win.
 - `PUT /preference` — admin token only; replace the pin. Seat names only;
   tokens, env values, and home paths are rejected.
+- `GET /deck/roster`, `POST /deck/roster` — the hub roster page (spec:
+  `docs/phase-fleet-roster-deck-page.md`). Read with the admin bearer, the
+  dashboard cookie, or a trusted Tailscale identity (read-only). Save with
+  the admin bearer or the dashboard cookie only; the form carries a CSRF
+  token derived from the admin token, the roster revision, and the
+  preference row's `updated_at`. One Save is one `BEGIN IMMEDIATE`
+  transaction: seat on/off and consumer defaults bump the roster revision
+  once; roles, notes, and cloud lane on/off do not touch the revision.
+  Schema v19 adds the three role columns.
 - `GET /nodes`, `POST /nodes` — admin token only; list enrolled nodes,
   `{"action": "add", "node_id", "label"?}` (the token is in that response
   and nowhere else; an enrolled, unrevoked node answers 409),
   `{"action": "revoke", "node_id"}`.
 - SQLite in WAL mode, `PRAGMA user_version` = schema version (v4 adds the
-  `nodes` table; v5 adds the one-row `run_preference` table); a database
-  from a newer hub is refused rather than reinterpreted.
+  `nodes` table; v5 adds the one-row `run_preference` table; v19 adds three
+  role columns to `run_preference`); a database from a newer hub is refused
+  rather than reinterpreted.
 - `brigade fleet serve --host <ip> [--port 3774] [--db PATH] [--token-file PATH] [--allow-admin-writes]`;
   `--host` is required so the hub never binds all interfaces by accident.
 - `brigade fleet nodes add <node_id> [--label L] [--json]`, `nodes list
@@ -296,11 +309,12 @@ phone over Tailscale:
   the page once with `?token=<fleet token>` and the hub answers a 303 to the
   same URL without the token and sets `brigade_fleet_view` (HttpOnly,
   SameSite=Strict, 30 days). The cookie value is an HMAC of the token, never
-  the token, and it authorizes only the HTML routes: it cannot read
-  `/status` or `/claims` or post events or claims, and rotating the hub token
-  invalidates every cookie. Tradeoff: the token transits once in a URL (it
+  the token, and it authorizes only the HTML routes: the cookie derived from the
+  admin token reads the dashboards and edits the roster page (never
+  `/status`, `/claims`, or `/events`), and rotating the hub token revokes it.
+  Tradeoff: the token transits once in a URL (it
   lands in that device's browser history; the hub logs nothing) and the
-  cookie is a 30-day read-only capability on that device — treat the device
+  cookie is a 30-day capability on that device — treat the device
   like a tailnet member, and rotate the token if it is lost. Tailscale
   encrypts the link, so the cookie is not marked `Secure` (the hub is plain
   HTTP on the tailnet).
