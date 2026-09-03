@@ -703,7 +703,7 @@ def test_schema_constants_stable():
     assert run_budget.RUN_BUDGET_SCHEMA == "brigade.run_budget.v1"
     assert run_budget.RUN_BUDGET_SCHEMA_VERSION == 1
     assert RUN_EVENT_SCHEMA == "brigade.run_event.v1"
-    assert RUN_EVENT_SCHEMA_VERSION == 1
+    assert RUN_EVENT_SCHEMA_VERSION == 2
 
 
 def test_parallel_same_stage_reservations_respect_dispatch_ceiling():

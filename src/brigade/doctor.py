@@ -591,25 +591,27 @@ def _recovery_checkpoint_run_verdict(target: Path, run_dir: Path) -> tuple[str, 
 def _historical_projection_metadata_matches(
     projected: dict[str, object], recorded: dict[str, object], recorded_bytes: bytes
 ) -> bool:
-    """Accept only the v5-to-v6 projector metadata compatibility shape.
+    """Accept only the v5-to-current projector metadata compatibility shape.
 
-    Projector v6 added the default ``kind: work`` field and incremented its
-    metadata version. A v5 authority snapshot is accepted only when its raw
+    Projector v6 added the default ``kind: work`` field and later versions only
+    add optional keys (v7: ``approval``), so a v5 snapshot is compatible with the
+    current projector when no later-only key is present. A v5 authority snapshot is accepted only when its raw
     bytes equal the canonical v5 projection, keeping every other run.json
     field and the writer encoding fail-closed.
     """
+    from brigade import run_projector  # lazy: authority compatibility only
+
     if (
-        projected.get("projector_version") != 6
+        projected.get("projector_version") != run_projector.PROJECTOR_VERSION
         or recorded.get("projector_version") != 5
         or projected.get("kind") != "work"
         or "kind" in recorded
+        or "approval" in projected
     ):
         return False
     historical = dict(projected)
     historical.pop("kind")
     historical["projector_version"] = 5
-    from brigade import run_projector  # lazy: authority compatibility only
-
     return recorded_bytes == run_projector.encode_snapshot_bytes(historical)
 
 
