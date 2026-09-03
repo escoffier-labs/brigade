@@ -1760,7 +1760,7 @@ def _fleet_routing_for_brief() -> dict[str, Any] | None:
 - Modify: `docs/runbooks/fleet-hub-proxmox.md:18-27` (endpoint list)
 - Modify: `CHANGELOG.md` (Unreleased section, follow its existing format)
 
-- [ ] In `docs/fleet-sync.md`, change the `GET /preference` bullet to list `impl`, `review`, `chef`, `research`, `security`, `scout`, `notes`, and add after the `PUT /preference` bullet:
+- [x] In `docs/fleet-sync.md`, change the `GET /preference` bullet to list `impl`, `review`, `chef`, `research`, `security`, `scout`, `notes`, and add after the `PUT /preference` bullet:
 
 ```markdown
 - `GET /deck/roster`, `POST /deck/roster` — the hub roster page (spec:
@@ -1775,20 +1775,20 @@ def _fleet_routing_for_brief() -> dict[str, Any] | None:
 ```
 
   Update the `PRAGMA user_version` bullet to mention v19.
-- [ ] In `docs/runbooks/fleet-hub-proxmox.md`, add to the endpoint list:
+- [x] In `docs/runbooks/fleet-hub-proxmox.md`, add to the endpoint list:
 
 ```markdown
 - `GET /deck/roster` and `POST /deck/roster`, the roster page (admin token or the dashboard cookie to save; see `docs/fleet-sync.md`)
 ```
 
   and in the upgrade section note that v19 adds columns to `run_preference` and the section 8 backup precedes the rollout.
-- [ ] In `CHANGELOG.md`, add this as the first bullet under `## [Unreleased]` / `### Added` (Keep a Changelog style, one bullet): "Fleet hub roster page at `/deck/roster`: roles (impl, review, chef, research, security, scout), seat and cloud lane toggles, consumer defaults, and notes saved in one revisioned transaction; `brigade work brief` prints the `fleet_routing` block; `fleet preference set` gains `--research`, `--security`, `--scout`; hub schema v19."
-- [ ] Full verification:
+- [x] In `CHANGELOG.md`, add this as the first bullet under `## [Unreleased]` / `### Added` (Keep a Changelog style, one bullet): "Fleet hub roster page at `/deck/roster`: roles (impl, review, chef, research, security, scout), seat and cloud lane toggles, consumer defaults, and notes saved in one revisioned transaction; `brigade work brief` prints the `fleet_routing` block; `fleet preference set` gains `--research`, `--security`, `--scout`; hub schema v19."
+- [x] Full verification:
   `brigade work verify run --target . --command "python -m pytest -q -x tests/test_run_preference.py tests/test_fleet_roster_page.py tests/test_fleet_command_deck.py tests/test_fleet_model_roster.py tests/test_fleet_cloud.py tests/test_work_cmd_session.py tests/test_module_size_ratchet.py tests/test_size_ratchet_baseline.py tests/test_fleet_model_admission.py" --capture brigade-work`
   Expect PASS.
-- [ ] Lint and types, through Brigade: `brigade work verify run --target . --command "ruff check src tests" --capture brigade-work` and `brigade work verify run --target . --command ".venv/bin/mypy src/brigade/fleet_hub_roster_page.py src/brigade/work_cmd/session/fleet_routing.py src/brigade/fleet_hub_preference.py src/brigade/run_preference.py" --capture brigade-work` (mypy lives in the repo `.venv`). Expect exit 0 for both.
-- [ ] Commit: `git add -A && git commit -m "docs(fleet): roster page, schema v19, and fleet_routing brief block"`
-- [ ] Write the Memory Handoff for the session (`.claude/memory-handoffs/`), then open the PR with `skillet:pass`.
+- [x] Lint and types, through Brigade: `brigade work verify run --target . --command "ruff check src tests" --capture brigade-work` and `brigade work verify run --target . --command ".venv/bin/mypy src/brigade/fleet_hub_roster_page.py src/brigade/work_cmd/session/fleet_routing.py src/brigade/fleet_hub_preference.py src/brigade/run_preference.py" --capture brigade-work` (mypy lives in the repo `.venv`). Expect exit 0 for both.
+- [x] Commit: `git add -A && git commit -m "docs(fleet): roster page, schema v19, and fleet_routing brief block"`
+- [x] Write the Memory Handoff for the session (`.claude/memory-handoffs/`), then open the PR with `skillet:pass`.
 
 ## Rollout (after merge)
 

@@ -100,17 +100,28 @@ Hub (`src/brigade/fleet_hub.py`):
   terminal event that omitted `seat` keeps the last non-empty seat from
   earlier events on that run.
 - `GET /preference` — admin or node token; the one-row fleet run preference
-  pin (`impl`, `review`, `chef`, `notes`). This is a routing overlay, not
-  roster sync. `--worker` and a spoken seat name always win.
+  pin (`impl`, `review`, `chef`, `research`, `security`, `scout`, `notes`).
+  This is a routing overlay, not roster sync. `--worker` and a spoken seat
+  name always win.
 - `PUT /preference` — admin token only; replace the pin. Seat names only;
   tokens, env values, and home paths are rejected.
+- `GET /deck/roster`, `POST /deck/roster` — the hub roster page (spec:
+  `docs/phase-fleet-roster-deck-page.md`). Read with the admin bearer, the
+  dashboard cookie, or a trusted Tailscale identity (read-only). Save with
+  the admin bearer or the dashboard cookie only; the form carries a CSRF
+  token derived from the admin token, the roster revision, and the
+  preference row's `updated_at`. One Save is one `BEGIN IMMEDIATE`
+  transaction: seat on/off and consumer defaults bump the roster revision
+  once; roles, notes, and cloud lane on/off do not touch the revision.
+  Schema v19 adds the three role columns.
 - `GET /nodes`, `POST /nodes` — admin token only; list enrolled nodes,
   `{"action": "add", "node_id", "label"?}` (the token is in that response
   and nowhere else; an enrolled, unrevoked node answers 409),
   `{"action": "revoke", "node_id"}`.
 - SQLite in WAL mode, `PRAGMA user_version` = schema version (v4 adds the
-  `nodes` table; v5 adds the one-row `run_preference` table); a database
-  from a newer hub is refused rather than reinterpreted.
+  `nodes` table; v5 adds the one-row `run_preference` table; v19 adds three
+  role columns to `run_preference`); a database from a newer hub is refused
+  rather than reinterpreted.
 - `brigade fleet serve --host <ip> [--port 3774] [--db PATH] [--token-file PATH] [--allow-admin-writes]`;
   `--host` is required so the hub never binds all interfaces by accident.
 - `brigade fleet nodes add <node_id> [--label L] [--json]`, `nodes list

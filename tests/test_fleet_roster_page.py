@@ -10,8 +10,6 @@ import threading
 from contextlib import contextmanager
 from urllib.parse import urlencode
 
-import pytest
-
 from brigade import fleet_hub, fleet_hub_roster_page
 
 TOKEN = "test-admin-token-roster"

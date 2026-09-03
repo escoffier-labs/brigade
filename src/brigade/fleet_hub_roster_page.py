@@ -14,8 +14,8 @@ import hmac
 import html
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Mapping
+from datetime import datetime
+from typing import Any
 from urllib.parse import parse_qs
 
 from . import fleet_command_deck, fleet_hub, fleet_hub_model_roster, fleet_hub_preference, fleet_model_roster
@@ -443,10 +443,10 @@ def apply(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig, submi
                 (consumer, seat, now),
             )
             roster_changed = True
-        for row in view.cloud:
-            want = row.provider in submission.cloud_on
-            if want != row.enabled:
-                _write_cloud_enabled(conn, row, want)
+        for cloud_row in view.cloud:
+            want = cloud_row.provider in submission.cloud_on
+            if want != cloud_row.enabled:
+                _write_cloud_enabled(conn, cloud_row, want)
         wanted_pref = {role: seat for role, seat in submission.roles.items() if seat}
         if submission.notes:
             wanted_pref["notes"] = submission.notes
