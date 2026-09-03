@@ -32,6 +32,7 @@ from .. import (
     research_cmd,
     roadmap_cmd,
     security_cmd,
+    toml_compat,
     tools_cmd,
     work_cmd,
 )
@@ -611,14 +612,15 @@ def _report_retention(target: Path, override: int | None = None) -> int:
     daily_toml = target / ".brigade" / "daily.toml"
     if daily_toml.is_file():
         try:
-            import tomllib
-
-            data = tomllib.loads(daily_toml.read_text())
+            data = toml_compat.loads(daily_toml.read_text())
+        except toml_compat.TOMLDecodeError as exc:
+            raise toml_compat.TOMLDecodeError(f"malformed {daily_toml}: {exc}") from exc
+        except OSError:
+            return DEFAULT_REPORT_RETENTION
+        if isinstance(data, dict):
             val = data.get("operator_report_retention")
             if isinstance(val, int) and val >= 1:
                 return val
-        except Exception:
-            pass
     return DEFAULT_REPORT_RETENTION
 
 
@@ -672,6 +674,34 @@ def _operator_report_dirs(target: Path) -> list[Path]:
     return dirs
 
 
+def _archived_report_dirs(target: Path) -> list[Path]:
+    root = _reports_archive_root(target)
+    if not root.is_dir():
+        return []
+    dirs = [
+        p
+        for p in root.iterdir()
+        if p.is_dir()
+        and not p.name.startswith(".")
+        and ("operator-report" in p.name or (p / "CENTER_EVIDENCE.json").is_file())
+    ]
+    dirs.sort(key=_report_dir_sort_key, reverse=True)
+    return dirs
+
+
+def _prune_archive(target: Path, *, retention: int = DEFAULT_REPORT_RETENTION) -> list[Path]:
+    """Prune archived operator report directories beyond retention, deleting the oldest."""
+    if retention < 1:
+        retention = DEFAULT_REPORT_RETENTION
+    dirs = _archived_report_dirs(target)
+    if len(dirs) <= retention:
+        return []
+    to_delete = dirs[retention:]
+    for d in to_delete:
+        shutil.rmtree(d)
+    return to_delete
+
+
 def _rotate_reports(
     target: Path,
     *,
@@ -681,19 +711,20 @@ def _rotate_reports(
     """Rotate operator report directories beyond retention into reports-archive/.
 
     Never rotates an unclosed report.
+    Crops reports-archive/ to the same retention count by deleting the oldest archived directories.
     Returns the list of report directories rotated (or that would be rotated if dry_run=True).
     """
     if retention < 1:
         retention = DEFAULT_REPORT_RETENTION
     dirs = _operator_report_dirs(target)
     if len(dirs) <= retention:
-        return []
-
-    candidates = dirs[retention:]
-    to_rotate: list[Path] = []
-    for d in candidates:
-        if _is_report_closed(d):
-            to_rotate.append(d)
+        to_rotate: list[Path] = []
+    else:
+        candidates = dirs[retention:]
+        to_rotate = []
+        for d in candidates:
+            if _is_report_closed(d):
+                to_rotate.append(d)
 
     if dry_run:
         return to_rotate
@@ -704,6 +735,8 @@ def _rotate_reports(
         if archive_dest.exists():
             shutil.rmtree(archive_dest)
         reportstore.move_bundle(source_dir, archive_root)
+
+    _prune_archive(target, retention=retention)
     return to_rotate
 
 

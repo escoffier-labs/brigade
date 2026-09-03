@@ -51,6 +51,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_risk_without_approval": "medium",
     "allow_context_pack_build": True,
     "allow_operator_report_build": True,
+    "operator_report_retention": 20,
     "allow_readiness_imports": True,
     "allow_import_promotion_with_approval": True,
     "allow_work_run": True,
@@ -438,7 +439,12 @@ def _validate_config(config: dict[str, Any]) -> list[dict[str, Any]]:
     ):
         if not isinstance(config.get(key), bool):
             checks.append({"status": "fail", "name": key, "detail": "expected boolean"})
-    for key in ("stale_plan_threshold_hours", "stale_run_threshold_hours", "verification_timeout"):
+    for key in (
+        "stale_plan_threshold_hours",
+        "stale_run_threshold_hours",
+        "verification_timeout",
+        "operator_report_retention",
+    ):
         value = config.get(key)
         if not isinstance(value, int) or value < 1:
             checks.append({"status": "fail", "name": key, "detail": "expected positive integer"})

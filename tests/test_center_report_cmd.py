@@ -2,6 +2,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from brigade import center_cmd
 from brigade import cli
 from brigade import handoff_cmd
@@ -410,10 +412,11 @@ def test_center_report_build_rotates_old_reports_down_to_keep_count(tmp_path, ca
     assert len(active) == 2
     assert set(active) == {built_ids[-1], built_ids[-2]}
 
-    # The 3 older reports should have been archived under reports-archive/
+    # The archive is capped at the same keep count (2), deleting the oldest archived report
     archived = [p.name for p in archive_root.iterdir() if p.is_dir()]
-    assert len(archived) == 3
-    assert set(archived) == {built_ids[0], built_ids[1], built_ids[2]}
+    assert len(archived) == 2
+    assert set(archived) == {built_ids[1], built_ids[2]}
+    assert built_ids[0] not in archived
 
 
 def test_center_report_build_never_deletes_or_rotates_unclosed_report(tmp_path, capsys):
@@ -526,3 +529,68 @@ def test_center_report_build_reads_retention_from_daily_toml(tmp_path, capsys):
 
     archived = {p.name for p in archive_root.iterdir() if p.is_dir()}
     assert built_ids[0] in archived
+
+
+def test_center_report_build_malformed_daily_toml_raises_error(tmp_path):
+    _seed_task_and_import(tmp_path)
+    (tmp_path / ".brigade").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".brigade" / "daily.toml").write_text("operator_report_retention = [invalid toml\n")
+    with pytest.raises(ValueError, match="malformed .*daily.toml"):
+        center_cmd.report_build(target=tmp_path)
+
+
+def test_center_report_build_cli_flags_dry_run_and_keep(tmp_path, capsys):
+    _seed_task_and_import(tmp_path)
+    # Build report via CLI with --keep
+    assert cli.main(["center", "report", "build", "--target", str(tmp_path), "--keep", "5", "--json"]) == 0
+    r1 = json.loads(capsys.readouterr().out)["report_id"]
+    assert center_cmd.report_closeout(target=tmp_path, report_id=r1, status="reviewed") == 0
+    capsys.readouterr()
+
+    # Build second report via CLI
+    assert cli.main(["center", "report", "build", "--target", str(tmp_path), "--keep", "5", "--json"]) == 0
+    r2 = json.loads(capsys.readouterr().out)["report_id"]
+    assert center_cmd.report_closeout(target=tmp_path, report_id=r2, status="reviewed") == 0
+    capsys.readouterr()
+
+    # Dry-run via CLI with --keep 1 should preview rotating r1 without moving it
+    assert cli.main(["center", "report", "build", "--target", str(tmp_path), "--dry-run", "--keep", "1", "--json"]) == 0
+    dry_data = json.loads(capsys.readouterr().out)
+    assert dry_data["dry_run"] is True
+    assert dry_data["retention"] == 1
+    assert dry_data["would_rotate_count"] == 1
+    assert dry_data["would_rotate"] == [r1]
+
+    # Active reports still contains both r1 and r2; reports-archive is empty
+    reports_root = tmp_path / ".brigade" / "center" / "reports"
+    archive_root = tmp_path / ".brigade" / "center" / "reports-archive"
+    active = {p.name for p in reports_root.iterdir() if p.is_dir() and not p.name.endswith("archive")}
+    assert {r1, r2} <= active
+    assert not archive_root.exists() or len(list(archive_root.iterdir())) == 0
+
+
+def test_center_report_archive_cap_prunes_oldest_archived_dirs(tmp_path, capsys):
+    _seed_task_and_import(tmp_path)
+    reports_root = tmp_path / ".brigade" / "center" / "reports"
+    archive_root = tmp_path / ".brigade" / "center" / "reports-archive"
+
+    # Build and close 6 reports with keep=2
+    built_ids: list[str] = []
+    for _ in range(6):
+        assert center_cmd.report_build(target=tmp_path, json_output=True, keep=2) == 0
+        rep = json.loads(capsys.readouterr().out)
+        built_ids.append(rep["report_id"])
+        assert center_cmd.report_closeout(target=tmp_path, report_id=rep["report_id"], status="reviewed") == 0
+        capsys.readouterr()
+
+    # Active reports: newest 2
+    active = {p.name for p in reports_root.iterdir() if p.is_dir() and not p.name.endswith("archive")}
+    assert active == {built_ids[4], built_ids[5]}
+
+    # Archived reports: capped at 2 (newest archived are built_ids[2] and built_ids[3])
+    # Oldest archived (built_ids[0] and built_ids[1]) must have been pruned
+    archived = {p.name for p in archive_root.iterdir() if p.is_dir()}
+    assert len(archived) == 2
+    assert archived == {built_ids[2], built_ids[3]}
+    assert built_ids[0] not in archived
+    assert built_ids[1] not in archived

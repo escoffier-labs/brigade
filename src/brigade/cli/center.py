@@ -84,6 +84,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_center_report_build.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
     )
+    p_center_report_build.add_argument(
+        "--dry-run", action="store_true", help="Preview report rotation without writing or rotating bundles."
+    )
+    p_center_report_build.add_argument(
+        "--keep", type=int, default=None, metavar="N", help="Override report retention count."
+    )
     p_center_report_build.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_center_report_list = center_report_sub.add_parser("list", help="List local operator report bundles.")
     p_center_report_list.add_argument(
@@ -273,7 +279,12 @@ def dispatch(args) -> int:
         if args.center_report_command == "plan":
             return center_cmd.report_plan(target=args.target, json_output=args.json)
         if args.center_report_command == "build":
-            return center_cmd.report_build(target=args.target, json_output=args.json)
+            return center_cmd.report_build(
+                target=args.target,
+                dry_run=args.dry_run,
+                keep=args.keep,
+                json_output=args.json,
+            )
         if args.center_report_command == "list":
             return center_cmd.report_list(target=args.target, limit=args.limit, json_output=args.json)
         if args.center_report_command == "show":
