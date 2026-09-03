@@ -20,7 +20,8 @@ SOD_POLICY_NAME = "brigade.sod.v1"
 SOD_POLICY_TEXT = """brigade.sod.v1
 approver.kind must be human.
 approver keyid must differ from every verify receipt signing key.
-approver principal must differ from requester_principal when known.
+approver principal and keyid must differ from the requester when known.
+approver keyid must differ from the workspace attestation key when present.
 approval must precede every merge or ship stage event.
 an allow decision must be unexpired at verification time.
 """
@@ -45,6 +46,7 @@ APPROVAL_STATUSES = frozenset(
         "HELD",
         "UNAPPROVED",
         "APPROVAL-INVALID",
+        "APPROVAL-STALE",
         "SOD-VIOLATION",
         "APPROVAL-EXPIRED",
     }
@@ -66,6 +68,7 @@ class VerifyReceiptEvidence:
     run_id: str
     receipt_sha256: str
     signing_keyids: frozenset[str]
+    producer_keyid_unavailable: bool = False
 
 
 @dataclass(frozen=True)
@@ -74,6 +77,9 @@ class ApprovalVerification:
     status: str
     decision: str | None
     sod: dict[str, Any] | None
+    live_tree: str | None = None
+    prior_approvals: tuple[dict[str, str | None], ...] = ()
+    detail: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -81,6 +87,9 @@ class ApprovalVerification:
             "status": self.status,
             "decision": self.decision,
             "sod": self.sod,
+            "live_tree": self.live_tree if self.live_tree is not None else "unavailable",
+            "prior_approvals": list(self.prior_approvals),
+            "detail": self.detail,
         }
 
 
@@ -147,6 +156,13 @@ def _read_journal(run_dir: Path) -> run_journal.JournalReport:
     return report
 
 
+def _read_journal_report(run_dir: Path) -> run_journal.JournalReport:
+    try:
+        return run_journal.read_journal_bounded(run_dir / "events" / "lifecycle.jsonl")
+    except (OSError, run_journal.RunJournalError) as exc:
+        raise ApprovalError("lifecycle journal is not readable") from exc
+
+
 def _attestation_keyid(path: Path) -> str | None:
     try:
         envelope = _load_json_object(path, label="verify receipt attestation")
@@ -155,20 +171,30 @@ def _attestation_keyid(path: Path) -> str | None:
     signatures = envelope.get("signatures")
     if not isinstance(signatures, list) or len(signatures) != 1 or not isinstance(signatures[0], Mapping):
         return None
-    value = signatures[0].get("keyid")
-    return value if isinstance(value, str) and value else None
+    signature = signatures[0].get("sig")
+    if not isinstance(signature, str):
+        return None
+    armored = attestation._decode_sig_armored(signature)
+    return attestation.extract_keyid_from_sshsig(armored) if armored is not None else None
 
 
-def collect_verify_receipts(target: Path, producer_run_id: str) -> list[VerifyReceiptEvidence]:
+def collect_verify_receipts(
+    target: Path, producer_run_id: str, *, tree_fingerprint: str | None = None
+) -> list[VerifyReceiptEvidence]:
     """Collect receipt subjects attributed to one orchestration run."""
     root = target / ".brigade" / "work" / "verify-runs"
     evidence: list[VerifyReceiptEvidence] = []
     for receipt_path in sorted(root.glob("*/receipt.json")):
+        if receipt_path.parent.is_symlink():
+            continue
         try:
             receipt = _load_json_object(receipt_path, label="verify receipt")
         except ApprovalError:
             continue
         if receipt.get("producer_run_id") != producer_run_id:
+            continue
+        receipt_tree = receipt.get("tree_fingerprint")
+        if tree_fingerprint is not None and receipt_tree != tree_fingerprint:
             continue
         verify_run_id = receipt.get("run_id")
         digests = receipt.get("digests")
@@ -181,7 +207,9 @@ def collect_verify_receipts(target: Path, producer_run_id: str) -> list[VerifyRe
         hmac_keyid = digests.get("key_id") if isinstance(digests, Mapping) else None
         if isinstance(hmac_keyid, str) and hmac_keyid:
             keyids.add(hmac_keyid)
-        ssh_keyid = _attestation_keyid(receipt_path.parent / "attestation.json")
+        attestation_path = receipt_path.parent / "attestation.json"
+        ssh_keyid = _attestation_keyid(attestation_path)
+        attestation_unparseable = attestation_path.exists() and ssh_keyid is None
         if ssh_keyid is not None:
             keyids.add(ssh_keyid)
         evidence.append(
@@ -189,6 +217,7 @@ def collect_verify_receipts(target: Path, producer_run_id: str) -> list[VerifyRe
                 run_id=verify_run_id,
                 receipt_sha256=receipt_sha256,
                 signing_keyids=frozenset(keyids),
+                producer_keyid_unavailable=attestation_unparseable,
             )
         )
     return evidence
@@ -213,6 +242,7 @@ def _is_merge_or_ship_event(event: run_journal.RunEvent) -> bool:
 
 def evaluate_sod(
     *,
+    target: Path,
     statement: Mapping[str, Any],
     run_meta: Mapping[str, Any],
     receipts: Sequence[VerifyReceiptEvidence],
@@ -231,24 +261,51 @@ def evaluate_sod(
     expires_at = _parse_timestamp(predicate.get("expiresAt"))
 
     checks: list[dict[str, str]] = []
-    checks.append({"id": "approver-is-human", "status": "passed" if approver.get("kind") == "human" else "failed"})
+    checks.append(
+        {
+            "id": "approver-is-human",
+            "status": "passed" if approver.get("kind") == "human" else "failed",
+            "detail": "declared",
+        }
+    )
     producer_keyids = {item for receipt in receipts for item in receipt.signing_keyids}
     checks.append(
         {
             "id": "approver-not-producer",
-            "status": "passed" if isinstance(keyid, str) and keyid not in producer_keyids else "failed",
+            "status": "passed"
+            if isinstance(keyid, str)
+            and keyid not in producer_keyids
+            and not any(item.producer_keyid_unavailable for item in receipts)
+            else "failed",
         }
     )
     requester = run_meta.get("requester_principal")
+    requester_keyid = run_meta.get("requester_keyid")
     if isinstance(requester, str) and requester:
         checks.append(
             {
                 "id": "approver-not-requester",
-                "status": "passed" if isinstance(principal, str) and principal != requester else "failed",
+                "status": "passed"
+                if isinstance(principal, str)
+                and principal != requester
+                and (not isinstance(requester_keyid, str) or keyid != requester_keyid)
+                else "failed",
             }
         )
     else:
         checks.append({"id": "requester-unknown", "status": "passed"})
+
+    workspace_key_path = attestation.resolve_signing_key_path(target)
+    try:
+        workspace_keyid = attestation.get_key_fingerprint(workspace_key_path) if workspace_key_path.is_file() else None
+    except attestation.AttestationError:
+        workspace_keyid = None
+    checks.append(
+        {
+            "id": "approver-key-not-workspace-key",
+            "status": "passed" if workspace_keyid is None or keyid != workspace_keyid else "failed",
+        }
+    )
 
     late = decided_at is None
     if decided_at is not None:
@@ -359,7 +416,7 @@ def record_approval(
     if not report.events:
         raise ApprovalError("lifecycle journal has no chain head")
     chain_head = report.events[-1].event_digest
-    receipts = collect_verify_receipts(target, run_id)
+    receipts = collect_verify_receipts(target, run_id, tree_fingerprint=tree_fingerprint)
     if decision == "allow" and not receipts:
         raise ApprovalError("allow requires at least one verify receipt")
 
@@ -367,6 +424,9 @@ def record_approval(
     decided_at = _utc_timestamp(instant)
     expires_at = _utc_timestamp(instant + parse_duration(expires_in))
     nonce = secrets.token_hex(16)
+    if any(event.payload.get("nonce") == nonce for event in report.events if event.event_type == _APPROVAL_EVENT_TYPE):
+        raise ApprovalError("approval nonce was already used for this run")
+    run_projector.project_run_snapshot(run_meta, report.events, journal_present=True)
     key_path = attestation.resolve_signing_key_path(target, key_file=key)
     keyid = attestation.get_key_fingerprint(key_path)
     tentative_principal = principal or "principal-pending-verification"
@@ -412,10 +472,16 @@ def record_approval(
     if signature_check.status != attestation.STATUS_SIGNED_OK:
         raise ApprovalError("signing key and principal are not trusted by the target allowed_signers policy")
 
-    sod = evaluate_sod(statement=statement, run_meta=run_meta, receipts=receipts, events=report.events, now=instant)
+    sod = evaluate_sod(
+        target=target,
+        statement=statement,
+        run_meta=run_meta,
+        receipts=receipts,
+        events=report.events,
+        now=instant,
+    )
     statement_sha256 = hashlib.sha256(attestation.canonical_statement_bytes(statement)).hexdigest()
     relative_path = Path("approvals") / f"{nonce}.json"
-    attestation.write_attestation_file(envelope, run_dir / relative_path)
     event = run_journal.append_event(
         run_dir / "events" / "lifecycle.jsonl",
         run_id=run_id,
@@ -435,6 +501,7 @@ def record_approval(
         expected_previous_sequence=report.events[-1].sequence,
         recorded_at=decided_at,
     )
+    attestation.write_attestation_file(envelope, run_dir / relative_path)
     approval_projection = {
         "decision": decision,
         "scope": scope,
@@ -477,6 +544,9 @@ def approve_cli(
             principal=principal,
             expires_in=expires_in,
         )
+    except run_projector.ProjectionError as exc:
+        print(f"error: {exc.diagnostic}", file=sys.stderr)
+        return 1
     except (ApprovalError, attestation.AttestationError, FileNotFoundError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -504,11 +574,58 @@ def _latest_approval_event(events: Sequence[run_journal.RunEvent]) -> run_journa
     return next((event for event in reversed(events) if event.event_type == _APPROVAL_EVENT_TYPE), None)
 
 
+def _prior_approvals(events: Sequence[run_journal.RunEvent]) -> tuple[dict[str, str | None], ...]:
+    approvals = [event for event in events if event.event_type == _APPROVAL_EVENT_TYPE]
+    return tuple(
+        {
+            "decision": event.payload.get("decision") if isinstance(event.payload.get("decision"), str) else None,
+            "principal": (
+                event.payload.get("approver_principal")
+                if isinstance(event.payload.get("approver_principal"), str)
+                else None
+            ),
+            "decided_at": event.recorded_at,
+        }
+        for event in approvals[:-1]
+    )
+
+
+def _signed_subjects(statement: Mapping[str, Any]) -> tuple[str, set[tuple[str, str]]] | None:
+    raw_subjects = statement.get("subject")
+    if not isinstance(raw_subjects, list):
+        return None
+    tree: str | None = None
+    receipts: set[tuple[str, str]] = set()
+    for subject in raw_subjects:
+        if not isinstance(subject, Mapping):
+            return None
+        name = subject.get("name")
+        digest = subject.get("digest")
+        if not isinstance(name, str) or not isinstance(digest, Mapping):
+            return None
+        if name == "git:tree":
+            value = digest.get("gitTree")
+            if tree is not None or not isinstance(value, str) or not value:
+                return None
+            tree = value
+        elif name.startswith("verify:"):
+            value = digest.get("sha256")
+            if not isinstance(value, str) or not _HEX64_RE.fullmatch(value):
+                return None
+            subject_key = (name, value)
+            if subject_key in receipts:
+                return None
+            receipts.add(subject_key)
+        else:
+            return None
+    return (tree, receipts) if tree is not None else None
+
+
 def verify_run_approval(target: Path, run_dir: Path, *, now: datetime | None = None) -> ApprovalVerification:
     """Verify the latest signed approval event for one run directory."""
     run_id = run_dir.name
     try:
-        report = _read_journal(run_dir)
+        report = _read_journal_report(run_dir)
     except ApprovalError:
         return ApprovalVerification(run_id, "APPROVAL-INVALID", None, None)
     event = _latest_approval_event(report.events)
@@ -516,11 +633,11 @@ def verify_run_approval(target: Path, run_dir: Path, *, now: datetime | None = N
         return ApprovalVerification(run_id, "UNAPPROVED", None, None)
     decision = event.payload.get("decision")
     decision_value = decision if isinstance(decision, str) else None
+    prior_approvals = _prior_approvals(report.events)
+    if report.partial_tail is not None or report.chain_errors:
+        return ApprovalVerification(run_id, "APPROVAL-INVALID", decision_value, None, prior_approvals=prior_approvals)
     try:
         run_meta = _load_json_object(run_dir / "run.json", label="run.json")
-        tree = run_meta.get("tree_fingerprint")
-        if not isinstance(tree, str) or not tree:
-            raise ApprovalError("run.json has no final tree_fingerprint")
         nonce = event.payload.get("nonce")
         rel = event.payload.get("attestation_path")
         if not isinstance(nonce, str) or not _HEX32_RE.fullmatch(nonce):
@@ -540,6 +657,14 @@ def verify_run_approval(target: Path, run_dir: Path, *, now: datetime | None = N
         policy = predicate.get("policy")
         if not isinstance(approver, Mapping) or not isinstance(run_ref, Mapping) or not isinstance(policy, Mapping):
             raise ApprovalError("approval predicate references are invalid")
+        signed = _signed_subjects(statement)
+        if signed is None:
+            raise ApprovalError("approval subjects are invalid")
+        approved_tree, signed_receipt_subjects = signed
+        live_tree = localio.tree_fingerprint(target)
+        comparison_tree = live_tree if live_tree is not None else run_meta.get("tree_fingerprint")
+        if not isinstance(comparison_tree, str) or not comparison_tree:
+            raise ApprovalError("run.json has no final tree_fingerprint")
         principal = approver.get("principal")
         signature = attestation.verify_attestation(
             envelope,
@@ -547,7 +672,14 @@ def verify_run_approval(target: Path, run_dir: Path, *, now: datetime | None = N
             principal=principal if isinstance(principal, str) else None,
             expected_predicate_type=HUMAN_APPROVAL_PREDICATE_TYPE,
         )
-        receipts = collect_verify_receipts(target, run_id)
+        receipts = collect_verify_receipts(target, run_id, tree_fingerprint=approved_tree)
+        current_receipt_subjects = {(f"verify:{receipt.run_id}", receipt.receipt_sha256) for receipt in receipts}
+        missing_subjects = signed_receipt_subjects - current_receipt_subjects
+        signed_receipts = [
+            receipt
+            for receipt in receipts
+            if (f"verify:{receipt.run_id}", receipt.receipt_sha256) in signed_receipt_subjects
+        ]
         policy_digest = policy.get("digest")
         chain_head = run_ref.get("journalChainHead")
         valid = all(
@@ -557,7 +689,6 @@ def verify_run_approval(target: Path, run_dir: Path, *, now: datetime | None = N
                 signature.keyid == approver.get("keyid"),
                 statement.get("_type") == attestation.IN_TOTO_STATEMENT_TYPE,
                 statement.get("predicateType") == HUMAN_APPROVAL_PREDICATE_TYPE,
-                statement.get("subject") == _subjects(tree, receipts),
                 run_ref.get("id") == run_id,
                 isinstance(chain_head, Mapping) and chain_head.get("sha256") == event.previous_digest,
                 predicate.get("schemaVersion") == 1,
@@ -567,7 +698,7 @@ def verify_run_approval(target: Path, run_dir: Path, *, now: datetime | None = N
                 approver.get("keyid") == event.payload.get("approver_keyid"),
                 predicate.get("nonce") == nonce,
                 predicate.get("expiresAt") == event.payload.get("expires_at"),
-                event.payload.get("subject_tree") == tree,
+                event.payload.get("subject_tree") == approved_tree,
                 hashlib.sha256(statement_bytes).hexdigest() == event.payload.get("statement_sha256"),
                 policy.get("name") == SOD_POLICY_NAME,
                 isinstance(policy_digest, Mapping) and policy_digest.get("sha256") == SOD_POLICY_SHA256,
@@ -580,21 +711,26 @@ def verify_run_approval(target: Path, run_dir: Path, *, now: datetime | None = N
         if not valid:
             raise ApprovalError("approval signature or subjects do not match current evidence")
     except (ApprovalError, OSError):
-        return ApprovalVerification(run_id, "APPROVAL-INVALID", decision_value, None)
+        return ApprovalVerification(run_id, "APPROVAL-INVALID", decision_value, None, prior_approvals=prior_approvals)
 
     instant = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     sod = evaluate_sod(
+        target=target,
         statement=statement,
         run_meta=run_meta,
-        receipts=receipts,
+        receipts=signed_receipts,
         events=report.events,
         now=instant,
     )
     expires_at = _parse_timestamp(predicate.get("expiresAt"))
-    if decision == "allow" and expires_at is not None and expires_at <= instant:
-        status = "APPROVAL-EXPIRED"
-    elif any(check["status"] == "failed" and check["id"] != "approval-not-expired" for check in sod["checks"]):
+    stale = comparison_tree != approved_tree or bool(missing_subjects)
+    detail = "APPROVAL-STALE" if stale else None
+    if any(check["status"] == "failed" and check["id"] != "approval-not-expired" for check in sod["checks"]):
         status = "SOD-VIOLATION"
+    elif decision == "allow" and expires_at is not None and expires_at <= instant:
+        status = "APPROVAL-EXPIRED"
+    elif decision == "allow" and stale:
+        status = "APPROVAL-STALE"
     elif decision == "allow":
         status = "APPROVED"
     elif decision == "deny":
@@ -603,7 +739,15 @@ def verify_run_approval(target: Path, run_dir: Path, *, now: datetime | None = N
         status = "HELD"
     else:
         status = "APPROVAL-INVALID"
-    return ApprovalVerification(run_id, status, decision_value, sod)
+    return ApprovalVerification(
+        run_id,
+        status,
+        decision_value,
+        sod,
+        live_tree=live_tree,
+        prior_approvals=prior_approvals,
+        detail=detail,
+    )
 
 
 def verify_approvals(target: Path) -> dict[str, Any]:
@@ -642,7 +786,14 @@ def verify_receipts_with_approvals(*, target: Path, json_output: bool = False) -
     receipts_rc = receipts_cmd.verify(target=target, json_output=False)
     print("approvals:")
     for item in approvals["runs"]:
-        print(f"- {item['status']} {item['run_id']}")
+        decision = item.get("decision")
+        status = str(item["status"])
+        decision_note = f" ({decision})" if status == "APPROVAL-STALE" and isinstance(decision, str) else ""
+        detail = f" [{item['detail']}]" if isinstance(item.get("detail"), str) and status != "APPROVAL-STALE" else ""
+        print(f"- {status}{decision_note} {item['run_id']}{detail}")
+        for prior in item.get("prior_approvals", []):
+            if isinstance(prior, Mapping):
+                print(f"  prior: {prior.get('decision')} {prior.get('principal')} {prior.get('decided_at')}")
     return 1 if receipts_rc != 0 or approval_failed else 0
 
 

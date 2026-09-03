@@ -19,6 +19,15 @@ from pathlib import Path
 from typing import Any
 
 
+TREE_FINGERPRINT_EVIDENCE_PATHS = (
+    ".brigade/work/verify-runs",
+    "memory/outcome/records.jsonl",
+    "memory/outcome/.records.lock",
+    ".brigade/work/miseledger-export-cursor.json",
+    ":(glob).brigade/work/miseledger-export-*.jsonl",
+)
+
+
 def utc_now() -> datetime:
     """Return the current time as an aware UTC datetime."""
     return datetime.now(timezone.utc)
@@ -41,6 +50,35 @@ def read_json_dict(path: Path) -> dict[str, Any] | None:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def tree_fingerprint(target: Path) -> str | None:
+    """Return the Git tree for the live workspace, excluding generated evidence."""
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_file = Path(tmpdir) / "index"
+            env = {**os.environ, "GIT_INDEX_FILE": str(index_file)}
+
+            def git(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["git", "-C", str(target), *args],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    timeout=30,
+                    env=env,
+                )
+
+            if git("read-tree", "HEAD").returncode != 0 or git("add", "-A").returncode != 0:
+                return None
+            if git("reset", "-q", "HEAD", "--", *TREE_FINGERPRINT_EVIDENCE_PATHS).returncode != 0:
+                return None
+            value = git("write-tree")
+            return value.stdout.strip() if value.returncode == 0 and value.stdout.strip() else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
 
 
 def _active_bound_target(path: Path) -> tuple[Any, tuple[str, ...], str] | None:

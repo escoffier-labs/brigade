@@ -28,7 +28,13 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _write_verify_receipt(target: Path, *, producer_key: Path | None = None) -> dict[str, Any]:
+def _write_verify_receipt(
+    target: Path,
+    *,
+    producer_key: Path | None = None,
+    tree_fingerprint: str = TREE,
+    hmac_keyid: str | None = None,
+) -> dict[str, Any]:
     receipt_dir = target / ".brigade" / "work" / "verify-runs" / VERIFY_ID
     receipt_dir.mkdir(parents=True)
     stdout = receipt_dir / "command-1-stdout.log"
@@ -43,7 +49,7 @@ def _write_verify_receipt(target: Path, *, producer_key: Path | None = None) -> 
         "status": "completed",
         "started_at": "2026-09-03T12:00:00Z",
         "completed_at": "2026-09-03T12:00:05Z",
-        "tree_fingerprint": TREE,
+        "tree_fingerprint": tree_fingerprint,
         "changes_patch_sha256": PATCH,
         "commands": [
             {
@@ -64,6 +70,8 @@ def _write_verify_receipt(target: Path, *, producer_key: Path | None = None) -> 
         },
         "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
     }
+    if hmac_keyid is not None:
+        receipt["digests"]["key_id"] = hmac_keyid
     _write_json(receipt_dir / "receipt.json", receipt)
     if producer_key is not None:
         envelope = attestation.export_attestation(receipt, producer_key)
@@ -80,7 +88,12 @@ def _workspace(
 ) -> tuple[Path, Path, Path]:
     target = tmp_path / "workspace"
     target.mkdir()
-    key, signers = attestation.keygen(target, principal="alice")
+    _workspace_key, signers = attestation.keygen(target, principal="workspace")
+    approver_home = tmp_path / "approver"
+    key, approver_signers = attestation.keygen(approver_home, principal="alice")
+    signers.write_text(
+        signers.read_text(encoding="utf-8") + approver_signers.read_text(encoding="utf-8"), encoding="utf-8"
+    )
     run_dir = target / ".brigade" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     created = run_events.build_event(
@@ -180,10 +193,13 @@ def test_allow_records_event_envelope_projection_and_verifies(tmp_path: Path, ca
     run_meta = json.loads((target / ".brigade" / "runs" / RUN_ID / "run.json").read_text())
     assert run_meta["approval"]["decision"] == "allow"
     assert run_meta["approval"]["sod"]["result"] == "PASSED"
-    assert {check["id"] for check in run_meta["approval"]["sod"]["checks"]} >= {
+    assert {check["id"] for check in run_meta["approval"]["sod"]["checks"]} == {
         "approver-is-human",
         "approver-not-producer",
         "requester-unknown",
+        "approver-key-not-workspace-key",
+        "approval-before-merge-ship",
+        "approval-not-expired",
     }
 
     assert cli.main(["receipts", "verify", "--target", str(target)]) == 0
@@ -206,17 +222,61 @@ def test_approver_cannot_be_a_verify_receipt_producer(tmp_path: Path, capsys: py
     assert "SOD-VIOLATION" in capsys.readouterr().out
 
 
-def test_tree_change_invalidates_approval(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+def test_committed_live_tree_change_makes_allow_stale(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     target, key, _signers = _workspace(tmp_path)
-    assert _approve(target, key) == 0
-    capsys.readouterr()
+    subprocess.run(["git", "init", "-q", str(target)], check=True)
+    tracked = target / "tracked.txt"
+    tracked.write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(target), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(target),
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+        check=True,
+    )
+    tree = localio.tree_fingerprint(target)
+    assert tree is not None
     run_path = target / ".brigade" / "runs" / RUN_ID / "run.json"
     run_meta = json.loads(run_path.read_text())
-    run_meta["tree_fingerprint"] = "9" * 40
+    run_meta["tree_fingerprint"] = tree
     _write_json(run_path, run_meta)
+    receipt_path = target / ".brigade" / "work" / "verify-runs" / VERIFY_ID / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["tree_fingerprint"] = tree
+    receipt["digests"].pop("receipt_sha256")
+    receipt["digests"]["receipt_sha256"] = localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    _write_json(receipt_path, receipt)
+    assert _approve(target, key) == 0
+    capsys.readouterr()
+    tracked.write_text("after\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(target), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(target),
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "after",
+        ],
+        check=True,
+    )
 
-    assert cli.main(["receipts", "verify", "--target", str(target)]) != 0
-    assert "APPROVAL-INVALID" in capsys.readouterr().out
+    assert cli.main(["receipts", "verify", "--target", str(target)]) == 0
+    assert "APPROVAL-STALE (allow)" in capsys.readouterr().out
 
 
 def test_expired_allow_is_reported_without_changing_verify_exit(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
@@ -335,3 +395,137 @@ def test_reason_refuses_absolute_paths(tmp_path: Path, capsys: pytest.CaptureFix
     assert _approve(target, key, "--reason", f"Reviewed {tmp_path / 'private.txt'}") == 2
     assert "absolute paths" in capsys.readouterr().err
     assert _approval_event(target).event_type == "run.created"
+
+
+def test_hmac_receipt_keyid_is_a_producer_for_sod(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    target, key, _signers = _workspace(tmp_path)
+    receipt_path = target / ".brigade" / "work" / "verify-runs" / VERIFY_ID / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["digests"]["key_id"] = attestation.get_key_fingerprint(key)
+    _write_json(receipt_path, receipt)
+
+    assert _approve(target, key) == 3
+    assert "approver-not-producer: failed" in capsys.readouterr().out
+
+
+def test_forged_attestation_keyid_hint_does_not_hide_the_producer(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    target, key, _signers = _workspace(tmp_path, producer_is_approver=True)
+    attestation_path = target / ".brigade" / "work" / "verify-runs" / VERIFY_ID / "attestation.json"
+    envelope = json.loads(attestation_path.read_text())
+    envelope["signatures"][0]["keyid"] = "SHA256:forged"
+    _write_json(attestation_path, envelope)
+
+    assert _approve(target, key) == 3
+    assert "approver-not-producer: failed" in capsys.readouterr().out
+
+
+def test_missing_signed_receipt_is_stale_but_extra_receipt_is_allowed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    target, key, _signers = _workspace(tmp_path)
+    assert _approve(target, key) == 0
+    capsys.readouterr()
+    receipt_dir = target / ".brigade" / "work" / "verify-runs" / VERIFY_ID
+    extra_dir = receipt_dir.with_name("20260903-120001-work-verify-extra")
+    shutil.copytree(receipt_dir, extra_dir)
+    extra_receipt = json.loads((extra_dir / "receipt.json").read_text())
+    extra_receipt["run_id"] = extra_dir.name
+    extra_receipt["digests"]["receipt_sha256"] = localio.canonical_json_digest(extra_receipt, exclude_keys={"digests"})
+    _write_json(extra_dir / "receipt.json", extra_receipt)
+
+    assert cli.main(["receipts", "verify", "--target", str(target)]) == 0
+    assert "APPROVED" in capsys.readouterr().out
+    shutil.rmtree(receipt_dir)
+
+    assert cli.main(["receipts", "verify", "--target", str(target)]) == 0
+    assert "APPROVAL-STALE (allow)" in capsys.readouterr().out
+
+
+def test_deny_stays_non_exit_changing_when_the_tree_is_stale(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    target, key, _signers = _workspace(tmp_path, with_receipt=False)
+    assert (
+        cli.main(
+            [
+                "run",
+                "approve",
+                RUN_ID,
+                "--decision",
+                "deny",
+                "--reason-code",
+                "needs-rework",
+                "--key",
+                str(key),
+                "--target",
+                str(target),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    run_path = target / ".brigade" / "runs" / RUN_ID / "run.json"
+    run_meta = json.loads(run_path.read_text())
+    run_meta["tree_fingerprint"] = "9" * 40
+    _write_json(run_path, run_meta)
+
+    assert cli.main(["receipts", "verify", "--target", str(target)]) == 0
+    assert "DENIED" in capsys.readouterr().out
+
+
+def test_invalid_projection_refuses_approval_without_appending_an_event(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    target, key, _signers = _workspace(tmp_path)
+    run_path = target / ".brigade" / "runs" / RUN_ID / "run.json"
+    run_meta = json.loads(run_path.read_text())
+    run_meta["unknown_field"] = True
+    _write_json(run_path, run_meta)
+
+    assert _approve(target, key) == 1
+    assert "unknown fields" in capsys.readouterr().err
+    assert _approval_event(target).event_type == "run.created"
+
+
+def test_later_approval_supersedes_earlier_decision_and_keeps_history(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    target, key, _signers = _workspace(tmp_path, with_receipt=False)
+    deny = [
+        "run",
+        "approve",
+        RUN_ID,
+        "--decision",
+        "deny",
+        "--scope",
+        "merge",
+        "--reason-code",
+        "needs-rework",
+        "--key",
+        str(key),
+        "--target",
+        str(target),
+    ]
+    assert cli.main(deny) == 0
+    capsys.readouterr()
+    allow = [
+        "run",
+        "approve",
+        RUN_ID,
+        "--decision",
+        "hold",
+        "--reason-code",
+        "needs-rework",
+        "--key",
+        str(key),
+        "--target",
+        str(target),
+    ]
+    assert cli.main(allow) == 0
+    capsys.readouterr()
+
+    assert cli.main(["receipts", "verify", "--target", str(target), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    result = payload["approvals"]["runs"][0]
+    assert result["decision"] == "hold"
+    assert result["prior_approvals"] == [
+        {"decision": "deny", "principal": "alice", "decided_at": result["prior_approvals"][0]["decided_at"]}
+    ]

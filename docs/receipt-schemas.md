@@ -1175,8 +1175,20 @@ binds the decision to the run's final tree and every verify receipt whose
 An `allow` statement requires at least one verify-receipt subject. `deny` and
 `hold` may have none. Verification recomputes all subjects and the
 `brigade.sod.v1` checks from local evidence. It reports `APPROVED`, `DENIED`,
-`HELD`, `UNAPPROVED`, `APPROVAL-INVALID`, `SOD-VIOLATION`, or
-`APPROVAL-EXPIRED` for each run.
+`HELD`, `UNAPPROVED`, `APPROVAL-INVALID`, `APPROVAL-STALE`, `SOD-VIOLATION`,
+or `APPROVAL-EXPIRED` for each run. `APPROVAL-STALE` means a valid approval no
+longer describes the live Git tree, or a signed verify-receipt subject is now
+missing. It does not change the command exit status. The signed receipt
+subjects need only be a subset of current evidence, so later receipts do not
+invalidate an approval. JSON output includes `live_tree` (`unavailable` when
+the tree cannot be computed) and earlier superseded decisions.
+
+Every approval event remains in the journal. Verification uses the latest one
+and reports prior decisions with their principal and recorded time. The SoD
+checks include `approver-key-not-workspace-key`: the approver key must not be
+the workspace's default attestation key. Projector version 7 makes existing
+`run.json` snapshots stale input for `run_shadow`; regenerate the shadow after
+the projection is refreshed.
 
 ### Trust Policy
 
