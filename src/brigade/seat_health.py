@@ -622,11 +622,11 @@ class SeatHealthProbe:
         return SeatHealthCheck("authentication-entitlement", "passed", f"agy models listed {len(model_ids)} model(s)")
 
     def _antigravity_version_check(self, seat: Any, timeout_seconds: float) -> SeatHealthCheck:
-        identity = _resolve_agent_executable(seat)
+        argv, env, env_error = _antigravity_probe_invocation(seat, "--version")
+        if env_error:
+            return SeatHealthCheck("version-gates", "failed", env_error, cause_code="version-unavailable")
         try:
-            result = proc.run(
-                [identity.command, "--version"], timeout=min(timeout_seconds, _ANTIGRAVITY_PROBE_TIMEOUT_SECONDS)
-            )
+            result = proc.run(argv, timeout=min(timeout_seconds, _ANTIGRAVITY_PROBE_TIMEOUT_SECONDS), env=env)
         except OSError as exc:
             return SeatHealthCheck("version-gates", "failed", safe_detail(str(exc)), cause_code="version-unavailable")
         output = f"{result.stdout}\n{result.stderr}"
@@ -667,7 +667,7 @@ class SeatHealthProbe:
             return SeatHealthCheck(
                 "model-reachability", "failed", f"agy models exited {result.code}", cause_code="models-command-failed"
             )
-        model = agents._antigravity_model_pin(seat.model)
+        model = _canonical_antigravity_model_id(seat.model)
         if _model_id_is_listed(model, output):
             return SeatHealthCheck("model-reachability", "passed", f"agy models lists requested model {model}")
         return SeatHealthCheck(
@@ -691,10 +691,12 @@ class SeatHealthProbe:
 
 
 def _antigravity_models(seat: Any, timeout_seconds: float) -> tuple[proc.Result | None, str]:
-    identity = _resolve_agent_executable(seat)
+    argv, env, env_error = _antigravity_probe_invocation(seat, "models")
+    if env_error:
+        return None, env_error
     try:
         return (
-            proc.run([identity.command, "models"], timeout=min(timeout_seconds, _ANTIGRAVITY_PROBE_TIMEOUT_SECONDS)),
+            proc.run(argv, timeout=min(timeout_seconds, _ANTIGRAVITY_PROBE_TIMEOUT_SECONDS), env=env),
             "",
         )
     except OSError as exc:
@@ -719,6 +721,26 @@ def _antigravity_model_ids(output: str) -> tuple[str, ...]:
 def _model_id_is_listed(model: str, output: str) -> bool:
     token = re.compile(rf"(?<!\S){re.escape(model)}(?=\s|$|\()")
     return any(token.search(line) is not None for line in output.splitlines())
+
+
+def _canonical_antigravity_model_id(model: str) -> str:
+    normalized = re.sub(r"[()]+", "", model.strip().lower())
+    normalized = re.sub(r"[\s_-]+", "-", normalized).strip("-")
+    return agents._antigravity_model_pin(normalized)
+
+
+def _antigravity_probe_invocation(seat: Any, subcommand: str) -> tuple[list[str], dict[str, str] | None, str]:
+    seat_env = getattr(seat, "env", None)
+    child_env: dict[str, str] | None = None
+    if seat_env is not None:
+        overrides, env_error = agents.resolve_env_overrides(seat_env)
+        if overrides is None:
+            return [], None, env_error
+        child_env = dict(os.environ)
+        child_env.update(overrides)
+    identity = _resolve_agent_executable(seat)
+    command = getattr(seat, "command", None) or ()
+    return [identity.command, *command[1:], subcommand], child_env, ""
 
 
 def seat_fingerprint(seat: Any, roster: Any, *, executable_version: str | None = None) -> str:
