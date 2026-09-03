@@ -183,7 +183,7 @@ def _select(name: str, current: str, seats: tuple[SeatRow, ...], *, editable: bo
 def _checkbox(name: str, checked: bool, *, editable: bool) -> str:
     return (
         f'<input type="checkbox" name="{_esc(name)}" value="1"'
-        f'{" checked" if checked else ""}{"" if editable else " disabled"}>'
+        f"{' checked' if checked else ''}{'' if editable else ' disabled'}>"
     )
 
 
@@ -215,7 +215,7 @@ def render(
     parts.append(
         '<header class="masthead"><div><p class="eyebrow">Fleet operations</p><h1>Command Deck &middot; Roster</h1>'
         f'<p class="station-meta">revision {view.revision}, updated {_esc(view.revision_updated_at)} by '
-        f'{_esc(view.updated_by or "unknown")}</p></div>'
+        f"{_esc(view.updated_by or 'unknown')}</p></div>"
         f'<p class="header-meta">{_esc(fleet_command_deck._stamp(now))}</p></header>'
     )
     parts.append(
@@ -237,7 +237,7 @@ def render(
         parts.append(f'<input type="hidden" name="csrf" value="{_esc(csrf)}">')
     # 1. roles
     role_cells = "".join(
-        f'<label>{_esc(role)}{_select(f"role.{role}", roles.get(role) or "", view.seats, editable=editable)}</label>'
+        f"<label>{_esc(role)}{_select(f'role.{role}', roles.get(role) or '', view.seats, editable=editable)}</label>"
         for role in ROLES
     )
     parts.append(
@@ -250,7 +250,9 @@ def render(
     for row in view.seats:
         cls = ' class="seat--off"' if row.seat not in seats_on else ""
         flag = ' <span class="flag">retired</span>' if row.retired else ""
-        box = _checkbox(f"seat.{row.seat}", row.seat in seats_on and not row.retired, editable=editable and not row.retired)
+        box = _checkbox(
+            f"seat.{row.seat}", row.seat in seats_on and not row.retired, editable=editable and not row.retired
+        )
         seat_rows.append(
             f"<tr{cls}><td>{_esc(row.seat)}{flag}</td><td>{_esc(row.provider)}/{_esc(row.model)}</td>"
             f"<td>{_esc(row.reasoning)}</td><td>{_esc('-' if row.limit is None else row.limit)}</td>"
@@ -260,7 +262,7 @@ def render(
         '<section class="panel" aria-labelledby="seats"><header><h2 id="seats">Seats</h2>'
         f'<p class="panel-count">{len(view.seats)} seat(s)</p></header><div class="table-wrap"><table class="roster-table">'
         "<thead><tr><th>Seat</th><th>Provider/model</th><th>Reasoning</th><th>Limit</th><th>Brigade CLI</th>"
-        f'<th>T3 instance</th><th>On</th></tr></thead><tbody>{"".join(seat_rows)}</tbody></table></div></section>'
+        f"<th>T3 instance</th><th>On</th></tr></thead><tbody>{''.join(seat_rows)}</tbody></table></div></section>"
     )
     # 3. cloud lanes
     cloud_rows = "".join(
@@ -275,7 +277,7 @@ def render(
     )
     # 4. consumer defaults
     default_cells = "".join(
-        f'<label>{_esc(consumer)}{_select(f"default.{consumer}", defaults.get(consumer) or "", view.seats, editable=editable, binding="brigade_cli" if consumer == "brigade-run" else "t3_instance_id")}</label>'
+        f"<label>{_esc(consumer)}{_select(f'default.{consumer}', defaults.get(consumer) or '', view.seats, editable=editable, binding='brigade_cli' if consumer == 'brigade-run' else 't3_instance_id')}</label>"
         for consumer in CONSUMERS
     )
     parts.append(
@@ -408,7 +410,9 @@ def apply(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig, submi
             )
         if view.preference_updated_at != submission.expected_preference_updated_at:
             conn.rollback()
-            return ApplyResult("conflict", "the run preference changed underneath you. Reload before saving.", view.revision)
+            return ApplyResult(
+                "conflict", "the run preference changed underneath you. Reload before saving.", view.revision
+            )
         error, target = _validate(view, submission)
         if error is not None:
             conn.rollback()

@@ -16,20 +16,36 @@ TOKEN = "test-admin-token-roster"
 NODE_A = "11111111-1111-4111-8111-111111111111"
 SEATS = {
     "agy_flash": {
-        "provider": "google", "model": "gemini-3.8-flash-high", "reasoning": "none",
-        "brigade_cli": "antigravity", "t3_instance_id": "", "limit": 4,
+        "provider": "google",
+        "model": "gemini-3.8-flash-high",
+        "reasoning": "none",
+        "brigade_cli": "antigravity",
+        "t3_instance_id": "",
+        "limit": 4,
     },
     "coder": {
-        "provider": "openai", "model": "gpt-5.6-terra", "reasoning": "high",
-        "brigade_cli": "codex", "t3_instance_id": "codex", "limit": 1,
+        "provider": "openai",
+        "model": "gpt-5.6-terra",
+        "reasoning": "high",
+        "brigade_cli": "codex",
+        "t3_instance_id": "codex",
+        "limit": 1,
     },
     "daybreak": {
-        "provider": "openai", "model": "gpt-daybreak-blue-latest", "reasoning": "high",
-        "brigade_cli": "codex", "t3_instance_id": "", "limit": 1,
+        "provider": "openai",
+        "model": "gpt-daybreak-blue-latest",
+        "reasoning": "high",
+        "brigade_cli": "codex",
+        "t3_instance_id": "",
+        "limit": 1,
     },
     "cursor_grok": {
-        "provider": "cursor", "model": "cursor-grok-4.6-high-fast", "reasoning": "none",
-        "brigade_cli": "cursor", "t3_instance_id": "cursor", "limit": 8,
+        "provider": "cursor",
+        "model": "cursor-grok-4.6-high-fast",
+        "reasoning": "none",
+        "brigade_cli": "cursor",
+        "t3_instance_id": "cursor",
+        "limit": 8,
     },
 }
 
@@ -67,7 +83,9 @@ def _bearer() -> dict:
 
 def _json(hub, method: str, path: str, body: dict, *, token: str = TOKEN):
     status, _headers, text = _request(
-        hub, method, path,
+        hub,
+        method,
+        path,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         body=json.dumps(body).encode("utf-8"),
     )
@@ -83,12 +101,16 @@ def _revision(hub) -> int:
 def _seed(hub) -> None:
     for seat, fields in SEATS.items():
         status, payload = _json(
-            hub, "POST", "/models",
+            hub,
+            "POST",
+            "/models",
             {"action": "set", "seat": seat, "enabled": True, "expected_revision": _revision(hub), **fields},
         )
         assert status == 200, payload
     status, payload = _json(
-        hub, "PUT", "/preference",
+        hub,
+        "PUT",
+        "/preference",
         {"impl": "coder", "review": "coder", "chef": "coder", "notes": "seeded"},
     )
     assert status == 200, payload
@@ -150,7 +172,13 @@ def _tables(db) -> str:
             for line in conn.iterdump()
             if any(
                 table in line
-                for table in ("model_policy", "model_consumer_defaults", "model_roster_meta", "run_preference", "cloud_provider_state")
+                for table in (
+                    "model_policy",
+                    "model_consumer_defaults",
+                    "model_roster_meta",
+                    "run_preference",
+                    "cloud_provider_state",
+                )
             )
         )
     finally:
@@ -232,7 +260,11 @@ def test_roster_post_auth_csrf_origin_and_body_rules(tmp_path):
         headers = {"Cookie": cookie, "Content-Type": "application/json"}
         assert _request(hub, "POST", "/deck/roster", headers=headers, body=b"{}")[0] == 415
         big = urlencode({**good, "notes": "x" * (64 * 1024)}).encode()
-        headers = {"Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"}
+        headers = {
+            "Cookie": cookie,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Sec-Fetch-Site": "same-origin",
+        }
         # The hub answers 413 from Content-Length without reading the body; the
         # peer may see the response or a reset socket, never a write.
         try:
@@ -260,7 +292,9 @@ def test_roster_post_stale_revision_and_stale_preference_write_nothing(tmp_path)
         form = _current_form(hub, cookie)
         # A CLI mutation lands between load and save.
         status, payload = _json(
-            hub, "POST", "/models",
+            hub,
+            "POST",
+            "/models",
             {"action": "set", "seat": "coder", "enabled": True, "expected_revision": _revision(hub), **SEATS["coder"]},
         )
         assert status == 200, payload
