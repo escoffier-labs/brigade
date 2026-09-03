@@ -1220,11 +1220,44 @@ Machine-readable result printed by `brigade receipts verify-attestation --json`:
 
 ---
 
+## `brigade.attestation.cosign-dsse.v1`
+
+**Path:** `<run-dir>/attestation.sigstore.json` (exported via `brigade receipts export attestation --profile cosign`)
+
+An opt-in signer profile packaging a verify receipt (`brigade.work_verify_receipt`) as an unwrapped standardized Sigstore bundle returned by `cosign attest-blob`. The file is the unmodified standardized Sigstore bundle output returned by cosign. Its `dsseEnvelope` signs the existing in-toto Test Result Statement without additional wrapper objects or custom fields.
+
+### Bundle Structure
+
+- Media type: `application/vnd.dev.sigstore.bundle.v0.3+json`
+- Default output file: `<run-dir>/attestation.sigstore.json`, keeping SSHSIG output (`attestation.json`) distinct.
+- Envelope payload type: `application/vnd.in-toto+json`
+- Scope: local cosign key files only. The default private key path is `.brigade/attestation/cosign.key`, overridable via `BRIGADE_COSIGN_KEY_FILE` or `--key`. Keyless OIDC, Fulcio, Rekor transparency log upload, KMS, and TSA are excluded.
+- Safe versions: cosign release versions 2.6.5 and newer within major 2 (invoked with `--new-bundle-format=true`) and 3.1.3 and newer within major 3. Prereleases, other major versions, and vulnerable ranges from GHSA-fx35-mq7g-6g98 are rejected.
+
+### External Verification
+
+Brigade does not provide a cosign verification wrapper command. `brigade receipts verify-attestation` remains the SSHSIG verifier and does not verify Sigstore bundles.
+
+External consumers verify the bundle directly with `cosign verify-blob-attestation`:
+
+```bash
+cosign verify-blob-attestation \
+  --bundle <run-dir>/attestation.sigstore.json \
+  --key .brigade/attestation/cosign.pub \
+  --type=unused \
+  --digest=<git-tree> \
+  --digestAlg=gitTree
+```
+
+Passing `--digest=<git-tree>` with `--digestAlg=gitTree` enables claim checking against the in-toto Statement subject.
+
+---
+
 ## Related commands
 
 - `brigade receipts verify`: digest chain checks for verify receipts and outcome rows
 - `brigade run approve`: record a signed human decision for a completed run
-- `brigade receipts export attestation`: export verify receipt as SSH-signed in-toto attestation
+- `brigade receipts export attestation`: export verify receipt as SSH-signed (default) or cosign-signed in-toto attestation
 - `brigade receipts verify-attestation`: offline verification of attestation against allowed_signers
 - `brigade receipts attestation-keygen`: generate Ed25519 attestation signing key and allowed_signers entry
 - `brigade receipts export miseledger`: adapter export (separate `miseledger.adapter.v1` envelope)

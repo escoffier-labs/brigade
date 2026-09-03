@@ -1,0 +1,531 @@
+"""Unit tests for cosign attest-blob signer profile and Sigstore bundle validation."""
+
+from __future__ import annotations
+
+import base64
+import json
+import shutil
+import subprocess
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from brigade import attestation, cli, cosign_attestation
+
+
+def _sample_statement() -> dict[str, Any]:
+    return {
+        "_type": attestation.IN_TOTO_STATEMENT_TYPE,
+        "subject": [
+            {"name": "git:tree", "digest": {"gitTree": "1111111111111111111111111111111111111111"}},
+            {
+                "name": "changes.patch",
+                "digest": {"sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+            },
+        ],
+        "predicateType": attestation.IN_TOTO_TEST_RESULT_PREDICATE_TYPE,
+        "predicate": {
+            "result": "PASSED",
+            "configuration": [
+                {
+                    "name": "receipt.json",
+                    "uri": "urn:brigade:verify:test-run:receipt",
+                    "digest": {"sha256": "4444444444444444444444444444444444444444444444444444444444444444"},
+                    "mediaType": "application/json",
+                }
+            ],
+            "url": "urn:brigade:verify:test-run",
+            "passedTests": ["unit-tests"],
+            "warnedTests": [],
+            "failedTests": [],
+        },
+    }
+
+
+def _make_valid_bundle(statement: Mapping[str, Any]) -> dict[str, Any]:
+    payload_b64 = base64.b64encode(attestation.canonical_statement_bytes(statement)).decode("ascii")
+    return {
+        "mediaType": cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE,
+        "verificationMaterial": {},
+        "dsseEnvelope": {
+            "payloadType": attestation.DSSE_PAYLOAD_TYPE,
+            "payload": payload_b64,
+            "signatures": [{"sig": base64.b64encode(b"dummy-sig").decode("ascii"), "keyid": "key1"}],
+        },
+    }
+
+
+def test_parse_cosign_version_accepts_safe_stable_releases() -> None:
+    assert cosign_attestation.parse_cosign_version('{"gitVersion":"v2.6.5"}') == (2, 6, 5)
+    assert cosign_attestation.parse_cosign_version("GitVersion: v3.1.3") == (3, 1, 3)
+
+
+@pytest.mark.parametrize("version_str", ["v2.6.4", "v3.1.2", "v3.1.3-rc.1", "v1.13.6"])
+def test_require_safe_cosign_rejects_unsafe_or_prerelease_versions(
+    monkeypatch: pytest.MonkeyPatch, version_str: str
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/local/bin/cosign")
+
+    def fake_run(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"gitVersion": version_str}), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(cosign_attestation.CosignAttestationError) as exc_info:
+        cosign_attestation.require_safe_cosign()
+    msg = str(exc_info.value)
+    assert "2.6.5" in msg
+    assert "3.1.3" in msg
+
+
+def test_create_bundle_v2_uses_statement_and_standard_bundle_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/local/bin/cosign")
+    captured_argv: list[str] = []
+
+    statement = _sample_statement()
+    key_path = tmp_path / "cosign.key"
+    key_path.write_text("dummy-private-key", encoding="utf-8")
+
+    def fake_run(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"gitVersion": "v2.6.5"}), stderr="")
+        captured_argv.extend(cmd)
+        bundle_idx = cmd.index("--bundle")
+        bundle_out = Path(cmd[bundle_idx + 1])
+        valid_bundle = _make_valid_bundle(statement)
+        bundle_out.write_text(json.dumps(valid_bundle), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    bundle = cosign_attestation.create_bundle(statement, key_path)
+    assert bundle["mediaType"] == cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE
+
+    assert "attest-blob" in captured_argv
+    assert "--statement" in captured_argv
+    assert "--key" in captured_argv
+    assert "--bundle" in captured_argv
+    assert "--new-bundle-format=true" in captured_argv
+    assert "--yes" in captured_argv
+
+    forbidden_terms = ("oidc", "fulcio", "rekor", "identity", "certificate")
+    for arg in captured_argv:
+        for forbidden in forbidden_terms:
+            assert forbidden not in arg.lower(), f"forbidden argument fragment '{forbidden}' in '{arg}'"
+
+
+def test_create_bundle_v3_omits_legacy_bundle_switch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/local/bin/cosign")
+    captured_argv: list[str] = []
+
+    statement = _sample_statement()
+    key_path = tmp_path / "cosign.key"
+    key_path.write_text("dummy-private-key", encoding="utf-8")
+
+    def fake_run(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"gitVersion": "v3.1.3"}), stderr="")
+        captured_argv.extend(cmd)
+        bundle_idx = cmd.index("--bundle")
+        bundle_out = Path(cmd[bundle_idx + 1])
+        valid_bundle = _make_valid_bundle(statement)
+        bundle_out.write_text(json.dumps(valid_bundle), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    bundle = cosign_attestation.create_bundle(statement, key_path)
+    assert bundle["mediaType"] == cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE
+    assert "--new-bundle-format=true" not in captured_argv
+
+
+@pytest.mark.parametrize(
+    ("anomaly_kind",),
+    [
+        ("wrong_media_type",),
+        ("wrong_payload_type",),
+        ("unequal_statement",),
+        ("zero_signatures",),
+        ("two_signatures",),
+    ],
+)
+def test_create_bundle_rejects_nonconforming_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, anomaly_kind: str
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/local/bin/cosign")
+    statement = _sample_statement()
+    key_path = tmp_path / "cosign.key"
+    key_path.write_text("dummy-private-key", encoding="utf-8")
+
+    def fake_run(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"gitVersion": "v3.1.3"}), stderr="")
+        bundle_idx = cmd.index("--bundle")
+        bundle_out = Path(cmd[bundle_idx + 1])
+        malformed_bundle = _make_valid_bundle(statement)
+
+        if anomaly_kind == "wrong_media_type":
+            malformed_bundle["mediaType"] = "application/vnd.dev.sigstore.bundle.v0.2+json"
+        elif anomaly_kind == "wrong_payload_type":
+            malformed_bundle["dsseEnvelope"]["payloadType"] = "text/plain"
+        elif anomaly_kind == "unequal_statement":
+            different_statement = dict(statement)
+            different_statement["predicate"] = {"result": "FAILED"}
+            malformed_bundle["dsseEnvelope"]["payload"] = base64.b64encode(
+                attestation.canonical_statement_bytes(different_statement)
+            ).decode("ascii")
+        elif anomaly_kind == "zero_signatures":
+            malformed_bundle["dsseEnvelope"]["signatures"] = []
+        elif anomaly_kind == "two_signatures":
+            malformed_bundle["dsseEnvelope"]["signatures"] = [
+                {"sig": "c2lnMQ==", "keyid": "k1"},
+                {"sig": "c2lnMg==", "keyid": "k2"},
+            ]
+
+        bundle_out.write_text(json.dumps(malformed_bundle), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(cosign_attestation.CosignAttestationError):
+        cosign_attestation.create_bundle(statement, key_path)
+
+
+@pytest.mark.parametrize("error_kind", ["missing_binary", "timeout", "nonzero_exit"])
+def test_create_bundle_maps_missing_binary_timeout_and_nonzero_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_kind: str
+) -> None:
+    statement = _sample_statement()
+    private_key_content = "SUPER_SECRET_PRIVATE_KEY_BYTES_CONTENT_GUARD_FIXTURE"
+    key_path = tmp_path / "cosign.key"
+    key_path.write_text(private_key_content, encoding="utf-8")
+
+    long_stderr = "cosign attest-blob: signing failed: bad password or key error\n" + ("x" * 3000)
+
+    if error_kind == "missing_binary":
+        monkeypatch.setattr(shutil, "which", lambda _name: None)
+    elif error_kind == "timeout":
+        monkeypatch.setattr(shutil, "which", lambda _name: "/usr/local/bin/cosign")
+
+        def fake_run_timeout(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if "version" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"gitVersion": "v3.1.3"}), stderr="")
+            raise subprocess.TimeoutExpired(cmd, 180)
+
+        monkeypatch.setattr(subprocess, "run", fake_run_timeout)
+    elif error_kind == "nonzero_exit":
+        monkeypatch.setattr(shutil, "which", lambda _name: "/usr/local/bin/cosign")
+
+        def fake_run_error(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if "version" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"gitVersion": "v3.1.3"}), stderr="")
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=long_stderr)
+
+        monkeypatch.setattr(subprocess, "run", fake_run_error)
+
+    with pytest.raises(cosign_attestation.CosignAttestationError) as exc_info:
+        cosign_attestation.create_bundle(statement, key_path)
+
+    err_msg = str(exc_info.value)
+    assert len(err_msg) > 0
+    assert private_key_content not in err_msg
+
+    if error_kind == "missing_binary":
+        assert "cosign" in err_msg.lower()
+        assert "path" in err_msg.lower() or "not found" in err_msg.lower()
+    elif error_kind == "timeout":
+        assert "timed out" in err_msg.lower()
+    elif error_kind == "nonzero_exit":
+        assert "failed" in err_msg.lower() or "exit" in err_msg.lower()
+        # Stderr excerpt must be limited to at most 2,000 characters
+        assert len(long_stderr) > 2000
+        assert len(err_msg) <= 2500
+
+
+def _sample_receipt(tmp_path: Path) -> dict[str, Any]:
+    run_id = "20260903-120000-work-verify-cosign123"
+    run_dir = tmp_path / ".brigade" / "work" / "verify-runs" / run_id
+    return {
+        "schema_version": 2,
+        "run_id": run_id,
+        "target": str(tmp_path),
+        "status": "completed",
+        "path": str(run_dir),
+        "tree_fingerprint": "1111111111111111111111111111111111111111",
+        "changes_patch_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "commands": [
+            {
+                "command": "pytest -q tests/test_unit.py",
+                "check_id": "unit-tests",
+                "status": "completed",
+                "exit_code": 0,
+            }
+        ],
+        "digests": {
+            "algorithm": "sha256",
+            "receipt_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        },
+    }
+
+
+def _write_receipt_to_disk(receipt: dict[str, Any]) -> None:
+    run_dir = Path(receipt["path"])
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+
+def test_cli_export_attestation_defaults_to_sshsig(tmp_path: Path) -> None:
+    attestation.keygen(tmp_path, principal="alice-signer")
+    receipt = _sample_receipt(tmp_path)
+    _write_receipt_to_disk(receipt)
+
+    run_id = receipt["run_id"]
+    rc = cli.main(["receipts", "export", "attestation", "--target", str(tmp_path), "--run-id", run_id])
+    assert rc == 0
+
+    attestation_path = Path(receipt["path"]) / "attestation.json"
+    assert attestation_path.is_file()
+    envelope = json.loads(attestation_path.read_text(encoding="utf-8"))
+    assert envelope["brigade"]["profile"] == "brigade.sshsig-dsse.v1"
+
+
+def test_cli_export_attestation_cosign_profile_uses_separate_default_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt = _sample_receipt(tmp_path)
+    _write_receipt_to_disk(receipt)
+    run_id = receipt["run_id"]
+
+    cosign_key_path = tmp_path / ".brigade" / "attestation" / "cosign.key"
+    cosign_key_path.parent.mkdir(parents=True, exist_ok=True)
+    cosign_key_path.write_text("dummy-cosign-key", encoding="utf-8")
+
+    received_receipt: dict[str, Any] | None = None
+    received_key: Path | None = None
+    mock_bundle = {
+        "mediaType": cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE,
+        "mock": "cosign-bundle",
+    }
+
+    def fake_export(receipt_data: Mapping[str, Any], key_path: Path) -> dict[str, Any]:
+        nonlocal received_receipt, received_key
+        received_receipt = dict(receipt_data)
+        received_key = key_path
+        return mock_bundle
+
+    monkeypatch.setattr(cosign_attestation, "export_attestation", fake_export)
+
+    rc = cli.main(
+        [
+            "receipts",
+            "export",
+            "attestation",
+            "--target",
+            str(tmp_path),
+            "--run-id",
+            run_id,
+            "--profile",
+            "cosign",
+        ]
+    )
+    assert rc == 0
+    assert received_receipt is not None
+    assert received_receipt["run_id"] == run_id
+    assert received_key == cosign_key_path.resolve()
+
+    bundle_path = Path(receipt["path"]) / "attestation.sigstore.json"
+    assert bundle_path.is_file()
+    saved_bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    assert saved_bundle == mock_bundle
+
+
+def test_cli_export_attestation_cosign_stdout_and_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    receipt = _sample_receipt(tmp_path)
+    _write_receipt_to_disk(receipt)
+    run_id = receipt["run_id"]
+
+    cosign_key_path = tmp_path / ".brigade" / "attestation" / "cosign.key"
+    cosign_key_path.parent.mkdir(parents=True, exist_ok=True)
+    cosign_key_path.write_text("dummy-cosign-key", encoding="utf-8")
+
+    mock_bundle = {
+        "mediaType": cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE,
+        "z_field": 1,
+        "a_field": 2,
+    }
+    monkeypatch.setattr(cosign_attestation, "export_attestation", lambda r, key_path: mock_bundle)
+
+    # 1. stdout: --out - prints sorted bundle JSON
+    rc0 = cli.main(
+        [
+            "receipts",
+            "export",
+            "attestation",
+            "--target",
+            str(tmp_path),
+            "--run-id",
+            run_id,
+            "--profile",
+            "cosign",
+            "--out",
+            "-",
+        ]
+    )
+    captured0 = capsys.readouterr()
+    assert rc0 == 0
+    expected_stdout = json.dumps(mock_bundle, indent=2, sort_keys=True) + "\n"
+    assert captured0.out == expected_stdout
+
+    # 2. first file export succeeds
+    rc1 = cli.main(
+        [
+            "receipts",
+            "export",
+            "attestation",
+            "--target",
+            str(tmp_path),
+            "--run-id",
+            run_id,
+            "--profile",
+            "cosign",
+        ]
+    )
+    assert rc1 == 0
+    capsys.readouterr()
+
+    # 3. second file export exits 1 and names --force
+    rc2 = cli.main(
+        [
+            "receipts",
+            "export",
+            "attestation",
+            "--target",
+            str(tmp_path),
+            "--run-id",
+            run_id,
+            "--profile",
+            "cosign",
+        ]
+    )
+    captured2 = capsys.readouterr()
+    assert rc2 == 1
+    assert "--force" in captured2.err
+
+    # 4. third export with --force exits 0
+    rc3 = cli.main(
+        [
+            "receipts",
+            "export",
+            "attestation",
+            "--target",
+            str(tmp_path),
+            "--run-id",
+            run_id,
+            "--profile",
+            "cosign",
+            "--force",
+        ]
+    )
+    assert rc3 == 0
+
+
+def test_cli_export_attestation_cosign_missing_key_is_actionable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    receipt = _sample_receipt(tmp_path)
+    _write_receipt_to_disk(receipt)
+    run_id = receipt["run_id"]
+
+    rc = cli.main(
+        [
+            "receipts",
+            "export",
+            "attestation",
+            "--target",
+            str(tmp_path),
+            "--run-id",
+            run_id,
+            "--profile",
+            "cosign",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert ".brigade/attestation/cosign.key" in captured.err
+    assert "--key" in captured.err
+
+
+@pytest.mark.skipif(shutil.which("cosign") is None, reason="cosign is required for interoperability test")
+def test_real_cosign_bundle_verifies_with_git_tree_subject(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    try:
+        cosign_bin, _version = cosign_attestation.require_safe_cosign()
+    except cosign_attestation.CosignAttestationError as exc:
+        pytest.skip(str(exc))
+
+    monkeypatch.setenv("COSIGN_PASSWORD", "fixture-password")
+
+    key_dir = tmp_path / ".brigade" / "attestation"
+    key_dir.mkdir(parents=True, exist_ok=True)
+    key_prefix = key_dir / "cosign"
+    public_key_path = key_dir / "cosign.pub"
+
+    keygen_cmd = [
+        cosign_bin,
+        "generate-key-pair",
+        "--output-key-prefix",
+        str(key_prefix),
+    ]
+    res_keygen = subprocess.run(
+        keygen_cmd,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+    )
+    assert res_keygen.returncode == 0
+
+    receipt = _sample_receipt(tmp_path)
+    _write_receipt_to_disk(receipt)
+    run_id = receipt["run_id"]
+    tree_fingerprint = receipt["tree_fingerprint"]
+
+    rc = cli.main(
+        [
+            "receipts",
+            "export",
+            "attestation",
+            "--target",
+            str(tmp_path),
+            "--run-id",
+            run_id,
+            "--profile",
+            "cosign",
+        ]
+    )
+    assert rc == 0
+
+    bundle_path = Path(receipt["path"]) / "attestation.sigstore.json"
+    assert bundle_path.is_file()
+
+    verify_cmd = [
+        cosign_bin,
+        "verify-blob-attestation",
+        "--bundle",
+        str(bundle_path),
+        "--key",
+        str(public_key_path),
+        "--type=unused",
+        f"--digest={tree_fingerprint}",
+        "--digestAlg=gitTree",
+    ]
+    res_verify = subprocess.run(
+        verify_cmd,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+    )
+    assert res_verify.returncode == 0

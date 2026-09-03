@@ -1299,7 +1299,17 @@ The optional receipt signing tier adds one local HMAC-SHA256 over `digests.recei
 
 This HMAC tier defends against receipt-plus-digest rewrites by someone who does not have the key. It does not protect against a trusted key holder, key theft, or malware running as the operator. It is single-machine authorship evidence, not PKI and not cross-machine identity. If a signed receipt has no local key, an unreadable key, a rotated-away key, or a foreign `key_id`, verify reports `UNVERIFIABLE-SIGNATURE` without changing the exit status. `brigade receipts keygen --force --target .` rotates the key and leaves old signatures unverifiable unless the old key is supplied through `BRIGADE_RECEIPT_SIGNING_KEY_FILE`.
 
-For cross-machine trust and external distribution, `brigade receipts export attestation` exports a verify receipt as a detached in-toto Statement v1 inside an SSH-signed DSSE v1 envelope (`brigade.attestation.sshsig-dsse.v1`), which can be verified offline via `brigade receipts verify-attestation` against an OpenSSH `allowed_signers` file. Keys are managed with `brigade receipts attestation-keygen`. Note that the SSHSIG profile is not a raw DSSE signature and is verified by `ssh-keygen`, not by cosign.
+For cross-machine trust and external distribution, `brigade receipts export attestation` supports explicit profile selection via `--profile {sshsig,cosign}`. The default remains `sshsig`, which exports a verify receipt as a detached in-toto Statement v1 inside an SSH-signed DSSE v1 envelope (`brigade.attestation.sshsig-dsse.v1`) verified offline via `brigade receipts verify-attestation` against an OpenSSH `allowed_signers` file. Keys for the SSHSIG profile are managed with `brigade receipts attestation-keygen`.
+
+The opt-in `cosign` profile signs the same in-toto Statement using a local cosign key file and produces an unwrapped standardized Sigstore bundle. The default private key is `.brigade/attestation/cosign.key`, overridable with `BRIGADE_COSIGN_KEY_FILE` or `--key`. Brigade enforces a safe version floor of cosign 2.6.5 or newer within major 2 and 3.1.3 or newer within major 3. External verification uses `cosign verify-blob-attestation`:
+
+```bash
+cosign generate-key-pair --output-key-prefix .brigade/attestation/cosign
+brigade receipts export attestation --profile cosign --run-id <id>
+cosign verify-blob-attestation --bundle <run-dir>/attestation.sigstore.json --key .brigade/attestation/cosign.pub --type=unused --digest=<git-tree> --digestAlg=gitTree
+```
+
+Cosign verifies the DSSE signature in `attestation.sigstore.json` and checks the Git tree claim directly. Cosign does not verify `attestation.json`, which is the SSHSIG profile.
 
 The MiseLedger export is a bridge format, not a live sync. It gives another local tool enough stable identity, digest, artifact, actor, and raw receipt data to index Brigade evidence without reading the Brigade tree directly. A typical flow is:
 

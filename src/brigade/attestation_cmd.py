@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import attestation
+from . import attestation, cosign_attestation
 from .work_cmd import verification as verify_mod
 
 
@@ -21,6 +21,7 @@ def export_attestation(
     run_id: str,
     out: str | None = None,
     key: Path | None = None,
+    profile: str = "sshsig",
     force: bool = False,
 ) -> int:
     if run_id != "latest" and (not _RUN_ID_RE.fullmatch(run_id) or run_id in {".", ".."}):
@@ -52,22 +53,40 @@ def export_attestation(
             return 1
         receipt_data = resolved
 
-    key_path = attestation.resolve_signing_key_path(target, key_file=key)
-    if not key_path.is_file():
-        print(f"error: signing key not found: {key_path}", file=sys.stderr)
-        return 1
-
-    try:
-        envelope = attestation.export_attestation(receipt_data, key_path=key_path)
-    except attestation.AttestationError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except Exception as exc:
-        print(f"error: failed to export attestation: {exc}", file=sys.stderr)
-        return 1
+    if profile == "cosign":
+        key_path = cosign_attestation.resolve_cosign_key_path(target, key_file=key)
+        if not key_path.is_file():
+            print(
+                f"error: cosign private key not found: {key_path} (use --key to select a cosign private key)",
+                file=sys.stderr,
+            )
+            return 1
+        default_name = "attestation.sigstore.json"
+        try:
+            artifact = cosign_attestation.export_attestation(receipt_data, key_path=key_path)
+        except attestation.AttestationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"error: failed to export attestation: {exc}", file=sys.stderr)
+            return 1
+    else:
+        key_path = attestation.resolve_signing_key_path(target, key_file=key)
+        if not key_path.is_file():
+            print(f"error: signing key not found: {key_path}", file=sys.stderr)
+            return 1
+        default_name = "attestation.json"
+        try:
+            artifact = attestation.export_attestation(receipt_data, key_path=key_path)
+        except attestation.AttestationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"error: failed to export attestation: {exc}", file=sys.stderr)
+            return 1
 
     if out == "-":
-        print(json.dumps(envelope, indent=2, sort_keys=True))
+        print(json.dumps(artifact, indent=2, sort_keys=True))
         return 0
 
     if out is not None:
@@ -79,10 +98,10 @@ def export_attestation(
         else:
             resolved_run_id = str(receipt_data.get("run_id") or run_id)
             run_dir = target / ".brigade" / "work" / "verify-runs" / resolved_run_id
-        out_path = run_dir / "attestation.json"
+        out_path = run_dir / default_name
 
     try:
-        attestation.write_attestation_file(envelope, out_path, force=force)
+        attestation.write_attestation_file(artifact, out_path, force=force)
     except FileExistsError as exc:
         print(f"error: {exc} (use --force to overwrite)", file=sys.stderr)
         return 1

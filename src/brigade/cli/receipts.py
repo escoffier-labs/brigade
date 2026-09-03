@@ -52,7 +52,15 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_attestation.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_attestation.add_argument("--run-id", metavar="<id|latest>", required=True, help="Verify run id or 'latest'.")
     p_attestation.add_argument("--out", metavar="PATH|-", default=None, help="Output path, or '-' for stdout.")
-    p_attestation.add_argument("--key", metavar="PATH", type=Path, default=None, help="Path to SSH private key.")
+    p_attestation.add_argument(
+        "--key", metavar="PATH", type=Path, default=None, help="Path to the signer profile's private key."
+    )
+    p_attestation.add_argument(
+        "--profile",
+        choices=("sshsig", "cosign"),
+        default="sshsig",
+        help="Signer profile. Defaults to sshsig.",
+    )
     p_attestation.add_argument("--force", action="store_true", help="Overwrite an existing attestation file.")
     p_attestation.set_defaults(func=dispatch)
     for projection in ("otel-genai", "openinference"):
@@ -109,6 +117,7 @@ def dispatch(args) -> int:
             run_id=args.run_id,
             out=args.out,
             key=args.key,
+            profile=args.profile,
             force=args.force,
         )
     if args.receipts_command == "export" and args.receipts_export_command == "miseledger":
