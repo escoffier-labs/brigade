@@ -2294,7 +2294,27 @@ def test_work_brief_fleet_routing_budget_and_unconfigured(tmp_path, monkeypatch,
     monkeypatch.setattr("brigade.run_preference.refresh_cache", lambda: run_preference.RunPreference())
     monkeypatch.setattr("brigade.fleet_client_cloud.load_model_policy_snapshot", slow)
     monkeypatch.setattr("brigade.fleet_client_cloud.fetch_cloud", lambda: {"policy": {"providers": []}})
+    monkeypatch.setattr(
+        "brigade.fleet_model_admission._load_lkg_record",
+        lambda: {
+            "cached_at": "2026-09-02T00:00:00Z",
+            "highest_revision": 15,
+            "roster": {"revision": 15, "seats": [{"seat": "coder", "enabled": False}]},
+        },
+    )
     started = time.monotonic()
     payload = fleet_routing.fleet_routing_for_brief()
     assert time.monotonic() - started < 1.5
+    assert (
+        payload["source"] == "lkg"
+        and payload["revision"] == 15
+        and payload["disabled_seats"] == ["coder"]
+        and payload["cached_at"] == "2026-09-02T00:00:00Z"
+    )
+
+    def _no_cache():
+        raise RuntimeError("no cache")
+
+    monkeypatch.setattr("brigade.fleet_model_admission._load_lkg_record", _no_cache)
+    payload = fleet_routing.fleet_routing_for_brief()
     assert payload["source"] == "unavailable"

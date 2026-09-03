@@ -96,9 +96,10 @@ bindings, and notes carried through unchanged; only `enabled` changes; notes
 are read straight from `model_policy` because the versioned seat projection
 omits them), `_write_default`, `set_run_preference`, and `_set_cloud_policy`.
 The cloud writer overwrites every column it is handed, so the page reads the
-current policy first and passes `limit`, `hosted`, `circuit_state`, `reason`,
-`subscription_pool`, `reset_at`, and `expires_at` through unchanged; only
-`enabled` differs.
+current policy first and passes `limit`, `hosted`, `circuit_state`, and
+`subscription_pool` through unchanged; re-enabling a lane clears `reason`,
+`reset_at`, and `expires_at`, while disabling a lane carries them through
+unchanged; only `enabled` differs.
 
 ## Page: `GET /deck/roster`
 
@@ -134,7 +135,8 @@ order:
 
 Hidden inputs: `expected_revision` (current roster revision),
 `expected_preference_updated_at` (the preference row's `updated_at`, or empty
-when unset), and `csrf`. A header line shows
+when unset), `expected_cloud_state` (a digest of provider on/off pairs), and
+`csrf`. A header line shows
 `revision N, updated <stamp> by <deck-form|admin|schema-v15>`; `admin` is what
 the CLI writers record today.
 One `<button type="submit">Save</button>` at the bottom.
@@ -171,11 +173,12 @@ Request contract:
 
 Apply, in one `BEGIN IMMEDIATE` transaction on the hub:
 
-1. Read the current revision and the preference row's `updated_at`. If
-   either differs from its hidden field, roll back and re-render the page
-   (status 409) with the banner "roster changed underneath you: revision N
-   is now M. Reload before saving." (or "the run preference changed
-   underneath you"). No table changes.
+1. Read the current revision, the preference row's `updated_at`, and the
+   current cloud state. If any differs from its hidden field, roll back and
+   re-render the page (status 409) with the banner "roster changed underneath
+   you: revision N is now M. Reload before saving." (or "the run preference
+   changed underneath you" or "the cloud lanes changed underneath you. Reload
+   before saving."). No table changes.
 2. Build the target state: for every seat, `enabled` = checkbox present;
    for every cloud provider, `enabled` = checkbox present; roles and
    consumer defaults from the selects (`(unset)` -> NULL); notes trimmed.

@@ -8,6 +8,7 @@ existing roster seats only: no tokens, env values, or home paths.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -129,7 +130,9 @@ def write_cached(preference: RunPreference, home: Path | None = None) -> Path:
     payload = preference.payload()
     if payload:
         lines.extend(f"{key} = {toml_compat.format_toml_value(value)}" for key, value in payload.items())
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tmp = path.with_suffix(".toml.tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
     return path
 
 

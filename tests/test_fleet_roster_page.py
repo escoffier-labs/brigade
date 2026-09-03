@@ -153,6 +153,7 @@ def _current_form(hub, cookie: str) -> dict:
     fields["expected_preference_updated_at"] = re.search(
         r'name="expected_preference_updated_at" value="([^"]*)"', page
     ).group(1)
+    fields["expected_cloud_state"] = re.search(r'name="expected_cloud_state" value="([^"]*)"', page).group(1)
     for seat in re.findall(r'name="seat\.([a-z0-9._-]+)" value="1" checked', page):
         fields[f"seat.{seat}"] = "1"
     for provider in re.findall(r'name="cloud\.([a-z0-9-]+)" value="1" checked', page):
@@ -195,7 +196,9 @@ def _tables(db) -> str:
 def test_roster_page_requires_auth_and_renders_every_block(tmp_path):
     with _hub(tmp_path) as (hub, _db):
         _seed(hub)
-        assert _request(hub, "GET", "/deck/roster")[0] == 401
+        status, _headers, unauth_page = _request(hub, "GET", "/deck/roster")
+        assert status == 401
+        assert "edits the roster" in unauth_page
         cookie = _login_cookie(hub)
         status, headers, page = _request(hub, "GET", "/deck/roster", headers={"Cookie": cookie})
         assert status == 200
@@ -299,7 +302,7 @@ def test_roster_post_stale_revision_and_stale_preference_write_nothing(tmp_path)
             hub,
             "POST",
             "/models",
-            {"action": "set", "seat": "coder", "enabled": True, "expected_revision": _revision(hub), **SEATS["coder"]},
+            {"action": "set", "seat": "coder", "enabled": False, "expected_revision": _revision(hub), **SEATS["coder"]},
         )
         assert status == 200, payload
         before = _tables(db)
@@ -307,6 +310,9 @@ def test_roster_post_stale_revision_and_stale_preference_write_nothing(tmp_path)
         assert status == 409
         assert "changed underneath you" in page
         assert _tables(db) == before
+        assert 'name="seat.coder" value="1" checked' not in page
+        assert '<option value="daybreak" selected' not in page
+        assert f'name="expected_revision" value="{_revision(hub)}"' in page
         form = _current_form(hub, cookie)
         status, payload = _json(hub, "PUT", "/preference", {"impl": "agy_flash"})
         assert status == 200, payload
@@ -345,7 +351,8 @@ def test_roster_post_applies_everything_in_one_revision(tmp_path):
         _status, _headers, pref = _request(hub, "GET", "/preference", headers=_bearer())
         preference = json.loads(pref)["preference"]
         assert preference["impl"] == "agy_flash" and preference["security"] == "daybreak"
-        assert preference["review"] is None and preference["notes"] == "cursor via Other Models only"
+        assert preference.get("review") is None and preference["notes"] == "cursor via Other Models only"
+        assert None not in preference.values()
         _status, _headers, cloud = _request(hub, "GET", "/cloud", headers=_bearer())
         providers = {row["provider"]: row["enabled"] for row in json.loads(cloud)["policy"]["providers"]}
         assert providers["claude"] is True and providers["codex"] is False
@@ -387,3 +394,28 @@ def test_roster_post_rejects_role_on_seat_disabled_in_same_save(tmp_path):
         assert status == 422 and "home paths" in page
         assert "keepass://roster" in page  # echoed back, escaped, so the operator can fix it
         assert _tables(db) == before
+
+
+def test_roster_post_stale_cloud_lane_writes_nothing(tmp_path):
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        cookie = _login_cookie(hub)
+        form = _current_form(hub, cookie)
+        status, payload = _json(
+            hub, "POST", "/cloud", {"action": "policy", "provider": "jules", "enabled": False, "reason": "quota"}
+        )
+        assert status == 200, payload
+        before = _tables(db)
+        status, _headers, page = _form(hub, {**form, "notes": "unrelated edit"}, cookie=cookie)
+        assert status == 409
+        assert "cloud lanes changed" in page
+        assert _tables(db) == before
+        # Reload, re-enable the lane on purpose: the stale reason is cleared.
+        form = _current_form(hub, cookie)
+        assert "cloud.jules" not in form
+        form["cloud.jules"] = "1"
+        status, _headers, _text = _form(hub, form, cookie=cookie)
+        assert status == 303
+        _status, _headers, cloud = _request(hub, "GET", "/cloud", headers=_bearer())
+        jules = next(row for row in json.loads(cloud)["policy"]["providers"] if row["provider"] == "jules")
+        assert jules["enabled"] is True and jules.get("reason") is None

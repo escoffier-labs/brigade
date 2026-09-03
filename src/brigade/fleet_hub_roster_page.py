@@ -71,6 +71,7 @@ class RosterView:
     updated_by: str
     seats: tuple[SeatRow, ...]
     cloud: tuple[CloudRow, ...]
+    cloud_state: str
     defaults: dict[str, str | None]
     retired: tuple[dict[str, Any], ...]
     preference: dict[str, str | None]
@@ -81,6 +82,7 @@ class RosterView:
 class Submission:
     expected_revision: int
     expected_preference_updated_at: str
+    expected_cloud_state: str
     csrf: str
     roles: dict[str, str]
     notes: str
@@ -136,6 +138,9 @@ def load_view(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig) -
         )
         for name, policy in sorted(providers.items())
     )
+    cloud_state = hashlib.sha256(
+        fleet_model_roster.canonical_json([[row.provider, row.enabled] for row in cloud]).encode("ascii")
+    ).hexdigest()
     pref_meta = fleet_hub_preference.get_run_preference_meta(conn)
     return RosterView(
         revision=int(meta[0]),
@@ -143,6 +148,7 @@ def load_view(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig) -
         updated_by=str(meta[2] or ""),
         seats=tuple(seats),
         cloud=cloud,
+        cloud_state=cloud_state,
         defaults=fleet_hub_model_roster._consumer_defaults(conn),
         retired=tuple(retired_rows),
         preference=fleet_hub_preference.get_run_preference(conn),
@@ -233,6 +239,7 @@ def render(
     parts.append(
         f'<input type="hidden" name="expected_preference_updated_at" value="{_esc(view.preference_updated_at)}">'
     )
+    parts.append(f'<input type="hidden" name="expected_cloud_state" value="{_esc(view.cloud_state)}">')
     if editable:
         parts.append(f'<input type="hidden" name="csrf" value="{_esc(csrf)}">')
     # 1. roles
@@ -322,6 +329,7 @@ def parse_form(raw: bytes) -> Submission:
     return Submission(
         expected_revision=expected,
         expected_preference_updated_at=first.get("expected_preference_updated_at", ""),
+        expected_cloud_state=first.get("expected_cloud_state", ""),
         csrf=first.get("csrf", ""),
         roles={role: first.get(f"role.{role}", "").strip() for role in ROLES},
         notes=first.get("notes", "").strip(),
@@ -386,10 +394,10 @@ def _write_cloud_enabled(conn: sqlite3.Connection, row: CloudRow, enabled: bool)
             int(row.limit),
             int(row.hosted),
             row.circuit_state,
-            policy.get("reason"),
+            None if enabled else policy.get("reason"),
             policy.get("subscription_pool"),
-            policy.get("reset_at"),
-            policy.get("expires_at"),
+            None if enabled else policy.get("reset_at"),
+            None if enabled else policy.get("expires_at"),
             _utc_now(),
         ),
     )
@@ -413,6 +421,11 @@ def apply(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig, submi
             return ApplyResult(
                 "conflict", "the run preference changed underneath you. Reload before saving.", view.revision
             )
+        if view.cloud_state != submission.expected_cloud_state:
+            conn.rollback()
+            return ApplyResult(
+                "conflict", "the cloud lanes changed underneath you. Reload before saving.", view.revision
+            )
         error, target = _validate(view, submission)
         if error is not None:
             conn.rollback()
@@ -421,7 +434,7 @@ def apply(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig, submi
         for row in view.seats:
             if row.retired or target[row.seat] == row.enabled:
                 continue
-            fleet_hub_model_roster._write_set(
+            written = fleet_hub_model_roster._write_set(
                 conn,
                 {
                     "seat": row.seat,
@@ -436,6 +449,9 @@ def apply(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig, submi
                     "notes": row.notes,
                 },
             )
+            if written.get("error"):
+                conn.rollback()
+                return ApplyResult("invalid", f"seat {row.seat} is retired and cannot be enabled", view.revision)
             roster_changed = True
         now = _utc_now()
         for consumer, seat in submission.defaults.items():

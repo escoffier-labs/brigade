@@ -158,7 +158,7 @@ class TestHub:
         url, token, _db = hub
         status, payload = _get(url, "/preference", token)
         assert status == 200
-        assert payload["preference"] == {"impl": None, "review": None, "chef": None, "notes": None}
+        assert payload["preference"] == {}
         request = urllib.request.Request(
             url + "/preference",
             data=json.dumps({"preference": {"impl": "cursor_grok", "review": "claude_standby"}}).encode(),

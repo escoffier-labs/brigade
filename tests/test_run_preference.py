@@ -69,6 +69,7 @@ def test_cache_round_trip(tmp_path) -> None:
     pref = run_preference.RunPreference(impl="cursor_grok", review="claude_standby")
     path = run_preference.write_cached(pref, tmp_path)
     assert path == tmp_path / ".brigade" / "run-preference.toml"
+    assert not path.with_suffix(".toml.tmp").exists()
     loaded = run_preference.load_cached(tmp_path)
     assert loaded == pref
 

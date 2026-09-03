@@ -403,7 +403,8 @@ def make_handler(
                 self._send_html(
                     401,
                     "Unauthorized: send the fleet bearer token, or open this page once with "
-                    "?token=<fleet token> to set the read-only dashboard cookie.\n",
+                    "?token=<fleet token> to set the dashboard cookie derived from the admin token "
+                    "that reads the dashboards and edits the roster page (rotating the hub token revokes it).\n",
                     content_type=plain,
                 )
                 return
@@ -493,7 +494,8 @@ def make_handler(
                 self._send_html(
                     401,
                     "Unauthorized: send the fleet bearer token, or open this page once with "
-                    "?token=<fleet token> to set the read-only dashboard cookie.\n",
+                    "?token=<fleet token> to set the dashboard cookie derived from the admin token "
+                    "that reads the dashboards and edits the roster page (rotating the hub token revokes it).\n",
                     content_type=plain,
                 )
                 return
@@ -624,7 +626,8 @@ def make_handler(
                 self._send_html(
                     401,
                     "Unauthorized: send the fleet bearer token, or open this page once with "
-                    "?token=<fleet token> to set the dashboard cookie.\n",
+                    "?token=<fleet token> to set the dashboard cookie derived from the admin token "
+                    "that reads the dashboards and edits the roster page (rotating the hub token revokes it).\n",
                     content_type=plain,
                 )
                 return
@@ -721,8 +724,10 @@ def make_handler(
                     303, "", content_type=plain, extra_headers={"Location": f"/deck/roster?saved={result.revision}"}
                 )
                 return
-            status = 409 if result.status == "conflict" else 422
-            self._render_roster(status=status, editable=True, error=result.message, submission=submission)
+            if result.status == "conflict":
+                self._render_roster(status=409, editable=True, error=result.message)
+                return
+            self._render_roster(status=422, editable=True, error=result.message, submission=submission)
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
             path, _, query = self.path.partition("?")
@@ -780,7 +785,8 @@ def make_handler(
                             raw_node_bearer=None if is_admin else presented,
                         )
                     elif path == "/preference":
-                        payload = {"preference": get_run_preference(conn)}
+                        pref = get_run_preference(conn)
+                        payload = {"preference": {key: value for key, value in pref.items() if value is not None}}
                     elif path == "/sessions":
                         payload = {"sessions": list_sessions(conn, include_all=include_all)}
                     else:
@@ -832,7 +838,8 @@ def make_handler(
                     self._send_json(400, {"error": "body is not valid JSON"})
                     return
                 body = parsed.get("preference") if isinstance(parsed, dict) and "preference" in parsed else parsed
-                payload = {"preference": set_run_preference(conn, body, updated_by="admin")}
+                stored = set_run_preference(conn, body, updated_by="admin")
+                payload = {"preference": {key: value for key, value in stored.items() if value is not None}}
             except FleetHubError as exc:
                 self._send_json(400, {"error": str(exc)})
                 return

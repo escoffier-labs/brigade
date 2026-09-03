@@ -18,12 +18,31 @@ def _pull() -> tuple[Any, dict[str, Any], dict[str, Any] | None]:
     from ... import fleet_client_cloud, run_preference
 
     preference = run_preference.refresh_cache()
-    snapshot = fleet_client_cloud.load_model_policy_snapshot()
+    try:
+        snapshot = fleet_client_cloud.load_model_policy_snapshot()
+    except Exception:  # noqa: BLE001
+        snapshot = {"state": "unavailable"}
     try:
         cloud = fleet_client_cloud.fetch_cloud()
     except Exception:  # noqa: BLE001 - lanes are optional under a down hub
         cloud = None
     return preference, snapshot, cloud
+
+
+def _lkg_snapshot() -> dict[str, Any]:
+    try:
+        from ... import fleet_model_admission
+
+        record = fleet_model_admission._load_lkg_record()
+        return {
+            "state": "authoritative",
+            "source": "lkg",
+            "revision": record["roster"].get("revision"),
+            "seats": record["roster"].get("seats") or [],
+            "cached_at": record.get("cached_at"),
+        }
+    except Exception:  # noqa: BLE001
+        return {"state": "unavailable"}
 
 
 def fleet_routing_for_brief() -> dict[str, Any] | None:
@@ -45,6 +64,8 @@ def fleet_routing_for_brief() -> dict[str, Any] | None:
         preference, snapshot, cloud = fleet_client._run_with_deadline(_pull, timeout=BUDGET_SECONDS)
     except Exception:  # noqa: BLE001 - brief stays fail-open
         preference, snapshot, cloud = run_preference.load_cached(), {"state": "unavailable"}, None
+    if snapshot.get("state") != "authoritative":
+        snapshot = _lkg_snapshot()
     result["roles"] = {role: value for role in run_preference.ROLE_FIELDS if (value := getattr(preference, role))}
     result["notes"] = preference.notes
     if snapshot.get("state") == "authoritative":
@@ -56,12 +77,15 @@ def fleet_routing_for_brief() -> dict[str, Any] | None:
             if isinstance(row, dict) and row.get("seat") and row.get("enabled") is not True
         )
         if result["source"] == "lkg":
-            try:
-                from ... import fleet_model_admission
+            if "cached_at" in snapshot:
+                result["cached_at"] = snapshot.get("cached_at")
+            else:
+                try:
+                    from ... import fleet_model_admission
 
-                result["cached_at"] = fleet_model_admission._load_lkg_record().get("cached_at")
-            except Exception:  # noqa: BLE001
-                result["cached_at"] = None
+                    result["cached_at"] = fleet_model_admission._load_lkg_record().get("cached_at")
+                except Exception:  # noqa: BLE001
+                    result["cached_at"] = None
     if isinstance(cloud, dict):
         providers = (cloud.get("policy") or {}).get("providers") or []
         result["cloud_lanes"] = {

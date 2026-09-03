@@ -83,12 +83,12 @@ Endpoints:
   or the ``brigade_fleet_view`` cookie: opening the page once with
   ``?token=<fleet token>`` from a phone sets an HttpOnly, SameSite=Strict
   cookie and 303-redirects to the same URL without the token. The cookie
-  value is an HMAC of the token, never the token: it grants read-only
-  dashboard access only (never ``/status``, ``/claims``, or ``/events``),
-  and rotating the hub token invalidates every cookie. Tradeoff: the token
-  transits once in a URL (browser history on that device; the hub logs
-  nothing) and the cookie is a 30-day read-only capability on that device,
-  which is why it is scoped to the HTML routes only.
+  value is an HMAC of the token, never the token: the cookie derived from the
+  admin token reads the dashboards and edits the roster page (never
+  ``/status``, ``/claims``, or ``/events``), and rotating the hub token
+  revokes it. Tradeoff: the token transits once in a URL (browser history on
+  that device; the hub logs nothing) and the cookie is a 30-day capability on
+  that device, which is why it is scoped to the HTML routes only.
 
 The admin token comes from ``BRIGADE_FLEET_TOKEN`` or ``--token-file``; it
 is never persisted by Brigade, and node tokens are persisted only as SHA-256

@@ -46,7 +46,9 @@ ever logged or rendered:
 - **The admin token is the control plane.** The one shared bearer from
   before (`BRIGADE_FLEET_TOKEN` / `--token-file` on the hub, `token_file`
   on a client) manages `/nodes`, reads `/status` and `/claims`, and enrols
-  the dashboard cookie. It may post events or claims under *any* `node_id`
+  the dashboard cookie. The cookie derived from the admin token reads the
+  dashboards and edits the roster page, and rotating the hub token revokes it.
+  It may post events or claims under *any* `node_id`
   only when the hub runs with `brigade fleet serve --allow-admin-writes`
   (off by default), which is the explicit switch for a fleet that is still
   on the shared token. A client with `token_file` but no `node_token_file`
@@ -307,11 +309,12 @@ phone over Tailscale:
   the page once with `?token=<fleet token>` and the hub answers a 303 to the
   same URL without the token and sets `brigade_fleet_view` (HttpOnly,
   SameSite=Strict, 30 days). The cookie value is an HMAC of the token, never
-  the token, and it authorizes only the HTML routes: it cannot read
-  `/status` or `/claims` or post events or claims, and rotating the hub token
-  invalidates every cookie. Tradeoff: the token transits once in a URL (it
+  the token, and it authorizes only the HTML routes: the cookie derived from the
+  admin token reads the dashboards and edits the roster page (never
+  `/status`, `/claims`, or `/events`), and rotating the hub token revokes it.
+  Tradeoff: the token transits once in a URL (it
   lands in that device's browser history; the hub logs nothing) and the
-  cookie is a 30-day read-only capability on that device — treat the device
+  cookie is a 30-day capability on that device — treat the device
   like a tailnet member, and rotate the token if it is lost. Tailscale
   encrypts the link, so the cookie is not marked `Secure` (the hub is plain
   HTTP on the tailnet).
