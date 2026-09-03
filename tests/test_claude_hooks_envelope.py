@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -197,12 +198,17 @@ def test_persisted_copy_is_atomic_private_and_cleaned(tmp_path: Path):
 
 
 def test_hook_timeout_covers_whole_operation(tmp_path: Path, monkeypatch, capsys):
+    """Timeout must bound the whole hook, including a stuck handle_payload.
+
+    Under load the worker can miss the 10ms prologue window. The parent then
+    writes ``hook.log`` under cwd, so chdir into the wired repo. The timeout
+    follow-up log line is best-effort on a daemon thread; wait briefly for it.
+    """
     target = _wired_claude(tmp_path)
+    monkeypatch.chdir(target)
     monkeypatch.setattr(envelope, "HOOK_TIMEOUT_SECONDS", 0.01)
 
     def hang(_event: str, _payload: dict, **_kwargs) -> dict | None:
-        import time
-
         time.sleep(1)
         return None
 
@@ -217,7 +223,11 @@ def test_hook_timeout_covers_whole_operation(tmp_path: Path, monkeypatch, capsys
         == 0
     )
     assert json.loads(capsys.readouterr().out) == envelope.degraded_envelope("PreToolUse")
-    assert "timed out" in envelope.log_path(target).read_text(encoding="utf-8")
+    log = envelope.log_path(target)
+    deadline = time.monotonic() + 1.0
+    while not log.is_file() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert "timed out" in log.read_text(encoding="utf-8")
 
 
 def test_preamble_and_banner_count_against_budget(tmp_path: Path):

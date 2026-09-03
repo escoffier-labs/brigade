@@ -8,6 +8,9 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ## [Unreleased]
 
+### Added
+- Added `miseledger migrate codex-arguments` command to migrate and truncate oversized or duplicated tool call arguments in the database for existing rows (#1414).
+
 ### Security
 - Round 6 (#1201): the GOOS=darwin build is repaired without weakening linux. The descriptor-relative `openat`/`unlinkat` implementations are now linux-only, while darwin and the other non-linux unix platforms get a functional pathname-based equivalent: opens carry `O_NOFOLLOW|O_CLOEXEC` relative to the already-validated data-directory path (`O_CREAT|O_EXCL` where creation is required), the validated directory descriptor is `fstat`ed before and after every open/removal and must keep an identical dev/ino pair, and the opened file must be regular, singly linked (nlink 1), and exactly 0600. The residual darwin mutation window between those parent identity checks is pathname-based and exploitable only by a same-uid data-directory writer — a writer outside this engine's model (#1093). Windows keeps failing closed.
 - Round 5 (#1201): execution of the verified stationtrail snapshot is now descriptor-based. Previously the snapshot was executed by its pathname after digest verification, so a same-uid process could rename another executable over the cached snapshot entry between verification and exec (the executed inode was no longer the verified one), and the cached `snapPath` let later commands skip every digest check. The verified snapshot is now kept open: its digest is re-read from that open descriptor immediately before each exec, and on linux every exec targets `/proc/self/fd/<fd>` so the kernel executes exactly the verified inode; platforms without descriptor exec fail closed with a typed error instead of degrading to pathname execution.

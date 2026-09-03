@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -334,8 +335,10 @@ def test_missing_legacy_snapshot_does_not_block_a_retrievable_report(tmp_path: P
     applied = grokbot_reconcile.apply(queue, owner)
 
     assert preview["unavailable"] == 1
+    assert preview["unavailable_reasons"] == {"report-missing": 1}
     assert preview["eligible"] == 1
     assert applied["unavailable"] == 1
+    assert applied["unavailable_reasons"] == {"report-missing": 1}
     assert applied["created"] == 1
     assert applied["jobs"] == [{"job_id": retrievable, "state": "completed"}]
     assert not (_queue_root(queue) / "reconcile" / f"{legacy}.json").exists()
@@ -714,3 +717,305 @@ def test_restart_after_draft_without_marker_does_not_duplicate(tmp_path: Path):
     drafts = list(_review_inbox(owner).glob("*.md"))
     assert [path.name for path in drafts] == [f"{job_id}-scout-report.md"]
     assert marker.is_file()
+
+
+def _hub_job_id(key: str) -> str:
+    return f"grokbot-{grokbot_jobs._idempotency_key_hash(key).removeprefix('sha256:')[:24]}"
+
+
+def _store_hub_scout(
+    queue: Path, *, key: str = "hub-scout-1", text: str = REPORT_TEXT
+) -> tuple[str, dict[str, object]]:
+    """Write the snapshot and artifact a hub-authority scout completion leaves locally."""
+    spec = grokbot_jobs._validate_spec(_spec())
+    job_id = _hub_job_id(key)
+    grokbot_jobs._store_task_snapshot(queue, job_id, spec, grokbot_jobs._idempotency_key_hash(key))
+    with grokbot_jobs._storage_paths(queue) as storage:
+        grokbot_jobs._write_bytes_file(storage.artifacts, f"{job_id}.md", text.encode("utf-8"))
+    digest = grokbot_jobs._task_hash(spec).removeprefix("sha256:")
+    return job_id, {
+        "job_id": job_id,
+        "label": spec["label"],
+        "role": spec["role"],
+        "repository": spec["repository"],
+        "task_digest": digest,
+        "state": "completed",
+        "created_at": "2026-09-01T12:00:00Z",
+        "updated_at": "2026-09-01T12:05:00Z",
+        "queued_at": "2026-09-01T12:00:00Z",
+        "timeout_seconds": spec["timeout_seconds"],
+        "item_revision": 4,
+        "artifact_kind": "report",
+        "artifact_digest": _report_digest(text),
+        "artifact_size": len(text.encode("utf-8")),
+        "private_snapshot_id": job_id,
+    }
+
+
+def _fake_hub_listing(monkeypatch: pytest.MonkeyPatch, jobs: list[dict[str, object]]) -> list[dict[str, object]]:
+    from brigade import fleet_client_grokbot
+
+    calls: list[dict[str, object]] = []
+
+    def list_jobs(**kwargs: object) -> fleet_client_grokbot.GrokbotHubDecision:
+        calls.append(kwargs)
+        return fleet_client_grokbot.GrokbotHubDecision(True, "ok", jobs=list(jobs))
+
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    monkeypatch.setattr(fleet_client_grokbot, "list_jobs", list_jobs)
+    return calls
+
+
+def test_hub_authority_preview_lists_completed_scout_without_local_job_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    queue = tmp_path / "queue"
+    owner = tmp_path / "owner"
+    queue.mkdir()
+    owner.mkdir()
+    job_id, hub_job = _store_hub_scout(queue)
+    leftover = _complete_report(queue, key="leftover-local")
+    (_queue_root(queue) / "artifacts" / f"{leftover}.md").unlink()
+    assert not (_queue_root(queue) / "jobs" / f"{job_id}.json").exists()
+    calls = _fake_hub_listing(monkeypatch, [hub_job])
+
+    result = grokbot_reconcile.preview(queue, owner)
+
+    assert calls == [{"role": "repository-scout", "include_all": True}]
+    assert result["eligible"] == 1
+    assert result["known"] == 0
+    assert result["unavailable"] == 0
+    assert result["jobs"] == [{"job_id": job_id, "state": "completed"}]
+    dumped = json.dumps(result, sort_keys=True)
+    assert REPORT_TEXT not in dumped
+    assert "PRIVATE_SCOUT_FINDING_TOKEN_alpha" not in dumped
+    assert not _review_inbox(owner).exists()
+
+
+def test_hub_authority_unavailable_is_missing_artifact_not_leftover_local_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    queue = tmp_path / "queue"
+    owner = tmp_path / "owner"
+    queue.mkdir()
+    owner.mkdir()
+    leftover = _complete_report(queue, key="leftover-local")
+    (_queue_root(queue) / "artifacts" / f"{leftover}.md").unlink()
+    job_id, hub_job = _store_hub_scout(queue, key="hub-orphan")
+    (_queue_root(queue) / "artifacts" / f"{job_id}.md").unlink()
+    _fake_hub_listing(monkeypatch, [hub_job])
+
+    preview = grokbot_reconcile.preview(queue, owner)
+    applied = grokbot_reconcile.apply(queue, owner)
+
+    assert preview["eligible"] == 0
+    assert preview["unavailable"] == 1
+    assert preview["unavailable_reasons"] == {"artifact-missing": 1}
+    assert applied["created"] == 0
+    assert applied["unavailable"] == 1
+    assert applied["unavailable_reasons"] == {"artifact-missing": 1}
+    assert not _review_inbox(owner).exists()
+    assert not (_queue_root(queue) / "reconcile" / f"{job_id}.json").exists()
+    assert not (_queue_root(queue) / "reconcile" / f"{leftover}.json").exists()
+
+
+def test_hub_authority_apply_drafts_unmarked_hub_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    queue = tmp_path / "queue"
+    owner = tmp_path / "owner"
+    queue.mkdir()
+    owner.mkdir()
+    job_id, hub_job = _store_hub_scout(queue)
+    _fake_hub_listing(monkeypatch, [hub_job])
+    task_hash = grokbot_jobs._task_hash(grokbot_jobs._validate_spec(_spec()))
+
+    result = grokbot_reconcile.apply(queue, owner)
+
+    assert result == {
+        "eligible": 1,
+        "known": 0,
+        "unavailable": 0,
+        "created": 1,
+        "skipped": 0,
+        "limit": 1,
+        "jobs": [{"job_id": job_id, "state": "completed"}],
+    }
+    assert REPORT_TEXT not in json.dumps(result)
+    inbox = _review_inbox(owner)
+    drafts = list(inbox.glob("*.md"))
+    assert [path.name for path in drafts] == [f"{job_id}-scout-report.md"]
+    text = drafts[0].read_text(encoding="utf-8")
+    assert job_id in text
+    assert "example/brigade" in text
+    assert task_hash in text
+    assert _report_digest() in text
+    assert "> PRIVATE_SCOUT_FINDING_TOKEN_alpha" in text
+    marker = json.loads((_queue_root(queue) / "reconcile" / f"{job_id}.json").read_text(encoding="utf-8"))
+    assert marker["schema"] == "brigade.grokbot.reconcile.v1"
+    assert marker["job_id"] == job_id
+    assert marker["sha256"] == _report_digest()
+    assert marker["task_hash"] == task_hash
+    assert REPORT_TEXT not in json.dumps(marker)
+
+
+def test_hub_authority_known_marker_skips_hub_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    queue = tmp_path / "queue"
+    owner = tmp_path / "owner"
+    queue.mkdir()
+    owner.mkdir()
+    job_id, hub_job = _store_hub_scout(queue)
+    _fake_hub_listing(monkeypatch, [hub_job])
+    grokbot_reconcile.apply(queue, owner)
+
+    preview = grokbot_reconcile.preview(queue, owner)
+    second = grokbot_reconcile.apply(queue, owner)
+
+    assert preview == {
+        "eligible": 0,
+        "known": 1,
+        "unavailable": 0,
+        "created": 0,
+        "limit": 1,
+        "jobs": [],
+    }
+    assert second["created"] == 0
+    assert second["skipped"] == 1
+    assert second["known"] == 1
+    assert list(_review_inbox(owner).glob("*.md")) == [_review_inbox(owner) / f"{job_id}-scout-report.md"]
+
+
+def test_cli_reconcile_preview_binds_operator_identity_for_hub_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    from brigade import fleet_client_grokbot
+
+    queue = tmp_path / "queue"
+    owner = tmp_path / "owner"
+    queue.mkdir()
+    owner.mkdir()
+    job_id, hub_job = _store_hub_scout(queue)
+    token = "operator-reconcile-token"  # content-guard: allow api-key-assignment
+    token_file = tmp_path / "operator.hub-token"
+    token_file.write_text(token + "\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    monkeypatch.setenv("BRIGADE_GROKBOT_OPERATOR_HUB_TOKEN_FILE", str(token_file))
+    seen: list[str | None] = []
+
+    def list_jobs(**kwargs: object) -> fleet_client_grokbot.GrokbotHubDecision:
+        seen.append(fleet_client_grokbot.current_listener_token())
+        assert kwargs == {"role": "repository-scout", "include_all": True}
+        return fleet_client_grokbot.GrokbotHubDecision(True, "ok", jobs=[hub_job])
+
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    monkeypatch.setattr(fleet_client_grokbot, "list_jobs", list_jobs)
+
+    assert _run_reconcile(queue, owner) == 0
+    assert seen == [token]
+    captured = capsys.readouterr()
+    assert f"job {job_id}" in captured.out
+    assert token not in captured.out
+    assert REPORT_TEXT not in captured.out
+
+
+def test_cli_reconcile_preview_binds_feed_identity_when_operator_token_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    from brigade import fleet_client_grokbot
+
+    queue = tmp_path / "queue"
+    owner = tmp_path / "owner"
+    queue.mkdir()
+    owner.mkdir()
+    job_id, hub_job = _store_hub_scout(queue)
+    token = "feed-reconcile-token"  # content-guard: allow api-key-assignment
+    token_file = tmp_path / "feed.hub-token"
+    token_file.write_text(token + "\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    monkeypatch.setenv("BRIGADE_GROKBOT_FEED_HUB_TOKEN_FILE", str(token_file))
+    seen: list[str | None] = []
+
+    def list_jobs(**kwargs: object) -> fleet_client_grokbot.GrokbotHubDecision:
+        seen.append(fleet_client_grokbot.current_listener_token())
+        return fleet_client_grokbot.GrokbotHubDecision(True, "ok", jobs=[hub_job])
+
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    monkeypatch.setattr(fleet_client_grokbot, "list_jobs", list_jobs)
+
+    assert _run_reconcile(queue, owner) == 0
+    assert seen == [token]
+    assert token not in capsys.readouterr().out
+    assert (_queue_root(queue) / "jobs" / f"{job_id}.json").exists() is False
+
+
+def test_hub_authority_apply_lists_hub_before_exclusive_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from brigade import fleet_client_grokbot
+
+    queue = tmp_path / "queue"
+    owner = tmp_path / "owner"
+    queue.mkdir()
+    owner.mkdir()
+    _job_id, hub_job = _store_hub_scout(queue)
+    order: list[str] = []
+    original_lock = grokbot_jobs._queue_lock
+
+    @contextmanager
+    def recording_lock(storage: object):
+        order.append("lock")
+        with original_lock(storage):
+            yield
+
+    def list_jobs(**kwargs: object) -> fleet_client_grokbot.GrokbotHubDecision:
+        order.append("list")
+        assert kwargs == {"role": "repository-scout", "include_all": True}
+        return fleet_client_grokbot.GrokbotHubDecision(True, "ok", jobs=[hub_job])
+
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    monkeypatch.setattr(fleet_client_grokbot, "list_jobs", list_jobs)
+    monkeypatch.setattr(grokbot_jobs, "_queue_lock", recording_lock)
+
+    result = grokbot_reconcile.apply(queue, owner)
+
+    assert result["created"] == 1
+    assert order == ["list", "lock"]
+
+
+def test_hub_authority_same_task_hash_retries_pair_by_job_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    queue = tmp_path / "queue"
+    owner = tmp_path / "owner"
+    queue.mkdir()
+    owner.mkdir()
+    first_id, hub_first = _store_hub_scout(queue, key="scout-retry-1")
+    second_id, hub_second = _store_hub_scout(queue, key="scout-retry-2", text=REPORT_TEXT + "retry\n")
+    assert hub_first["task_digest"] == hub_second["task_digest"]
+    assert first_id != second_id
+    _fake_hub_listing(monkeypatch, [hub_first, hub_second])
+
+    preview = grokbot_reconcile.preview(queue, owner)
+    applied = grokbot_reconcile.apply(queue, owner)
+
+    assert preview["eligible"] == 2
+    assert preview["unavailable"] == 0
+    assert applied["eligible"] == 2
+    assert applied["created"] == 1
+    assert applied["jobs"] == [{"job_id": first_id, "state": "completed"}]
+    second = grokbot_reconcile.apply(queue, owner)
+    assert second["created"] == 1
+    assert second["known"] == 1
+    drafts = sorted(path.name for path in _review_inbox(owner).glob("*.md"))
+    assert drafts == sorted([f"{first_id}-scout-report.md", f"{second_id}-scout-report.md"])
+
+
+def test_hub_authority_snapshot_task_hash_mismatch_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    queue = tmp_path / "queue"
+    owner = tmp_path / "owner"
+    queue.mkdir()
+    owner.mkdir()
+    job_id, hub_job = _store_hub_scout(queue)
+    snapshot = _queue_root(queue) / "snapshots" / f"{job_id}.json"
+    payload = json.loads(snapshot.read_text(encoding="utf-8"))
+    payload["task_hash"] = "sha256:" + "0" * 64
+    snapshot.write_text(json.dumps(payload), encoding="utf-8")
+    _fake_hub_listing(monkeypatch, [hub_job])
+
+    with pytest.raises(grokbot_reconcile.ReconcileError, match="^snapshot-mismatch$"):
+        grokbot_reconcile.apply(queue, owner)
+    assert not _review_inbox(owner).exists()

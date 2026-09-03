@@ -1876,13 +1876,15 @@ def repo_claim(
     # when repo_claim was entered off the main thread.
     cancel_event = threading.Event()
     owner_thread = threading.current_thread()
+    generation = [0]
 
     def _renew_loop() -> None:
         warned_unavailable = False
         while not stop.wait(_claim_renew_interval(ttl_seconds)):
+            current_gen = generation[0]
             outcome = renew_claim(target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds)
             if not outcome.granted and outcome.reason == "missing":
-                if stop.is_set():
+                if stop.is_set() or generation[0] != current_gen:
                     # "missing" during shutdown is our own release landing
                     # first; re-acquiring here would resurrect the released
                     # claim for a full TTL that nothing ever frees.
@@ -1961,6 +1963,7 @@ def repo_claim(
     try:
         yield replace(decision, cancel_event=cancel_event)
     finally:
+        generation[0] += 1
         stop.set()
         # Drain the heartbeat before releasing: an in-flight renew/acquire
         # landing after the DELETE would resurrect the row for a full TTL.

@@ -150,7 +150,7 @@ Every center row uses the same wrapper-facing fields: `subsystem`, `local_id`, `
 
 `brigade daily status` summarizes the current local operating state from work, imports, center reviews, action queues, readiness, handoffs, memory-care, security, tools, release receipts, and operator reports. It also returns the next recommended command.
 
-`brigade daily init` writes conservative local defaults to `.brigade/daily.toml`. The config can prefer task, inbox, or readiness modes and can disable context pack builds, operator report builds, readiness imports, import promotion, or work runs.
+`brigade daily init` writes conservative local defaults to `.brigade/daily.toml`. The config can prefer task, inbox, or readiness modes and can disable context pack builds, operator report builds (`allow_operator_report_build`), readiness imports, import promotion, or work runs. It also configures operator report retention via `operator_report_retention` (defaults to 20).
 
 `brigade daily plan` ranks local candidate actions by urgency, safety, acceptance coverage, provenance, and expected usefulness. It prefers pending accepted tasks, then reviewed imports with acceptance criteria, reviewed center actions, readiness blockers that can become imports, and stale handoff, memory, or security issues. It chooses one recommended action and writes no state unless `--record` is passed. The local preferred mode can move inbox or readiness items upward without bypassing risk, approval, or remote-mutation guards. JSON output includes selection reasons, rejection reasons, safety blockers, approval blockers, stale evidence blockers, and quality blockers for wrappers.
 
@@ -239,6 +239,8 @@ Each bundle contains:
 - `CENTER_EVIDENCE.json`, stable JSON evidence for wrappers.
 
 `brigade center report plan` previews the same evidence without writing. `list`, `show`, and `archive` inspect or move local bundles. Report health warns when the latest bundle is unclosed, stale, references missing receipts, was built from an older git HEAD, or newer center activity exists. `brigade work brief`, `brigade work doctor`, `brigade release doctor`, release candidate evidence, and release candidate compare surface those report health checks.
+
+`brigade center report build` automatically rotates older closed operator report directories under `.brigade/center/reports/` into `.brigade/center/reports-archive/` beyond a retention threshold (configurable via `--keep N` or `operator_report_retention` in `.brigade/daily.toml`, defaulting to 20). Unclosed reports are never rotated. The archive directory `.brigade/center/reports-archive/` is bounded to the same keep count, deleting the oldest archived directories beyond retention. Passing `--dry-run` previews what would be rotated without writing or moving bundles.
 
 `brigade center report review <report-id|latest>` groups actionable report items into:
 
