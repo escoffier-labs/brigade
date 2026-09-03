@@ -285,7 +285,7 @@ Preference (`tests/test_run_preference.py`):
 - The secret key regex still rejects `token`, `env`, `path`, `home` keys
   and does not reject `security`.
 
-Brief (`tests/test_work_cmd.py`, the module that already asserts the brief's text keys):
+Brief (`tests/test_work_cmd_session.py`, next to the existing brief assertions):
 
 - Cached preference and roster render the five `fleet_` keys.
 - Hub unreachable renders the cache source line within the time budget.
@@ -309,8 +309,9 @@ CLI:
 - Modify `src/brigade/fleet_command_deck.py`: nav link, form CSS.
 - Modify `src/brigade/run_preference.py`: fields, prefix.
 - Modify `src/brigade/cli/fleet.py`: three flags, printing.
-- Modify the work brief producer under `src/brigade/work_cmd/`: the
-  `fleet_routing` block with a 3 second budget.
+- Modify `src/brigade/work_cmd/session/briefing.py` (the brief text and
+  JSON producer): the `fleet_routing` block with a 3 second budget, in a
+  helper small enough to keep that module under its frozen ceiling.
 - Modify `docs/fleet-sync.md`: the page, the write contract, the role set,
   schema v19.
 - Modify `docs/runbooks/fleet-hub-proxmox.md`: endpoint list.
