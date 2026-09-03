@@ -411,17 +411,21 @@ jobs:
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: ${{ matrix.cosign }}
+      - name: Display cosign version
+        run: cosign version
       - name: Exercise real cosign bundle verification
         run: |
+          set +e
           output=$(python -m pytest tests/test_cosign_attestation.py::test_real_cosign_bundle_verifies_with_git_tree_subject -q --no-header -p no:cacheprovider 2>&1)
           pytest_exit=$?
+          set -e
           echo "$output"
           if [ $pytest_exit -ne 0 ]; then
             echo "ERROR: real cosign integration test failed"
             exit 1
           fi
-          if grep -q 'skipped' <<< "$output"; then
-            echo "ERROR: real cosign integration test was skipped"
+          if ! grep -q '1 passed' <<< "$output"; then
+            echo "ERROR: real cosign integration test did not pass"
             exit 1
           fi
 

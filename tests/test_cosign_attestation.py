@@ -176,7 +176,7 @@ def test_create_bundle_v2_uses_statement_and_standard_bundle_flags(
             assert forbidden not in arg.lower(), f"forbidden argument fragment '{forbidden}' in '{arg}'"
 
 
-def test_create_bundle_v3_omits_legacy_bundle_switch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_create_bundle_v3_uses_offline_signing_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda _name: "/usr/local/bin/cosign")
     captured_argv: list[str] = []
     captured_signing_config: dict[str, Any] | None = None

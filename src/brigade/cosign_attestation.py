@@ -257,12 +257,12 @@ def create_bundle(statement: Mapping[str, Any], key_path: Path) -> dict[str, Any
 
         if proc.returncode != 0:
             err_excerpt = proc.stderr.strip()[:2000]
-            hint = " (if private key is password-encrypted, ensure COSIGN_PASSWORD is set)"
+            password_hint = " (if private key is password-encrypted, ensure COSIGN_PASSWORD is set)"
             if err_excerpt:
                 raise CosignAttestationError(
-                    f"cosign attest-blob failed with exit code {proc.returncode}: {err_excerpt}{hint}"
+                    f"cosign attest-blob failed with exit code {proc.returncode}: {err_excerpt}{password_hint}"
                 )
-            raise CosignAttestationError(f"cosign attest-blob failed with exit code {proc.returncode}{hint}")
+            raise CosignAttestationError(f"cosign attest-blob failed with exit code {proc.returncode}{password_hint}")
 
         if not bundle_path.is_file():
             raise CosignAttestationError("cosign exited 0 but output bundle was not created")
