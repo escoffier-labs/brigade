@@ -7,6 +7,7 @@ import html
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -45,6 +46,7 @@ from ..render import emit
 
 from . import core as _core_mod
 from .schema_ops import (
+    DEFAULT_REPORT_RETENTION,
     REPORT_STALE_HOURS,
     SCHEMA_VERSION,
     _parse_time,
@@ -598,11 +600,145 @@ def report_plan(*, target: Path, json_output: bool = False) -> int:
     return 0
 
 
-def report_build(*, target: Path, json_output: bool = False) -> int:
+def _report_retention(target: Path, override: int | None = None) -> int:
+    """Return the retention keep count for operator reports.
+
+    Reads operator_report_retention from .brigade/daily.toml if configured alongside
+    allow_operator_report_build; defaults to DEFAULT_REPORT_RETENTION (20).
+    """
+    if override is not None and override >= 1:
+        return override
+    daily_toml = target / ".brigade" / "daily.toml"
+    if daily_toml.is_file():
+        try:
+            import tomllib
+
+            data = tomllib.loads(daily_toml.read_text())
+            val = data.get("operator_report_retention")
+            if isinstance(val, int) and val >= 1:
+                return val
+        except Exception:
+            pass
+    return DEFAULT_REPORT_RETENTION
+
+
+def _is_report_closed(report_dir: Path, report_payload: dict[str, Any] | None = None) -> bool:
+    """Return True if a report bundle has a recorded closeout with a recognized status."""
+    if report_payload is not None:
+        closeout = report_payload.get("closeout")
+        if isinstance(closeout, dict):
+            status = str(closeout.get("status") or "")
+            if status in reportstore.CLOSEOUT_STATUSES:
+                return True
+    closeout_file = report_dir / "CLOSEOUT.json"
+    if closeout_file.is_file():
+        closeout_data = _read_json(closeout_file)
+        if isinstance(closeout_data, dict):
+            status = str(closeout_data.get("status") or "")
+            if status in reportstore.CLOSEOUT_STATUSES:
+                return True
+    if report_payload is None:
+        payload = _read_report(report_dir)
+        if payload is not None:
+            closeout = payload.get("closeout")
+            if isinstance(closeout, dict):
+                status = str(closeout.get("status") or "")
+                if status in reportstore.CLOSEOUT_STATUSES:
+                    return True
+    return False
+
+
+def _report_dir_sort_key(report_dir: Path) -> tuple[str, str]:
+    payload = _read_report(report_dir)
+    created = ""
+    if payload is not None:
+        created = str(payload.get("created_at") or payload.get("generated_at") or "")
+    return (created or report_dir.name, report_dir.name)
+
+
+def _operator_report_dirs(target: Path) -> list[Path]:
+    root = _reports_root(target)
+    if not root.is_dir():
+        return []
+    dirs = [
+        p
+        for p in root.iterdir()
+        if p.is_dir()
+        and not p.name.startswith(".")
+        and not p.name.endswith("archive")
+        and ("operator-report" in p.name or (p / "CENTER_EVIDENCE.json").is_file())
+    ]
+    dirs.sort(key=_report_dir_sort_key, reverse=True)
+    return dirs
+
+
+def _rotate_reports(
+    target: Path,
+    *,
+    retention: int = DEFAULT_REPORT_RETENTION,
+    dry_run: bool = False,
+) -> list[Path]:
+    """Rotate operator report directories beyond retention into reports-archive/.
+
+    Never rotates an unclosed report.
+    Returns the list of report directories rotated (or that would be rotated if dry_run=True).
+    """
+    if retention < 1:
+        retention = DEFAULT_REPORT_RETENTION
+    dirs = _operator_report_dirs(target)
+    if len(dirs) <= retention:
+        return []
+
+    candidates = dirs[retention:]
+    to_rotate: list[Path] = []
+    for d in candidates:
+        if _is_report_closed(d):
+            to_rotate.append(d)
+
+    if dry_run:
+        return to_rotate
+
+    archive_root = _reports_archive_root(target)
+    for source_dir in to_rotate:
+        archive_dest = archive_root / source_dir.name
+        if archive_dest.exists():
+            shutil.rmtree(archive_dest)
+        reportstore.move_bundle(source_dir, archive_root)
+    return to_rotate
+
+
+def report_build(
+    *,
+    target: Path,
+    json_output: bool = False,
+    dry_run: bool = False,
+    keep: int | None = None,
+) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
+    retention = _report_retention(target, override=keep)
+    if dry_run:
+        would_rotate = _rotate_reports(target, retention=retention, dry_run=True)
+        if json_output:
+            payload = {
+                "schema_version": SCHEMA_VERSION,
+                "target": str(target),
+                "dry_run": True,
+                "retention": retention,
+                "would_rotate": [d.name for d in would_rotate],
+                "would_rotate_count": len(would_rotate),
+            }
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0
+        print(f"operator report build (dry run): {target}")
+        print(f"retention: keep={retention}")
+        print(f"would rotate: {len(would_rotate)}")
+        for d in would_rotate:
+            print(f"- {d.name}")
+        return 0
+
     created = _now()
     report_id = f"{created.strftime('%Y%m%d-%H%M%S')}-operator-report-{uuid4().hex[:6]}"
     report_dir = _reports_root(target) / report_id
@@ -616,13 +752,22 @@ def report_build(*, target: Path, json_output: bool = False) -> int:
         }
     )
     _write_report_bundle(report_dir, payload)
+    rotated = _rotate_reports(target, retention=retention, dry_run=False)
+    if rotated:
+        payload["rotated_reports"] = [d.name for d in rotated]
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
+    reviews = payload.get("reviews")
+    reviews_count = len(reviews) if isinstance(reviews, list) else 0
+    activity = payload.get("activity")
+    activity_count = len(activity) if isinstance(activity, list) else 0
     print(f"operator report: {report_id}")
-    print(f"reviews: {len(payload['reviews'])}")
-    print(f"activity: {len(payload['activity'])}")
+    print(f"reviews: {reviews_count}")
+    print(f"activity: {activity_count}")
     print(f"path: {report_dir}")
+    if rotated:
+        print(f"rotated: {len(rotated)}")
     return 0
 
 

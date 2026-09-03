@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `brigade center report build` rotates old operator report directories automatically under `.brigade/center/reports/` into `reports-archive/` according to retention (default keep newest 20, configurable via `operator_report_retention` in `.brigade/daily.toml` alongside `allow_operator_report_build`), never rotates unclosed reports, and supports dry-run mode that previews rotation without deleting or moving bundles. Fixes #1415.
 - Fixed timing flakes in tests `test_release_with_renew_in_flight_never_resurrects` and `test_concurrent_edge_writes_do_not_lose_dependency_edges`. (#1396)
 
 ### Added
