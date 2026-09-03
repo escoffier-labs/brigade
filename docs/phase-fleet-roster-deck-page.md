@@ -33,9 +33,11 @@ interactive session reads the pin at start.
    `scout`.** Basis: evidence+judgment. These are the three spoken routing
    intents that are not "impl", "review", or "chef". Cloud lanes are not a
    role slot; they are the existing per-provider cloud policy rows.
-4. **One Save is one hub transaction and one roster revision.** Basis:
-   judgment. A save that touches four seats and two roles still bumps the
-   revision once, so an LKG cache sees one coherent document.
+4. **One Save is one hub transaction, and the roster revision bumps at most
+   once.** Basis: judgment. A save that touches four seats and two consumer
+   defaults bumps the revision once, so an LKG cache sees one coherent
+   document. Roles and notes live in the preference row, which is outside
+   the roster digest; they carry their own `updated_at` fence.
 5. **Writes need the admin-derived dashboard cookie or the admin bearer.**
    Basis: stated-constraint (existing trust model). Node tokens and the
    Tailscale identity header are read-only for this page.
@@ -81,8 +83,8 @@ roles as `- research: <seat>`, `- security: <seat>`, `- scout: <seat>` after
 The cache file `~/.brigade/run-preference.toml` carries the new keys.
 
 An older client reading a newer hub raises `unknown preference field` inside
-`refresh_cache()` and keeps its cache; that is the existing behavior and is
-acceptable for the rollout window.
+`refresh_cache()` and silently keeps its cache; that is the existing behavior
+and is acceptable for the rollout window. No new warning is added.
 
 ### Seats, consumer defaults, retired families, cloud lanes
 
@@ -90,9 +92,13 @@ No schema change. The page reads `model_policy`, `model_consumer_defaults`,
 `retired_models`, `model_roster_meta`, and the cloud provider policy
 (`fleet_hub._cloud_policy`). Writes reuse the existing hub writers:
 `_write_set` (with the seat's current provider, model, reasoning, limit,
-bindings, and notes carried through unchanged; only `enabled` changes),
-`_write_default`, `set_run_preference`, and `_set_cloud_policy` (only
-`enabled` changes).
+bindings, and notes carried through unchanged; only `enabled` changes; notes
+are read straight from `model_policy` because the versioned seat projection
+omits them), `_write_default`, `set_run_preference`, and `_set_cloud_policy`.
+The cloud writer overwrites every column it is handed, so the page reads the
+current policy first and passes `limit`, `hosted`, `circuit_state`, `reason`,
+`subscription_pool`, `reset_at`, and `expires_at` through unchanged; only
+`enabled` differs.
 
 ## Page: `GET /deck/roster`
 
@@ -126,8 +132,11 @@ order:
 5. **Retired families.** Read-only list: provider, family, permanent flag,
    reason code.
 
-Hidden inputs: `expected_revision` (current roster revision) and `csrf`. A
-header line shows `revision N, updated <stamp> by <deck-form|cli|schema-v15>`.
+Hidden inputs: `expected_revision` (current roster revision),
+`expected_preference_updated_at` (the preference row's `updated_at`, or empty
+when unset), and `csrf`. A header line shows
+`revision N, updated <stamp> by <deck-form|admin|schema-v15>`; `admin` is what
+the CLI writers record today.
 One `<button type="submit">Save</button>` at the bottom.
 
 When the request is authorized only by the Tailscale identity header, every
@@ -155,16 +164,18 @@ Request contract:
   lowercase hex, compared with `hmac.compare_digest`. Mismatch answers 403.
   The value is distinct from the dashboard cookie value and is never logged.
 - Same-origin: when a `Sec-Fetch-Site` header is present it must be
-  `same-origin` or `none`; when absent and an `Origin` header is present,
-  its host must equal the request `Host`. Otherwise 403.
+  `same-origin`; when absent and an `Origin` header is present, its host
+  must equal the request `Host`. Otherwise 403. A bearer-authenticated
+  `curl` sends neither header and passes.
 - `expected_revision` must parse as an integer; otherwise 400.
 
 Apply, in one `BEGIN IMMEDIATE` transaction on the hub:
 
-1. Read the current revision. If it differs from `expected_revision`, roll
-   back and re-render the page (status 409) with the banner "roster changed
-   underneath you: revision N is now M. Reload before saving." No table
-   changes.
+1. Read the current revision and the preference row's `updated_at`. If
+   either differs from its hidden field, roll back and re-render the page
+   (status 409) with the banner "roster changed underneath you: revision N
+   is now M. Reload before saving." (or "the run preference changed
+   underneath you"). No table changes.
 2. Build the target state: for every seat, `enabled` = checkbox present;
    for every cloud provider, `enabled` = checkbox present; roles and
    consumer defaults from the selects (`(unset)` -> NULL); notes trimmed.
@@ -183,10 +194,10 @@ Apply, in one `BEGIN IMMEDIATE` transaction on the hub:
    policy writer, changed consumer defaults through the default writer, and
    the preference row through `set_run_preference` with `updated_by =
    "deck-form"`.
-5. Bump the roster revision once (`updated_by = "deck-form"`) when any seat,
-   consumer default, or role changed. A save that changes only cloud lanes
-   or notes still writes the preference row but leaves the roster revision
-   alone, because those are not part of the roster document digest.
+5. Bump the roster revision once (`updated_by = "deck-form"`) when any seat
+   or consumer default changed. A save that changes only roles, notes, or
+   cloud lanes writes those rows but leaves the roster revision alone,
+   because they are not part of the roster document digest.
 6. Commit and answer 303 to `/deck/roster?saved=<revision>`.
 
 A no-op save (nothing differs) commits nothing and redirects with the
@@ -238,7 +249,7 @@ denied by `resolve_fleet_model_policy`; nothing changes there.
 | Role points at a seat disabled in the same save | 422 re-render, no write |
 | Consumer default points at a seat without that binding | 422, no write |
 | Notes contain a token, env value, or home path | 422, no write |
-| Old client, new hub | client keeps cache, one warning per process |
+| Old client, new hub | client keeps cache silently (existing behavior) |
 | Hub rollback after v19 | restore the section 8 backup per runbook |
 
 ## Tests
@@ -256,7 +267,8 @@ Hub (`tests/test_fleet_roster_page.py`, new):
   wrong CSRF 403; cross-site `Sec-Fetch-Site` 403; wrong Content-Type 415;
   oversized body 413.
 - Stale `expected_revision`: 409 and every roster table is byte-identical
-  before and after.
+  before and after. Stale `expected_preference_updated_at` (a CLI
+  `preference set` between load and save): 409, nothing written.
 - A save that disables two seats, sets `role.security`, sets
   `default.t3-fleet`, toggles one cloud lane, and edits notes bumps the
   revision exactly once and lands every value.
@@ -273,7 +285,7 @@ Preference (`tests/test_run_preference.py`):
 - The secret key regex still rejects `token`, `env`, `path`, `home` keys
   and does not reject `security`.
 
-Brief (`tests/test_work_brief*.py` or the existing brief test module):
+Brief (`tests/test_work_cmd.py`, the module that already asserts the brief's text keys):
 
 - Cached preference and roster render the five `fleet_` keys.
 - Hub unreachable renders the cache source line within the time budget.
