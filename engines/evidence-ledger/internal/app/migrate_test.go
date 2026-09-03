@@ -5,13 +5,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/escoffier-labs/miseledger/internal/adapter"
+	"github.com/escoffier-labs/miseledger/internal/sources"
 )
 
 func TestMigrateCodexArguments(t *testing.T) {
@@ -381,6 +384,23 @@ func TestMigrateCodexArguments(t *testing.T) {
 		t.Fatalf("expected schema_version json.Number 1, got %v (%T)", provMap["schema_version"], provMap["schema_version"])
 	}
 
+	// Verify embedded metadata in raw_json equals metadata_json minus importer-added fields (tags, provenance)
+	storedMetaMinusImporter := make(map[string]any)
+	for k, v := range parsedM1Apply {
+		if k != "tags" && k != "provenance" {
+			storedMetaMinusImporter[k] = v
+		}
+	}
+	var rec1MetaNumbers map[string]any
+	decRec1Meta := json.NewDecoder(bytes.NewReader(rec1After.Item.Metadata))
+	decRec1Meta.UseNumber()
+	if err := decRec1Meta.Decode(&rec1MetaNumbers); err != nil {
+		t.Fatalf("decode rec1 Item.Metadata with UseNumber: %s", err)
+	}
+	if !reflect.DeepEqual(rec1MetaNumbers, storedMetaMinusImporter) {
+		t.Fatalf("embedded metadata in raw_json does not match metadata_json minus importer fields:\nembedded: %+v\nstored: %+v", rec1MetaNumbers, storedMetaMinusImporter)
+	}
+
 	// Verify row 2 (other source) untouched
 	var r2, m2, t2 string
 	if err := db.QueryRow(`SELECT raw_json, metadata_json, text FROM items WHERE external_id = 'other:call:call-2'`).Scan(&r2, &m2, &t2); err != nil {
@@ -458,5 +478,464 @@ func TestMigrateCommandRegistered(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "LIKE scan") {
 		t.Fatalf("expected LIKE scan in help, got %s", out.String())
+	}
+}
+
+func TestMigrateCodexArguments_FTSDifferentRowID(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+
+	largeArgs := `{"cmd":"fts_diff_prefix ` + strings.Repeat("x", 4200) + ` FTS_DIFF_UNICORN_TOKEN"}`
+	ordinal := int64(1)
+	meta := map[string]any{
+		"harness":    "codex",
+		"event_type": "response_item",
+		"session_id": "s_fts",
+		"name":       "exec_command",
+		"call_id":    "call-fts",
+		"arguments":  largeArgs,
+	}
+	metaBytes, _ := json.Marshal(meta)
+	text := "function_call\nexec_command\ncall-fts\n" + largeArgs
+
+	rec := adapter.Record{
+		Schema: adapter.SchemaV1,
+		Source: adapter.Source{Kind: "codex", Name: "Codex Sessions", Version: "1.0.0"},
+		Collection: adapter.Collection{
+			ExternalID: "codex:session:s_fts",
+			Kind:       "agent_session",
+			Name:       "s_fts",
+		},
+		Item: adapter.Item{
+			ExternalID: "codex:call:call-fts",
+			Kind:       "tool_call",
+			CreatedAt:  "2026-07-14T19:29:50Z",
+			Text:       text,
+			Tags:       []string{"agent-session", "codex"},
+			Metadata:   json.RawMessage(metaBytes),
+		},
+		Actor: &adapter.Actor{
+			ExternalID: "codex:assistant",
+			Type:       "agent",
+			Name:       "assistant",
+		},
+		Raw: adapter.RawRef{
+			Format:  "json",
+			Hash:    "sha256:preCapHashFTS",
+			Path:    "/path/to/fts.jsonl",
+			Ordinal: &ordinal,
+		},
+	}
+
+	tempDir := t.TempDir()
+	recBytes, _ := json.Marshal(rec)
+	codexPath := filepath.Join(tempDir, "codex.adapter.jsonl")
+	if err := os.WriteFile(codexPath, append(recBytes, '\n'), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "import", "adapter", codexPath, "--source", "codex")
+
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatalf("failed to open test db: %s", err)
+	}
+	defer db.Close()
+
+	var itemRowID int64
+	var itemID string
+	if err := db.QueryRow(`SELECT rowid, id FROM items WHERE external_id = 'codex:call:call-fts'`).Scan(&itemRowID, &itemID); err != nil {
+		t.Fatal(err)
+	}
+
+	var ftsRowIDBefore int64
+	var ftsBodyBefore string
+	if err := db.QueryRow(`SELECT rowid, body FROM item_fts WHERE item_id = ?`, itemID).Scan(&ftsRowIDBefore, &ftsBodyBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	// Delete and re-insert the FTS row so its rowid is different from item's rowid
+	if _, err := db.Exec(`DELETE FROM item_fts WHERE item_id = ?`, itemID); err != nil {
+		t.Fatal(err)
+	}
+	// Insert dummy rows to advance the FTS rowid sequence
+	for i := 0; i < 5; i++ {
+		if _, err := db.Exec(`INSERT INTO item_fts(item_id, source_kind, collection_kind, item_kind, actor_type, body) VALUES ('dummy', 'other', 'col', 'item', 'actor', 'dummy')`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Re-insert FTS row for itemID
+	if _, err := db.Exec(`INSERT INTO item_fts(item_id, source_kind, collection_kind, item_kind, actor_type, body) VALUES (?, 'codex', 'agent_session', 'tool_call', 'agent', ?)`, itemID, ftsBodyBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	var ftsRowIDAfterReinsert int64
+	if err := db.QueryRow(`SELECT rowid FROM item_fts WHERE item_id = ?`, itemID).Scan(&ftsRowIDAfterReinsert); err != nil {
+		t.Fatal(err)
+	}
+	if ftsRowIDAfterReinsert == itemRowID {
+		t.Fatalf("expected fts rowid (%d) to differ from item rowid (%d)", ftsRowIDAfterReinsert, itemRowID)
+	}
+
+	// Run migration with --apply
+	var out, errw bytes.Buffer
+	code := cmdMigrateCodexArguments([]string{"--apply", "--json"}, &out, &errw)
+	if code != 0 {
+		t.Fatalf("apply failed: %s", errw.String())
+	}
+	var res map[string]any
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("failed to decode json: %s", err)
+	}
+	if matched := int(res["matched"].(float64)); matched != 1 {
+		t.Fatalf("expected 1 matched, got %d", matched)
+	}
+	if ftsMiss := int(res["fts_missing"].(float64)); ftsMiss != 0 {
+		t.Fatalf("expected 0 fts_missing, got %d", ftsMiss)
+	}
+
+	// Assert the FTS body is still updated despite different rowid
+	var ftsBodyAfter string
+	if err := db.QueryRow(`SELECT body FROM item_fts WHERE item_id = ?`, itemID).Scan(&ftsBodyAfter); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(ftsBodyAfter, "FTS_DIFF_UNICORN_TOKEN") {
+		t.Fatalf("expected FTS_DIFF_UNICORN_TOKEN to be removed from fts body, got: %s", ftsBodyAfter)
+	}
+	if !strings.Contains(ftsBodyAfter, "[truncated]") {
+		t.Fatalf("expected fts body to contain [truncated]")
+	}
+	var countPast int
+	if err := db.QueryRow(`SELECT count(*) FROM item_fts WHERE item_fts MATCH 'FTS_DIFF_UNICORN_TOKEN'`).Scan(&countPast); err != nil {
+		t.Fatal(err)
+	}
+	if countPast != 0 {
+		t.Fatalf("expected 0 matches for FTS_DIFF_UNICORN_TOKEN in FTS, got %d", countPast)
+	}
+	var countPrefix int
+	if err := db.QueryRow(`SELECT count(*) FROM item_fts WHERE item_fts MATCH 'fts_diff_prefix'`).Scan(&countPrefix); err != nil {
+		t.Fatal(err)
+	}
+	if countPrefix != 1 {
+		t.Fatalf("expected 1 match for fts_diff_prefix in FTS, got %d", countPrefix)
+	}
+}
+
+func TestMigrateCodexArguments_MultibyteRunes(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+
+	// 4,100 CJK runes and 4,100 emoji runes
+	cjkRunes := strings.Repeat("世界", 2050)
+	emojiRunes := strings.Repeat("🚀✨", 2050)
+
+	for _, tc := range []struct {
+		name      string
+		arguments string
+		callID    string
+	}{
+		{name: "cjk", arguments: `{"text":"` + cjkRunes + `"}`, callID: "call-cjk"},
+		{name: "emoji", arguments: `{"text":"` + emojiRunes + `"}`, callID: "call-emoji"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ordinal := int64(1)
+			meta := map[string]any{
+				"harness":    "codex",
+				"event_type": "response_item",
+				"session_id": "s_" + tc.name,
+				"name":       "exec_command",
+				"call_id":    tc.callID,
+				"arguments":  tc.arguments,
+			}
+			metaBytes, _ := json.Marshal(meta)
+			text := "function_call\nexec_command\n" + tc.callID + "\n" + tc.arguments
+
+			rec := adapter.Record{
+				Schema: adapter.SchemaV1,
+				Source: adapter.Source{Kind: "codex", Name: "Codex Sessions", Version: "1.0.0"},
+				Collection: adapter.Collection{
+					ExternalID: "codex:session:" + tc.name,
+					Kind:       "agent_session",
+					Name:       tc.name,
+				},
+				Item: adapter.Item{
+					ExternalID: "codex:call:" + tc.callID,
+					Kind:       "tool_call",
+					CreatedAt:  "2026-07-14T19:29:50Z",
+					Text:       text,
+					Tags:       []string{"agent-session", "codex"},
+					Metadata:   json.RawMessage(metaBytes),
+				},
+				Actor: &adapter.Actor{
+					ExternalID: "codex:assistant",
+					Type:       "agent",
+					Name:       "assistant",
+				},
+				Raw: adapter.RawRef{
+					Format:  "json",
+					Hash:    "sha256:preCap" + tc.name,
+					Path:    "/path/to/" + tc.name + ".jsonl",
+					Ordinal: &ordinal,
+				},
+			}
+
+			tempDir := t.TempDir()
+			recBytes, _ := json.Marshal(rec)
+			codexPath := filepath.Join(tempDir, tc.name+".adapter.jsonl")
+			if err := os.WriteFile(codexPath, append(recBytes, '\n'), 0644); err != nil {
+				t.Fatal(err)
+			}
+			runOK(t, "import", "adapter", codexPath, "--source", "codex")
+
+			var out, errw bytes.Buffer
+			code := cmdMigrateCodexArguments([]string{"--apply", "--json"}, &out, &errw)
+			if code != 0 {
+				t.Fatalf("apply failed: %s", errw.String())
+			}
+
+			db, _, err := openMigrated()
+			if err != nil {
+				t.Fatalf("failed to open test db: %s", err)
+			}
+			defer db.Close()
+
+			var rawJSON, metadataJSON, storedText string
+			if err := db.QueryRow(`SELECT raw_json, metadata_json, text FROM items WHERE external_id = ?`, "codex:call:"+tc.callID).Scan(&rawJSON, &metadataJSON, &storedText); err != nil {
+				t.Fatal(err)
+			}
+
+			// Assert no U+FFFD in raw_json, metadata_json, or text
+			if strings.Contains(rawJSON, "\ufffd") || strings.Contains(rawJSON, "\uFFFD") {
+				t.Fatalf("raw_json contains U+FFFD")
+			}
+			if strings.Contains(metadataJSON, "\ufffd") || strings.Contains(metadataJSON, "\uFFFD") {
+				t.Fatalf("metadata_json contains U+FFFD")
+			}
+			if strings.Contains(storedText, "\ufffd") || strings.Contains(storedText, "\uFFFD") {
+				t.Fatalf("text contains U+FFFD")
+			}
+
+			// Assert byte-identical output to what the adapter helper produces
+			expectedTruncated := sources.TextFromAny(tc.arguments, sources.DefaultTextCap)
+			if strings.Contains(expectedTruncated, "\ufffd") {
+				t.Fatalf("expectedTruncated from sources.TextFromAny contains U+FFFD")
+			}
+
+			var parsedMeta map[string]any
+			if err := json.Unmarshal([]byte(metadataJSON), &parsedMeta); err != nil {
+				t.Fatalf("unmarshal metadata_json: %s", err)
+			}
+			migratedArgs, ok := parsedMeta["arguments"].(string)
+			if !ok {
+				t.Fatalf("arguments not found in metadata_json")
+			}
+			if migratedArgs != expectedTruncated {
+				t.Fatalf("migrated arguments not byte-identical to adapter helper:\ngot:  %q\nwant: %q", migratedArgs, expectedTruncated)
+			}
+
+			var recAfter adapter.Record
+			if err := json.Unmarshal([]byte(rawJSON), &recAfter); err != nil {
+				t.Fatalf("unmarshal raw_json: %s", err)
+			}
+			var rawMetaAfter map[string]any
+			if err := json.Unmarshal(recAfter.Item.Metadata, &rawMetaAfter); err != nil {
+				t.Fatalf("unmarshal Item.Metadata: %s", err)
+			}
+			if rawMetaAfter["arguments"] != expectedTruncated {
+				t.Fatalf("raw_json arguments not byte-identical to adapter helper:\ngot:  %q\nwant: %q", rawMetaAfter["arguments"], expectedTruncated)
+			}
+		})
+	}
+}
+
+func TestMigrateCodexArguments_KeysetPaging(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+
+	origBatchSize := migrateBatchSize
+	migrateBatchSize = 2
+	defer func() { migrateBatchSize = origBatchSize }()
+
+	tempDir := t.TempDir()
+	codexPath := filepath.Join(tempDir, "paging.adapter.jsonl")
+
+	var records []string
+	for i := 1; i <= 5; i++ {
+		ordinal := int64(i)
+		callID := fmt.Sprintf("call-paging-%02d", i)
+		largeArgs := fmt.Sprintf(`{"cmd":"paging_%d %s UNICORN_%d"}`, i, strings.Repeat("a", 4200), i)
+		meta := map[string]any{
+			"harness":    "codex",
+			"event_type": "response_item",
+			"session_id": "s_paging",
+			"name":       "exec_command",
+			"call_id":    callID,
+			"arguments":  largeArgs,
+		}
+		metaBytes, _ := json.Marshal(meta)
+		text := fmt.Sprintf("function_call\nexec_command\n%s\n%s", callID, largeArgs)
+		rec := adapter.Record{
+			Schema: adapter.SchemaV1,
+			Source: adapter.Source{Kind: "codex", Name: "Codex Sessions", Version: "1.0.0"},
+			Collection: adapter.Collection{
+				ExternalID: "codex:session:s_paging",
+				Kind:       "agent_session",
+				Name:       "s_paging",
+			},
+			Item: adapter.Item{
+				ExternalID: "codex:call:" + callID,
+				Kind:       "tool_call",
+				CreatedAt:  fmt.Sprintf("2026-07-14T19:29:%02dZ", i),
+				Text:       text,
+				Tags:       []string{"agent-session", "codex"},
+				Metadata:   json.RawMessage(metaBytes),
+			},
+			Actor: &adapter.Actor{
+				ExternalID: "codex:assistant",
+				Type:       "agent",
+				Name:       "assistant",
+			},
+			Raw: adapter.RawRef{
+				Format:  "json",
+				Hash:    fmt.Sprintf("sha256:preCapPaging%d", i),
+				Path:    "/path/to/paging.jsonl",
+				Ordinal: &ordinal,
+			},
+		}
+		b, _ := json.Marshal(rec)
+		records = append(records, string(b))
+	}
+	if err := os.WriteFile(codexPath, []byte(strings.Join(records, "\n")+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "import", "adapter", codexPath, "--source", "codex")
+
+	var out, errw bytes.Buffer
+	code := cmdMigrateCodexArguments([]string{"--apply", "--json"}, &out, &errw)
+	if code != 0 {
+		t.Fatalf("apply failed: %s", errw.String())
+	}
+	var res map[string]any
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("failed to decode json: %s", err)
+	}
+	matched := int(res["matched"].(float64))
+	if matched != 5 {
+		t.Fatalf("expected 5 matched rows across paged batches, got %d", matched)
+	}
+
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatalf("failed to open test db: %s", err)
+	}
+	defer db.Close()
+
+	for i := 1; i <= 5; i++ {
+		callID := fmt.Sprintf("call-paging-%02d", i)
+		var metaJSON, itemText string
+		if err := db.QueryRow(`SELECT metadata_json, text FROM items WHERE external_id = ?`, "codex:call:"+callID).Scan(&metaJSON, &itemText); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(metaJSON, "[truncated]") || !strings.Contains(itemText, "[truncated]") {
+			t.Fatalf("row %d was not truncated", i)
+		}
+	}
+
+	out.Reset()
+	errw.Reset()
+	code = cmdMigrateCodexArguments([]string{"--apply", "--json"}, &out, &errw)
+	if code != 0 {
+		t.Fatalf("second apply failed: %s", errw.String())
+	}
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if matched := int(res["matched"].(float64)); matched != 0 {
+		t.Fatalf("expected 0 matched on second apply, got %d", matched)
+	}
+}
+
+func TestMigrateCodexArguments_FTSMissing(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+
+	largeArgs := `{"cmd":"exec_prefix ` + strings.Repeat("a", 4200) + ` UNICORN_TOKEN_PAST_CAP"}`
+	ordinal := int64(1)
+	meta := map[string]any{
+		"harness":    "codex",
+		"event_type": "response_item",
+		"session_id": "s_miss",
+		"name":       "exec_command",
+		"call_id":    "call-miss",
+		"arguments":  largeArgs,
+	}
+	metaBytes, _ := json.Marshal(meta)
+	text := "function_call\nexec_command\ncall-miss\n" + largeArgs
+
+	rec := adapter.Record{
+		Schema: adapter.SchemaV1,
+		Source: adapter.Source{Kind: "codex", Name: "Codex Sessions", Version: "1.0.0"},
+		Collection: adapter.Collection{
+			ExternalID: "codex:session:s_miss",
+			Kind:       "agent_session",
+			Name:       "s_miss",
+		},
+		Item: adapter.Item{
+			ExternalID: "codex:call:call-miss",
+			Kind:       "tool_call",
+			CreatedAt:  "2026-07-14T19:29:50Z",
+			Text:       text,
+			Tags:       []string{"agent-session", "codex"},
+			Metadata:   json.RawMessage(metaBytes),
+		},
+		Actor: &adapter.Actor{
+			ExternalID: "codex:assistant",
+			Type:       "agent",
+			Name:       "assistant",
+		},
+		Raw: adapter.RawRef{
+			Format:  "json",
+			Hash:    "sha256:preCapMiss",
+			Path:    "/path/to/miss.jsonl",
+			Ordinal: &ordinal,
+		},
+	}
+
+	tempDir := t.TempDir()
+	recBytes, _ := json.Marshal(rec)
+	codexPath := filepath.Join(tempDir, "miss.adapter.jsonl")
+	if err := os.WriteFile(codexPath, append(recBytes, '\n'), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "import", "adapter", codexPath, "--source", "codex")
+
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatalf("failed to open test db: %s", err)
+	}
+	defer db.Close()
+
+	// Delete from item_fts completely
+	var itemID string
+	if err := db.QueryRow(`SELECT id FROM items WHERE external_id = 'codex:call:call-miss'`).Scan(&itemID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM item_fts WHERE item_id = ?`, itemID); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errw bytes.Buffer
+	code := cmdMigrateCodexArguments([]string{"--apply", "--json"}, &out, &errw)
+	if code != 0 {
+		t.Fatalf("apply failed: %s", errw.String())
+	}
+	var res map[string]any
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if matched := int(res["matched"].(float64)); matched != 1 {
+		t.Fatalf("expected 1 matched, got %d", matched)
+	}
+	if ftsMissing := int(res["fts_missing"].(float64)); ftsMissing != 1 {
+		t.Fatalf("expected 1 fts_missing, got %d", ftsMissing)
 	}
 }

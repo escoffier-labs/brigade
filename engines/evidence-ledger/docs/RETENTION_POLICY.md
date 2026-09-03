@@ -10,7 +10,7 @@ miseledger prune policy --policy retention.json --dry-run --json
 
 Dry run is the default. A destructive run must include both `--apply` and `--export <path>`. Matched records are written to compressed adapter JSONL before any rows are deleted, so the slice can be restored later with `miseledger import adapter <file>`.
 
-> **Note:** The operator sequence for fully reclaiming space is `prune policy --apply` for chatter, then `migrate codex-arguments --apply` to truncate old tool arguments, then `compact`.
+> **Note:** The operator sequence for fully reclaiming space is `prune policy --apply --export <path>` for chatter, then `migrate codex-arguments --apply` to truncate old tool arguments, then `compact`.
 
 ## Default Policy
 

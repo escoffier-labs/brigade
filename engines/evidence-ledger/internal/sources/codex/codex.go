@@ -84,8 +84,8 @@ func normalize(ev sources.RawEvent) (rec adapter.Record, warning string, skipped
 	// Create a copy of payload and ev.Object to compute text without the huge arguments
 	// so that we don't bleed huge arguments into the `text` field, which ruins the truncation.
 	var truncatedArgs = arguments
-	if len(truncatedArgs) > 4000 {
-		truncatedArgs = truncatedArgs[:4000] + "\n[truncated]"
+	if len([]rune(truncatedArgs)) > sources.DefaultTextCap {
+		truncatedArgs = sources.TextFromAny(truncatedArgs, sources.DefaultTextCap)
 		truncated = true
 	}
 
