@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -119,10 +121,12 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
     assert [pack["id"] for pack in grokbot_packs.list_packs()] == [pack["id"] for pack in packs]
     assert not hasattr(grokbot_packs, "register_pack")
     for pack in packs:
-        assert set(pack) == grokbot_packs.PACK_KEYS
+        assert set(pack) == grokbot_packs.LIST_PACK_KEYS
         assert pack["schema"] == grokbot_packs.PACK_SCHEMA
+        assert pack["installed_bind"] is None
         shown = grokbot_packs.show_pack(pack["id"])
         assert shown == pack
+        assert grokbot_packs.PACK_KEYS <= set(shown)
         if pack["id"] in QUEUE_PACK_IDS:
             assert pack["kind"] == "queue-role"
             assert set(shown["tools"]) == grokbot_mcp.tools_for_instance(pack["instance"])
@@ -1477,3 +1481,174 @@ def test_pack_doctor_cli_fails_only_on_non_allowlisted_statuses(
 
     assert cli.main(_pack_argv(tmp_path, "doctor", "--id", "repository-scout")) == exit_code
     assert f"feed-authority: {feed_status}" in capsys.readouterr().out
+
+
+PUBLIC_HOST = "obsidian.packs.test"
+CUSTOM_BIND = "127.0.0.1:8799"
+
+
+def _start_json_server(routes: dict[str, tuple[int, bytes]]) -> ThreadingHTTPServer:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            status, body = routes.get(self.path, (404, b"{}"))
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def _start_host_gate_server(*, forbidden_host: str) -> ThreadingHTTPServer:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            host = (self.headers.get("Host") or "").split(":", 1)[0].casefold()
+            status = 403 if host == forbidden_host.casefold() else 401
+            self.send_response(status)
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def _cloudflared_config(hostname: str, origin_port: int) -> bytes:
+    payload = {
+        "config": {
+            "ingress": [
+                {"hostname": hostname, "service": f"http://127.0.0.1:{origin_port}"},
+                {"service": "http_status:404"},
+            ]
+        }
+    }
+    return json.dumps(payload).encode("utf-8")
+
+
+def test_pack_list_reports_installed_bind_alongside_packaged_default(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    grokbot_packs.apply_setup(tmp_path, "operator", bind=CUSTOM_BIND, bearer_env="TEST_GROKBOT_BEARER")
+
+    listed = {pack["id"]: pack for pack in grokbot_packs.list_packs(tmp_path)}
+    assert listed["operator"]["default_bind"] == "127.0.0.1:8766"
+    assert listed["operator"]["installed_bind"] == CUSTOM_BIND
+    assert listed["repository-scout"]["installed_bind"] is None
+
+    assert cli.main(_pack_argv(tmp_path, "list", "--json")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    cli_listed = {pack["id"]: pack for pack in payload["packs"]}
+    assert cli_listed["operator"]["default_bind"] == "127.0.0.1:8766"
+    assert cli_listed["operator"]["installed_bind"] == CUSTOM_BIND
+    assert SECRET not in json.dumps(payload)
+    assert str(tmp_path) not in json.dumps(payload)
+
+
+def test_pack_doctor_warns_on_installed_default_bind_drift(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    grokbot_packs.apply_setup(tmp_path, "operator", bind=CUSTOM_BIND, bearer_env="TEST_GROKBOT_BEARER")
+    matching = grokbot_packs.apply_setup(tmp_path, "repository-scout", bearer_env="TEST_GROKBOT_BEARER")
+    assert matching["bind"] == "127.0.0.1:8767"
+
+    drifted = grokbot_packs.doctor(tmp_path, "operator")
+    aligned = grokbot_packs.doctor(tmp_path, "repository-scout")
+    rendered = json.dumps({"drifted": drifted, "aligned": aligned})
+
+    assert {"check": "bind-drift", "status": "warn"} in drifted
+    assert {"check": "bind-drift", "status": "ok"} in aligned
+    assert all(check["check"] != "ingress-port-mismatch" for check in drifted)
+    assert all(check["check"] != "allowed-host-missing" for check in drifted)
+    assert all(set(check) == {"check", "status"} for check in drifted)
+    assert SECRET not in rendered
+    assert CUSTOM_BIND not in rendered
+    assert str(tmp_path) not in rendered
+
+
+def test_pack_doctor_fails_ingress_port_mismatch_from_cloudflared_config(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    grokbot_packs.apply_setup(
+        tmp_path,
+        "operator",
+        bind=CUSTOM_BIND,
+        allowed_hosts=[PUBLIC_HOST],
+        bearer_env="TEST_GROKBOT_BEARER",
+    )
+    mismatch = _start_json_server({"/config": (200, _cloudflared_config(PUBLIC_HOST, 8771))})
+    match = _start_json_server({"/config": (200, _cloudflared_config(PUBLIC_HOST, 8799))})
+    try:
+        monkeypatch.setattr(
+            grokbot_packs,
+            "_cloudflared_metrics_binds",
+            lambda: (f"127.0.0.1:{mismatch.server_address[1]}",),
+        )
+        failed = grokbot_packs.doctor(tmp_path, "operator")
+        monkeypatch.setattr(
+            grokbot_packs,
+            "_cloudflared_metrics_binds",
+            lambda: (f"127.0.0.1:{match.server_address[1]}",),
+        )
+        passed = grokbot_packs.doctor(tmp_path, "operator")
+    finally:
+        mismatch.shutdown()
+        mismatch.server_close()
+        match.shutdown()
+        match.server_close()
+
+    rendered = json.dumps({"failed": failed, "passed": passed})
+    assert {"check": "ingress-port-mismatch", "status": "fail"} in failed
+    assert {"check": "ingress-port-mismatch", "status": "ok"} in passed
+    assert all(set(check) == {"check", "status"} for check in failed)
+    assert SECRET not in rendered
+    assert PUBLIC_HOST not in rendered
+    assert "/config" not in rendered
+    assert str(tmp_path) not in rendered
+
+
+def test_pack_doctor_fails_allowed_host_missing_on_running_listener(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    monkeypatch.setattr(grokbot_packs, "_cloudflared_metrics_binds", lambda: ())
+    missing = _start_host_gate_server(forbidden_host=PUBLIC_HOST)
+    allowed = _start_host_gate_server(forbidden_host="other.packs.test")
+    try:
+        missing_bind = f"127.0.0.1:{missing.server_address[1]}"
+        allowed_bind = f"127.0.0.1:{allowed.server_address[1]}"
+        grokbot_packs.apply_setup(
+            tmp_path,
+            "operator",
+            bind=missing_bind,
+            allowed_hosts=[PUBLIC_HOST],
+            bearer_env="TEST_GROKBOT_BEARER",
+        )
+        missing_checks = grokbot_packs.doctor(tmp_path, "operator")
+        grokbot_packs.apply_setup(
+            tmp_path,
+            "operator",
+            bind=allowed_bind,
+            allowed_hosts=[PUBLIC_HOST],
+            bearer_env="TEST_GROKBOT_BEARER",
+        )
+        allowed_checks = grokbot_packs.doctor(tmp_path, "operator")
+    finally:
+        missing.shutdown()
+        missing.server_close()
+        allowed.shutdown()
+        allowed.server_close()
+
+    rendered = json.dumps({"missing": missing_checks, "allowed": allowed_checks})
+    assert {"check": "allowed-host-missing", "status": "fail"} in missing_checks
+    assert {"check": "allowed-host-missing", "status": "ok"} in allowed_checks
+    assert all(set(check) == {"check", "status"} for check in missing_checks)
+    assert SECRET not in rendered
+    assert PUBLIC_HOST not in rendered
+    assert str(tmp_path) not in rendered
+    assert missing_bind not in rendered
+    assert allowed_bind not in rendered

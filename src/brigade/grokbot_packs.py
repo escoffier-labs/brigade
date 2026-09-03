@@ -8,13 +8,17 @@ stop, or reload services.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
 import stat
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from urllib.parse import urlsplit
 
 from . import (
     grokbot_backup,
@@ -32,6 +36,15 @@ PACK_SCHEMA = "brigade.grokbot.connector-pack.v1"
 INSTANCE_SCHEMA = "brigade.grokbot.connector-instance.v1"
 INSTANCE_DIR = Path(".brigade") / "grokbot" / "packs"
 PACK_KEYS = frozenset({"schema", "id", "version", "kind", "instance", "default_bind", "public_route", "tools"})
+LIST_PACK_KEYS = PACK_KEYS | {"installed_bind"}
+BIND_DRIFT_CHECK = "bind-drift"
+INGRESS_PORT_MISMATCH_CHECK = "ingress-port-mismatch"
+ALLOWED_HOST_MISSING_CHECK = "allowed-host-missing"
+_MAX_CLOUDFLARED_PROCS = 16
+_MAX_METRICS_ENDPOINTS = 8
+_MAX_PUBLIC_HOSTS = 8
+_MAX_CONFIG_BYTES = 65_536
+_PROBE_TIMEOUT_SECONDS = 2
 INSTANCE_KEYS = frozenset(
     {
         "schema",
@@ -163,12 +176,26 @@ def instance_config_path(target: Path, pack_id: str) -> Path:
     return target / INSTANCE_DIR / f"{pack_id}.json"
 
 
-def list_packs() -> list[dict[str, Any]]:
+def _packaged_packs() -> list[dict[str, Any]]:
     return [dict(pack) for pack in validate_registry(packaged_manifests())]
 
 
-def show_pack(pack_id: str) -> dict[str, Any]:
-    for pack in list_packs():
+def list_packs(target: Path | None = None) -> list[dict[str, Any]]:
+    """Return packaged manifests plus the installed bind when one exists.
+
+    ``installed_bind`` is read from ``.brigade/grokbot/packs/<id>.json``. The
+    pack CLI dispatcher does not pass ``--target`` into this function, so a
+    missing target uses that command's target when present, else ``.``.
+    """
+    resolved = target if target is not None else _cli_pack_target()
+    packs = _packaged_packs()
+    for pack in packs:
+        pack["installed_bind"] = _peek_installed_bind(resolved, pack["id"])
+    return packs
+
+
+def show_pack(pack_id: str, target: Path | None = None) -> dict[str, Any]:
+    for pack in list_packs(target):
         if pack["id"] == pack_id:
             return pack
     raise PackError("unknown-pack")
@@ -300,7 +327,7 @@ def apply_setup(
 
 
 def doctor(target: Path, pack_id: str, *, service_result: bool = False) -> list[dict[str, str]]:
-    pack = show_pack(pack_id)
+    pack = show_pack(pack_id, target)
     if pack["kind"] == "queue-role":
         checks = grokbot_ops.doctor(target, pack["instance"])
     elif pack["id"] == "fleet-steward":
@@ -317,6 +344,7 @@ def doctor(target: Path, pack_id: str, *, service_result: bool = False) -> list[
         checks = grokbot_operations_relay.doctor(target)
     else:
         checks = grokbot_cerebro.doctor(target)
+    checks.extend(_installed_bind_checks(target, pack))
     if service_result:
         checks.append(grokbot_ops.inspect_service_result(pack["instance"]))
     return checks
@@ -790,7 +818,7 @@ def _assert_setup_bind_available(target: Path, pack_id: str, chosen_bind: str) -
 
 def _occupied_setup_ports(target: Path, *, exclude_pack_id: str) -> set[int]:
     ports: set[int] = set()
-    for pack in list_packs():
+    for pack in list_packs(target):
         if pack["id"] == exclude_pack_id:
             continue
         _host, port = _parse_default_bind(pack["default_bind"])
@@ -1127,6 +1155,263 @@ def _connector_path_reference(value: object, *, kind: str) -> str:
         return grokbot_cerebro.validate_workdir(text)
     except grokbot_cerebro.CerebroError as exc:
         raise PackError("unsafe-path") from exc
+
+
+def _cli_pack_target() -> Path:
+    """Honor ``pack --target`` when the dispatcher calls ``list_packs()`` with no args."""
+    for item in inspect.stack(context=0):
+        if item.function == "_dispatch_grokbot_pack":
+            candidate = item.frame.f_locals.get("target")
+            if isinstance(candidate, Path):
+                return candidate
+    return Path(".")
+
+
+def _peek_instance_payload(target: Path, pack_id: str) -> dict[str, Any] | None:
+    path = instance_config_path(target, pack_id)
+    try:
+        if grokbot_ops._path_is_symlink(path) or path.is_symlink():
+            return None
+        payload = json.loads(grokbot_ops._read_regular_text(path))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _peek_installed_bind(target: Path, pack_id: str) -> str | None:
+    payload = _peek_instance_payload(target, pack_id)
+    if payload is None:
+        return None
+    bind = payload.get("bind")
+    if not isinstance(bind, str):
+        return None
+    try:
+        _parse_default_bind(bind)
+    except PackError:
+        return None
+    return bind
+
+
+def _peek_allowed_hosts(target: Path, pack_id: str) -> list[str]:
+    payload = _peek_instance_payload(target, pack_id)
+    if payload is None:
+        return []
+    hosts = payload.get("allowed_hosts")
+    if not isinstance(hosts, list):
+        return []
+    return [host for host in hosts if isinstance(host, str)]
+
+
+def _public_allowed_hosts(hosts: Iterable[str]) -> tuple[str, ...]:
+    public: list[str] = []
+    for raw in hosts:
+        if not grokbot_mcp._valid_host(raw):
+            continue
+        name = raw.casefold().split(":", 1)[0]
+        if grokbot_mcp._is_loopback(name):
+            continue
+        if name not in public:
+            public.append(name)
+        if len(public) >= _MAX_PUBLIC_HOSTS:
+            break
+    return tuple(public)
+
+
+def _installed_bind_checks(target: Path, pack: Mapping[str, Any]) -> list[dict[str, str]]:
+    pack_id = str(pack["id"])
+    installed = _peek_installed_bind(target, pack_id)
+    if installed is None:
+        return []
+    checks: list[dict[str, str]] = [
+        {
+            "check": BIND_DRIFT_CHECK,
+            "status": "ok" if installed == pack["default_bind"] else "warn",
+        }
+    ]
+    public = _public_allowed_hosts(_peek_allowed_hosts(target, pack_id))
+    if not public:
+        return checks
+    ingress = _ingress_bind_status(public, installed)
+    if ingress is not None:
+        checks.append({"check": INGRESS_PORT_MISMATCH_CHECK, "status": ingress})
+    allowed = _listener_allows_public_hosts(installed, public)
+    if allowed is not None:
+        checks.append({"check": ALLOWED_HOST_MISSING_CHECK, "status": "ok" if allowed else "fail"})
+    return checks
+
+
+def _ingress_bind_status(public_hosts: tuple[str, ...], installed_bind: str) -> str | None:
+    try:
+        _host, installed_port = _parse_default_bind(installed_bind)
+    except PackError:
+        return None
+    public = set(public_hosts)
+    observed_mismatch = False
+    observed_match = False
+    for metrics_bind in _cloudflared_metrics_binds()[:_MAX_METRICS_ENDPOINTS]:
+        payload = _fetch_metrics_config(metrics_bind)
+        if payload is None:
+            continue
+        for hostname, origin_port in _ingress_origin_ports(payload):
+            if hostname not in public:
+                continue
+            if origin_port == installed_port:
+                observed_match = True
+            else:
+                observed_mismatch = True
+    if observed_mismatch:
+        return "fail"
+    if observed_match:
+        return "ok"
+    return None
+
+
+def _listener_allows_public_hosts(installed_bind: str, public_hosts: tuple[str, ...]) -> bool | None:
+    try:
+        host, port = _parse_default_bind(installed_bind)
+    except PackError:
+        return None
+    url = f"http://{grokbot_ops._connect_host(host)}:{port}/health"
+    seen = False
+    for hostname in public_hosts:
+        status = _http_status(url, host_header=hostname)
+        if status is None:
+            continue
+        seen = True
+        if status == 403:
+            return False
+    if not seen:
+        return None
+    return True
+
+
+def _cloudflared_metrics_binds() -> tuple[str, ...]:
+    root = Path("/proc")
+    if not root.is_dir():
+        return ()
+    found: list[str] = []
+    scanned = 0
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return ()
+    for entry in entries:
+        if scanned >= _MAX_CLOUDFLARED_PROCS or len(found) >= _MAX_METRICS_ENDPOINTS:
+            break
+        if not entry.name.isdigit():
+            continue
+        try:
+            comm = (entry / "comm").read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if comm != "cloudflared":
+            continue
+        scanned += 1
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        argv = [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+        bind = _metrics_bind_from_argv(argv)
+        if bind is not None:
+            found.append(bind)
+    return tuple(found)
+
+
+def _metrics_bind_from_argv(argv: list[str]) -> str | None:
+    for index, arg in enumerate(argv):
+        if arg == "--metrics" and index + 1 < len(argv):
+            return _loopback_metrics_bind(argv[index + 1])
+        if arg.startswith("--metrics="):
+            return _loopback_metrics_bind(arg.split("=", 1)[1])
+    return None
+
+
+def _loopback_metrics_bind(value: str) -> str | None:
+    try:
+        host, port = grokbot_mcp.parse_bind(value)
+    except grokbot_mcp.ConfigurationError:
+        return None
+    connect = grokbot_ops._connect_host(host)
+    if not grokbot_mcp._is_loopback(connect):
+        return None
+    return f"{connect}:{port}"
+
+
+def _fetch_metrics_config(metrics_bind: str) -> dict[str, Any] | None:
+    parsed = _loopback_metrics_bind(metrics_bind)
+    if parsed is None:
+        return None
+    host, port = grokbot_mcp.parse_bind(parsed)
+    payload = _fetch_json(f"http://{host}:{port}/config")
+    return payload
+
+
+def _ingress_origin_ports(payload: Mapping[str, Any]) -> list[tuple[str, int]]:
+    config = payload.get("config")
+    raw: object = None
+    if isinstance(config, Mapping):
+        raw = config.get("ingress")
+    if raw is None:
+        raw = payload.get("ingress")
+    if not isinstance(raw, list):
+        return []
+    rules: list[tuple[str, int]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        hostname = item.get("hostname")
+        service = item.get("service")
+        if not isinstance(hostname, str) or not hostname or not isinstance(service, str):
+            continue
+        origin = _origin_port(service)
+        if origin is None:
+            continue
+        rules.append((hostname.casefold().split(":", 1)[0], origin))
+    return rules
+
+
+def _origin_port(service: str) -> int | None:
+    parsed = urlsplit(service)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    host = parsed.hostname
+    if host is None or not grokbot_mcp._is_loopback(host):
+        return None
+    if parsed.port is not None:
+        return parsed.port
+    return 80 if parsed.scheme == "http" else 443
+
+
+def _fetch_json(url: str) -> dict[str, Any] | None:
+    request = urllib.request.Request(url, method="GET")
+    try:
+        with grokbot_ops._open_http(request, _PROBE_TIMEOUT_SECONDS) as response:
+            body = response.read(_MAX_CONFIG_BYTES + 1)
+    except urllib.error.HTTPError:
+        return None
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None
+    if len(body) > _MAX_CONFIG_BYTES:
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _http_status(url: str, *, host_header: str) -> int | None:
+    request = urllib.request.Request(url, method="GET")
+    request.add_unredirected_header("Host", host_header)
+    try:
+        with grokbot_ops._open_http(request, _PROBE_TIMEOUT_SECONDS) as response:
+            response.read(256)
+            return int(response.status)
+    except urllib.error.HTTPError as exc:
+        return int(exc.code)
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None
 
 
 def _parse_default_bind(value: str) -> tuple[str, int]:
