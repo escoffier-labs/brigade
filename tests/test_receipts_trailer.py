@@ -177,3 +177,13 @@ def test_verify_commit_with_target_outside_cwd(capsys, tmp_path, monkeypatch):
     assert dispatch(args) == 0
     out, err = capsys.readouterr()
     assert "ok" in out
+
+
+def test_verify_commit_missing_target(capsys, tmp_path, monkeypatch):
+    """Regression: a missing or non-directory target must produce a controlled
+    'missing trailer' result instead of raising OSError from subprocess."""
+    monkeypatch.chdir(tmp_path)
+    args = DummyArgs("verify", commit="HEAD", target=tmp_path / "does-not-exist")
+    assert dispatch(args) == 1
+    out, err = capsys.readouterr()
+    assert "missing trailer" in out

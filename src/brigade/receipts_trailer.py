@@ -34,7 +34,7 @@ def verify_commit(commit_sha: str, target: Path = Path(".")) -> int:
             stderr=subprocess.STDOUT,
             cwd=str(target),
         )
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, OSError):
         print("missing trailer")
         return 1
 
