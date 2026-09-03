@@ -297,3 +297,171 @@ def render(
         parts.append('<p class="roster-actions"><button type="submit">Save</button></p>')
     parts.append("</form></main>")
     return fleet_command_deck._document("\n".join(parts), nonce=nonce, now=now, title="Roster", refresh=False)
+
+
+# --- form ------------------------------------------------------------------
+
+
+def parse_form(raw: bytes) -> Submission:
+    """Decode a form body. Size and content-type are enforced by the HTTP layer."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise FormError("form body is not UTF-8") from exc
+    try:
+        fields = parse_qs(text, keep_blank_values=True, max_num_fields=_MAX_FIELDS)
+    except ValueError as exc:
+        raise FormError("too many form fields") from exc
+    first = {key: values[0] for key, values in fields.items() if values}
+    try:
+        expected = int(first.get("expected_revision", ""))
+    except ValueError as exc:
+        raise FormError("expected_revision must be an integer") from exc
+    return Submission(
+        expected_revision=expected,
+        expected_preference_updated_at=first.get("expected_preference_updated_at", ""),
+        csrf=first.get("csrf", ""),
+        roles={role: first.get(f"role.{role}", "").strip() for role in ROLES},
+        notes=first.get("notes", "").strip(),
+        seats_on=frozenset(key[len("seat.") :] for key in fields if key.startswith("seat.")),
+        cloud_on=frozenset(key[len("cloud.") :] for key in fields if key.startswith("cloud.")),
+        defaults={consumer: first.get(f"default.{consumer}", "").strip() for consumer in CONSUMERS},
+    )
+
+
+# --- apply -----------------------------------------------------------------
+
+
+def _utc_now() -> str:
+    return fleet_hub._utc_now()
+
+
+def _validate(view: RosterView, submission: Submission) -> tuple[str | None, dict[str, bool]]:
+    """``(error, target_enabled)``; ``error`` is ``None`` when the save is admissible."""
+    known = {row.seat: row for row in view.seats}
+    target = {name: (name in submission.seats_on) and not row.retired for name, row in known.items()}
+    for role, seat in submission.roles.items():
+        if not seat:
+            continue
+        if seat not in known:
+            return f"role {role} names unknown seat {seat}", target
+        if not target[seat]:
+            return f"role {role} names seat {seat}, which is disabled or retired in this save", target
+    for consumer, seat in submission.defaults.items():
+        if not seat:
+            continue
+        if seat not in known:
+            return f"default {consumer} names unknown seat {seat}", target
+        if not target[seat]:
+            return f"default {consumer} names seat {seat}, which is disabled or retired in this save", target
+        row = known[seat]
+        bound = row.brigade_cli if consumer == "brigade-run" else row.t3_instance_id
+        if not bound:
+            return f"default {consumer} names seat {seat}, which has no {consumer} binding", target
+    raw = {role: seat for role, seat in submission.roles.items() if seat}
+    if submission.notes:
+        raw["notes"] = submission.notes
+    try:
+        run_preference.parse_preference(raw)
+    except run_preference.RunPreferenceError as exc:
+        return str(exc), target
+    return None, target
+
+
+def _write_cloud_enabled(conn: sqlite3.Connection, row: CloudRow, enabled: bool) -> None:
+    """Same upsert as ``fleet_hub._set_cloud_policy`` minus its commit; only ``enabled`` differs."""
+    policy = row.policy
+    conn.execute(
+        "INSERT INTO cloud_provider_state (provider, enabled, limit_count, hosted, circuit_state, reason, "
+        "subscription_pool, reset_at, expires_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(provider) DO UPDATE SET enabled=excluded.enabled, limit_count=excluded.limit_count, "
+        "hosted=excluded.hosted, circuit_state=excluded.circuit_state, reason=excluded.reason, "
+        "subscription_pool=excluded.subscription_pool, reset_at=excluded.reset_at, expires_at=excluded.expires_at, "
+        "updated_at=excluded.updated_at",
+        (
+            row.provider,
+            int(enabled),
+            int(row.limit),
+            int(row.hosted),
+            row.circuit_state,
+            policy.get("reason"),
+            policy.get("subscription_pool"),
+            policy.get("reset_at"),
+            policy.get("expires_at"),
+            _utc_now(),
+        ),
+    )
+
+
+def apply(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig, submission: Submission) -> ApplyResult:
+    """One Save: fences, validation, then only the differences, in one transaction."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        view = load_view(conn, config)
+        if view.revision != submission.expected_revision:
+            conn.rollback()
+            return ApplyResult(
+                "conflict",
+                f"roster changed underneath you: revision {submission.expected_revision} is now {view.revision}. "
+                "Reload before saving.",
+                view.revision,
+            )
+        if view.preference_updated_at != submission.expected_preference_updated_at:
+            conn.rollback()
+            return ApplyResult("conflict", "the run preference changed underneath you. Reload before saving.", view.revision)
+        error, target = _validate(view, submission)
+        if error is not None:
+            conn.rollback()
+            return ApplyResult("invalid", error, view.revision)
+        roster_changed = False
+        for row in view.seats:
+            if row.retired or target[row.seat] == row.enabled:
+                continue
+            fleet_hub_model_roster._write_set(
+                conn,
+                {
+                    "seat": row.seat,
+                    "provider": row.provider,
+                    "model": row.model,
+                    "reasoning": row.reasoning,
+                    "enabled": target[row.seat],
+                    "limit": row.limit,
+                    "brigade_cli": row.brigade_cli,
+                    "t3_instance_id": row.t3_instance_id,
+                    "t3_service_tier": row.t3_service_tier,
+                    "notes": row.notes,
+                },
+            )
+            roster_changed = True
+        now = _utc_now()
+        for consumer, seat in submission.defaults.items():
+            if seat == (view.defaults.get(consumer) or ""):
+                continue
+            conn.execute(
+                "INSERT INTO model_consumer_defaults (consumer, seat, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(consumer) DO UPDATE SET seat=excluded.seat, updated_at=excluded.updated_at",
+                (consumer, seat, now),
+            )
+            roster_changed = True
+        for row in view.cloud:
+            want = row.provider in submission.cloud_on
+            if want != row.enabled:
+                _write_cloud_enabled(conn, row, want)
+        wanted_pref = {role: seat for role, seat in submission.roles.items() if seat}
+        if submission.notes:
+            wanted_pref["notes"] = submission.notes
+        current_pref = {key: value for key, value in view.preference.items() if value}
+        if wanted_pref != current_pref:
+            fleet_hub_preference.upsert_run_preference(conn, wanted_pref, updated_by=UPDATED_BY)
+        revision = view.revision
+        if roster_changed:
+            revision += 1
+            conn.execute(
+                "UPDATE model_roster_meta SET revision=?, updated_at=?, updated_by=? WHERE singleton=1",
+                (revision, now, UPDATED_BY),
+            )
+        conn.commit()
+        return ApplyResult("saved", f"saved as revision {revision}", revision)
+    except BaseException:
+        conn.rollback()
+        raise

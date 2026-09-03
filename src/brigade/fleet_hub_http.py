@@ -632,6 +632,98 @@ def make_handler(
             saved_revision = int(saved) if saved.isdigit() and len(saved) <= 12 else None
             self._render_roster(status=200, editable=editable, saved_revision=saved_revision)
 
+        def _same_origin(self) -> bool:
+            site = self.headers.get("Sec-Fetch-Site")
+            if site is not None:
+                return site.strip().lower() == "same-origin"
+            origin = self.headers.get("Origin")
+            if origin is None:
+                return True
+            host = self.headers.get("Host", "")
+            origin_host = origin.partition("://")[2].partition("/")[0]
+            return bool(host) and hmac.compare_digest(origin_host.encode("utf-8"), host.encode("utf-8"))
+
+        def _post_roster(self) -> None:
+            plain = "text/plain; charset=utf-8"
+            content_type = self.headers.get("Content-Type", "").partition(";")[0].strip().lower()
+            if content_type != fleet_hub_roster_page.FORM_CONTENT_TYPE:
+                self._send_html(415, "Unsupported Media Type: send a form body.\n", content_type=plain)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._send_html(400, "bad Content-Length\n", content_type=plain)
+                return
+            if length <= 0:
+                self._send_html(400, "missing body\n", content_type=plain)
+                return
+            if length > fleet_hub_roster_page.MAX_FORM_BYTES:
+                self._send_html(413, "form body too large\n", content_type=plain)
+                return
+            presented = self._bearer()
+            if presented is not None:
+                # A bearer is checked against the database (node tokens) before the
+                # body is read, exactly like the JSON routes.
+                try:
+                    conn = open_db(Path(db_path))
+                except (FleetHubError, sqlite3.Error) as exc:
+                    self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
+                    return
+                try:
+                    if self._authorized():
+                        is_admin = True
+                    else:
+                        node_id, _revoked = lookup_node_token(conn, presented)
+                        is_admin = False
+                        if node_id is None:
+                            self._send_html(401, "Unauthorized.\n", content_type=plain)
+                            return
+                finally:
+                    conn.close()
+                if not is_admin:
+                    self._send_html(403, "the admin token is required to edit the roster\n", content_type=plain)
+                    return
+            elif self._cookie_authorized():
+                pass
+            elif self._tailscale_identity_authorized():
+                self._send_html(403, "read-only: enroll with the fleet token to edit\n", content_type=plain)
+                return
+            else:
+                self._send_html(401, "Unauthorized.\n", content_type=plain)
+                return
+            if not self._same_origin():
+                self._send_html(403, "cross-origin form post refused\n", content_type=plain)
+                return
+            raw = self.rfile.read(length)
+            try:
+                submission = fleet_hub_roster_page.parse_form(raw)
+            except fleet_hub_roster_page.FormError as exc:
+                self._send_html(400, f"{exc}\n", content_type=plain)
+                return
+            expected = fleet_hub_roster_page.csrf_value(token)
+            if not hmac.compare_digest(submission.csrf.encode("utf-8"), expected.encode("utf-8")):
+                self._send_html(403, "form token mismatch: reload the page\n", content_type=plain)
+                return
+            try:
+                conn = open_db(Path(db_path))
+            except (FleetHubError, sqlite3.Error) as exc:
+                self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
+                return
+            try:
+                result = fleet_hub_roster_page.apply(conn, frozen_deck, submission)
+            except (FleetHubError, sqlite3.Error) as exc:
+                self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
+                return
+            finally:
+                conn.close()
+            if result.status == "saved":
+                self._send_html(
+                    303, "", content_type=plain, extra_headers={"Location": f"/deck/roster?saved={result.revision}"}
+                )
+                return
+            status = 409 if result.status == "conflict" else 422
+            self._render_roster(status=status, editable=True, error=result.message, submission=submission)
+
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
             path, _, query = self.path.partition("?")
             if path in _ASSET_ROUTES:
@@ -767,6 +859,9 @@ def make_handler(
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
             path = self.path.partition("?")[0]
+            if path == "/deck/roster":
+                self._post_roster()
+                return
             if path.startswith("/work/"):
                 self._handle_worklore()
                 return

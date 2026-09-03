@@ -215,3 +215,139 @@ def test_roster_page_escapes_hostile_notes(tmp_path):
         page = _request(hub, "GET", "/deck/roster", headers=_bearer())[2]
         assert "<script>alert(1)</script>" not in page
         assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+
+
+# --- POST ------------------------------------------------------------------
+
+
+def test_roster_post_auth_csrf_origin_and_body_rules(tmp_path):
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        cookie = _login_cookie(hub)
+        good = _current_form(hub, cookie)
+        assert _form(hub, good)[0] == 401
+        node_token = _enroll_node(db)
+        assert _form(hub, good, extra={"Authorization": f"Bearer {node_token}"})[0] == 403
+        bad_csrf = {**good, "csrf": "0" * 64}
+        assert _form(hub, bad_csrf, cookie=cookie)[0] == 403
+        assert _form(hub, good, cookie=cookie, extra={"Sec-Fetch-Site": "cross-site"})[0] == 403
+        headers = {"Cookie": cookie, "Content-Type": "application/json"}
+        assert _request(hub, "POST", "/deck/roster", headers=headers, body=b"{}")[0] == 415
+        big = urlencode({**good, "notes": "x" * (64 * 1024)}).encode()
+        headers = {"Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"}
+        # The hub answers 413 from Content-Length without reading the body; the
+        # peer may see the response or a reset socket, never a write.
+        try:
+            assert _request(hub, "POST", "/deck/roster", headers=headers, body=big)[0] == 413
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        assert _form(hub, {**good, "expected_revision": "x"}, cookie=cookie)[0] == 400
+
+
+def test_roster_post_tailscale_identity_cannot_write(tmp_path):
+    with _hub(tmp_path, trust_tailscale=True) as (hub, _db):
+        _seed(hub)
+        cookie = _login_cookie(hub)
+        good = _current_form(hub, cookie)
+        before = _tables(_db)
+        status, _headers, _text = _form(hub, good, extra={"Tailscale-User-Login": "operator@example.test"})
+        assert status == 403
+        assert _tables(_db) == before
+
+
+def test_roster_post_stale_revision_and_stale_preference_write_nothing(tmp_path):
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        cookie = _login_cookie(hub)
+        form = _current_form(hub, cookie)
+        # A CLI mutation lands between load and save.
+        status, payload = _json(
+            hub, "POST", "/models",
+            {"action": "set", "seat": "coder", "enabled": True, "expected_revision": _revision(hub), **SEATS["coder"]},
+        )
+        assert status == 200, payload
+        before = _tables(db)
+        status, _headers, page = _form(hub, {**form, "role.security": "daybreak"}, cookie=cookie)
+        assert status == 409
+        assert "changed underneath you" in page
+        assert _tables(db) == before
+        form = _current_form(hub, cookie)
+        status, payload = _json(hub, "PUT", "/preference", {"impl": "agy_flash"})
+        assert status == 200, payload
+        before = _tables(db)
+        status, _headers, page = _form(hub, {**form, "role.security": "daybreak"}, cookie=cookie)
+        assert status == 409
+        assert "run preference changed" in page
+        assert _tables(db) == before
+
+
+def test_roster_post_applies_everything_in_one_revision(tmp_path):
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        cookie = _login_cookie(hub)
+        form = _current_form(hub, cookie)
+        start = _revision(hub)
+        form.pop("seat.cursor_grok")
+        form.pop("seat.coder")
+        form.pop("cloud.codex", None)
+        form["cloud.claude"] = "1"
+        form["role.impl"] = "agy_flash"
+        form["role.review"] = ""
+        form["role.chef"] = ""
+        form["role.security"] = "daybreak"
+        form["default.brigade-run"] = "agy_flash"
+        form["notes"] = "cursor via Other Models only"
+        status, headers, _text = _form(hub, form, cookie=cookie)
+        assert status == 303
+        assert headers["location"] == f"/deck/roster?saved={start + 1}"
+        assert _revision(hub) == start + 1
+        _status, _headers, models = _request(hub, "GET", "/models", headers=_bearer())
+        roster = json.loads(models)
+        enabled = {row["seat"]: row["enabled"] for row in roster["seats"]}
+        assert enabled == {"agy_flash": True, "coder": False, "daybreak": True, "cursor_grok": False}
+        assert roster["consumer_defaults"]["brigade-run"] == "agy_flash"
+        _status, _headers, pref = _request(hub, "GET", "/preference", headers=_bearer())
+        preference = json.loads(pref)["preference"]
+        assert preference["impl"] == "agy_flash" and preference["security"] == "daybreak"
+        assert preference["review"] is None and preference["notes"] == "cursor via Other Models only"
+        _status, _headers, cloud = _request(hub, "GET", "/cloud", headers=_bearer())
+        providers = {row["provider"]: row["enabled"] for row in json.loads(cloud)["policy"]["providers"]}
+        assert providers["claude"] is True and providers["codex"] is False
+        page = _request(hub, "GET", f"/deck/roster?saved={start + 1}", headers={"Cookie": cookie})[2]
+        assert f"saved as revision {start + 1}" in page
+        assert "by deck-form" in page
+        conn = sqlite3.connect(db)
+        assert conn.execute("SELECT updated_by FROM run_preference WHERE id=1").fetchone()[0] == "deck-form"
+        conn.close()
+        # A no-op save leaves the revision alone.
+        again = _current_form(hub, cookie)
+        status, headers, _text = _form(hub, again, cookie=cookie)
+        assert status == 303 and headers["location"] == f"/deck/roster?saved={start + 1}"
+        assert _revision(hub) == start + 1
+
+
+def test_roster_post_rejects_role_on_seat_disabled_in_same_save(tmp_path):
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        cookie = _login_cookie(hub)
+        form = _current_form(hub, cookie)
+        form.pop("seat.daybreak")
+        form["role.security"] = "daybreak"
+        before = _tables(db)
+        status, _headers, page = _form(hub, form, cookie=cookie)
+        assert status == 422
+        assert "role security names seat daybreak" in page
+        assert 'name="role.security"' in page and '<option value="daybreak" selected' in page
+        assert _tables(db) == before
+        # A consumer default needs the consumer's binding.
+        form = _current_form(hub, cookie)
+        form["default.t3-fleet"] = "agy_flash"
+        status, _headers, page = _form(hub, form, cookie=cookie)
+        assert status == 422 and "no t3-fleet binding" in page
+        # Notes still go through the secret regexes.
+        form = _current_form(hub, cookie)
+        form["notes"] = "see /home/operator/roster.toml"
+        status, _headers, page = _form(hub, form, cookie=cookie)
+        assert status == 422 and "home paths" in page
+        assert "/home/operator" in page  # echoed back, escaped, so the operator can fix it
+        assert _tables(db) == before

@@ -1088,7 +1088,7 @@ def _document(body: str, *, nonce: str, now: datetime, title: str = "Command Dec
 - Modify: `src/brigade/fleet_hub_http.py` (`do_POST`, new `_post_roster`)
 - Test: `tests/test_fleet_roster_page.py` (append)
 
-- [ ] Append these tests to `tests/test_fleet_roster_page.py`:
+- [x] Append these tests to `tests/test_fleet_roster_page.py`:
 
 ```python
 # --- POST ------------------------------------------------------------------
@@ -1227,10 +1227,10 @@ def test_roster_post_rejects_role_on_seat_disabled_in_same_save(tmp_path):
         assert _tables(db) == before
 ```
 
-- [ ] Run, watch it fail:
+- [x] Run, watch it fail:
   `brigade work verify run --target . --command "python -m pytest -q tests/test_fleet_roster_page.py -k post" --capture brigade-work`
   Expect FAIL: `assert 404 == 401` (the POST route does not exist yet).
-- [ ] Append to `src/brigade/fleet_hub_roster_page.py`:
+- [x] Append to `src/brigade/fleet_hub_roster_page.py`:
 
 ```python
 # --- form ------------------------------------------------------------------
@@ -1401,7 +1401,7 @@ def apply(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig, submi
         raise
 ```
 
-- [ ] In `fleet_hub_http.py`, add to the handler class after `_serve_roster`:
+- [x] In `fleet_hub_http.py`, add to the handler class after `_serve_roster`:
 
 ```python
         def _same_origin(self) -> bool:
@@ -1497,7 +1497,7 @@ def apply(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig, submi
             self._render_roster(status=status, editable=True, error=result.message, submission=submission)
 ```
 
-- [ ] In `do_POST`, insert as the first statement after `path = ...`:
+- [x] In `do_POST`, insert as the first statement after `path = ...`:
 
 ```python
             if path == "/deck/roster":
@@ -1505,13 +1505,13 @@ def apply(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig, submi
                 return
 ```
 
-- [ ] Run to green:
+- [x] Run to green:
   `brigade work verify run --target . --command "python -m pytest -q tests/test_fleet_roster_page.py tests/test_fleet_command_deck.py tests/test_fleet_model_roster.py" --capture brigade-work`
   Expect PASS.
-- [ ] Run the size ratchet:
+- [x] Run the size ratchet:
   `brigade work verify run --target . --command "python -m pytest -q tests/test_module_size_ratchet.py tests/test_size_ratchet_baseline.py" --capture brigade-work`
   Expect PASS. `fleet_hub_http.py` grows from 810 to roughly 970 lines and is not a legacy entry, so the ratchet stays green.
-- [ ] Commit: `git add -A && git commit -m "feat(fleet): save the roster from /deck/roster in one revisioned transaction"`
+- [x] Commit: `git add -A && git commit -m "feat(fleet): save the roster from /deck/roster in one revisioned transaction"`
 
 ### Task 6: `fleet_routing` block in `brigade work brief`
 
