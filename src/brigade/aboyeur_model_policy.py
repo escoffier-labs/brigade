@@ -125,6 +125,24 @@ def _local_cli_matches_hub_binding(aboyeur: Any, agent: Agent, binding: Mapping[
     return aboyeur.agents.command_for(local) == instance_id
 
 
+def _set_remediation_detail(row: Mapping[str, Any], revision: object, *, fallback_seat: str | None = None) -> str:
+    """Return a remediation block for a versioned roster seat row."""
+    provider = row.get("provider")
+    model = row.get("model")
+    seat = row.get("seat") or fallback_seat
+    reasoning = row.get("reasoning")
+    if not isinstance(provider, str) or not isinstance(model, str) or not isinstance(seat, str):
+        return ""
+    return "\n" + fleet_model_admission._set_command_remediation(
+        provider=provider,
+        model=model,
+        seat=seat,
+        reasoning=reasoning if isinstance(reasoning, str) and reasoning else None,
+        brigade_cli=fleet_model_admission._brigade_cli_from_row(row),
+        revision=revision,
+    )
+
+
 def resolve_fleet_model_policy(
     roster: Roster,
     *,
@@ -420,12 +438,15 @@ def _resolve_versioned(
             elif cleaned_override is not None and seat == worker and cleaned_override != policy_model:
                 outcome = "mismatch"
                 detail = f"--model {cleaned_override!r} does not match Hub model {policy_model!r}"
+                detail += _set_remediation_detail(row, revision, fallback_seat=seat)
             elif not isinstance(policy_reasoning, str) or not policy_reasoning:
                 outcome = "binding-missing"
                 detail = "registry entry is missing exact reasoning"
+                detail += _set_remediation_detail(row, revision, fallback_seat=seat)
             elif binding is None or not isinstance(binding.get("instance_id"), str) or not binding["instance_id"]:
                 outcome = "binding-missing"
                 detail = "registry entry is missing consumer binding"
+                detail += _set_remediation_detail(row, revision, fallback_seat=seat)
             elif row.get("enabled") is not True:
                 outcome = "disabled"
                 detail = "registry entry is disabled"

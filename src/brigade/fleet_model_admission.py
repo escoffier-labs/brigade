@@ -54,6 +54,7 @@ _SAFE_ADMISSION_KEYS = (
     "expires_at",
     "error",
     "reason",
+    "remediation",
 )
 _SUCCESS_ADMISSION_KEYS = (
     "schema",
@@ -669,6 +670,17 @@ def _resolve_from_roster(
         "reasoning": None if match is None else match.get("reasoning"),
         "expires_at": roster.get("expires_at"),
     }
+    if reason == "binding-missing" and isinstance(match, dict):
+        remediation = _set_command_remediation(
+            provider=str(match.get("provider") or ""),
+            model=str(match.get("model") or ""),
+            seat=str(seat_name),
+            reasoning=match.get("reasoning"),
+            brigade_cli=_brigade_cli_from_row(match),
+            revision=roster.get("revision"),
+        )
+        payload["error"] = f"{reason}\n{remediation}"
+        payload["remediation"] = remediation
     return _fail(reason, 3, payload)
 
 
@@ -1241,15 +1253,57 @@ def _reconcile_findings(
     return findings
 
 
+def _set_command_remediation(
+    *,
+    provider: str,
+    model: str,
+    seat: str,
+    reasoning: str | None,
+    brigade_cli: str | None,
+    revision: object,
+) -> str:
+    """Human-readable 'brigade fleet models set' command for a seat row."""
+    rev = revision if isinstance(revision, int) else "N"
+    reason = reasoning if isinstance(reasoning, str) and reasoning else "none"
+    cli = brigade_cli if isinstance(brigade_cli, str) and brigade_cli else ""
+    return (
+        f"bind it with: brigade fleet models set {provider} {model} {seat} --enable "
+        f"--reasoning {reason} --brigade-cli {cli} --expect-revision {rev}\n"
+        f"see current rows: brigade fleet models list --seat {seat}"
+    )
+
+
+def _brigade_cli_from_row(row: Mapping[str, Any]) -> str | None:
+    """Return the brigade-run CLI binding from a versioned roster seat row."""
+    bindings = row.get("bindings")
+    if not isinstance(bindings, dict):
+        return None
+    brigade = bindings.get("brigade")
+    if not isinstance(brigade, dict):
+        return None
+    cli = brigade.get("cli")
+    return cli if isinstance(cli, str) and cli else None
+
+
 def _empty_binding_remediation(seat: Mapping[str, Any], roster: Mapping[str, Any]) -> str:
     revision = roster.get("revision") or roster.get("roster_revision") or "N"
     name = seat.get("seat") or "SEAT"
     provider = seat.get("provider") or "provider"
     model = seat.get("model") or "model"
-    return (
-        f"brigade fleet models set {provider} {model} {name} --enable "
-        f"--reasoning <reasoning|none> --brigade-cli <cli> --t3-instance-id <id> "
-        f"--expect-revision {revision}"
+    reasoning = seat.get("reasoning")
+    brigade_cli = None
+    bindings = seat.get("bindings")
+    if isinstance(bindings, dict):
+        brigade = bindings.get("brigade")
+        if isinstance(brigade, dict):
+            brigade_cli = brigade.get("cli")
+    return _set_command_remediation(
+        provider=str(provider),
+        model=str(model),
+        seat=str(name),
+        reasoning=reasoning if isinstance(reasoning, str) and reasoning else None,
+        brigade_cli=brigade_cli if isinstance(brigade_cli, str) and brigade_cli else None,
+        revision=revision,
     )
 
 
