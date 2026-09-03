@@ -86,7 +86,9 @@ def dispatch(args) -> int:
     from .. import receipts_cmd
 
     if args.receipts_command == "verify":
-        return receipts_cmd.verify(target=args.target, json_output=args.json)
+        from .. import approval
+
+        return approval.verify_receipts_with_approvals(target=args.target, json_output=args.json)
     if args.receipts_command == "keygen":
         return receipts_cmd.keygen(target=args.target, force=args.force)
     if args.receipts_command == "export" and args.receipts_export_command == "attestation":

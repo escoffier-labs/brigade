@@ -89,6 +89,19 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
     "approval.rejected": frozenset({"approval_id", "decided_at", "decision_state"}),
     "approval.held": frozenset({"approval_id", "decided_at", "decision_state"}),
     "approval.consumed": frozenset({"approval_id", "consuming_run_id"}),
+    "approval": frozenset(
+        {
+            "decision",
+            "scope",
+            "approver_principal",
+            "approver_keyid",
+            "subject_tree",
+            "nonce",
+            "expires_at",
+            "statement_sha256",
+            "attestation_path",
+        }
+    ),
     "run.recovery.started": frozenset({"detail"}),
     "run.recovery.completed": frozenset({"detail"}),
     "run.completed": frozenset({"status", "detail"}),

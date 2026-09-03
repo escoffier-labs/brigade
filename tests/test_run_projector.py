@@ -551,7 +551,7 @@ def test_dataclasses_replace_mutation_of_typed_run_event_raises_event_chain_erro
 
 def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     base = _full_base_snapshot()
-    assert len(PRESERVED_FIELDS) == 63
+    assert len(PRESERVED_FIELDS) == 66
     assert DERIVED_FIELDS == {
         "status",
         "projector_version",
@@ -707,14 +707,14 @@ def test_projector_defaults_missing_kind_to_work() -> None:
     assert projected["kind"] == "work"
 
 
-def test_projector_version_is_six_and_replaces_stale_v5():
+def test_projector_version_is_seven_and_replaces_stale_v6():
     base = _minimal_base_snapshot()
-    base["projector_version"] = 5
+    base["projector_version"] = 6
 
     projection = project_run_snapshot(base, [], journal_present=False)
 
-    assert PROJECTOR_VERSION == 6
-    assert projection.snapshot["projector_version"] == 6
+    assert PROJECTOR_VERSION == 7
+    assert projection.snapshot["projector_version"] == 7
     assert projection.snapshot["kind"] == "work"
 
 
