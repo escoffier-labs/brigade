@@ -696,9 +696,12 @@ def _approval_state_drift(
             "decision": last_approval.payload.get("decision"),
             "scope": last_approval.payload.get("scope"),
             "approver_principal": last_approval.payload.get("approver_principal"),
+            "approver_keyid": last_approval.payload.get("approver_keyid"),
+            "subject_tree": last_approval.payload.get("subject_tree"),
             "expires_at": last_approval.payload.get("expires_at"),
             "nonce": last_approval.payload.get("nonce"),
             "statement_sha256": last_approval.payload.get("statement_sha256"),
+            "attestation_path": last_approval.payload.get("attestation_path"),
         }
         observed = {key: approval.get(key) for key in expected}
         if expected != observed:

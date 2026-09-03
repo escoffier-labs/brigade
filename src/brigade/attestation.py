@@ -283,7 +283,7 @@ def find_principals(
 
 
 def _compute_receipt_sha256(receipt: Mapping[str, Any]) -> str:
-    return localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    return localio.canonical_json_digest(receipt, exclude_keys={"digests", "path"})
 
 
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -426,11 +426,15 @@ def sign_pae(
     if not key_path.is_file():
         raise FileNotFoundError(f"signing key not found: {key_path}")
 
-    res = subprocess.run(
-        [binary, "-Y", "sign", "-f", str(key_path), "-n", namespace],
-        input=pae,
-        capture_output=True,
-    )
+    try:
+        res = subprocess.run(
+            [binary, "-Y", "sign", "-f", str(key_path), "-n", namespace],
+            input=pae,
+            capture_output=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AttestationError("ssh-keygen -Y sign timed out after 30 seconds") from exc
     if res.returncode != 0:
         err = res.stderr.decode("utf-8", errors="replace").strip()
         raise AttestationError(f"ssh-keygen -Y sign failed (code {res.returncode}): {err}")

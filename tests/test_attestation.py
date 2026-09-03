@@ -532,6 +532,48 @@ def test_cli_export_attestation_run_id_latest(tmp_path):
     assert envelope["payloadType"] == attestation.DSSE_PAYLOAD_TYPE
 
 
+def test_cli_export_without_receipt_digest_verifies_against_target(tmp_path, capsys):
+    key_path, _signers = attestation.keygen(tmp_path, principal="alice-signer")
+    receipt = _sample_receipt(tmp_path)
+    receipt.pop("digests")
+    receipt_path = Path(receipt["path"]) / "receipt.json"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    disk_receipt = dict(receipt)
+    disk_receipt.pop("path")
+    receipt_path.write_text(json.dumps(disk_receipt), encoding="utf-8")
+
+    run_id = receipt["run_id"]
+    assert cli.main(["receipts", "export", "attestation", "--target", str(tmp_path), "--run-id", run_id]) == 0
+    capsys.readouterr()
+
+    attestation_path = Path(receipt["path"]) / "attestation.json"
+    assert cli.main(["receipts", "verify-attestation", str(attestation_path), "--target", str(tmp_path)]) == 0
+    assert capsys.readouterr().out.strip() == attestation.STATUS_SIGNED_OK
+
+
+def test_cli_export_refuses_unsafe_run_id_before_path_resolution(tmp_path, capsys):
+    attestation.keygen(tmp_path, principal="alice-signer")
+
+    assert cli.main(["receipts", "export", "attestation", "--target", str(tmp_path), "--run-id", "../../etc"]) == 1
+    assert (
+        capsys.readouterr().err.strip()
+        == "error: run id must be 'latest' or contain only letters, digits, dot, underscore, or hyphen"
+    )
+    assert list((tmp_path / ".brigade" / "work" / "verify-runs").glob("**/*")) == []
+
+
+def test_sign_pae_converts_ssh_keygen_timeout_to_attestation_error(tmp_path, monkeypatch):
+    key_path = tmp_path / "signing-key"
+    key_path.write_text("placeholder", encoding="utf-8")
+
+    def _timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(attestation.subprocess, "run", _timeout)
+    with pytest.raises(attestation.AttestationError, match="timed out"):
+        attestation.sign_pae(b"payload", key_path)
+
+
 def test_cli_verify_attestation_with_revoked_keys_fails(tmp_path, capsys):
     key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)

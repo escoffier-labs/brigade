@@ -34,6 +34,12 @@ JSON Schema files.
    per line).
 5. **Readers** must accept records **without** `schema_version` (pre-#506 storage).
 
+## `brigade.run_event.v1`: `schema_version: 2`
+
+Lifecycle journals that contain `approval`, `run.ship`, or `run.merge` events
+use schema version 2. Readers older than version 2 refuse these events with
+`unknown event_type` rather than replaying them under an older contract.
+
 ---
 
 ## `brigade.work_verify_receipt`: `schema_version: 2`

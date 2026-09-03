@@ -400,6 +400,20 @@ def test_runs_show_prints_the_approval_projection(tmp_path: Path, capsys: pytest
     assert "approval sod: PASSED" in shown
 
 
+def test_run_audit_detects_approval_keyid_projection_drift(tmp_path: Path):
+    target, key, _signers = _workspace(tmp_path)
+    assert _approve(target, key) == 0
+    run_dir = target / ".brigade" / "runs" / RUN_ID
+    run_meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    run_meta["approval"]["approver_keyid"] = "SHA256:rewritten"
+    _write_json(run_dir / "run.json", run_meta)
+
+    report = run_audit.audit_run(run_dir)
+    assert report.result == run_audit.RESULT_DIVERGE
+    assert report.first_divergence is not None
+    assert report.first_divergence.divergence_class == run_audit.CLASS_APPROVAL_STATE_DRIFT
+
+
 def test_requester_cannot_approve_their_own_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     target, key, _signers = _workspace(tmp_path, requester_principal="alice")
 
@@ -436,6 +450,43 @@ def test_forged_attestation_keyid_hint_does_not_hide_the_producer(tmp_path: Path
 
     assert _approve(target, key) == 3
     assert "approver-not-producer: failed" in capsys.readouterr().out
+
+
+def test_unverifiable_producer_attestation_fails_closed_at_approval(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    target, key, _signers = _workspace(tmp_path, producer_is_approver=True)
+    attestation_path = target / ".brigade" / "work" / "verify-runs" / VERIFY_ID / "attestation.json"
+    envelope = json.loads(attestation_path.read_text())
+    envelope["signatures"][0]["sig"] = "not a signature"
+    _write_json(attestation_path, envelope)
+
+    assert _approve(target, key) == 3
+    assert "producer-identity-unverifiable: failed" in capsys.readouterr().out
+
+
+def test_missing_producer_receipt_keeps_recorded_sod_violation(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    target, key, _signers = _workspace(tmp_path, producer_is_approver=True)
+    assert _approve(target, key) == 3
+    capsys.readouterr()
+
+    shutil.rmtree(target / ".brigade" / "work" / "verify-runs" / VERIFY_ID)
+
+    assert cli.main(["receipts", "verify", "--target", str(target)]) != 0
+    output = capsys.readouterr().out
+    assert "- SOD-VIOLATION" in output
+
+
+def test_revoked_approver_key_makes_approval_invalid(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    target, key, _signers = _workspace(tmp_path)
+    assert _approve(target, key) == 0
+    capsys.readouterr()
+
+    krl_path = target / ".brigade" / "attestation" / "revoked_keys"
+    subprocess.run(
+        ["ssh-keygen", "-k", "-f", str(krl_path), str(key.with_suffix(".pub"))], check=True, capture_output=True
+    )
+
+    assert cli.main(["receipts", "verify", "--target", str(target)]) != 0
+    assert "APPROVAL-INVALID" in capsys.readouterr().out
 
 
 def test_missing_signed_receipt_is_stale_but_extra_receipt_is_allowed(

@@ -71,6 +71,18 @@ class VerifyReceiptEvidence:
     producer_keyid_unavailable: bool = False
 
 
+@dataclass
+class ApprovalVerificationContext:
+    """Per-verification facts and cached receipt queries."""
+
+    target: Path
+    live_tree: str | None
+    live_tree_state: str
+    workspace_keyid: str | None
+    workspace_keyid_state: str
+    receipts: dict[tuple[str, str | None], list[VerifyReceiptEvidence]]
+
+
 @dataclass(frozen=True)
 class ApprovalVerification:
     run_id: str
@@ -163,25 +175,34 @@ def _read_journal_report(run_dir: Path) -> run_journal.JournalReport:
         raise ApprovalError("lifecycle journal is not readable") from exc
 
 
-def _attestation_keyid(path: Path) -> str | None:
+def _verification_context(target: Path) -> ApprovalVerificationContext:
+    live_tree = localio.tree_fingerprint(target)
     try:
-        envelope = _load_json_object(path, label="verify receipt attestation")
-    except ApprovalError:
-        return None
-    signatures = envelope.get("signatures")
-    if not isinstance(signatures, list) or len(signatures) != 1 or not isinstance(signatures[0], Mapping):
-        return None
-    signature = signatures[0].get("sig")
-    if not isinstance(signature, str):
-        return None
-    armored = attestation._decode_sig_armored(signature)
-    return attestation.extract_keyid_from_sshsig(armored) if armored is not None else None
+        workspace_key_path = attestation.resolve_signing_key_path(target)
+        workspace_keyid = attestation.get_key_fingerprint(workspace_key_path) if workspace_key_path.is_file() else None
+    except attestation.AttestationError:
+        workspace_keyid = None
+    return ApprovalVerificationContext(
+        target=target,
+        live_tree=live_tree,
+        live_tree_state="computed" if live_tree is not None else "unavailable",
+        workspace_keyid=workspace_keyid,
+        workspace_keyid_state="computed" if workspace_keyid is not None else "unavailable",
+        receipts={},
+    )
 
 
 def collect_verify_receipts(
-    target: Path, producer_run_id: str, *, tree_fingerprint: str | None = None
+    target: Path,
+    producer_run_id: str,
+    *,
+    tree_fingerprint: str | None = None,
+    context: ApprovalVerificationContext | None = None,
 ) -> list[VerifyReceiptEvidence]:
     """Collect receipt subjects attributed to one orchestration run."""
+    cache_key = (producer_run_id, tree_fingerprint)
+    if context is not None and cache_key in context.receipts:
+        return list(context.receipts[cache_key])
     root = target / ".brigade" / "work" / "verify-runs"
     evidence: list[VerifyReceiptEvidence] = []
     for receipt_path in sorted(root.glob("*/receipt.json")):
@@ -208,10 +229,13 @@ def collect_verify_receipts(
         if isinstance(hmac_keyid, str) and hmac_keyid:
             keyids.add(hmac_keyid)
         attestation_path = receipt_path.parent / "attestation.json"
-        ssh_keyid = _attestation_keyid(attestation_path)
-        attestation_unparseable = attestation_path.exists() and ssh_keyid is None
-        if ssh_keyid is not None:
-            keyids.add(ssh_keyid)
+        attestation_unparseable = False
+        if attestation_path.exists():
+            verified_attestation = attestation.verify_attestation(attestation_path, target=target)
+            if verified_attestation.status == attestation.STATUS_SIGNED_OK and verified_attestation.keyid:
+                keyids.add(verified_attestation.keyid)
+            else:
+                attestation_unparseable = True
         evidence.append(
             VerifyReceiptEvidence(
                 run_id=verify_run_id,
@@ -220,6 +244,8 @@ def collect_verify_receipts(
                 producer_keyid_unavailable=attestation_unparseable,
             )
         )
+    if context is not None:
+        context.receipts[cache_key] = list(evidence)
     return evidence
 
 
@@ -248,6 +274,8 @@ def evaluate_sod(
     receipts: Sequence[VerifyReceiptEvidence],
     events: Sequence[run_journal.RunEvent],
     now: datetime,
+    recorded_producer_keyids: set[str] | None = None,
+    context: ApprovalVerificationContext | None = None,
 ) -> dict[str, Any]:
     """Evaluate the five brigade.sod.v1 rules over recorded evidence."""
     predicate = statement.get("predicate")
@@ -269,13 +297,21 @@ def evaluate_sod(
         }
     )
     producer_keyids = {item for receipt in receipts for item in receipt.signing_keyids}
+    producer_keyids.update(recorded_producer_keyids or set())
+    unavailable_receipts = [receipt.run_id for receipt in receipts if receipt.producer_keyid_unavailable]
+    if unavailable_receipts:
+        checks.append(
+            {
+                "id": "producer-identity-unverifiable",
+                "status": "failed",
+                "detail": f"receipt {unavailable_receipts[0]}",
+            }
+        )
     checks.append(
         {
             "id": "approver-not-producer",
             "status": "passed"
-            if isinstance(keyid, str)
-            and keyid not in producer_keyids
-            and not any(item.producer_keyid_unavailable for item in receipts)
+            if isinstance(keyid, str) and keyid not in producer_keyids and not unavailable_receipts
             else "failed",
         }
     )
@@ -295,11 +331,7 @@ def evaluate_sod(
     else:
         checks.append({"id": "requester-unknown", "status": "passed"})
 
-    workspace_key_path = attestation.resolve_signing_key_path(target)
-    try:
-        workspace_keyid = attestation.get_key_fingerprint(workspace_key_path) if workspace_key_path.is_file() else None
-    except attestation.AttestationError:
-        workspace_keyid = None
+    workspace_keyid = context.workspace_keyid if context is not None else _verification_context(target).workspace_keyid
     checks.append(
         {
             "id": "approver-key-not-workspace-key",
@@ -357,6 +389,11 @@ def build_statement(
             "reasonCode": reason_code,
             "reason": reason,
             "policy": {"name": SOD_POLICY_NAME, "digest": {"sha256": SOD_POLICY_SHA256}},
+            "producers": [
+                {"receipt": receipt.run_id, "keyid": producer_keyid}
+                for receipt in receipts
+                for producer_keyid in sorted(receipt.signing_keyids)
+            ],
         },
     }
 
@@ -366,6 +403,7 @@ def _discover_principal(statement: dict[str, Any], key_path: Path, target: Path)
     result = attestation.verify_attestation(
         probe,
         allowed_signers_path=attestation.default_allowed_signers_path(target),
+        target=target,
         expected_predicate_type=HUMAN_APPROVAL_PREDICATE_TYPE,
     )
     if result.status != attestation.STATUS_SIGNED_OK or not result.principal:
@@ -466,6 +504,7 @@ def record_approval(
     signature_check = attestation.verify_attestation(
         envelope,
         allowed_signers_path=attestation.default_allowed_signers_path(target),
+        target=target,
         principal=resolved_principal,
         expected_predicate_type=HUMAN_APPROVAL_PREDICATE_TYPE,
     )
@@ -496,6 +535,7 @@ def record_approval(
             "expires_at": expires_at,
             "statement_sha256": statement_sha256,
             "attestation_path": relative_path.as_posix(),
+            "producer_keyids": sorted({keyid for receipt in receipts for keyid in receipt.signing_keyids}),
         },
         idempotency_key=f"approval:{nonce}",
         expected_previous_sequence=report.events[-1].sequence,
@@ -510,6 +550,9 @@ def record_approval(
         "expires_at": expires_at,
         "nonce": nonce,
         "statement_sha256": statement_sha256,
+        "approver_keyid": keyid,
+        "subject_tree": tree_fingerprint,
+        "attestation_path": relative_path.as_posix(),
         "sod": sod,
     }
     updated = dict(run_meta)
@@ -621,7 +664,29 @@ def _signed_subjects(statement: Mapping[str, Any]) -> tuple[str, set[tuple[str, 
     return (tree, receipts) if tree is not None else None
 
 
-def verify_run_approval(target: Path, run_dir: Path, *, now: datetime | None = None) -> ApprovalVerification:
+def _recorded_producer_keyids(predicate: Mapping[str, Any]) -> set[str] | None:
+    producers = predicate.get("producers")
+    if not isinstance(producers, list):
+        return set()
+    keyids: set[str] = set()
+    for producer in producers:
+        if not isinstance(producer, Mapping):
+            return None
+        receipt = producer.get("receipt")
+        keyid = producer.get("keyid")
+        if not isinstance(receipt, str) or not _RUN_ID_RE.fullmatch(receipt) or not isinstance(keyid, str) or not keyid:
+            return None
+        keyids.add(keyid)
+    return keyids
+
+
+def verify_run_approval(
+    target: Path,
+    run_dir: Path,
+    *,
+    now: datetime | None = None,
+    context: ApprovalVerificationContext | None = None,
+) -> ApprovalVerification:
     """Verify the latest signed approval event for one run directory."""
     run_id = run_dir.name
     try:
@@ -637,6 +702,7 @@ def verify_run_approval(target: Path, run_dir: Path, *, now: datetime | None = N
     if report.partial_tail is not None or report.chain_errors:
         return ApprovalVerification(run_id, "APPROVAL-INVALID", decision_value, None, prior_approvals=prior_approvals)
     try:
+        context = context or _verification_context(target)
         run_meta = _load_json_object(run_dir / "run.json", label="run.json")
         nonce = event.payload.get("nonce")
         rel = event.payload.get("attestation_path")
@@ -657,11 +723,14 @@ def verify_run_approval(target: Path, run_dir: Path, *, now: datetime | None = N
         policy = predicate.get("policy")
         if not isinstance(approver, Mapping) or not isinstance(run_ref, Mapping) or not isinstance(policy, Mapping):
             raise ApprovalError("approval predicate references are invalid")
+        recorded_producer_keyids = _recorded_producer_keyids(predicate)
+        if recorded_producer_keyids is None:
+            raise ApprovalError("approval producer identities are invalid")
         signed = _signed_subjects(statement)
         if signed is None:
             raise ApprovalError("approval subjects are invalid")
         approved_tree, signed_receipt_subjects = signed
-        live_tree = localio.tree_fingerprint(target)
+        live_tree = context.live_tree
         comparison_tree = live_tree if live_tree is not None else run_meta.get("tree_fingerprint")
         if not isinstance(comparison_tree, str) or not comparison_tree:
             raise ApprovalError("run.json has no final tree_fingerprint")
@@ -669,10 +738,11 @@ def verify_run_approval(target: Path, run_dir: Path, *, now: datetime | None = N
         signature = attestation.verify_attestation(
             envelope,
             allowed_signers_path=attestation.default_allowed_signers_path(target),
+            target=target,
             principal=principal if isinstance(principal, str) else None,
             expected_predicate_type=HUMAN_APPROVAL_PREDICATE_TYPE,
         )
-        receipts = collect_verify_receipts(target, run_id, tree_fingerprint=approved_tree)
+        receipts = collect_verify_receipts(target, run_id, tree_fingerprint=approved_tree, context=context)
         current_receipt_subjects = {(f"verify:{receipt.run_id}", receipt.receipt_sha256) for receipt in receipts}
         missing_subjects = signed_receipt_subjects - current_receipt_subjects
         signed_receipts = [
@@ -698,6 +768,7 @@ def verify_run_approval(target: Path, run_dir: Path, *, now: datetime | None = N
                 approver.get("keyid") == event.payload.get("approver_keyid"),
                 predicate.get("nonce") == nonce,
                 predicate.get("expiresAt") == event.payload.get("expires_at"),
+                event.payload.get("producer_keyids") == sorted(recorded_producer_keyids),
                 event.payload.get("subject_tree") == approved_tree,
                 hashlib.sha256(statement_bytes).hexdigest() == event.payload.get("statement_sha256"),
                 policy.get("name") == SOD_POLICY_NAME,
@@ -721,6 +792,8 @@ def verify_run_approval(target: Path, run_dir: Path, *, now: datetime | None = N
         receipts=signed_receipts,
         events=report.events,
         now=instant,
+        recorded_producer_keyids=recorded_producer_keyids,
+        context=context,
     )
     expires_at = _parse_timestamp(predicate.get("expiresAt"))
     stale = comparison_tree != approved_tree or bool(missing_subjects)
@@ -753,9 +826,10 @@ def verify_run_approval(target: Path, run_dir: Path, *, now: datetime | None = N
 def verify_approvals(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     runs_root = target / ".brigade" / "runs"
+    context = _verification_context(target)
     results = (
         [
-            verify_run_approval(target, run_dir).to_dict()
+            verify_run_approval(target, run_dir, context=context).to_dict()
             for run_dir in sorted(runs_root.iterdir())
             if run_dir.is_dir() and not run_dir.is_symlink() and (run_dir / "run.json").is_file()
         ]
