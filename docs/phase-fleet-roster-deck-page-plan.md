@@ -439,7 +439,7 @@ import pytest
 
 from brigade import fleet_hub, fleet_hub_roster_page
 
-TOKEN = "test-admin-token-roster"
+TOKEN = "test-admin-token-roster"  # content-guard: allow api-key-assignment
 NODE_A = "11111111-1111-4111-8111-111111111111"
 SEATS = {
     "agy_flash": {
@@ -465,8 +465,12 @@ SEATS = {
 def _hub(tmp_path, *, trust_tailscale: bool = False):
     db = tmp_path / "hub" / "fleet.db"
     server = fleet_hub.make_server(
-        "127.0.0.1", 0, db, TOKEN, trust_tailscale_identity=trust_tailscale
-    )  # content-guard: allow loopback-ipv4
+        "127.0.0.1",  # content-guard: allow loopback-ipv4
+        0,
+        db,
+        TOKEN,
+        trust_tailscale_identity=trust_tailscale,
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -1220,10 +1224,10 @@ def test_roster_post_rejects_role_on_seat_disabled_in_same_save(tmp_path):
         assert status == 422 and "no t3-fleet binding" in page
         # Notes still go through the secret regexes.
         form = _current_form(hub, cookie)
-        form["notes"] = "see /home/operator/roster.toml"
+        form["notes"] = "see keepass://roster for the real pins"
         status, _headers, page = _form(hub, form, cookie=cookie)
         assert status == 422 and "home paths" in page
-        assert "/home/operator" in page  # echoed back, escaped, so the operator can fix it
+        assert "keepass://roster" in page  # echoed back, escaped, so the operator can fix it
         assert _tables(db) == before
 ```
 
