@@ -10,6 +10,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/escoffier-labs/miseledger/internal/provenance"
 	"github.com/escoffier-labs/miseledger/internal/textnorm"
 )
 
@@ -69,23 +70,25 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 		metadataJSON string
 		text         string
 		ftsUpdated   bool
+		ftsRowID     int64
 		ftsBody      string
 	}
 	var matchedRows int
 	var bytesSaved int
 
-	offset := 0
+	lastID := ""
 	batchSize := 1000
 
 	for {
 		rows, err := db.Query(`
-			SELECT i.id, coalesce(i.text, ''), i.raw_json, i.metadata_json 
+			SELECT i.rowid, i.id, coalesce(i.text, ''), i.raw_json, i.metadata_json, coalesce(f.rowid, 0), coalesce(f.item_id, ''), coalesce(f.body, '') 
 			FROM items i
 			JOIN sources s ON i.source_id = s.id
-			WHERE s.kind = 'codex' AND i.metadata_json LIKE '%"arguments"%'
+			LEFT JOIN item_fts f ON f.rowid = i.rowid
+			WHERE s.kind = 'codex' AND i.metadata_json LIKE '%"arguments"%' AND i.id > ?
 			ORDER BY i.id
-			LIMIT ? OFFSET ?
-		`, batchSize, offset)
+			LIMIT ?
+		`, lastID, batchSize)
 		if err != nil {
 			return fatalf(errw, "migrate codex-arguments query: %s", err)
 		}
@@ -95,14 +98,18 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 
 		for rows.Next() {
 			hasRows = true
-			var id, text, raw, meta string
-			if err := rows.Scan(&id, &text, &raw, &meta); err != nil {
+			var itemRowID, ftsRowID int64
+			var id, text, raw, meta, ftsItemID, ftsBody string
+			if err := rows.Scan(&itemRowID, &id, &text, &raw, &meta, &ftsRowID, &ftsItemID, &ftsBody); err != nil {
 				rows.Close()
 				return fatalf(errw, "migrate codex-arguments scan: %s", err)
 			}
+			lastID = id
 
 			var metaObj map[string]any
-			if err := json.Unmarshal([]byte(meta), &metaObj); err != nil {
+			decMeta := json.NewDecoder(bytes.NewReader([]byte(meta)))
+			decMeta.UseNumber()
+			if err := decMeta.Decode(&metaObj); err != nil {
 				continue
 			}
 
@@ -126,18 +133,11 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 			metaObj["arguments"] = truncatedArgs
 			metaObj["arguments_digest"] = digest
 
-			newMetaBytes, err := json.Marshal(metaObj)
-			if err != nil {
-				rows.Close()
-				return fatalf(errw, "migrate codex-arguments marshal metadata: %s", err)
-			}
-			newMeta := string(newMetaBytes)
-
 			// Parse raw_json with json.Decoder and UseNumber to preserve precise float types and integers
 			var rawObj map[string]any
-			dec := json.NewDecoder(bytes.NewReader([]byte(raw)))
-			dec.UseNumber()
-			if err := dec.Decode(&rawObj); err != nil {
+			decRaw := json.NewDecoder(bytes.NewReader([]byte(raw)))
+			decRaw.UseNumber()
+			if err := decRaw.Decode(&rawObj); err != nil {
 				continue
 			}
 
@@ -164,11 +164,54 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 				newText = strings.Replace(text, argsStr, truncatedArgs, 1)
 			}
 
-			var ftsBody string
+			if prov, ok := metaObj["provenance"].(map[string]any); ok {
+				hashes, ok := prov["hashes"].(map[string]any)
+				if !ok {
+					hashes = make(map[string]any)
+					prov["hashes"] = hashes
+				}
+				hashes["content"] = provenance.ContentSHA256(newText)
+				if _, ok := hashes["content_scope"]; !ok {
+					hashes["content_scope"] = "item.text.utf8.v1"
+				}
+				if _, ok := hashes["content_algorithm"]; !ok {
+					hashes["content_algorithm"] = provenance.HashAlgorithm
+				}
+				hashes["raw"] = provenance.SHA256Bytes([]byte(newRaw))
+				if _, ok := hashes["raw_scope"]; !ok {
+					hashes["raw_scope"] = provenance.RawScope
+				}
+				if _, ok := hashes["raw_algorithm"]; !ok {
+					hashes["raw_algorithm"] = provenance.HashAlgorithm
+				}
+			}
+
+			newMetaBytes, err := json.Marshal(metaObj)
+			if err != nil {
+				rows.Close()
+				return fatalf(errw, "migrate codex-arguments marshal metadata: %s", err)
+			}
+			newMeta := string(newMetaBytes)
+
+			targetFTSRowID := int64(0)
+			if ftsRowID > 0 && ftsItemID == id {
+				targetFTSRowID = ftsRowID
+			} else {
+				var qRowID int64
+				var qBody string
+				err := db.QueryRow(`SELECT rowid, body FROM item_fts WHERE item_id = ?`, id).Scan(&qRowID, &qBody)
+				if err == nil {
+					targetFTSRowID = qRowID
+					ftsBody = qBody
+				} else if err != sql.ErrNoRows {
+					rows.Close()
+					return fatalf(errw, "migrate codex-arguments fts query: %s", err)
+				}
+			}
+
 			ftsUpdated := false
 			newFtsBody := ""
-			err = db.QueryRow(`SELECT body FROM item_fts WHERE item_id = ?`, id).Scan(&ftsBody)
-			if err == nil {
+			if targetFTSRowID > 0 {
 				newFtsBody = ftsBody
 				normOldText := textnorm.Normalize(text)
 				normNewText := textnorm.Normalize(newText)
@@ -185,9 +228,6 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 				if newFtsBody != ftsBody {
 					ftsUpdated = true
 				}
-			} else if err != sql.ErrNoRows {
-				rows.Close()
-				return fatalf(errw, "migrate codex-arguments fts query: %s", err)
 			}
 
 			saved := len(raw) + len(meta) + len(text) - len(newRaw) - len(newMeta) - len(newText)
@@ -200,6 +240,7 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 				metadataJSON: newMeta,
 				text:         newText,
 				ftsUpdated:   ftsUpdated,
+				ftsRowID:     targetFTSRowID,
 				ftsBody:      newFtsBody,
 			})
 		}
@@ -226,7 +267,7 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 				return fatalf(errw, "migrate codex-arguments stmt prepare: %s", err)
 			}
 
-			stmtFTS, err := tx.Prepare(`UPDATE item_fts SET body = ? WHERE item_id = ?`)
+			stmtFTS, err := tx.Prepare(`UPDATE item_fts SET body = ? WHERE rowid = ?`)
 			if err != nil {
 				stmtItems.Close()
 				tx.Rollback()
@@ -241,8 +282,8 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 					tx.Rollback()
 					return fatalf(errw, "migrate codex-arguments stmt exec: %s", err)
 				}
-				if upd.ftsUpdated {
-					_, err := stmtFTS.Exec(upd.ftsBody, upd.id)
+				if upd.ftsUpdated && upd.ftsRowID > 0 {
+					_, err := stmtFTS.Exec(upd.ftsBody, upd.ftsRowID)
 					if err != nil {
 						stmtItems.Close()
 						stmtFTS.Close()
@@ -257,8 +298,6 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 				return fatalf(errw, "migrate codex-arguments tx commit: %s", err)
 			}
 		}
-
-		offset += batchSize
 	}
 
 	if isJSON {
