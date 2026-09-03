@@ -278,8 +278,9 @@ def register(sub: argparse._SubParsersAction) -> None:
             "Release the hub claim on TARGET, a claim key as listed by this command (a claim left behind by a "
             "crashed run). Refused unless this node holds it and the run that took it is verifiably dead: the "
             "claim's recorded run directory resolves to a workspace on this machine whose run lock has no live "
-            "owner (with --path, that workspace must be the one given). See --force. With --holder, release "
-            "the exact session that acquired the row instead of the operator recovery path."
+            "owner (with --path, that workspace must be the one given). When the row records no run directory, "
+            "--path proves deadness via the pointed-at workspace's own run.lock. See --force. With --holder, "
+            "release the exact session that acquired the row instead of the operator recovery path."
         ),
     )
     p_claims.add_argument("--harness", default=None, help="Opaque harness label for --acquire or --outcome.")
@@ -303,8 +304,9 @@ def register(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help=(
             "With --release: TARGET is a workspace directory, not a key; its name is the claim key, its node "
-            "identity is used, and the claim must have been taken by a run in that workspace. The directory "
-            "must be the workspace itself, not a directory inside one."
+            "identity is used, and the claim must have been taken by a run in that workspace when the row "
+            "records a run directory. When the row records none, deadness is proved via this workspace's own "
+            "run.lock. The directory must be the workspace itself, not a directory inside one."
         ),
     )
     p_claims.add_argument(
@@ -800,11 +802,17 @@ def _dispatch_preference_pull(args: argparse.Namespace) -> int:
 
 
 def _workspace_from_run_dir(raw_run_dir: str | None) -> tuple[Path | None, str]:
-    """(workspace, reason) for a claim's recorded run directory: the workspace
-    it belongs to when that directory is on this machine — ``run.json``'s
-    ``lock_workspace`` / ``cwd``, else the ``<workspace>/.brigade/runs/<id>``
-    layout — or ``None`` and why not."""
+    """(workspace, reason) for a claim's recorded run directory.
+
+    Resolution is ``runguard.resolve_run_lock_workspace`` so this CLI path
+    cannot drift from every other run-lock caller (#1159). Existence on
+    this machine is CLI-only: a missing run directory or a resolved path
+    that is not a directory is ``None`` and a refusal reason, never a
+    guessed ancestor.
+    """
     import json as _json
+
+    from .. import runguard
 
     if not raw_run_dir:
         return None, "the claim records no run directory"
@@ -815,13 +823,11 @@ def _workspace_from_run_dir(raw_run_dir: str | None) -> tuple[Path | None, str]:
         meta = _json.loads((run_dir / "run.json").read_text())
     except (OSError, ValueError):
         meta = None
-    if isinstance(meta, dict):
-        for key in ("lock_workspace", "cwd"):
-            value = meta.get(key)
-            if isinstance(value, str) and value and Path(value).expanduser().is_dir():
-                return Path(value).expanduser().resolve(), "ok"
-    if run_dir.parent.name == "runs" and run_dir.parent.parent.name == ".brigade":
-        return run_dir.parent.parent.parent.resolve(), "ok"
+    resolved = runguard.resolve_run_lock_workspace(meta if isinstance(meta, dict) else {}, run_dir)
+    if resolved is not None and resolved.is_dir():
+        return resolved, "ok"
+    if resolved is not None:
+        return None, f"its recorded workspace {resolved} does not exist on this machine"
     return None, (
         f"its run directory {raw_run_dir} has no readable run.json naming its workspace and is not under a "
         "<workspace>/.brigade/runs layout"
@@ -836,7 +842,7 @@ def _print_claim_failure(decision, *, what: str) -> bool:
     if decision.reason == "no-identity":
         print(
             f"error: no usable fleet node identity ({decision.detail}); initialize this machine's "
-            "identity with `brigade node --machine`, or pass --node",
+            "identity with `brigade node --machine`",
             file=sys.stderr,
         )
         return True
@@ -865,7 +871,9 @@ def _release_claim(raw_target: str, *, as_path: bool, node_override: str | None,
     same proof: this node must own the claim, its recorded run directory
     must resolve to a workspace on this machine (with ``--path``, the one
     given), and that workspace's run lock must have no live owner; the
-    release is then fenced to the inspected row."""
+    release is then fenced to the inspected row. When the row records no
+    run directory, ``--path`` proves deadness via the pointed-at
+    workspace's own run.lock (#1160)."""
     import json as _json
 
     from .. import fleet_client, runguard
@@ -904,6 +912,15 @@ def _release_claim(raw_target: str, *, as_path: bool, node_override: str | None,
         )
         return 1
     node_id = node_override or local_node
+    if not fleet_client._node_id_is_claimable(node_id):
+        # ``--node`` cannot repair a missing local identity: any other value
+        # differs from ``unknown`` and is refused without ``--force`` (#1160).
+        print(
+            f"error: no usable fleet node identity ({node_id}); initialize this machine's "
+            "identity with `brigade node --machine`",
+            file=sys.stderr,
+        )
+        return 1
     inspected_acquired_at: str | None = None
     if not force:
         probe = fleet_client.inspect_claim(target, node_id=node_id)
@@ -936,18 +953,31 @@ def _release_claim(raw_target: str, *, as_path: bool, node_override: str | None,
                     file=sys.stderr,
                 )
             return 1
-        run_workspace, why = _workspace_from_run_dir(probe.lock_run_dir)
-        if run_workspace is None:
+        if probe.lock_run_dir:
+            run_workspace, why = _workspace_from_run_dir(probe.lock_run_dir)
+            if run_workspace is None:
+                print(
+                    f"error: cannot verify that the run holding {target!r} is dead ({why}); "
+                    "pass --force to release it anyway",
+                    file=sys.stderr,
+                )
+                return 1
+            if workspace is not None and run_workspace != workspace:
+                print(
+                    f"error: the claim on {target!r} was taken by a run in {run_workspace}, not {workspace}; "
+                    f"release it from that workspace (--release {run_workspace} --path) or pass --force",
+                    file=sys.stderr,
+                )
+                return 1
+        elif workspace is not None:
+            # --path: the operator pointed at the workspace. When the row
+            # recorded no run_dir (--no-artifacts, or a pre-lease claim),
+            # prove deadness via that workspace's own run.lock (#1160).
+            run_workspace = workspace
+        else:
             print(
-                f"error: cannot verify that the run holding {target!r} is dead ({why}); "
-                "pass --force to release it anyway",
-                file=sys.stderr,
-            )
-            return 1
-        if workspace is not None and run_workspace != workspace:
-            print(
-                f"error: the claim on {target!r} was taken by a run in {run_workspace}, not {workspace}; "
-                f"release it from that workspace (--release {run_workspace} --path) or pass --force",
+                f"error: cannot verify that the run holding {target!r} is dead "
+                "(the claim records no run directory); pass --force to release it anyway",
                 file=sys.stderr,
             )
             return 1

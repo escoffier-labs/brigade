@@ -11,6 +11,7 @@ claim row that run took under its ``run.lock`` lease — and ``brigade run
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import sqlite3
@@ -292,6 +293,44 @@ class TestHubScopes:
         no_fence.pop("holder")
         assert _post(url, token, no_fence)[0] == 400
 
+    def test_token_less_release_409_uses_in_transaction_prior(self, tmp_path, monkeypatch):
+        """A fenced-out token-less release's 409 owner is the row seen
+        inside the write transaction, not a row that appears after commit.
+
+        #1160 item 2: the failure branch used to re-read after ``commit()``,
+        so a concurrent replace could make the payload describe a different
+        owner than the one that caused the refusal.
+        """
+        db = tmp_path / "hub.db"
+        conn = fleet_hub.init_db(db)
+        try:
+            status, granted = fleet_hub.handle_claim(conn, _claim(holder="h1", conductor="chef"))
+            assert status == 200 and granted["granted"] is True
+            stale = "1999-01-01T00:00:00+00:00"
+            real_fetch = fleet_hub._fetch_claim
+            fetches: list = []
+
+            def fetch_then_lie(c: sqlite3.Connection, target: str):
+                row = real_fetch(c, target)
+                fetches.append(row)
+                # A post-commit re-read that sees a replaced owner. The
+                # in-transaction ``prior`` (first fetch) stays NODE_A/chef.
+                if len(fetches) >= 2 and row is not None:
+                    return (target, NODE_B, "intruder", *row[3:])
+                return row
+
+            monkeypatch.setattr(fleet_hub, "_fetch_claim", fetch_then_lie)
+            body = _claim("release", scope="node", acquired_at=stale)
+            body.pop("holder")
+            status, payload = fleet_hub.handle_claim(conn, body)
+            assert status == 409 and payload["released"] is False
+            assert payload["owner"]["owner_node"] == NODE_A
+            assert payload["owner"]["owner_conductor"] == "chef"
+            assert "re-acquired" in payload["error"]
+            assert f"now acquired {payload['owner']['acquired_at']}" in payload["error"]
+        finally:
+            conn.close()
+
     def test_v2_claim_rows_survive_the_lease_column_upgrade(self, tmp_path):
         db = tmp_path / "hub.db"
         conn = sqlite3.connect(str(db))
@@ -320,9 +359,11 @@ class TestHubScopes:
             conn.close()
 
     def test_lease_column_upgrade_is_safe_under_concurrent_init(self, tmp_path):
-        """init_db runs per request on a threading server: many first-touch
-        connections against a v2 database (one lease column already present,
-        as a half-finished upgrade would leave it) must all succeed.
+        """Many first-touch ``init_db`` callers against a v2 database (one
+        lease column already present, as a half-finished upgrade would
+        leave it) must all succeed. Request handlers no longer call
+        ``init_db`` (#1161); this still covers tools, tests, and a
+        cross-process first-touch storm (#1159).
 
         Bounded ``database is locked`` is retried with the same delays as
         ``_init_schema``; any other error still fails the test.
@@ -678,6 +719,53 @@ class TestReleaseCli:
         assert json.loads(capsys.readouterr().out)["forced"] is True
         assert fleet_client.fetch_claims() == []
 
+    def test_release_path_proves_deadness_when_claim_has_no_run_dir(self, hub, tmp_path, monkeypatch, capsys):
+        """#1160 item 1: a claim with no recorded ``lock_run_dir``
+        (``--no-artifacts``, or a row predating the lease columns) can be
+        released without ``--force`` when ``--path`` points at the workspace
+        whose own ``run.lock`` is dead.
+        """
+        from brigade import cli, runguard
+
+        url, token, _db = hub
+        _env(monkeypatch, url, token)
+        _bound_find_workspace_to_tmp(monkeypatch, tmp_path)
+        ws = tmp_path / "api"
+        ws.mkdir()
+        _post(url, token, _claim(target="api", holder="bare"))
+        inspect = _claim("inspect", target="api")
+        inspect.pop("holder")
+        probed = _post(url, token, inspect)[1]
+        assert probed["owned"] is True
+        assert probed.get("lock_run_dir") in (None, "")
+        lock = runguard.lock_path(ws)
+        lock.mkdir(parents=True)
+        (lock / "pid").write_text(f"{os.getpid()}\n")
+        assert cli.main(["fleet", "claims", "--release", str(ws), "--path"]) == 1
+        err = capsys.readouterr().err
+        assert "run owner is still alive" in err and str(ws) in err and "--force" in err
+        assert [c["target"] for c in fleet_client.fetch_claims()] == ["api"]
+        (lock / "pid").write_text(f"{DEAD_PID}\n")
+        assert cli.main(["fleet", "claims", "--release", str(ws), "--path", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["released"] is True and payload["forced"] is False
+        assert payload["target"] == "api"
+        assert fleet_client.fetch_claims() == []
+        # Absent lock is also dead enough: no --force required.
+        _post(url, token, _claim(target="api", holder="bare2"))
+        import shutil
+
+        shutil.rmtree(lock)
+        assert cli.main(["fleet", "claims", "--release", str(ws), "--path"]) == 0
+        assert "released claim on 'api'" in capsys.readouterr().out
+        assert fleet_client.fetch_claims() == []
+        # Bare-key mode still cannot prove a NULL run_dir row.
+        _post(url, token, _claim(target="api", holder="bare3"))
+        assert cli.main(["fleet", "claims", "--release", "api"]) == 1
+        err = capsys.readouterr().err
+        assert "cannot verify" in err and "records no run directory" in err and "--force" in err
+        assert [c["target"] for c in fleet_client.fetch_claims()] == ["api"]
+
     def test_release_path_uses_the_workspace_itself(self, hub, tmp_path, monkeypatch, capsys):
         from brigade import cli, node as node_mod
 
@@ -751,7 +839,10 @@ class TestReleaseCli:
             assert "require --release" in capsys.readouterr().err
         monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: "unknown")
         assert cli.main(["fleet", "claims", "--release", "repo-a"]) == 1
-        assert "no usable fleet node identity" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "no usable fleet node identity" in err
+        assert "brigade node --machine" in err
+        assert "or pass --node" not in err
         monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
         monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: NODE_A)
         assert cli.main(["fleet", "claims", "--release", "repo-a"]) == 1
@@ -1090,3 +1181,99 @@ def test_run_lock_reports_reconciled_dead_owner_and_its_own_lease(tmp_path):
         with runguard.run_lock(repo, on_reconcile=seen.append):
             pass  # pragma: no cover - never entered
     assert seen == []
+
+
+class TestWorkspaceFromRunDir:
+    """#1159: ``_workspace_from_run_dir`` wraps ``resolve_run_lock_workspace``
+    and keeps CLI-only refusal reasons when a workspace is missing here."""
+
+    def test_source_calls_runguard_helper_instead_of_a_local_parser(self):
+        from brigade.cli import fleet as fleet_cli
+
+        source = inspect.getsource(fleet_cli._workspace_from_run_dir)
+        assert "resolve_run_lock_workspace" in source
+        assert 'for key in ("lock_workspace", "cwd")' not in source
+
+    def test_delegates_resolution_to_runguard(self, tmp_path, monkeypatch):
+        from brigade import runguard
+        from brigade.cli import fleet as fleet_cli
+
+        workspace = tmp_path / "ws"
+        run_dir = workspace / ".brigade" / "runs" / "r1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text(json.dumps({"lock_workspace": str(workspace), "status": "completed"}))
+        seen: list[tuple[dict[str, object], Path]] = []
+        real = runguard.resolve_run_lock_workspace
+
+        def spy(meta: dict[str, object], path: Path, **kwargs: object) -> Path | None:
+            seen.append((dict(meta), Path(path)))
+            assert kwargs == {}
+            return real(meta, path)
+
+        monkeypatch.setattr(runguard, "resolve_run_lock_workspace", spy)
+        resolved, why = fleet_cli._workspace_from_run_dir(str(run_dir))
+        assert resolved == workspace.resolve() and why == "ok"
+        assert len(seen) == 1
+        assert seen[0][0]["lock_workspace"] == str(workspace)
+        assert seen[0][1] == run_dir
+
+    def test_follows_runguard_precedence_over_cwd(self, tmp_path):
+        from brigade.cli import fleet as fleet_cli
+
+        canonical = tmp_path / "canonical"
+        worktree = tmp_path / "worktree"
+        canonical.mkdir()
+        worktree.mkdir()
+        run_dir = worktree / ".brigade" / "runs" / "r1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text(json.dumps({"lock_workspace": str(canonical), "cwd": str(worktree)}))
+        resolved, why = fleet_cli._workspace_from_run_dir(str(run_dir))
+        assert resolved == canonical.resolve() and why == "ok"
+
+    def test_layout_without_run_json_still_resolves(self, tmp_path):
+        from brigade.cli import fleet as fleet_cli
+
+        workspace = tmp_path / "ws"
+        run_dir = workspace / ".brigade" / "runs" / "r1"
+        run_dir.mkdir(parents=True)
+        resolved, why = fleet_cli._workspace_from_run_dir(str(run_dir))
+        assert resolved == workspace.resolve() and why == "ok"
+
+    def test_missing_run_dir_keeps_cli_refusal_and_does_not_call_runguard(self, monkeypatch):
+        from brigade import runguard
+        from brigade.cli import fleet as fleet_cli
+
+        def boom(*_args: object, **_kwargs: object) -> Path | None:
+            raise AssertionError("resolve_run_lock_workspace must not run before the run dir exists")
+
+        monkeypatch.setattr(runguard, "resolve_run_lock_workspace", boom)
+        resolved, why = fleet_cli._workspace_from_run_dir(None)
+        assert resolved is None and why == "the claim records no run directory"
+        resolved, why = fleet_cli._workspace_from_run_dir("/nonexistent/.brigade/runs/x")
+        assert resolved is None
+        assert why == "its run directory /nonexistent/.brigade/runs/x does not exist on this machine"
+
+    def test_refuses_when_recorded_workspace_is_missing_on_this_machine(self, tmp_path):
+        from brigade.cli import fleet as fleet_cli
+
+        missing = tmp_path / "gone"
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        run_dir = worktree / ".brigade" / "runs" / "r1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text(json.dumps({"lock_workspace": str(missing), "cwd": str(worktree)}))
+        resolved, why = fleet_cli._workspace_from_run_dir(str(run_dir))
+        assert resolved is None
+        assert str(missing.resolve()) in why
+        assert "does not exist on this machine" in why
+
+    def test_unreadable_run_json_off_layout_keeps_cli_refusal(self, tmp_path):
+        from brigade.cli import fleet as fleet_cli
+
+        run_dir = tmp_path / "orphan" / "r1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text("{not-json")
+        resolved, why = fleet_cli._workspace_from_run_dir(str(run_dir))
+        assert resolved is None
+        assert "has no readable run.json naming its workspace" in why
+        assert "<workspace>/.brigade/runs layout" in why

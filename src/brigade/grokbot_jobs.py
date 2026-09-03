@@ -65,6 +65,13 @@ REQUIRED_ENVELOPE_KEYS = frozenset(
         "timeout_seconds",
     }
 )
+OPTIONAL_ENVELOPE_KEYS = frozenset({"queue_ttl_seconds"})
+# ``timeout_seconds`` is the execution budget, counted from ``claimed_at``.
+# ``queue_ttl_seconds`` bounds the wait before a claim, so a job that queued
+# behind other work is not charged for that wait (#1403).
+DEFAULT_QUEUE_TTL_SECONDS = 86400
+QUEUE_TTL_SECONDS_MIN = 60
+QUEUE_TTL_SECONDS_MAX = 604800
 SENSITIVE_KEY_TOKENS = (
     "token",
     "secret",
@@ -488,10 +495,12 @@ def _claim_job(
             raise GrokbotJobError("lease-conflict")
         if record["state"] != "queued":
             _reject_nonqueued_claim(record)
-        deadline = _deadline(record)
-        if instant >= deadline:
+        if instant >= _queue_deadline(record):
             _expire_if_elapsed(storage, record, instant)
             raise GrokbotJobError("job-expired")
+        # The execution budget starts at the claim, so a job that waited in the
+        # queue still gets its whole ``timeout_seconds`` to run (#1403).
+        deadline = instant + timedelta(seconds=record["timeout_seconds"])
         record.update(
             {
                 "state": "claimed",
@@ -1293,7 +1302,6 @@ def _validate_record(record: dict[str, Any]) -> dict[str, Any]:
     updated_at = _parse_timestamp(record.get("updated_at"))
     if not created_at <= queued_at <= updated_at:
         raise GrokbotJobError("corrupt-storage")
-    deadline = created_at + timedelta(seconds=spec["timeout_seconds"])
     live_fields = {"claimed_at", "lease_expires_at", "bot_id", "lease_id"}
     present_live_fields = live_fields & set(record)
     if present_live_fields and present_live_fields != live_fields:
@@ -1301,6 +1309,7 @@ def _validate_record(record: dict[str, Any]) -> dict[str, Any]:
     if present_live_fields:
         claimed_at = _parse_timestamp(record["claimed_at"])
         lease_expires_at = _parse_timestamp(record["lease_expires_at"])
+        deadline = claimed_at + timedelta(seconds=spec["timeout_seconds"])
         if not created_at <= claimed_at <= updated_at or not claimed_at <= lease_expires_at <= deadline:
             raise GrokbotJobError("corrupt-storage")
         _validate_opaque_id(record["bot_id"], "corrupt-storage")
@@ -1394,10 +1403,10 @@ def _validate_spec(spec: object) -> dict[str, Any]:
         raise GrokbotJobError("invalid-spec")
     _reject_sensitive_keys(spec)
     keys = set(spec)
-    unknown = keys - REQUIRED_ENVELOPE_KEYS
+    unknown = keys - REQUIRED_ENVELOPE_KEYS - OPTIONAL_ENVELOPE_KEYS
     if unknown:
         raise GrokbotJobError("unknown-key")
-    if keys != REQUIRED_ENVELOPE_KEYS:
+    if not REQUIRED_ENVELOPE_KEYS <= keys or keys - REQUIRED_ENVELOPE_KEYS - OPTIONAL_ENVELOPE_KEYS:
         raise GrokbotJobError("missing-key")
 
     normalized = json.loads(json.dumps(spec, sort_keys=True, separators=(",", ":")))
@@ -1414,6 +1423,10 @@ def _validate_spec(spec: object) -> dict[str, Any]:
     timeout = normalized["timeout_seconds"]
     if type(timeout) is not int or not 60 <= timeout <= 14400:
         raise GrokbotJobError("invalid-timeout")
+    if "queue_ttl_seconds" in normalized:
+        queue_ttl = normalized["queue_ttl_seconds"]
+        if type(queue_ttl) is not int or not QUEUE_TTL_SECONDS_MIN <= queue_ttl <= QUEUE_TTL_SECONDS_MAX:
+            raise GrokbotJobError("invalid-queue-ttl")
     return normalized
 
 
@@ -1582,6 +1595,7 @@ def _enqueue_via_hub(target: Path, spec: dict[str, Any], idempotency_key: str, n
             task_digest=task_hash.removeprefix("sha256:"),
             idempotency_key_hash=key_hash.removeprefix("sha256:"),
             timeout_seconds=envelope["timeout_seconds"],
+            queue_ttl_seconds=envelope.get("queue_ttl_seconds", DEFAULT_QUEUE_TTL_SECONDS),
             artifact_kind=envelope["artifact"]["kind"],
             private_snapshot_id=job_id,
             operation_id=f"enqueue:{job_id}",
@@ -1842,6 +1856,7 @@ def _hub_projection_job(job: dict[str, Any]) -> dict[str, Any]:
         "updated_at": job.get("updated_at"),
         "queued_at": job.get("queued_at"),
         "timeout_seconds": job.get("timeout_seconds"),
+        "queue_ttl_seconds": job.get("queue_ttl_seconds", DEFAULT_QUEUE_TTL_SECONDS),
         "item_revision": job.get("item_revision"),
         "sequence": job.get("sequence"),
         "artifact": {"kind": job.get("artifact_kind")},
@@ -1895,6 +1910,9 @@ def load_task_snapshot(target: Path, job_id: str) -> dict[str, Any]:
 from .grokbot_jobs_expiry import (  # noqa: E402, F401
     _claim_result,
     _deadline,
+    _execution_deadline,
+    _queue_deadline,
+    _queue_ttl_seconds,
     _execution_context,
     _expire_if_elapsed,
     _handle,

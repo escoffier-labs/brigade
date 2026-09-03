@@ -849,3 +849,26 @@ class TestOpenDbSideEffectFree:
         assert mode == "wal"
         assert version == fleet_hub.SCHEMA_VERSION
         assert {"events", "claims", "nodes"} <= tables
+
+    def test_init_schema_reads_user_version_before_taking_the_write_lock(self):
+        source = inspect.getsource(fleet_hub._init_schema)
+        assert source.index('conn.execute("PRAGMA user_version")') < source.index('conn.execute("BEGIN IMMEDIATE")')
+        assert source.index("if current == SCHEMA_VERSION:") < source.index('conn.execute("BEGIN IMMEDIATE")')
+
+    def test_init_db_skips_write_lock_when_user_version_is_current(self, tmp_path):
+        """#1159: a current schema is accepted after a plain ``user_version``
+        read. Another connection can hold ``BEGIN IMMEDIATE`` and ``init_db``
+        must still return without waiting on that write lock."""
+        db = tmp_path / "hub" / "fleet.db"
+        fleet_hub.init_db(db).close()
+        blocker = sqlite3.connect(str(db))
+        try:
+            blocker.execute("BEGIN IMMEDIATE")
+            reopened = fleet_hub.init_db(db)
+            try:
+                assert reopened.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
+            finally:
+                reopened.close()
+        finally:
+            blocker.rollback()
+            blocker.close()

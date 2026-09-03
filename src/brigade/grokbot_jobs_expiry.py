@@ -34,6 +34,7 @@ def _projection(record: dict[str, Any]) -> dict[str, Any]:
         "updated_at": record["updated_at"],
         "queued_at": record["queued_at"],
         "timeout_seconds": record["timeout_seconds"],
+        "queue_ttl_seconds": _queue_ttl_seconds(record),
         "item_revision": record["item_revision"],
         "artifact": spec["artifact"],
     }
@@ -98,18 +99,17 @@ def _require_live_lease_or_expire(
 ) -> None:
     """Guard one lease-holder mutation, expiring a job whose deadline passed.
 
-    Both refusals answer ``lease-expired``: that is the reason the Bot acts on,
-    and it is true either way, since a granted lease is always clamped to the
-    job's own deadline. When the deadline is what lapsed the row is
-    terminalized here too, so the queue does not need an operator sweep to
-    agree with the answer it just gave (#1353 composed with #1383).
+    A lapsed lease inside a live budget answers ``lease-expired`` and leaves
+    the row claimable. A spent execution budget answers ``job-expired`` and
+    terminalizes the row here, so the queue does not need an operator sweep to
+    agree with the answer it just gave (#1353 and #1383, refined by #1403).
     """
     from .grokbot_jobs import GrokbotJobError
 
     try:
         _require_current_lease(record, bot_id, lease_id, instant)
     except GrokbotJobError as exc:
-        if exc.reason == "lease-expired":
+        if exc.reason in {"lease-expired", "job-expired"}:
             _expire_if_elapsed(storage, record, now)
         raise
 
@@ -127,14 +127,57 @@ def _require_current_lease(record: dict[str, Any], bot_id: str, lease_id: str, i
 
 
 def _require_live_lease(record: dict[str, Any], instant: datetime) -> None:
-    if instant >= min(_parse_timestamp(record["lease_expires_at"]), _deadline(record)):
-        from .grokbot_jobs import GrokbotJobError
+    """Refuse a holder call whose budget or lease is gone, naming which one.
 
+    A spent execution budget answers ``job-expired``: the job is over and the
+    holder should push what it has and stop. A lease that lapsed inside a live
+    budget stays ``lease-expired``, which is recoverable (#1403 over #1383).
+    """
+    from .grokbot_jobs import GrokbotJobError
+
+    execution = _execution_deadline(record)
+    if execution is not None and instant >= execution:
+        raise GrokbotJobError("job-expired")
+    if instant >= min(_parse_timestamp(record["lease_expires_at"]), _deadline(record)):
         raise GrokbotJobError("lease-expired")
 
 
 def _deadline(record: dict[str, Any]) -> datetime:
-    return _parse_timestamp(record["created_at"]) + timedelta(seconds=record["timeout_seconds"])
+    """The instant this job ends: its execution budget once claimed, its queue TTL before.
+
+    ``timeout_seconds`` bounds execution and is counted from ``claimed_at``
+    (#1403). The wait in the queue is bounded separately by
+    ``queue_ttl_seconds`` so a job claimed hours late still gets its full
+    budget instead of expiring mid-run.
+    """
+    execution = _execution_deadline(record)
+    if execution is not None:
+        return execution
+    return _queue_deadline(record)
+
+
+def _execution_deadline(record: dict[str, Any]) -> datetime | None:
+    """When the claimant's execution budget runs out, or None while unclaimed."""
+    claimed_at = record.get("claimed_at")
+    if claimed_at is None:
+        return None
+    return _parse_timestamp(claimed_at) + timedelta(seconds=record["timeout_seconds"])
+
+
+def _queue_deadline(record: dict[str, Any]) -> datetime:
+    """When an unclaimed job stops being worth claiming."""
+    return _parse_timestamp(record["queued_at"]) + timedelta(seconds=_queue_ttl_seconds(record))
+
+
+def _queue_ttl_seconds(record: dict[str, Any]) -> int:
+    """This job's queue TTL, defaulted for envelopes that did not declare one."""
+    from .grokbot_jobs import DEFAULT_QUEUE_TTL_SECONDS
+
+    spec = record.get("spec")
+    value = spec.get("queue_ttl_seconds") if isinstance(spec, dict) else None
+    if type(value) is int:
+        return value
+    return DEFAULT_QUEUE_TTL_SECONDS
 
 
 def expire(target: Path, job_id: str, now: datetime | None = None) -> dict[str, Any]:

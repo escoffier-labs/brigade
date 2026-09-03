@@ -223,7 +223,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         dest="verify_commands",
         action="append",
         default=None,
-        help="Verification command. May be repeated. Mutually exclusive with --argv-json.",
+        help=(
+            "Verification command. May be repeated. Mutually exclusive with --argv-json. "
+            "If using 'timeout' inside a wrapped script, pass '--foreground' so its child "
+            "can be cleaned up on cancellation."
+        ),
     )
     p_work_verify_run.add_argument(
         "--argv-json",

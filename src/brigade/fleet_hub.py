@@ -76,7 +76,10 @@ Endpoints:
 - ``GET /claims`` — admin or node token; active claims (``?all=1`` includes
   expired).
 - ``GET /`` and ``GET /deck`` — the server-rendered Command Deck, with the
-  legacy Fleet dashboard retained at ``/view/{machines,repos}``. Same bearer auth,
+  legacy Fleet dashboard retained at ``/view/{machines,repos}``. The classic
+  boards reuse latest-state-per-run, window terminal history to the deck
+  horizon (default 24h) unless ``all=1``, and cap each page with LIMIT plus
+  a ``more`` link. Same bearer auth,
   or the ``brigade_fleet_view`` cookie: opening the page once with
   ``?token=<fleet token>`` from a phone sets an HttpOnly, SameSite=Strict
   cookie and 303-redirects to the same URL without the token. The cookie
@@ -109,12 +112,14 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from . import fleet_command_deck, fleet_hub_preference, worklore_store
 from .fleet_hub_status import (
     ACTIVE_EVENT_TTL_SECONDS as ACTIVE_EVENT_TTL_SECONDS,
+    BOARD_LIMIT as BOARD_LIMIT,
     STALE_HISTORY_AFTER_SECONDS as STALE_HISTORY_AFTER_SECONDS,
+    board_status as board_status,
     latest_status as latest_status,
 )
 
@@ -501,6 +506,7 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     if _claims_table_needs_migration(_claims_columns(conn)):
         _migrate_claims_table(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
+    conn.execute("CREATE INDEX IF NOT EXISTS events_received_at ON events (received_at)")
     # v3 -> v4 is one additive table; v5-v8 add cloud lease and policy
     # tables only, and v9 canonicalizes provider aliases. Existing event,
     # claim, node, and active lease rows survive.
@@ -558,11 +564,19 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
     ALTER) so a later CREATE or ``ensure_schema`` cannot escape as
     ``database is locked``. A caller that loses the write lock treats
     "someone else already set user_version" as success.
+
+    A current ``user_version`` is accepted after a plain read so an
+    already-migrated database never takes the write lock (#1159). Request
+    handlers still use ``open_db`` (#1161); this path is for startup and
+    other ``init_db`` callers (tools, tests, a first-touch storm).
     """
     for delay in _MIGRATION_LOCK_DELAYS:
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
             _refuse_newer_schema(conn, db_path)
+            current = conn.execute("PRAGMA user_version").fetchone()[0]
+            if current == SCHEMA_VERSION:
+                return
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError as exc:
             if not _locked_operational_error(exc):
@@ -757,41 +771,38 @@ def set_run_preference(conn: sqlite3.Connection, raw: Any, *, updated_by: str | 
     return fleet_hub_preference.set_run_preference(conn, raw, updated_by=updated_by)
 
 
-def run_started_at(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
-    """Timestamp of the first observed event per dashboard run key, for elapsed."""
-    rows = conn.execute(
-        "WITH starts AS ("
-        "  SELECT node_id, run_id, harness, ts, ROW_NUMBER() OVER ("
-        "    PARTITION BY node_id, run_id ORDER BY sequence ASC, received_at ASC, digest ASC"
-        "  ) AS rn FROM events"
-        "), latest_grokbot AS ("
-        "  SELECT node_id, run_id FROM ("
-        "    SELECT node_id, run_id, ROW_NUMBER() OVER ("
-        "      PARTITION BY run_id ORDER BY sequence DESC, received_at DESC, digest DESC"
-        "    ) AS rn FROM events WHERE harness = 'grokbot'"
-        "  ) WHERE rn = 1"
-        "), first_grokbot AS ("
-        "  SELECT run_id, ts FROM ("
-        "    SELECT run_id, ts, ROW_NUMBER() OVER ("
-        "      PARTITION BY run_id ORDER BY sequence ASC, received_at ASC, digest ASC"
-        "    ) AS rn FROM events WHERE harness = 'grokbot'"
-        "  ) WHERE rn = 1"
-        ") SELECT starts.node_id, starts.run_id, COALESCE(first_grokbot.ts, starts.ts)"
-        " FROM starts"
-        " LEFT JOIN latest_grokbot ON starts.harness = 'grokbot'"
-        "  AND starts.node_id = latest_grokbot.node_id AND starts.run_id = latest_grokbot.run_id"
-        " LEFT JOIN first_grokbot ON latest_grokbot.run_id = first_grokbot.run_id"
-        " WHERE starts.rn = 1"
-    ).fetchall()
-    return {(row[0], row[1]): row[2] for row in rows}
+def run_started_at(
+    conn: sqlite3.Connection,
+    runs: Sequence[tuple[str, str, str | None]] = (),
+) -> dict[tuple[str, str], str]:
+    """Timestamp of the first observed event for the rendered run keys.
+
+    The boards pass the bounded latest-state rows. This looks up those keys
+    only; it does not scan the events journal.
+    """
+    return fleet_command_deck.fetch_started_at(conn, runs)
 
 
-def node_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """Every observed node with when the hub last heard from it and its event count."""
-    rows = conn.execute(
-        "SELECT node_id, MAX(received_at), COUNT(*) FROM events GROUP BY node_id ORDER BY node_id"
-    ).fetchall()
-    return [{"node_id": row[0], "last_received_at": row[1], "events": row[2]} for row in rows]
+def node_summary(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Nodes present on the bounded board, derived from those latest-state rows.
+
+    Last receipt and the per-node count come from the rendered runs. This
+    does not ``COUNT(*)`` the events table.
+    """
+    latest: dict[str, str] = {}
+    counts: dict[str, int] = {}
+    for run in runs:
+        node_id = str(run.get("node_id") or "")
+        if not node_id:
+            continue
+        received = str(run.get("received_at") or "")
+        counts[node_id] = counts.get(node_id, 0) + 1
+        if received > latest.get(node_id, ""):
+            latest[node_id] = received
+    return [
+        {"node_id": node_id, "last_received_at": latest[node_id], "events": counts[node_id]}
+        for node_id in sorted(latest)
+    ]
 
 
 def dashboard_cookie_value(token: str) -> str:
@@ -984,7 +995,8 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
     must carry the ``acquired_at`` of the row the caller inspected (400
     without it): the delete is fenced to that exact row, so a claim
     re-acquired between the caller's inspect and its release is never
-    deleted (409 with the current row). Only ``force`` deletes unfenced.
+    deleted (409 with the row seen inside the write transaction). Only
+    ``force`` deletes unfenced.
     """
     request = _validate_claim_request(raw)
     if caller_node is not None and request["node_id"] != caller_node:
@@ -1152,13 +1164,14 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
         if prior is not None:
             released["claim"] = _claim_payload(prior)
         return 200, released
-    row = _fetch_claim(conn, target)
-    if row is not None:
-        if scope != "force" and row[1] != node:
-            error = f"target {target!r} is held by {row[1]}, not {node}"
+    # Reuse the in-transaction ``prior`` for the 409 payload. A post-commit
+    # re-read can describe a row that landed after this refusal (#1160).
+    if prior is not None:
+        if scope != "force" and prior[1] != node:
+            error = f"target {target!r} is held by {prior[1]}, not {node}"
         else:
-            error = f"target {target!r} was re-acquired since it was inspected (now acquired {row[7]})"
-        return 409, {"released": False, "error": error, "owner": _claim_payload(row)}
+            error = f"target {target!r} was re-acquired since it was inspected (now acquired {prior[7]})"
+        return 409, {"released": False, "error": error, "owner": _claim_payload(prior)}
     return 200, {"released": False}
 
 

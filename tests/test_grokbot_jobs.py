@@ -230,6 +230,7 @@ def test_status_returns_only_safe_projections(tmp_path: Path):
             "updated_at",
             "queued_at",
             "timeout_seconds",
+            "queue_ttl_seconds",
             "item_revision",
             "artifact",
         }
@@ -644,7 +645,7 @@ def test_posix_storage_write_stays_anchored_when_visible_directory_is_replaced(t
 def test_status_expires_a_job_past_its_timeout_without_an_operator_sweep(tmp_path: Path):
     """#1353: a read is a deadline check, on the hub and on local storage alike."""
     job_id = _enqueue(tmp_path)
-    late = NOW + timedelta(seconds=901)
+    late = NOW + timedelta(seconds=grokbot_jobs.DEFAULT_QUEUE_TTL_SECONDS + 1)
 
     assert grokbot_jobs.status(tmp_path, job_id, now=late)["state"] == "expired"
     assert grokbot_jobs.status(tmp_path)["jobs"][0]["state"] == "expired"
@@ -696,15 +697,67 @@ def test_a_read_does_not_end_a_job_whose_lease_alone_lapsed(tmp_path: Path):
     assert grokbot_jobs.get_job(tmp_path, job_id, now=lapsed)["state"] == "claimed"
 
 
-def test_a_lease_call_past_the_job_deadline_expires_and_still_says_lease_expired(tmp_path: Path):
-    """The row is terminalized, but the holder hears the reason it can act on."""
+def test_a_lease_call_past_the_execution_deadline_expires_and_says_job_expired(tmp_path: Path):
+    """#1403: a spent execution budget is a dead job, not a dead lease."""
     job_id = _enqueue(tmp_path)
     grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 300, now=NOW)
     late = NOW + timedelta(seconds=901)
 
-    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^lease-expired$"):
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^job-expired$"):
         grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "failed", now=late)
     assert grokbot_jobs.get_job(tmp_path, job_id, now=late)["state"] == "expired"
+
+
+def test_renew_after_the_execution_deadline_answers_job_expired(tmp_path: Path):
+    """The refusal that used to read as a broken adapter now names the deadline."""
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 300, now=NOW)
+    late = NOW + timedelta(seconds=901)
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^job-expired$"):
+        grokbot_jobs.renew(tmp_path, job_id, "bot-a", "lease-a", 300, now=late)
+    assert grokbot_jobs.get_job(tmp_path, job_id, now=late)["state"] == "expired"
+
+
+def test_a_late_claim_gets_its_whole_execution_budget(tmp_path: Path):
+    """#1403: a job claimed hours after it queued still has its full timeout."""
+    job_id = _enqueue(tmp_path)
+    late = NOW + timedelta(seconds=4 * 3600)
+
+    claimed = grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 300, now=late)
+
+    assert claimed["state"] == "claimed"
+    assert claimed["lease_expires_at"] == _stamp(late + timedelta(seconds=300))
+    renewed = grokbot_jobs.renew(tmp_path, job_id, "bot-a", "lease-a", 900, now=late + timedelta(seconds=200))
+    # The lease clamps to claimed_at + timeout_seconds, not queued_at + timeout.
+    assert renewed["lease_expires_at"] == _stamp(late + timedelta(seconds=900))
+
+
+def test_an_unclaimed_job_expires_at_its_queue_ttl(tmp_path: Path):
+    job_id = _enqueue(tmp_path)
+    inside = NOW + timedelta(seconds=grokbot_jobs.DEFAULT_QUEUE_TTL_SECONDS - 60)
+    past = NOW + timedelta(seconds=grokbot_jobs.DEFAULT_QUEUE_TTL_SECONDS + 60)
+
+    assert grokbot_jobs.status(tmp_path, job_id, now=inside)["state"] == "queued"
+    assert grokbot_jobs.status(tmp_path, job_id, now=past)["state"] == "expired"
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^job-expired$"):
+        grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=past)
+
+
+def test_an_envelope_may_declare_a_bounded_queue_ttl(tmp_path: Path):
+    spec = {**_spec(), "queue_ttl_seconds": 3600}
+    job_id = grokbot_jobs.enqueue(tmp_path, spec, "request-ttl", now=NOW)["job_id"]
+
+    assert grokbot_jobs.get_job(tmp_path, job_id, now=NOW)["queue_ttl_seconds"] == 3600
+    assert grokbot_jobs.status(tmp_path, job_id, now=NOW + timedelta(seconds=3601))["state"] == "expired"
+
+    for invalid in (grokbot_jobs.QUEUE_TTL_SECONDS_MIN - 1, grokbot_jobs.QUEUE_TTL_SECONDS_MAX + 1, "3600"):
+        with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-queue-ttl$"):
+            grokbot_jobs.enqueue(tmp_path, {**_spec(), "queue_ttl_seconds": invalid}, f"bad-ttl-{invalid}", now=NOW)
+
+
+def _stamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def test_expire_still_terminalizes_a_job_whose_lease_alone_lapsed(tmp_path: Path):
@@ -717,7 +770,7 @@ def test_expire_still_terminalizes_a_job_whose_lease_alone_lapsed(tmp_path: Path
 
 def test_claim_past_the_deadline_expires_the_job_and_stays_job_expired(tmp_path: Path):
     job_id = _enqueue(tmp_path)
-    late = NOW + timedelta(seconds=901)
+    late = NOW + timedelta(seconds=grokbot_jobs.DEFAULT_QUEUE_TTL_SECONDS + 1)
 
     with pytest.raises(grokbot_jobs.GrokbotJobError, match="^job-expired$"):
         grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=late)
@@ -728,7 +781,8 @@ def test_claim_past_the_deadline_expires_the_job_and_stays_job_expired(tmp_path:
 
 def test_expiry_never_requeues_and_late_completion_is_rejected(tmp_path: Path):
     queued_job = _enqueue(tmp_path)
-    assert grokbot_jobs.expire(tmp_path, queued_job, now=NOW + timedelta(seconds=900))["state"] == "expired"
+    queue_ttl = timedelta(seconds=grokbot_jobs.DEFAULT_QUEUE_TTL_SECONDS)
+    assert grokbot_jobs.expire(tmp_path, queued_job, now=NOW + queue_ttl)["state"] == "expired"
 
     live_job = _enqueue(tmp_path, idempotency_key="request-live")
     grokbot_jobs.claim(tmp_path, live_job, "bot-a", "lease-a", 30, now=NOW)

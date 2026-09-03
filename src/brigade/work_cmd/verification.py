@@ -31,6 +31,7 @@ from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
 from . import verify_ranking
+from . import verify_reaper
 from .verify_scoreability import _print_graph_impact, _print_scoreability_notice, _scoreability_notice
 
 
@@ -350,10 +351,17 @@ def _decode_verify_child_output(stdout: str | bytes | None, stderr: str | bytes 
 
 
 def _terminate_verify_child(process: subprocess.Popen[bytes]) -> None:
+    b = verify_reaper._collect_descendants(process.pid)
     try:
         proc._terminate_processes((process,), terminate_grace=0.5, kill_grace=0.5)
     except KeyboardInterrupt:
         proc._terminate_processes((process,), terminate_grace=0.0, kill_grace=0.0)
+    survivors = tuple(verify_reaper._survivor_mocks(b | verify_reaper._collect_descendants(process.pid)))
+    if survivors:
+        try:
+            proc._terminate_processes(survivors, terminate_grace=0.5, kill_grace=0.5)  # type: ignore
+        except KeyboardInterrupt:
+            proc._terminate_processes(survivors, terminate_grace=0.0, kill_grace=0.0)  # type: ignore
 
 
 def _run_verify_child_process(

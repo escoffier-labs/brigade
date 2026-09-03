@@ -29,9 +29,15 @@ from . import (
     verification_contract,
     worker_events,
 )
+from .aboyeur.direct_worker_finish import (
+    terminal_failure_kind as _resume_terminal_failure_kind,
+    terminal_failure_phase as _resume_terminal_failure_phase,
+    terminal_run_status as _resume_terminal_status,
+)
 from .aboyeur.planning import resolve_run_sandbox
 from .roster import Agent, Roster, _as_bool, _as_capabilities, _as_command, _as_env
 from .run_receipts import agent_result_from_worker
+from .run_transport import Assignment
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
 _NONTERMINAL_RUN_STATUSES = frozenset(
@@ -425,24 +431,89 @@ def _continuation_prompt(task: str) -> str:
     )
 
 
+def _assignments_from_plan(run_dir: Path) -> list:
+    plan = _load_json(run_dir, "plan.json")
+    raw = plan.get("assignments") if plan is not None else None
+    if not isinstance(raw, list):
+        return []
+    assignments = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        worker = item.get("worker")
+        task = item.get("task")
+        if not isinstance(worker, str) or not isinstance(task, str):
+            continue
+        stage = item.get("stage", 1)
+        assignments.append(
+            Assignment(
+                worker=worker,
+                task=task,
+                stage=stage if isinstance(stage, int) and not isinstance(stage, bool) else 1,
+            )
+        )
+    return assignments
+
+
+def _write_requested_run_handoff(
+    run_dir: Path,
+    run_meta: dict,
+    *,
+    worker_results: list,
+    final_text: str,
+) -> str | None:
+    """Write the same run handoff the orchestrator writes when --handoff was requested.
+
+    Returns a bounded error detail when the write fails, otherwise None.
+    """
+    raw_inbox = run_meta.get("handoff_inbox")
+    if not isinstance(raw_inbox, str) or not raw_inbox.strip():
+        return None
+    if not all(result.ok for result in worker_results):
+        return None
+    raw_cwd = run_meta.get("cwd")
+    cwd = Path(raw_cwd).expanduser() if isinstance(raw_cwd, str) and raw_cwd else None
+    task = run_meta.get("task", "")
+    if not isinstance(task, str):
+        task = ""
+    try:
+        handoff = aboyeur.write_run_handoff(
+            Path(raw_inbox),
+            task=task,
+            cwd=cwd,
+            output_dir=run_dir,
+            assignments=_assignments_from_plan(run_dir),
+            worker_results=worker_results,
+            final_text=final_text,
+            read_only=bool(run_meta.get("read_only")),
+        )
+    except OSError as exc:
+        return f"handoff failed: {exc}"
+    run_meta["handoff"] = str(handoff)
+    print(f"handoff: {handoff}", file=sys.stderr)
+    return None
+
+
 def _finish_resume_receipt(
     run_dir: Path,
     run_meta: dict,
     final: agents.AgentResult,
     *,
     seat: str,
+    worker_results: list,
 ) -> int:
     now = datetime.now(timezone.utc).isoformat()
     run_meta.setdefault("resumed_at", []).append(now)
     if not final.ok:
         bounded_detail = (final.detail or "orchestrator failed during synthesis")[:2000]
+        failure_phase = _resume_terminal_failure_phase(final, direct_worker=False)
         _archive_failure(run_meta)
-        run_meta["status"] = "failed"
+        run_meta["status"] = _resume_terminal_status(final)
         run_meta["error"] = bounded_detail
-        run_meta["failure_phase"] = "synthesis"
+        run_meta["failure_phase"] = failure_phase
         run_meta["failure"] = {
-            "phase": "synthesis",
-            "kind": "agent-error",
+            "phase": failure_phase,
+            "kind": _resume_terminal_failure_kind(final),
             "detail": bounded_detail,
             "seat": seat,
         }
@@ -457,6 +528,31 @@ def _finish_resume_receipt(
     run_meta["status"] = "ok"
     run_meta.pop("error", None)
     _archive_failure(run_meta)
+    handoff_error = _write_requested_run_handoff(
+        run_dir,
+        run_meta,
+        worker_results=worker_results,
+        final_text=final.text,
+    )
+    if handoff_error is not None:
+        _archive_failure(run_meta)
+        run_meta["status"] = "failed"
+        run_meta["error"] = handoff_error
+        run_meta["failure_phase"] = "handoff"
+        run_meta["failure"] = {
+            "phase": "handoff",
+            "kind": "handoff-write-error",
+            "detail": handoff_error,
+            "seat": seat,
+        }
+        _refresh_run_timing(run_meta)
+        try:
+            aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
+        except run_lifecycle.LifecycleJournalError as exc:
+            raise runguard.RetainRunLockError(f"failed to write failed-handoff run receipt: {exc}") from exc
+        print(f"error: {handoff_error}", file=sys.stderr)
+        print(final.text)
+        return 2
     _refresh_run_timing(run_meta)
     try:
         aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
@@ -472,27 +568,29 @@ def _finish_direct_worker_resume_receipt(
     final: agents.AgentResult,
     *,
     worker: str,
+    worker_results: list,
 ) -> int:
     """Terminalize a resumed ``--worker`` result without chef synthesis labels.
 
     A failed direct worker is still the user-visible result: write ``final.txt``,
-    type ``failure_phase`` from the worker (or ``dispatch``), and attribute the
-    seat to the worker. Reusing ``_finish_resume_receipt`` would mislabel this
-    as a chef synthesis failure.
+    type ``failure_phase`` from the worker (or ``dispatch``/``inference``), and
+    attribute the seat to the worker. Reusing ``_finish_resume_receipt`` would
+    mislabel this as a chef synthesis failure. Timeout and interrupt map to
+    ``timeout`` / ``canceled`` the same way the orchestrator finish path does.
     """
     now = datetime.now(timezone.utc).isoformat()
     run_meta.setdefault("resumed_at", []).append(now)
     (run_dir / "final.txt").write_text(final.text + "\n")
     if not final.ok:
         bounded_detail = (final.detail or "worker failed")[:2000]
-        failure_phase = final.failure_phase or "dispatch"
+        failure_phase = _resume_terminal_failure_phase(final, direct_worker=True)
         _archive_failure(run_meta)
-        run_meta["status"] = "failed"
+        run_meta["status"] = _resume_terminal_status(final)
         run_meta["error"] = bounded_detail
         run_meta["failure_phase"] = failure_phase
         run_meta["failure"] = {
             "phase": failure_phase,
-            "kind": final.failure_kind or "agent-error",
+            "kind": _resume_terminal_failure_kind(final),
             "detail": bounded_detail,
             "seat": worker,
         }
@@ -508,6 +606,31 @@ def _finish_direct_worker_resume_receipt(
     run_meta["status"] = "ok"
     run_meta.pop("error", None)
     _archive_failure(run_meta)
+    handoff_error = _write_requested_run_handoff(
+        run_dir,
+        run_meta,
+        worker_results=worker_results,
+        final_text=final.text,
+    )
+    if handoff_error is not None:
+        _archive_failure(run_meta)
+        run_meta["status"] = "failed"
+        run_meta["error"] = handoff_error
+        run_meta["failure_phase"] = "handoff"
+        run_meta["failure"] = {
+            "phase": "handoff",
+            "kind": "handoff-write-error",
+            "detail": handoff_error,
+            "seat": worker,
+        }
+        _refresh_run_timing(run_meta)
+        try:
+            aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
+        except run_lifecycle.LifecycleJournalError as exc:
+            raise runguard.RetainRunLockError(f"failed to write failed-handoff run receipt: {exc}") from exc
+        print(f"error: {handoff_error}", file=sys.stderr)
+        print(final.text)
+        return 2
     _refresh_run_timing(run_meta)
     try:
         aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
@@ -694,6 +817,7 @@ def _resume_locked(
     probe = seat_health.SeatHealthProbe(collect_executable_version=False)
     try:
         for entry in resumable:
+            entry.pop("failure_phase", None)
             worker = entry.get("worker", "")
             agent = roster.agents.get(worker)
             if agent is not None:
@@ -752,6 +876,9 @@ def _resume_locked(
             entry["ok"] = turn.ok and bool(entry["text"])
             entry["detail"] = "" if entry["ok"] else redact_approval_token(turn.detail or f"turn {turn.status}")[:200]
             entry["status"] = turn.status
+            entry["timed_out"] = bool(getattr(turn, "timed_out", False))
+            if entry["timed_out"] and not entry["ok"]:
+                entry["failure_kind"] = "timeout"
             if getattr(turn, "output_limit_exceeded", False):
                 entry["failure_kind"] = "output-limit"
                 entry["output_truncated"] = True
@@ -804,6 +931,7 @@ def _resume_locked(
             failure_phase=(
                 r.get("failure_phase") if not r.get("ok") and isinstance(r.get("failure_phase"), str) else None
             ),
+            timed_out=bool(r.get("timed_out")),
             output_truncated=bool(r.get("output_truncated")),
             output_bytes=int(r.get("output_bytes") or 0),
             output_cap_bytes=int(r.get("output_cap_bytes") or 0),
@@ -856,6 +984,7 @@ def _resume_locked(
             run_meta,
             final,
             worker=str(run_meta.get("worker") or direct_result.worker),
+            worker_results=worker_results,
         )
     synth_prompt = aboyeur.build_synth_prompt(
         task,
@@ -930,4 +1059,10 @@ def _resume_locked(
         "synthesis.json",
         synthesis_payload,
     )
-    return _finish_resume_receipt(run_dir, run_meta, final, seat=roster.orchestrator)
+    return _finish_resume_receipt(
+        run_dir,
+        run_meta,
+        final,
+        seat=roster.orchestrator,
+        worker_results=worker_results,
+    )

@@ -1584,6 +1584,29 @@ def test_work_verify_run_rejects_shell_interpreter_with_remedy(tmp_path, capsys,
     assert "--argv-json" not in summary
 
 
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_work_verify_run_help_prints_flag_list_and_exits_0(capsys, flag):
+    # Usage is not a verification run. --help/-h must reach argparse and list
+    # the capture/argv-json flags instead of being refused by a pre-parse gate.
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["work", "verify", "run", flag])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "usage:" in out
+    assert "--capture" in out
+    assert "--argv-json" in out
+
+
+def test_work_verify_run_help_is_recognized_before_capture_policy():
+    from brigade.cli.work.dispatching import work_verify_run_help_requested
+
+    assert work_verify_run_help_requested(["work", "verify", "run", "--help"])
+    assert work_verify_run_help_requested(["work", "verify", "run", "-h"])
+    assert work_verify_run_help_requested(["work", "verify", "run", "--target", ".", "--help"])
+    assert not work_verify_run_help_requested(["work", "verify", "run", "--command", "true"])
+    assert not work_verify_run_help_requested(["work", "verify", "plan", "--help"])
+
+
 def test_work_verify_run_command_and_argv_json_are_mutually_exclusive(tmp_path, capsys):
     with pytest.raises(SystemExit) as exc:
         cli.main(
@@ -3714,3 +3737,33 @@ def test_outcome_health_names_registered_manifest_ids_for_remediation(tmp_target
     assert health["registered_verify_manifest_ids"] == [manifest_id]
     assert health["top_issue"]["name"] == "outcome_loop_half_fed"
     assert manifest_id in health["top_issue"]["detail"]
+
+
+def test_work_verify_run_timeout_reaps_descendants_and_records_receipt(tmp_path, capsys):
+    from brigade.work_cmd import verification
+    import os
+    import subprocess
+    import time
+
+    marker = f"brigade-1413-{os.getpid()}"
+    # Creates a wrapper script that spawns a descendant that intentionally changes its process group via GNU timeout
+    wrapper = tmp_path / "wrapper.sh"
+    wrapper.write_text(f"#!/bin/bash\nexec -a {marker} timeout 120 sleep 100 &\nwait\n")
+    wrapper.chmod(0o755)
+
+    assert (
+        verification._run_verify_child_process(
+            [str(wrapper)],
+            cwd=tmp_path,
+            env=os.environ.copy(),
+            timeout=1,
+        )[0]
+        == "timed_out"
+    )
+
+    probe = subprocess.run(["pgrep", "-f", marker], stdout=subprocess.PIPE, check=False)
+    deadline = time.time() + 5
+    while probe.returncode == 0 and time.time() < deadline:
+        time.sleep(0.2)
+        probe = subprocess.run(["pgrep", "-f", marker], stdout=subprocess.PIPE, check=False)
+    assert probe.returncode != 0, f"descendant survived timeout: {probe.stdout.decode()}"

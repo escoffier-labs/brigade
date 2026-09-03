@@ -1527,3 +1527,222 @@ def test_resume_allows_undeclared_budget_for_backward_compatibility(tmp_path, mo
 
     assert run_resume.resume(run_dir) == 0
     assert json.loads((run_dir / "run.json").read_text())["status"] == "ok"
+
+
+def test_resume_writes_run_handoff_via_write_run_handoff(tmp_path, monkeypatch, capsys):
+    inbox = tmp_path / "memory-handoffs"
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["handoff_inbox"] = str(inbox)
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    seen: dict[str, object] = {}
+    real_write = run_resume.aboyeur.write_run_handoff
+
+    def spy_write(target, **kwargs):
+        seen["inbox"] = target
+        seen["kwargs"] = kwargs
+        return real_write(target, **kwargs)
+
+    monkeypatch.setattr(run_resume.aboyeur, "write_run_handoff", spy_write)
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="final synthesis", ok=True),
+    )
+
+    assert run_resume.resume(run_dir) == 0
+    assert seen["inbox"] == inbox
+    assert seen["kwargs"]["task"] == "big task"
+    assert seen["kwargs"]["final_text"] == "final synthesis"
+    handoffs = list(inbox.glob("*.md"))
+    assert len(handoffs) == 1
+    run_json = json.loads((run_dir / "run.json").read_text())
+    assert run_json["status"] == "ok"
+    assert run_json["handoff"] == str(handoffs[0])
+    assert "handoff:" in capsys.readouterr().err
+
+
+def test_resume_skips_handoff_when_inbox_was_not_requested(tmp_path, monkeypatch):
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    calls: list[object] = []
+    monkeypatch.setattr(
+        run_resume.aboyeur,
+        "write_run_handoff",
+        lambda *a, **k: calls.append((a, k)) or (_ for _ in ()).throw(AssertionError("handoff not requested")),
+    )
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="final synthesis", ok=True),
+    )
+
+    assert run_resume.resume(run_dir) == 0
+    assert calls == []
+    run_json = json.loads((run_dir / "run.json").read_text())
+    assert run_json["status"] == "ok"
+    assert "handoff" not in run_json
+
+
+class _StatusThread:
+    def __init__(self, thread_id, *, text, ok, status, detail="", timed_out=False):
+        self.thread_id = thread_id
+        self._text = text
+        self._ok = ok
+        self._status = status
+        self._detail = detail
+        self._timed_out = timed_out
+
+    def run_turn(self, prompt, *, timeout, on_event=None):  # noqa: ARG002
+        return codex_appserver.TurnResult(
+            text=self._text,
+            ok=self._ok,
+            status=self._status,
+            detail=self._detail,
+            thread_id=self.thread_id,
+            timed_out=self._timed_out,
+        )
+
+
+class _StatusServer(_StubServer):
+    def __init__(
+        self,
+        *a,
+        turn_text="partial",
+        turn_ok=False,
+        turn_status="failed",
+        turn_detail="",
+        turn_timed_out=False,
+        **k,
+    ):
+        super().__init__(*a, **k)
+        self.turn_text = turn_text
+        self.turn_ok = turn_ok
+        self.turn_status = turn_status
+        self.turn_detail = turn_detail
+        self.turn_timed_out = turn_timed_out
+
+    def resume_thread(self, thread_id, *, cwd, model=None, sandbox=None):
+        self.resumed.append(thread_id)
+        return _StatusThread(
+            thread_id,
+            text=self.turn_text,
+            ok=self.turn_ok,
+            status=self.turn_status,
+            detail=self.turn_detail,
+            timed_out=self.turn_timed_out,
+        )
+
+
+def test_resume_maps_timed_out_direct_worker_to_timeout(tmp_path, monkeypatch):
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["worker"] = "cook"
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda *a, **k: _StatusServer(
+            turn_text="partial worker output",
+            turn_ok=False,
+            turn_status="interrupted",
+            turn_detail="turn timed out",
+            turn_timed_out=True,
+        ),
+    )
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("direct-worker resume must not invoke chef")),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    run_json = json.loads((run_dir / "run.json").read_text())
+    assert run_json["status"] == "timeout"
+    assert run_json["failure"]["kind"] == "timeout"
+    assert run_json["failure"]["seat"] == "cook"
+
+
+def test_resume_maps_interrupted_direct_worker_to_canceled(tmp_path, monkeypatch):
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["worker"] = "cook"
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda *a, **k: _StatusServer(
+            turn_text="partial worker output",
+            turn_ok=False,
+            turn_status="interrupted",
+            turn_detail="operator interrupted",
+            turn_timed_out=False,
+        ),
+    )
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("direct-worker resume must not invoke chef")),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    run_json = json.loads((run_dir / "run.json").read_text())
+    assert run_json["status"] == "canceled"
+    assert run_json["failure"]["kind"] == "interrupted"
+    assert run_json["failure"]["seat"] == "cook"
+
+
+def test_resume_maps_timed_out_synthesis_to_timeout(tmp_path, monkeypatch):
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(
+            text="",
+            ok=False,
+            detail="orchestrator timed out",
+            timed_out=True,
+            status="failed",
+        ),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    run_json = json.loads((run_dir / "run.json").read_text())
+    assert run_json["status"] == "timeout"
+    assert run_json["failure"]["kind"] == "timeout"
+    assert run_json["failure_phase"] == "inference"
+
+
+def test_resume_resets_stale_failure_phase_before_retry(tmp_path, monkeypatch):
+    stale = dict(_RESUMABLE_COOK)
+    stale["failure_phase"] = "dispatch"
+    stale["detail"] = "run owner exited"
+    run_dir = _write_run_dir(tmp_path, results=[stale])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["worker"] = "cook"
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda *a, **k: _StatusServer(
+            turn_text="",
+            turn_ok=False,
+            turn_status="failed",
+            turn_detail="provider hung up",
+            turn_timed_out=False,
+        ),
+    )
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="unused", ok=True),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    results = json.loads((run_dir / "worker-results.json").read_text())["results"]
+    assert results[0]["ok"] is False
+    assert results[0]["detail"] == "provider hung up"
+    assert results[0].get("failure_phase") != "dispatch"
+    assert "failure_phase" not in results[0]

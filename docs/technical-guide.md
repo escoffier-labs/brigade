@@ -522,7 +522,13 @@ greater than 1 cannot be salvaged this way when earlier-stage worker results
 were never persisted. Resume fails closed before provider construction instead
 of synthesizing from partial stage output. A successful resume refreshes
 `finished_at` and `duration_seconds` to the post-resume completion time rather
-than retaining the pre-resume owner-exit timestamp.
+than retaining the pre-resume owner-exit timestamp. When the original run
+requested `--handoff`, resume writes the Memory Handoff through the same
+`write_run_handoff` path the orchestrator uses and records the path on
+`run.json`. A timed-out direct worker finishes as `status: timeout` and an
+interrupted one as `status: canceled`, matching the orchestrator finish path.
+Resume clears each worker's prior `failure_phase` before the retry so a new
+failure is not labeled with the earlier phase.
 
 If the approved action completed but the process exited before recording
 `approval.consumed` and `run.resumed`, run `brigade runs resume <run>` again.
@@ -1263,7 +1269,7 @@ Manual session commands:
 Work verification and closeout commands:
 
 - `brigade work verify plan` previews the local verification commands and current evidence snapshot without running anything. When GraphTrail is available it also ranks affected-test candidates (`graph_impact` / `ranked_candidates`) from changed files (`--file` or `git diff --name-only HEAD`) with hop-distance confidence and via-symbol evidence; the worker still chooses the command. Missing GraphTrail degrades to an empty advisory ranking. Manifest plans also surface VerificationContract completeness when the tracked manifest declares one (#500).
-- `brigade work verify run` executes explicit local verification commands without a shell and writes receipts under `.brigade/work/verify-runs/`.
+- `brigade work verify run` executes explicit local verification commands without a shell and writes receipts under `.brigade/work/verify-runs/`. `brigade work verify run --help` and `-h` print argparse usage, including `--capture` and `--argv-json`, and exit 0; printing usage is not a verification run and is not subject to capture policy.
 - `brigade work verify runs` and `brigade work verify show <run-id>` inspect local verification receipts, command exit codes, summaries, and log paths.
 - `brigade receipts keygen` creates the optional local HMAC key used to sign new receipt digests. Pass `--force` to rotate the key.
 - `brigade receipts verify` recomputes SHA-256 receipt digests, stdout and stderr log digests, the `memory/outcome/records.jsonl` digest chain, and optional local HMAC signatures. It reports `OK`, `SIGNED-OK`, `MISMATCH`, `SIGNATURE-MISMATCH`, `MISSING`, `LEGACY`, or `UNVERIFIABLE-SIGNATURE` for checked artifacts and exits non-zero only for mismatch, signature mismatch, or missing evidence.
@@ -1825,7 +1831,7 @@ The normal exception is your own configured tooling:
 A few commands sit outside the daily loop:
 
 - `brigade reconfigure --target <path>` adjusts an existing install to a new Selection. Pass `--depth`, `--harnesses`, `--owner`, or repeatable `--include`, and add `--prune` to remove files for harnesses you no longer select.
-- `brigade scrub --target <path>` runs the embedded content guard against a target, defaulting to the `public-repo` policy. Use `--policy <name-or-path>` to pick another policy and `--dry-run` to preview. Set `CONTENT_GUARD_DIR` only when an older standalone checkout must remain in use.
+- `brigade scrub --target <path>` runs the embedded content guard against a target, defaulting to the `public-repo` policy. Use `--policy <name-or-path>` to pick another policy and `--dry-run` to preview. Set `CONTENT_GUARD_DIR` only when an older standalone checkout must remain in use. File-scoped `content-guard: allow … file` markers count only in a comment or directive position, never inside a string literal; see [`docs/content-guard-allow-markers.md`](content-guard-allow-markers.md).
 - `brigade handoff-template` prints the handoff `TEMPLATE.md`; `--target` prefers a target's installed template when present.
 - `brigade openclaw-fragments --out <dir>` writes OpenClaw config fragments for manual review.
 - `brigade hermes-fragments --out <dir>` writes Hermes adapter fragments (experimental).
@@ -1846,6 +1852,7 @@ Each subsystem has a companion doc under [`docs/`]() with the full local contrac
 - [`docs/execution-model.md`](execution-model.md) - explicit-invocation boundary and external-scheduler ownership
 - [`docs/scheduled-care.md`](scheduled-care.md) - operator-owned cron, systemd, and CI recipes plus `brigade care` scaffold for the memory-care loop
 - [`docs/security.md`](security.md) - the agent workspace security scanner and evidence bundles
+- [`docs/content-guard-allow-markers.md`](content-guard-allow-markers.md) - inline and file-scoped content-guard allow comments
 - [`docs/inspiration-patterns.md`](inspiration-patterns.md) - neutral pattern families and source-pattern decisions
 - [`docs/roadmap-completion-plan.md`](roadmap-completion-plan.md) - the large-roadmap completion plan and phase boundaries
 

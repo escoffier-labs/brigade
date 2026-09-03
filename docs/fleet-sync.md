@@ -280,8 +280,14 @@ phone over Tailscale:
 - Query params: `sort=attention|age|node|repo|state|seat`, substring filters
   `node=`, `repo=`, `seat=` (matches seat or harness), `state=` (bucket or raw
   event type), `attention=1` (needs-attention only), `all=1` (include
-  finished runs). Same params on both boards; the board links carry them
-  across.
+  finished runs, still paginated), `offset=` (next LIMIT page). Same params
+  on both boards; the board links carry them across.
+- Board queries reuse latest-state-per-run. The default fetch windows
+  terminal history to the deck horizon (`stale_history_after_seconds`,
+  default 24h) so the 10s refresh does not scan the whole journal; `all=1`
+  drops the window and still applies LIMIT plus a `more` link. Start times
+  and node cards are derived from those rendered rows. GET never prunes
+  events; operators compact the journal from the Proxmox runbook.
 - Server-rendered, stdlib only, no framework or CDN asset. Tables, sorting,
   and filtering are plain HTML + query params and work with JavaScript off;
   refresh is a `<meta http-equiv="refresh" content="10">`. The inline
@@ -316,6 +322,17 @@ Claims are best-effort protection layered over the local run lock. If the hub
 rejects the configured token with HTTP 401 or 403, the client logs one WARNING
 (carrying the hub's message) and continues under the local lock alone, just as
 it does when the hub is unreachable.
+
+Fleet claims require **machine-local workspaces**. Node identity is a
+per-workspace (or per-home) uuid4 stored in `.brigade/node.toml`, and
+deadness is a local pid check against that workspace's `run.lock`. A
+workspace shared across machines over a network filesystem (NFS, SMB, or
+a bind-mount of the same tree) collapses two machines into one `node_id`
+*and* one `run.lock`: machine B's pid check calls machine A's live owner
+dead because that PID is not local, and a same-node supersede or
+`--release` then fires. Copied `node.toml` files with *separate* local
+workspaces stay distinct (different `lock_token`s); a shared mount does
+not. Keep each machine's checkout on its own disk.
 
 Lost ownership fails closed by default (#1152): when the mid-run heartbeat
 learns another owner holds the claim (a renew answered 409 held-by-another),
@@ -495,11 +512,17 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
   inside a workspace is refused, never resolved upward). Without `--force`,
   both modes run the same proof that the run which took the claim is dead:
   `POST /claims` `inspect` returns the recorded run directory to the owner
-  node only, the CLI maps it to a workspace on this machine (`run.json`
-  `lock_workspace` / `cwd`, or the `.brigade/runs/<id>` layout; with
-  `--path` it must be the workspace given) and refuses while that
-  `run.lock` has a live owner or is malformed, or when it cannot resolve
-  the run at all, or when the probe finds no claim owned by this node.
+  node only, the CLI maps it to a workspace on this machine through
+  `runguard.resolve_run_lock_workspace` (`run.json` `lock_workspace`, the
+  `.brigade/runs/<id>` layout, then `cwd`; a resolved path that is not a
+  directory here is refused; with `--path` it must be the workspace given)
+  and refuses while that `run.lock` has a live owner or is malformed, or
+  when it cannot resolve the run at all, or when the probe finds no claim
+  owned by this node.
+  When the row records no run directory (`--no-artifacts`, or a claim
+  predating the lease columns), `--path` proves deadness via the
+  pointed-at workspace's own `run.lock` instead of requiring `--force`;
+  a bare key still cannot verify that row.
   The release then carries the inspected row's `acquired_at` — the hub
   refuses a token-less node-scoped delete without it — and deletes only
   that exact row (one write transaction), so a claim re-acquired in

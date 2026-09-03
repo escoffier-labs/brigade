@@ -1349,3 +1349,34 @@ def test_resume_read_only_sandbox_never_becomes_a_write(tmp_path, monkeypatch):
         captured["sandbox"] is None and captured["read_only"] is False
     )
     assert write_invocation is False
+
+
+def test_handoff_run_persists_inbox_so_resume_can_write_it(monkeypatch, tmp_path):
+    from brigade import aboyeur
+    from tests.run_test_helpers import run_aboyeur_guarded
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        return agents.AgentResult(text="worker final output", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    output_dir = tmp_path / "run"
+    inbox = tmp_path / "handoffs"
+
+    rc = run_aboyeur_guarded(
+        "implement the bounded fix",
+        _direct_worker_roster(),
+        worker="coder",
+        sandbox="danger-full-access",
+        handoff_inbox=inbox,
+        output_dir=output_dir,
+        cwd=tmp_path,
+        route_enabled=False,
+        code_graph_enabled=False,
+        evidence_enabled=False,
+    )
+
+    assert rc == 0
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "ok"
+    assert run_meta["handoff_inbox"] == str(inbox)
+    assert list(inbox.glob("*.md"))

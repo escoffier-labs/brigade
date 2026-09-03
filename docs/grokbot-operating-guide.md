@@ -212,37 +212,51 @@ requeues a job; it finalizes one whose deadline or lease has passed.
 
 ### Job deadlines
 
-A job's deadline is `queued_at` plus its `timeout_seconds`. The deadline is the
-hub's, not an operator's: nobody has to call `expire` for a job to end.
+A job carries two deadlines, and neither one is an operator's: nobody has to
+call `expire` for a job to end.
+
+- **Execution budget.** `timeout_seconds` (60..14400) runs from `claimed_at`. A
+  claimed or running job ends at `claimed_at` plus `timeout_seconds`.
+- **Queue TTL.** `queue_ttl_seconds` (60..604800, default 86400) runs from
+  `queued_at` and bounds an unclaimed job only.
+
+Counting `timeout_seconds` from `queued_at` charged a job for the hours it sat
+in the queue behind other jobs, so a job claimed late expired mid-run and every
+renew after that was refused (#1403). The wait is now the queue TTL's problem
+and the run is the timeout's.
 
 - Every `list`, `status`, `claim`, `renew`, and other mutating request sweeps
   past-deadline jobs to `expired` before it answers, so a read never reports a
   job that is already over as `queued` or `running`.
 - The hub also sweeps on a timer (`start_expiry_sweeper`, every 60 seconds by
   default) for the life of the process, so a queue that nobody polls still
-  expires. A job enqueued with `timeout_seconds` 7200 that no worker ever claims
-  is `expired` about 7200 seconds later with no request involved.
+  expires. A job that no worker ever claims is `expired` about
+  `queue_ttl_seconds` after it was queued with no request involved.
 - Each automatic expiry writes an `expire` row to `grokbot_operations` with an
   `expire:deadline:<job_id>:<revision>` operation id and a NULL `actor_node_id`:
   the deadline asked for it, not an actor. An operator `expire` still writes its
   own operation id, and the two ids can never collide.
-- Claiming a job that is already past its deadline is refused with `job-expired`
-  rather than a state or revision error, so a Bot can tell "too late" apart from
-  "you raced another worker".
+- Claiming a job past its queue TTL is refused with `job-expired` rather than a
+  state or revision error, so a Bot can tell "too late" apart from "you raced
+  another worker". A claim inside the TTL is granted the whole execution budget,
+  however long the job waited.
+- A `renew` or `fail` sent after the execution deadline is refused with
+  `job-expired` too, not with the generic `invalid-request` a Bot reads as a
+  broken adapter. It is a stop signal: push the branch, fail the job with a
+  bounded reason, and do not retry.
+- The listener journals both deadlines when it grants a lease:
+  `deadline=<lease_expires_at> job_deadline=<claimed_at + timeout_seconds>`.
 
-The local (no-hub) queue in `grokbot_jobs.py` follows the same rule: `status`
-and `get_job` terminalize an elapsed job before projecting it, and a claim past
-the deadline expires the job and fails with `job-expired`.
+The local (no-hub) queue in `grokbot_jobs.py` follows the same rules: `status`
+and `get_job` terminalize an elapsed job before projecting it, a claim past the
+queue TTL expires the job and fails with `job-expired`, and a holder call past
+the execution deadline expires the row and answers `job-expired`.
 
 A lapsed lease is not a lapsed job. A read keys on the job's own deadline only,
-so a claimed job whose lease ran out stays `claimed` and can be picked up again;
-the holder's `renew`, `start`, `fail`, `complete`, and `ack_cancel` are refused
-with `lease-expired`. When the job's own deadline is what passed, the row is
-expired and the operation recorded, and the holder still hears `lease-expired`
-rather than `job-expired`: a granted lease is always clamped to the deadline, so
-the lease is genuinely gone, and that is the reason a Bot can act on.
-`job-expired` stays the claim-side answer, which is what tells a Bot not to
-start work at all.
+so a claimed job whose lease ran out inside a live execution budget stays
+`claimed` and can be picked up again; that holder's `renew`, `start`, `fail`,
+`complete`, and `ack_cancel` are refused with `lease-expired`, which is
+recoverable. `job-expired` means the budget itself is gone.
 
 `grokbot_queue_claim` takes `lease_id` as an optional argument. A Bot that has
 no lease to supply omits it or sends `null`, and the listener mints a uuid4 hex
