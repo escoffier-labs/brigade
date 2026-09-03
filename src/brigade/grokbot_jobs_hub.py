@@ -2,7 +2,7 @@
 
 Queue storage and lease mutations stay in ``grokbot_jobs``. This sibling lists
 hub jobs, projects safe rows, and pairs local artifacts and snapshots by
-``task_hash``. ``grokbot_jobs`` re-exports every name so callers and tests keep
+``job_id``. ``grokbot_jobs`` re-exports every name so callers and tests keep
 the same bindings.
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from .grokbot_job_validation import (
-    TASK_HASH_RE,
+    JOB_ID_RE,
     GrokbotJobError,
     validate_job_id as _validate_job_id,
 )
@@ -31,8 +31,8 @@ def _read_hub_report_from_storage(storage: Any, job: dict[str, Any]) -> dict[str
     return grokbot_jobs._verified_report(job_id, data, expected)
 
 
-def _snapshots_by_task_hash(storage: Any) -> dict[str, dict[str, Any]]:
-    """Index private task snapshots by task_hash for hub-authority pairing."""
+def _snapshots_by_job_id(storage: Any) -> dict[str, dict[str, Any]]:
+    """Index private task snapshots by job_id for hub-authority pairing."""
     from . import grokbot_jobs
 
     if storage.snapshots is None:
@@ -42,9 +42,10 @@ def _snapshots_by_task_hash(storage: Any) -> dict[str, dict[str, Any]]:
         payload = grokbot_jobs._read_json_file(storage.snapshots, name, missing_ok=True)
         if not isinstance(payload, dict) or payload.get("schema") != grokbot_jobs.SNAPSHOT_SCHEMA:
             continue
-        task_hash = payload.get("task_hash")
-        if isinstance(task_hash, str) and TASK_HASH_RE.fullmatch(task_hash):
-            index[task_hash] = payload
+        job_id = payload.get("job_id")
+        name_id = name[: -len(".json")]
+        if isinstance(job_id, str) and JOB_ID_RE.fullmatch(job_id) and job_id == name_id:
+            index[job_id] = payload
     return index
 
 

@@ -224,18 +224,18 @@ def _scan_hub(
     storage: grokbot_jobs._Storage | None,
     hub_jobs: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """List completed scout reports from the hub and pair local artifacts by task_hash."""
+    """Pair completed hub scout reports with local artifacts and snapshots by job_id."""
     eligible: list[dict[str, Any]] = []
     known: list[dict[str, Any]] = []
     unavailable: list[dict[str, Any]] = []
     jobs = hub_jobs if hub_jobs is not None else _hub_scout_jobs()
-    snapshots = grokbot_jobs._snapshots_by_task_hash(storage) if storage is not None else {}
+    snapshots = grokbot_jobs._snapshots_by_job_id(storage) if storage is not None else {}
     for job in jobs:
         if not _is_completed_report(job):
             continue
-        task_hash = job.get("task_hash")
-        snapshot = snapshots.get(task_hash) if isinstance(task_hash, str) else None
-        if snapshot is not None and snapshot.get("job_id") != job.get("job_id"):
+        job_id = job.get("job_id")
+        snapshot = snapshots.get(job_id) if isinstance(job_id, str) else None
+        if snapshot is not None and snapshot.get("task_hash") != job.get("task_hash"):
             raise ReconcileError("snapshot-mismatch")
         if storage is None:
             unavailable.append({**job, "reason": UNAVAILABLE_ARTIFACT_MISSING})

@@ -47,7 +47,7 @@ from .grokbot_jobs_hub import (
     _hub_unavailable_row,
     _read_hub_report_from_storage as _read_hub_report_from_storage,
     _require_hub,
-    _snapshots_by_task_hash as _snapshots_by_task_hash,
+    _snapshots_by_job_id as _snapshots_by_job_id,
 )
 
 try:  # pragma: no cover - Windows does not provide fcntl.

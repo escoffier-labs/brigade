@@ -976,3 +976,46 @@ def test_hub_authority_apply_lists_hub_before_exclusive_lock(tmp_path: Path, mon
 
     assert result["created"] == 1
     assert order == ["list", "lock"]
+
+
+def test_hub_authority_same_task_hash_retries_pair_by_job_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    queue = tmp_path / "queue"
+    owner = tmp_path / "owner"
+    queue.mkdir()
+    owner.mkdir()
+    first_id, hub_first = _store_hub_scout(queue, key="scout-retry-1")
+    second_id, hub_second = _store_hub_scout(queue, key="scout-retry-2", text=REPORT_TEXT + "retry\n")
+    assert hub_first["task_digest"] == hub_second["task_digest"]
+    assert first_id != second_id
+    _fake_hub_listing(monkeypatch, [hub_first, hub_second])
+
+    preview = grokbot_reconcile.preview(queue, owner)
+    applied = grokbot_reconcile.apply(queue, owner)
+
+    assert preview["eligible"] == 2
+    assert preview["unavailable"] == 0
+    assert applied["eligible"] == 2
+    assert applied["created"] == 1
+    assert applied["jobs"] == [{"job_id": first_id, "state": "completed"}]
+    second = grokbot_reconcile.apply(queue, owner)
+    assert second["created"] == 1
+    assert second["known"] == 1
+    drafts = sorted(path.name for path in _review_inbox(owner).glob("*.md"))
+    assert drafts == [f"{first_id}-scout-report.md", f"{second_id}-scout-report.md"]
+
+
+def test_hub_authority_snapshot_task_hash_mismatch_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    queue = tmp_path / "queue"
+    owner = tmp_path / "owner"
+    queue.mkdir()
+    owner.mkdir()
+    job_id, hub_job = _store_hub_scout(queue)
+    snapshot = _queue_root(queue) / "snapshots" / f"{job_id}.json"
+    payload = json.loads(snapshot.read_text(encoding="utf-8"))
+    payload["task_hash"] = "sha256:" + "0" * 64
+    snapshot.write_text(json.dumps(payload), encoding="utf-8")
+    _fake_hub_listing(monkeypatch, [hub_job])
+
+    with pytest.raises(grokbot_reconcile.ReconcileError, match="^snapshot-mismatch$"):
+        grokbot_reconcile.apply(queue, owner)
+    assert not _review_inbox(owner).exists()
