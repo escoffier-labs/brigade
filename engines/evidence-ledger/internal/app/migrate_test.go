@@ -223,6 +223,19 @@ func TestMigrateCodexArguments(t *testing.T) {
 		t.Fatalf("expected match for exec_prefix before migration")
 	}
 
+	// Verify IntegrityMismatch == false before migration for rec1
+	var rec1ID string
+	if err := db.QueryRow(`SELECT id FROM items WHERE external_id = 'codex:call:call-1'`).Scan(&rec1ID); err != nil {
+		t.Fatal(err)
+	}
+	viewBefore, err := inspectStoredItem(db, rec1ID)
+	if err != nil {
+		t.Fatalf("inspectStoredItem before: %s", err)
+	}
+	if viewBefore.IntegrityMismatch {
+		t.Fatalf("expected IntegrityMismatch == false before migration, got mismatches: %+v", viewBefore.Mismatches)
+	}
+
 	// Verify --apply and --dry-run together fail with usage
 	var errw bytes.Buffer
 	code := cmdMigrateCodexArguments([]string{"--apply", "--dry-run"}, io.Discard, &errw)
@@ -342,6 +355,30 @@ func TestMigrateCodexArguments(t *testing.T) {
 	}
 	if strings.Contains(rec1After.Item.Text, "UNICORN_TOKEN_PAST_CAP") {
 		t.Fatalf("rec1 Item.Text still contains UNICORN_TOKEN_PAST_CAP")
+	}
+
+	// Verify inspectStoredItem(db, id).IntegrityMismatch == false after migration
+	viewAfter, err := inspectStoredItem(db, rec1ID)
+	if err != nil {
+		t.Fatalf("inspectStoredItem after: %s", err)
+	}
+	if viewAfter.IntegrityMismatch {
+		t.Fatalf("expected inspectStoredItem(db, id).IntegrityMismatch == false after migration, got mismatches: %+v", viewAfter.Mismatches)
+	}
+
+	// Verify metadata_json decoded with UseNumber preserves integer types
+	var parsedM1Apply map[string]any
+	decM1 := json.NewDecoder(bytes.NewReader([]byte(m1)))
+	decM1.UseNumber()
+	if err := decM1.Decode(&parsedM1Apply); err != nil {
+		t.Fatalf("decode m1: %s", err)
+	}
+	provMap, ok := parsedM1Apply["provenance"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected provenance map in metadata_json")
+	}
+	if ver, ok := provMap["schema_version"].(json.Number); !ok || ver.String() != "1" {
+		t.Fatalf("expected schema_version json.Number 1, got %v (%T)", provMap["schema_version"], provMap["schema_version"])
 	}
 
 	// Verify row 2 (other source) untouched
