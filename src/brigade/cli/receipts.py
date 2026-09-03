@@ -14,7 +14,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_verify = receipts_sub.add_parser("verify", help="Verify receipt and outcome digest chains.")
     p_verify.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_verify.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_verify.add_argument("--commit", help="Verify receipt trailers from a commit message.")
     p_verify.set_defaults(func=dispatch)
+
+    p_trailer = receipts_sub.add_parser("trailer", help="Print commit trailers for a run receipt.")
+    p_trailer.add_argument("--run", required=True, help="The run id.")
+    p_trailer.set_defaults(func=dispatch)
 
     p_keygen = receipts_sub.add_parser("keygen", help="Generate a local receipt signing key.")
     p_keygen.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -50,8 +55,13 @@ def register(sub: argparse._SubParsersAction) -> None:
 
 def dispatch(args) -> int:
     from .. import receipts_cmd
+    from .. import receipts_trailer
 
+    if args.receipts_command == "trailer":
+        return receipts_trailer.trailer(run_id=args.run)
     if args.receipts_command == "verify":
+        if getattr(args, "commit", None):
+            return receipts_trailer.verify_commit(args.commit)
         return receipts_cmd.verify(target=args.target, json_output=args.json)
     if args.receipts_command == "keygen":
         return receipts_cmd.keygen(target=args.target, force=args.force)
