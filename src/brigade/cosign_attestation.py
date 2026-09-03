@@ -18,6 +18,7 @@ from . import attestation
 COSIGN_KEY_ENV = "BRIGADE_COSIGN_KEY_FILE"
 DEFAULT_COSIGN_KEY_NAME = "cosign.key"
 SIGSTORE_BUNDLE_MEDIA_TYPE = "application/vnd.dev.sigstore.bundle.v0.3+json"
+OFFLINE_SIGNING_CONFIG_MEDIA_TYPE = "application/vnd.dev.sigstore.signingconfig.v0.2+json"
 MIN_SAFE_V2 = (2, 6, 5)
 MIN_SAFE_V3 = (3, 1, 3)
 
@@ -27,9 +28,6 @@ class CosignAttestationError(attestation.AttestationError):
 
 
 def default_cosign_key_path(target: Path) -> Path:
-    configured = os.environ.get(COSIGN_KEY_ENV)
-    if configured:
-        return Path(configured).expanduser()
     return target.expanduser().resolve() / ".brigade" / "attestation" / DEFAULT_COSIGN_KEY_NAME
 
 
@@ -78,7 +76,7 @@ def parse_cosign_version(output: str) -> tuple[int, int, int]:
     major_s, minor_s, patch_s, suffix = m_semver.groups()
     if suffix:
         raise CosignAttestationError(
-            f"unsupported cosign prerelease version '{raw_ver}'; "
+            f"unsupported cosign prerelease or distro-suffixed version '{raw_ver}'; "
             f"safe releases >= {MIN_SAFE_V2[0]}.{MIN_SAFE_V2[1]}.{MIN_SAFE_V2[2]} "
             f"or >= {MIN_SAFE_V3[0]}.{MIN_SAFE_V3[1]}.{MIN_SAFE_V3[2]} required"
         )
@@ -136,6 +134,22 @@ def validate_bundle(bundle: Mapping[str, Any], statement: Mapping[str, Any]) -> 
     verification_material = bundle.get("verificationMaterial")
     if not isinstance(verification_material, Mapping):
         raise CosignAttestationError("cosign bundle missing or invalid verificationMaterial object")
+
+    public_key = verification_material.get("publicKey")
+    if not isinstance(public_key, Mapping):
+        raise CosignAttestationError("cosign bundle missing or invalid verificationMaterial.publicKey object")
+
+    hint = public_key.get("hint")
+    if not isinstance(hint, str) or not hint.strip():
+        raise CosignAttestationError("cosign bundle verificationMaterial.publicKey.hint must be a nonempty string")
+
+    if verification_material.get("tlogEntries") or bundle.get("tlogEntries"):
+        raise CosignAttestationError("cosign bundle contains unexpected tlogEntries; profile excludes Rekor")
+
+    if verification_material.get("timestampVerificationData") or bundle.get("timestampVerificationData"):
+        raise CosignAttestationError(
+            "cosign bundle contains unexpected timestampVerificationData; profile excludes TSA"
+        )
 
     dsse_envelope = bundle.get("dsseEnvelope")
     if not isinstance(dsse_envelope, Mapping):
@@ -206,7 +220,16 @@ def create_bundle(statement: Mapping[str, Any], key_path: Path) -> dict[str, Any
             "attest-blob",
         ]
         if version[0] == 2:
-            cmd.append("--new-bundle-format=true")
+            cmd.extend(["--new-bundle-format=true", "--tlog-upload=false"])
+        elif version[0] == 3:
+            signing_config_path = tmp_dir / "signing-config.json"
+            signing_config = {
+                "mediaType": OFFLINE_SIGNING_CONFIG_MEDIA_TYPE,
+                "rekorTlogConfig": {},
+                "tsaConfig": {},
+            }
+            signing_config_path.write_text(json.dumps(signing_config), encoding="utf-8")
+            cmd.extend(["--signing-config", str(signing_config_path)])
         cmd.extend(
             [
                 "--yes",
@@ -234,7 +257,12 @@ def create_bundle(statement: Mapping[str, Any], key_path: Path) -> dict[str, Any
 
         if proc.returncode != 0:
             err_excerpt = proc.stderr.strip()[:2000]
-            raise CosignAttestationError(f"cosign attest-blob failed with exit code {proc.returncode}: {err_excerpt}")
+            hint = " (if private key is password-encrypted, ensure COSIGN_PASSWORD is set)"
+            if err_excerpt:
+                raise CosignAttestationError(
+                    f"cosign attest-blob failed with exit code {proc.returncode}: {err_excerpt}{hint}"
+                )
+            raise CosignAttestationError(f"cosign attest-blob failed with exit code {proc.returncode}{hint}")
 
         if not bundle_path.is_file():
             raise CosignAttestationError("cosign exited 0 but output bundle was not created")

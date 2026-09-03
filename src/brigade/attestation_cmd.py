@@ -76,7 +76,7 @@ def export_attestation(
         except Exception as exc:
             print(f"error: failed to export attestation: {exc}", file=sys.stderr)
             return 1
-    elif profile == "sshsig":
+    else:  # sshsig (validated at entry)
         key_path = attestation.resolve_signing_key_path(target, key_file=key)
         if not key_path.is_file():
             print(f"error: signing key not found: {key_path}", file=sys.stderr)
@@ -90,12 +90,6 @@ def export_attestation(
         except Exception as exc:
             print(f"error: failed to export attestation: {exc}", file=sys.stderr)
             return 1
-    else:
-        print(
-            f"error: unsupported attestation profile '{profile}' (supported profiles: 'sshsig', 'cosign')",
-            file=sys.stderr,
-        )
-        return 1
 
     if out == "-":
         print(json.dumps(artifact, indent=2, sort_keys=True))

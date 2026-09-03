@@ -48,7 +48,13 @@ def _make_valid_bundle(statement: Mapping[str, Any]) -> dict[str, Any]:
     payload_b64 = base64.b64encode(attestation.canonical_statement_bytes(statement)).decode("ascii")
     return {
         "mediaType": cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE,
-        "verificationMaterial": {},
+        "verificationMaterial": {
+            "publicKey": {
+                "hint": "dummy-key-hint",
+            },
+            "tlogEntries": [],
+            "timestampVerificationData": {},
+        },
         "dsseEnvelope": {
             "payloadType": attestation.DSSE_PAYLOAD_TYPE,
             "payload": payload_b64,
@@ -62,7 +68,18 @@ def test_parse_cosign_version_accepts_safe_stable_releases() -> None:
     assert cosign_attestation.parse_cosign_version("GitVersion: v3.1.3") == (3, 1, 3)
 
 
-@pytest.mark.parametrize("version_str", ["v2.6.4", "v3.1.2", "v3.1.3-rc.1", "v1.13.6"])
+@pytest.mark.parametrize(
+    "version_str",
+    [
+        "v2.6.4",
+        "v3.1.2",
+        "v3.1.3-rc.1",
+        "v1.13.6",
+        "v3.1.3-1ubuntu1",
+        "v2.6.5+distro",
+        "v3.1.3~deb12",
+    ],
+)
 def test_require_safe_cosign_rejects_unsafe_or_prerelease_versions(
     monkeypatch: pytest.MonkeyPatch, version_str: str
 ) -> None:
@@ -149,6 +166,8 @@ def test_create_bundle_v2_uses_statement_and_standard_bundle_flags(
     assert "--key" in captured_argv
     assert "--bundle" in captured_argv
     assert "--new-bundle-format=true" in captured_argv
+    assert "--tlog-upload=false" in captured_argv
+    assert "--signing-config" not in captured_argv
     assert "--yes" in captured_argv
 
     forbidden_terms = ("oidc", "fulcio", "rekor", "identity", "certificate")
@@ -160,15 +179,20 @@ def test_create_bundle_v2_uses_statement_and_standard_bundle_flags(
 def test_create_bundle_v3_omits_legacy_bundle_switch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda _name: "/usr/local/bin/cosign")
     captured_argv: list[str] = []
+    captured_signing_config: dict[str, Any] | None = None
 
     statement = _sample_statement()
     key_path = tmp_path / "cosign.key"
     key_path.write_text("dummy-private-key", encoding="utf-8")
 
     def fake_run(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal captured_signing_config
         if "version" in cmd:
             return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"gitVersion": "v3.1.3"}), stderr="")
         captured_argv.extend(cmd)
+        if "--signing-config" in cmd:
+            cfg_path = Path(cmd[cmd.index("--signing-config") + 1])
+            captured_signing_config = json.loads(cfg_path.read_text(encoding="utf-8"))
         bundle_idx = cmd.index("--bundle")
         bundle_out = Path(cmd[bundle_idx + 1])
         valid_bundle = _make_valid_bundle(statement)
@@ -180,6 +204,14 @@ def test_create_bundle_v3_omits_legacy_bundle_switch(tmp_path: Path, monkeypatch
     bundle = cosign_attestation.create_bundle(statement, key_path)
     assert bundle["mediaType"] == cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE
     assert "--new-bundle-format=true" not in captured_argv
+    assert "--tlog-upload=false" not in captured_argv
+    assert "--signing-config" in captured_argv
+
+    assert captured_signing_config == {
+        "mediaType": "application/vnd.dev.sigstore.signingconfig.v0.2+json",
+        "rekorTlogConfig": {},
+        "tsaConfig": {},
+    }
 
 
 @pytest.mark.parametrize(
@@ -192,6 +224,16 @@ def test_create_bundle_v3_omits_legacy_bundle_switch(tmp_path: Path, monkeypatch
         ("two_signatures",),
         ("missing_verification_material",),
         ("non_object_verification_material",),
+        ("missing_public_key",),
+        ("non_object_public_key",),
+        ("missing_hint",),
+        ("empty_hint",),
+        ("whitespace_hint",),
+        ("non_string_hint",),
+        ("nonempty_tlog_entries",),
+        ("nonempty_bundle_tlog_entries",),
+        ("nonempty_timestamp_data",),
+        ("nonempty_bundle_timestamp_data",),
         ("missing_sig",),
         ("empty_sig",),
         ("invalid_base64_sig",),
@@ -234,6 +276,28 @@ def test_create_bundle_rejects_nonconforming_output(
             del malformed_bundle["verificationMaterial"]
         elif anomaly_kind == "non_object_verification_material":
             malformed_bundle["verificationMaterial"] = "not-an-object"
+        elif anomaly_kind == "missing_public_key":
+            del malformed_bundle["verificationMaterial"]["publicKey"]
+        elif anomaly_kind == "non_object_public_key":
+            malformed_bundle["verificationMaterial"]["publicKey"] = "not-an-object"
+        elif anomaly_kind == "missing_hint":
+            del malformed_bundle["verificationMaterial"]["publicKey"]["hint"]
+        elif anomaly_kind == "empty_hint":
+            malformed_bundle["verificationMaterial"]["publicKey"]["hint"] = ""
+        elif anomaly_kind == "whitespace_hint":
+            malformed_bundle["verificationMaterial"]["publicKey"]["hint"] = "   "
+        elif anomaly_kind == "non_string_hint":
+            malformed_bundle["verificationMaterial"]["publicKey"]["hint"] = 12345
+        elif anomaly_kind == "nonempty_tlog_entries":
+            malformed_bundle["verificationMaterial"]["tlogEntries"] = [{"logIndex": 42}]
+        elif anomaly_kind == "nonempty_bundle_tlog_entries":
+            malformed_bundle["tlogEntries"] = [{"logIndex": 42}]
+        elif anomaly_kind == "nonempty_timestamp_data":
+            malformed_bundle["verificationMaterial"]["timestampVerificationData"] = {
+                "rfc3161Timestamps": [{"timestamp": "fake"}]
+            }
+        elif anomaly_kind == "nonempty_bundle_timestamp_data":
+            malformed_bundle["timestampVerificationData"] = {"rfc3161Timestamps": [{"timestamp": "fake"}]}
         elif anomaly_kind == "missing_sig":
             malformed_bundle["dsseEnvelope"]["signatures"] = [{"keyid": "k1"}]
         elif anomaly_kind == "empty_sig":
@@ -261,6 +325,28 @@ def test_create_bundle_rejects_nonconforming_output(
         (lambda b: b.__setitem__("verificationMaterial", [1, 2, 3]), "verificationMaterial"),
         (lambda b: b.__setitem__("verificationMaterial", 123), "verificationMaterial"),
         (lambda b: b.__setitem__("verificationMaterial", False), "verificationMaterial"),
+        (lambda b: b["verificationMaterial"].pop("publicKey"), "publicKey"),
+        (lambda b: b["verificationMaterial"].__setitem__("publicKey", None), "publicKey"),
+        (lambda b: b["verificationMaterial"].__setitem__("publicKey", "not-an-object"), "publicKey"),
+        (lambda b: b["verificationMaterial"].__setitem__("publicKey", [1, 2, 3]), "publicKey"),
+        (lambda b: b["verificationMaterial"]["publicKey"].pop("hint"), "hint"),
+        (lambda b: b["verificationMaterial"]["publicKey"].__setitem__("hint", ""), "hint"),
+        (lambda b: b["verificationMaterial"]["publicKey"].__setitem__("hint", "   "), "hint"),
+        (lambda b: b["verificationMaterial"]["publicKey"].__setitem__("hint", None), "hint"),
+        (lambda b: b["verificationMaterial"]["publicKey"].__setitem__("hint", 12345), "hint"),
+        (
+            lambda b: b["verificationMaterial"].__setitem__("tlogEntries", [{"logIndex": 1}]),
+            "tlogEntries",
+        ),
+        (lambda b: b.__setitem__("tlogEntries", [{"logIndex": 1}]), "tlogEntries"),
+        (
+            lambda b: b["verificationMaterial"].__setitem__("timestampVerificationData", {"rfc3161Timestamps": [{}]}),
+            "timestampVerificationData",
+        ),
+        (
+            lambda b: b.__setitem__("timestampVerificationData", {"rfc3161Timestamps": [{}]}),
+            "timestampVerificationData",
+        ),
         (lambda b: b["dsseEnvelope"]["signatures"][0].pop("sig"), "nonempty base64"),
         (lambda b: b["dsseEnvelope"]["signatures"][0].__setitem__("sig", ""), "nonempty base64"),
         (lambda b: b["dsseEnvelope"]["signatures"][0].__setitem__("sig", "   "), "nonempty base64"),
@@ -333,6 +419,7 @@ def test_create_bundle_maps_missing_binary_timeout_and_nonzero_exit(
         assert "timed out" in err_msg.lower()
     elif error_kind == "nonzero_exit":
         assert "failed" in err_msg.lower() or "exit" in err_msg.lower()
+        assert "COSIGN_PASSWORD" in err_msg
         # Stderr excerpt must be limited to at most 2,000 characters
         assert len(long_stderr) > 2000
         assert len(err_msg) <= 2500
@@ -637,7 +724,8 @@ def test_real_cosign_bundle_verifies_with_git_tree_subject(tmp_path: Path, monke
         str(bundle_path),
         "--key",
         str(public_key_path),
-        "--type=unused",
+        "--insecure-ignore-tlog=true",
+        f"--type={attestation.IN_TOTO_TEST_RESULT_PREDICATE_TYPE}",
         f"--digest={tree_fingerprint}",
         "--digestAlg=gitTree",
     ]
@@ -647,4 +735,55 @@ def test_real_cosign_bundle_verifies_with_git_tree_subject(tmp_path: Path, monke
         capture_output=True,
         text=True,
     )
-    assert res_verify.returncode == 0
+    assert res_verify.returncode == 0, f"cosign verify failed: {res_verify.stderr}\nstdout: {res_verify.stdout}"
+
+
+def test_cosign_key_path_resolution_and_env_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 1. Unset environment variable defaults to .brigade/attestation/cosign.key
+    monkeypatch.delenv(cosign_attestation.COSIGN_KEY_ENV, raising=False)
+    default_expected = tmp_path.resolve() / ".brigade" / "attestation" / "cosign.key"
+    assert cosign_attestation.default_cosign_key_path(tmp_path) == default_expected
+    assert cosign_attestation.resolve_cosign_key_path(tmp_path) == default_expected
+
+    # 2. BRIGADE_COSIGN_KEY_FILE affects resolve_cosign_key_path but leaves default_cosign_key_path untouched
+    custom_key = tmp_path / "custom_keys" / "my_cosign.key"
+    monkeypatch.setenv(cosign_attestation.COSIGN_KEY_ENV, str(custom_key))
+    assert cosign_attestation.default_cosign_key_path(tmp_path) == default_expected
+    assert cosign_attestation.resolve_cosign_key_path(tmp_path) == custom_key.resolve()
+
+    # 3. Explicit key argument overrides BRIGADE_COSIGN_KEY_FILE
+    explicit_key = tmp_path / "explicit" / "chosen.key"
+    assert cosign_attestation.resolve_cosign_key_path(tmp_path, key_file=explicit_key) == explicit_key.resolve()
+
+    # 4. CLI export honoring BRIGADE_COSIGN_KEY_FILE without --key
+    custom_key.parent.mkdir(parents=True, exist_ok=True)
+    custom_key.write_text("dummy-custom-key", encoding="utf-8")
+    receipt = _sample_receipt(tmp_path)
+    _write_receipt_to_disk(receipt)
+    run_id = receipt["run_id"]
+
+    received_key: Path | None = None
+    mock_bundle = _make_valid_bundle(_sample_statement())
+
+    def fake_export(_receipt_data: Mapping[str, Any], key_path: Path) -> dict[str, Any]:
+        nonlocal received_key
+        received_key = key_path
+        return mock_bundle
+
+    monkeypatch.setattr(cosign_attestation, "export_attestation", fake_export)
+
+    rc = cli.main(
+        [
+            "receipts",
+            "export",
+            "attestation",
+            "--target",
+            str(tmp_path),
+            "--run-id",
+            run_id,
+            "--profile",
+            "cosign",
+        ]
+    )
+    assert rc == 0
+    assert received_key == custom_key.resolve()
