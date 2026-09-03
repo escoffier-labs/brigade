@@ -81,8 +81,9 @@ def apply(
         if not _queue_root(target).is_dir():
             eligible, known, unavailable = _scan_hub(target, None)
             return _apply_result(eligible, known, unavailable, created, recovered, limit)
+        hub_jobs = _hub_scout_jobs() if grokbot_jobs.hub_authority(target) else None
         with grokbot_jobs._storage_paths(target) as storage, grokbot_jobs._queue_lock(storage):
-            eligible, known, unavailable = _scan(target, storage)
+            eligible, known, unavailable = _scan(target, storage, hub_jobs=hub_jobs)
             for job in eligible:
                 if len(created) >= limit:
                     break
@@ -200,27 +201,34 @@ def _preview_scan(
         return _scan(target, storage)
 
 
+def _hub_scout_jobs() -> list[dict[str, Any]]:
+    """List Repository Scout jobs from the hub without holding the queue lock."""
+    try:
+        return grokbot_jobs._hub_jobs(role="repository-scout", include_all=True)
+    except grokbot_jobs.GrokbotJobError as exc:
+        raise ReconcileError(exc.reason) from exc
+
+
 def _scan(
     target: Path,
     storage: grokbot_jobs._Storage,
+    hub_jobs: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     if grokbot_jobs.hub_authority(target):
-        return _scan_hub(target, storage)
+        return _scan_hub(target, storage, hub_jobs=hub_jobs)
     return _scan_local(storage)
 
 
 def _scan_hub(
     _target: Path,
     storage: grokbot_jobs._Storage | None,
+    hub_jobs: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """List completed scout reports from the hub and pair local artifacts by task_hash."""
     eligible: list[dict[str, Any]] = []
     known: list[dict[str, Any]] = []
     unavailable: list[dict[str, Any]] = []
-    try:
-        jobs = grokbot_jobs._hub_jobs(role="repository-scout", include_all=True)
-    except grokbot_jobs.GrokbotJobError as exc:
-        raise ReconcileError(exc.reason) from exc
+    jobs = hub_jobs if hub_jobs is not None else _hub_scout_jobs()
     snapshots = grokbot_jobs._snapshots_by_task_hash(storage) if storage is not None else {}
     for job in jobs:
         if not _is_completed_report(job):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -943,3 +944,35 @@ def test_cli_reconcile_preview_binds_feed_identity_when_operator_token_absent(
     assert seen == [token]
     assert token not in capsys.readouterr().out
     assert (_queue_root(queue) / "jobs" / f"{job_id}.json").exists() is False
+
+
+def test_hub_authority_apply_lists_hub_before_exclusive_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from brigade import fleet_client_grokbot
+
+    queue = tmp_path / "queue"
+    owner = tmp_path / "owner"
+    queue.mkdir()
+    owner.mkdir()
+    _job_id, hub_job = _store_hub_scout(queue)
+    order: list[str] = []
+    original_lock = grokbot_jobs._queue_lock
+
+    @contextmanager
+    def recording_lock(storage: object):
+        order.append("lock")
+        with original_lock(storage):
+            yield
+
+    def list_jobs(**kwargs: object) -> fleet_client_grokbot.GrokbotHubDecision:
+        order.append("list")
+        assert kwargs == {"role": "repository-scout", "include_all": True}
+        return fleet_client_grokbot.GrokbotHubDecision(True, "ok", jobs=[hub_job])
+
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    monkeypatch.setattr(fleet_client_grokbot, "list_jobs", list_jobs)
+    monkeypatch.setattr(grokbot_jobs, "_queue_lock", recording_lock)
+
+    result = grokbot_reconcile.apply(queue, owner)
+
+    assert result["created"] == 1
+    assert order == ["list", "lock"]
