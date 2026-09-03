@@ -41,9 +41,11 @@ type Options struct {
 }
 
 type Result struct {
-	Records  int        `json:"records"`
-	Warnings []string   `json:"warnings"`
-	Files    []FileScan `json:"files,omitempty"`
+	Records   int        `json:"records"`
+	Warnings  []string   `json:"warnings"`
+	Files     []FileScan `json:"files,omitempty"`
+	Skipped   int        `json:"skipped,omitempty"`
+	Truncated int        `json:"truncated,omitempty"`
 }
 
 type Generator func(path string, opts Options, w io.Writer) (Result, error)
