@@ -1037,9 +1037,117 @@ Unknown, corrupt, or parentless run IDs fail closed with no JSON.
 
 ---
 
+## `brigade.attestation.sshsig-dsse.v1`
+
+**Path:** `<run-dir>/attestation.json` (exported via `brigade receipts export attestation`)
+
+An additive envelope profile packaging a verify receipt (`brigade.work_verify_receipt`) as a detached, portable in-toto Statement v1 inside a DSSE (Dead Simple Signing Envelope) v1 structure signed with OpenSSH (`ssh-keygen -Y sign`).
+
+### DSSE Envelope
+
+```json
+{
+  "payloadType": "application/vnd.in-toto+json",
+  "payload": "<base64 canonical statement bytes>",
+  "signatures": [
+    {
+      "keyid": "<sha256 fingerprint of the signer public key, as ssh-keygen -lf prints it>",
+      "sig": "<base64 of the full SSHSIG armored block>"
+    }
+  ],
+  "brigade": {
+    "profile": "brigade.sshsig-dsse.v1",
+    "namespace": "brigade-attestation"
+  }
+}
+```
+
+- `payloadType`: standard in-toto JSON MIME type `application/vnd.in-toto+json`.
+- `payload`: base64-encoded UTF-8 bytes of the canonical in-toto Statement (`sort_keys=True`, `separators=(",", ":")`).
+- `signatures`: array of signer entries. `keyid` is the `SHA256:...` fingerprint of the public key (from `ssh-keygen -lf`). `sig` is the base64 encoding of the full ASCII-armored OpenSSH signature block (`-----BEGIN SSH SIGNATURE-----...-----END SSH SIGNATURE-----`).
+- `brigade`: marker object identifying the envelope profile (`brigade.sshsig-dsse.v1`) and the OpenSSH signature namespace (`brigade-attestation`). This indicates the signature is an SSHSIG armored block rather than a raw signature algorithm output.
+
+### Pre-Authentication Encoding (PAE)
+
+The bytes signed by `ssh-keygen -Y sign -n brigade-attestation` follow standard DSSE v1 Pre-Authentication Encoding:
+
+```text
+"DSSEv1" SP LEN(payloadType) SP payloadType SP LEN(payload) SP payload
+```
+
+where `payload` is the raw canonical statement bytes (not base64) and `LEN(x)` is the base-10 ASCII byte length of `x`.
+
+### Statement Shape
+
+The decoded payload is an in-toto Statement v1 with the Test Result v0.1 predicate:
+
+```json
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    {"name": "git:tree", "digest": {"gitTree": "<tree_fingerprint>"}},
+    {"name": "changes.patch", "digest": {"sha256": "<changes_patch_sha256>"}}
+  ],
+  "predicateType": "https://in-toto.io/attestation/test-result/v0.1",
+  "predicate": {
+    "result": "PASSED | FAILED",
+    "configuration": [
+      {
+        "name": "receipt.json",
+        "uri": "urn:brigade:verify:<run_id>:receipt",
+        "digest": {"sha256": "<digests.receipt_sha256>"},
+        "mediaType": "application/json",
+        "annotations": {
+          "brigade": {
+            "run_id": "<run_id>",
+            "baseline_commit": "<baseline_commit>",
+            "producer_run_id": "<producer_run_id>"
+          }
+        }
+      }
+    ],
+    "url": "urn:brigade:verify:<run_id>",
+    "passedTests": ["<check_id or command>", "..."],
+    "warnedTests": [],
+    "failedTests": ["..."]
+  }
+}
+```
+
+- `subject`: records the exact Git tree identity (`gitTree`) and `changes.patch` SHA-256 digest. Never includes target workspace paths, absolute paths, environment variables, or raw logs. If either `tree_fingerprint` or `changes_patch_sha256` is missing, export is refused.
+- `predicate.result`: `PASSED` only when receipt `status == "completed"` and every command has `exit_code == 0`. Otherwise `FAILED`. Commands with null or nonzero exit codes are recorded in `failedTests`.
+- `predicate.configuration`: references the verify receipt digest with annotations carrying `run_id`, `baseline_commit`, and `producer_run_id` when present.
+
+### Trust Policy
+
+Trust is evaluated offline via standard OpenSSH `allowed_signers` files:
+- Default path: `.brigade/attestation/allowed_signers`.
+- Key file: `.brigade/attestation/signing-key` (Ed25519, mode 0600).
+- Key revocation list (optional): `.brigade/attestation/revoked_keys`.
+- Allowed signers entry format: `<principal> namespaces="brigade-attestation" <key-type> <base64-key>`.
+- Verification executes `ssh-keygen -Y verify -f <allowed_signers> -I <principal> -n brigade-attestation -s <sigfile>` over the recomputed DSSE PAE. Re-derivation of the in-toto Statement from the local verify receipt, and therefore the `SUBJECT-MISMATCH` check, only runs when `--target` is given and the run directory referenced by the receipt exists.
+
+### `brigade.attestation_verify_result.v1`
+
+Machine-readable result printed by `brigade receipts verify-attestation --json`:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schema` | string | Always `brigade.attestation_verify_result.v1` |
+| `status` | string | One of `SIGNED-OK`, `SIGNATURE-MISMATCH`, `UNTRUSTED-KEY`, `UNVERIFIABLE-SIGNATURE`, `SUBJECT-MISMATCH` |
+| `principal` | string \| null | Verified signer principal when status is `SIGNED-OK` |
+| `keyid` | string \| null | `SHA256:...` fingerprint of the signing key when known |
+| `subject` | array of object | Reproduced in-toto Statement subjects |
+| `run_id` | string \| null | Run id recovered from the statement `predicate.url` when it is safe |
+
+---
+
 ## Related commands
 
 - `brigade receipts verify`: digest chain checks for verify receipts and outcome rows
+- `brigade receipts export attestation`: export verify receipt as SSH-signed in-toto attestation
+- `brigade receipts verify-attestation`: offline verification of attestation against allowed_signers
+- `brigade receipts attestation-keygen`: generate Ed25519 attestation signing key and allowed_signers entry
 - `brigade receipts export miseledger`: adapter export (separate `miseledger.adapter.v1` envelope)
 - `brigade runs export` / `import` / `validate-archive`: portable `brigade.work-run` archives
 - `brigade outcome rebuild-status`: prove `status.json` matches decision receipts
