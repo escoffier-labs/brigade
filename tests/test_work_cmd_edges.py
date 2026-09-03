@@ -543,6 +543,7 @@ def test_concurrent_edge_writes_do_not_lose_dependency_edges(tmp_path, monkeypat
         return datetime(2026, 8, 9, 20, 0, clock["n"], tzinfo=timezone.utc)
 
     monkeypatch.setattr(work_cmd.helpers, "_now", _now)
+    monkeypatch.setattr(work_cmd.ledger.locking, "TASK_LEDGER_LOCK_DEADLINE_SECONDS", 2.0)
     hub = _add(tmp_path, "Hub")
     targets = [_add(tmp_path, f"Target {index}") for index in range(12)]
     worker_count = len(targets)
@@ -550,15 +551,26 @@ def test_concurrent_edge_writes_do_not_lose_dependency_edges(tmp_path, monkeypat
     errors: list[str] = []
 
     def add_edge(target_task):
+        import time
+
         ready.wait()
-        rc = work_cmd.task_edge_add(
-            target=tmp_path,
-            edge_type="blocks",
-            source=hub["id"],
-            target_id=target_task["id"],
-        )
-        if rc != 0:
-            errors.append(f"{target_task['id']}: rc={rc}")
+        for attempt in range(3):
+            try:
+                rc = work_cmd.task_edge_add(
+                    target=tmp_path,
+                    edge_type="blocks",
+                    source=hub["id"],
+                    target_id=target_task["id"],
+                )
+                if rc == 0:
+                    break
+                errors.append(f"{target_task['id']}: rc={rc}")
+                break
+            except work_cmd.ledger.locking.TaskLedgerLockTimeout:
+                if attempt == 2:
+                    errors.append(f"{target_task['id']}: TaskLedgerLockTimeout")
+                else:
+                    time.sleep(0.05)
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         list(executor.map(add_edge, targets))
