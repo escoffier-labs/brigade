@@ -2718,10 +2718,10 @@ def test_the_legacy_quota_reconciliation_runs_once_not_on_every_start(tmp_path):
 
 
 def test_fleet_hub_schema_is_v18_for_the_recoverable_link_ceiling(tmp_path):
-    assert fleet_hub.SCHEMA_VERSION == 18
+    assert fleet_hub.SCHEMA_VERSION == 19
     conn = fleet_hub.init_db(tmp_path / "hub.db")
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 19
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(work_import_keys)")}
         assert "refused" in columns
         assert conn.execute("SELECT COUNT(*) FROM work_schema_meta").fetchone()[0] >= 1

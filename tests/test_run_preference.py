@@ -76,7 +76,15 @@ def test_cache_round_trip(tmp_path) -> None:
 def test_hub_preference_get_put_and_rejects_secrets(tmp_path) -> None:
     conn = fleet_hub.init_db(tmp_path / "hub.db")
     empty = fleet_hub.get_run_preference(conn)
-    assert empty == {"impl": None, "review": None, "chef": None, "notes": None}
+    assert empty == {
+        "impl": None,
+        "review": None,
+        "chef": None,
+        "research": None,
+        "security": None,
+        "scout": None,
+        "notes": None,
+    }
     stored = fleet_hub.set_run_preference(
         conn,
         {"impl": "cursor_grok", "review": "claude_standby"},
@@ -178,3 +186,38 @@ def test_role_fields_are_seat_names_and_never_dispatch() -> None:
     # "security" must not trip the secret-key regex.
     assert run_preference.parse_preference({"security": "daybreak"}).security == "daybreak"
 
+
+def test_hub_preference_stores_roles_and_meta(tmp_path) -> None:
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    assert fleet_hub.get_run_preference_meta(conn) == {"updated_at": None, "updated_by": None}
+    stored = fleet_hub.set_run_preference(conn, {"security": "daybreak", "scout": "cursor_scout"}, updated_by="admin")
+    assert stored["security"] == "daybreak"
+    assert stored["scout"] == "cursor_scout"
+    meta = fleet_hub.get_run_preference_meta(conn)
+    assert meta["updated_by"] == "admin"
+    assert isinstance(meta["updated_at"], str) and meta["updated_at"]
+    conn.close()
+
+
+def test_hub_preference_v18_row_survives_v19_migration(tmp_path) -> None:
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.execute(
+        "CREATE TABLE run_preference (id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, "
+        "chef TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT)"
+    )
+    old.execute(
+        "INSERT INTO run_preference VALUES (1, 'coder', 'claude_standby', 'chef', 'kept', "
+        "'2026-01-01T00:00:00+00:00', 'admin')"
+    )
+    old.execute("PRAGMA user_version=18")
+    old.commit()
+    old.close()
+    conn = fleet_hub.init_db(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 19
+    pref = fleet_hub.get_run_preference(conn)
+    assert pref["impl"] == "coder" and pref["notes"] == "kept"
+    assert pref["research"] is None and pref["security"] is None and pref["scout"] is None
+    conn.close()

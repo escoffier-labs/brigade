@@ -123,7 +123,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -552,6 +552,7 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # item over the Worklore link ceiling no longer refuses startup: reads are cut by SQL,
     # new writes still enforce the ceiling, and an operator unlinks the excess on a
     # running hub rather than needing one that will not start.
+    # v18 -> v19: research/security/scout role columns on run_preference (roster page).
     worklore_store.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
@@ -769,6 +770,11 @@ def get_run_preference(conn: sqlite3.Connection) -> dict[str, Any]:
 def set_run_preference(conn: sqlite3.Connection, raw: Any, *, updated_by: str | None = None) -> dict[str, Any]:
     """Replace the fleet run preference (see ``fleet_hub_preference``)."""
     return fleet_hub_preference.set_run_preference(conn, raw, updated_by=updated_by)
+
+
+def get_run_preference_meta(conn: sqlite3.Connection) -> dict[str, str | None]:
+    """Facade for the preference row's ``updated_at`` and ``updated_by``."""
+    return fleet_hub_preference.get_run_preference_meta(conn)
 
 
 def run_started_at(

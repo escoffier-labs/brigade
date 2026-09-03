@@ -152,7 +152,7 @@ class RunPreference:
 - Modify: `src/brigade/fleet_hub.py:126` (`SCHEMA_VERSION`)
 - Test: `tests/test_run_preference.py`
 
-- [ ] In `tests/test_run_preference.py`, change the `empty ==` assertion inside `test_hub_preference_get_put_and_rejects_secrets` to:
+- [x] In `tests/test_run_preference.py`, change the `empty ==` assertion inside `test_hub_preference_get_put_and_rejects_secrets` to:
 
 ```python
     assert empty == {
@@ -166,7 +166,7 @@ class RunPreference:
     }
 ```
 
-- [ ] Append these tests:
+- [x] Append these tests:
 
 ```python
 def test_hub_preference_stores_roles_and_meta(tmp_path) -> None:
@@ -207,10 +207,10 @@ def test_hub_preference_v18_row_survives_v19_migration(tmp_path) -> None:
     conn.close()
 ```
 
-- [ ] Run, watch it fail:
+- [x] Run, watch it fail:
   `brigade work verify run --target . --command "python -m pytest -q tests/test_run_preference.py -k 'hub_preference'" --capture brigade-work`
   Expect FAIL: `AttributeError: module 'brigade.fleet_hub' has no attribute 'get_run_preference_meta'` and the `empty ==` mismatch.
-- [ ] Replace `src/brigade/fleet_hub_preference.py` with:
+- [x] Replace `src/brigade/fleet_hub_preference.py` with:
 
 ```python
 """Fleet hub storage for the one-row run preference pin (#1223).
@@ -307,7 +307,7 @@ def set_run_preference(conn: sqlite3.Connection, raw: Any, *, updated_by: str | 
     return stored
 ```
 
-- [ ] In `src/brigade/fleet_hub.py`, change line 126 to `SCHEMA_VERSION = 19`, and after the existing `set_run_preference` facade (around line 769) add:
+- [x] In `src/brigade/fleet_hub.py`, change line 126 to `SCHEMA_VERSION = 19`, and after the existing `set_run_preference` facade (around line 769) add:
 
 ```python
 def get_run_preference_meta(conn: sqlite3.Connection) -> dict[str, str | None]:
@@ -315,12 +315,12 @@ def get_run_preference_meta(conn: sqlite3.Connection) -> dict[str, str | None]:
     return fleet_hub_preference.get_run_preference_meta(conn)
 ```
 
-- [ ] Update the comment near line 546 of `fleet_hub.py` that lists migrations by appending: `# v18 -> v19: research/security/scout role columns on run_preference (roster page).`
-- [ ] Run to green:
+- [x] Update the comment near line 546 of `fleet_hub.py` that lists migrations by appending: `# v18 -> v19: research/security/scout role columns on run_preference (roster page).`
+- [x] Run to green:
   `brigade work verify run --target . --command "python -m pytest -q tests/test_run_preference.py tests/test_fleet_model_roster.py tests/test_fleet_command_deck.py" --capture brigade-work`
   Expect PASS. `tests/test_worklore_store.py:2721-2724` asserts the literal `18` twice (`fleet_hub.SCHEMA_VERSION == 18` and `PRAGMA user_version == 18`); change both literals to `19` in the same commit and include that file in the run:
   `brigade work verify run --target . --command "python -m pytest -q tests/test_worklore_store.py -k schema" --capture brigade-work` - expect PASS.
-- [ ] Commit: `git add -A && git commit -m "feat(fleet): store research, security, and scout roles on the hub (schema v19)"`
+- [x] Commit: `git add -A && git commit -m "feat(fleet): store research, security, and scout roles on the hub (schema v19)"`
 
 ### Task 3: CLI flags and printing
 
