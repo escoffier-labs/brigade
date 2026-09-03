@@ -1001,7 +1001,7 @@ def test_hub_authority_same_task_hash_retries_pair_by_job_id(tmp_path: Path, mon
     assert second["created"] == 1
     assert second["known"] == 1
     drafts = sorted(path.name for path in _review_inbox(owner).glob("*.md"))
-    assert drafts == [f"{first_id}-scout-report.md", f"{second_id}-scout-report.md"]
+    assert drafts == sorted([f"{first_id}-scout-report.md", f"{second_id}-scout-report.md"])
 
 
 def test_hub_authority_snapshot_task_hash_mismatch_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
