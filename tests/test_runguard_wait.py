@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 
 import pytest
 
@@ -8,7 +9,7 @@ from brigade import runguard
 
 
 def _repo(tmp_path):
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repo with spaces"
     repo.mkdir()
     for args in (
         ("init",),
@@ -68,7 +69,9 @@ def test_run_lock_wait_fails_immediately_for_retained_claim_with_recovery_comman
     assert str(retained_claims[0]) in message
     assert str(run_dir.resolve()) in message
     assert "43210" in message
-    assert f"brigade runs recover --cwd {repo.resolve()} abandoned-run" in message
+    expected = ["brigade", "runs", "recover", "--cwd", str(repo.resolve()), "abandoned-run"]
+    command = message.split("recover with: ", 1)[1]
+    assert shlex.split(command) == expected
     assert sleeps == []
 
 

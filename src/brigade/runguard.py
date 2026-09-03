@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import shlex
 import shutil
 import stat
 import tempfile
@@ -1090,7 +1091,7 @@ def _retained_claim_wait_error(path: Path) -> RunLockError | None:
     return RunLockError(
         "retained stale run lock claim requires explicit recovery: "
         f"{claim}; owner run_dir {run_dir}; owner pid {pid} is dead; "
-        f"recover with: brigade runs recover --cwd {workspace} {run_id}"
+        f"recover with: brigade runs recover --cwd {shlex.quote(str(workspace))} {shlex.quote(run_id)}"
     )
 
 
