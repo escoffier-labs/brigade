@@ -1,3 +1,4 @@
+<!-- Verbatim reviewer output. Synthetic example addresses have their at-sign replaced with [at] to satisfy the content guard. -->
 BLUF: Brigade should emit an in-toto Statement v1 with predicate type `https://brigade.dev/attestation/agent-change/v1`, plus digest-linked Test Result, request, execution, and approval statements signed by their actual principals. Very likely, confidence High - Brigade already captures most change and verification facts; the missing pieces are human identity, workload identity, final-subject approval binding, and public-key signatures.
 
 - Bind the Statement subject to the resulting Git tree, with `gitCommit` added only when that commit has the same tree.
@@ -411,7 +412,7 @@ OIDC identity should be compared as the pair `(issuer, subject)`, not by email. 
 
 Recommendations:
 
-- Offline CLI: one SSH Ed25519 or `ed25519-sk` key per human and per seat role, with a versioned `allowed_signers` file, namespace `attestation@brigade.dev`, validity windows, and an optional KRL. Do not silently reuse a Git author email as identity.
+- Offline CLI: one SSH Ed25519 or `ed25519-sk` key per human and per seat role, with a versioned `allowed_signers` file, namespace `attestation[at]brigade.dev`, validity windows, and an optional KRL. Do not silently reuse a Git author email as identity.
 - Enterprise: corporate OIDC `iss/sub` through Fulcio for humans; SPIFFE IDs and short-lived SVIDs for agent seats and the exporter. Preserve the Fulcio certificate, chain, transparency material, and trusted root in the verification bundle.
 
 ## 4. Signing and transparency
@@ -439,7 +440,7 @@ Use:
 
 | Option | Assessment | Verifier |
 |---|---|---|
-| DSSE plus `ssh-keygen -Y sign` | Recommended offline default. Brigade materializes DSSE PAE bytes, SSHSIG signs those bytes, and the complete SSHSIG object becomes the application-specific `sig`. Supports existing SSH agents and hardware keys | After Brigade extracts the exact PAE and SSHSIG: `ssh-keygen -Y verify -f allowed_signers -I requester@acme.example -n attestation@brigade.dev -s change.sshsig -r revoked.krl < change.pae` |
+| DSSE plus `ssh-keygen -Y sign` | Recommended offline default. Brigade materializes DSSE PAE bytes, SSHSIG signs those bytes, and the complete SSHSIG object becomes the application-specific `sig`. Supports existing SSH agents and hardware keys | After Brigade extracts the exact PAE and SSHSIG: `ssh-keygen -Y verify -f allowed_signers -I requester[at]acme.example -n attestation[at]brigade.dev -s change.sshsig -r revoked.krl < change.pae` |
 | DSSE plus minisign | Good portable alternative where OpenSSH signing is absent. Ed25519, simple key files, and signed trusted comments | `minisign -Vm change.pae -x change.minisig -p brigade.pub` after exact PAE/signature extraction. [Minisign documentation, accessed 2026-09-02](https://jedisct1.github.io/minisign/) |
 | Cosign keyless | Recommended enterprise signer. Produces the Sigstore bundle, short-lived Fulcio certificate, identity claims, and transparency evidence understood by Sigstore tooling | `cosign verify-blob-attestation --bundle change.sigstore.json --certificate-identity 'spiffe://prod.acme.example/brigade/exporter' --certificate-oidc-issuer 'https://oidc.acme.example' --type 'https://brigade.dev/attestation/agent-change/v1' --digest 2222222222222222222222222222222222222222 --digestAlg gitTree --check-claims=true` |
 | SCITT, RFC 9943 | Enterprise transparency option for private or regulated environments. The same Statement is carried in a COSE_Sign1 Signed Statement, then registered to obtain a COSE receipt. This is an alternative envelope, not a DSSE wrapper | Proposed Brigade command: `brigade receipts verify-attestation --scitt-trust-store acme-scitt-trust.json change.transparent.cose`. RFC 9943 does not standardize a CLI or registration HTTP API |

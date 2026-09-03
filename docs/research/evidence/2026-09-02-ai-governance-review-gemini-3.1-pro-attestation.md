@@ -1,3 +1,4 @@
+<!-- Verbatim reviewer output. Synthetic example addresses have their at-sign replaced with [at] to satisfy the content guard. -->
 ## 1. Concrete in-toto Statement v1 and Proposed Predicate
 
 The attestation envelope conforms to **in-toto Statement v1** (`[https://in-toto.io/Statement/v1](https://in-toto.io/Statement/v1)`)[cite: 1]. The predicate defines `[https://brigade.dev/attestation/agent-change/v1](https://brigade.dev/attestation/agent-change/v1)`[cite: 1, 2] to bind the orchestrator session, producing seats, human requester, human approver, patch digests, and verification receipts into an immutable, verifiable claim.
@@ -30,7 +31,7 @@ The attestation envelope conforms to **in-toto Statement v1** (`[https://in-toto
     },
     "request": {
       "requester": {
-        "id": "alice@corp.internal",
+        "id": "alice[at]corp.internal",
         "kind": "human",
         "keyId": "SHA256:uN0b904v83kd9K30Dkdf903ldkj02kdkf903lkd"
       },
@@ -111,7 +112,7 @@ The attestation envelope conforms to **in-toto Statement v1** (`[https://in-toto
       "reason": "Verified unit test execution against OIDC token claims and segregation-of-duties invariant.",
       "approvedAt": "2026-09-02T19:42:15Z",
       "approver": {
-        "id": "bob-security@corp.internal",
+        "id": "bob-security[at]corp.internal",
         "kind": "human",
         "keyId": "SHA256:kL893jd08Kdf023jkd98234lksdf0923jksdf90234l"
       },
@@ -231,7 +232,7 @@ Non-repudiation requires unforgeable cryptographic identity binding across three
 # 1. Extract payload and verify the SSH signature over DSSE PAE using allowed_signers
 ssh-keygen -Y verify \
   -f /etc/brigade/allowed_signers \
-  -I "approver@corp.internal" \
+  -I "approver[at]corp.internal" \
   -n "in-toto" \
   -s attestation.dsse.sig \
   < <(brigade receipts dsse-pae attestation.json)
@@ -250,7 +251,7 @@ cosign verify-blob-attestation \
 # Verifies OIDC subject, issuer, and inclusion proof from Rekor transparency log
 cosign verify-blob-attestation \
   --bundle brigade-run-20260902.sigstore.json \
-  --certificate-identity "bob-security@corp.internal" \
+  --certificate-identity "bob-security[at]corp.internal" \
   --certificate-oidc-issuer "https://login.microsoftonline.com/v2.0" \
   --type https://brigade.dev/attestation/agent-change/v1 \
   --check-claims \

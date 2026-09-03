@@ -1057,7 +1057,7 @@ An additive envelope profile packaging a verify receipt (`brigade.work_verify_re
   ],
   "brigade": {
     "profile": "brigade.sshsig-dsse.v1",
-    "namespace": "attestation@brigade.dev"
+    "namespace": "brigade-attestation"
   }
 }
 ```
@@ -1065,11 +1065,11 @@ An additive envelope profile packaging a verify receipt (`brigade.work_verify_re
 - `payloadType`: standard in-toto JSON MIME type `application/vnd.in-toto+json`.
 - `payload`: base64-encoded UTF-8 bytes of the canonical in-toto Statement (`sort_keys=True`, `separators=(",", ":")`).
 - `signatures`: array of signer entries. `keyid` is the `SHA256:...` fingerprint of the public key (from `ssh-keygen -lf`). `sig` is the base64 encoding of the full ASCII-armored OpenSSH signature block (`-----BEGIN SSH SIGNATURE-----...-----END SSH SIGNATURE-----`).
-- `brigade`: marker object identifying the envelope profile (`brigade.sshsig-dsse.v1`) and the OpenSSH signature namespace (`attestation@brigade.dev`). This indicates the signature is an SSHSIG armored block rather than a raw signature algorithm output.
+- `brigade`: marker object identifying the envelope profile (`brigade.sshsig-dsse.v1`) and the OpenSSH signature namespace (`brigade-attestation`). This indicates the signature is an SSHSIG armored block rather than a raw signature algorithm output.
 
 ### Pre-Authentication Encoding (PAE)
 
-The bytes signed by `ssh-keygen -Y sign -n attestation@brigade.dev` follow standard DSSE v1 Pre-Authentication Encoding:
+The bytes signed by `ssh-keygen -Y sign -n brigade-attestation` follow standard DSSE v1 Pre-Authentication Encoding:
 
 ```text
 "DSSEv1" SP LEN(payloadType) SP payloadType SP LEN(payload) SP payload
@@ -1124,8 +1124,8 @@ Trust is evaluated offline via standard OpenSSH `allowed_signers` files:
 - Default path: `.brigade/attestation/allowed_signers`.
 - Key file: `.brigade/attestation/signing-key` (Ed25519, mode 0600).
 - Key revocation list (optional): `.brigade/attestation/revoked_keys`.
-- Allowed signers entry format: `<principal> namespaces="attestation@brigade.dev" <key-type> <base64-key>`.
-- Verification executes `ssh-keygen -Y verify -f <allowed_signers> -I <principal> -n attestation@brigade.dev -s <sigfile>` over the recomputed DSSE PAE. Re-derivation of the in-toto Statement from the local verify receipt, and therefore the `SUBJECT-MISMATCH` check, only runs when `--target` is given and the run directory referenced by the receipt exists.
+- Allowed signers entry format: `<principal> namespaces="brigade-attestation" <key-type> <base64-key>`.
+- Verification executes `ssh-keygen -Y verify -f <allowed_signers> -I <principal> -n brigade-attestation -s <sigfile>` over the recomputed DSSE PAE. Re-derivation of the in-toto Statement from the local verify receipt, and therefore the `SUBJECT-MISMATCH` check, only runs when `--target` is given and the run directory referenced by the receipt exists.
 
 ### `brigade.attestation_verify_result.v1`
 

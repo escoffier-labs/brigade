@@ -23,7 +23,7 @@ IN_TOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 IN_TOTO_TEST_RESULT_PREDICATE_TYPE = "https://in-toto.io/attestation/test-result/v0.1"
 DSSE_PAYLOAD_TYPE = "application/vnd.in-toto+json"
 ATTESTATION_PROFILE = "brigade.sshsig-dsse.v1"
-ATTESTATION_NAMESPACE = "attestation@brigade.dev"
+ATTESTATION_NAMESPACE = "brigade-attestation"
 
 KEY_ENV = "BRIGADE_ATTESTATION_KEY_FILE"
 DEFAULT_KEY_NAME = "signing-key"
