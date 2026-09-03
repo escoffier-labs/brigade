@@ -95,7 +95,7 @@ def dispatch(args) -> int:
         return receipts_trailer.trailer(run_id=args.run)
     if args.receipts_command == "verify":
         if getattr(args, "commit", None):
-            return receipts_trailer.verify_commit(args.commit)
+            return receipts_trailer.verify_commit(args.commit, target=args.target)
         from .. import approval
 
         return approval.verify_receipts_with_approvals(target=args.target, json_output=args.json)
