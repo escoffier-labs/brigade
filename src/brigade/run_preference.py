@@ -18,7 +18,8 @@ from . import toml_compat
 SCHEMA = "brigade.run_preference.v1"
 CACHE_REL_PATH = Path(".brigade") / "run-preference.toml"
 SEAT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-ALLOWED_FIELDS = ("impl", "review", "chef", "notes")
+ROLE_FIELDS = ("impl", "review", "chef", "research", "security", "scout")
+ALLOWED_FIELDS = (*ROLE_FIELDS, "notes")
 _SECRET_KEY_RE = re.compile(
     r"(token|secret|password|passwd|api[_-]?key|credential|env|path|home)",
     re.IGNORECASE,
@@ -38,6 +39,9 @@ class RunPreference:
     impl: str | None = None
     review: str | None = None
     chef: str | None = None
+    research: str | None = None
+    security: str | None = None
+    scout: str | None = None
     notes: str | None = None
 
     def payload(self) -> dict[str, str]:
@@ -52,12 +56,10 @@ class RunPreference:
         lines = [
             "Fleet run preference (explicit --worker or a named seat in the task wins):",
         ]
-        if self.impl:
-            lines.append(f"- default impl: {self.impl}")
-        if self.review:
-            lines.append(f"- default review: {self.review}")
-        if self.chef:
-            lines.append(f"- default chef: {self.chef}")
+        for role in ROLE_FIELDS:
+            value = getattr(self, role)
+            if value:
+                lines.append(f"- default {role}: {value}")
         if self.notes:
             lines.append(f"- notes: {self.notes}")
         if len(lines) == 1:

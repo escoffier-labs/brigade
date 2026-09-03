@@ -142,3 +142,39 @@ def test_print_preference_sanitizes_control_characters(capsys) -> None:
     assert "chef: -" in out
     assert "\x1b" not in out
     assert "\\x1b[31mred" in out
+
+
+def test_role_fields_parse_round_trip_and_prefix(tmp_path) -> None:
+    raw = {
+        "impl": "agy_flash",
+        "review": "claude_standby",
+        "chef": "chef",
+        "research": "researcher",
+        "security": "daybreak",
+        "scout": "cursor_scout",
+        "notes": "cursor via Other Models only",
+    }
+    pref = run_preference.parse_preference(raw)
+    assert pref.research == "researcher"
+    assert pref.security == "daybreak"
+    assert pref.scout == "cursor_scout"
+    assert pref.payload() == raw
+    assert run_preference.ROLE_FIELDS == ("impl", "review", "chef", "research", "security", "scout")
+    run_preference.write_cached(pref, tmp_path)
+    assert run_preference.load_cached(tmp_path) == pref
+    prefix = pref.planner_prefix()
+    assert "- default research: researcher" in prefix
+    assert "- default security: daybreak" in prefix
+    assert "- default scout: cursor_scout" in prefix
+    assert prefix.index("default chef") < prefix.index("default research")
+
+
+def test_role_fields_are_seat_names_and_never_dispatch() -> None:
+    with pytest.raises(run_preference.RunPreferenceError, match="roster seat name"):
+        run_preference.parse_preference({"security": "not a seat"})
+    roster = _FakeRoster(orchestrator="chef", agents={"chef": object(), "daybreak": object()})
+    pref = run_preference.RunPreference(security="daybreak")
+    assert run_preference.resolve_worker(pref, roster, worker=None, task="scan the repo") is None
+    # "security" must not trip the secret-key regex.
+    assert run_preference.parse_preference({"security": "daybreak"}).security == "daybreak"
+

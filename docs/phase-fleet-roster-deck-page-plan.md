@@ -56,7 +56,7 @@ brigade work verify run --target . --command "python -m pytest -q tests/test_run
 - Modify: `src/brigade/run_preference.py:20-66`
 - Test: `tests/test_run_preference.py`
 
-- [ ] Append these tests to `tests/test_run_preference.py`
+- [x] Append these tests to `tests/test_run_preference.py`
 
 ```python
 def test_role_fields_parse_round_trip_and_prefix(tmp_path) -> None:
@@ -94,17 +94,17 @@ def test_role_fields_are_seat_names_and_never_dispatch() -> None:
     assert run_preference.parse_preference({"security": "daybreak"}).security == "daybreak"
 ```
 
-- [ ] Run it, watch it fail:
+- [x] Run it, watch it fail:
   `brigade work verify run --target . --command "python -m pytest -q tests/test_run_preference.py -k role_fields" --capture brigade-work`
   Expect FAIL: `AttributeError: module 'brigade.run_preference' has no attribute 'ROLE_FIELDS'` or `RunPreferenceError: unknown preference field: research`.
-- [ ] Replace lines 20-21 (`ALLOWED_FIELDS = ...`) with:
+- [x] Replace lines 20-21 (`ALLOWED_FIELDS = ...`) with:
 
 ```python
 ROLE_FIELDS = ("impl", "review", "chef", "research", "security", "scout")
 ALLOWED_FIELDS = (*ROLE_FIELDS, "notes")
 ```
 
-- [ ] Replace the `RunPreference` dataclass body (fields and `planner_prefix`) with:
+- [x] Replace the `RunPreference` dataclass body (fields and `planner_prefix`) with:
 
 ```python
 @dataclass(frozen=True)
@@ -140,10 +140,10 @@ class RunPreference:
         return "\n".join(lines) + "\n\n"
 ```
 
-- [ ] Run to green:
+- [x] Run to green:
   `brigade work verify run --target . --command "python -m pytest -q tests/test_run_preference.py" --capture brigade-work`
   Expect: all tests pass (the existing `test_hub_preference_get_put_and_rejects_secrets` still passes because the hub side is unchanged so far).
-- [ ] Commit: `git add -A && git commit -m "feat(preference): add research, security, and scout role fields"`
+- [x] Commit: `git add -A && git commit -m "feat(preference): add research, security, and scout role fields"`
 
 ### Task 2: hub storage for the roles (schema v19)
 
