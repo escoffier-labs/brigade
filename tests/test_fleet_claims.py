@@ -894,24 +894,42 @@ class TestClientClaims:
         renew_started = threading.Event()
         allow_renew = threading.Event()
 
+        # We can extract the heartbeat thread during the context to wait on it!
+        # wait, we can just intercept the acquire_claim to know if it happened,
+        # but to know it DIDN'T happen, we just wait for the thread to die!
+
         def stuck_renew(target, **kwargs):
             renew_started.set()
             allow_renew.wait(5)
-            # By the time this "lands", the main thread has already released:
-            # the hub's answer for the deleted row is "missing".
             return fleet_client.ClaimDecision(granted=False, reason="missing", holder=kwargs.get("holder"))
 
         monkeypatch.setattr(fleet_client, "renew_claim", stuck_renew)
+
+        heartbeat_thread = None
+        real_thread_start = threading.Thread.start
+
+        def track_thread(self_thread, *args, **kwargs):
+            nonlocal heartbeat_thread
+            if self_thread.name == "brigade-fleet-claim-renew":
+                heartbeat_thread = self_thread
+            return real_thread_start(self_thread, *args, **kwargs)
+
+        monkeypatch.setattr(threading.Thread, "start", track_thread)
+
         with fleet_client.repo_claim("repo-a", ttl_seconds=60):
             assert renew_started.wait(5)
-        # Exit drained what it could (bounded join), then released.
+
         assert fleet_client.fetch_claims(include_all=True) == []
-        # Let the stale renew finish and tempt the re-acquire path.
+
+        # Let the stale renew finish.
         allow_renew.set()
-        deadline = time.monotonic() + 1
-        while time.monotonic() < deadline:
-            assert fleet_client.fetch_claims(include_all=True) == [], "released claim was resurrected"
-            time.sleep(0.02)
+
+        # Wait for the thread to definitively end.
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=5)
+            assert not heartbeat_thread.is_alive()
+
+        assert fleet_client.fetch_claims(include_all=True) == [], "released claim was resurrected"
 
     def test_client_rejects_invalid_opaque_labels_without_posting(self, hub, monkeypatch):
         url, token, _db = hub
