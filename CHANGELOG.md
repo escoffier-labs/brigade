@@ -1687,6 +1687,7 @@ closes them and makes the loop's own health visible.
 - Dogfood runs default to prompt-level read-only plus Codex's `danger-full-access` sandbox setting for trusted-workspace use so repo inspection works on hosts where native read-only sandboxing blocks shell inspection; `--native-read-only-sandbox` opts into stricter native enforcement.
 
 ### Fixed
+- Reduced storage footprint of the Codex adapter by skipping useless protocol chatter, storing tool-call arguments only once, capping the argument size to 4 KB (with a truncated marker and its full digest), and reporting skip/truncate metrics.
 - `brigade init` now collapses mixed current and legacy managed `.gitignore` blocks into one regenerated Brigade block.
 
 ## [0.6.0] - 2026-05-24
