@@ -28,12 +28,12 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 11 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 32 command path(s)
+- `brigade fleet`: 9 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade guard`: 1 command path(s)
 - `brigade handoff`: 17 command path(s)
 - `brigade handoff-template`: 1 command path(s)
-- `brigade harness`: 5 command path(s)
+- `brigade harness`: 4 command path(s)
 - `brigade hermes-fragments` (extras): 1 command path(s)
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
@@ -50,7 +50,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade profiles`: 2 command path(s)
 - `brigade projection`: 1 command path(s)
 - `brigade projects` (extras): 10 command path(s)
-- `brigade receipts`: 8 command path(s)
+- `brigade receipts`: 5 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release` (extras): 23 command path(s)
 - `brigade repos` (extras): 74 command path(s)
@@ -58,10 +58,10 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade roadmap` (extras): 4 command path(s)
 - `brigade roster`: 4 command path(s)
 - `brigade route`: 1 command path(s)
-- `brigade run`: 45 command path(s)
-- `brigade run-cloud` (deprecated; use `brigade run cloud`): 44 command path(s)
+- `brigade run`: 1 command path(s)
+- `brigade run-cloud`: 20 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
-- `brigade runs`: 20 command path(s)
+- `brigade runs`: 18 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade search`: 6 command path(s)
 - `brigade security`: 16 command path(s)
@@ -74,7 +74,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade untrusted` (extras): 2 command path(s)
 - `brigade update`: 1 command path(s)
 - `brigade version`: 1 command path(s)
-- `brigade work`: 156 command path(s)
+- `brigade work`: 155 command path(s)
 - `brigade workflow` (extras): 3 command path(s)
 
 ## Commands
@@ -190,37 +190,14 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade extras on`
 - `brigade extras status`
 - `brigade fleet claims`
-- `brigade fleet cloud`
 - `brigade fleet export`
 - `brigade fleet flush`
-- `brigade fleet grokbot enroll-actor`
-- `brigade fleet models admit`
-- `brigade fleet models default set`
-- `brigade fleet models doctor`
-- `brigade fleet models reconcile`
-- `brigade fleet models retire`
-- `brigade fleet models set`
 - `brigade fleet nodes add`
 - `brigade fleet nodes list`
 - `brigade fleet nodes revoke`
-- `brigade fleet preference get`
-- `brigade fleet preference pull`
-- `brigade fleet preference set`
 - `brigade fleet serve`
-- `brigade fleet sessions`
 - `brigade fleet sink`
 - `brigade fleet status`
-- `brigade fleet work attempt`
-- `brigade fleet work burn`
-- `brigade fleet work create`
-- `brigade fleet work link`
-- `brigade fleet work list`
-- `brigade fleet work patch`
-- `brigade fleet work show`
-- `brigade fleet work sync-brigade`
-- `brigade fleet work sync-github`
-- `brigade fleet work transition`
-- `brigade fleet work unlink`
 - `brigade friction add` (extras)
 - `brigade friction scan` (extras)
 - `brigade friction show` (extras)
@@ -244,7 +221,6 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade handoff sync-issues`
 - `brigade handoff-template`
 - `brigade harness doctor`
-- `brigade harness fragments`
 - `brigade harness install`
 - `brigade harness sync`
 - `brigade harness uninstall`
@@ -368,14 +344,11 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade projects readiness plan` (extras)
 - `brigade projects readiness record` (extras)
 - `brigade projects readiness show` (extras)
-- `brigade receipts attestation-keygen`
-- `brigade receipts export attestation`
 - `brigade receipts export miseledger`
 - `brigade receipts export openinference`
 - `brigade receipts export otel-genai`
 - `brigade receipts keygen`
 - `brigade receipts verify`
-- `brigade receipts verify-attestation`
 - `brigade reconfigure`
 - `brigade release candidate archive` (extras)
 - `brigade release candidate audit` (extras)
@@ -499,94 +472,26 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade roster suggest`
 - `brigade route`
 - `brigade run`
-- `brigade run cloud adopt`
-- `brigade run cloud canary`
-- `brigade run cloud compact`
-- `brigade run cloud doctor`
-- `brigade run cloud grokbot ack-cancel`
-- `brigade run cloud grokbot build-feed`
-- `brigade run cloud grokbot canary`
-- `brigade run cloud grokbot cancel`
-- `brigade run cloud grokbot claim`
-- `brigade run cloud grokbot complete`
-- `brigade run cloud grokbot convert-findings`
-- `brigade run cloud grokbot doctor`
-- `brigade run cloud grokbot enqueue`
-- `brigade run cloud grokbot expire`
-- `brigade run cloud grokbot fail`
-- `brigade run cloud grokbot feed`
-- `brigade run cloud grokbot install-service`
-- `brigade run cloud grokbot pack canary`
-- `brigade run cloud grokbot pack doctor`
-- `brigade run cloud grokbot pack install-relay-service`
-- `brigade run cloud grokbot pack install-service`
-- `brigade run cloud grokbot pack list`
-- `brigade run cloud grokbot pack relay`
-- `brigade run cloud grokbot pack relay-doctor`
-- `brigade run cloud grokbot pack relay-setup`
-- `brigade run cloud grokbot pack remove`
-- `brigade run cloud grokbot pack setup`
-- `brigade run cloud grokbot pack show`
-- `brigade run cloud grokbot pack update`
-- `brigade run cloud grokbot reconcile-findings`
-- `brigade run cloud grokbot reconcile-reports`
-- `brigade run cloud grokbot relay-findings`
-- `brigade run cloud grokbot renew`
-- `brigade run cloud grokbot scout-feed`
-- `brigade run cloud grokbot serve`
-- `brigade run cloud grokbot setup`
-- `brigade run cloud grokbot start`
-- `brigade run cloud grokbot status`
-- `brigade run cloud launch`
-- `brigade run cloud register`
-- `brigade run cloud setup`
-- `brigade run cloud status`
-- `brigade run cloud sweep`
-- `brigade run cloud sync`
-- `brigade run-cloud adopt` (deprecated; use `brigade run cloud adopt`)
-- `brigade run-cloud canary` (deprecated; use `brigade run cloud canary`)
-- `brigade run-cloud compact` (deprecated; use `brigade run cloud compact`)
-- `brigade run-cloud doctor` (deprecated; use `brigade run cloud doctor`)
-- `brigade run-cloud grokbot ack-cancel` (deprecated; use `brigade run cloud grokbot ack-cancel`)
-- `brigade run-cloud grokbot build-feed` (deprecated; use `brigade run cloud grokbot build-feed`)
-- `brigade run-cloud grokbot canary` (deprecated; use `brigade run cloud grokbot canary`)
-- `brigade run-cloud grokbot cancel` (deprecated; use `brigade run cloud grokbot cancel`)
-- `brigade run-cloud grokbot claim` (deprecated; use `brigade run cloud grokbot claim`)
-- `brigade run-cloud grokbot complete` (deprecated; use `brigade run cloud grokbot complete`)
-- `brigade run-cloud grokbot convert-findings` (deprecated; use `brigade run cloud grokbot convert-findings`)
-- `brigade run-cloud grokbot doctor` (deprecated; use `brigade run cloud grokbot doctor`)
-- `brigade run-cloud grokbot enqueue` (deprecated; use `brigade run cloud grokbot enqueue`)
-- `brigade run-cloud grokbot expire` (deprecated; use `brigade run cloud grokbot expire`)
-- `brigade run-cloud grokbot fail` (deprecated; use `brigade run cloud grokbot fail`)
-- `brigade run-cloud grokbot feed` (deprecated; use `brigade run cloud grokbot feed`)
-- `brigade run-cloud grokbot install-service` (deprecated; use `brigade run cloud grokbot install-service`)
-- `brigade run-cloud grokbot pack canary` (deprecated; use `brigade run cloud grokbot pack canary`)
-- `brigade run-cloud grokbot pack doctor` (deprecated; use `brigade run cloud grokbot pack doctor`)
-- `brigade run-cloud grokbot pack install-relay-service` (deprecated; use `brigade run cloud grokbot pack install-relay-service`)
-- `brigade run-cloud grokbot pack install-service` (deprecated; use `brigade run cloud grokbot pack install-service`)
-- `brigade run-cloud grokbot pack list` (deprecated; use `brigade run cloud grokbot pack list`)
-- `brigade run-cloud grokbot pack relay` (deprecated; use `brigade run cloud grokbot pack relay`)
-- `brigade run-cloud grokbot pack relay-doctor` (deprecated; use `brigade run cloud grokbot pack relay-doctor`)
-- `brigade run-cloud grokbot pack relay-setup` (deprecated; use `brigade run cloud grokbot pack relay-setup`)
-- `brigade run-cloud grokbot pack remove` (deprecated; use `brigade run cloud grokbot pack remove`)
-- `brigade run-cloud grokbot pack setup` (deprecated; use `brigade run cloud grokbot pack setup`)
-- `brigade run-cloud grokbot pack show` (deprecated; use `brigade run cloud grokbot pack show`)
-- `brigade run-cloud grokbot pack update` (deprecated; use `brigade run cloud grokbot pack update`)
-- `brigade run-cloud grokbot reconcile-findings` (deprecated; use `brigade run cloud grokbot reconcile-findings`)
-- `brigade run-cloud grokbot reconcile-reports` (deprecated; use `brigade run cloud grokbot reconcile-reports`)
-- `brigade run-cloud grokbot relay-findings` (deprecated; use `brigade run cloud grokbot relay-findings`)
-- `brigade run-cloud grokbot renew` (deprecated; use `brigade run cloud grokbot renew`)
-- `brigade run-cloud grokbot scout-feed` (deprecated; use `brigade run cloud grokbot scout-feed`)
-- `brigade run-cloud grokbot serve` (deprecated; use `brigade run cloud grokbot serve`)
-- `brigade run-cloud grokbot setup` (deprecated; use `brigade run cloud grokbot setup`)
-- `brigade run-cloud grokbot start` (deprecated; use `brigade run cloud grokbot start`)
-- `brigade run-cloud grokbot status` (deprecated; use `brigade run cloud grokbot status`)
-- `brigade run-cloud launch` (deprecated; use `brigade run cloud launch`)
-- `brigade run-cloud register` (deprecated; use `brigade run cloud register`)
-- `brigade run-cloud setup` (deprecated; use `brigade run cloud setup`)
-- `brigade run-cloud status` (deprecated; use `brigade run cloud status`)
-- `brigade run-cloud sweep` (deprecated; use `brigade run cloud sweep`)
-- `brigade run-cloud sync` (deprecated; use `brigade run cloud sync`)
+- `brigade run-cloud adopt`
+- `brigade run-cloud grokbot ack-cancel`
+- `brigade run-cloud grokbot canary`
+- `brigade run-cloud grokbot cancel`
+- `brigade run-cloud grokbot claim`
+- `brigade run-cloud grokbot complete`
+- `brigade run-cloud grokbot doctor`
+- `brigade run-cloud grokbot enqueue`
+- `brigade run-cloud grokbot expire`
+- `brigade run-cloud grokbot fail`
+- `brigade run-cloud grokbot feed`
+- `brigade run-cloud grokbot install-service`
+- `brigade run-cloud grokbot renew`
+- `brigade run-cloud grokbot serve`
+- `brigade run-cloud grokbot setup`
+- `brigade run-cloud grokbot start`
+- `brigade run-cloud grokbot status`
+- `brigade run-cloud register`
+- `brigade run-cloud status`
+- `brigade run-cloud sweep`
 - `brigade runbook closeout` (extras)
 - `brigade runbook pin` (extras)
 - `brigade runbook plan` (extras)
@@ -602,8 +507,6 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runs interrupt`
 - `brigade runs latest`
 - `brigade runs list`
-- `brigade runs prune-worktrees`
-- `brigade runs reap`
 - `brigade runs recover`
 - `brigade runs redact`
 - `brigade runs resume`
@@ -834,7 +737,6 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade work plan-promote`
 - `brigade work plan-proposals`
 - `brigade work plans`
-- `brigade work presence-hook`
 - `brigade work ready`
 - `brigade work reassign`
 - `brigade work rebind-authority`

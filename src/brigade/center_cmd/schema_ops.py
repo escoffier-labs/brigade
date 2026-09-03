@@ -48,6 +48,7 @@ SCHEMA_VERSION = 1
 SCHEMA_MANIFEST_VERSION = 1
 
 REPORT_STALE_HOURS = 24
+DEFAULT_REPORT_RETENTION = 20
 
 ACTION_STATUSES = {"pending", "active", "done", "deferred", "archived"}
 

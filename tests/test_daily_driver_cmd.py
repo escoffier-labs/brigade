@@ -280,6 +280,14 @@ def test_daily_config_validation_preferred_mode_and_unsafe_warning(tmp_path, cap
     invalid_payload = json.loads(capsys.readouterr().out)
     assert any(check["name"] == "daily_preferred_mode" for check in invalid_payload["checks"])
 
+    (tmp_path / ".brigade" / "daily.toml").write_text("operator_report_retention = 0\n")
+    assert daily_cmd.doctor(target=tmp_path, json_output=True) == 1
+    invalid_retention = json.loads(capsys.readouterr().out)
+    assert any(
+        check["name"] == "operator_report_retention" and check["status"] == "fail"
+        for check in invalid_retention["checks"]
+    )
+
 
 def test_daily_plan_ranks_tasks_imports_center_actions_and_readiness(tmp_path, capsys):
     _seed_ready_repo(tmp_path, capsys)

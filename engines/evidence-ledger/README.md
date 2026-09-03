@@ -222,6 +222,7 @@ miseledger export markdown --out /tmp/miseledger-md
 miseledger relations backfill --json
 miseledger stats --json
 miseledger compact --json
+miseledger migrate codex-arguments --dry-run --json
 miseledger prune imports --before 2026-01-01 --dry-run --json
 miseledger sql "select count(*) as items from items" --json
 miseledger doctor --json
@@ -423,6 +424,7 @@ Archive maintenance commands are local-only:
 miseledger stats --json
 miseledger relations backfill --json
 miseledger compact --json
+miseledger migrate codex-arguments --dry-run --json
 miseledger prune --policy default --dry-run --json
 miseledger prune imports --before 2026-01-01 --dry-run --json
 miseledger prune scans --missing --dry-run --json

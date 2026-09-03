@@ -41,9 +41,11 @@ type Options struct {
 }
 
 type Result struct {
-	Records  int        `json:"records"`
-	Warnings []string   `json:"warnings"`
-	Files    []FileScan `json:"files,omitempty"`
+	Records   int        `json:"records"`
+	Warnings  []string   `json:"warnings"`
+	Files     []FileScan `json:"files,omitempty"`
+	Skipped   int        `json:"skipped,omitempty"`
+	Truncated int        `json:"truncated,omitempty"`
 }
 
 type Generator func(path string, opts Options, w io.Writer) (Result, error)
@@ -662,13 +664,19 @@ func NestedString(v any, keys ...string) string {
 	return ""
 }
 
+const (
+	DefaultTextCap   = 4000
+	TruncationMarker = "\n[truncated]"
+)
+
 func TextFromAny(v any, max int) string {
 	if max <= 0 {
-		max = 4000
+		max = DefaultTextCap
 	}
 	text := strings.TrimSpace(textFromAny(v, 0))
-	if len(text) > max {
-		return text[:max] + "\n[truncated]"
+	runes := []rune(text)
+	if len(runes) > max {
+		return string(runes[:max]) + TruncationMarker
 	}
 	return text
 }

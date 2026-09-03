@@ -30,7 +30,14 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 			scans.Warning(ev.Path)
 			return nil
 		}
-		rec, warning := normalize(ev)
+		rec, warning, skipped, truncated := normalize(ev)
+		if skipped {
+			result.Skipped++
+			return nil
+		}
+		if truncated {
+			result.Truncated++
+		}
 		if warning != "" {
 			result.Warnings = append(result.Warnings, warning)
 			scans.Warning(ev.Path)
@@ -51,7 +58,7 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 	return result, err
 }
 
-func normalize(ev sources.RawEvent) (adapter.Record, string) {
+func normalize(ev sources.RawEvent) (rec adapter.Record, warning string, skipped bool, truncated bool) {
 	eventType := sources.String(ev.Object, "type")
 	ts := sources.String(ev.Object, "timestamp", "ts", "created_at")
 	payload, _ := ev.Object["payload"].(map[string]any)
@@ -73,20 +80,44 @@ func normalize(ev sources.RawEvent) (adapter.Record, string) {
 	name := sources.String(payload, "name")
 	callID := sources.String(payload, "call_id", "callId")
 	arguments := sources.String(payload, "arguments")
+
+	// Create a copy of payload and ev.Object to compute text without the huge arguments
+	// so that we don't bleed huge arguments into the `text` field, which ruins the truncation.
+	var truncatedArgs = arguments
+	if len([]rune(truncatedArgs)) > sources.DefaultTextCap {
+		truncatedArgs = sources.TextFromAny(truncatedArgs, sources.DefaultTextCap)
+		truncated = true
+	}
+
+	payloadForText := make(map[string]any)
+	for k, v := range payload {
+		payloadForText[k] = v
+	}
+	if arguments != "" {
+		payloadForText["arguments"] = truncatedArgs
+	}
+
 	encrypted := payload["encrypted_content"] != nil
-	text := codexText(ev.Object, payload)
+	text := codexText(ev.Object, payloadForText)
 	if text == "" && encrypted {
 		text = strings.TrimSpace(strings.Join(nonEmpty("Codex", eventType, payloadType, name, callID, "encrypted_content present"), " "))
 	}
 	if text == "" && payloadType != "" {
 		text = strings.TrimSpace(strings.Join(nonEmpty("Codex", eventType, payloadType, name, callID), " "))
 	}
-	if text == "" && eventType != "session_meta" && eventType != "turn_context" && eventType != "compacted" {
-		return adapter.Record{}, fmt.Sprintf("%s:%d: no searchable text for event type %q", ev.Path, ev.Ordinal, eventType)
+	if text == "" {
+		if eventType == "event_msg" || eventType == "turn_context" || eventType == "response_item" {
+			return adapter.Record{}, "", true, false
+		}
+		if eventType != "session_meta" && eventType != "compacted" {
+			return adapter.Record{}, fmt.Sprintf("%s:%d: no searchable text for event type %q", ev.Path, ev.Ordinal, eventType), false, false
+		}
 	}
 	if text == "" {
 		text = eventType
 	}
+
+	arguments = truncatedArgs
 	model := sources.String(payload, "model")
 	if model == "" {
 		model = sources.String(ev.Object, "model")
@@ -96,7 +127,19 @@ func normalize(ev sources.RawEvent) (adapter.Record, string) {
 		cwd = sources.String(ev.Object, "cwd", "workspace_dir", "workspaceDir")
 	}
 	kind := codexKind(eventType, payloadType, name, text)
-	itemHash := sources.HashBytes([]byte(text))
+
+	// Calculate a full digest of the arguments, if truncated.
+	var digest string
+	if truncated {
+		digest = sources.HashBytes([]byte(sources.String(payload, "arguments")))
+	}
+
+	// For the hash, include the full digest so the externalID reflects the full data
+	hashData := text
+	if digest != "" {
+		hashData += digest
+	}
+	itemHash := sources.HashBytes([]byte(hashData))
 	externalID := "codex:" + sources.StableID(ev.Path, sessionID, fmt.Sprint(ev.Ordinal), eventType, ts, itemHash)
 	if callID != "" {
 		if strings.Contains(strings.ToLower(payloadType), "output") || strings.Contains(strings.ToLower(payloadType), "result") {
@@ -120,7 +163,33 @@ func normalize(ev sources.RawEvent) (adapter.Record, string) {
 		"arguments":    arguments,
 		"encrypted":    encrypted,
 	}
-	rec := adapter.Record{
+	if truncated {
+		meta["arguments_digest"] = digest
+	}
+
+	rawEv := ev
+	if arguments != "" {
+		// "single-stored arguments": if we keep them in `meta`, we should remove them from `raw`
+		// to avoid storing them twice even if they are not truncated.
+		var newObj map[string]any
+		objBytes, _ := json.Marshal(ev.Object)
+		_ = json.Unmarshal(objBytes, &newObj)
+		if p, ok := newObj["payload"].(map[string]any); ok {
+			if _, hasArgs := p["arguments"]; hasArgs {
+				delete(p, "arguments")
+			}
+		}
+		if _, hasArgs := newObj["arguments"]; hasArgs {
+			delete(newObj, "arguments")
+		}
+		rawEv.Object = newObj
+		// Update rawEv.Line so that the json format does not contain the original arguments
+		if newLine, err := json.Marshal(newObj); err == nil {
+			rawEv.Line = newLine
+		}
+	}
+
+	rec = adapter.Record{
 		Schema: adapter.SchemaV1,
 		Source: adapter.Source{Kind: "codex", Name: "Codex Sessions"},
 		Collection: adapter.Collection{
@@ -138,7 +207,7 @@ func normalize(ev sources.RawEvent) (adapter.Record, string) {
 			Metadata:   sources.Metadata(meta),
 		},
 		Actor: sources.ActorFromRole("codex", role, eventType),
-		Raw:   sources.RawRef(ev),
+		Raw:   sources.RawRef(rawEv),
 	}
 	rec.Artifacts = append(rec.Artifacts, sources.ExtractArtifacts(externalID, ev.Object)...)
 	rec.Artifacts = append(rec.Artifacts, sources.ExtractArtifacts(externalID, payload)...)
@@ -149,7 +218,7 @@ func normalize(ev sources.RawEvent) (adapter.Record, string) {
 			Type:             "result_of",
 		})
 	}
-	return rec, ""
+	return rec, "", false, truncated
 }
 
 func codexText(root, payload map[string]any) string {
