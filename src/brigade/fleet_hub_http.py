@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlencode
 from . import fleet_command_deck, fleet_dashboard, fleet_hub_grokbot, fleet_hub_sessions, worklore_http
 from . import fleet_hub as _hub
 from . import fleet_hub_model_roster
+from . import fleet_hub_roster_page
 from . import fleet_hub_status
 from .fleet_hub import (
     DASHBOARD_COOKIE,
@@ -558,6 +559,79 @@ def make_handler(
             page = render(view, nonce=nonce, now=now)
             self._send_html(200, page, nonce=nonce)
 
+        def _roster_auth(self) -> tuple[bool, bool]:
+            """``(authorized, editable)``: bearer/cookie edit; Tailscale identity reads."""
+            if self._authorized() or self._cookie_authorized():
+                return True, True
+            if self._tailscale_identity_authorized():
+                return True, False
+            return False, False
+
+        def _render_roster(
+            self,
+            *,
+            status: int,
+            editable: bool,
+            saved_revision: int | None = None,
+            error: str | None = None,
+            submission: Any = None,
+        ) -> None:
+            plain = "text/plain; charset=utf-8"
+            try:
+                conn = open_db(Path(db_path))
+            except (FleetHubError, sqlite3.Error) as exc:
+                self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
+                return
+            try:
+                view = fleet_hub_roster_page.load_view(conn, frozen_deck)
+            except (FleetHubError, sqlite3.Error) as exc:
+                self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
+                return
+            finally:
+                conn.close()
+            nonce = secrets.token_urlsafe(16)
+            banner = f"saved as revision {view.revision}" if saved_revision == view.revision else None
+            page = fleet_hub_roster_page.render(
+                view,
+                nonce=nonce,
+                now=datetime.now(timezone.utc),
+                csrf=fleet_hub_roster_page.csrf_value(token),
+                editable=editable,
+                banner=banner,
+                error=error,
+                submission=submission,
+            )
+            self._send_html(status, page, nonce=nonce)
+
+        def _serve_roster(self, query: str) -> None:
+            plain = "text/plain; charset=utf-8"
+            params = parse_qs(query, keep_blank_values=False)
+            presented = params.pop("token", [""])[0]
+            if presented:
+                if not hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8")):
+                    self._send_html(401, "Unauthorized.\n", content_type=plain)
+                    return
+                cookie = (
+                    f"{DASHBOARD_COOKIE}={dashboard_cookie_value(token)}; Path=/; HttpOnly; "
+                    f"SameSite=Strict; Max-Age={DASHBOARD_COOKIE_MAX_AGE}"
+                )
+                self._send_html(
+                    303, "", content_type=plain, extra_headers={"Location": "/deck/roster", "Set-Cookie": cookie}
+                )
+                return
+            authorized, editable = self._roster_auth()
+            if not authorized:
+                self._send_html(
+                    401,
+                    "Unauthorized: send the fleet bearer token, or open this page once with "
+                    "?token=<fleet token> to set the dashboard cookie.\n",
+                    content_type=plain,
+                )
+                return
+            saved = params.get("saved", [""])[0]
+            saved_revision = int(saved) if saved.isdigit() and len(saved) <= 12 else None
+            self._render_roster(status=200, editable=editable, saved_revision=saved_revision)
+
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
             path, _, query = self.path.partition("?")
             if path in _ASSET_ROUTES:
@@ -565,6 +639,9 @@ def make_handler(
                 return
             if path == "/health":
                 self._send_json(200, {"ok": True, "service": "brigade-fleet-hub"})
+                return
+            if path == "/deck/roster":
+                self._serve_roster(query)
                 return
             if path == "/" or path in ("/deck", "/deck/repos") or path.startswith("/deck/"):
                 self._serve_deck(path, query)

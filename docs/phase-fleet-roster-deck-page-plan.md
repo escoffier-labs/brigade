@@ -420,7 +420,7 @@ def _print_preference(payload: dict[str, str | None], *, source: str) -> None:
 - Modify: `src/brigade/fleet_command_deck.py:975,1075` (nav), `:1182-1196` (`_document`), `_STYLE`
 - Test: `tests/test_fleet_roster_page.py` (create)
 
-- [ ] Create `tests/test_fleet_roster_page.py` with the fixtures and the GET tests:
+- [x] Create `tests/test_fleet_roster_page.py` with the fixtures and the GET tests:
 
 ```python
 """Hub-served roster page: GET rendering, auth, and POST apply (roster page spec)."""
@@ -642,10 +642,10 @@ def test_roster_page_escapes_hostile_notes(tmp_path):
         assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
 ```
 
-- [ ] Run, watch it fail:
+- [x] Run, watch it fail:
   `brigade work verify run --target . --command "python -m pytest -q tests/test_fleet_roster_page.py -k 'renders_every_block or nav_links or read_only or hostile'" --capture brigade-work`
   Expect FAIL: `ModuleNotFoundError: No module named 'brigade.fleet_hub_roster_page'`.
-- [ ] Create `src/brigade/fleet_hub_roster_page.py`:
+- [x] Create `src/brigade/fleet_hub_roster_page.py`:
 
 ```python
 """Hub-served roster page (``/deck/roster``): projection, HTML, form parse, apply.
@@ -952,7 +952,7 @@ def render(
   (The parse and apply halves are added in Task 5; the module stays one
   file, well under the ceiling.)
 
-- [ ] In `src/brigade/fleet_command_deck.py`, change `_document` to:
+- [x] In `src/brigade/fleet_command_deck.py`, change `_document` to:
 
 ```python
 def _document(body: str, *, nonce: str, now: datetime, title: str = "Command Deck", refresh: bool = True) -> str:
@@ -975,8 +975,8 @@ def _document(body: str, *, nonce: str, now: datetime, title: str = "Command Dec
     )
 ```
 
-- [ ] In both nav strings (`render_deck` line 975 and `render_repos` line 1075) insert `<a href="/deck/roster">roster</a> ` before `<a href="/view/machines">machines board</a>`.
-- [ ] Append to `_STYLE` (before the `@media` block):
+- [x] In both nav strings (`render_deck` line 975 and `render_repos` line 1075) insert `<a href="/deck/roster">roster</a> ` before `<a href="/view/machines">machines board</a>`.
+- [x] Append to `_STYLE` (before the `@media` block):
 
 ```css
 .roster-form label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
@@ -991,7 +991,7 @@ def _document(body: str, *, nonce: str, now: datetime, title: str = "Command Dec
 .panel + .panel { margin-top: 12px; }
 ```
 
-- [ ] In `src/brigade/fleet_hub_http.py`, import the module (`from . import fleet_hub_roster_page`) and add this method to the handler class after `_serve_deck`:
+- [x] In `src/brigade/fleet_hub_http.py`, import the module (`from . import fleet_hub_roster_page`) and add this method to the handler class after `_serve_deck`:
 
 ```python
         def _roster_auth(self) -> tuple[bool, bool]:
@@ -1068,7 +1068,7 @@ def _document(body: str, *, nonce: str, now: datetime, title: str = "Command Dec
             self._render_roster(status=200, editable=editable, saved_revision=saved_revision)
 ```
 
-- [ ] In `do_GET`, insert before the `if path == "/" or path in ("/deck", "/deck/repos") ...` line:
+- [x] In `do_GET`, insert before the `if path == "/" or path in ("/deck", "/deck/repos") ...` line:
 
 ```python
             if path == "/deck/roster":
@@ -1076,10 +1076,10 @@ def _document(body: str, *, nonce: str, now: datetime, title: str = "Command Dec
                 return
 ```
 
-- [ ] Run to green:
+- [x] Run to green:
   `brigade work verify run --target . --command "python -m pytest -q tests/test_fleet_roster_page.py tests/test_fleet_command_deck.py" --capture brigade-work`
   Expect PASS.
-- [ ] Commit: `git add -A && git commit -m "feat(fleet): hub roster page at /deck/roster (read view)"`
+- [x] Commit: `git add -A && git commit -m "feat(fleet): hub roster page at /deck/roster (read view)"`
 
 ### Task 5: form parse, apply transaction, and `POST /deck/roster`
 
