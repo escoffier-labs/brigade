@@ -39,6 +39,11 @@ MODEL_REACHABILITY_TIMEOUT_SECONDS = 15.0
 HEALTHY_CACHE_TTL_SECONDS = 5 * 60.0
 UNHEALTHY_CACHE_TTL_SECONDS = 30.0
 DETAIL_LIMIT = 240
+# agy 1.1.25 was installed when #1418 added these prompt-free probes. Keep
+# that reviewed version as the floor because earlier releases were not checked
+# to support both `agy models` and `agy --version` in automation.
+_ANTIGRAVITY_MIN_VERSION = (1, 1, 25)
+_ANTIGRAVITY_PROBE_TIMEOUT_SECONDS = 2.0
 _MODEL_SMOKE_MARKER = "BRIGADE_SEAT_HEALTH_EXACT_MARKER"
 _MODEL_SMOKE_PROMPT = (
     "Return exactly BRIGADE_SEAT_HEALTH_EXACT_MARKER and nothing else. Do not use tools. Do not write files."
@@ -428,6 +433,8 @@ class SeatHealthProbe:
                 if auth.state == "unauthenticated":
                     return SeatHealthCheck(name, "failed", auth.detail, cause_code="auth-required")
                 return SeatHealthCheck(name, "degraded", auth.detail, cause_code="auth-status-unavailable")
+            if seat.cli == "antigravity":
+                return self._antigravity_auth_check(seat, timeout_seconds)
             return SeatHealthCheck(
                 name,
                 "degraded",
@@ -447,6 +454,8 @@ class SeatHealthProbe:
                     f"requires {seat.transport_version}; found {version or detail}",
                     cause_code="version-mismatch",
                 )
+            if seat.cli == "antigravity":
+                return self._antigravity_version_check(seat, timeout_seconds)
             return SeatHealthCheck(
                 name, "degraded", "adapter has no reviewed version gate", cause_code="probe-incomplete"
             )
@@ -522,6 +531,8 @@ class SeatHealthProbe:
             )
         if seat.model is None:
             return SeatHealthCheck("model-reachability", "degraded", "seat has no exact model declaration")
+        if seat.cli == "antigravity":
+            return self._antigravity_model_check(seat, timeout_seconds)
         # Roster doctor retains its established inventory rendering below.  It
         # asks the shared coordinator for all other facts without duplicating a
         # provider inventory call, and it deliberately never sends a smoke
@@ -581,6 +592,91 @@ class SeatHealthProbe:
         finally:
             _remove_temp_repo(root)
 
+    def _antigravity_auth_check(self, seat: Any, timeout_seconds: float) -> SeatHealthCheck:
+        result, detail = _antigravity_models(seat, timeout_seconds)
+        if result is None:
+            return SeatHealthCheck("authentication-entitlement", "failed", detail, cause_code="models-command-failed")
+        output = f"{result.stdout}\n{result.stderr}"
+        if _antigravity_auth_error(output):
+            return SeatHealthCheck(
+                "authentication-entitlement",
+                "failed",
+                "agy models reported authentication is required",
+                cause_code="auth-required",
+            )
+        if result.code != 0:
+            return SeatHealthCheck(
+                "authentication-entitlement",
+                "failed",
+                f"agy models exited {result.code}",
+                cause_code="models-command-failed",
+            )
+        model_ids = _antigravity_model_ids(output)
+        if not model_ids:
+            return SeatHealthCheck(
+                "authentication-entitlement",
+                "failed",
+                "agy models returned no model lines",
+                cause_code="model-list-empty",
+            )
+        return SeatHealthCheck("authentication-entitlement", "passed", f"agy models listed {len(model_ids)} model(s)")
+
+    def _antigravity_version_check(self, seat: Any, timeout_seconds: float) -> SeatHealthCheck:
+        identity = _resolve_agent_executable(seat)
+        try:
+            result = proc.run(
+                [identity.command, "--version"], timeout=min(timeout_seconds, _ANTIGRAVITY_PROBE_TIMEOUT_SECONDS)
+            )
+        except OSError as exc:
+            return SeatHealthCheck("version-gates", "failed", safe_detail(str(exc)), cause_code="version-unavailable")
+        output = f"{result.stdout}\n{result.stderr}"
+        match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", output)
+        if result.code != 0:
+            return SeatHealthCheck(
+                "version-gates", "failed", f"agy --version exited {result.code}", cause_code="version-unavailable"
+            )
+        if match is None:
+            return SeatHealthCheck(
+                "version-gates",
+                "failed",
+                "agy --version returned no semantic version",
+                cause_code="version-unavailable",
+            )
+        version = tuple(int(part) for part in match.groups())
+        if version < _ANTIGRAVITY_MIN_VERSION:
+            required = ".".join(str(part) for part in _ANTIGRAVITY_MIN_VERSION)
+            found = ".".join(str(part) for part in version)
+            return SeatHealthCheck(
+                "version-gates", "failed", f"requires agy {required}; found {found}", cause_code="version-mismatch"
+            )
+        return SeatHealthCheck("version-gates", "passed", f"agy version {'.'.join(match.groups())}")
+
+    def _antigravity_model_check(self, seat: Any, timeout_seconds: float) -> SeatHealthCheck:
+        result, detail = _antigravity_models(seat, timeout_seconds)
+        if result is None:
+            return SeatHealthCheck("model-reachability", "failed", detail, cause_code="models-command-failed")
+        output = f"{result.stdout}\n{result.stderr}"
+        if _antigravity_auth_error(output):
+            return SeatHealthCheck(
+                "model-reachability",
+                "failed",
+                "agy models reported authentication is required",
+                cause_code="auth-required",
+            )
+        if result.code != 0:
+            return SeatHealthCheck(
+                "model-reachability", "failed", f"agy models exited {result.code}", cause_code="models-command-failed"
+            )
+        model = agents._antigravity_model_pin(seat.model)
+        if _model_id_is_listed(model, output):
+            return SeatHealthCheck("model-reachability", "passed", f"agy models lists requested model {model}")
+        return SeatHealthCheck(
+            "model-reachability",
+            "failed",
+            f"requested model {model} is not listed by agy models",
+            cause_code="model-not-listed",
+        )
+
     def _app_server_model_smoke(self, seat: Any, roster: Any, root: Path, timeout_seconds: float) -> SeatHealthCheck:
         try:
             with _app_server(root) as server:
@@ -592,6 +688,37 @@ class SeatHealthProbe:
             )
         cause = "timeout" if result.timed_out else "model-unavailable"
         return _model_smoke_result(result.ok, result.text, result.detail, cause, result.timed_out)
+
+
+def _antigravity_models(seat: Any, timeout_seconds: float) -> tuple[proc.Result | None, str]:
+    identity = _resolve_agent_executable(seat)
+    try:
+        return (
+            proc.run([identity.command, "models"], timeout=min(timeout_seconds, _ANTIGRAVITY_PROBE_TIMEOUT_SECONDS)),
+            "",
+        )
+    except OSError as exc:
+        return None, safe_detail(str(exc))
+
+
+def _antigravity_auth_error(output: str) -> bool:
+    lowered = output.lower()
+    return any(marker in lowered for marker in ("authentication required", "not authenticated", "not logged in"))
+
+
+def _antigravity_model_ids(output: str) -> tuple[str, ...]:
+    ignored = frozenset({"available", "model", "models", "no", "none"})
+    model_ids: list[str] = []
+    for line in output.splitlines():
+        token = line.strip().split(maxsplit=1)[0] if line.strip() else ""
+        if token.lower() not in ignored and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", token):
+            model_ids.append(token)
+    return tuple(model_ids)
+
+
+def _model_id_is_listed(model: str, output: str) -> bool:
+    token = re.compile(rf"(?<!\S){re.escape(model)}(?=\s|$|\()")
+    return any(token.search(line) is not None for line in output.splitlines())
 
 
 def seat_fingerprint(seat: Any, roster: Any, *, executable_version: str | None = None) -> str:
@@ -719,6 +846,7 @@ def _failure_for(check: SeatHealthCheck) -> WorkerFailure:
         "entitlement-denied": FailureClass.ENTITLEMENT_DENIED,
         "version-mismatch": FailureClass.VERSION_GATE,
         "model-unavailable": FailureClass.MODEL_UNAVAILABLE,
+        "model-not-listed": FailureClass.MODEL_UNAVAILABLE,
         "missing-transport": FailureClass.TRANSPORT_UNAVAILABLE,
         "app-server-unavailable": FailureClass.TRANSPORT_UNAVAILABLE,
         "initialize-no-progress": FailureClass.TRANSPORT_HANG,
