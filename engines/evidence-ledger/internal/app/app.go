@@ -80,6 +80,7 @@ var commandTable = []commandSpec{
 	{name: "diff", usage: "diff", description: "Compare archive forks.", run: cmdDiff},
 	{name: "compact", usage: "compact", description: "Compact the SQLite archive.", run: cmdCompact},
 	{name: "prune", usage: "prune", description: "Prune archive data.", run: cmdPrune},
+	{name: "migrate", usage: "migrate", description: "Rewrite stored rows into the current shape.", run: cmdMigrate},
 	{name: "sql", usage: "sql", description: "Run read-only SQL.", run: cmdSQL},
 	{name: "doctor", usage: "doctor", description: "Run diagnostic checks.", run: cmdDoctor},
 	{name: "trust", usage: "trust review", description: "Review or verify an item trust label.", run: cmdTrust},
