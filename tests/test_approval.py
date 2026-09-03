@@ -6,12 +6,13 @@ import base64
 import json
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from brigade import attestation, cli, localio, run_audit, run_events, run_journal
+from brigade import approval, attestation, cli, localio, run_audit, run_events, run_journal
 
 if not shutil.which("ssh-keygen"):
     pytest.skip("ssh-keygen is required for approval tests", allow_module_level=True)
@@ -31,6 +32,7 @@ def _write_json(path: Path, payload: object) -> None:
 def _write_verify_receipt(
     target: Path,
     *,
+    producer_run_id: str = RUN_ID,
     producer_key: Path | None = None,
     tree_fingerprint: str = TREE,
     hmac_keyid: str | None = None,
@@ -44,7 +46,7 @@ def _write_verify_receipt(
     receipt: dict[str, Any] = {
         "schema_version": 2,
         "run_id": VERIFY_ID,
-        "producer_run_id": RUN_ID,
+        "producer_run_id": producer_run_id,
         "target": str(target),
         "status": "completed",
         "started_at": "2026-09-03T12:00:00Z",
@@ -82,6 +84,7 @@ def _write_verify_receipt(
 def _workspace(
     tmp_path: Path,
     *,
+    run_id: str = RUN_ID,
     with_receipt: bool = True,
     producer_is_approver: bool = False,
     requester_principal: str | None = None,
@@ -94,10 +97,10 @@ def _workspace(
     signers.write_text(
         signers.read_text(encoding="utf-8") + approver_signers.read_text(encoding="utf-8"), encoding="utf-8"
     )
-    run_dir = target / ".brigade" / "runs" / RUN_ID
+    run_dir = target / ".brigade" / "runs" / run_id
     run_dir.mkdir(parents=True)
     created = run_events.build_event(
-        run_id=RUN_ID,
+        run_id=run_id,
         sequence=1,
         event_type="run.created",
         payload={"status": "started"},
@@ -121,16 +124,16 @@ def _workspace(
         run_meta["requester_principal"] = requester_principal
     _write_json(run_dir / "run.json", run_meta)
     if with_receipt:
-        _write_verify_receipt(target, producer_key=key if producer_is_approver else None)
+        _write_verify_receipt(target, producer_run_id=run_id, producer_key=key if producer_is_approver else None)
     return target, key, signers
 
 
-def _approve(target: Path, key: Path, *extra: str) -> int:
+def _approve(target: Path, key: Path, *extra: str, run_id: str = RUN_ID) -> int:
     return cli.main(
         [
             "run",
             "approve",
-            RUN_ID,
+            run_id,
             "--decision",
             "allow",
             "--reason-code",
@@ -146,16 +149,16 @@ def _approve(target: Path, key: Path, *extra: str) -> int:
     )
 
 
-def _approval_event(target: Path):
-    journal = target / ".brigade" / "runs" / RUN_ID / "events" / "lifecycle.jsonl"
+def _approval_event(target: Path, run_id: str = RUN_ID):
+    journal = target / ".brigade" / "runs" / run_id / "events" / "lifecycle.jsonl"
     report = run_journal.read_journal(journal)
     assert report.chain_errors == []
     return report.events[-1]
 
 
-def _statement(target: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    event = _approval_event(target)
-    path = target / ".brigade" / "runs" / RUN_ID / event.payload["attestation_path"]
+def _statement(target: Path, run_id: str = RUN_ID) -> tuple[dict[str, Any], dict[str, Any]]:
+    event = _approval_event(target, run_id=run_id)
+    path = target / ".brigade" / "runs" / run_id / event.payload["attestation_path"]
     envelope = json.loads(path.read_text(encoding="utf-8"))
     return envelope, json.loads(base64.b64decode(envelope["payload"]))
 
@@ -362,11 +365,27 @@ def test_run_audit_receipt_includes_approval_decision_and_sod(tmp_path: Path):
     target, key, _signers = _workspace(tmp_path)
     assert _approve(target, key) == 0
 
-    report = run_audit.audit_run(target / ".brigade" / "runs" / RUN_ID)
+    run_dir = target / ".brigade" / "runs" / RUN_ID
+    run_meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    event = run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events[-1]
+    envelope = json.loads((run_dir / event.payload["attestation_path"]).read_text(encoding="utf-8"))
+    statement = json.loads(base64.b64decode(envelope["payload"]))
+    receipts = approval.collect_verify_receipts(target, RUN_ID, tree_fingerprint=run_meta["tree_fingerprint"])
+    events = run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events
+    expected_sod = approval.evaluate_sod(
+        target=target,
+        statement=statement,
+        run_meta=run_meta,
+        receipts=receipts,
+        events=events,
+        now=datetime.now(timezone.utc),
+    )
+
+    report = run_audit.audit_run(run_dir)
     assert report.result == run_audit.RESULT_MATCH
     assert report.to_receipt()["approval"] == {
         "decision": "allow",
-        "sod": json.loads((target / ".brigade" / "runs" / RUN_ID / "run.json").read_text())["approval"]["sod"],
+        "sod": expected_sod,
     }
 
 
@@ -529,3 +548,170 @@ def test_later_approval_supersedes_earlier_decision_and_keeps_history(
     assert result["prior_approvals"] == [
         {"decision": "deny", "principal": "alice", "decided_at": result["prior_approvals"][0]["decided_at"]}
     ]
+
+
+def test_approval_after_ship_stage_event_is_late_sod_violation(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    """A ship stage event recorded before the approval makes the approval late."""
+    target, key, _signers = _workspace(tmp_path)
+    journal = target / ".brigade" / "runs" / RUN_ID / "events" / "lifecycle.jsonl"
+    ship = run_journal.append_event(
+        journal,
+        run_id=RUN_ID,
+        event_type="run.ship",
+        payload={"stage": "ship"},
+        idempotency_key="ship-stage-1",
+        expected_previous_sequence=1,
+        recorded_at="2020-01-01T00:00:00.000000Z",
+    )
+    assert ship.sequence == 2
+
+    assert _approve(target, key) == 3
+    approved = capsys.readouterr()
+    assert "approval-before-merge-ship: failed" in approved.out
+
+    capsys.readouterr()
+    assert cli.main(["receipts", "verify", "--target", str(target)]) != 0
+    assert "SOD-VIOLATION" in capsys.readouterr().out
+
+
+def test_tampered_signature_yields_approval_invalid(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    """A tampered signature on the approval envelope is detected as invalid."""
+    target, key, _signers = _workspace(tmp_path)
+    assert _approve(target, key) == 0
+    capsys.readouterr()
+
+    envelope, _statement_payload = _statement(target)
+    path = target / ".brigade" / "runs" / RUN_ID / _approval_event(target).payload["attestation_path"]
+    sig = envelope["signatures"][0]["sig"]
+    raw = base64.b64decode(sig)
+    tampered = raw[:-1] + bytes([raw[-1] ^ 1])
+    envelope["signatures"][0]["sig"] = base64.b64encode(tampered).decode()
+    _write_json(path, envelope)
+
+    assert cli.main(["receipts", "verify", "--target", str(target)]) != 0
+    assert "APPROVAL-INVALID" in capsys.readouterr().out
+
+
+def test_wrong_statement_sha256_yields_approval_invalid(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    """A mismatched statement_sha256 in the approval event is detected as invalid."""
+    target, key, _signers = _workspace(tmp_path)
+    assert _approve(target, key) == 0
+    capsys.readouterr()
+
+    journal = target / ".brigade" / "runs" / RUN_ID / "events" / "lifecycle.jsonl"
+    report = run_journal.read_journal(journal)
+    events = [ev.to_dict() for ev in report.events]
+    approval_env = events[-1]
+    approval_env["payload"]["statement_sha256"] = "0" * 64
+    rebuilt = run_events.build_event(
+        run_id=approval_env["run_id"],
+        sequence=approval_env["sequence"],
+        event_type=approval_env["event_type"],
+        payload=approval_env["payload"],
+        idempotency_key=approval_env["idempotency_key"],
+        recorded_at=approval_env["recorded_at"],
+        previous_digest=approval_env["previous_digest"],
+    )
+    journal.write_bytes(
+        b"".join(run_events.canonical_bytes(ev) + b"\n" for ev in events[:-1])
+        + run_events.canonical_bytes(rebuilt)
+        + b"\n"
+    )
+
+    assert cli.main(["receipts", "verify", "--target", str(target)]) != 0
+    assert "APPROVAL-INVALID" in capsys.readouterr().out
+
+
+def test_wrong_journal_chain_head_yields_approval_invalid(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    """A statement whose journal chain head does not match the event is invalid."""
+    target, key, _signers = _workspace(tmp_path)
+    assert _approve(target, key) == 0
+    capsys.readouterr()
+
+    envelope, statement = _statement(target)
+    path = target / ".brigade" / "runs" / RUN_ID / _approval_event(target).payload["attestation_path"]
+    statement["predicate"]["run"]["journalChainHead"]["sha256"] = "0" * 64
+    envelope["payload"] = base64.b64encode(attestation.canonical_statement_bytes(statement)).decode()
+    _write_json(path, envelope)
+
+    assert cli.main(["receipts", "verify", "--target", str(target)]) != 0
+    assert "APPROVAL-INVALID" in capsys.readouterr().out
+
+
+def test_envelope_copied_from_another_run_yields_approval_invalid(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    """An approval envelope copied from a different run is detected as invalid."""
+    run_a = "approval-run-a"
+    run_b = "approval-run-b"
+    target, key_a, _signers = _workspace(tmp_path, run_id=run_a)
+    assert _approve(target, key_a, run_id=run_a) == 0
+    capsys.readouterr()
+
+    event_a = _approval_event(target, run_id=run_a)
+    nonce_a = event_a.payload["nonce"]
+    envelope_a, _statement_payload = _statement(target, run_id=run_a)
+
+    run_b_dir = target / ".brigade" / "runs" / run_b
+    run_b_dir.mkdir(parents=True)
+    created_b = run_events.build_event(
+        run_id=run_b,
+        sequence=1,
+        event_type="run.created",
+        payload={"status": "started"},
+        idempotency_key="created",
+        recorded_at="2026-09-03T11:59:00.000000Z",
+        previous_digest=None,
+    )
+    journal_b = run_b_dir / "events" / "lifecycle.jsonl"
+    journal_b.parent.mkdir(parents=True)
+    journal_b.write_bytes(run_events.canonical_bytes(created_b) + b"\n")
+    _write_json(
+        run_b_dir / "run.json",
+        {
+            "schema": "brigade.run.v1",
+            "schema_version": 1,
+            "status": "started",
+            "tree_fingerprint": TREE,
+            "journal_present": True,
+            "journal_last_sequence": 1,
+            "journal_last_event_digest": created_b["event_digest"],
+        },
+    )
+
+    dest_dir = run_b_dir / "approvals"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / f"{nonce_a}.json"
+    _write_json(dest_path, envelope_a)
+
+    payload_b = dict(event_a.payload)
+    payload_b["attestation_path"] = f"approvals/{nonce_a}.json"
+    event_b = run_events.build_event(
+        run_id=run_b,
+        sequence=2,
+        event_type="approval",
+        payload=payload_b,
+        idempotency_key=f"approval:{nonce_a}",
+        recorded_at=event_a.recorded_at,
+        previous_digest=created_b["event_digest"],
+    )
+    with journal_b.open("ab") as handle:
+        handle.write(run_events.canonical_bytes(event_b) + b"\n")
+
+    capsys.readouterr()
+    assert cli.main(["receipts", "verify", "--target", str(target)]) != 0
+    assert "APPROVAL-INVALID" in capsys.readouterr().out
+
+
+def test_scope_merge_round_trip_records_scope_and_verifies_approved(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    """A --scope merge approval round-trips through the event and verifies APPROVED."""
+    target, key, _signers = _workspace(tmp_path)
+    assert _approve(target, key, "--scope", "merge") == 0
+    capsys.readouterr()
+
+    event = _approval_event(target)
+    assert event.payload["scope"] == "merge"
+
+    run_meta = json.loads((target / ".brigade" / "runs" / RUN_ID / "run.json").read_text())
+    assert run_meta["approval"]["scope"] == "merge"
+
+    assert cli.main(["receipts", "verify", "--target", str(target)]) == 0
+    assert "APPROVED" in capsys.readouterr().out

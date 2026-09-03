@@ -168,6 +168,8 @@ _STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
         "approval.held",
         "approval.consumed",
         "approval",
+        "run.ship",
+        "run.merge",
         "run.redaction.recorded",
         # Live-control pairs advance the journal cursor only (issue #604).
         "control.requested",
