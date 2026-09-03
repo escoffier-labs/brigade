@@ -69,6 +69,7 @@ def test_cache_round_trip(tmp_path) -> None:
     pref = run_preference.RunPreference(impl="cursor_grok", review="claude_standby")
     path = run_preference.write_cached(pref, tmp_path)
     assert path == tmp_path / ".brigade" / "run-preference.toml"
+    assert not path.with_suffix(".toml.tmp").exists()
     loaded = run_preference.load_cached(tmp_path)
     assert loaded == pref
 
@@ -76,7 +77,15 @@ def test_cache_round_trip(tmp_path) -> None:
 def test_hub_preference_get_put_and_rejects_secrets(tmp_path) -> None:
     conn = fleet_hub.init_db(tmp_path / "hub.db")
     empty = fleet_hub.get_run_preference(conn)
-    assert empty == {"impl": None, "review": None, "chef": None, "notes": None}
+    assert empty == {
+        "impl": None,
+        "review": None,
+        "chef": None,
+        "research": None,
+        "security": None,
+        "scout": None,
+        "notes": None,
+    }
     stored = fleet_hub.set_run_preference(
         conn,
         {"impl": "cursor_grok", "review": "claude_standby"},
@@ -142,3 +151,111 @@ def test_print_preference_sanitizes_control_characters(capsys) -> None:
     assert "chef: -" in out
     assert "\x1b" not in out
     assert "\\x1b[31mred" in out
+
+
+def test_role_fields_parse_round_trip_and_prefix(tmp_path) -> None:
+    raw = {
+        "impl": "agy_flash",
+        "review": "claude_standby",
+        "chef": "chef",
+        "research": "researcher",
+        "security": "daybreak",
+        "scout": "cursor_scout",
+        "notes": "cursor via Other Models only",
+    }
+    pref = run_preference.parse_preference(raw)
+    assert pref.research == "researcher"
+    assert pref.security == "daybreak"
+    assert pref.scout == "cursor_scout"
+    assert pref.payload() == raw
+    assert run_preference.ROLE_FIELDS == ("impl", "review", "chef", "research", "security", "scout")
+    run_preference.write_cached(pref, tmp_path)
+    assert run_preference.load_cached(tmp_path) == pref
+    prefix = pref.planner_prefix()
+    assert "- default research: researcher" in prefix
+    assert "- default security: daybreak" in prefix
+    assert "- default scout: cursor_scout" in prefix
+    assert prefix.index("default chef") < prefix.index("default research")
+
+
+def test_role_fields_are_seat_names_and_never_dispatch() -> None:
+    with pytest.raises(run_preference.RunPreferenceError, match="roster seat name"):
+        run_preference.parse_preference({"security": "not a seat"})
+    roster = _FakeRoster(orchestrator="chef", agents={"chef": object(), "daybreak": object()})
+    pref = run_preference.RunPreference(security="daybreak")
+    assert run_preference.resolve_worker(pref, roster, worker=None, task="scan the repo") is None
+    # "security" must not trip the secret-key regex.
+    assert run_preference.parse_preference({"security": "daybreak"}).security == "daybreak"
+
+
+def test_hub_preference_stores_roles_and_meta(tmp_path) -> None:
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    assert fleet_hub.get_run_preference_meta(conn) == {"updated_at": None, "updated_by": None}
+    stored = fleet_hub.set_run_preference(conn, {"security": "daybreak", "scout": "cursor_scout"}, updated_by="admin")
+    assert stored["security"] == "daybreak"
+    assert stored["scout"] == "cursor_scout"
+    meta = fleet_hub.get_run_preference_meta(conn)
+    assert meta["updated_by"] == "admin"
+    assert isinstance(meta["updated_at"], str) and meta["updated_at"]
+    conn.close()
+
+
+def test_hub_preference_v18_row_survives_v19_migration(tmp_path) -> None:
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.execute(
+        "CREATE TABLE run_preference (id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, "
+        "chef TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT)"
+    )
+    old.execute(
+        "INSERT INTO run_preference VALUES (1, 'coder', 'claude_standby', 'chef', 'kept', "
+        "'2026-01-01T00:00:00+00:00', 'admin')"
+    )
+    old.execute("PRAGMA user_version=18")
+    old.commit()
+    old.close()
+    conn = fleet_hub.init_db(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 19
+    pref = fleet_hub.get_run_preference(conn)
+    assert pref["impl"] == "coder" and pref["notes"] == "kept"
+    assert pref["research"] is None and pref["security"] is None and pref["scout"] is None
+    conn.close()
+
+
+def test_fleet_preference_cli_sets_and_prints_roles(tmp_path, monkeypatch, capsys) -> None:
+    from brigade import cli
+
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "home"))
+    stored: dict[str, str] = {}
+
+    def fake_put(preference, *, hub_url=None):
+        stored.clear()
+        stored.update(preference)
+        return dict(stored)
+
+    monkeypatch.setattr("brigade.fleet_client.fetch_run_preference", lambda: dict(stored))
+    monkeypatch.setattr("brigade.fleet_client.put_run_preference", fake_put)
+    assert (
+        cli.main(
+            [
+                "fleet",
+                "preference",
+                "set",
+                "--research",
+                "researcher",
+                "--security",
+                "daybreak",
+                "--scout",
+                "cursor_scout",
+            ]
+        )
+        == 0
+    )
+    assert stored == {"research": "researcher", "security": "daybreak", "scout": "cursor_scout"}
+    out = capsys.readouterr().out
+    assert "  security: daybreak" in out
+    assert "  scout: cursor_scout" in out
+    assert cli.main(["fleet", "preference", "get"]) == 0
+    assert "  research: researcher" in capsys.readouterr().out

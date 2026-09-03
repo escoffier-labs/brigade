@@ -551,6 +551,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         "orphaned_runs": orphaned_runs,
         "update": update_notify.available_update(),
         "cloud_tracker": _cloud_tracker_for_brief(target),
+        "fleet_routing": _fleet_routing_for_brief(),
         **_interactive_presence_for_brief(target),
     }
 
@@ -607,6 +608,15 @@ def _cloud_tracker_for_brief(target: Path) -> dict[str, Any]:
             "error": f"{type(exc).__name__}: {exc}",
             "suggested_command": "brigade run cloud status --json",
         }
+
+
+def _fleet_routing_for_brief() -> dict[str, Any] | None:
+    try:
+        from . import fleet_routing
+
+        return fleet_routing.fleet_routing_for_brief()
+    except Exception:  # noqa: BLE001 - brief stays fail-open
+        return None
 
 
 def _print_bootstrap_line(level: str, name: str, detail: object) -> None:
@@ -700,6 +710,12 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             print(f"latest_task: {helpers._short(str(latest_run['task']))}")
     else:
         print("latest_run: none")
+
+    routing = payload.get("fleet_routing")
+    if isinstance(routing, dict):
+        from . import fleet_routing
+
+        fleet_routing.print_fleet_routing(routing)
 
     outcome_loop = payload.get("outcome_loop") if isinstance(payload.get("outcome_loop"), dict) else {}
     if outcome_loop:
