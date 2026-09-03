@@ -221,3 +221,40 @@ def test_hub_preference_v18_row_survives_v19_migration(tmp_path) -> None:
     assert pref["impl"] == "coder" and pref["notes"] == "kept"
     assert pref["research"] is None and pref["security"] is None and pref["scout"] is None
     conn.close()
+
+
+def test_fleet_preference_cli_sets_and_prints_roles(tmp_path, monkeypatch, capsys) -> None:
+    from brigade import cli
+
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "home"))
+    stored: dict[str, str] = {}
+
+    def fake_put(preference, *, hub_url=None):
+        stored.clear()
+        stored.update(preference)
+        return dict(stored)
+
+    monkeypatch.setattr("brigade.fleet_client.fetch_run_preference", lambda: dict(stored))
+    monkeypatch.setattr("brigade.fleet_client.put_run_preference", fake_put)
+    assert (
+        cli.main(
+            [
+                "fleet",
+                "preference",
+                "set",
+                "--research",
+                "researcher",
+                "--security",
+                "daybreak",
+                "--scout",
+                "cursor_scout",
+            ]
+        )
+        == 0
+    )
+    assert stored == {"research": "researcher", "security": "daybreak", "scout": "cursor_scout"}
+    out = capsys.readouterr().out
+    assert "  security: daybreak" in out
+    assert "  scout: cursor_scout" in out
+    assert cli.main(["fleet", "preference", "get"]) == 0
+    assert "  research: researcher" in capsys.readouterr().out

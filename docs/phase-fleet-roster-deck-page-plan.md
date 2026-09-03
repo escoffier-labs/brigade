@@ -328,7 +328,7 @@ def get_run_preference_meta(conn: sqlite3.Connection) -> dict[str, str | None]:
 - Modify: `src/brigade/cli/fleet.py:374-380` (parser), `:717-741` (`_preference_payload`, `_print_preference`), `:763-771` (`_dispatch_preference_set`)
 - Test: `tests/test_run_preference.py`
 
-- [ ] Append this test:
+- [x] Append this test:
 
 ```python
 def test_fleet_preference_cli_sets_and_prints_roles(tmp_path, monkeypatch, capsys) -> None:
@@ -361,10 +361,10 @@ def test_fleet_preference_cli_sets_and_prints_roles(tmp_path, monkeypatch, capsy
     assert "  research: researcher" in capsys.readouterr().out
 ```
 
-- [ ] Run, watch it fail:
+- [x] Run, watch it fail:
   `brigade work verify run --target . --command "python -m pytest -q tests/test_run_preference.py -k cli_sets_and_prints_roles" --capture brigade-work`
   Expect FAIL: argparse `error: unrecognized arguments: --research` (exit code 2 raised as SystemExit).
-- [ ] In the parser block (after the `--chef` argument, before `--notes`) add:
+- [x] In the parser block (after the `--chef` argument, before `--notes`) add:
 
 ```python
     p_pref_set.add_argument("--research", default=None, help="Default read-only research seat name.")
@@ -372,7 +372,7 @@ def test_fleet_preference_cli_sets_and_prints_roles(tmp_path, monkeypatch, capsy
     p_pref_set.add_argument("--scout", default=None, help="Default fast repository scout seat name.")
 ```
 
-- [ ] Replace `_preference_payload` and `_print_preference` with:
+- [x] Replace `_preference_payload` and `_print_preference` with:
 
 ```python
 def _preference_payload(preference: object) -> dict[str, str | None]:
@@ -393,7 +393,7 @@ def _print_preference(payload: dict[str, str | None], *, source: str) -> None:
         print(f"  {key}: {_safe_table_cell(payload.get(key) or '-')}")
 ```
 
-- [ ] In `_dispatch_preference_set`, replace the `raw = ...` line and the error message with:
+- [x] In `_dispatch_preference_set`, replace the `raw = ...` line and the error message with:
 
 ```python
     raw = {
@@ -407,10 +407,10 @@ def _print_preference(payload: dict[str, str | None], *, source: str) -> None:
         return 2
 ```
 
-- [ ] Run to green:
+- [x] Run to green:
   `brigade work verify run --target . --command "python -m pytest -q tests/test_run_preference.py" --capture brigade-work`
   Expect PASS.
-- [ ] Commit: `git add -A && git commit -m "feat(fleet): preference set gains --research, --security, and --scout"`
+- [x] Commit: `git add -A && git commit -m "feat(fleet): preference set gains --research, --security, and --scout"`
 
 ### Task 4: roster page read view and `GET /deck/roster`
 
