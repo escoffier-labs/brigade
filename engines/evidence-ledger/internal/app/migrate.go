@@ -3,16 +3,23 @@ package app
 import (
 	"bytes"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
+
+	"github.com/escoffier-labs/miseledger/internal/textnorm"
 )
 
 // cmdMigrate dispatches `miseledger migrate <target>`; mirrors cmdPrune.
 func cmdMigrate(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
 		return fatalf(errw, "usage: miseledger migrate codex-arguments [--dry-run] [--apply] [--json]")
+	}
+	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		return writeMigrateHelp(out)
 	}
 	switch args[0] {
 	case "codex-arguments":
@@ -22,20 +29,31 @@ func cmdMigrate(args []string, out, errw io.Writer) int {
 	}
 }
 
+func writeMigrateHelp(w io.Writer) int {
+	fmt.Fprintln(w, "usage: miseledger migrate codex-arguments [--dry-run] [--apply] [--json]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Rewrite stored Codex tool-call rows to truncate oversized arguments and remove duplicate arguments.")
+	fmt.Fprintln(w, "Note: Candidate selection performs a full-table LIKE scan across items for matching metadata.")
+	return 0
+}
+
+// cmdMigrateCodexArguments scans for Codex tool-call items whose arguments exceed
+// 4000 characters and truncates them, keeping a SHA-256 digest in metadata.
+// Note: Candidate selection performs a full-table LIKE scan across items for matching metadata.
 func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
-	_, bools, rest, err := splitFlags(args, nil, map[string]bool{"dry-run": true, "apply": true, "json": true})
+	_, bools, rest, err := splitFlags(args, nil, map[string]bool{"dry-run": true, "apply": true, "json": true, "help": true})
 	if err != nil {
 		return fatalf(errw, "migrate codex-arguments: %s", err)
 	}
-	if len(rest) != 0 {
+	if bools["help"] || (len(rest) == 1 && (rest[0] == "help" || rest[0] == "-h")) {
+		return writeMigrateHelp(out)
+	}
+	if len(rest) != 0 || (bools["apply"] && bools["dry-run"]) {
 		return fatalf(errw, "usage: miseledger migrate codex-arguments [--dry-run] [--apply] [--json]")
 	}
 	isDryRun := true
 	if bools["apply"] {
 		isDryRun = false
-	}
-	if bools["dry-run"] {
-		isDryRun = true
 	}
 	isJSON := bools["json"]
 
@@ -45,22 +63,13 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 	}
 	defer db.Close()
 
-	// 1. Get total number of items to migrate to allocate batches.
-	var total int
-	err = db.QueryRow(`
-		SELECT COUNT(*) 
-		FROM items i
-		JOIN sources s ON i.source_id = s.id
-		WHERE s.kind = 'codex' AND i.metadata_json LIKE '%"arguments"%'
-	`).Scan(&total)
-	if err != nil {
-		return fatalf(errw, "migrate codex-arguments count query: %s", err)
-	}
-
 	type updateRow struct {
 		id           string
 		rawJSON      string
 		metadataJSON string
+		text         string
+		ftsUpdated   bool
+		ftsBody      string
 	}
 	var matchedRows int
 	var bytesSaved int
@@ -70,7 +79,7 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 
 	for {
 		rows, err := db.Query(`
-			SELECT i.id, i.raw_json, i.metadata_json 
+			SELECT i.id, coalesce(i.text, ''), i.raw_json, i.metadata_json 
 			FROM items i
 			JOIN sources s ON i.source_id = s.id
 			WHERE s.kind = 'codex' AND i.metadata_json LIKE '%"arguments"%'
@@ -86,13 +95,12 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 
 		for rows.Next() {
 			hasRows = true
-			var id, raw, meta string
-			if err := rows.Scan(&id, &raw, &meta); err != nil {
+			var id, text, raw, meta string
+			if err := rows.Scan(&id, &text, &raw, &meta); err != nil {
 				rows.Close()
 				return fatalf(errw, "migrate codex-arguments scan: %s", err)
 			}
 
-			// Parse metadata using default unmarshal since it doesn't matter for the structure
 			var metaObj map[string]any
 			if err := json.Unmarshal([]byte(meta), &metaObj); err != nil {
 				continue
@@ -107,7 +115,23 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 				continue
 			}
 
-			needsTruncate := len(argsStr) > 4000
+			if len(argsStr) <= 4000 || isAlreadyTruncated(argsStr, metaObj) {
+				continue
+			}
+
+			truncatedArgs := argsStr[:4000] + "\n[truncated]"
+			digestBytes := sha256.Sum256([]byte(argsStr))
+			digest := hex.EncodeToString(digestBytes[:])
+
+			metaObj["arguments"] = truncatedArgs
+			metaObj["arguments_digest"] = digest
+
+			newMetaBytes, err := json.Marshal(metaObj)
+			if err != nil {
+				rows.Close()
+				return fatalf(errw, "migrate codex-arguments marshal metadata: %s", err)
+			}
+			newMeta := string(newMetaBytes)
 
 			// Parse raw_json with json.Decoder and UseNumber to preserve precise float types and integers
 			var rawObj map[string]any
@@ -117,48 +141,72 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 				continue
 			}
 
-			changedRaw := false
-			if p, ok := rawObj["payload"].(map[string]any); ok {
-				if _, hasArgs := p["arguments"]; hasArgs {
-					delete(p, "arguments")
-					changedRaw = true
+			// Update item.metadata and item.text inside the marshaled adapter.Record
+			if itemObj, ok := rawObj["item"].(map[string]any); ok {
+				if itemMeta, ok := itemObj["metadata"].(map[string]any); ok {
+					itemMeta["arguments"] = truncatedArgs
+					itemMeta["arguments_digest"] = digest
 				}
-			}
-			if _, hasArgs := rawObj["arguments"]; hasArgs {
-				delete(rawObj, "arguments")
-				changedRaw = true
-			}
-
-			changedMeta := false
-			if needsTruncate {
-				if !hasPrefixOrTruncatedCheck(argsStr) {
-					truncatedArgs := argsStr[:4000] + "\n[truncated]"
-					digestBytes := sha256.Sum256([]byte(argsStr))
-					digest := hex.EncodeToString(digestBytes[:])
-
-					metaObj["arguments"] = truncatedArgs
-					metaObj["arguments_digest"] = digest
-					changedMeta = true
+				if itemText, ok := itemObj["text"].(string); ok && strings.Contains(itemText, argsStr) {
+					itemObj["text"] = strings.Replace(itemText, argsStr, truncatedArgs, 1)
 				}
 			}
 
-			if changedRaw || changedMeta {
-				newRawBytes, _ := json.Marshal(rawObj)
-				newMetaBytes, _ := json.Marshal(metaObj)
-
-				newRaw := string(newRawBytes)
-				newMeta := string(newMetaBytes)
-
-				saved := len(raw) + len(meta) - len(newRaw) - len(newMeta)
-				bytesSaved += saved
-				matchedRows++
-
-				batchUpdates = append(batchUpdates, updateRow{
-					id:           id,
-					rawJSON:      newRaw,
-					metadataJSON: newMeta,
-				})
+			newRawBytes, err := json.Marshal(rawObj)
+			if err != nil {
+				rows.Close()
+				return fatalf(errw, "migrate codex-arguments marshal raw: %s", err)
 			}
+			newRaw := string(newRawBytes)
+
+			newText := text
+			if strings.Contains(text, argsStr) {
+				newText = strings.Replace(text, argsStr, truncatedArgs, 1)
+			}
+
+			var ftsBody string
+			ftsUpdated := false
+			newFtsBody := ""
+			err = db.QueryRow(`SELECT body FROM item_fts WHERE item_id = ?`, id).Scan(&ftsBody)
+			if err == nil {
+				newFtsBody = ftsBody
+				normOldText := textnorm.Normalize(text)
+				normNewText := textnorm.Normalize(newText)
+				normOldArgs := textnorm.Normalize(argsStr)
+				normNewArgs := textnorm.Normalize(truncatedArgs)
+
+				if normOldText != "" && strings.Contains(ftsBody, normOldText) {
+					newFtsBody = strings.Replace(ftsBody, normOldText, normNewText, 1)
+				} else if normOldArgs != "" && strings.Contains(ftsBody, normOldArgs) {
+					newFtsBody = strings.Replace(ftsBody, normOldArgs, normNewArgs, 1)
+				} else if strings.Contains(ftsBody, argsStr) {
+					newFtsBody = strings.Replace(ftsBody, argsStr, truncatedArgs, 1)
+				}
+				if newFtsBody != ftsBody {
+					ftsUpdated = true
+				}
+			} else if err != sql.ErrNoRows {
+				rows.Close()
+				return fatalf(errw, "migrate codex-arguments fts query: %s", err)
+			}
+
+			saved := len(raw) + len(meta) + len(text) - len(newRaw) - len(newMeta) - len(newText)
+			bytesSaved += saved
+			matchedRows++
+
+			batchUpdates = append(batchUpdates, updateRow{
+				id:           id,
+				rawJSON:      newRaw,
+				metadataJSON: newMeta,
+				text:         newText,
+				ftsUpdated:   ftsUpdated,
+				ftsBody:      newFtsBody,
+			})
+		}
+
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fatalf(errw, "migrate codex-arguments rows: %s", err)
 		}
 		rows.Close()
 
@@ -172,21 +220,39 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 				return fatalf(errw, "migrate codex-arguments tx begin: %s", err)
 			}
 
-			stmt, err := tx.Prepare(`UPDATE items SET raw_json = ?, metadata_json = ? WHERE id = ?`)
+			stmtItems, err := tx.Prepare(`UPDATE items SET raw_json = ?, metadata_json = ?, text = ? WHERE id = ?`)
 			if err != nil {
 				tx.Rollback()
 				return fatalf(errw, "migrate codex-arguments stmt prepare: %s", err)
 			}
 
+			stmtFTS, err := tx.Prepare(`UPDATE item_fts SET body = ? WHERE item_id = ?`)
+			if err != nil {
+				stmtItems.Close()
+				tx.Rollback()
+				return fatalf(errw, "migrate codex-arguments fts stmt prepare: %s", err)
+			}
+
 			for _, upd := range batchUpdates {
-				_, err := stmt.Exec(upd.rawJSON, upd.metadataJSON, upd.id)
+				_, err := stmtItems.Exec(upd.rawJSON, upd.metadataJSON, upd.text, upd.id)
 				if err != nil {
-					stmt.Close()
+					stmtItems.Close()
+					stmtFTS.Close()
 					tx.Rollback()
 					return fatalf(errw, "migrate codex-arguments stmt exec: %s", err)
 				}
+				if upd.ftsUpdated {
+					_, err := stmtFTS.Exec(upd.ftsBody, upd.id)
+					if err != nil {
+						stmtItems.Close()
+						stmtFTS.Close()
+						tx.Rollback()
+						return fatalf(errw, "migrate codex-arguments fts stmt exec: %s", err)
+					}
+				}
 			}
-			stmt.Close()
+			stmtItems.Close()
+			stmtFTS.Close()
 			if err := tx.Commit(); err != nil {
 				return fatalf(errw, "migrate codex-arguments tx commit: %s", err)
 			}
@@ -203,7 +269,9 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 		}
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
-		enc.Encode(res)
+		if err := enc.Encode(res); err != nil {
+			return fatalf(errw, "migrate codex-arguments encode json: %s", err)
+		}
 	} else {
 		prefix := ""
 		if isDryRun {
@@ -219,6 +287,12 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 	return 0
 }
 
-func hasPrefixOrTruncatedCheck(argsStr string) bool {
-	return len(argsStr) > 11 && argsStr[len(argsStr)-11:] == "[truncated]"
+func isAlreadyTruncated(argsStr string, metaObj map[string]any) bool {
+	if strings.HasSuffix(argsStr, "\n[truncated]") {
+		return true
+	}
+	if _, hasDigest := metaObj["arguments_digest"]; hasDigest && strings.HasSuffix(argsStr, "[truncated]") {
+		return true
+	}
+	return false
 }
