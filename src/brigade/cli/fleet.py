@@ -1372,7 +1372,7 @@ def _dispatch_models_list(args: argparse.Namespace) -> int:
     if consumer not in fleet_model_roster.CONSUMERS:
         print(f"error: unsupported consumer {consumer!r}", file=sys.stderr)
         return 2
-    decision = fleet_model_admission.fetch_versioned_roster(allow_lkg=False, cache_write=False, inspect_only=True)
+    decision = fleet_model_admission.fetch_versioned_roster(allow_lkg=True, cache_write=False, inspect_only=True)
     if not decision.ok:
         print(f"error: {decision.reason}", file=sys.stderr)
         return decision.exit_code
@@ -1380,6 +1380,7 @@ def _dispatch_models_list(args: argparse.Namespace) -> int:
     revision = roster.get("revision")
     if not isinstance(revision, int):
         revision = roster.get("roster_revision")
+    cached = roster.get("source") == "lkg"
     raw_seats = roster.get("seats")
     seats = [dict(item) for item in raw_seats if isinstance(item, dict)] if isinstance(raw_seats, list) else []
     selected_seat = args.seat
@@ -1426,6 +1427,8 @@ def _dispatch_models_list(args: argparse.Namespace) -> int:
         )
     widths = [max(len(h), *(len(r[i]) for r in rows)) if rows else len(h) for i, h in enumerate(headers)]
     print(f"roster revision {revision} (consumer {consumer})")
+    if cached:
+        print("note: roster served from cache; hub is unavailable")
     print("  ".join(h.ljust(w) for h, w in zip(headers, widths, strict=True)))
     for row in rows:
         print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)))

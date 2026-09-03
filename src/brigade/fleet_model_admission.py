@@ -677,7 +677,10 @@ def _resolve_from_roster(
             seat=str(seat_name),
             reasoning=match.get("reasoning"),
             brigade_cli=_brigade_cli_from_row(match),
+            t3_instance_id=_t3_instance_id_from_row(match),
+            t3_service_tier=_t3_service_tier_from_row(match),
             revision=roster.get("revision"),
+            consumer=consumer,
         )
         payload["error"] = f"{reason}\n{remediation}"
         payload["remediation"] = remediation
@@ -1190,6 +1193,7 @@ def doctor_model_roster(*, consumer: str) -> ModelAdmissionDecision:
                 "model": resolved.payload.get("model") or payload.get("model"),
             },
             roster,
+            consumer=consumer,
         )
     try:
         record = _load_lkg_record()
@@ -1230,7 +1234,7 @@ def _reconcile_findings(
                 {
                     "code": "empty-binding",
                     "seat": seat_name,
-                    "remediation": _empty_binding_remediation(item, roster),
+                    "remediation": _empty_binding_remediation(item, roster, consumer=consumer),
                 }
             )
             continue
@@ -1253,6 +1257,30 @@ def _reconcile_findings(
     return findings
 
 
+def _t3_instance_id_from_row(row: Mapping[str, Any]) -> str | None:
+    """Return the T3 Fleet instance binding from a versioned roster seat row."""
+    bindings = row.get("bindings")
+    if not isinstance(bindings, dict):
+        return None
+    t3_fleet = bindings.get("t3_fleet")
+    if not isinstance(t3_fleet, dict):
+        return None
+    instance_id = t3_fleet.get("instance_id")
+    return instance_id if isinstance(instance_id, str) and instance_id else None
+
+
+def _t3_service_tier_from_row(row: Mapping[str, Any]) -> str | None:
+    """Return the T3 Fleet service tier from a versioned roster seat row."""
+    bindings = row.get("bindings")
+    if not isinstance(bindings, dict):
+        return None
+    t3_fleet = bindings.get("t3_fleet")
+    if not isinstance(t3_fleet, dict):
+        return None
+    service_tier = t3_fleet.get("service_tier")
+    return service_tier if isinstance(service_tier, str) and service_tier else None
+
+
 def _set_command_remediation(
     *,
     provider: str,
@@ -1260,17 +1288,32 @@ def _set_command_remediation(
     seat: str,
     reasoning: str | None,
     brigade_cli: str | None,
+    t3_instance_id: str | None,
+    t3_service_tier: str | None,
     revision: object,
+    consumer: str = "brigade-run",
 ) -> str:
     """Human-readable 'brigade fleet models set' command for a seat row."""
     rev = revision if isinstance(revision, int) else "N"
     reason = reasoning if isinstance(reasoning, str) and reasoning else "none"
-    cli = brigade_cli if isinstance(brigade_cli, str) and brigade_cli else ""
-    return (
-        f"bind it with: brigade fleet models set {provider} {model} {seat} --enable "
-        f"--reasoning {reason} --brigade-cli {cli} --expect-revision {rev}\n"
-        f"see current rows: brigade fleet models list --seat {seat}"
-    )
+    cmd_parts = [f"brigade fleet models set {provider} {model} {seat} --enable"]
+    cmd_parts.append(f"--reasoning {reason}")
+    if consumer == "t3-fleet":
+        instance_id = t3_instance_id if isinstance(t3_instance_id, str) and t3_instance_id else brigade_cli
+        if isinstance(instance_id, str) and instance_id:
+            cmd_parts.append(f"--t3-instance-id {instance_id}")
+            if isinstance(t3_service_tier, str) and t3_service_tier:
+                cmd_parts.append(f"--t3-service-tier {t3_service_tier}")
+        else:
+            cmd_parts.append("--t3-instance-id INSTANCE")
+    else:
+        cli = brigade_cli if isinstance(brigade_cli, str) and brigade_cli else t3_instance_id
+        if isinstance(cli, str) and cli:
+            cmd_parts.append(f"--brigade-cli {cli}")
+        else:
+            cmd_parts.append("--brigade-cli CLI")
+    cmd_parts.append(f"--expect-revision {rev}")
+    return f"bind it with: {' '.join(cmd_parts)}\nsee current rows: brigade fleet models list --seat {seat}"
 
 
 def _brigade_cli_from_row(row: Mapping[str, Any]) -> str | None:
@@ -1285,7 +1328,12 @@ def _brigade_cli_from_row(row: Mapping[str, Any]) -> str | None:
     return cli if isinstance(cli, str) and cli else None
 
 
-def _empty_binding_remediation(seat: Mapping[str, Any], roster: Mapping[str, Any]) -> str:
+def _empty_binding_remediation(
+    seat: Mapping[str, Any],
+    roster: Mapping[str, Any],
+    *,
+    consumer: str = "brigade-run",
+) -> str:
     revision = roster.get("revision") or roster.get("roster_revision") or "N"
     name = seat.get("seat") or "SEAT"
     provider = seat.get("provider") or "provider"
@@ -1303,7 +1351,10 @@ def _empty_binding_remediation(seat: Mapping[str, Any], roster: Mapping[str, Any
         seat=str(name),
         reasoning=reasoning if isinstance(reasoning, str) and reasoning else None,
         brigade_cli=brigade_cli if isinstance(brigade_cli, str) and brigade_cli else None,
+        t3_instance_id=_t3_instance_id_from_row(seat),
+        t3_service_tier=_t3_service_tier_from_row(seat),
         revision=revision,
+        consumer=consumer,
     )
 
 

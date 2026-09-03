@@ -139,6 +139,8 @@ def _set_remediation_detail(row: Mapping[str, Any], revision: object, *, fallbac
         seat=seat,
         reasoning=reasoning if isinstance(reasoning, str) and reasoning else None,
         brigade_cli=fleet_model_admission._brigade_cli_from_row(row),
+        t3_instance_id=fleet_model_admission._t3_instance_id_from_row(row),
+        t3_service_tier=fleet_model_admission._t3_service_tier_from_row(row),
         revision=revision,
     )
 

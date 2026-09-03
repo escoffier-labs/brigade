@@ -144,3 +144,34 @@ def test_list_reports_fetch_failure(monkeypatch):
     rc = cli.main(["fleet", "models", "list"])
     assert rc == 1
     assert "auth-failed" in err.getvalue()
+
+
+def test_list_uses_cached_lkg_when_hub_unavailable(monkeypatch):
+    snapshot = _versioned_snapshot(
+        _versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast"),
+    )
+    snapshot["source"] = "lkg"
+    decision = fleet_model_admission.ModelAdmissionDecision(
+        ok=True,
+        exit_code=0,
+        reason="lkg",
+        payload=snapshot,
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_fetch(**kwargs):
+        calls.append(kwargs)
+        return decision
+
+    monkeypatch.setattr(fleet_model_admission, "fetch_versioned_roster", fake_fetch)
+    out = StringIO()
+    err = StringIO()
+    monkeypatch.setattr("sys.stdout", out)
+    monkeypatch.setattr("sys.stderr", err)
+    rc = cli.main(["fleet", "models", "list"])
+    assert rc == 0
+    assert err.getvalue() == ""
+    assert any(kwargs.get("allow_lkg") is True for kwargs in calls)
+    assert "roster served from cache" in out.getvalue()
+    assert "hub is unavailable" in out.getvalue()
+    assert "cursor_grok" in out.getvalue()
