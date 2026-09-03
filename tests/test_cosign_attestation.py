@@ -6,13 +6,13 @@ import base64
 import json
 import shutil
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from brigade import attestation, cli, cosign_attestation
+from brigade import attestation, attestation_cmd, cli, cosign_attestation
 
 
 def _sample_statement() -> dict[str, Any]:
@@ -77,6 +77,46 @@ def test_require_safe_cosign_rejects_unsafe_or_prerelease_versions(
     msg = str(exc_info.value)
     assert "2.6.5" in msg
     assert "3.1.3" in msg
+
+
+def test_require_safe_cosign_rejects_nonzero_exit_even_with_parseable_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/local/bin/cosign")
+
+    # 1. Nonzero exit with parseable safe version on stdout and empty stderr
+    def fake_run_stdout(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 1, stdout=json.dumps({"gitVersion": "v3.1.3"}), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run_stdout)
+    with pytest.raises(cosign_attestation.CosignAttestationError) as exc_info:
+        cosign_attestation.require_safe_cosign()
+    assert "cosign version failed with exit code 1" in str(exc_info.value)
+
+    # 2. Nonzero exit with parseable safe version on stderr
+    def fake_run_stderr(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="GitVersion: v3.1.3\nfatal: something broke")
+
+    monkeypatch.setattr(subprocess, "run", fake_run_stderr)
+    with pytest.raises(cosign_attestation.CosignAttestationError) as exc_info:
+        cosign_attestation.require_safe_cosign()
+    assert "cosign version failed with exit code 2: GitVersion: v3.1.3\nfatal: something broke" in str(exc_info.value)
+
+    # 3. Nonzero exit with stderr exceeding 2000 chars is capped at 2000 chars
+    long_err = "err_prefix: " + ("z" * 3500)
+
+    def fake_run_long_err(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 1, stdout=json.dumps({"gitVersion": "v3.1.3"}), stderr=long_err)
+
+    monkeypatch.setattr(subprocess, "run", fake_run_long_err)
+    with pytest.raises(cosign_attestation.CosignAttestationError) as exc_info:
+        cosign_attestation.require_safe_cosign()
+    err_str = str(exc_info.value)
+    prefix = "cosign version failed with exit code 1: "
+    assert err_str.startswith(prefix)
+    exposed_stderr = err_str[len(prefix) :]
+    assert len(exposed_stderr) <= 2000
+    assert "z" * 2001 not in err_str
 
 
 def test_create_bundle_v2_uses_statement_and_standard_bundle_flags(
@@ -150,6 +190,12 @@ def test_create_bundle_v3_omits_legacy_bundle_switch(tmp_path: Path, monkeypatch
         ("unequal_statement",),
         ("zero_signatures",),
         ("two_signatures",),
+        ("missing_verification_material",),
+        ("non_object_verification_material",),
+        ("missing_sig",),
+        ("empty_sig",),
+        ("invalid_base64_sig",),
+        ("non_string_sig",),
     ],
 )
 def test_create_bundle_rejects_nonconforming_output(
@@ -184,6 +230,18 @@ def test_create_bundle_rejects_nonconforming_output(
                 {"sig": "c2lnMQ==", "keyid": "k1"},
                 {"sig": "c2lnMg==", "keyid": "k2"},
             ]
+        elif anomaly_kind == "missing_verification_material":
+            del malformed_bundle["verificationMaterial"]
+        elif anomaly_kind == "non_object_verification_material":
+            malformed_bundle["verificationMaterial"] = "not-an-object"
+        elif anomaly_kind == "missing_sig":
+            malformed_bundle["dsseEnvelope"]["signatures"] = [{"keyid": "k1"}]
+        elif anomaly_kind == "empty_sig":
+            malformed_bundle["dsseEnvelope"]["signatures"] = [{"sig": "", "keyid": "k1"}]
+        elif anomaly_kind == "invalid_base64_sig":
+            malformed_bundle["dsseEnvelope"]["signatures"] = [{"sig": "not-valid-base64!", "keyid": "k1"}]
+        elif anomaly_kind == "non_string_sig":
+            malformed_bundle["dsseEnvelope"]["signatures"] = [{"sig": 12345, "keyid": "k1"}]
 
         bundle_out.write_text(json.dumps(malformed_bundle), encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -192,6 +250,41 @@ def test_create_bundle_rejects_nonconforming_output(
 
     with pytest.raises(cosign_attestation.CosignAttestationError):
         cosign_attestation.create_bundle(statement, key_path)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_err"),
+    [
+        (lambda b: b.pop("verificationMaterial"), "verificationMaterial"),
+        (lambda b: b.__setitem__("verificationMaterial", None), "verificationMaterial"),
+        (lambda b: b.__setitem__("verificationMaterial", "not-an-object"), "verificationMaterial"),
+        (lambda b: b.__setitem__("verificationMaterial", [1, 2, 3]), "verificationMaterial"),
+        (lambda b: b.__setitem__("verificationMaterial", 123), "verificationMaterial"),
+        (lambda b: b.__setitem__("verificationMaterial", False), "verificationMaterial"),
+        (lambda b: b["dsseEnvelope"]["signatures"][0].pop("sig"), "nonempty base64"),
+        (lambda b: b["dsseEnvelope"]["signatures"][0].__setitem__("sig", ""), "nonempty base64"),
+        (lambda b: b["dsseEnvelope"]["signatures"][0].__setitem__("sig", "   "), "nonempty base64"),
+        (lambda b: b["dsseEnvelope"]["signatures"][0].__setitem__("sig", None), "nonempty base64"),
+        (lambda b: b["dsseEnvelope"]["signatures"][0].__setitem__("sig", 12345), "nonempty base64"),
+        (lambda b: b["dsseEnvelope"]["signatures"][0].__setitem__("sig", "invalid-base64!*"), "invalid base64"),
+        (lambda b: b["dsseEnvelope"]["signatures"][0].__setitem__("sig", "abc"), "invalid base64"),
+    ],
+)
+def test_validate_bundle_malformed_cases(mutate: Callable[[dict[str, Any]], None], expected_err: str) -> None:
+    statement = _sample_statement()
+    bundle = _make_valid_bundle(statement)
+    mutate(bundle)
+    with pytest.raises(cosign_attestation.CosignAttestationError) as exc_info:
+        cosign_attestation.validate_bundle(bundle, statement)
+    assert expected_err in str(exc_info.value)
+
+
+def test_validate_bundle_accepts_conforming_bundle() -> None:
+    statement = _sample_statement()
+    bundle = _make_valid_bundle(statement)
+    validated = cosign_attestation.validate_bundle(bundle, statement)
+    assert validated["mediaType"] == cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE
+    assert isinstance(validated["verificationMaterial"], Mapping)
 
 
 @pytest.mark.parametrize("error_kind", ["missing_binary", "timeout", "nonzero_exit"])
@@ -458,6 +551,32 @@ def test_cli_export_attestation_cosign_missing_key_is_actionable(
     assert rc == 1
     assert ".brigade/attestation/cosign.key" in captured.err
     assert "--key" in captured.err
+
+
+@pytest.mark.parametrize("invalid_profile", ["bogus", "rsa", "gpg", "", "SSHsig", "COSIGN"])
+def test_export_attestation_rejects_unsupported_profile_direct_python_caller(
+    tmp_path: Path, invalid_profile: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    attestation.keygen(tmp_path, principal="alice-signer")
+    receipt = _sample_receipt(tmp_path)
+    _write_receipt_to_disk(receipt)
+    run_id = receipt["run_id"]
+
+    rc = attestation_cmd.export_attestation(
+        target=tmp_path,
+        run_id=run_id,
+        profile=invalid_profile,
+    )
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert f"unsupported attestation profile '{invalid_profile}'" in captured.err
+    assert "sshsig" in captured.err
+    assert "cosign" in captured.err
+
+    # Must never silently fall back to SSHSIG or write any attestation artifact
+    run_dir = Path(receipt["path"])
+    assert not (run_dir / "attestation.json").exists()
+    assert not (run_dir / "attestation.sigstore.json").exists()
 
 
 @pytest.mark.skipif(shutil.which("cosign") is None, reason="cosign is required for interoperability test")

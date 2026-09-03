@@ -103,10 +103,13 @@ def require_safe_cosign(binary: str | None = None) -> tuple[str, tuple[int, int,
     except OSError as exc:
         raise CosignAttestationError(f"failed to execute cosign binary '{resolved_binary}': {exc}") from exc
 
-    raw_output = proc.stdout if proc.stdout.strip() else proc.stderr
-    if proc.returncode != 0 and not raw_output.strip():
-        raise CosignAttestationError(f"cosign version failed with exit code {proc.returncode}: {proc.stderr[:2000]}")
+    if proc.returncode != 0:
+        err_excerpt = proc.stderr.strip()[:2000]
+        if err_excerpt:
+            raise CosignAttestationError(f"cosign version failed with exit code {proc.returncode}: {err_excerpt}")
+        raise CosignAttestationError(f"cosign version failed with exit code {proc.returncode}")
 
+    raw_output = proc.stdout if proc.stdout.strip() else proc.stderr
     version = parse_cosign_version(raw_output)
     if version[0] == 2 and version >= MIN_SAFE_V2:
         return resolved_binary, version
@@ -130,6 +133,10 @@ def validate_bundle(bundle: Mapping[str, Any], statement: Mapping[str, Any]) -> 
             f"invalid bundle mediaType: expected {SIGSTORE_BUNDLE_MEDIA_TYPE}, got {media_type!r}"
         )
 
+    verification_material = bundle.get("verificationMaterial")
+    if not isinstance(verification_material, Mapping):
+        raise CosignAttestationError("cosign bundle missing or invalid verificationMaterial object")
+
     dsse_envelope = bundle.get("dsseEnvelope")
     if not isinstance(dsse_envelope, Mapping):
         raise CosignAttestationError("cosign bundle missing or invalid dsseEnvelope object")
@@ -145,8 +152,21 @@ def validate_bundle(bundle: Mapping[str, Any], statement: Mapping[str, Any]) -> 
         raise CosignAttestationError("dsseEnvelope signatures must be a list")
     if len(signatures) != 1:
         raise CosignAttestationError(f"dsseEnvelope must have exactly 1 signature, found {len(signatures)}")
-    if not isinstance(signatures[0], Mapping):
+    sig_entry = signatures[0]
+    if not isinstance(sig_entry, Mapping):
         raise CosignAttestationError("dsseEnvelope signature entry must be an object")
+
+    sig = sig_entry.get("sig")
+    if not isinstance(sig, str) or not sig.strip():
+        raise CosignAttestationError("dsseEnvelope signature sig must be a nonempty base64-encoded string")
+
+    try:
+        sig_bytes = base64.b64decode(sig, validate=True)
+    except Exception as exc:
+        raise CosignAttestationError(f"invalid base64 in dsseEnvelope signature sig: {exc}") from exc
+
+    if not sig_bytes:
+        raise CosignAttestationError("dsseEnvelope signature sig must not decode to empty bytes")
 
     raw_payload = dsse_envelope.get("payload")
     if not isinstance(raw_payload, str):
