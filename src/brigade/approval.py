@@ -521,6 +521,7 @@ def record_approval(
     )
     statement_sha256 = hashlib.sha256(attestation.canonical_statement_bytes(statement)).hexdigest()
     relative_path = Path("approvals") / f"{nonce}.json"
+    attestation.write_attestation_file(envelope, run_dir / relative_path)
     event = run_journal.append_event(
         run_dir / "events" / "lifecycle.jsonl",
         run_id=run_id,
@@ -541,7 +542,6 @@ def record_approval(
         expected_previous_sequence=report.events[-1].sequence,
         recorded_at=decided_at,
     )
-    attestation.write_attestation_file(envelope, run_dir / relative_path)
     approval_projection = {
         "decision": decision,
         "scope": scope,

@@ -209,6 +209,30 @@ def test_allow_records_event_envelope_projection_and_verifies(tmp_path: Path, ca
     assert "APPROVED" in capsys.readouterr().out
 
 
+def test_attestation_write_failure_leaves_no_approval_event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """If publishing the signed envelope fails, no durable approval event is appended."""
+    target, key, _signers = _workspace(tmp_path)
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(attestation, "write_attestation_file", _raise)
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        approval.record_approval(
+            target=target,
+            run_id=RUN_ID,
+            decision="allow",
+            scope="run",
+            reason_code="reviewed-tests",
+            reason="Reviewed the focused test receipt.",
+            key=key,
+        )
+
+    event = _approval_event(target)
+    assert event.event_type == "run.created"
+
+
 def _write_receipt_digest(target: Path) -> str:
     receipt = json.loads((target / ".brigade" / "work" / "verify-runs" / VERIFY_ID / "receipt.json").read_text())
     return receipt["digests"]["receipt_sha256"]
