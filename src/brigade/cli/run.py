@@ -303,6 +303,10 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Path to a brigade.run_budget.v1 JSON declaration persisted with this run.",
     )
+    parser.add_argument(
+        "--requester-key", type=Path, default=None, help="Sign an agent-request/v1 statement before dispatch."
+    )
+    parser.add_argument("--requester-principal", default=None, help="Expected requester allowed_signers principal.")
     parser.add_argument("--no-artifacts", action="store_true", help="Do not write run artifacts.")
     parser.add_argument(
         "--handoff",
@@ -697,6 +701,20 @@ def dispatch(args) -> int:
                     output_dir,
                     **start_kwargs,
                 )
+                if args.requester_key is not None:
+                    from .. import agent_request
+
+                    try:
+                        agent_request.record_request(
+                            target=run_cwd,
+                            run_dir=output_dir,
+                            task=args.task,
+                            key=args.requester_key,
+                            principal=args.requester_principal,
+                        )
+                    except (agent_request.AgentRequestError, OSError) as exc:
+                        print(f"error: requester signing failed: {exc}", file=sys.stderr)
+                        return 2
             if output_dir is not None and (advisory or output_warnings):
                 from .. import localio
 
@@ -1071,6 +1089,20 @@ def _dispatch_detached(
                 output_dir,
                 **start_kwargs,
             )
+            if args.requester_key is not None:
+                from .. import agent_request
+
+                try:
+                    agent_request.record_request(
+                        target=run_cwd,
+                        run_dir=output_dir,
+                        task=args.task,
+                        key=args.requester_key,
+                        principal=args.requester_principal,
+                    )
+                except (agent_request.AgentRequestError, OSError) as exc:
+                    print(f"error: requester signing failed: {exc}", file=sys.stderr)
+                    return 2
             initial_receipt = (output_dir / "run.json").read_bytes()
             log_path = output_dir / "detached.log"
             argv = _detached_child_argv(

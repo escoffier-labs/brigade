@@ -790,3 +790,11 @@ def test_scope_merge_round_trip_records_scope_and_verifies_approved(tmp_path: Pa
 
     assert cli.main(["receipts", "verify", "--target", str(target)]) == 0
     assert "APPROVED" in capsys.readouterr().out
+
+
+def test_strict_approvals_makes_an_expired_allow_nonzero(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    target, key, _signers = _workspace(tmp_path)
+    assert _approve(target, key, "--expires-in", "0s") != 0
+    capsys.readouterr()
+
+    assert cli.main(["receipts", "verify", "--target", str(target), "--strict-approvals"]) != 0

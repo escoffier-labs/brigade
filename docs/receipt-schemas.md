@@ -1204,6 +1204,7 @@ Trust is evaluated offline via standard OpenSSH `allowed_signers` files:
 - Key revocation list (optional): `.brigade/attestation/revoked_keys`.
 - Allowed signers entry format: `<principal> namespaces="brigade-attestation" <key-type> <base64-key>`.
 - Verification executes `ssh-keygen -Y verify -f <allowed_signers> -I <principal> -n brigade-attestation -s <sigfile>` over the recomputed DSSE PAE. Re-derivation of the in-toto Statement from the local verify receipt, and therefore the `SUBJECT-MISMATCH` check, only runs when `--target` is given and the run directory referenced by the receipt exists.
+- `brigade receipts verify-attestation --require-receipt --target <workspace>` requires that local receipt. A missing receipt reports `EVIDENCE-MISSING`; without this opt-in, cross-machine signature-only verification remains valid.
 
 ### `brigade.attestation_verify_result.v1`
 
@@ -1212,11 +1213,21 @@ Machine-readable result printed by `brigade receipts verify-attestation --json`:
 | Field | Type | Notes |
 | --- | --- | --- |
 | `schema` | string | Always `brigade.attestation_verify_result.v1` |
-| `status` | string | One of `SIGNED-OK`, `SIGNATURE-MISMATCH`, `UNTRUSTED-KEY`, `UNVERIFIABLE-SIGNATURE`, `SUBJECT-MISMATCH` |
+| `status` | string | One of `SIGNED-OK`, `SIGNATURE-MISMATCH`, `UNTRUSTED-KEY`, `UNVERIFIABLE-SIGNATURE`, `SUBJECT-MISMATCH`, `EVIDENCE-MISSING` |
 | `principal` | string \| null | Verified signer principal when status is `SIGNED-OK` |
 | `keyid` | string \| null | `SHA256:...` fingerprint of the signing key when known |
 | `subject` | array of object | Reproduced in-toto Statement subjects |
 | `run_id` | string \| null | Run id recovered from the statement `predicate.url` when it is safe |
+| `rederived` | boolean | True only when a local Test Result statement was successfully re-derived from its referenced receipt |
+
+### Agent request predicate
+
+`brigade run --requester-key <path>` records an SSHSIG `agent-request/v1`
+statement before dispatch and appends a `request.signed` journal event. The
+statement binds the run id, baseline Git commit, SHA-256 task digest, request
+time, and nonce. It does not include task text, workspace paths, argv,
+environment values, or command output. Requester principal and key id are
+projected into `run.json` for separation-of-duties evaluation.
 
 ---
 

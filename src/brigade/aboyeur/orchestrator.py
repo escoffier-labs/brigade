@@ -648,6 +648,12 @@ def run(
                         kwargs["handoff_inbox"] = existing["handoff_inbox"]
                     if "causal_receipt_payload" not in kwargs and isinstance(existing.get("causal_receipt"), dict):
                         kwargs["causal_receipt_payload"] = dict(existing["causal_receipt"])
+                    if "requester_principal" not in kwargs and isinstance(existing.get("requester_principal"), str):
+                        kwargs["requester_principal"] = existing["requester_principal"]
+                    if "requester_keyid" not in kwargs and isinstance(existing.get("requester_keyid"), str):
+                        kwargs["requester_keyid"] = existing["requester_keyid"]
+                    if "request_payload" not in kwargs and isinstance(existing.get("request"), dict):
+                        kwargs["request_payload"] = dict(existing["request"])
                     existing_retry = existing.get("retry_decisions")
                     if isinstance(existing_retry, list):
                         prior = [dict(entry) for entry in existing_retry if isinstance(entry, dict)]

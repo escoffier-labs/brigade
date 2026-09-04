@@ -842,13 +842,16 @@ def verify_approvals(target: Path) -> dict[str, Any]:
     return {"runs": results, "summary": counts}
 
 
-def verify_receipts_with_approvals(*, target: Path, json_output: bool = False) -> int:
+def verify_receipts_with_approvals(*, target: Path, json_output: bool = False, strict_approvals: bool = False) -> int:
     """Run existing receipt verification and add signed approval results."""
     from . import receipts_cmd
 
     target = target.expanduser().resolve()
     approvals = verify_approvals(target)
-    approval_failed = any(item["status"] in {"SOD-VIOLATION", "APPROVAL-INVALID"} for item in approvals["runs"])
+    failing_statuses = {"SOD-VIOLATION", "APPROVAL-INVALID"}
+    if strict_approvals:
+        failing_statuses.update({"APPROVAL-STALE", "APPROVAL-EXPIRED", "UNAPPROVED"})
+    approval_failed = any(item["status"] in failing_statuses for item in approvals["runs"])
     if json_output:
         payload = receipts_cmd.verify_payload(target)
         payload["approvals"] = approvals

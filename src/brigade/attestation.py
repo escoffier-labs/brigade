@@ -35,6 +35,7 @@ STATUS_SIGNATURE_MISMATCH = "SIGNATURE-MISMATCH"
 STATUS_UNTRUSTED_KEY = "UNTRUSTED-KEY"
 STATUS_UNVERIFIABLE_SIGNATURE = "UNVERIFIABLE-SIGNATURE"
 STATUS_SUBJECT_MISMATCH = "SUBJECT-MISMATCH"
+STATUS_EVIDENCE_MISSING = "EVIDENCE-MISSING"
 
 VERIFY_STATUSES = {
     STATUS_SIGNED_OK,
@@ -42,6 +43,7 @@ VERIFY_STATUSES = {
     STATUS_UNTRUSTED_KEY,
     STATUS_UNVERIFIABLE_SIGNATURE,
     STATUS_SUBJECT_MISMATCH,
+    STATUS_EVIDENCE_MISSING,
 }
 
 
@@ -60,6 +62,7 @@ class AttestationVerifyResult:
     keyid: str | None = None
     subject: list[dict[str, Any]] = field(default_factory=list)
     run_id: str | None = None
+    rederived: bool = False
 
     def __getitem__(self, item: str) -> Any:
         if hasattr(self, item):
@@ -77,6 +80,7 @@ class AttestationVerifyResult:
             "keyid": self.keyid,
             "subject": self.subject,
             "run_id": self.run_id,
+            "rederived": self.rederived,
         }
 
 
@@ -523,6 +527,7 @@ def verify_attestation(
     krl_path: Path | None = None,
     namespace: str = ATTESTATION_NAMESPACE,
     expected_predicate_type: str = IN_TOTO_TEST_RESULT_PREDICATE_TYPE,
+    require_receipt: bool = False,
 ) -> AttestationVerifyResult:
     """Verify an attestation envelope against OpenSSH allowed_signers policy."""
     binary = shutil.which("ssh-keygen")
@@ -762,7 +767,7 @@ def verify_attestation(
                     run_id=run_id,
                 )
 
-        # 7. Check target receipt re-derivation (step 4)
+        # 7. Check target receipt re-derivation when local evidence is requested.
         if target is not None and run_id and expected_predicate_type == IN_TOTO_TEST_RESULT_PREDICATE_TYPE:
             resolved_target = target.expanduser().resolve()
             run_dir = resolved_target / ".brigade" / "work" / "verify-runs" / run_id
@@ -779,6 +784,7 @@ def verify_attestation(
                             keyid=actual_keyid,
                             subject=subject,
                             run_id=run_id,
+                            rederived=False,
                         )
                 except Exception:
                     return AttestationVerifyResult(
@@ -787,7 +793,35 @@ def verify_attestation(
                         keyid=actual_keyid,
                         subject=subject,
                         run_id=run_id,
+                        rederived=False,
                     )
+                return AttestationVerifyResult(
+                    status=STATUS_SIGNED_OK,
+                    principal=verified_principal,
+                    keyid=actual_keyid,
+                    subject=subject,
+                    run_id=run_id,
+                    rederived=True,
+                )
+            if require_receipt:
+                return AttestationVerifyResult(
+                    status=STATUS_EVIDENCE_MISSING,
+                    principal=verified_principal,
+                    keyid=actual_keyid,
+                    subject=subject,
+                    run_id=run_id,
+                    rederived=False,
+                )
+
+        if require_receipt:
+            return AttestationVerifyResult(
+                status=STATUS_EVIDENCE_MISSING,
+                principal=verified_principal,
+                keyid=actual_keyid,
+                subject=subject,
+                run_id=run_id,
+                rederived=False,
+            )
 
         return AttestationVerifyResult(
             status=STATUS_SIGNED_OK,
@@ -795,4 +829,5 @@ def verify_attestation(
             keyid=actual_keyid,
             subject=subject,
             run_id=run_id,
+            rederived=False,
         )

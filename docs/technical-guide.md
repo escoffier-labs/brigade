@@ -501,6 +501,9 @@ recorded comparisons. A valid signature proves possession of the trusted key,
 not that a person read every changed line or understood every verification
 result. Later verify receipts are allowed; missing signed receipts or a changed
 live tree are reported as non-exit-changing `APPROVAL-STALE`.
+Pass `--strict-approvals` to make stale, expired, invalid,
+segregation-of-duties-failed, or unapproved runs return nonzero. The default
+receipt-verification exit behavior is unchanged.
 
 Use `brigade runs reap --cwd /path/to/repo` to terminalize local runs whose
 recorded owner process is gone. Reap writes `status: orphaned` and a dirty-file

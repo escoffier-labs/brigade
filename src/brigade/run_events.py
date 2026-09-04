@@ -106,6 +106,17 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
             "producer_keyids",
         }
     ),
+    "request.signed": frozenset(
+        {
+            "requester_principal",
+            "requester_keyid",
+            "baseline_commit",
+            "task_sha256",
+            "nonce",
+            "statement_sha256",
+            "attestation_path",
+        }
+    ),
     "run.recovery.started": frozenset({"detail"}),
     "run.recovery.completed": frozenset({"detail"}),
     "run.completed": frozenset({"status", "detail"}),
@@ -195,6 +206,17 @@ _REQUIRED_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
             "subject_tree",
             "nonce",
             "expires_at",
+            "statement_sha256",
+            "attestation_path",
+        }
+    ),
+    "request.signed": frozenset(
+        {
+            "requester_principal",
+            "requester_keyid",
+            "baseline_commit",
+            "task_sha256",
+            "nonce",
             "statement_sha256",
             "attestation_path",
         }
@@ -445,6 +467,12 @@ def _validate_payload(event_type: str, payload: Any) -> None:
             raise CanonicalizationError("approval nonce must be 32 lowercase hex characters")
         if not isinstance(payload.get("statement_sha256"), str) or not _HEX64.fullmatch(payload["statement_sha256"]):
             raise CanonicalizationError("approval statement_sha256 must be 64 lowercase hex characters")
+    if event_type == "request.signed":
+        if not isinstance(payload.get("nonce"), str) or not _HEX32.fullmatch(payload["nonce"]):
+            raise CanonicalizationError("request.signed nonce must be 32 lowercase hex characters")
+        for key in ("task_sha256", "statement_sha256"):
+            if not isinstance(payload.get(key), str) or not _HEX64.fullmatch(payload[key]):
+                raise CanonicalizationError(f"request.signed {key} must be 64 lowercase hex characters")
     if event_type in {"run.ship", "run.merge"} and (not isinstance(payload.get("stage"), str) or not payload["stage"]):
         raise CanonicalizationError(f"{event_type} stage is required")
     expected_decision = APPROVAL_DECISION_EVENT_STATES.get(event_type)

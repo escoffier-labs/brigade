@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .. import agents
+from .. import localio
 from .. import receipt_schema
 from .. import seat_health_policy
 from ..roster import Roster
@@ -24,6 +25,20 @@ from ..run_transport import WorkerResult
 
 JsonWriter = Callable[[Path, object], None]
 PayloadBuilder = Callable[..., dict[str, object]]
+
+
+def _final_tree_base(base: Mapping[str, Any]) -> dict[str, Any]:
+    """Return terminal receipt fields with the final non-evidence Git tree when available."""
+    result = dict(base)
+    if result.get("dry_run") is True:
+        return result
+    cwd = result.get("cwd")
+    if not isinstance(cwd, Path):
+        return result
+    tree_fingerprint = localio.tree_fingerprint(cwd)
+    if tree_fingerprint is not None:
+        result["tree_fingerprint"] = tree_fingerprint
+    return result
 
 
 def terminal_run_status(final: agents.AgentResult) -> str:
@@ -119,12 +134,13 @@ def write_failed_run_receipt(
     roster: Roster,
     base: Mapping[str, Any],
 ) -> None:
+    terminal_base = _final_tree_base(base)
     if direct_worker:
         (output_dir / "final.txt").write_text(final.text + "\n")
     write_json(
         output_dir / "run.json",
         payload(
-            **base,
+            **terminal_base,
             status=terminal_run_status(final),
             finished_at=datetime.now(timezone.utc),
             error=final.detail,
@@ -151,6 +167,7 @@ def write_completed_run_receipt(
     base: Mapping[str, Any],
     extra: Mapping[str, Any],
 ) -> None:
+    terminal_base = _final_tree_base(base)
     failed_seats = [result.worker for result in worker_results if not result.ok]
     finished_at: datetime | None
     if not workers_ok:
@@ -164,7 +181,7 @@ def write_completed_run_receipt(
     write_json(
         output_dir / "run.json",
         payload(
-            **base,
+            **terminal_base,
             **extra,
             status=run_status,
             finished_at=finished_at,
@@ -194,10 +211,11 @@ def write_handoff_failure_receipt(
     base: Mapping[str, Any],
     extra: Mapping[str, Any],
 ) -> None:
+    terminal_base = _final_tree_base(base)
     write_json(
         output_dir / "run.json",
         payload(
-            **base,
+            **terminal_base,
             **extra,
             status="failed",
             finished_at=datetime.now(timezone.utc),
@@ -219,11 +237,12 @@ def write_ok_after_handoff_receipt(
     base: Mapping[str, Any],
     extra: Mapping[str, Any],
 ) -> None:
+    terminal_base = _final_tree_base(base)
     finished_at = None if defer_artifact_collection else datetime.now(timezone.utc)
     write_json(
         output_dir / "run.json",
         payload(
-            **base,
+            **terminal_base,
             **extra,
             status="artifact-collection" if defer_artifact_collection else "ok",
             finished_at=finished_at,

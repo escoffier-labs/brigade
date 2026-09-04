@@ -680,6 +680,9 @@ def _run_payload(
     run_budget_payload: Mapping[str, Any] | None = None,
     kind: str = "work",
     causal_receipt_payload: Mapping[str, Any] | None = None,
+    requester_principal: str | None = None,
+    requester_keyid: str | None = None,
+    request_payload: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": receipt_schema.RUN_RECEIPT_SCHEMA,
@@ -735,6 +738,12 @@ def _run_payload(
         payload["skill_route_policy"] = route_policy_extensions_from_decision(skill_route_policy)
     if worker is not None:
         payload["worker"] = worker
+    if requester_principal is not None:
+        payload["requester_principal"] = requester_principal
+    if requester_keyid is not None:
+        payload["requester_keyid"] = requester_keyid
+    if request_payload is not None:
+        payload["request"] = dict(request_payload)
     if include_git:
         git = prompts._receipt_git_snapshot(cwd)
         if git is not None:
@@ -849,6 +858,9 @@ def record_run_start(
     existing_kind: str | None = None
     existing_causal_receipt: dict[str, Any] | None = None
     existing_retry_decisions: list[dict[str, Any]] | None = None
+    existing_requester_principal: str | None = None
+    existing_requester_keyid: str | None = None
+    existing_request: dict[str, Any] | None = None
     if run_json_exists:
         try:
             existing = json.loads(run_json.read_text(encoding="utf-8"))
@@ -876,6 +888,12 @@ def record_run_start(
             existing_kind = existing["kind"].strip()
         if isinstance(existing.get("causal_receipt"), dict):
             existing_causal_receipt = dict(existing["causal_receipt"])
+        if isinstance(existing.get("requester_principal"), str):
+            existing_requester_principal = existing["requester_principal"]
+        if isinstance(existing.get("requester_keyid"), str):
+            existing_requester_keyid = existing["requester_keyid"]
+        if isinstance(existing.get("request"), dict):
+            existing_request = dict(existing["request"])
         existing_retry = existing.get("retry_decisions")
         if isinstance(existing_retry, list):
             existing_retry_decisions = [dict(entry) for entry in existing_retry if isinstance(entry, dict)]
@@ -933,6 +951,9 @@ def record_run_start(
                     if existing_causal_receipt is not None
                     else (causal_receipt.recorded_run(run_id=output_dir.name) if new_run else None)
                 ),
+                requester_principal=existing_requester_principal,
+                requester_keyid=existing_requester_keyid,
+                request_payload=existing_request,
                 retry_decisions=existing_retry_decisions,
                 handoff_inbox=handoff_inbox,
             ),

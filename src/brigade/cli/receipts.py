@@ -14,6 +14,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_verify = receipts_sub.add_parser("verify", help="Verify receipt and outcome digest chains.")
     p_verify.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_verify.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_verify.add_argument(
+        "--strict-approvals",
+        action="store_true",
+        help="Return nonzero for stale, expired, invalid, or indeterminate approvals.",
+    )
     p_verify.add_argument("--commit", help="Verify receipt trailers from a commit message.")
     p_verify.set_defaults(func=dispatch)
 
@@ -89,6 +94,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--revoked-keys", metavar="PATH", type=Path, default=None, help="Path to OpenSSH key revocation list (KRL)."
     )
     p_verify_att.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_verify_att.add_argument(
+        "--require-receipt",
+        action="store_true",
+        help="Require a local verify receipt to re-derive the Test Result statement.",
+    )
     p_verify_att.set_defaults(func=dispatch)
 
     p_att_keygen = receipts_sub.add_parser("attestation-keygen", help="Generate an Ed25519 attestation signing key.")
@@ -109,7 +119,11 @@ def dispatch(args) -> int:
             return receipts_trailer.verify_commit(args.commit, target=args.target)
         from .. import approval
 
-        return approval.verify_receipts_with_approvals(target=args.target, json_output=args.json)
+        return approval.verify_receipts_with_approvals(
+            target=args.target,
+            json_output=args.json,
+            strict_approvals=args.strict_approvals,
+        )
     if args.receipts_command == "keygen":
         return receipts_cmd.keygen(target=args.target, force=args.force)
     if args.receipts_command == "export" and args.receipts_export_command == "attestation":
@@ -151,6 +165,7 @@ def dispatch(args) -> int:
             principal=args.principal,
             krl_path=args.revoked_keys,
             json_output=args.json,
+            require_receipt=args.require_receipt,
         )
     if args.receipts_command == "attestation-keygen":
         from .. import attestation_cmd
