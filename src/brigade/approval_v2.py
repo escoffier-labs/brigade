@@ -22,7 +22,7 @@ approver keyid must differ from every verified Test Result producer key.
 requester identity must be verified from the signed request evidence.
 approver principal and keyid must differ from the verified requester.
 approver keyid must differ from the workspace attestation key when present.
-approval must precede every merge or ship stage event.
+approval journal sequence must precede every merge or ship stage event.
 an allow decision must be unexpired at verification time.
 """
 SOD_POLICY_SHA256 = hashlib.sha256(SOD_POLICY_TEXT.encode("utf-8")).hexdigest()
@@ -243,6 +243,7 @@ def collect_test_result_evidence(
     results: list[TestResultEvidence] = []
     baselines: set[str] = set()
     patch_digests: set[str] = set()
+    other_tree_receipt_found = False
     for receipt_path in _matching_receipt_paths(target):
         receipt = _load_json_object(receipt_path, "verify receipt")
         if receipt.get("producer_run_id") != producer_run_id:
@@ -250,6 +251,11 @@ def collect_test_result_evidence(
         verify_run_id = receipt.get("run_id")
         baseline_commit = receipt.get("baseline_commit")
         tree_fingerprint = receipt.get("tree_fingerprint")
+        if not isinstance(tree_fingerprint, str) or not _HEX40_OR_64_RE.fullmatch(tree_fingerprint):
+            raise ApprovalV2Error("matching verify receipt tree fingerprint is invalid")
+        if tree_fingerprint != final_tree:
+            other_tree_receipt_found = True
+            continue
         patch_sha256 = receipt.get("changes_patch_sha256")
         digests = receipt.get("digests")
         receipt_sha256 = digests.get("receipt_sha256") if isinstance(digests, Mapping) else None
@@ -260,7 +266,6 @@ def collect_test_result_evidence(
             or verify_run_id != receipt_path.parent.name
             or not isinstance(baseline_commit, str)
             or not _HEX40_OR_64_RE.fullmatch(baseline_commit)
-            or tree_fingerprint != final_tree
             or not isinstance(patch_sha256, str)
             or not _HEX64_RE.fullmatch(patch_sha256)
             or not isinstance(receipt_sha256, str)
@@ -297,12 +302,6 @@ def collect_test_result_evidence(
             raise ApprovalV2Error(
                 f"matching verify receipt {verify_run_id} requires a re-derived SIGNED-OK PASSED Test Result"
             )
-        producer_keyids = {signer_keyid}
-        receipt_keyid = digests.get("key_id") if isinstance(digests, Mapping) else None
-        if isinstance(receipt_keyid, str) and receipt_keyid:
-            if not _KEY_ID_RE.fullmatch(receipt_keyid):
-                raise ApprovalV2Error("matching verify receipt producer key id is invalid")
-            producer_keyids.add(receipt_keyid)
         results.append(
             TestResultEvidence(
                 verify_run_id=verify_run_id,
@@ -310,12 +309,14 @@ def collect_test_result_evidence(
                 envelope_sha256=localio.canonical_json_digest(envelope),
                 profile=attestation.ATTESTATION_PROFILE,
                 signer_keyid=signer_keyid,
-                producer_keyids=tuple(sorted(producer_keyids)),
+                producer_keyids=(signer_keyid,),
             )
         )
         baselines.add(baseline_commit)
         patch_digests.add(patch_sha256)
     if not results:
+        if other_tree_receipt_found:
+            raise ApprovalV2Error("allow requires a re-derived SIGNED-OK Test Result for the run final tree")
         raise ApprovalV2Error("allow requires at least one re-derived SIGNED-OK Test Result envelope")
     if len(baselines) != 1:
         raise ApprovalV2Error("matching verify receipts do not agree on baseline commit")
@@ -485,7 +486,7 @@ def parse_signed_bindings(statement: Mapping[str, Any]) -> SignedBindings:
             or not isinstance(signer_keyid, str)
             or not _KEY_ID_RE.fullmatch(signer_keyid)
             or producer_keyids != sorted(set(producer_keyid_values))
-            or signer_keyid not in producer_keyid_values
+            or producer_keyid_values != (signer_keyid,)
         ):
             raise ApprovalV2Error("approval v2 envelope binding is invalid")
         results.append(
@@ -558,6 +559,7 @@ def evaluate_sod(
     evidence: ApprovalEvidence,
     requester: RequesterIdentity | None,
     events: Sequence[run_journal.RunEvent],
+    approval_sequence: int,
     workspace_keyid: str | None,
     now: datetime,
 ) -> dict[str, Any]:
@@ -569,7 +571,6 @@ def evaluate_sod(
     principal = approver.get("principal")
     keyid = approver.get("keyid")
     decision = predicate.get("decision")
-    decided_at = _parse_timestamp(predicate.get("decidedAt"))
     expires_at = _parse_timestamp(predicate.get("expiresAt"))
     checks: list[dict[str, str]] = [
         {
@@ -603,15 +604,9 @@ def evaluate_sod(
             "status": "passed" if workspace_keyid is None or keyid != workspace_keyid else "failed",
         }
     )
-    late = decided_at is None
-    if decided_at is not None:
-        for event in events:
-            if not _is_merge_or_ship_event(event):
-                continue
-            stage_time = _parse_timestamp(event.recorded_at)
-            if stage_time is None or decided_at >= stage_time:
-                late = True
-                break
+    late = not isinstance(approval_sequence, int) or isinstance(approval_sequence, bool) or approval_sequence < 1
+    if not late:
+        late = any(_is_merge_or_ship_event(event) and event.sequence < approval_sequence for event in events)
     checks.append({"id": "approval-before-merge-ship", "status": "failed" if late else "passed"})
     expired = decision == "allow" and (expires_at is None or expires_at <= now.astimezone(timezone.utc))
     checks.append({"id": "approval-not-expired", "status": "failed" if expired else "passed"})

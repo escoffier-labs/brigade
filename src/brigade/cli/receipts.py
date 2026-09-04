@@ -17,10 +17,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_verify.add_argument(
         "--strict-approvals",
         action="store_true",
-        help=(
-            "Return nonzero for stale, expired, invalid, segregation-of-duties-failed, "
-            "indeterminate, or unapproved runs."
-        ),
+        help="Also return nonzero for stale, expired, indeterminate, or unapproved runs.",
     )
     p_verify.add_argument("--commit", help="Verify receipt trailers from a commit message.")
     p_verify.set_defaults(func=dispatch)

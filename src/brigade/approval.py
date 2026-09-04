@@ -526,6 +526,7 @@ def record_approval(
         evidence=evidence,
         requester=requester,
         events=report.events,
+        approval_sequence=report.events[-1].sequence + 1,
         workspace_keyid=verification_context.workspace_keyid,
         now=instant,
     )
@@ -535,33 +536,56 @@ def record_approval(
         raise approval_v2.ApprovalV2Error("signed request evidence changed before approval write")
     statement_sha256 = hashlib.sha256(attestation.canonical_statement_bytes(statement)).hexdigest()
     relative_path = Path("approvals") / f"{nonce}.json"
-    attestation.write_attestation_file(envelope, run_dir / relative_path)
-    event = run_journal.append_event(
-        run_dir / "events" / "lifecycle.jsonl",
-        run_id=run_id,
-        event_type=_APPROVAL_EVENT_TYPE,
-        payload={
-            "decision": decision,
-            "scope": scope,
-            "approver_principal": resolved_principal,
-            "approver_keyid": keyid,
-            "subject_tree": tree_fingerprint,
-            "nonce": nonce,
-            "expires_at": expires_at,
-            "statement_sha256": statement_sha256,
-            "attestation_path": relative_path.as_posix(),
-            "producer_keyids": sorted(evidence.producer_keyids),
-        },
-        idempotency_key=f"approval:{nonce}",
-        expected_previous_sequence=report.events[-1].sequence,
-        recorded_at=decided_at,
-    )
+    envelope_path = run_dir / relative_path
+    event_payload = {
+        "decision": decision,
+        "scope": scope,
+        "approver_principal": resolved_principal,
+        "approver_keyid": keyid,
+        "subject_tree": tree_fingerprint,
+        "nonce": nonce,
+        "decided_at": decided_at,
+        "expires_at": expires_at,
+        "statement_sha256": statement_sha256,
+        "attestation_path": relative_path.as_posix(),
+        "producer_keyids": sorted(evidence.producer_keyids),
+    }
+    attestation.write_attestation_file(envelope, envelope_path)
+    try:
+        event = run_journal.append_event(
+            run_dir / "events" / "lifecycle.jsonl",
+            run_id=run_id,
+            event_type=_APPROVAL_EVENT_TYPE,
+            payload=event_payload,
+            idempotency_key=f"approval:{nonce}",
+            expected_previous_sequence=report.events[-1].sequence,
+            recorded_at=decided_at,
+        )
+    except BaseException:
+        envelope_is_referenced = False
+        try:
+            after_failed_append = _read_journal_report(run_dir)
+            envelope_is_referenced = any(
+                candidate.event_type == _APPROVAL_EVENT_TYPE
+                and candidate.payload.get("nonce") == nonce
+                and candidate.payload.get("attestation_path") == relative_path.as_posix()
+                for candidate in after_failed_append.events
+            )
+        except ApprovalError:
+            pass
+        if not envelope_is_referenced:
+            try:
+                envelope_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
     approval_projection = {
         "decision": decision,
         "scope": scope,
         "approver_principal": resolved_principal,
         "decided_at": decided_at,
         "expires_at": expires_at,
+        "reason": reason,
         "nonce": nonce,
         "statement_sha256": statement_sha256,
         "approver_keyid": keyid,
@@ -574,7 +598,8 @@ def record_approval(
     after = _read_journal(run_dir)
     projection = run_projector.project_run_snapshot(updated, after.events, journal_present=True)
     localio.write_bytes_atomic(run_dir / "run.json", projection.to_bytes())
-    return {"event": event.to_dict(), "approval": approval_projection}
+    public_approval = {name: value for name, value in approval_projection.items() if name != "reason"}
+    return {"event": event.to_dict(), "approval": public_approval}
 
 
 def approve_cli(
@@ -752,6 +777,7 @@ def _verify_v2_approval(
                 principal == event.payload.get("approver_principal"),
                 approver.get("keyid") == event.payload.get("approver_keyid"),
                 predicate.get("nonce") == event.payload.get("nonce"),
+                predicate.get("decidedAt") == event.payload.get("decided_at") == event.recorded_at,
                 predicate.get("expiresAt") == event.payload.get("expires_at"),
                 event.payload.get("producer_keyids") == sorted(signed.evidence.producer_keyids),
                 event.payload.get("subject_tree") == signed.tree_fingerprint,
@@ -815,6 +841,7 @@ def _verify_v2_approval(
         evidence=signed.evidence,
         requester=signed.requester,
         events=report.events,
+        approval_sequence=event.sequence,
         workspace_keyid=context.workspace_keyid,
         now=instant,
     )

@@ -16,6 +16,7 @@ import pytest
 from brigade import (
     agent_request,
     approval,
+    approval_v2,
     attestation,
     cli,
     localio,
@@ -112,9 +113,9 @@ def _append_signed_request(
     run_id: str,
     key: Path,
     principal: str,
+    nonce: str = "a" * 32,
+    requested_at: str = "2026-09-03T11:59:30.000000Z",
 ) -> dict[str, str]:
-    nonce = "a" * 32
-    requested_at = "2026-09-03T11:59:30.000000Z"
     statement = agent_request.build_statement(
         run_id=run_id,
         baseline_commit=BASELINE,
@@ -330,6 +331,7 @@ def test_allow_records_event_envelope_projection_and_verifies(tmp_path: Path, ca
     assert event.payload["approver_principal"] == "alice"
     assert event.payload["subject_tree"] == TREE
     assert event.payload["attestation_path"] == f"approvals/{event.payload['nonce']}.json"
+    assert "reason" not in event.payload
 
     envelope, statement = _statement(target)
     assert envelope["brigade"] == {
@@ -345,6 +347,7 @@ def test_allow_records_event_envelope_projection_and_verifies(tmp_path: Path, ca
     assert statement["predicateType"] == approval.HUMAN_APPROVAL_V2_PREDICATE_TYPE
     assert predicate["schemaVersion"] == 2
     assert predicate["decision"] == "allow"
+    assert event.payload["decided_at"] == event.recorded_at == predicate["decidedAt"]
     assert predicate["approver"]["kind"] == "human"
     assert predicate["policy"]["name"] == "brigade.sod.v2"
     assert predicate["requester"]["status"] == "verified"
@@ -376,6 +379,7 @@ def test_allow_records_event_envelope_projection_and_verifies(tmp_path: Path, ca
 
     run_meta = json.loads((target / ".brigade" / "runs" / RUN_ID / "run.json").read_text())
     assert run_meta["approval"]["decision"] == "allow"
+    assert run_meta["approval"]["reason"] == "Reviewed the focused test receipt."
     assert run_meta["approval"]["sod"]["result"] == "PASSED"
     assert {check["id"] for check in run_meta["approval"]["sod"]["checks"]} == {
         "approver-is-human",
@@ -390,6 +394,7 @@ def test_allow_records_event_envelope_projection_and_verifies(tmp_path: Path, ca
     verified = json.loads(capsys.readouterr().out)
     assert verified["approvals"]["runs"][0]["status"] == "APPROVED"
     assert verified["approvals"]["runs"][0]["binding"] == "test-result"
+    assert "Reviewed the focused test receipt." not in json.dumps(verified)
 
 
 def test_v1_approval_verification_stays_receipt_bound(tmp_path: Path) -> None:
@@ -420,6 +425,44 @@ def test_v2_binds_the_exact_sorted_test_result_payload_digest_set(tmp_path: Path
     ]
 
 
+def test_v2_ignores_matching_receipts_for_older_trees(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    target, key, _signers = _workspace(tmp_path)
+    verifier_key = tmp_path / "verifier" / ".brigade" / "attestation" / "signing-key"
+    stale_verify_id = "20260903-115900-work-verify-stale-tree"
+    _write_verify_receipt(
+        target,
+        verify_id=stale_verify_id,
+        producer_key=verifier_key,
+        tree_fingerprint="9" * 40,
+    )
+
+    assert _approve(target, key) == 0
+    _envelope, statement = _statement(target)
+    assert [subject["name"] for subject in statement["subject"] if subject["name"].startswith("test-result:")] == [
+        f"test-result:{VERIFY_ID}"
+    ]
+
+    capsys.readouterr()
+    assert cli.main(["receipts", "verify", "--target", str(target)]) == 0
+    assert "APPROVED" in capsys.readouterr().out
+
+
+def test_v2_reports_when_matching_receipts_exist_only_for_other_trees(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, key, _signers = _workspace(tmp_path)
+    receipt_path = target / ".brigade" / "work" / "verify-runs" / VERIFY_ID / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["tree_fingerprint"] = "9" * 40
+    receipt["digests"]["receipt_sha256"] = localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    _write_json(receipt_path, receipt)
+    _resign_verify_receipt(target, tmp_path / "verifier" / ".brigade" / "attestation" / "signing-key")
+
+    assert _approve(target, key) == 2
+    assert "final tree" in capsys.readouterr().err
+    assert _approval_event(target).event_type == "request.signed"
+
+
 def test_attestation_write_failure_leaves_no_approval_event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """If publishing the signed envelope fails, no durable approval event is appended."""
     target, key, _signers = _workspace(tmp_path)
@@ -440,6 +483,32 @@ def test_attestation_write_failure_leaves_no_approval_event(tmp_path: Path, monk
             key=key,
         )
 
+    assert _approval_event(target).event_type == "request.signed"
+
+
+def test_journal_append_failure_removes_unreferenced_approval_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target, key, _signers = _workspace(tmp_path)
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("append refused")
+
+    monkeypatch.setattr(run_journal, "append_event", _raise)
+
+    with pytest.raises(RuntimeError, match="append refused"):
+        approval.record_approval(
+            target=target,
+            run_id=RUN_ID,
+            decision="allow",
+            scope="run",
+            reason_code="reviewed-tests",
+            reason="Reviewed the focused test receipt.",
+            key=key,
+        )
+
+    approvals_dir = target / ".brigade" / "runs" / RUN_ID / "approvals"
+    assert not approvals_dir.exists() or list(approvals_dir.iterdir()) == []
     assert _approval_event(target).event_type == "request.signed"
 
 
@@ -609,6 +678,27 @@ def test_allow_refuses_tampered_signed_request_before_writing(
     assert _approval_event(target).event_type == "request.signed"
 
 
+def test_allow_refuses_ambiguous_signed_requests_before_writing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, key, _signers = _workspace(tmp_path)
+    run_dir = target / ".brigade" / "runs" / RUN_ID
+    requester_key = tmp_path / "requester" / ".brigade" / "attestation" / "signing-key"
+    _append_signed_request(
+        target,
+        run_dir,
+        run_id=RUN_ID,
+        key=requester_key,
+        principal="requester",
+        nonce="b" * 32,
+        requested_at="2026-09-03T11:59:31.000000Z",
+    )
+
+    assert _approve(target, key) == 2
+    assert "signed request evidence is ambiguous" in capsys.readouterr().err
+    assert _approval_event(target).event_type == "request.signed"
+
+
 @pytest.mark.parametrize(("decision", "status"), [("deny", "DENIED"), ("hold", "HELD")])
 def test_deny_and_hold_need_no_receipts_and_do_not_fail_verify(
     tmp_path: Path,
@@ -682,18 +772,18 @@ def test_run_audit_receipt_includes_approval_decision_and_sod(tmp_path: Path):
     assert _approve(target, key) == 0
 
     run_dir = target / ".brigade" / "runs" / RUN_ID
-    run_meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     event = run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events[-1]
     envelope = json.loads((run_dir / event.payload["attestation_path"]).read_text(encoding="utf-8"))
     statement = json.loads(base64.b64decode(envelope["payload"]))
-    receipts = approval.collect_verify_receipts(target, RUN_ID, tree_fingerprint=run_meta["tree_fingerprint"])
+    signed = approval_v2.parse_signed_bindings(statement)
     events = run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events
-    expected_sod = approval.evaluate_sod(
-        target=target,
+    expected_sod = approval_v2.evaluate_sod(
         statement=statement,
-        run_meta=run_meta,
-        receipts=receipts,
+        evidence=signed.evidence,
+        requester=signed.requester,
         events=events,
+        approval_sequence=event.sequence,
+        workspace_keyid=attestation.get_key_fingerprint(attestation.resolve_signing_key_path(target)),
         now=datetime.now(timezone.utc),
     )
 
@@ -785,15 +875,21 @@ def test_reason_refuses_absolute_paths(tmp_path: Path, capsys: pytest.CaptureFix
     assert _approval_event(target).event_type == "request.signed"
 
 
-def test_hmac_receipt_keyid_is_a_producer_for_sod(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+def test_hmac_receipt_keyid_is_not_a_verified_producer_identity(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     target, key, _signers = _workspace(tmp_path)
     receipt_path = target / ".brigade" / "work" / "verify-runs" / VERIFY_ID / "receipt.json"
     receipt = json.loads(receipt_path.read_text())
     receipt["digests"]["key_id"] = attestation.get_key_fingerprint(key)
     _write_json(receipt_path, receipt)
 
-    assert _approve(target, key) == 3
-    assert "approver-not-producer: failed" in capsys.readouterr().out
+    assert _approve(target, key) == 0
+    assert "approver-not-producer: passed" in capsys.readouterr().out
+    _envelope, statement = _statement(target)
+    descriptor = statement["predicate"]["evidence"]["envelopes"][0]
+    assert descriptor["producerKeyids"] == [descriptor["signerKeyid"]]
+    assert attestation.get_key_fingerprint(key) not in descriptor["producerKeyids"]
 
 
 def test_forged_attestation_keyid_hint_does_not_hide_the_producer(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
@@ -967,8 +1063,10 @@ def test_later_approval_supersedes_earlier_decision_and_keeps_history(
     ]
 
 
-def test_approval_after_ship_stage_event_is_late_sod_violation(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
-    """A ship stage event recorded before the approval makes the approval late."""
+def test_backdated_approval_after_ship_stage_is_late_by_sequence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An approval appended after ship fails even when its signed time is earlier."""
     target, key, _signers = _workspace(tmp_path)
     journal = target / ".brigade" / "runs" / RUN_ID / "events" / "lifecycle.jsonl"
     before_ship = run_journal.read_journal(journal)
@@ -979,17 +1077,81 @@ def test_approval_after_ship_stage_event_is_late_sod_violation(tmp_path: Path, c
         payload={"stage": "ship"},
         idempotency_key="ship-stage-1",
         expected_previous_sequence=before_ship.events[-1].sequence,
-        recorded_at="2020-01-01T00:00:00.000000Z",
+        recorded_at="2030-01-01T00:00:00.000000Z",
     )
     assert ship.sequence == before_ship.events[-1].sequence + 1
 
-    assert _approve(target, key) == 3
-    approved = capsys.readouterr()
-    assert "approval-before-merge-ship: failed" in approved.out
+    result = approval.record_approval(
+        target=target,
+        run_id=RUN_ID,
+        decision="allow",
+        scope="run",
+        reason_code="reviewed-tests",
+        reason="Reviewed the focused test receipt.",
+        key=key,
+        now=datetime(2026, 9, 3, 12, 1, tzinfo=timezone.utc),
+    )
+    ordering_check = next(
+        check for check in result["approval"]["sod"]["checks"] if check["id"] == "approval-before-merge-ship"
+    )
+    assert ordering_check["status"] == "failed"
 
     capsys.readouterr()
     assert cli.main(["receipts", "verify", "--target", str(target)]) != 0
     assert "SOD-VIOLATION" in capsys.readouterr().out
+
+
+def test_backdated_ship_after_approval_does_not_violate_sequence_order(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, key, _signers = _workspace(tmp_path)
+    assert _approve(target, key) == 0
+    capsys.readouterr()
+    journal = target / ".brigade" / "runs" / RUN_ID / "events" / "lifecycle.jsonl"
+    before_ship = run_journal.read_journal(journal)
+    run_journal.append_event(
+        journal,
+        run_id=RUN_ID,
+        event_type="run.ship",
+        payload={"stage": "ship"},
+        idempotency_key="ship-stage-after-approval",
+        expected_previous_sequence=before_ship.events[-1].sequence,
+        recorded_at="2020-01-01T00:00:00.000000Z",
+    )
+
+    assert cli.main(["receipts", "verify", "--target", str(target)]) == 0
+    assert "APPROVED" in capsys.readouterr().out
+
+
+def test_event_decision_time_must_match_the_signed_decision_time(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, key, _signers = _workspace(tmp_path)
+    assert _approve(target, key) == 0
+    capsys.readouterr()
+
+    journal = target / ".brigade" / "runs" / RUN_ID / "events" / "lifecycle.jsonl"
+    report = run_journal.read_journal(journal)
+    events = [event.to_dict() for event in report.events]
+    approval_event = events[-1]
+    approval_event["payload"]["decided_at"] = "2026-09-03T12:02:00.000000Z"
+    rebuilt = run_events.build_event(
+        run_id=approval_event["run_id"],
+        sequence=approval_event["sequence"],
+        event_type=approval_event["event_type"],
+        payload=approval_event["payload"],
+        idempotency_key=approval_event["idempotency_key"],
+        recorded_at=approval_event["recorded_at"],
+        previous_digest=approval_event["previous_digest"],
+    )
+    journal.write_bytes(
+        b"".join(run_events.canonical_bytes(event) + b"\n" for event in events[:-1])
+        + run_events.canonical_bytes(rebuilt)
+        + b"\n"
+    )
+
+    assert cli.main(["receipts", "verify", "--target", str(target)]) != 0
+    assert "APPROVAL-INVALID" in capsys.readouterr().out
 
 
 def test_tampered_signature_yields_approval_invalid(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
@@ -1146,6 +1308,20 @@ def test_strict_approvals_makes_an_expired_allow_nonzero(tmp_path: Path, capsys:
     assert cli.main(["receipts", "verify", "--target", str(target), "--strict-approvals"]) != 0
 
 
+def test_strict_approvals_makes_a_stale_allow_nonzero(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    target, key, _signers = _workspace(tmp_path)
+    assert _approve(target, key) == 0
+    capsys.readouterr()
+    run_path = target / ".brigade" / "runs" / RUN_ID / "run.json"
+    run_meta = json.loads(run_path.read_text())
+    run_meta["tree_fingerprint"] = "9" * 40
+    _write_json(run_path, run_meta)
+
+    assert cli.main(["receipts", "verify", "--target", str(target)]) == 0
+    assert "APPROVAL-STALE" in capsys.readouterr().out
+    assert cli.main(["receipts", "verify", "--target", str(target), "--strict-approvals"]) != 0
+
+
 def test_default_and_strict_approval_exit_behavior_for_unapproved_run(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1164,12 +1340,7 @@ def test_strict_approvals_help_names_each_additional_failure_status(capsys: pyte
 
     assert exc_info.value.code == 0
     help_text = capsys.readouterr().out
-    for status in (
-        "stale",
-        "expired",
-        "invalid",
-        "segregation-of-duties-failed",
-        "indeterminate",
-        "unapproved",
-    ):
+    for status in ("stale", "expired", "indeterminate", "unapproved"):
         assert status in help_text
+    assert "invalid" not in help_text
+    assert "segregation-of-duties-failed" not in help_text
