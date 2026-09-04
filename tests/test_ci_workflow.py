@@ -343,11 +343,17 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     assert "python -m coverage combine .coverage-data" in coverage
     assert "python -m coverage report --fail-under=78" in coverage
     assert "name: test (${{ matrix.python }})" in protected
-    assert "needs: [test-shards, coverage]" in protected
+    assert "needs: [test-shards, coverage, cosign-integration]" in protected
     assert 'python: ["3.10", "3.11", "3.12"]' in protected
     assert "if: ${{ always() }}" in protected
     assert "SHARDS_RESULT: ${{ needs.test-shards.result }}" in protected
     assert "COVERAGE_RESULT: ${{ needs.coverage.result }}" in protected
+    assert "COSIGN_RESULT: ${{ needs.cosign-integration.result }}" in protected
+    assert '[ "$COSIGN_RESULT" != "success" ]' in protected
+    assert (
+        '[ "$SHARDS_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ] || [ "$COSIGN_RESULT" != "success" ]'
+        in protected
+    )
 
 
 def test_ci_workflow_caches_pip_for_jobs_that_install_dev_extras():
