@@ -366,6 +366,9 @@ def _load_lkg_record() -> dict[str, Any]:
     except (TypeError, ValueError) as exc:
         raise FleetClientError("lkg is malformed") from exc
     record["highest_revision"] = max(cached_highest, high_water)
+    revision = record["roster"].get("revision")
+    if type(revision) is not int or revision < record["highest_revision"]:
+        raise FleetClientError("revision-rollback")
     return record
 
 

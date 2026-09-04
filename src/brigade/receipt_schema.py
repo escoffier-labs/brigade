@@ -145,6 +145,7 @@ def worker_results_document(
     results: list[dict[str, object]],
     *,
     ground_truth: dict[str, object] | None = None,
+    producer_run_id: str | None = None,
 ) -> dict[str, object]:
     doc: dict[str, object] = {
         "schema": WORKER_RESULTS_SCHEMA,
@@ -153,7 +154,7 @@ def worker_results_document(
     }
     if ground_truth is not None:
         doc["ground_truth"] = ground_truth
-    return doc
+    return stamp_optional_producer_run_id(doc, producer_run_id=producer_run_id)
 
 
 def synthesis_document(

@@ -48,11 +48,13 @@ Unavailable owner, environment, purpose, lifecycle, privilege, provider-retentio
 provenance fields are represented as `{"value":"unknown","reason":"..."}`.
 Brigade does not infer them from a model name or an external provider.
 
-Observed use comes from each bounded `worker-results.json` `results` record;
-the companion `run.json` contributes only its timestamp. Seat names are joined
-to the configured workspace roster for provider attribution. An unconfigured
-seat remains explicitly unknown. When a valid node-local Fleet model-policy
-LKG is present, the model-provider registry labels its cached time, revision,
+Observed use comes only from a schema-versioned `worker-results.json` whose
+`producer_run_id` matches its containing run directory, plus a schema-versioned
+companion `run.json` for the timestamp. Legacy or unbound records are reported
+as bounded errors rather than observed facts. Seat names are joined to the
+configured workspace roster for provider attribution. An unconfigured seat
+remains explicitly unknown. When a valid node-local Fleet model-policy LKG is
+present, the model-provider registry labels its cached time, revision,
 admissions, and denials. It never contacts Fleet to create this projection.
 
 ## Privacy and input handling
@@ -65,7 +67,9 @@ credentials, or account identifiers.
 Stdio MCP servers become `local-mcp-server` components. HTTP and SSE MCP servers
 become `remote-mcp-service` records with a sanitized scheme and authority only.
 Malformed, oversized, symlinked, unsupported, or unsafe inputs produce bounded
-registry errors and are omitted from public output.
+registry errors and are omitted from public output. Reads use held no-follow
+descriptors where the platform provides them, share one export-wide byte budget,
+and cap observed worker rows across the entire export.
 
 ## CycloneDX and detached artifacts
 

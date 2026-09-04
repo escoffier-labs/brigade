@@ -9,14 +9,13 @@ import shutil
 import stat
 import tempfile
 import uuid
-from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from itertools import islice
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import fleet_model_admission, fleet_model_roster, localio, mcp_cmd, roster, tools_cmd
+from . import dirfd, fleet_model_admission, fleet_model_roster, localio, mcp_cmd, receipt_schema, roster, tools_cmd
 
 
 INVENTORY_SCHEMA = "brigade.governance_inventory.v1"
@@ -29,6 +28,20 @@ MANIFEST_SCHEMA = "brigade.governance_inventory.manifest.v1"
 SCOPE_NOTICE = "This export covers Brigade configured workspace scope only, not a company-wide AI inventory."
 MAX_INPUT_BYTES = 1024 * 1024
 MAX_RUN_FILES = 10_000
+MAX_WORKER_ROWS = 10_000
+
+
+class _InputBudget:
+    """One bounded byte allowance for every local file read during an export."""
+
+    def __init__(self, maximum: int | None = None) -> None:
+        self.remaining = MAX_INPUT_BYTES if maximum is None else maximum
+
+    def consume(self, count: int) -> bool:
+        if count < 0 or count > self.remaining:
+            return False
+        self.remaining -= count
+        return True
 
 
 def canonical_json(value: object) -> str:
@@ -74,38 +87,70 @@ def _time_window(since: str | datetime | None, until: str | datetime | None) -> 
     return parsed_since, parsed_until
 
 
-def _safe_regular(path: Path) -> tuple[bool, str | None]:
+def _read_regular_bytes(path: Path, budget: _InputBudget) -> tuple[bytes | None, str | None]:
+    """Read one bounded regular file without reopening a checked pathname."""
+
     try:
-        info = path.lstat()
+        parent_fd = dirfd.open_directory_nofollow(path.parent)
     except FileNotFoundError:
-        return False, "missing"
+        return None, "missing"
     except OSError:
-        return False, "unreadable"
-    if stat.S_ISLNK(info.st_mode):
-        return False, "symlink"
-    if not stat.S_ISREG(info.st_mode):
-        return False, "not-regular"
-    if info.st_size > MAX_INPUT_BYTES:
-        return False, "oversized"
-    return True, None
+        return None, "unreadable"
+    try:
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            fd = dirfd.open_child_file(parent_fd, path.name, flags | getattr(os, "O_NONBLOCK", 0))
+        except FileNotFoundError:
+            return None, "missing"
+        except OSError:
+            try:
+                entry = dirfd.stat_child(parent_fd, path.name)
+            except OSError:
+                entry = None
+            if entry is not None and stat.S_ISLNK(entry.st_mode):
+                return None, "symlink"
+            return None, "unreadable"
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                return None, "not-regular"
+            if info.st_size > budget.remaining:
+                return None, "oversized"
+            chunks: list[bytes] = []
+            size = 0
+            while True:
+                chunk = os.read(fd, min(64 * 1024, budget.remaining - size + 1))
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > budget.remaining:
+                    return None, "oversized"
+                chunks.append(chunk)
+            if not budget.consume(size):
+                return None, "oversized"
+            return b"".join(chunks), None
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
 
 
-def _read_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
-    safe, reason = _safe_regular(path)
-    if not safe:
+def _read_json_object(path: Path, budget: _InputBudget) -> tuple[dict[str, Any] | None, str | None]:
+    raw, reason = _read_regular_bytes(path, budget)
+    if raw is None:
         return None, reason
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None, "malformed"
     return (value, None) if isinstance(value, dict) else (None, "not-object")
 
 
-def _read_mcp_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+def _read_mcp_object(path: Path, budget: _InputBudget) -> tuple[dict[str, Any] | None, str | None]:
     """Read canonical MCP JSON while rejecting duplicate object keys."""
 
-    safe, reason = _safe_regular(path)
-    if not safe:
+    raw, reason = _read_regular_bytes(path, budget)
+    if raw is None:
         return None, reason
 
     def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -121,7 +166,7 @@ def _read_mcp_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
 
     try:
         value = json.loads(
-            path.read_text(encoding="utf-8"),
+            raw.decode("utf-8"),
             object_pairs_hook=reject_duplicates,
             parse_constant=reject_non_finite,
         )
@@ -131,7 +176,7 @@ def _read_mcp_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
         if str(exc) == "non-finite":
             return None, "non-finite"
         return None, "malformed"
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None, "malformed"
     return (value, None) if isinstance(value, dict) else (None, "not-object")
 
@@ -152,25 +197,16 @@ def _provider_for(cli: str | None, model: str | None) -> tuple[str, dict[str, st
     for prefix, provider in known.items():
         if lowered == prefix or lowered.startswith(f"{prefix}-") or lowered.startswith(f"{prefix}:"):
             return fleet_model_roster.canonicalize_provider(provider), None
-    model_prefixes = (
-        ("gpt-", "openai"),
-        ("o1", "openai"),
-        ("claude-", "anthropic"),
-        ("gemini-", "google"),
-    )
-    for prefix, provider in model_prefixes:
-        if model.lower().startswith(prefix):
-            return provider, None
     return "unknown", _unknown("provider is not configured")
 
 
-def _agent_registry(target: Path) -> dict[str, Any]:
+def _agent_registry(target: Path, budget: _InputBudget) -> dict[str, Any]:
     errors: list[str] = []
     items: list[dict[str, Any]] = []
     source = {"kind": "workspace-roster", "state": "available"}
     path = target / ".brigade" / "roster.toml"
     try:
-        safe, reason = _safe_regular(path)
+        raw, reason = _read_regular_bytes(path, budget)
         if reason == "missing":
             return {
                 "schema": AGENT_SCHEMA,
@@ -179,7 +215,7 @@ def _agent_registry(target: Path) -> dict[str, Any]:
                 "source": {"kind": "workspace-roster", "state": "unavailable"},
                 "unknown": {"ownership": _unknown("workspace roster is not configured")},
             }
-        if not safe:
+        if raw is None:
             return {
                 "schema": AGENT_SCHEMA,
                 "items": [],
@@ -187,8 +223,10 @@ def _agent_registry(target: Path) -> dict[str, Any]:
                 "source": {"kind": "workspace-roster", "state": "unavailable"},
                 "unknown": {},
             }
+        # ``load_roster`` is the existing validator. Parse the bytes from the
+        # held descriptor rather than reopening the checked pathname.
         resolution = roster.RosterResolution(path=path, source="workspace")
-        loaded = roster.load_roster(path, resolution=resolution)
+        loaded = roster.load_roster(path, resolution=resolution, text=raw.decode("utf-8"))
     except (OSError, ValueError):
         return {
             "schema": AGENT_SCHEMA,
@@ -328,16 +366,12 @@ def _model_registry(agents: dict[str, Any], now: datetime) -> dict[str, Any]:
     }
 
 
-def _tool_registry(target: Path) -> dict[str, Any]:
-    safe, reason = _safe_regular(tools_cmd.paths.config_path(target))
-    if not safe and reason != "missing":
-        return {
-            "schema": TOOL_SCHEMA,
-            "items": [],
-            "errors": [f"tool-catalog: {reason}"],
-            "unknown": {},
-        }
-    entries, reader_errors = tools_cmd.config._load_config(target)
+def _tool_registry(target: Path, budget: _InputBudget) -> dict[str, Any]:
+    raw, raw_reason = _read_regular_bytes(tools_cmd.paths.config_path(target), budget)
+    if raw is None and raw_reason != "missing":
+        return {"schema": TOOL_SCHEMA, "items": [], "errors": [f"tool-catalog: {raw_reason}"], "unknown": {}}
+    text = raw.decode("utf-8") if raw is not None else None
+    entries, reader_errors = tools_cmd.config._load_config(target, text=text)
     if reader_errors:
         missing_only = len(reader_errors) == 1 and reader_errors[0].startswith("tool catalog config missing:")
         return {
@@ -390,6 +424,8 @@ def _safe_endpoint(value: str) -> str | None:
     if parsed.query or parsed.fragment:
         return None
     authority = parsed.hostname
+    if ":" in authority:
+        authority = f"[{authority}]"
     try:
         port = parsed.port
     except ValueError:
@@ -399,9 +435,9 @@ def _safe_endpoint(value: str) -> str | None:
     return f"{parsed.scheme}://{authority}"
 
 
-def _mcp_registry(target: Path) -> dict[str, Any]:
+def _mcp_registry(target: Path, budget: _InputBudget) -> dict[str, Any]:
     path = mcp_cmd.canonical_path(target)
-    raw, reason = _read_mcp_object(path)
+    raw, reason = _read_mcp_object(path, budget)
     if raw is None:
         if reason == "missing":
             return {
@@ -473,8 +509,20 @@ def _mcp_registry(target: Path) -> dict[str, Any]:
     }
 
 
+def _valid_observed_worker(worker: object) -> bool:
+    if not isinstance(worker, dict):
+        return False
+    seat = worker.get("worker")
+    model = worker.get("effective_model") or worker.get("requested_model")
+    return isinstance(seat, str) and 0 < len(seat) <= 256 and isinstance(model, str) and 0 < len(model) <= 256
+
+
 def _observed_runs(
-    target: Path, since: datetime | None, until: datetime | None, configured_agents: dict[str, Any]
+    target: Path,
+    since: datetime | None,
+    until: datetime | None,
+    configured_agents: dict[str, Any],
+    budget: _InputBudget,
 ) -> dict[str, Any]:
     root = target / ".brigade" / "runs"
     try:
@@ -488,8 +536,9 @@ def _observed_runs(
             "errors": [],
             "unknown": {"provenance": _unknown("no bounded run receipts are configured")},
         }
-    observations: dict[tuple[str, str, str], list[tuple[datetime, dict[str, str] | None]]] = defaultdict(list)
+    observations: dict[tuple[str, str, str], dict[str, Any]] = {}
     errors: list[str] = []
+    worker_rows = 0
     try:
         with os.scandir(root) as scanned:
             entries = sorted(islice(scanned, MAX_RUN_FILES + 1), key=lambda entry: entry.name)
@@ -508,10 +557,16 @@ def _observed_runs(
         if run_dir.is_symlink() or not run_dir.is_dir():
             errors.append("run-receipts: unsafe-entry")
             continue
-        raw, reason = _read_json_object(run_dir / "run.json")
+        raw, reason = _read_json_object(run_dir / "run.json", budget)
         if raw is None:
             if reason != "missing":
                 errors.append(f"run-receipts: {reason}")
+            continue
+        if (
+            raw.get("schema") != receipt_schema.RUN_RECEIPT_SCHEMA
+            or raw.get("schema_version") != receipt_schema.RUN_RECEIPT_SCHEMA_VERSION
+        ):
+            errors.append("run-receipts: run-unverifiable")
             continue
         started = raw.get("started_at")
         try:
@@ -523,20 +578,39 @@ def _observed_runs(
             continue
         if (since is not None and observed_at < since) or (until is not None and observed_at >= until):
             continue
-        worker_payload, worker_reason = _read_json_object(run_dir / "worker-results.json")
+        worker_payload, worker_reason = _read_json_object(run_dir / "worker-results.json", budget)
         if worker_payload is None:
             errors.append(f"run-receipts: worker-results-{worker_reason}")
             continue
         workers = worker_payload.get("results")
-        if not isinstance(workers, list):
-            errors.append("run-receipts: worker-results-missing-results")
+        if (
+            worker_payload.get("schema") != receipt_schema.WORKER_RESULTS_SCHEMA
+            or worker_payload.get("schema_version") != receipt_schema.WORKER_RESULTS_SCHEMA_VERSION
+            or worker_payload.get("producer_run_id") != entry.name
+            or not isinstance(workers, list)
+        ):
+            errors.append("run-receipts: worker-results-unverifiable")
+            continue
+        if any(not _valid_observed_worker(worker) for worker in workers):
+            errors.append("run-receipts: worker-results-malformed-row")
             continue
         for worker in workers:
+            if worker_rows >= MAX_WORKER_ROWS:
+                errors.append("run-receipts: worker-row-limit-exceeded")
+                break
+            worker_rows += 1
             if not isinstance(worker, dict):
+                errors.append("run-receipts: worker-results-malformed-row")
                 continue
             seat = worker.get("worker")
             model = worker.get("effective_model") or worker.get("requested_model")
-            if not isinstance(seat, str) or not seat or not isinstance(model, str) or not model:
+            if (
+                not isinstance(seat, str)
+                or not 0 < len(seat) <= 256
+                or not isinstance(model, str)
+                or not 0 < len(model) <= 256
+            ):
+                errors.append("run-receipts: worker-results-malformed-row")
                 continue
             configured = configured_agents.get(seat)
             if isinstance(configured, dict) and isinstance(configured.get("provider"), str):
@@ -545,20 +619,24 @@ def _observed_runs(
             else:
                 provider = "unknown"
                 unknown = _unknown("observed seat is not configured in the workspace roster")
-            observations[(seat, provider, model)].append((observed_at, unknown))
+            aggregate = observations.setdefault(
+                (seat, provider, model),
+                {"first_seen": observed_at, "last_seen": observed_at, "run_count": 0, "unknown": unknown},
+            )
+            aggregate["first_seen"] = min(aggregate["first_seen"], observed_at)
+            aggregate["last_seen"] = max(aggregate["last_seen"], observed_at)
+            aggregate["run_count"] += 1
     items = [
         {
-            "first_seen": _iso(min(time for time, _unknown_provider in times)),
-            "last_seen": _iso(max(time for time, _unknown_provider in times)),
+            "first_seen": _iso(aggregate["first_seen"]),
+            "last_seen": _iso(aggregate["last_seen"]),
             "model": model,
             "provider": provider,
-            "run_count": len(times),
+            "run_count": aggregate["run_count"],
             "seat": seat,
-            "unknown": {"provider_attribution": next(unknown for _time, unknown in times if unknown is not None)}
-            if any(unknown is not None for _time, unknown in times)
-            else {},
+            "unknown": {"provider_attribution": aggregate["unknown"]} if aggregate["unknown"] is not None else {},
         }
-        for (seat, provider, model), times in sorted(observations.items())
+        for (seat, provider, model), aggregate in sorted(observations.items())
     ]
     return {"schema": OBSERVED_RUNS_SCHEMA, "items": items, "errors": sorted(set(errors)), "unknown": {}}
 
@@ -578,16 +656,17 @@ def build_inventory(
     parsed_since, parsed_until = _time_window(since, until)
     clock = _parse_time(now or datetime.now(timezone.utc), "clock")
     assert clock is not None
-    agents = _agent_registry(target)
+    budget = _InputBudget()
+    agents = _agent_registry(target, budget)
     configured_agents = {item["name"]: item for item in agents["items"] if isinstance(item.get("name"), str)}
     inventory = {
         "generated_at": _iso(clock),
-        "observed_runs": _observed_runs(target, parsed_since, parsed_until, configured_agents),
+        "observed_runs": _observed_runs(target, parsed_since, parsed_until, configured_agents, budget),
         "registries": {
             "agents": agents,
-            "mcp_servers": _mcp_registry(target),
+            "mcp_servers": _mcp_registry(target, budget),
             "model_providers": _model_registry(agents, clock),
-            "tools": _tool_registry(target),
+            "tools": _tool_registry(target, budget),
         },
         "schema": INVENTORY_SCHEMA,
         "scope": {"notice": SCOPE_NOTICE, "type": "brigade-configured-workspace"},
@@ -681,6 +760,27 @@ def _write_fsync(path: Path, content: bytes) -> None:
 def _publish_directory(temporary: Path, destination: Path) -> None:
     """Publish without a remove gap where the platform supports replacement."""
 
+    if dirfd.available():
+        parent_fd = dirfd.open_directory_nofollow(destination.parent)
+        try:
+            try:
+                existing = dirfd.stat_child(parent_fd, destination.name)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and (stat.S_ISLNK(existing.st_mode) or not stat.S_ISDIR(existing.st_mode)):
+                raise ValueError("--output-dir must be a non-symlink directory")
+            if existing is not None:
+                destination_fd = dirfd.open_child_directory(parent_fd, destination.name)
+                try:
+                    if os.listdir(destination_fd):
+                        raise ValueError("--output-dir must be empty")
+                finally:
+                    os.close(destination_fd)
+            dirfd.replace_children(parent_fd, temporary.name, destination.name)
+            dirfd.fsync_directory(parent_fd)
+            return
+        finally:
+            os.close(parent_fd)
     try:
         os.replace(temporary, destination)
     except FileExistsError:

@@ -55,11 +55,13 @@ def _configured_target(tmp_path):
     _write(
         run_dir / "run.json",
         json.dumps(
-            {
-                "started_at": "2026-09-03T10:00:00Z",
-                "finished_at": "2026-09-03T10:01:00Z",
-                "task": "CANARY task text must not escape",
-            }
+            receipt_schema.stamp_run_receipt(
+                {
+                    "started_at": "2026-09-03T10:00:00Z",
+                    "finished_at": "2026-09-03T10:01:00Z",
+                    "task": "CANARY task text must not escape",
+                }
+            )
         ),
     )
     worker = WorkerResult(
@@ -71,7 +73,9 @@ def _configured_target(tmp_path):
     )
     _write(
         run_dir / "worker-results.json",
-        json.dumps(receipt_schema.worker_results_document(run_receipts.worker_payload([worker]))),
+        json.dumps(
+            receipt_schema.worker_results_document(run_receipts.worker_payload([worker]), producer_run_id=run_dir.name)
+        ),
     )
     return tmp_path
 
@@ -175,7 +179,9 @@ def test_observed_provider_without_a_configured_seat_is_explicitly_unknown(tmp_p
     worker = WorkerResult(worker="retired-seat", task="CANARY", text="CANARY", ok=True, effective_model="gpt-5.6")
     _write(
         run_dir / "worker-results.json",
-        json.dumps(receipt_schema.worker_results_document(run_receipts.worker_payload([worker]))),
+        json.dumps(
+            receipt_schema.worker_results_document(run_receipts.worker_payload([worker]), producer_run_id=run_dir.name)
+        ),
     )
 
     observed = governance_inventory.build_inventory(target=target, now=NOW)["observed_runs"]["items"]
@@ -187,6 +193,58 @@ def test_observed_provider_without_a_configured_seat_is_explicitly_unknown(tmp_p
             "value": "unknown",
         }
     }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda document, run_dir: document.pop("schema"),
+        lambda document, run_dir: document.update({"producer_run_id": "other-run"}),
+        lambda document, run_dir: document["results"].append({"worker": "", "effective_model": "gpt-5.6"}),
+    ],
+)
+def test_observed_runs_refuse_unverifiable_worker_documents(tmp_path, mutation):
+    target = _configured_target(tmp_path)
+    run_dir = target / ".brigade" / "runs" / "run-1"
+    document = json.loads((run_dir / "worker-results.json").read_text(encoding="utf-8"))
+    mutation(document, run_dir)
+    _write(run_dir / "worker-results.json", json.dumps(document))
+
+    observed = governance_inventory.build_inventory(target=target, now=NOW)["observed_runs"]
+
+    assert observed["items"] == []
+    assert observed["errors"]
+
+
+def test_observed_run_budget_is_global_and_aggregates_incrementally(tmp_path, monkeypatch):
+    target = _configured_target(tmp_path)
+    source = target / ".brigade" / "runs" / "run-1"
+    second = target / ".brigade" / "runs" / "run-2"
+    second.mkdir(parents=True)
+    _write(second / "run.json", (source / "run.json").read_text(encoding="utf-8"))
+    worker = json.loads((source / "worker-results.json").read_text(encoding="utf-8"))
+    worker["producer_run_id"] = second.name
+    _write(second / "worker-results.json", json.dumps(worker))
+    monkeypatch.setattr(governance_inventory, "MAX_WORKER_ROWS", 1)
+
+    observed = governance_inventory.build_inventory(target=target, now=NOW)["observed_runs"]
+
+    assert observed["items"][0]["run_count"] == 1
+    assert observed["errors"] == ["run-receipts: worker-row-limit-exceeded"]
+
+
+def test_remote_mcp_ipv6_endpoint_preserves_brackets(tmp_path):
+    target = _configured_target(tmp_path)
+    _write(
+        target / ".brigade" / "mcp.json",
+        json.dumps({"servers": {"v6": {"transport": "http", "url": "https://[2001:db8::1]:8443/private"}}}),
+    )
+
+    endpoint = governance_inventory.build_inventory(target=target, now=NOW)["registries"]["mcp_servers"]["items"][0][
+        "endpoint"
+    ]
+
+    assert endpoint == "https://[2001:db8::1]:8443"
 
 
 @pytest.mark.parametrize(
@@ -299,6 +357,23 @@ def test_symlinked_or_oversized_mcp_input_is_refused(tmp_path):
 
     assert oversized["items"] == []
     assert oversized["errors"] == ["mcp-catalog: oversized"]
+
+
+def test_mcp_input_uses_a_descriptor_relative_read(tmp_path, monkeypatch):
+    target = _configured_target(tmp_path)
+    calls = []
+    original = governance_inventory.dirfd.open_child_file
+
+    def open_child(parent_fd, name, flags, mode=0o600):
+        calls.append(name)
+        return original(parent_fd, name, flags, mode)
+
+    monkeypatch.setattr(governance_inventory.dirfd, "open_child_file", open_child)
+
+    registry = governance_inventory.build_inventory(target=target, now=NOW)["registries"]["mcp_servers"]
+
+    assert registry["items"]
+    assert "mcp.json" in calls
 
 
 def test_workspace_inventory_never_falls_back_to_the_user_roster(tmp_path, monkeypatch):
@@ -506,6 +581,16 @@ def test_cli_emits_combined_json_or_refuses_nonempty_output(tmp_path, capsys):
     out.mkdir()
     (out / "present").write_text("x", encoding="utf-8")
     assert cli.main(["governance", "inventory", "--target", str(target), "--output-dir", str(out)]) == 2
+
+
+def test_cli_json_output_does_not_echo_an_absolute_output_path(tmp_path, capsys):
+    target = _configured_target(tmp_path)
+    output = tmp_path / "export"
+
+    assert cli.main(["governance", "inventory", "--target", str(target), "--output-dir", str(output), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"artifacts": ["inventory.json", "manifest.json"]}
 
 
 def test_cli_filesystem_failure_has_a_bounded_error(tmp_path, monkeypatch, capsys):

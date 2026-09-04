@@ -54,7 +54,7 @@ def dispatch(args) -> int:
     except OSError:
         print("error: governance inventory input or output is inaccessible", file=sys.stderr)
         return 2
-    payload = {"artifacts": artifacts, "output_dir": str(args.output_dir)}
+    payload = {"artifacts": artifacts}
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
