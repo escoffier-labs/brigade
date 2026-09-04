@@ -80,8 +80,13 @@ def _configured_target(tmp_path):
     return tmp_path
 
 
-def test_inventory_is_deterministic_and_never_exports_secret_or_path(tmp_path):
+def test_inventory_is_deterministic_and_never_exports_secret_or_path(tmp_path, monkeypatch):
     target = _configured_target(tmp_path)
+    monkeypatch.setattr(
+        governance_inventory,
+        "_fleet_policy",
+        lambda _now: {"admissions": [], "denials": [], "source": {}, "unknown": {}},
+    )
 
     first = governance_inventory.build_inventory(target=target, now=NOW)
     second = governance_inventory.build_inventory(target=target, now=NOW)
@@ -111,10 +116,15 @@ def test_inventory_is_deterministic_and_never_exports_secret_or_path(tmp_path):
             "first_seen": "2026-09-03T10:00:00Z",
             "last_seen": "2026-09-03T10:00:00Z",
             "model": "gpt-5.6-luna",
-            "provider": "openai",
+            "provider": "unknown",
             "run_count": 1,
             "seat": "research",
-            "unknown": {},
+            "unknown": {
+                "provider_attribution": {
+                    "reason": "no authenticated Fleet provider fact is available for this configured seat",
+                    "value": "unknown",
+                }
+            },
         }
     ]
 
@@ -137,7 +147,12 @@ def test_time_bounds_constrain_only_observed_run_facts(tmp_path):
     assert inventory["registries"]["agents"]["items"]
 
 
-def test_agents_expose_each_required_unknown_field(tmp_path):
+def test_agents_expose_each_required_unknown_field(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        governance_inventory,
+        "_fleet_policy",
+        lambda _now: {"admissions": [], "denials": [], "source": {}, "unknown": {}},
+    )
     agents = governance_inventory.build_inventory(target=_configured_target(tmp_path), now=NOW)["registries"]["agents"][
         "items"
     ]
@@ -146,17 +161,51 @@ def test_agents_expose_each_required_unknown_field(tmp_path):
         "environment": {"reason": "environment is not configured", "value": "unknown"},
         "lifecycle": {"reason": "lifecycle is not configured", "value": "unknown"},
         "owner": {"reason": "owner is not configured", "value": "unknown"},
+        "provider": {
+            "reason": "no authenticated Fleet provider fact is available for this configured seat",
+            "value": "unknown",
+        },
         "privilege": {"reason": "privilege is not configured", "value": "unknown"},
         "purpose": {"reason": "purpose is not configured", "value": "unknown"},
     }
 
 
-def test_observed_runs_use_worker_results_and_configured_provider_attribution(tmp_path):
+def test_cli_adapter_name_is_not_provider_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        governance_inventory,
+        "_fleet_policy",
+        lambda _now: {"admissions": [], "denials": [], "source": {}, "unknown": {}},
+    )
+
+    research = governance_inventory.build_inventory(target=_configured_target(tmp_path), now=NOW)["registries"][
+        "agents"
+    ]["items"][1]
+
+    assert research["cli"] == "codex"
+    assert research["model"] == "gpt-5.6-luna"
+    assert research["provider"] == "unknown"
+    assert research["unknown"]["provider"] == {
+        "reason": "no authenticated Fleet provider fact is available for this configured seat",
+        "value": "unknown",
+    }
+
+
+def test_observed_runs_use_worker_results_and_authenticated_provider_attribution(tmp_path, monkeypatch):
     target = _configured_target(tmp_path)
     run_dir = target / ".brigade" / "runs" / "run-1"
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     run["workers"] = [{"worker": "wrong", "effective_model": "wrong-model"}]
     _write(run_dir / "run.json", json.dumps(run))
+    monkeypatch.setattr(
+        governance_inventory,
+        "_fleet_policy",
+        lambda _now: {
+            "admissions": [{"model": "gpt-5.6-luna", "provider": "openai", "seat": "research"}],
+            "denials": [],
+            "source": {},
+            "unknown": {},
+        },
+    )
 
     inventory = governance_inventory.build_inventory(target=target, now=NOW)
 
@@ -376,6 +425,42 @@ def test_mcp_input_uses_a_descriptor_relative_read(tmp_path, monkeypatch):
     assert "mcp.json" in calls
 
 
+def test_run_inputs_walk_held_workspace_descriptors(tmp_path, monkeypatch):
+    target = _configured_target(tmp_path)
+    calls = []
+    original = governance_inventory.dirfd.open_child_directory
+
+    def open_child(parent_fd, name):
+        calls.append(name)
+        return original(parent_fd, name)
+
+    monkeypatch.setattr(governance_inventory.dirfd, "open_child_directory", open_child)
+
+    observed = governance_inventory.build_inventory(target=target, now=NOW)["observed_runs"]
+
+    assert observed["items"]
+    assert [".brigade", "runs", "run-1"] == [name for name in calls if name in {".brigade", "runs", "run-1"}]
+
+
+def test_missing_tool_catalog_does_not_invoke_the_pathname_loader(tmp_path, monkeypatch):
+    target = _configured_target(tmp_path)
+    (target / ".brigade" / "tools.toml").unlink()
+    monkeypatch.setattr(
+        governance_inventory.tools_cmd.config,
+        "_load_config",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pathname loader called")),
+    )
+
+    tools = governance_inventory.build_inventory(target=target, now=NOW)["registries"]["tools"]
+
+    assert tools == {
+        "schema": governance_inventory.TOOL_SCHEMA,
+        "items": [],
+        "errors": [],
+        "unknown": {"purpose": {"reason": "tool catalog is not configured", "value": "unknown"}},
+    }
+
+
 def test_workspace_inventory_never_falls_back_to_the_user_roster(tmp_path, monkeypatch):
     home = tmp_path / "home"
     _write(
@@ -490,7 +575,12 @@ def test_duplicate_mcp_names_fail_closed(tmp_path):
     assert inventory["registries"]["mcp_servers"]["errors"] == ["mcp-catalog: duplicate-key"]
 
 
-def test_cyclonedx_mapping_is_optional_and_uses_17_contract(tmp_path):
+def test_cyclonedx_mapping_is_optional_and_uses_17_contract(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        governance_inventory,
+        "_fleet_policy",
+        lambda _now: {"admissions": [], "denials": [], "source": {}, "unknown": {}},
+    )
     inventory = governance_inventory.build_inventory(target=_configured_target(tmp_path), now=NOW)
 
     bom = governance_inventory.cyclonedx_bom(inventory)
@@ -505,8 +595,7 @@ def test_cyclonedx_mapping_is_optional_and_uses_17_contract(tmp_path):
     assert any(item["name"] == "local" for item in bom["components"])
     assert bom["services"] == [{"bom-ref": "mcp:remote", "endpoints": ["https://example.test"], "name": "remote"}]
     assert {
-        "bom-ref": "model:openai:gpt-5.6-luna",
-        "group": "openai",
+        "bom-ref": "model:unknown:gpt-5.6-luna",
         "name": "gpt-5.6-luna",
         "type": "machine-learning-model",
         "version": "configured",
@@ -534,38 +623,32 @@ def test_artifact_manifest_is_detached_and_covers_final_bytes(tmp_path):
     assert inventory_item["sha256"] != hashlib.sha256((output / "inventory.json").read_bytes()).hexdigest()
 
 
-def test_artifact_publishing_uses_the_guarded_parent_fsync_helper(tmp_path, monkeypatch):
+def test_artifact_publishing_stages_files_through_held_descriptors(tmp_path, monkeypatch):
     target = _configured_target(tmp_path)
     output = tmp_path / "export"
     calls = []
-    monkeypatch.setattr(governance_inventory.localio, "_fsync_parent_directory", lambda path: calls.append(path))
+    original = governance_inventory.dirfd.open_child_file
+
+    def open_child(parent_fd, name, flags, mode=0o600):
+        calls.append(name)
+        return original(parent_fd, name, flags, mode)
+
+    monkeypatch.setattr(governance_inventory.dirfd, "open_child_file", open_child)
 
     governance_inventory.write_artifacts(target=target, output_dir=output, now=NOW)
 
-    assert calls == [output.parent]
+    assert {"inventory.json", "manifest.json"}.issubset(calls)
 
 
-def test_windows_publish_falls_back_only_when_atomic_directory_replacement_is_unavailable(tmp_path, monkeypatch):
-    temporary = tmp_path / "temporary"
-    destination = tmp_path / "destination"
-    temporary.mkdir()
-    destination.mkdir()
-    calls = []
-    replace = governance_inventory.os.replace
+def test_artifact_publishing_fails_closed_without_descriptor_primitives(tmp_path, monkeypatch):
+    target = _configured_target(tmp_path)
+    output = tmp_path / "export"
+    monkeypatch.setattr(governance_inventory.dirfd, "posix_available", lambda: False)
 
-    def replace_after_windows_refusal(source, target):
-        calls.append((source, target))
-        if len(calls) == 1:
-            raise FileExistsError()
-        replace(source, target)
+    with pytest.raises(ValueError, match="descriptor-relative artifact publication is unavailable on this platform"):
+        governance_inventory.write_artifacts(target=target, output_dir=output, now=NOW)
 
-    monkeypatch.setattr(governance_inventory.os, "name", "nt")
-    monkeypatch.setattr(governance_inventory.os, "replace", replace_after_windows_refusal)
-
-    governance_inventory._publish_directory(temporary, destination)
-
-    assert calls == [(temporary, destination), (temporary, destination)]
-    assert destination.is_dir()
+    assert not output.exists()
 
 
 def test_cli_emits_combined_json_or_refuses_nonempty_output(tmp_path, capsys):
