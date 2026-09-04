@@ -496,8 +496,15 @@ tree, `changes.patch` digest, and exact Test Result payload set for that tree,
 then appends the decision to the lifecycle journal. `brigade receipts verify`
 checks the signature, signed subjects against current evidence, expiry,
 verified requester and producer identities, the workspace-default-key
-comparison, and journal sequence ordering. Approval v1 remains readable as
-receipt-digest-bound compatibility evidence. A valid signature proves
+comparison, and journal sequence ordering for both v1 and v2. An approval event
+must precede every merge or ship event regardless of their timestamps.
+Approval v1 remains readable as receipt-digest-bound compatibility evidence.
+Each v2 Test Result descriptor emits `producerKeyids` as the singleton list
+containing its verified SSHSIG `signerKeyid`; receipt HMAC key ids are excluded.
+The private reason is stored only in the local `run.json` projection, while the
+closed signed predicate commits to SHA-256 over its nonce, a NUL byte, and the
+UTF-8 reason. Verification reports a local reason mismatch as
+`APPROVAL-STALE` without printing the reason. A valid signature proves
 possession of the trusted key, not that a person read every changed line or
 understood every verification result. A changed final tree or final-tree Test
 Result set is reported as non-exit-changing `APPROVAL-STALE`; receipts for

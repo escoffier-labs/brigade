@@ -376,6 +376,13 @@ def test_allow_records_event_envelope_projection_and_verifies(tmp_path: Path, ca
         }
     ]
     assert len(predicate["nonce"]) == 32
+    assert (
+        predicate["reasonSha256"]
+        == hashlib.sha256(
+            predicate["nonce"].encode("ascii") + b"\0" + b"Reviewed the focused test receipt."
+        ).hexdigest()
+    )
+    assert predicate["reasonSha256"] != hashlib.sha256(b"Reviewed the focused test receipt.").hexdigest()
 
     run_meta = json.loads((target / ".brigade" / "runs" / RUN_ID / "run.json").read_text())
     assert run_meta["approval"]["decision"] == "allow"
@@ -407,6 +414,32 @@ def test_v1_approval_verification_stays_receipt_bound(tmp_path: Path) -> None:
     assert verified.binding == "receipt"
 
 
+def test_v1_backdated_approval_after_ship_is_late_by_common_sequence_rule(tmp_path: Path) -> None:
+    target, key, _signers = _workspace(tmp_path, requester_principal=None)
+    journal = target / ".brigade" / "runs" / RUN_ID / "events" / "lifecycle.jsonl"
+    report = run_journal.read_journal(journal)
+    run_journal.append_event(
+        journal,
+        run_id=RUN_ID,
+        event_type="run.ship",
+        payload={"stage": "ship"},
+        idempotency_key="v1-ship-before-approval",
+        expected_previous_sequence=report.events[-1].sequence,
+        recorded_at="2030-01-01T00:00:00.000000Z",
+    )
+    _record_v1_approval(target, key)
+
+    verified = approval.verify_run_approval(target, target / ".brigade" / "runs" / RUN_ID)
+
+    assert verified.status == "SOD-VIOLATION"
+    assert verified.binding == "receipt"
+    assert verified.sod is not None
+    assert (
+        next(check for check in verified.sod["checks"] if check["id"] == "approval-before-merge-ship")["status"]
+        == "failed"
+    )
+
+
 def test_v2_binds_the_exact_sorted_test_result_payload_digest_set(tmp_path: Path) -> None:
     target, key, _signers = _workspace(tmp_path)
     verifier_key = tmp_path / "verifier" / ".brigade" / "attestation" / "signing-key"
@@ -423,6 +456,37 @@ def test_v2_binds_the_exact_sorted_test_result_payload_digest_set(tmp_path: Path
     assert payload_digests == [
         item["digest"]["sha256"] for item in statement["subject"] if item["name"].startswith("test-result:")
     ]
+
+
+@pytest.mark.parametrize(("extra_key", "extra_value"), [("reason", "private reason"), ("futureField", True)])
+def test_v2_predicate_rejects_unknown_keys(tmp_path: Path, extra_key: str, extra_value: object) -> None:
+    target, key, _signers = _workspace(tmp_path)
+    assert _approve(target, key) == 0
+    _envelope, statement = _statement(target)
+    statement["predicate"][extra_key] = extra_value
+
+    with pytest.raises(approval_v2.ApprovalV2Error, match="predicate key set"):
+        approval_v2.parse_signed_bindings(statement)
+
+
+def test_v2_local_reason_mutation_is_stale_and_reason_stays_private(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, key, _signers = _workspace(tmp_path)
+    assert _approve(target, key) == 0
+    capsys.readouterr()
+    run_path = target / ".brigade" / "runs" / RUN_ID / "run.json"
+    run_meta = json.loads(run_path.read_text(encoding="utf-8"))
+    run_meta["approval"]["reason"] = "Changed after approval."
+    _write_json(run_path, run_meta)
+
+    assert cli.main(["receipts", "verify", "--target", str(target), "--json"]) == 0
+    output = capsys.readouterr().out
+    verified = json.loads(output)
+
+    assert verified["approvals"]["runs"][0]["status"] == "APPROVAL-STALE"
+    assert "Reviewed the focused test receipt." not in output
+    assert "Changed after approval." not in output
 
 
 def test_v2_ignores_matching_receipts_for_older_trees(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

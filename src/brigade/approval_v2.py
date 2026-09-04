@@ -32,6 +32,23 @@ _HEX32_RE = re.compile(r"^[0-9a-f]{32}$")
 _HEX40_OR_64_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _KEY_ID_RE = re.compile(r"^[A-Za-z0-9:+/=._-]{1,200}$")
+_PREDICATE_KEYS = frozenset(
+    {
+        "schemaVersion",
+        "run",
+        "decision",
+        "scope",
+        "approver",
+        "requester",
+        "decidedAt",
+        "expiresAt",
+        "nonce",
+        "reasonCode",
+        "reasonSha256",
+        "evidence",
+        "policy",
+    }
+)
 
 
 class ApprovalV2Error(RuntimeError):
@@ -357,6 +374,13 @@ def _evidence_predicate(evidence: ApprovalEvidence) -> dict[str, Any]:
     return payload
 
 
+def reason_sha256(nonce: object, reason: str) -> str:
+    """Return the nonce-salted commitment for one private approval reason."""
+    if not isinstance(nonce, str) or not _HEX32_RE.fullmatch(nonce):
+        raise ApprovalV2Error("approval nonce is invalid")
+    return hashlib.sha256(nonce.encode("ascii") + b"\0" + reason.encode("utf-8")).hexdigest()
+
+
 def build_statement(
     *,
     run_id: str,
@@ -392,7 +416,7 @@ def build_statement(
             "expiresAt": expires_at,
             "nonce": nonce,
             "reasonCode": reason_code,
-            "reasonSha256": hashlib.sha256(reason.encode("utf-8")).hexdigest(),
+            "reasonSha256": reason_sha256(nonce, reason),
             "evidence": _evidence_predicate(evidence),
             "policy": {"name": SOD_POLICY_NAME, "digest": {"sha256": SOD_POLICY_SHA256}},
         },
@@ -440,6 +464,8 @@ def parse_signed_bindings(statement: Mapping[str, Any]) -> SignedBindings:
     subjects = statement.get("subject")
     if not isinstance(predicate, Mapping) or not isinstance(subjects, list):
         raise ApprovalV2Error("approval v2 statement is invalid")
+    if set(predicate) != _PREDICATE_KEYS:
+        raise ApprovalV2Error("approval v2 predicate key set is invalid")
     if not subjects or not isinstance(subjects[0], Mapping):
         raise ApprovalV2Error("approval v2 subjects are invalid")
     tree_digest = subjects[0].get("digest")
@@ -485,7 +511,6 @@ def parse_signed_bindings(statement: Mapping[str, Any]) -> SignedBindings:
             or profile != attestation.ATTESTATION_PROFILE
             or not isinstance(signer_keyid, str)
             or not _KEY_ID_RE.fullmatch(signer_keyid)
-            or producer_keyids != sorted(set(producer_keyid_values))
             or producer_keyid_values != (signer_keyid,)
         ):
             raise ApprovalV2Error("approval v2 envelope binding is invalid")
@@ -553,6 +578,16 @@ def _is_merge_or_ship_event(event: run_journal.RunEvent) -> bool:
     return isinstance(stage, str) and stage.lower() in {"merge", "ship"}
 
 
+def approval_precedes_merge_ship(
+    events: Sequence[run_journal.RunEvent],
+    approval_sequence: int,
+) -> bool:
+    """Return whether an approval sequence precedes every merge or ship event."""
+    if not isinstance(approval_sequence, int) or isinstance(approval_sequence, bool) or approval_sequence < 1:
+        return False
+    return not any(_is_merge_or_ship_event(event) and event.sequence < approval_sequence for event in events)
+
+
 def evaluate_sod(
     *,
     statement: Mapping[str, Any],
@@ -604,10 +639,12 @@ def evaluate_sod(
             "status": "passed" if workspace_keyid is None or keyid != workspace_keyid else "failed",
         }
     )
-    late = not isinstance(approval_sequence, int) or isinstance(approval_sequence, bool) or approval_sequence < 1
-    if not late:
-        late = any(_is_merge_or_ship_event(event) and event.sequence < approval_sequence for event in events)
-    checks.append({"id": "approval-before-merge-ship", "status": "failed" if late else "passed"})
+    checks.append(
+        {
+            "id": "approval-before-merge-ship",
+            "status": "passed" if approval_precedes_merge_ship(events, approval_sequence) else "failed",
+        }
+    )
     expired = decision == "allow" and (expires_at is None or expires_at <= now.astimezone(timezone.utc))
     checks.append({"id": "approval-not-expired", "status": "failed" if expired else "passed"})
     statuses = {check["status"] for check in checks}

@@ -260,16 +260,6 @@ def _subjects(tree_fingerprint: str, receipts: Sequence[VerifyReceiptEvidence]) 
     ]
 
 
-def _is_merge_or_ship_event(event: run_journal.RunEvent) -> bool:
-    event_type = event.event_type.lower()
-    if event_type in {"merge", "ship", "run.merge", "run.ship"}:
-        return True
-    if event_type.startswith(("merge.", "ship.", "run.merge.", "run.ship.")):
-        return True
-    stage = event.payload.get("stage")
-    return isinstance(stage, str) and stage.lower() in {"merge", "ship"}
-
-
 def evaluate_sod(
     *,
     target: Path,
@@ -277,6 +267,7 @@ def evaluate_sod(
     run_meta: Mapping[str, Any],
     receipts: Sequence[VerifyReceiptEvidence],
     events: Sequence[run_journal.RunEvent],
+    approval_sequence: int,
     now: datetime,
     recorded_producer_keyids: set[str] | None = None,
     context: ApprovalVerificationContext | None = None,
@@ -289,7 +280,6 @@ def evaluate_sod(
     principal = approver.get("principal")
     keyid = approver.get("keyid")
     decision = predicate.get("decision")
-    decided_at = _parse_timestamp(predicate.get("decidedAt"))
     expires_at = _parse_timestamp(predicate.get("expiresAt"))
 
     checks: list[dict[str, str]] = []
@@ -343,16 +333,12 @@ def evaluate_sod(
         }
     )
 
-    late = decided_at is None
-    if decided_at is not None:
-        for event in events:
-            if not _is_merge_or_ship_event(event):
-                continue
-            stage_time = _parse_timestamp(event.recorded_at)
-            if stage_time is None or decided_at >= stage_time:
-                late = True
-                break
-    checks.append({"id": "approval-before-merge-ship", "status": "failed" if late else "passed"})
+    checks.append(
+        {
+            "id": "approval-before-merge-ship",
+            "status": ("passed" if approval_v2.approval_precedes_merge_ship(events, approval_sequence) else "failed"),
+        }
+    )
 
     expired = decision == "allow" and (expires_at is None or expires_at <= now.astimezone(timezone.utc))
     checks.append({"id": "approval-not-expired", "status": "failed" if expired else "passed"})
@@ -822,6 +808,11 @@ def _verify_v2_approval(
             binding="test-result",
         )
     requester_stale = current_requester != signed.requester
+    local_approval = run_meta.get("approval")
+    local_reason = local_approval.get("reason") if isinstance(local_approval, Mapping) else None
+    reason_stale = not isinstance(local_reason, str) or approval_v2.reason_sha256(
+        predicate["nonce"], local_reason
+    ) != predicate.get("reasonSha256")
     live_tree = context.live_tree
     comparison_tree = live_tree if live_tree is not None else run_meta.get("tree_fingerprint")
     if not isinstance(comparison_tree, str) or not comparison_tree:
@@ -846,13 +837,13 @@ def _verify_v2_approval(
         now=instant,
     )
     expires_at = _parse_timestamp(predicate.get("expiresAt"))
-    stale = comparison_tree != signed.tree_fingerprint or evidence_stale or requester_stale
+    stale = comparison_tree != signed.tree_fingerprint or evidence_stale or requester_stale or reason_stale
     detail = "APPROVAL-STALE" if stale else None
     if any(check["status"] == "failed" and check["id"] != "approval-not-expired" for check in sod["checks"]):
         status = "SOD-VIOLATION"
     elif decision_value == "allow" and expires_at is not None and expires_at <= instant:
         status = "APPROVAL-EXPIRED"
-    elif decision_value == "allow" and stale:
+    elif reason_stale or (decision_value == "allow" and stale):
         status = "APPROVAL-STALE"
     elif sod["result"] == "INDETERMINATE":
         status = "SOD-INDETERMINATE"
@@ -1002,6 +993,7 @@ def verify_run_approval(
         run_meta=run_meta,
         receipts=signed_receipts,
         events=report.events,
+        approval_sequence=event.sequence,
         now=instant,
         recorded_producer_keyids=recorded_producer_keyids,
         context=context,

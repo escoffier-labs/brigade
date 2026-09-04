@@ -1198,9 +1198,11 @@ the tree cannot be computed) and earlier superseded decisions.
 Every approval event remains in the journal. Verification uses the latest one
 and reports prior decisions with their principal and recorded time. The SoD
 checks include `approver-key-not-workspace-key`: the approver key must not be
-the workspace's default attestation key. Projector version 7 makes existing
-`run.json` snapshots stale input for `run_shadow`; regenerate the shadow after
-the projection is refreshed.
+the workspace's default attestation key. The common v1/v2 verifier enforces
+`approval-before-merge-ship` from journal sequence. An approval event must
+precede every merge or ship event even if its signed `decidedAt` was backdated.
+Projector version 7 makes existing `run.json` snapshots stale input for
+`run_shadow`; regenerate the shadow after the projection is refreshed.
 
 Approval v1 remains verification-only compatibility. Verification reports
 `binding: receipt` because its subjects contain verify receipt digests. That
@@ -1234,19 +1236,24 @@ The v2 subject list contains the final `git:tree`, the agreed
 canonical Test Result payload. Test Result subjects are ordered by payload
 SHA-256 and then verify run id. The predicate repeats the exact sorted payload
 digest set and records, for every item, its verify run id, canonical envelope
-SHA-256, envelope profile, and verified SSHSIG signer key id. Removable receipt
-HMAC metadata is not a producer identity. Verification compares the signed set
-to the complete current final-tree set, so a missing, changed, or later
-final-tree receipt makes an allow approval stale. The predicate records only
-`reasonCode` and `reasonSha256`, not the approval reason text. The reason
-preimage remains only in the local `run.json` approval projection. JSON
+SHA-256, envelope profile, verified SSHSIG `signerKeyid`, and
+`producerKeyids`. The emitted `producerKeyids` value is the exact singleton
+list containing `signerKeyid`; removable receipt HMAC metadata is not a
+producer identity. Verification compares the signed set to the complete
+current final-tree set, so a missing, changed, or later final-tree receipt
+makes an allow approval stale. The predicate has a closed key set and records
+only `reasonCode` and `reasonSha256`, not the approval reason text.
+`reasonSha256` is SHA-256 over the ASCII nonce, one NUL byte, and the UTF-8
+reason. The reason preimage remains only in the local `run.json` approval
+projection. Verification recomputes the commitment from that projection and
+reports a mismatch as `APPROVAL-STALE` without printing either reason. JSON
 verification reports `binding: test-result`.
 
 The approval journal event binds the signed `decidedAt` value as `decided_at`.
 Verification requires the signed value, event payload value, and event envelope
-time to agree. The `approval-before-merge-ship` SoD check uses journal sequence,
-not timestamps: any merge or ship event before the approval event fails the
-check, including when either event carries a backdated timestamp.
+time to agree. The common v1/v2 `approval-before-merge-ship` check uses journal
+sequence, not timestamps: any merge or ship event before the approval event
+fails the check, including when either event carries a backdated timestamp.
 
 Before v2 uses requester identity, it re-verifies the referenced
 `agent-request/v1` SSHSIG envelope against `allowed_signers` and the optional
