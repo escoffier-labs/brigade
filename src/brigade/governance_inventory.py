@@ -10,12 +10,13 @@ import stat
 import tempfile
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from itertools import islice
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import fleet_model_roster, mcp_cmd, roster, tools_cmd
+from . import fleet_model_admission, fleet_model_roster, localio, mcp_cmd, roster, tools_cmd
 
 
 INVENTORY_SCHEMA = "brigade.governance_inventory.v1"
@@ -115,10 +116,21 @@ def _read_mcp_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
             result[key] = value
         return result
 
+    def reject_non_finite(value: str) -> None:
+        raise ValueError("non-finite")
+
     try:
-        value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicates)
+        value = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=reject_non_finite,
+        )
     except ValueError as exc:
-        return None, "duplicate-key" if str(exc) == "duplicate-key" else "malformed"
+        if str(exc) == "duplicate-key":
+            return None, "duplicate-key"
+        if str(exc) == "non-finite":
+            return None, "non-finite"
+        return None, "malformed"
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None, "malformed"
     return (value, None) if isinstance(value, dict) else (None, "not-object")
@@ -155,35 +167,42 @@ def _provider_for(cli: str | None, model: str | None) -> tuple[str, dict[str, st
 def _agent_registry(target: Path) -> dict[str, Any]:
     errors: list[str] = []
     items: list[dict[str, Any]] = []
+    source = {"kind": "workspace-roster", "state": "available"}
+    path = target / ".brigade" / "roster.toml"
     try:
-        resolution = roster.resolve_roster(target)
-        safe, reason = _safe_regular(resolution.path)
+        safe, reason = _safe_regular(path)
+        if reason == "missing":
+            return {
+                "schema": AGENT_SCHEMA,
+                "items": [],
+                "errors": [],
+                "source": {"kind": "workspace-roster", "state": "unavailable"},
+                "unknown": {"ownership": _unknown("workspace roster is not configured")},
+            }
         if not safe:
             return {
                 "schema": AGENT_SCHEMA,
                 "items": [],
                 "errors": [f"roster: {reason}"],
+                "source": {"kind": "workspace-roster", "state": "unavailable"},
                 "unknown": {},
             }
-        loaded = roster.load_roster(resolution.path, resolution=resolution)
-    except FileNotFoundError:
-        return {
-            "schema": AGENT_SCHEMA,
-            "items": [],
-            "errors": [],
-            "unknown": {"ownership": _unknown("roster is not configured")},
-        }
+        resolution = roster.RosterResolution(path=path, source="workspace")
+        loaded = roster.load_roster(path, resolution=resolution)
     except (OSError, ValueError):
         return {
             "schema": AGENT_SCHEMA,
             "items": [],
             "errors": ["roster: unreadable-or-invalid"],
+            "source": {"kind": "workspace-roster", "state": "unavailable"},
             "unknown": {},
         }
     for name, agent in sorted(loaded.agents.items()):
         provider, provider_unknown = _provider_for(agent.cli, agent.model)
         unknown = {
+            "environment": _unknown("environment is not configured"),
             "lifecycle": _unknown("lifecycle is not configured"),
+            "owner": _unknown("owner is not configured"),
             "privilege": _unknown("privilege is not configured"),
         }
         if agent.purpose is None:
@@ -209,12 +228,70 @@ def _agent_registry(target: Path) -> dict[str, Any]:
         "schema": AGENT_SCHEMA,
         "items": items,
         "errors": errors,
-        "source": resolution.source,
+        "source": source,
         "unknown": {},
     }
 
 
-def _model_registry(agents: dict[str, Any]) -> dict[str, Any]:
+def _fleet_policy(now: datetime) -> dict[str, Any]:
+    unavailable = {
+        "admissions": [],
+        "denials": [],
+        "source": {
+            "cached_at": None,
+            "kind": "node-local-fleet-model-policy-lkg",
+            "revision": None,
+            "state": "unavailable",
+        },
+        "unknown": {"fleet_policy": _unknown("no valid node-local Fleet model-policy LKG is available")},
+    }
+    try:
+        record = fleet_model_admission._load_lkg_record()
+        cached_at = fleet_model_admission._parse_iso(record.get("cached_at"))
+        envelope = record.get("roster")
+        if not isinstance(envelope, dict) or cached_at is None:
+            return unavailable
+        token = fleet_model_admission._node_token() or fleet_model_admission._client.load_fleet_settings()["token"]
+        audience = fleet_model_admission._client.resolve_node_id()
+        if not token or fleet_model_admission._validate_envelope(envelope, token=token, audience=audience) is not None:
+            return unavailable
+        expires_at = fleet_model_admission._parse_iso(envelope.get("expires_at"))
+        if (
+            expires_at is None
+            or expires_at <= now
+            or cached_at > now + timedelta(seconds=fleet_model_roster.CLOCK_SKEW_SECONDS)
+            or (now - cached_at).total_seconds() > fleet_model_roster.LKG_TTL_SECONDS
+        ):
+            return unavailable
+        revision = envelope.get("revision")
+        if type(revision) is not int:
+            return unavailable
+        admissions: list[dict[str, str]] = []
+        denials: list[dict[str, str]] = []
+        for row in envelope["seats"]:
+            if not isinstance(row, dict):
+                return unavailable
+            item = {key: row[key] for key in ("seat", "provider", "model", "reasoning")}
+            if row["enabled"]:
+                admissions.append(item)
+            else:
+                denials.append({key: item[key] for key in ("seat", "provider", "model")} | {"reason": "seat-disabled"})
+        return {
+            "admissions": sorted(admissions, key=lambda item: item["seat"]),
+            "denials": sorted(denials, key=lambda item: item["seat"]),
+            "source": {
+                "cached_at": _iso(cached_at),
+                "kind": "node-local-fleet-model-policy-lkg",
+                "revision": revision,
+                "state": "available",
+            },
+            "unknown": {},
+        }
+    except (KeyError, OSError, TypeError, ValueError, fleet_model_admission.FleetClientError):
+        return unavailable
+
+
+def _model_registry(agents: dict[str, Any], now: datetime) -> dict[str, Any]:
     entries: dict[tuple[str, str], dict[str, Any]] = {}
     for agent in agents["items"]:
         model = agent.get("model")
@@ -247,6 +324,7 @@ def _model_registry(agents: dict[str, Any]) -> dict[str, Any]:
         "items": sorted(entries.values(), key=lambda item: (item["provider"], item["model"])),
         "retired_families": retired,
         "errors": [],
+        "fleet_policy": _fleet_policy(now),
     }
 
 
@@ -309,7 +387,7 @@ def _safe_endpoint(value: str) -> str | None:
         return None
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         return None
-    if parsed.query or parsed.fragment or ".." in parsed.path.split("/"):
+    if parsed.query or parsed.fragment:
         return None
     authority = parsed.hostname
     try:
@@ -318,10 +396,7 @@ def _safe_endpoint(value: str) -> str | None:
         return None
     if port is not None:
         authority = f"{authority}:{port}"
-    path = parsed.path or "/"
-    if len(path) > 512:
-        return None
-    return f"{parsed.scheme}://{authority}{path}"
+    return f"{parsed.scheme}://{authority}"
 
 
 def _mcp_registry(target: Path) -> dict[str, Any]:
@@ -349,14 +424,6 @@ def _mcp_registry(target: Path) -> dict[str, Any]:
             "errors": ["mcp-catalog: missing-servers-object"],
             "unknown": {},
         }
-    parsed, load_errors, _warnings = mcp_cmd.load_canonical(target)
-    if load_errors:
-        return {
-            "schema": MCP_SCHEMA,
-            "items": [],
-            "errors": ["mcp-catalog: unreadable-or-invalid"],
-            "unknown": {},
-        }
     items: list[dict[str, Any]] = []
     errors: list[str] = []
     for name, raw_server in sorted(servers.items()):
@@ -367,31 +434,32 @@ def _mcp_registry(target: Path) -> dict[str, Any]:
         if transport not in {"stdio", "http", "sse"}:
             errors.append(f"{name}: unsupported transport")
             continue
-        server = parsed.get(name)
-        if server is None:
+        enabled = raw_server.get("enabled", True)
+        if type(enabled) is not bool:
             errors.append(f"{name}: malformed")
             continue
         if transport == "stdio":
-            if not server.command:
+            if not isinstance(raw_server.get("command"), str) or not raw_server["command"]:
                 errors.append(f"{name}: missing command")
                 continue
             items.append(
                 {
                     "component_type": "local-mcp-server",
-                    "enabled": server.enabled,
+                    "enabled": enabled,
                     "name": name,
                     "transport": transport,
                 }
             )
             continue
-        endpoint = _safe_endpoint(server.url or "")
+        raw_url = raw_server.get("url")
+        endpoint = _safe_endpoint(raw_url if isinstance(raw_url, str) else "")
         if endpoint is None:
             errors.append(f"{name}: unsafe endpoint")
             continue
         items.append(
             {
                 "component_type": "remote-mcp-service",
-                "enabled": server.enabled,
+                "enabled": enabled,
                 "endpoint": endpoint,
                 "name": name,
                 "transport": transport,
@@ -405,7 +473,9 @@ def _mcp_registry(target: Path) -> dict[str, Any]:
     }
 
 
-def _observed_runs(target: Path, since: datetime | None, until: datetime | None) -> dict[str, Any]:
+def _observed_runs(
+    target: Path, since: datetime | None, until: datetime | None, configured_agents: dict[str, Any]
+) -> dict[str, Any]:
     root = target / ".brigade" / "runs"
     try:
         root_info = root.lstat()
@@ -418,12 +488,23 @@ def _observed_runs(target: Path, since: datetime | None, until: datetime | None)
             "errors": [],
             "unknown": {"provenance": _unknown("no bounded run receipts are configured")},
         }
-    observations: dict[tuple[str, str, str], list[datetime]] = defaultdict(list)
+    observations: dict[tuple[str, str, str], list[tuple[datetime, dict[str, str] | None]]] = defaultdict(list)
     errors: list[str] = []
-    for index, run_dir in enumerate(sorted(root.iterdir(), key=lambda path: path.name)):
-        if index >= MAX_RUN_FILES:
-            errors.append("run-receipts: limit-exceeded")
-            break
+    try:
+        with os.scandir(root) as scanned:
+            entries = sorted(islice(scanned, MAX_RUN_FILES + 1), key=lambda entry: entry.name)
+    except OSError:
+        return {
+            "schema": OBSERVED_RUNS_SCHEMA,
+            "items": [],
+            "errors": ["run-receipts: unreadable"],
+            "unknown": {},
+        }
+    if len(entries) > MAX_RUN_FILES:
+        errors.append("run-receipts: limit-exceeded")
+        entries = entries[:MAX_RUN_FILES]
+    for entry in entries:
+        run_dir = Path(entry.path)
         if run_dir.is_symlink() or not run_dir.is_dir():
             errors.append("run-receipts: unsafe-entry")
             continue
@@ -440,10 +521,15 @@ def _observed_runs(target: Path, since: datetime | None, until: datetime | None)
             continue
         if observed_at is None:
             continue
-        if (since is not None and observed_at < since) or (until is not None and observed_at > until):
+        if (since is not None and observed_at < since) or (until is not None and observed_at >= until):
             continue
-        workers = raw.get("workers")
+        worker_payload, worker_reason = _read_json_object(run_dir / "worker-results.json")
+        if worker_payload is None:
+            errors.append(f"run-receipts: worker-results-{worker_reason}")
+            continue
+        workers = worker_payload.get("results")
         if not isinstance(workers, list):
+            errors.append("run-receipts: worker-results-missing-results")
             continue
         for worker in workers:
             if not isinstance(worker, dict):
@@ -452,16 +538,25 @@ def _observed_runs(target: Path, since: datetime | None, until: datetime | None)
             model = worker.get("effective_model") or worker.get("requested_model")
             if not isinstance(seat, str) or not seat or not isinstance(model, str) or not model:
                 continue
-            provider, _unknown_provider = _provider_for(None, model)
-            observations[(seat, provider, model)].append(observed_at)
+            configured = configured_agents.get(seat)
+            if isinstance(configured, dict) and isinstance(configured.get("provider"), str):
+                provider = configured["provider"]
+                unknown = configured.get("unknown", {}).get("provider") if provider == "unknown" else None
+            else:
+                provider = "unknown"
+                unknown = _unknown("observed seat is not configured in the workspace roster")
+            observations[(seat, provider, model)].append((observed_at, unknown))
     items = [
         {
-            "first_seen": _iso(min(times)),
-            "last_seen": _iso(max(times)),
+            "first_seen": _iso(min(time for time, _unknown_provider in times)),
+            "last_seen": _iso(max(time for time, _unknown_provider in times)),
             "model": model,
             "provider": provider,
             "run_count": len(times),
             "seat": seat,
+            "unknown": {"provider_attribution": next(unknown for _time, unknown in times if unknown is not None)}
+            if any(unknown is not None for _time, unknown in times)
+            else {},
         }
         for (seat, provider, model), times in sorted(observations.items())
     ]
@@ -484,13 +579,14 @@ def build_inventory(
     clock = _parse_time(now or datetime.now(timezone.utc), "clock")
     assert clock is not None
     agents = _agent_registry(target)
+    configured_agents = {item["name"]: item for item in agents["items"] if isinstance(item.get("name"), str)}
     inventory = {
         "generated_at": _iso(clock),
-        "observed_runs": _observed_runs(target, parsed_since, parsed_until),
+        "observed_runs": _observed_runs(target, parsed_since, parsed_until, configured_agents),
         "registries": {
             "agents": agents,
             "mcp_servers": _mcp_registry(target),
-            "model_providers": _model_registry(agents),
+            "model_providers": _model_registry(agents, clock),
             "tools": _tool_registry(target),
         },
         "schema": INVENTORY_SCHEMA,
@@ -526,6 +622,16 @@ def cyclonedx_bom(inventory: dict[str, Any]) -> dict[str, Any]:
                     "version": "configured",
                 }
             )
+    for model in inventory["registries"]["model_providers"]["items"]:
+        component = {
+            "bom-ref": f"model:{model['provider']}:{model['model']}",
+            "name": model["model"],
+            "type": "machine-learning-model",
+            "version": "configured",
+        }
+        if model["provider"] != "unknown":
+            component["group"] = model["provider"]
+        components.append(component)
     components.sort(key=lambda item: item["bom-ref"])
     services = [
         {
@@ -572,6 +678,18 @@ def _write_fsync(path: Path, content: bytes) -> None:
         os.fsync(handle.fileno())
 
 
+def _publish_directory(temporary: Path, destination: Path) -> None:
+    """Publish without a remove gap where the platform supports replacement."""
+
+    try:
+        os.replace(temporary, destination)
+    except FileExistsError:
+        if os.name != "nt" or not destination.is_dir():
+            raise
+        os.rmdir(destination)
+        os.replace(temporary, destination)
+
+
 def write_artifacts(
     *,
     target: Path,
@@ -612,14 +730,8 @@ def write_artifacts(
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
-        if destination.exists():
-            os.rmdir(destination)
-        os.replace(temporary, destination)
-        parent_fd = os.open(parent, os.O_RDONLY)
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
+        _publish_directory(temporary, destination)
+        localio._fsync_parent_directory(parent)
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
         raise

@@ -18,7 +18,10 @@ publishes the destination.
 
 ## Output contract
 
-The combined export uses schema `brigade.governance_inventory.v1` and contains:
+The combined export uses schema `brigade.governance_inventory.v1`. It is the one
+canonical inventory document: the agent, model-provider, tool, and MCP registries
+are keys inside `registries`, rather than separately generated registry artifacts.
+That avoids a clock or detached-manifest digest disagreement between files. It contains:
 
 - `scope`: a fixed notice that the scope is limited to Brigade's configured
   workspace surface.
@@ -37,11 +40,20 @@ The combined export uses schema `brigade.governance_inventory.v1` and contains:
 
 All collections are sorted. With identical configuration, bounds, and clock,
 the export is byte-identical. Configuration is a point-in-time observation. The
-time bounds apply only to observed-run facts, not configuration.
+time bounds apply only to observed-run facts, using the half-open interval
+`[since, until)`, not configuration. The roster is read only from
+`--target/.brigade/roster.toml`; Brigade never substitutes a user-home roster.
 
-Unavailable ownership, purpose, lifecycle, privilege, provider-retention, and
+Unavailable owner, environment, purpose, lifecycle, privilege, provider-retention, and
 provenance fields are represented as `{"value":"unknown","reason":"..."}`.
 Brigade does not infer them from a model name or an external provider.
+
+Observed use comes from each bounded `worker-results.json` `results` record;
+the companion `run.json` contributes only its timestamp. Seat names are joined
+to the configured workspace roster for provider attribution. An unconfigured
+seat remains explicitly unknown. When a valid node-local Fleet model-policy
+LKG is present, the model-provider registry labels its cached time, revision,
+admissions, and denials. It never contacts Fleet to create this projection.
 
 ## Privacy and input handling
 
@@ -51,7 +63,7 @@ URL fragments, URL userinfo, task text, logs, worker output, approval reasons,
 credentials, or account identifiers.
 
 Stdio MCP servers become `local-mcp-server` components. HTTP and SSE MCP servers
-become `remote-mcp-service` records with a sanitized scheme, authority, and path.
+become `remote-mcp-service` records with a sanitized scheme and authority only.
 Malformed, oversized, symlinked, unsupported, or unsafe inputs produce bounded
 registry errors and are omitted from public output.
 
@@ -59,7 +71,8 @@ registry errors and are omitted from public output.
 
 `--cyclonedx` is opt-in. It adds `cyclonedx.json`, using the official CycloneDX
 1.7 JSON schema URI, deterministic serial number and `bom-ref` values, components
-for local tools and stdio MCP servers, and services for HTTP/SSE MCP endpoints.
+for local tools, stdio MCP servers, and configured model/provider entries (as
+`machine-learning-model` components), plus services for HTTP/SSE MCP endpoints.
 The BOM represents the time window as metadata properties and does not add
 `modelCard` data outside machine-learning-model components.
 
