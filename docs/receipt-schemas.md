@@ -377,9 +377,10 @@ the run lifecycle status. Its payload has exactly these keys:
 | `statement_sha256` | string | SHA-256 digest of the canonical in-toto Statement bytes |
 | `attestation_path` | string | Run-relative `approvals/<nonce>.json` envelope path |
 
-The projected `approval.sod` object has a `result` of `PASSED` or `FAILED` and
-a `checks` array. Each check contains its policy `id` and a `status` of
-`passed` or `failed`. The journal event and signed envelope remain the evidence.
+The projected `approval.sod` object has a `result` of `PASSED`, `FAILED`, or
+v2-only `INDETERMINATE` and a `checks` array. Each check contains its policy
+`id` and a `status` of `passed`, `failed`, or v2-only `indeterminate`. The
+journal event and signed envelope remain the evidence.
 `run.json` is the latest compatibility projection.
 
 ### Run budget lifecycle (`brigade.run_event.v1` event types, #593)
@@ -1147,7 +1148,9 @@ The decoded payload is an in-toto Statement v1 with the Test Result v0.1 predica
 - `predicate.result`: `PASSED` only when receipt `status == "completed"` and every command has `exit_code == 0`. Otherwise `FAILED`. Commands with null or nonzero exit codes are recorded in `failedTests`.
 - `predicate.configuration`: references the verify receipt digest with annotations carrying `run_id`, `baseline_commit`, and `producer_run_id` when present.
 
-### Human approval predicate
+### Human approval predicates
+
+#### `human-approval/v1` compatibility profile
 
 The same envelope profile also carries `https://brigade.dev/attestation/human-approval/v1`
 statements written under `<run-dir>/approvals/<nonce>.json`. The subject list
@@ -1195,6 +1198,55 @@ checks include `approver-key-not-workspace-key`: the approver key must not be
 the workspace's default attestation key. Projector version 7 makes existing
 `run.json` snapshots stale input for `run_shadow`; regenerate the shadow after
 the projection is refreshed.
+
+Approval v1 remains verification-only compatibility. Verification reports
+`binding: receipt` because its subjects contain verify receipt digests. That
+binding is not portable Test Result evidence and cannot satisfy a future
+agent-change evidence index.
+
+#### `human-approval/v2` portable evidence profile
+
+New decisions use
+`https://brigade.dev/attestation/human-approval/v2` with policy
+`brigade.sod.v2`. An `allow` decision is written only after every local verify
+receipt attributed to the run by exact `producer_run_id` has all of the
+following:
+
+- complete baseline commit, final Git tree, and `changes.patch` identity;
+- a retained `changes.patch` whose SHA-256 matches the receipt;
+- a canonical SSHSIG Test Result envelope at `attestation.json` that verifies
+  as `SIGNED-OK`, re-derives exactly from the local receipt, and has predicate
+  result `PASSED`.
+
+All matching receipts must name the run's final tree and agree on one baseline
+commit and one patch digest. A missing, failed, untrusted, non-canonical, or
+inconsistent item refuses the approval before its envelope or journal event is
+written. Deny and hold decisions do not require Test Result evidence.
+
+The v2 subject list contains the final `git:tree`, the agreed
+`changes.patch` SHA-256, and one `test-result:<verify-run-id>` subject per
+canonical Test Result payload. Test Result subjects are ordered by payload
+SHA-256 and then verify run id. The predicate repeats the exact sorted payload
+digest set and records, for every item, its verify run id, canonical envelope
+SHA-256, envelope profile, signer key id, and the producer key-id set used by
+SoD evaluation. Verification compares the signed set to the complete current
+matching set, so a missing, changed, or later matching receipt makes an allow
+approval stale. The predicate records only `reasonCode` and `reasonSha256`, not
+the approval reason text. JSON verification reports `binding: test-result`.
+
+Before v2 uses requester identity, it re-verifies the referenced
+`agent-request/v1` SSHSIG envelope against `allowed_signers` and the optional
+KRL, checks its canonical statement digest against the paired
+`request.signed` event, and binds both the request statement and envelope
+digests into the approval. The mutable requester projection in `run.json` is
+not an identity source. A missing signed request gives the v2 SoD result
+`INDETERMINATE` and approval status `SOD-INDETERMINATE`. A matching requester
+principal or key id gives `FAILED` / `SOD-VIOLATION`.
+
+`brigade receipts verify` keeps its existing exit behavior. The opt-in
+`--strict-approvals` gate also returns nonzero for stale, expired, invalid,
+SoD-failed, SoD-indeterminate, or unapproved runs. Deny and hold remain
+reported decisions rather than strict verification failures.
 
 ### Trust Policy
 
