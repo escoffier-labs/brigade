@@ -583,8 +583,23 @@ def _observed_runs(
     worker_rows = 0
     try:
         scan_fd = os.dup(root_fd)
-        with os.scandir(scan_fd) as scanned:
-            entries = sorted(islice((entry.name for entry in scanned), MAX_RUN_FILES + 1))
+        try:
+            with os.scandir(scan_fd) as scanned:
+                entries = sorted(islice((entry.name for entry in scanned), MAX_RUN_FILES + 1))
+        finally:
+            os.close(scan_fd)
+    except TypeError:
+        os.close(root_fd)
+        return {
+            "schema": OBSERVED_RUNS_SCHEMA,
+            "items": [],
+            "errors": ["run-receipts: unsupported-platform"],
+            "unknown": {},
+        }
+    except OSError:
+        os.close(root_fd)
+        return {"schema": OBSERVED_RUNS_SCHEMA, "items": [], "errors": ["run-receipts: unreadable"], "unknown": {}}
+    try:
         if len(entries) > MAX_RUN_FILES:
             errors.append("run-receipts: limit-exceeded")
             entries = entries[:MAX_RUN_FILES]
@@ -656,9 +671,18 @@ def _observed_runs(
                         errors.append("run-receipts: worker-results-malformed-row")
                         continue
                     configured = configured_agents.get(seat)
-                    if isinstance(configured, dict) and isinstance(configured.get("provider"), str):
+                    if (
+                        isinstance(configured, dict)
+                        and model == configured.get("model")
+                        and isinstance(configured.get("provider"), str)
+                    ):
                         provider = configured["provider"]
                         unknown = configured.get("unknown", {}).get("provider") if provider == "unknown" else None
+                    elif isinstance(configured, dict):
+                        provider = "unknown"
+                        unknown = _unknown(
+                            "observed model does not match the authenticated Fleet model fact for this configured seat"
+                        )
                     else:
                         provider = "unknown"
                         unknown = _unknown("observed seat is not configured in the workspace roster")
@@ -829,7 +853,14 @@ def _create_staging_directory(parent_fd: int, destination_name: str) -> tuple[st
             dirfd.mkdir_child(parent_fd, name)
         except FileExistsError:
             continue
-        return name, dirfd.open_child_directory(parent_fd, name)
+        try:
+            return name, dirfd.open_child_directory(parent_fd, name)
+        except BaseException:
+            try:
+                os.rmdir(name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            raise
     raise OSError("could not create a private artifact staging directory")
 
 

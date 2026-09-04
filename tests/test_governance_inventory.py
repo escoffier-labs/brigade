@@ -222,6 +222,97 @@ def test_observed_runs_use_worker_results_and_authenticated_provider_attribution
     ]
 
 
+def test_observed_runs_require_an_authenticated_model_match_for_provider_attribution(tmp_path, monkeypatch):
+    target = _configured_target(tmp_path)
+    run_dir = target / ".brigade" / "runs" / "run-1"
+    worker = WorkerResult(
+        worker="research",
+        task="CANARY worker task",
+        text="CANARY output",
+        ok=True,
+        effective_model="gpt-5.6-terra",
+    )
+    _write(
+        run_dir / "worker-results.json",
+        json.dumps(
+            receipt_schema.worker_results_document(run_receipts.worker_payload([worker]), producer_run_id=run_dir.name)
+        ),
+    )
+    monkeypatch.setattr(
+        governance_inventory,
+        "_fleet_policy",
+        lambda _now: {
+            "admissions": [{"model": "gpt-5.6-luna", "provider": "openai", "seat": "research"}],
+            "denials": [],
+            "source": {},
+            "unknown": {},
+        },
+    )
+
+    observed = governance_inventory.build_inventory(target=target, now=NOW)["observed_runs"]["items"]
+
+    assert observed[0]["model"] == "gpt-5.6-terra"
+    assert observed[0]["provider"] == "unknown"
+    assert observed[0]["unknown"] == {
+        "provider_attribution": {
+            "reason": "observed model does not match the authenticated Fleet model fact for this configured seat",
+            "value": "unknown",
+        }
+    }
+
+
+def test_observed_runs_bound_unsupported_descriptor_scans_and_closes_the_scan_fd(tmp_path, monkeypatch):
+    target = _configured_target(tmp_path)
+    scanned: list[int] = []
+    closed: list[int] = []
+    original_close = os.close
+
+    def unsupported_scan(descriptor):
+        scanned.append(descriptor)
+        raise TypeError("scandir does not accept a descriptor")
+
+    def recording_close(descriptor):
+        closed.append(descriptor)
+        return original_close(descriptor)
+
+    monkeypatch.setattr(governance_inventory.os, "scandir", unsupported_scan)
+    monkeypatch.setattr(governance_inventory.os, "close", recording_close)
+
+    observed = governance_inventory.build_inventory(target=target, now=NOW)["observed_runs"]
+
+    assert observed == {
+        "schema": governance_inventory.OBSERVED_RUNS_SCHEMA,
+        "items": [],
+        "errors": ["run-receipts: unsupported-platform"],
+        "unknown": {},
+    }
+    assert scanned[0] in closed
+
+
+def test_observed_runs_closes_the_scan_fd_after_a_successful_scan(tmp_path, monkeypatch):
+    target = _configured_target(tmp_path)
+    scanned: list[int] = []
+    closed: list[int] = []
+    original_scan = os.scandir
+    original_close = os.close
+
+    def recording_scan(descriptor):
+        scanned.append(descriptor)
+        return original_scan(descriptor)
+
+    def recording_close(descriptor):
+        closed.append(descriptor)
+        return original_close(descriptor)
+
+    monkeypatch.setattr(governance_inventory.os, "scandir", recording_scan)
+    monkeypatch.setattr(governance_inventory.os, "close", recording_close)
+
+    observed = governance_inventory.build_inventory(target=target, now=NOW)["observed_runs"]
+
+    assert observed["items"]
+    assert scanned[0] in closed
+
+
 def test_observed_provider_without_a_configured_seat_is_explicitly_unknown(tmp_path):
     target = _configured_target(tmp_path)
     run_dir = target / ".brigade" / "runs" / "run-1"
@@ -638,6 +729,24 @@ def test_artifact_publishing_stages_files_through_held_descriptors(tmp_path, mon
     governance_inventory.write_artifacts(target=target, output_dir=output, now=NOW)
 
     assert {"inventory.json", "manifest.json"}.issubset(calls)
+
+
+def test_artifact_staging_directory_is_removed_when_its_open_fails(tmp_path, monkeypatch):
+    target = _configured_target(tmp_path)
+    output = tmp_path / "export"
+    original_open = governance_inventory.dirfd.open_child_directory
+
+    def fail_staging_open(parent_fd, name):
+        if name.startswith(".export."):
+            raise OSError("staging open failed")
+        return original_open(parent_fd, name)
+
+    monkeypatch.setattr(governance_inventory.dirfd, "open_child_directory", fail_staging_open)
+
+    with pytest.raises(OSError, match="staging open failed"):
+        governance_inventory.write_artifacts(target=target, output_dir=output, now=NOW)
+
+    assert not list(tmp_path.glob(".export.*.tmp"))
 
 
 def test_artifact_publishing_fails_closed_without_descriptor_primitives(tmp_path, monkeypatch):
