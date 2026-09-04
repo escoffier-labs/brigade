@@ -1553,6 +1553,18 @@ def test_pack_list_reports_installed_bind_alongside_packaged_default(tmp_path: P
     assert str(tmp_path) not in json.dumps(payload)
 
 
+def test_parser_construction_performs_no_installed_pack_io(monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("installed-state I/O attempted during parser construction")
+
+    monkeypatch.setattr(grokbot_packs, "_peek_installed_bind", boom)
+    monkeypatch.setattr(grokbot_packs, "_peek_instance_payload", boom)
+    monkeypatch.setattr(grokbot_ops, "_read_regular_text", boom)
+
+    parser = cli._build_parser()
+    assert parser is not None
+
+
 def test_pack_doctor_warns_on_installed_default_bind_drift(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
     grokbot_packs.apply_setup(tmp_path, "operator", bind=CUSTOM_BIND, bearer_env="TEST_GROKBOT_BEARER")

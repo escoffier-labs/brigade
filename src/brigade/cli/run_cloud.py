@@ -352,7 +352,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     from .. import grokbot_packs
 
-    pack_ids = tuple(pack["id"] for pack in grokbot_packs.list_packs())
+    pack_ids = tuple(pack["id"] for pack in grokbot_packs.packaged_manifests())
     p_pack = grokbot_sub.add_parser("pack", help="Inspect and manage first-party Grok Bot connector packs.")
     pack_sub = p_pack.add_subparsers(dest="grokbot_pack_command", metavar="<pack-command>")
     pack_sub.required = True
