@@ -357,20 +357,21 @@ jobs:
 
   test:
     name: test (${{ matrix.python }})
-    needs: [test-shards, coverage]
+    needs: [test-shards, coverage, cosign-integration]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python: ["3.10", "3.11", "3.12"]
     steps:
-      - name: Require shards and coverage
+      - name: Require shards, coverage, and cosign integration
         env:
           SHARDS_RESULT: ${{ needs.test-shards.result }}
           COVERAGE_RESULT: ${{ needs.coverage.result }}
+          COSIGN_RESULT: ${{ needs.cosign-integration.result }}
         run: |
-          if [ "$SHARDS_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ]; then
-            echo "test-shards=$SHARDS_RESULT coverage=$COVERAGE_RESULT"
+          if [ "$SHARDS_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ] || [ "$COSIGN_RESULT" != "success" ]; then
+            echo "test-shards=$SHARDS_RESULT coverage=$COVERAGE_RESULT cosign-integration=$COSIGN_RESULT"
             exit 1
           fi
 

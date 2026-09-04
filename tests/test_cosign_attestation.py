@@ -68,6 +68,17 @@ def test_parse_cosign_version_accepts_safe_stable_releases() -> None:
     assert cosign_attestation.parse_cosign_version("GitVersion: v3.1.3") == (3, 1, 3)
 
 
+def test_parse_cosign_version_normalizes_quoted_text_fallback_values() -> None:
+    assert cosign_attestation.parse_cosign_version('GitVersion: "v2.6.5"') == (2, 6, 5)
+    assert cosign_attestation.parse_cosign_version("gitVersion: 'v3.1.3'") == (3, 1, 3)
+    assert cosign_attestation.parse_cosign_version('gitVersion: "2.6.5"') == (2, 6, 5)
+    assert cosign_attestation.parse_cosign_version("GitVersion: '3.1.3'") == (3, 1, 3)
+    assert cosign_attestation.parse_cosign_version('GitVersion="v2.6.5"') == (2, 6, 5)
+    assert cosign_attestation.parse_cosign_version("gitVersion='v3.1.3'") == (3, 1, 3)
+    assert cosign_attestation.parse_cosign_version('"GitVersion": "v2.6.5"') == (2, 6, 5)
+    assert cosign_attestation.parse_cosign_version("'gitVersion': 'v3.1.3'") == (3, 1, 3)
+
+
 @pytest.mark.parametrize(
     "version_str",
     [
@@ -666,6 +677,20 @@ def test_export_attestation_rejects_unsupported_profile_direct_python_caller(
     assert not (run_dir / "attestation.sigstore.json").exists()
 
 
+def test_cli_export_attestation_help_mentions_ssh_and_cosign_profiles(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["receipts", "export", "attestation", "--help"])
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "SSH and cosign profiles" in out
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["receipts", "export", "--help"])
+    assert exc_info.value.code == 0
+    out_parent = capsys.readouterr().out
+    assert "SSH and cosign profiles" in " ".join(out_parent.split())
+
+
 @pytest.mark.skipif(shutil.which("cosign") is None, reason="cosign is required for interoperability test")
 def test_real_cosign_bundle_verifies_with_git_tree_subject(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     try:
@@ -691,6 +716,7 @@ def test_real_cosign_bundle_verifies_with_git_tree_subject(tmp_path: Path, monke
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
+        timeout=30,
     )
     assert res_keygen.returncode == 0
 
@@ -734,6 +760,7 @@ def test_real_cosign_bundle_verifies_with_git_tree_subject(tmp_path: Path, monke
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
+        timeout=30,
     )
     assert res_verify.returncode == 0, f"cosign verify failed: {res_verify.stderr}\nstdout: {res_verify.stdout}"
 

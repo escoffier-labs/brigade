@@ -53,9 +53,9 @@ def parse_cosign_version(output: str) -> tuple[int, int, int]:
         pass
 
     if raw_ver is None:
-        m = re.search(r"(?:GitVersion|gitVersion)\s*[:=]?\s*([^\s,;]+)", output_str)
+        m = re.search(r"""["']?(?:GitVersion|gitVersion)["']?\s*[:=]?\s*["']?\s*([^"'\s,;]+)\s*["']?""", output_str)
         if m:
-            raw_ver = m.group(1).strip()
+            raw_ver = m.group(1).strip().strip("\"'")
 
     if raw_ver is None:
         raise CosignAttestationError(

@@ -46,8 +46,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Export from enabled [[repo]] entries in the target fleet config instead of the target itself.",
     )
     p_miseledger.set_defaults(func=dispatch)
+    help_attestation = "Export verify receipt as an in-toto attestation (SSH and cosign profiles)."
     p_attestation = export_sub.add_parser(
-        "attestation", help="Export verify receipt as an SSH-signed in-toto attestation."
+        "attestation",
+        help=help_attestation,
+        description=help_attestation,
     )
     p_attestation.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_attestation.add_argument("--run-id", metavar="<id|latest>", required=True, help="Verify run id or 'latest'.")
