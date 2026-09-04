@@ -210,12 +210,22 @@ def _opencode_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path 
     return ["opencode", "run", prompt]
 
 
-def _antigravity_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
+def _antigravity_argv(
+    prompt: str,
+    read_only: bool,
+    sandbox: str | None,
+    cwd: Path | None,
+    timeout_seconds: int | float | None = None,
+) -> List[str]:
+    timeout_flags: List[str] = []
+    if timeout_seconds is not None and _antigravity_supports_print_timeout():
+        seconds = max(60, int(timeout_seconds) - 30)
+        timeout_flags = ["--print-timeout", f"{seconds}s"]
     if read_only or sandbox == "read-only":
-        return ["agy", "--sandbox", "--print", prompt]
+        return ["agy", "--sandbox", *timeout_flags, "--print", prompt]
     effective_cwd = cwd if cwd is not None else Path.cwd().resolve()
     argv = ["agy", "--add-dir", str(effective_cwd)]
-    argv.extend(["--dangerously-skip-permissions", "--print", prompt])
+    argv.extend(["--dangerously-skip-permissions", *timeout_flags, "--print", prompt])
     return argv
 
 
@@ -313,7 +323,7 @@ def _oracle_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | 
     return ["oracle", "-p", prompt]
 
 
-_ADAPTERS: dict[str, Callable[[str, bool, str | None, Path | None], List[str]]] = {
+_ADAPTERS: dict[str, Callable[..., List[str]]] = {
     "claude": _claude_argv,
     "codex": _codex_argv,
     "opencode": _opencode_argv,
@@ -637,6 +647,43 @@ def _oracle_supports_browser_engine(
     return bool(_ORACLE_BROWSER_ENGINE_HELP_RE.search("\n".join((result.stdout, result.stderr))))
 
 
+_ANTIGRAVITY_PRINT_TIMEOUT_HELP = "--print-timeout"
+_ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED: bool | None = None
+
+
+def _antigravity_supports_print_timeout(
+    executable: str = "agy",
+    *,
+    env: dict[str, str] | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
+) -> bool:
+    """Whether this Antigravity executable advertises --print-timeout in agy --help."""
+    global _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED
+    if _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED is not None:
+        return _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED
+    result = proc.run(
+        [executable, "--help"],
+        timeout=5.0,
+        env=env,
+        process_registry=process_registry,
+    )
+    if result.code != 0:
+        supported = False
+    else:
+        combined = "\n".join((result.stdout, result.stderr))
+        supported = _ANTIGRAVITY_PRINT_TIMEOUT_HELP in combined
+    _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED = supported
+    return supported
+
+
+def _clear_antigravity_print_timeout_cache() -> None:
+    global _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED
+    _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED = None
+
+
+_antigravity_supports_print_timeout.cache_clear = _clear_antigravity_print_timeout_cache  # type: ignore[attr-defined]
+
+
 def _oracle_auth_detail(cli_ref: str, stdout: str, stderr: str) -> str | None:
     """Turn an oracle browser-session auth failure into a pantry next step.
 
@@ -790,6 +837,7 @@ def build_argv(
     resume_session_id: str | None = None,
     session_binding_id: str | None = None,
     oracle_browser_engine: bool = False,
+    timeout_seconds: int | float | None = None,
 ) -> List[str]:
     if resume_session_id is not None:
         if cli_ref != "grok":
@@ -828,7 +876,10 @@ def build_argv(
             "copilot, qwen, kimi, adal, openhands, grok, amp, crush, ollama:<model>, "
             "codex-cloud:<env-id>)"
         )
-    argv = builder(prompt, read_only, sandbox, cwd)
+    if _accepts_keyword(builder, "timeout_seconds"):
+        argv = builder(prompt, read_only, sandbox, cwd, timeout_seconds=timeout_seconds)
+    else:
+        argv = builder(prompt, read_only, sandbox, cwd)
     if cli_ref == "oracle" and oracle_browser_engine:
         argv = [argv[0], "--engine", "browser", *argv[1:]]
     if resume_session_id is not None:
