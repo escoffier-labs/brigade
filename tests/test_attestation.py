@@ -640,6 +640,17 @@ def test_cli_verify_attestation_with_revoked_keys_fails(tmp_path, capsys):
     assert captured.out.strip() == attestation.STATUS_UNTRUSTED_KEY
 
 
+def test_cli_verify_attestation_require_receipt_requires_target(tmp_path, capsys):
+    attestation_path = tmp_path / "attestation.json"
+    attestation_path.write_text("{}")
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["receipts", "verify-attestation", str(attestation_path), "--require-receipt"])
+
+    assert exc_info.value.code == 2
+    assert "--require-receipt requires --target" in capsys.readouterr().err
+
+
 def test_cli_verify_attestation_with_missing_revoked_keys_returns_unverifiable(tmp_path, capsys):
     key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)

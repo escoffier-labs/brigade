@@ -2018,11 +2018,13 @@ def test_recover_stale_run_without_callback_terminalizes_as_today(tmp_path, monk
     lock_path = runguard.lock_path(repo)
     _write_lock_owner_metadata(lock_path, owner_token="dead-owner", pid=99999999, run_dir=run_dir)
     monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    monkeypatch.setattr(runguard.localio, "tree_fingerprint", lambda path: "f" * 40)
 
     assert runguard.recover_stale_run(repo, run_dir) is True
     assert not lock_path.exists()
     recovered = json.loads((run_dir / "run.json").read_text())
     assert recovered["status"] == "failed"
+    assert recovered["tree_fingerprint"] == "f" * 40
     assert "lock_workspace" not in recovered.get("failure", {})
     assert "lock_acquired_at" not in recovered.get("failure", {})
 

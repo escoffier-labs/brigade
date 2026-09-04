@@ -260,6 +260,12 @@ def record_run_termination(
     elif active_seats:
         failure["seats"] = list(active_seats)
     finished_at = datetime.now(timezone.utc)
+    if payload.get("dry_run") is not True:
+        raw_cwd = payload.get("cwd")
+        if isinstance(raw_cwd, str) and raw_cwd:
+            tree_fingerprint = localio.tree_fingerprint(Path(raw_cwd))
+            if tree_fingerprint is not None:
+                payload["tree_fingerprint"] = tree_fingerprint
     payload.update(
         {
             "status": status,
@@ -683,6 +689,7 @@ def _run_payload(
     requester_principal: str | None = None,
     requester_keyid: str | None = None,
     request_payload: Mapping[str, Any] | None = None,
+    tree_fingerprint: str | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": receipt_schema.RUN_RECEIPT_SCHEMA,
@@ -744,6 +751,8 @@ def _run_payload(
         payload["requester_keyid"] = requester_keyid
     if request_payload is not None:
         payload["request"] = dict(request_payload)
+    if tree_fingerprint is not None:
+        payload["tree_fingerprint"] = tree_fingerprint
     if include_git:
         git = prompts._receipt_git_snapshot(cwd)
         if git is not None:

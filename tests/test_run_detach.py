@@ -400,6 +400,7 @@ def test_run_detach_startup_escape_kills_child_group_before_terminal_receipt(
 
 def test_run_detach_terminalizes_startup_timeout_and_kills_child(tmp_path, monkeypatch):
     _write_roster(tmp_path)
+    monkeypatch.setattr(aboyeur.localio, "tree_fingerprint", lambda path: "c" * 40)
 
     class FakeProcess:
         pid = 4321
@@ -426,6 +427,7 @@ def test_run_detach_terminalizes_startup_timeout_and_kills_child(tmp_path, monke
         "seat": "chef",
     }
     assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["tree_fingerprint"] == "c" * 40
     assert roster["orchestrator"] == "chef"
 
 
@@ -554,6 +556,50 @@ def test_run_detach_child_argv_forwards_run_budget(tmp_path):
     )
 
     assert argv[argv.index("--run-budget") + 1] == str(budget_path.resolve())
+
+
+def test_run_detach_child_argv_forwards_requester_identity_without_resolving_symlink(tmp_path):
+    real_key = tmp_path / "real-key"
+    real_key.write_text("private")
+    linked_key = tmp_path / "linked-key"
+    linked_key.symlink_to(real_key)
+    args = argparse.Namespace(
+        task="do work",
+        allow_dirty=False,
+        worktree=False,
+        show_plan=False,
+        verbose=False,
+        read_only=False,
+        no_code_graph=False,
+        no_evidence=False,
+        no_fleet_claim=True,
+        sandbox=None,
+        codex_transport=None,
+        handoff=False,
+        handoff_inbox=None,
+        worker="coder",
+        model=None,
+        wait=2.5,
+        keep_going=False,
+        scheduler="waves",
+        run_budget=None,
+        requester_key=linked_key,
+        requester_principal="requester",
+    )
+    roster_resolution = roster_mod.RosterResolution(
+        path=(tmp_path / "roster.toml").resolve(),
+        source="workspace",
+    )
+
+    argv = run_cli._detached_child_argv(
+        args,
+        run_cwd=tmp_path,
+        roster_resolution=roster_resolution,
+        output_dir=tmp_path / "run",
+    )
+
+    assert argv[argv.index("--requester-key") + 1] == str(linked_key.absolute())
+    assert argv[argv.index("--requester-principal") + 1] == "requester"
 
 
 def _minimal_roster() -> roster_mod.Roster:

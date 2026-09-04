@@ -1223,11 +1223,22 @@ Machine-readable result printed by `brigade receipts verify-attestation --json`:
 ### Agent request predicate
 
 `brigade run --requester-key <path>` records an SSHSIG `agent-request/v1`
-statement before dispatch and appends a `request.signed` journal event. The
+statement before dispatch and records a checkpoint-paired `request.signed`
+journal event under the active run lock. The
 statement binds the run id, baseline Git commit, SHA-256 task digest, request
 time, and nonce. It does not include task text, workspace paths, argv,
 environment values, or command output. Requester principal and key id are
 projected into `run.json` for separation-of-duties evaluation.
+
+Approval v1 keeps its current compatibility behavior and may use those
+projected fields when present. A future approval v2 must not trust the
+projection alone. Before using requester identity for segregation of duties,
+it must load the referenced request envelope, verify its SSHSIG signature
+against the target's `allowed_signers` policy and optional KRL, recompute the
+canonical statement digest, and require that digest to match the paired
+`request.signed` event. This requirement applies only to the SSHSIG request
+profile. It does not route request verification through the separate cosign
+profile.
 
 ---
 

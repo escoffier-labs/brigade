@@ -17,7 +17,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_verify.add_argument(
         "--strict-approvals",
         action="store_true",
-        help="Return nonzero for stale, expired, invalid, or indeterminate approvals.",
+        help="Return nonzero for stale, expired, invalid, segregation-of-duties-failed, or unapproved runs.",
     )
     p_verify.add_argument("--commit", help="Verify receipt trailers from a commit message.")
     p_verify.set_defaults(func=dispatch)
@@ -157,6 +157,9 @@ def dispatch(args) -> int:
         )
     if args.receipts_command == "verify-attestation":
         from .. import attestation_cmd
+
+        if args.require_receipt and args.target is None:
+            args._brigade_parser.error("--require-receipt requires --target")
 
         return attestation_cmd.verify_attestation(
             attestation_path=args.attestation_file,

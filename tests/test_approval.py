@@ -797,4 +797,29 @@ def test_strict_approvals_makes_an_expired_allow_nonzero(tmp_path: Path, capsys:
     assert _approve(target, key, "--expires-in", "0s") != 0
     capsys.readouterr()
 
+    assert cli.main(["receipts", "verify", "--target", str(target)]) == 0
+    assert "APPROVAL-EXPIRED" in capsys.readouterr().out
+
     assert cli.main(["receipts", "verify", "--target", str(target), "--strict-approvals"]) != 0
+
+
+def test_default_and_strict_approval_exit_behavior_for_unapproved_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, _key, _signers = _workspace(tmp_path)
+
+    assert cli.main(["receipts", "verify", "--target", str(target)]) == 0
+    assert "UNAPPROVED" in capsys.readouterr().out
+
+    assert cli.main(["receipts", "verify", "--target", str(target), "--strict-approvals"]) != 0
+    assert "UNAPPROVED" in capsys.readouterr().out
+
+
+def test_strict_approvals_help_names_each_additional_failure_status(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["receipts", "verify", "--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    for status in ("stale", "expired", "invalid", "segregation-of-duties-failed", "unapproved"):
+        assert status in help_text
