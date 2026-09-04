@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -894,3 +895,195 @@ def test_worker_instructions_name_every_verification_command():
     assert "  - ruff check .\n  - pytest -q tests/test_one.py\n" in instructions
     assert "a branch cut from release/2.0 named cursor/issue-12-<slug>" in instructions
     assert "Fixes #12" in instructions
+
+
+FEED_NODE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+WORKER_NODE = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+OPERATOR_NODE = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+HUB_QUEUE_ID = "grokbot-feed-terminal-replay"
+
+
+def _enroll_hub_actor(connection, node: str, kind: str, role: str | None = None) -> None:
+    body = {
+        "action": "enroll-actor",
+        "enroll_node_id": node,
+        "queue_owner_node_id": FEED_NODE,
+        "queue_id": HUB_QUEUE_ID,
+        "actor_kind": kind,
+        "enabled": True,
+    }
+    if role is not None:
+        body["role"] = role
+    status, payload = fleet_hub_grokbot.handle_grokbot(connection, body, caller_node=None)
+    assert status == 200, payload
+
+
+def _bind_hub_enqueue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    connection = fleet_hub.init_db(tmp_path / "fleet.db")
+    _enroll_hub_actor(connection, FEED_NODE, "feed")
+    _enroll_hub_actor(connection, WORKER_NODE, "implementation-worker", "implementation-worker")
+    _enroll_hub_actor(connection, OPERATOR_NODE, "operator")
+
+    def enqueue(**fields: object) -> fleet_client_grokbot.GrokbotHubDecision:
+        status, payload = fleet_hub_grokbot.handle_grokbot(
+            connection,
+            {"action": "enqueue", **fields},
+            caller_node=FEED_NODE,
+        )
+        return fleet_client_grokbot.GrokbotHubDecision(
+            granted=status == 200 and payload.get("enqueued") is True,
+            reason=payload.get("error", "") if isinstance(payload, dict) else "invalid-response",
+            job=payload.get("job") if isinstance(payload, dict) else None,
+            idempotent=payload.get("idempotent") is True if isinstance(payload, dict) else False,
+        )
+
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: True)
+    monkeypatch.setattr(fleet_client_grokbot, "enqueue", enqueue)
+    return connection
+
+
+def _drift_hub_enqueue_digest(connection, job_id: str) -> None:
+    connection.execute(
+        "UPDATE grokbot_operations SET request_digest=? WHERE job_id=? AND action='enqueue'",
+        ("0" * 64, job_id),
+    )
+    connection.commit()
+
+
+def _complete_hub_job(connection, job_id: str) -> None:
+    claimed = fleet_hub_grokbot.handle_grokbot(
+        connection,
+        {
+            "action": "claim",
+            "job_id": job_id,
+            "lease_id": "lease-a",
+            "expected_item_revision": 1,
+            "lease_seconds": 300,
+            "operation_id": "op-claim-1",
+        },
+        caller_node=WORKER_NODE,
+    )
+    assert claimed[0] == 200, claimed[1]
+    generation = claimed[1]["lease_generation"]
+    started = fleet_hub_grokbot.handle_grokbot(
+        connection,
+        {
+            "action": "start",
+            "job_id": job_id,
+            "lease_id": "lease-a",
+            "expected_item_revision": claimed[1]["job"]["item_revision"],
+            "lease_generation": generation,
+            "operation_id": "op-start-1",
+        },
+        caller_node=WORKER_NODE,
+    )
+    assert started[0] == 200, started[1]
+    completed = fleet_hub_grokbot.handle_grokbot(
+        connection,
+        {
+            "action": "complete",
+            "job_id": job_id,
+            "lease_id": "lease-a",
+            "expected_item_revision": started[1]["job"]["item_revision"],
+            "lease_generation": generation,
+            "operation_id": "op-complete-1",
+            "artifact": {"kind": "draft-pr", "ref": "https://github.com/example/brigade/pull/9"},
+        },
+        caller_node=WORKER_NODE,
+    )
+    assert completed[0] == 200, completed[1]
+
+
+def _cancel_hub_job(connection, job_id: str) -> None:
+    status, payload = fleet_hub_grokbot.handle_grokbot(
+        connection,
+        {"action": "cancel", "job_id": job_id, "expected_item_revision": 1, "operation_id": "op-cancel-1"},
+        caller_node=OPERATOR_NODE,
+    )
+    assert status == 200, payload
+    assert payload["job"]["state"] == "canceled"
+
+
+def _expire_hub_job(connection, job_id: str) -> None:
+    queued_at = datetime.now(timezone.utc) - timedelta(seconds=fleet_hub_grokbot.DEFAULT_QUEUE_TTL_SECONDS + 60)
+    stamp = queued_at.isoformat().replace("+00:00", "Z")
+    connection.execute(
+        "UPDATE grokbot_jobs SET queued_at=?, created_at=?, updated_at=? WHERE job_id=?",
+        (stamp, stamp, stamp, job_id),
+    )
+    connection.commit()
+    assert fleet_hub_grokbot.sweep_expired_jobs(connection) == [job_id]
+
+
+@pytest.mark.parametrize("terminalize", ["completed", "expired", "canceled"])
+def test_apply_replays_terminal_hub_jobs_and_creates_the_next_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminalize: str
+):
+    connection = _bind_hub_enqueue(tmp_path, monkeypatch)
+    try:
+        manifest = _write_manifest(
+            tmp_path / "feed.json",
+            _manifest(_entry("task-a", _spec(label="First")), _entry("task-b", _spec(label="Second"))),
+        )
+        first = grokbot_feed.apply(tmp_path, manifest, limit=1)
+        job_id = first["jobs"][0]["job_id"]
+        if terminalize == "completed":
+            _complete_hub_job(connection, job_id)
+        elif terminalize == "expired":
+            _expire_hub_job(connection, job_id)
+        else:
+            _cancel_hub_job(connection, job_id)
+        _drift_hub_enqueue_digest(connection, job_id)
+
+        result = grokbot_feed.apply(tmp_path, manifest, limit=1)
+
+        assert result["created"] == 1
+        assert result["skipped"] == 1
+        assert result["jobs"][0]["job_id"] == job_id
+        assert result["jobs"][0]["idempotent"] is True
+        assert result["jobs"][0]["state"] == terminalize
+        assert result["jobs"][1]["idempotent"] is False
+        assert result["jobs"][1]["state"] == "queued"
+        assert result["jobs"][1]["job_id"] != job_id
+        assert connection.execute("SELECT COUNT(*) FROM grokbot_jobs").fetchone()[0] == 2
+        _assert_redacted(result)
+    finally:
+        connection.close()
+
+
+def test_apply_surfaces_bounded_hub_error_detail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    manifest = _write_manifest(
+        tmp_path / "feed.json",
+        _manifest(_entry("task-a", _spec(label="First")), _entry("task-b", _spec(label="Second"))),
+    )
+
+    def boom(target: Path, spec: dict, idempotency_key: str, now=None):
+        raise grokbot_jobs.GrokbotJobError("operation-mismatch")
+
+    monkeypatch.setattr(grokbot_jobs, "enqueue", boom)
+
+    with pytest.raises(grokbot_feed.FeedError) as exc:
+        grokbot_feed.apply(tmp_path, manifest, limit=1)
+
+    assert exc.value.reason == "queue-error index=0 operation-mismatch"
+    assert exc.value.index == 0
+    assert exc.value.detail == "operation-mismatch"
+    assert not _queue_root(tmp_path).exists()
+
+
+def test_cli_feed_reports_bounded_hub_error_detail(tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch):
+    manifest = _write_manifest(
+        tmp_path / "feed.json",
+        _manifest(_entry("task-a", _spec(label="First")), _entry("task-b", _spec(label="Second"))),
+    )
+
+    def boom(target: Path, spec: dict, idempotency_key: str, now=None):
+        raise grokbot_jobs.GrokbotJobError("operation-mismatch")
+
+    monkeypatch.setattr(grokbot_jobs, "enqueue", boom)
+
+    assert _run_feed(tmp_path, "--manifest", str(manifest), "--apply", "--limit", "1") == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == "error: queue-error index=0 operation-mismatch"
+    assert SECRET_INSTRUCTIONS not in captured.err

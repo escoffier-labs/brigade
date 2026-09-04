@@ -53,9 +53,9 @@ def _enroll(conn: sqlite3.Connection) -> None:
         assert status == 200, payload
 
 
-def _enqueue(conn: sqlite3.Connection, job_id: str = JOB_ID) -> dict[str, object]:
-    digest = "b" * 64
-    body = {
+def _enqueue_body(job_id: str = JOB_ID, *, digest: str | None = None) -> dict[str, object]:
+    digest = digest or "b" * 64
+    return {
         "action": "enqueue",
         "job_id": job_id,
         "role": "implementation-worker",
@@ -67,7 +67,12 @@ def _enqueue(conn: sqlite3.Connection, job_id: str = JOB_ID) -> dict[str, object
         "artifact_kind": "draft-pr",
         "operation_id": f"op-enqueue-{job_id[-4:]}",
     }
-    status, payload = fleet_hub_grokbot.handle_grokbot(conn, body, caller_node=FEED_NODE)
+
+
+def _enqueue(conn: sqlite3.Connection, job_id: str = JOB_ID, *, digest: str | None = None) -> dict[str, object]:
+    status, payload = fleet_hub_grokbot.handle_grokbot(
+        conn, _enqueue_body(job_id, digest=digest), caller_node=FEED_NODE
+    )
     assert status == 200, payload
     return payload["job"]
 
@@ -338,3 +343,99 @@ def test_fail_after_the_execution_deadline_answers_job_expired(conn):
 
     assert status == 409
     assert payload == {"failed": False, "error": "job-expired"}
+
+
+def _drift_enqueue_digest(conn: sqlite3.Connection, job_id: str = JOB_ID) -> None:
+    """Simulate an additive request field so the stored enqueue digest no longer matches."""
+    conn.execute(
+        "UPDATE grokbot_operations SET request_digest=? WHERE job_id=? AND action='enqueue'",
+        ("0" * 64, job_id),
+    )
+    conn.commit()
+
+
+def _complete(conn: sqlite3.Connection, job_id: str = JOB_ID) -> None:
+    claimed = fleet_hub_grokbot.handle_grokbot(conn, _claim_body(job_id), caller_node=WORKER_NODE)
+    assert claimed[0] == 200, claimed[1]
+    generation = claimed[1]["lease_generation"]
+    started = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        {
+            "action": "start",
+            "job_id": job_id,
+            "lease_id": "lease-a",
+            "expected_item_revision": claimed[1]["job"]["item_revision"],
+            "lease_generation": generation,
+            "operation_id": "op-start-1",
+        },
+        caller_node=WORKER_NODE,
+    )
+    assert started[0] == 200, started[1]
+    completed = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        {
+            "action": "complete",
+            "job_id": job_id,
+            "lease_id": "lease-a",
+            "expected_item_revision": started[1]["job"]["item_revision"],
+            "lease_generation": generation,
+            "operation_id": "op-complete-1",
+            "artifact": {"kind": "draft-pr", "ref": "https://github.com/example/brigade/pull/9"},
+        },
+        caller_node=WORKER_NODE,
+    )
+    assert completed[0] == 200, completed[1]
+    assert completed[1]["job"]["state"] == "completed"
+
+
+def _cancel_queued(conn: sqlite3.Connection, job_id: str = JOB_ID) -> None:
+    status, payload = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        {"action": "cancel", "job_id": job_id, "expected_item_revision": 1, "operation_id": "op-cancel-1"},
+        caller_node=OPERATOR_NODE,
+    )
+    assert status == 200, payload
+    assert payload["job"]["state"] == "canceled"
+
+
+def _expire_queued(conn: sqlite3.Connection, job_id: str = JOB_ID) -> None:
+    _backdate(conn, job_id, seconds=fleet_hub_grokbot.DEFAULT_QUEUE_TTL_SECONDS + 60)
+    assert fleet_hub_grokbot.sweep_expired_jobs(conn) == [job_id]
+
+
+@pytest.mark.parametrize("terminalize", ["completed", "expired", "canceled"])
+def test_enqueue_replays_terminal_jobs_as_idempotent_and_admits_a_later_entry(conn, terminalize: str):
+    """#1411: a completed/expired/canceled row must replay as idempotent so later keys can enqueue."""
+    _enqueue(conn)
+    if terminalize == "completed":
+        _complete(conn)
+    elif terminalize == "expired":
+        _expire_queued(conn)
+    else:
+        _cancel_queued(conn)
+    assert _state(conn) == terminalize
+    _drift_enqueue_digest(conn)
+
+    status, payload = fleet_hub_grokbot.handle_grokbot(conn, _enqueue_body(), caller_node=FEED_NODE)
+
+    assert status == 200, payload
+    assert payload["enqueued"] is True
+    assert payload["idempotent"] is True
+    assert payload["job"]["job_id"] == JOB_ID
+    assert payload["job"]["state"] == terminalize
+
+    later = _enqueue(conn, "grokbot-" + "d" * 24, digest="d" * 64)
+    assert later["state"] == "queued"
+    assert later["job_id"] != JOB_ID
+    assert conn.execute("SELECT COUNT(*) FROM grokbot_jobs").fetchone()[0] == 2
+
+
+def test_enqueue_digest_drift_on_a_queued_job_stays_operation_mismatch(conn):
+    _enqueue(conn)
+    _drift_enqueue_digest(conn)
+
+    status, payload = fleet_hub_grokbot.handle_grokbot(conn, _enqueue_body(), caller_node=FEED_NODE)
+
+    assert status == 409
+    assert payload == {"enqueued": False, "error": "operation-mismatch"}
+    assert _state(conn) == "queued"
