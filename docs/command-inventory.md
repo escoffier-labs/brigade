@@ -30,6 +30,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade extras`: 3 command path(s)
 - `brigade fleet`: 33 command path(s)
 - `brigade friction` (extras): 3 command path(s)
+- `brigade governance`: 1 command path(s)
 - `brigade guard`: 1 command path(s)
 - `brigade handoff`: 17 command path(s)
 - `brigade handoff-template`: 1 command path(s)
@@ -225,6 +226,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade friction add` (extras)
 - `brigade friction scan` (extras)
 - `brigade friction show` (extras)
+- `brigade governance inventory`
 - `brigade guard`
 - `brigade handoff archive`
 - `brigade handoff closeout`
