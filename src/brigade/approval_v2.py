@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -12,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import agent_request, attestation, localio, run_journal
+from . import agent_request, attestation, attestation_input, localio, run_journal
 
 HUMAN_APPROVAL_PREDICATE_TYPE = "https://brigade.dev/attestation/human-approval/v2"
 SOD_POLICY_NAME = "brigade.sod.v2"
@@ -116,12 +114,9 @@ def _load_json_object(path: Path, label: str) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise ApprovalV2Error(f"{label} is missing or not a regular file")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return attestation_input.read_json_object(path)
+    except (OSError, attestation_input.AttestationInputError) as exc:
         raise ApprovalV2Error(f"{label} is not readable JSON") from exc
-    if not isinstance(payload, dict):
-        raise ApprovalV2Error(f"{label} must contain a JSON object")
-    return payload
 
 
 def _decode_payload(envelope: Mapping[str, Any], label: str) -> tuple[dict[str, Any], bytes]:
@@ -129,9 +124,16 @@ def _decode_payload(envelope: Mapping[str, Any], label: str) -> tuple[dict[str, 
     if not isinstance(payload, str):
         raise ApprovalV2Error(f"{label} has no payload")
     try:
-        payload_bytes = base64.b64decode(payload, validate=True)
-        statement = json.loads(payload_bytes.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload_bytes = attestation_input.decode_dsse_base64(
+            payload,
+            label=f"{label} payload",
+            max_bytes=attestation_input.MAX_PAYLOAD_BYTES,
+        )
+        statement = attestation_input.strict_json_loads(
+            payload_bytes,
+            max_bytes=attestation_input.MAX_PAYLOAD_BYTES,
+        )
+    except attestation_input.AttestationInputError as exc:
         raise ApprovalV2Error(f"{label} payload is invalid") from exc
     if not isinstance(statement, dict) or attestation.canonical_statement_bytes(statement) != payload_bytes:
         raise ApprovalV2Error(f"{label} payload is not canonical JSON")

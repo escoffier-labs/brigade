@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
@@ -13,7 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from . import attestation
+from . import attestation, attestation_input
 
 COSIGN_KEY_ENV = "BRIGADE_COSIGN_KEY_FILE"
 DEFAULT_COSIGN_KEY_NAME = "cosign.key"
@@ -122,14 +121,17 @@ def require_safe_cosign(binary: str | None = None) -> tuple[str, tuple[int, int,
 
 
 def validate_bundle(bundle: Mapping[str, Any], statement: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        bundle = attestation_input.validate_json_value(bundle)
+        statement = attestation_input.validate_json_value(statement)
+    except attestation_input.AttestationInputError as exc:
+        raise CosignAttestationError("invalid cosign bundle input") from exc
     if not isinstance(bundle, Mapping):
         raise CosignAttestationError("cosign bundle must be a JSON object")
 
     media_type = bundle.get("mediaType")
     if media_type != SIGSTORE_BUNDLE_MEDIA_TYPE:
-        raise CosignAttestationError(
-            f"invalid bundle mediaType: expected {SIGSTORE_BUNDLE_MEDIA_TYPE}, got {media_type!r}"
-        )
+        raise CosignAttestationError(f"invalid bundle mediaType: expected {SIGSTORE_BUNDLE_MEDIA_TYPE}")
 
     verification_material = bundle.get("verificationMaterial")
     if not isinstance(verification_material, Mapping):
@@ -157,9 +159,7 @@ def validate_bundle(bundle: Mapping[str, Any], statement: Mapping[str, Any]) -> 
 
     payload_type = dsse_envelope.get("payloadType")
     if payload_type != attestation.DSSE_PAYLOAD_TYPE:
-        raise CosignAttestationError(
-            f"invalid dsseEnvelope payloadType: expected {attestation.DSSE_PAYLOAD_TYPE}, got {payload_type!r}"
-        )
+        raise CosignAttestationError(f"invalid dsseEnvelope payloadType: expected {attestation.DSSE_PAYLOAD_TYPE}")
 
     signatures = dsse_envelope.get("signatures")
     if not isinstance(signatures, list):
@@ -175,8 +175,12 @@ def validate_bundle(bundle: Mapping[str, Any], statement: Mapping[str, Any]) -> 
         raise CosignAttestationError("dsseEnvelope signature sig must be a nonempty base64-encoded string")
 
     try:
-        sig_bytes = base64.b64decode(sig, validate=True)
-    except Exception as exc:
+        sig_bytes = attestation_input.decode_dsse_base64(
+            sig,
+            label="dsseEnvelope signature sig",
+            max_bytes=attestation_input.MAX_SIGNATURE_BYTES,
+        )
+    except attestation_input.AttestationInputError as exc:
         raise CosignAttestationError(f"invalid base64 in dsseEnvelope signature sig: {exc}") from exc
 
     if not sig_bytes:
@@ -187,14 +191,21 @@ def validate_bundle(bundle: Mapping[str, Any], statement: Mapping[str, Any]) -> 
         raise CosignAttestationError("dsseEnvelope payload must be a base64-encoded string")
 
     try:
-        payload_bytes = base64.b64decode(raw_payload, validate=True)
-    except Exception as exc:
+        payload_bytes = attestation_input.decode_dsse_base64(
+            raw_payload,
+            label="dsseEnvelope payload",
+            max_bytes=attestation_input.MAX_PAYLOAD_BYTES,
+        )
+    except attestation_input.AttestationInputError as exc:
         raise CosignAttestationError(f"invalid base64 in dsseEnvelope payload: {exc}") from exc
 
     try:
-        decoded_statement = json.loads(payload_bytes.decode("utf-8"))
-    except Exception as exc:
-        raise CosignAttestationError(f"dsseEnvelope payload is not valid JSON: {exc}") from exc
+        decoded_statement = attestation_input.strict_json_loads(
+            payload_bytes,
+            max_bytes=attestation_input.MAX_PAYLOAD_BYTES,
+        )
+    except attestation_input.AttestationInputError as exc:
+        raise CosignAttestationError("dsseEnvelope payload is not valid JSON") from exc
 
     if not isinstance(decoded_statement, Mapping):
         raise CosignAttestationError("dsseEnvelope payload JSON must be an object")
@@ -268,9 +279,8 @@ def create_bundle(statement: Mapping[str, Any], key_path: Path) -> dict[str, Any
             raise CosignAttestationError("cosign exited 0 but output bundle was not created")
 
         try:
-            raw_json = bundle_path.read_text(encoding="utf-8")
-            bundle_data = json.loads(raw_json)
-        except Exception as exc:
+            bundle_data = attestation_input.read_json_object(bundle_path)
+        except (OSError, attestation_input.AttestationInputError) as exc:
             raise CosignAttestationError(f"failed to read or parse cosign bundle JSON: {exc}") from exc
 
         return validate_bundle(bundle_data, statement)
