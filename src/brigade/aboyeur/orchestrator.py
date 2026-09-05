@@ -1484,7 +1484,7 @@ def run(
             run_io.write_sidecar_revision(
                 output_dir,
                 "worker-results.json",
-                receipt_schema.worker_results_document(_worker_payload([result])),
+                receipt_schema.worker_results_document(_worker_payload([result]), producer_run_id=output_dir.name),
             )
         except OSError as exc:
             print(f"error: worker attempt receipt failed: {exc}", file=sys.stderr)
@@ -1650,6 +1650,7 @@ def run(
             receipt_schema.worker_results_document(
                 _worker_payload(worker_results),
                 ground_truth=ground_truth,
+                producer_run_id=output_dir.name,
             ),
         )
     isolation_detail = _run_isolation_check()
