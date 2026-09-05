@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from brigade import attestation, attestation_cmd, cli, cosign_attestation
+from brigade import attestation, attestation_cmd, cli, cosign_attestation, localio
 
 
 def _sample_statement() -> dict[str, Any]:
@@ -439,7 +439,7 @@ def test_create_bundle_maps_missing_binary_timeout_and_nonzero_exit(
 def _sample_receipt(tmp_path: Path) -> dict[str, Any]:
     run_id = "20260903-120000-work-verify-cosign123"
     run_dir = tmp_path / ".brigade" / "work" / "verify-runs" / run_id
-    return {
+    receipt = {
         "schema_version": 2,
         "run_id": run_id,
         "target": str(tmp_path),
@@ -457,15 +457,25 @@ def _sample_receipt(tmp_path: Path) -> dict[str, Any]:
         ],
         "digests": {
             "algorithm": "sha256",
-            "receipt_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "receipt_sha256": "",
         },
     }
+    receipt["digests"]["receipt_sha256"] = localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    return receipt
 
 
 def _write_receipt_to_disk(receipt: dict[str, Any]) -> None:
     run_dir = Path(receipt["path"])
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+
+def test_cosign_export_refuses_a_stale_stored_receipt_digest(tmp_path: Path) -> None:
+    receipt = _sample_receipt(tmp_path)
+    receipt["path"] = str(tmp_path / "moved" / "receipt")
+
+    with pytest.raises(attestation.AttestationExportError, match="receipt digest does not match"):
+        cosign_attestation.export_attestation(receipt, tmp_path / "cosign.key")
 
 
 def test_cli_export_attestation_defaults_to_sshsig(tmp_path: Path) -> None:

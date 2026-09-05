@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import attestation_input, localio
+from . import attestation_input, attestation_receipt, localio
 
 IN_TOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 IN_TOTO_TEST_RESULT_PREDICATE_TYPE = "https://in-toto.io/attestation/test-result/v0.1"
@@ -286,10 +286,6 @@ def find_principals(
     return [line for line in lines if line != "No principal matched."]
 
 
-def _compute_receipt_sha256(receipt: Mapping[str, Any]) -> str:
-    return localio.canonical_json_digest(receipt, exclude_keys={"digests", "path"})
-
-
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
@@ -326,8 +322,17 @@ def _test_name(cmd: Mapping[str, Any]) -> str:
     return " ".join(cleaned)
 
 
-def build_statement(receipt: Mapping[str, Any]) -> dict[str, Any]:
+def build_statement(receipt: Mapping[str, Any] | attestation_receipt.ReceiptSnapshot) -> dict[str, Any]:
     """Build an in-toto Statement v1 with Test Result v0.1 predicate from a verify receipt."""
+    try:
+        snapshot = (
+            receipt
+            if isinstance(receipt, attestation_receipt.ReceiptSnapshot)
+            else attestation_receipt.snapshot_receipt(receipt)
+        )
+    except attestation_receipt.ReceiptDigestError as exc:
+        raise AttestationExportError(f"cannot export attestation: {exc}") from exc
+    receipt = snapshot.receipt
     tree_fingerprint = receipt.get("tree_fingerprint")
     changes_patch_sha256 = receipt.get("changes_patch_sha256")
 
@@ -338,12 +343,7 @@ def build_statement(receipt: Mapping[str, Any]) -> dict[str, Any]:
 
     run_id = str(receipt.get("run_id", "")).strip()
 
-    digests = receipt.get("digests")
-    receipt_sha256 = (
-        digests.get("receipt_sha256")
-        if isinstance(digests, Mapping) and digests.get("receipt_sha256")
-        else _compute_receipt_sha256(receipt)
-    )
+    receipt_sha256 = snapshot.digest
 
     passed_tests: list[str] = []
     failed_tests: list[str] = []
