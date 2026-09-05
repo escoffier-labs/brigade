@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import localio
+from . import attestation_input, localio
 
 IN_TOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 IN_TOTO_TEST_RESULT_PREDICATE_TYPE = "https://in-toto.io/attestation/test-result/v0.1"
@@ -506,16 +506,10 @@ def write_attestation_file(
 
 
 def _decode_sig_armored(sig_value: str) -> str | None:
-    cleaned = sig_value.strip()
-    if "-----BEGIN SSH SIGNATURE-----" in cleaned:
-        return cleaned
     try:
-        decoded = base64.b64decode(cleaned).decode("utf-8", errors="replace")
-        if "-----BEGIN SSH SIGNATURE-----" in decoded:
-            return decoded
-    except Exception:
-        pass
-    return None
+        return attestation_input.decode_ssh_signature(sig_value)
+    except attestation_input.AttestationInputError:
+        return None
 
 
 def verify_attestation(
@@ -536,19 +530,20 @@ def verify_attestation(
 
     # 1. Parse envelope
     if isinstance(envelope_data, Path):
-        if not envelope_data.is_file():
-            return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE)
         try:
-            envelope = json.loads(envelope_data.read_text(encoding="utf-8"))
-        except Exception:
+            envelope = attestation_input.read_json_object(envelope_data)
+        except (OSError, attestation_input.AttestationInputError):
             return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE)
     elif isinstance(envelope_data, (str, bytes)):
         try:
-            envelope = json.loads(envelope_data)
-        except Exception:
+            envelope = attestation_input.strict_json_loads(envelope_data)
+        except attestation_input.AttestationInputError:
             return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE)
     elif isinstance(envelope_data, Mapping):
-        envelope = envelope_data
+        try:
+            envelope = attestation_input.validate_json_value(envelope_data)
+        except attestation_input.AttestationInputError:
+            return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE)
     else:
         return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE)
 
@@ -571,9 +566,16 @@ def verify_attestation(
 
     # 2. Decode payload & parse Statement
     try:
-        payload_bytes = base64.b64decode(payload_b64)
-        statement = json.loads(payload_bytes.decode("utf-8"))
-    except Exception:
+        payload_bytes = attestation_input.decode_dsse_base64(
+            payload_b64,
+            label="attestation payload",
+            max_bytes=attestation_input.MAX_PAYLOAD_BYTES,
+        )
+        statement = attestation_input.strict_json_loads(
+            payload_bytes,
+            max_bytes=attestation_input.MAX_PAYLOAD_BYTES,
+        )
+    except attestation_input.AttestationInputError:
         return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE)
 
     if not isinstance(statement, Mapping):
@@ -774,7 +776,7 @@ def verify_attestation(
             receipt_file = run_dir / "receipt.json"
             if receipt_file.is_file():
                 try:
-                    receipt_data = json.loads(receipt_file.read_text(encoding="utf-8"))
+                    receipt_data = attestation_input.read_json_object(receipt_file)
                     rederived_statement = build_statement(receipt_data)
                     rederived_bytes = canonical_statement_bytes(rederived_statement)
                     if rederived_bytes != payload_bytes:

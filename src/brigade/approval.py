@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import re
@@ -13,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import approval_v2, attestation, localio, run_events, run_journal, run_projector
+from . import approval_v2, attestation, attestation_input, localio, run_events, run_journal, run_projector
 
 HUMAN_APPROVAL_PREDICATE_TYPE = "https://brigade.dev/attestation/human-approval/v1"
 HUMAN_APPROVAL_V2_PREDICATE_TYPE = approval_v2.HUMAN_APPROVAL_PREDICATE_TYPE
@@ -140,12 +139,9 @@ def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise ApprovalError(f"{label} is missing or not a regular file")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return attestation_input.read_json_object(path)
+    except (OSError, attestation_input.AttestationInputError) as exc:
         raise ApprovalError(f"{label} is not readable JSON") from exc
-    if not isinstance(payload, dict):
-        raise ApprovalError(f"{label} must contain a JSON object")
-    return payload
 
 
 def _resolve_run_dir(target: Path, run_id: str) -> Path:
@@ -637,9 +633,16 @@ def _decode_statement(envelope: Mapping[str, Any]) -> tuple[dict[str, Any] | Non
     if not isinstance(payload, str):
         return None, None
     try:
-        payload_bytes = base64.b64decode(payload, validate=True)
-        statement = json.loads(payload_bytes.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        payload_bytes = attestation_input.decode_dsse_base64(
+            payload,
+            label="attestation payload",
+            max_bytes=attestation_input.MAX_PAYLOAD_BYTES,
+        )
+        statement = attestation_input.strict_json_loads(
+            payload_bytes,
+            max_bytes=attestation_input.MAX_PAYLOAD_BYTES,
+        )
+    except attestation_input.AttestationInputError:
         return None, None
     return (statement, payload_bytes) if isinstance(statement, dict) else (None, None)
 
