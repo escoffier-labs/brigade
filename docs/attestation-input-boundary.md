@@ -10,8 +10,14 @@ than 100,000 value nodes.
 Mapping and list inputs receive the same limits as serialized inputs. The
 boundary builds a plain JSON snapshot before consumers inspect a mapping, so
 later mapping methods cannot change the validated values. Root containers count
-as depth 1. String and integer sizes are checked before serialization, and
-decoder or serializer value errors become bounded input errors.
+as depth 1. Scalar values and mapping keys become exact built-in JSON types.
+String sizes are checked before allocating their normalized copies. Duplicate
+normalized keys are rejected, and ordinary mapping iteration failures become
+content-free input errors. Decoder or serializer value errors become bounded
+input errors.
+
+The node cap is checked after decoding an already byte-bounded JSON document.
+It is not a promise about a streaming parser's peak memory use.
 
 Path inputs are opened with the existing no-follow descriptor helper, checked
 as regular files, and read only through a fixed byte budget. When that
@@ -30,6 +36,6 @@ discarded for both the predicate URL form and the fallback `predicate.run.id`
 form. An absent usable run ID prevents local receipt re-derivation.
 Signature-only verification keeps its existing status behavior.
 
-This boundary does not add ancestor containment checks, aggregate directory
-budgets, subprocess output or time budgets, new receipt-digest fields, or
-stored receipt-digest recomputation.
+This boundary does not add ancestor containment checks, trust-policy file snapshots,
+aggregate directory budgets, subprocess output or time budgets, new
+receipt-digest fields, or stored receipt-digest recomputation.

@@ -131,9 +131,7 @@ def validate_bundle(bundle: Mapping[str, Any], statement: Mapping[str, Any]) -> 
 
     media_type = bundle.get("mediaType")
     if media_type != SIGSTORE_BUNDLE_MEDIA_TYPE:
-        raise CosignAttestationError(
-            f"invalid bundle mediaType: expected {SIGSTORE_BUNDLE_MEDIA_TYPE}, got {media_type!r}"
-        )
+        raise CosignAttestationError(f"invalid bundle mediaType: expected {SIGSTORE_BUNDLE_MEDIA_TYPE}")
 
     verification_material = bundle.get("verificationMaterial")
     if not isinstance(verification_material, Mapping):
@@ -161,9 +159,7 @@ def validate_bundle(bundle: Mapping[str, Any], statement: Mapping[str, Any]) -> 
 
     payload_type = dsse_envelope.get("payloadType")
     if payload_type != attestation.DSSE_PAYLOAD_TYPE:
-        raise CosignAttestationError(
-            f"invalid dsseEnvelope payloadType: expected {attestation.DSSE_PAYLOAD_TYPE}, got {payload_type!r}"
-        )
+        raise CosignAttestationError(f"invalid dsseEnvelope payloadType: expected {attestation.DSSE_PAYLOAD_TYPE}")
 
     signatures = dsse_envelope.get("signatures")
     if not isinstance(signatures, list):

@@ -10,6 +10,74 @@ import pytest
 from brigade import attestation_input
 
 
+class _ScalarSubclass(str):
+    """A scalar whose Python-level hooks must not affect its snapshot."""
+
+    def __str__(self) -> str:
+        raise AssertionError("validator must use base string operations")
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        raise AssertionError("validator must use base string operations")
+
+    def encode(self, *args: object, **kwargs: object) -> bytes:
+        raise AssertionError("validator must use base string operations")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("validator must not compare subclass values")
+
+    def __hash__(self) -> int:
+        raise AssertionError("validator must not hash subclass values")
+
+
+class _IntegerSubclass(int):
+    def bit_length(self) -> int:
+        raise AssertionError("validator must use base integer operations")
+
+
+class _FloatSubclass(float):
+    def __float__(self) -> float:
+        raise AssertionError("validator must use base float operations")
+
+
+class _PairsMapping(dict[str, object]):
+    def __init__(self, pairs: list[tuple[object, object]]) -> None:
+        self._pairs = pairs
+
+    def items(self):  # type: ignore[no-untyped-def]
+        return iter(self._pairs)
+
+
+class _BrokenMapping(dict[str, object]):
+    def items(self):  # type: ignore[no-untyped-def]
+        raise RuntimeError("untrusted mapping iteration detail")
+
+
+def test_mapping_validation_snapshots_scalar_subclasses_and_normalized_keys() -> None:
+    source = _ScalarSubclass("fixture")
+
+    snapshot = attestation_input.validate_json_value(_PairsMapping([(source, source)]))
+
+    key, value = next(iter(snapshot.items()))
+    assert type(key) is str
+    assert key == "fixture"
+    assert type(value) is str
+    assert value == "fixture"
+    assert type(attestation_input.validate_json_value(_IntegerSubclass(7))) is int
+    assert type(attestation_input.validate_json_value(_FloatSubclass(-0.0))) is float
+    assert math.copysign(1.0, attestation_input.validate_json_value(_FloatSubclass(-0.0))) == -1.0
+
+
+def test_mapping_validation_rejects_duplicate_normalized_keys_and_hides_iteration_errors() -> None:
+    with pytest.raises(attestation_input.AttestationInputError, match="duplicate property names"):
+        attestation_input.validate_json_value(_PairsMapping([("same", 1), ("same", 2)]))
+
+    with pytest.raises(attestation_input.AttestationInputError) as exc_info:
+        attestation_input.validate_json_value(_BrokenMapping())
+
+    assert str(exc_info.value) == "JSON mapping cannot be iterated"
+    assert "untrusted" not in str(exc_info.value)
+
+
 def test_strict_json_rejects_duplicate_names() -> None:
     source = b'{"version":1,"nested":{"name":"ok"}}'
 

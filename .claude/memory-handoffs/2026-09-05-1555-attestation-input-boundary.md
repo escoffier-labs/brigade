@@ -24,6 +24,11 @@ receipt boundaries for later work.
   retains bounded raw SSH armor.
 - Mapping and list inputs are copied into plain JSON snapshots after bounded
   depth, node, Unicode, scalar-size, and aggregate-byte validation.
+- Scalar subclasses and mapping-key subclasses are normalized to exact built-in
+  JSON types after string bounds are checked. Duplicate normalized keys and
+  ordinary mapping iteration failures return bounded input errors.
+- Cosign bundle media-type and payload-type diagnostics name the fields and
+  expected profile constants without echoing supplied values.
 - `predicate.url` and fallback `predicate.run.id` both discard dot-only run IDs.
 - Ancestor containment, aggregate directory budgets, subprocess budgets, raw
   artifact digest versioning, and stored receipt digest recomputation remain
@@ -34,7 +39,7 @@ receipt boundaries for later work.
 - files changed: `src/brigade/attestation_input.py`, `src/brigade/attestation.py`,
   `src/brigade/cosign_attestation.py`, attestation consumers, focused tests,
   documentation, and changelog
-- final focused verification: 192 passed, 1 skipped because cosign is absent.
+- previous checkpoint verification: 192 passed, 1 skipped because cosign is absent.
   Receipt `20260905-162105-work-verify-e1b4e5`.
   Evidence `4a0e6d91b88f1d1723f80dbc`.
 - commands run: `brigade work verify run --target . --argv-json '["./scripts/verify-focused","tests/test_attestation_input.py","tests/test_attestation_input_integration.py","tests/test_attestation.py","tests/test_cosign_attestation.py","tests/test_agent_request.py","tests/test_approval.py"]' --capture brigade-work`

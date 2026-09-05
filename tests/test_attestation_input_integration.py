@@ -110,6 +110,35 @@ def test_cosign_bundle_uses_validated_mapping_snapshot() -> None:
     assert validated["mediaType"] == cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE
 
 
+def test_cosign_bundle_type_diagnostics_do_not_echo_supplied_values() -> None:
+    statement = {"subject": []}
+    payload = base64.b64encode(attestation.canonical_statement_bytes(statement)).decode("ascii")
+    bundle = {
+        "mediaType": "untrusted-media-type",
+        "verificationMaterial": {"publicKey": {"hint": "test-key"}, "tlogEntries": []},
+        "dsseEnvelope": {
+            "payloadType": "untrusted-payload-type",
+            "payload": payload,
+            "signatures": [{"sig": "c2ln"}],
+        },
+    }
+
+    with pytest.raises(cosign_attestation.CosignAttestationError) as media_type_error:
+        cosign_attestation.validate_bundle(bundle, statement)
+
+    assert "mediaType" in str(media_type_error.value)
+    assert cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE in str(media_type_error.value)
+    assert "untrusted-media-type" not in str(media_type_error.value)
+
+    bundle["mediaType"] = cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE
+    with pytest.raises(cosign_attestation.CosignAttestationError) as payload_type_error:
+        cosign_attestation.validate_bundle(bundle, statement)
+
+    assert "payloadType" in str(payload_type_error.value)
+    assert attestation.DSSE_PAYLOAD_TYPE in str(payload_type_error.value)
+    assert "untrusted-payload-type" not in str(payload_type_error.value)
+
+
 def test_cosign_duplicate_parse_error_does_not_echo_property_name(monkeypatch: pytest.MonkeyPatch) -> None:
     statement = {"subject": []}
     payload = base64.b64encode(attestation.canonical_statement_bytes(statement)).decode("ascii")
