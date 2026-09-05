@@ -10,14 +10,14 @@ from .. import toml_compat as tomllib
 from . import constants, paths
 
 
-def _load_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]:
+def _load_config(target: Path, *, text: str | None = None) -> tuple[list[dict[str, Any]], list[str]]:
     path = paths.config_path(target)
-    if not path.is_file():
+    if text is None and not path.is_file():
         return [], [f"tool catalog config missing: {path}"]
     if tomllib is None:
         return [], ["tool catalog requires Python tomllib support"]
     try:
-        payload = tomllib.loads(path.read_text())
+        payload = tomllib.loads(text if text is not None else path.read_text())
     except (OSError, tomllib.TOMLDecodeError) as exc:  # type: ignore[union-attr]
         return [], [f"invalid tool catalog config: {exc}"]
     values = payload.get("tool")

@@ -514,7 +514,7 @@ def write_approval_resume_handoff(
         run_io.write_sidecar_revision(
             output_dir,
             "worker-results.json",
-            receipt_schema.worker_results_document(resumable),
+            receipt_schema.worker_results_document(resumable, producer_run_id=output_dir.name),
         )
     except (OSError, TypeError, ValueError) as exc:
         raise runguard.RetainRunLockError("failed to persist approval resume handoff") from exc

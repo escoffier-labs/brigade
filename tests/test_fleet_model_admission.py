@@ -2454,6 +2454,22 @@ def test_lkg_rejects_cached_at_beyond_allowed_future_skew(tmp_path, monkeypatch)
         assert decision.reason in {"future-timestamp", "malformed-roster"}
 
 
+@pytest.mark.skipif(os.name != "posix", reason="LKG descriptor protections require POSIX")
+def test_lkg_read_rejects_a_mac_valid_revision_below_high_water(tmp_path, monkeypatch):
+    with _hub(tmp_path) as hub:
+        node_token = _enroll(hub)
+        roster = _seed_hub(hub, node_token)
+        _configure_client(monkeypatch, tmp_path, hub, node_token)
+        assert fleet_model_admission.fetch_versioned_roster().ok is True
+
+        high_water = fleet_model_admission.high_water_path()
+        high_water.write_text(json.dumps({"revision": roster["revision"] + 1}), encoding="utf-8")
+        os.chmod(high_water, 0o600)
+
+        with pytest.raises(fleet_client.FleetClientError, match="revision-rollback"):
+            fleet_model_admission._load_lkg_record()
+
+
 @pytest.mark.parametrize("highest_revision", ["not-an-integer", ["not-an-integer"]])
 def test_lkg_rejects_malformed_highest_revision_without_raising(tmp_path, monkeypatch, highest_revision):
     from brigade import fleet_model_admission
