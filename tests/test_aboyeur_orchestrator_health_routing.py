@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 from brigade import aboyeur
 from brigade import agents
@@ -25,6 +26,18 @@ class PerSeatFakeAdapter:
 class RaisingProbe:
     def probe_roster(self, *args, **kwargs):
         raise RuntimeError("probe failed")
+
+
+class ModelNotListedAdapter:
+    def check(self, name, *, seat, roster, workspace, timeout_seconds):
+        if seat.name == "coder" and name == "model-reachability":
+            return SeatHealthCheck(
+                name,
+                "failed",
+                "requested model gemini-3.8-flash-low is not listed",
+                cause_code="model-not-listed",
+            )
+        return SeatHealthCheck(name, "passed", "ok")
 
 
 def _roster(*, fallback: tuple[str, ...] = (), worker_fallback: tuple[str, ...] = ()):
@@ -326,6 +339,38 @@ def test_unhealthy_direct_worker_without_fallback_aborts(monkeypatch, tmp_path, 
 
     routing = json.loads((output_dir / "seat-routing.json").read_text())
     assert routing["decisions"] == [expected]
+
+
+def test_model_not_listed_probe_refuses_direct_worker_before_dispatch(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        aboyeur, "dispatch", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dispatched"))
+    )
+    _install_probe(monkeypatch, ModelNotListedAdapter())
+    output_dir = tmp_path / "run-model-not-listed"
+    roster_value = _roster()
+    roster_value = replace(
+        roster_value,
+        agents={
+            **roster_value.agents,
+            "coder": replace(roster_value.agents["coder"], model="gemini-3.8-flash-low"),
+        },
+    )
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            roster_value,
+            worker="coder",
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 2
+    )
+
+    stderr = capsys.readouterr().err
+    assert "error: seat coder is unhealthy [model-unavailable]" in stderr
+    assert "requested model gemini-3.8-flash-low is not listed" in stderr
 
 
 def test_direct_worker_fallback_prints_requested_and_effective(monkeypatch, tmp_path, capsys):

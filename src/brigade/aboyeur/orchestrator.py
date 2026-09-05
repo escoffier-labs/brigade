@@ -380,6 +380,8 @@ def resolve_orchestrator_health_routing(
     else:
         detail = f"seat {requested} is unhealthy [{typed_cause}]{rejected_detail}"
     failure = unhealthy_result.failure
+    if failure is not None and failure.detail:
+        detail = f"{detail}: {seat_health.safe_detail(failure.detail)}"
     return OrchestratorHealthRoutingDecision(
         roster=effective,
         warning="\n".join(warnings) or None,
