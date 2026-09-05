@@ -128,6 +128,7 @@ def verify_attestation(
     principal: str | None = None,
     krl_path: Path | None = None,
     json_output: bool = False,
+    require_receipt: bool = False,
 ) -> int:
     effective_krl = krl_path
     if effective_krl is None and target is not None:
@@ -141,6 +142,7 @@ def verify_attestation(
         principal=principal,
         target=target,
         krl_path=effective_krl,
+        require_receipt=require_receipt,
     )
     if json_output:
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))

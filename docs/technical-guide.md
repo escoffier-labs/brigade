@@ -491,16 +491,28 @@ unable to interpret a journal event or projector version, stop that writer and
 roll forward. The append-only journal format is a one-way storage boundary.
 
 Record a final human decision with `brigade run approve <run-id> --decision
-allow|deny|hold`. Brigade signs the final tree and matching verify-receipt
-digests, appends the decision to the lifecycle journal, and shows the
-`brigade.sod.v1` segregation-of-duties checks. `brigade receipts verify` checks
-the signature, signed subjects against current evidence, expiry, approver and
-requester principal/keyid comparisons when recorded, the workspace-default-key
-comparison, and event ordering. It does not establish custody beyond those
-recorded comparisons. A valid signature proves possession of the trusted key,
-not that a person read every changed line or understood every verification
-result. Later verify receipts are allowed; missing signed receipts or a changed
-live tree are reported as non-exit-changing `APPROVAL-STALE`.
+allow|deny|hold`. New decisions use `human-approval/v2`: Brigade signs the final
+tree, `changes.patch` digest, and exact Test Result payload set for that tree,
+then appends the decision to the lifecycle journal. `brigade receipts verify`
+checks the signature, signed subjects against current evidence, expiry,
+verified requester and producer identities, the workspace-default-key
+comparison, and journal sequence ordering for both v1 and v2. An approval event
+must precede every merge or ship event regardless of their timestamps.
+Approval v1 remains readable as receipt-digest-bound compatibility evidence.
+Each v2 Test Result descriptor emits `producerKeyids` as the singleton list
+containing its verified SSHSIG `signerKeyid`; receipt HMAC key ids are excluded.
+The private reason is stored only in the local `run.json` projection, while the
+closed signed predicate commits to SHA-256 over its nonce, a NUL byte, and the
+UTF-8 reason. Verification reports a local reason mismatch as
+`APPROVAL-STALE` without printing the reason. A valid signature proves
+possession of the trusted key, not that a person read every changed line or
+understood every verification result. A changed final tree or final-tree Test
+Result set is reported as non-exit-changing `APPROVAL-STALE`; receipts for
+older trees are ignored.
+Invalid approvals and segregation-of-duties violations return nonzero by
+default. Pass `--strict-approvals` to also make stale, expired,
+indeterminate, or unapproved runs return nonzero. The default
+receipt-verification exit behavior is unchanged.
 
 Use `brigade runs reap --cwd /path/to/repo` to terminalize local runs whose
 recorded owner process is gone. Reap writes `status: orphaned` and a dirty-file

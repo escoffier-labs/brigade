@@ -11,11 +11,14 @@ from pathlib import Path
 import pytest
 
 from brigade import aboyeur
+from brigade import agent_request
 from brigade import agents
+from brigade import attestation
 from brigade import cli
 from brigade import localio
 from brigade import proc
 from brigade import roster
+from brigade import run_journal
 from brigade import runguard
 from brigade import runs_cmd
 from tests import thread_sync
@@ -1332,6 +1335,163 @@ role = "code"
     return repo
 
 
+def test_run_cli_rejects_requester_key_without_artifacts_before_setup(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    allocations = []
+    monkeypatch.setattr(aboyeur, "make_run_dir", lambda base: allocations.append(base))
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "x",
+                "--cwd",
+                str(repo),
+                "--requester-key",
+                str(tmp_path / "missing-key"),
+                "--no-artifacts",
+            ]
+        )
+        == 2
+    )
+    assert "--requester-key requires run artifacts" in capsys.readouterr().err
+    assert allocations == []
+
+
+def test_run_cli_records_trusted_request_before_dispatch(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    identity = tmp_path / "identity"
+    key_path, signers_path = attestation.keygen(identity, principal="requester")
+    target_signers = attestation.default_allowed_signers_path(repo)
+    target_signers.parent.mkdir(parents=True, exist_ok=True)
+    target_signers.write_text(signers_path.read_text())
+    _git(repo, "add", ".brigade/attestation/allowed_signers")
+    _git(repo, "commit", "-m", "trust requester")
+    output_dir = repo / ".brigade" / "runs" / "signed-request"
+    dispatched = []
+
+    def fake_run(*args, **kwargs):
+        dispatched.append(json.loads((output_dir / "run.json").read_text()))
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "private task",
+                "--cwd",
+                str(repo),
+                "--output-dir",
+                str(output_dir),
+                "--worker",
+                "coder",
+                "--requester-key",
+                str(key_path),
+                "--requester-principal",
+                "requester",
+                "--no-fleet-claim",
+            ]
+        )
+        == 0
+    )
+    assert len(dispatched) == 1
+    assert dispatched[0]["requester_principal"] == "requester"
+    assert dispatched[0]["request"]["task_sha256"] == agent_request.task_digest("private task")
+    assert "private task" not in json.dumps(dispatched[0]["request"])
+    events = run_journal.read_journal_bounded(output_dir / "events" / "lifecycle.jsonl").events
+    request_index = next(index for index, event in enumerate(events) if event.event_type == "request.signed")
+    assert events[request_index - 1].payload["paired_event_type"] == "request.signed"
+
+
+def test_run_cli_refuses_untrusted_request_and_terminalizes_before_dispatch(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    key_path, _ = attestation.keygen(tmp_path / "identity", principal="requester")
+    output_dir = repo / ".brigade" / "runs" / "refused-request"
+
+    monkeypatch.setattr(
+        aboyeur,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dispatch must not start")),
+    )
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "private task",
+                "--cwd",
+                str(repo),
+                "--output-dir",
+                str(output_dir),
+                "--worker",
+                "coder",
+                "--requester-key",
+                str(key_path),
+                "--no-fleet-claim",
+            ]
+        )
+        == 2
+    )
+    assert "requester signing failed" in capsys.readouterr().err
+    receipt = json.loads((output_dir / "run.json").read_text())
+    assert receipt["status"] == "failed"
+    assert receipt["failure"]["phase"] == "startup"
+    assert receipt["failure"]["kind"] == "request-signing"
+    assert "request" not in receipt
+    events = run_journal.read_journal_bounded(output_dir / "events" / "lifecycle.jsonl").events
+    assert all(event.event_type != "request.signed" for event in events)
+
+
+def test_run_cli_terminalizes_request_projection_failure_with_paired_event(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    key_path, signers_path = attestation.keygen(tmp_path / "identity", principal="requester")
+    target_signers = attestation.default_allowed_signers_path(repo)
+    target_signers.parent.mkdir(parents=True, exist_ok=True)
+    target_signers.write_text(signers_path.read_text())
+    _git(repo, "add", ".brigade/attestation/allowed_signers")
+    _git(repo, "commit", "-m", "trust requester")
+    output_dir = repo / ".brigade" / "runs" / "request-projection-failed"
+
+    monkeypatch.setattr(
+        aboyeur,
+        "update_run_receipt",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("receipt update failed")),
+    )
+    monkeypatch.setattr(
+        aboyeur,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dispatch must not start")),
+    )
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "private task",
+                "--cwd",
+                str(repo),
+                "--output-dir",
+                str(output_dir),
+                "--worker",
+                "coder",
+                "--requester-key",
+                str(key_path),
+                "--no-fleet-claim",
+            ]
+        )
+        == 2
+    )
+    receipt = json.loads((output_dir / "run.json").read_text())
+    assert receipt["status"] == "failed"
+    assert receipt["failure"]["kind"] == "request-signing"
+    events = run_journal.read_journal_bounded(output_dir / "events" / "lifecycle.jsonl").events
+    request_index = next(index for index, event in enumerate(events) if event.event_type == "request.signed")
+    assert events[request_index - 1].event_type == "run.snapshot.checkpointed"
+    assert events[request_index - 1].payload["paired_event_type"] == "request.signed"
+
+
 def test_run_cli_dirty_guard_blocks_by_default(tmp_path, monkeypatch, capsys):
     repo = _git_repo_with_roster(tmp_path)
     (repo / "tracked.txt").write_text("dirty\n")
@@ -1690,6 +1850,7 @@ def test_run_cli_terminalizes_keyboard_interrupt_during_worktree_creation(tmp_pa
     repo = _git_repo_with_roster(tmp_path)
     output_dir = repo / ".brigade" / "runs" / "worktree-entry"
     checkout = tmp_path / "checkout"
+    monkeypatch.setattr(localio, "tree_fingerprint", lambda path: "c" * 40)
 
     monkeypatch.setattr(
         "brigade.cli.run._worktree_checkout_path",
@@ -1723,6 +1884,7 @@ def test_run_cli_terminalizes_keyboard_interrupt_during_worktree_creation(tmp_pa
     assert receipt["schema"] == "brigade.run.v1"
     assert receipt["status"] == "canceled"
     assert receipt["failure"]["phase"] == "startup"
+    assert receipt["tree_fingerprint"] == "c" * 40
     assert receipt["failure"]["seat"] == "coder"
     assert not (repo / ".brigade" / "run.lock").exists()
 
