@@ -504,29 +504,36 @@ def test_antigravity_supports_print_timeout_probe(monkeypatch):
         agents._antigravity_supports_print_timeout.cache_clear()
 
     calls = []
+    current_env = {"PATH": "/seat/bin", "AGY_PROFILE": "current"}
+    legacy_env = {"PATH": "/legacy/bin", "AGY_PROFILE": "legacy"}
 
     def stub_run(argv, **kwargs):
-        calls.append(argv)
-        return agents.proc.Result(0, "Usage: agy [options]\n  --print-timeout <duration>  timeout for print mode\n", "")
+        calls.append((argv, kwargs))
+        if argv[0] == "/seat/bin/agy":
+            return agents.proc.Result(
+                0, "Usage: agy [options]\n  --print-timeout <duration>  timeout for print mode\n", ""
+            )
+        return agents.proc.Result(0, "Usage: agy\n", "")
 
     monkeypatch.setattr(agents.proc, "run", stub_run)
-    assert agents._antigravity_supports_print_timeout() is True
-    assert calls == [["agy", "--help"]]
+    assert agents._antigravity_supports_print_timeout("/seat/bin/agy", env=current_env) is True
+    assert calls == [(["/seat/bin/agy", "--help"], {"timeout": 5.0, "env": current_env, "process_registry": None})]
 
-    # Cached on subsequent call
-    assert agents._antigravity_supports_print_timeout() is True
+    # Cache only identical executable/environment capability probes.
+    assert agents._antigravity_supports_print_timeout("/seat/bin/agy", env=current_env) is True
     assert len(calls) == 1
 
-    # Returns False when flag is absent
+    assert agents._antigravity_supports_print_timeout("/legacy/bin/agy", env=legacy_env) is False
+    assert calls[-1] == (["/legacy/bin/agy", "--help"], {"timeout": 5.0, "env": legacy_env, "process_registry": None})
+
+    # Returns False when command fails.
     if hasattr(agents, "_clear_antigravity_print_timeout_cache"):
         agents._clear_antigravity_print_timeout_cache()
     elif hasattr(agents._antigravity_supports_print_timeout, "cache_clear"):
         agents._antigravity_supports_print_timeout.cache_clear()
-
     monkeypatch.setattr(agents.proc, "run", lambda *a, **kw: agents.proc.Result(0, "Usage: agy\n", ""))
     assert agents._antigravity_supports_print_timeout() is False
 
-    # Returns False when command fails
     if hasattr(agents, "_clear_antigravity_print_timeout_cache"):
         agents._clear_antigravity_print_timeout_cache()
     elif hasattr(agents._antigravity_supports_print_timeout, "cache_clear"):
@@ -1212,6 +1219,48 @@ def test_run_agent_threads_cwd_into_argv_builder(monkeypatch, tmp_path):
     ]
 
 
+def test_run_agent_antigravity_forwards_timeout_and_probes_resolved_seat(monkeypatch, tmp_path):
+    agents._clear_antigravity_print_timeout_cache()
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv == ["/seat/bin/agy", "--help"]:
+            return agents.proc.Result(0, "--print-timeout <duration>", "")
+        return agents.proc.Result(0, "answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda command, path=None: "/seat/bin/agy")
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    result = agents.run_agent(
+        "antigravity",
+        "hi",
+        timeout=900,
+        cwd=tmp_path,
+        env={"PATH": "/seat/bin", "AGY_PROFILE": "seat-specific"},
+    )
+
+    assert result.ok is True
+    assert calls[0] == (
+        ["/seat/bin/agy", "--help"],
+        {
+            "timeout": 5.0,
+            "env": {**agents.os.environ, "PATH": "/seat/bin", "AGY_PROFILE": "seat-specific"},
+            "process_registry": None,
+        },
+    )
+    assert calls[1][0] == [
+        "/seat/bin/agy",
+        "--add-dir",
+        str(tmp_path),
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "870s",
+        "--print",
+        "hi",
+    ]
+
+
 def test_ollama_model_present_threads_process_registry(monkeypatch):
     registry = agents.proc.ProcessRegistry()
     seen = {}
@@ -1282,7 +1331,7 @@ def test_run_agent_antigravity_with_no_cwd_allows_current_cwd(monkeypatch, tmp_p
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
     monkeypatch.setattr(agents.proc, "run", fake_run)
-    res = agents.run_agent("antigravity", "hi")
+    res = agents.run_agent("antigravity", "hi", timeout=None)
 
     assert res.ok is True
     assert captured["cwd"] is None

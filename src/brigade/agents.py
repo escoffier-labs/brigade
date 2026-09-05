@@ -216,9 +216,12 @@ def _antigravity_argv(
     sandbox: str | None,
     cwd: Path | None,
     timeout_seconds: int | float | None = None,
+    print_timeout_supported: bool | None = None,
 ) -> List[str]:
     timeout_flags: List[str] = []
-    if timeout_seconds is not None and _antigravity_supports_print_timeout():
+    if timeout_seconds is not None and (
+        _antigravity_supports_print_timeout() if print_timeout_supported is None else print_timeout_supported
+    ):
         seconds = max(60, int(timeout_seconds) - 30)
         timeout_flags = ["--print-timeout", f"{seconds}s"]
     if read_only or sandbox == "read-only":
@@ -648,7 +651,7 @@ def _oracle_supports_browser_engine(
 
 
 _ANTIGRAVITY_PRINT_TIMEOUT_HELP = "--print-timeout"
-_ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED: bool | None = None
+_ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED: dict[tuple[str, tuple[tuple[str, str], ...]], bool] = {}
 
 
 def _antigravity_supports_print_timeout(
@@ -658,9 +661,9 @@ def _antigravity_supports_print_timeout(
     process_registry: proc.ProcessRegistry | None = None,
 ) -> bool:
     """Whether this Antigravity executable advertises --print-timeout in agy --help."""
-    global _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED
-    if _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED is not None:
-        return _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED
+    cache_key = (executable, tuple(sorted(env.items())) if env is not None else ())
+    if cache_key in _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED:
+        return _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED[cache_key]
     result = proc.run(
         [executable, "--help"],
         timeout=5.0,
@@ -672,13 +675,12 @@ def _antigravity_supports_print_timeout(
     else:
         combined = "\n".join((result.stdout, result.stderr))
         supported = _ANTIGRAVITY_PRINT_TIMEOUT_HELP in combined
-    _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED = supported
+    _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED[cache_key] = supported
     return supported
 
 
 def _clear_antigravity_print_timeout_cache() -> None:
-    global _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED
-    _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED = None
+    _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED.clear()
 
 
 _antigravity_supports_print_timeout.cache_clear = _clear_antigravity_print_timeout_cache  # type: ignore[attr-defined]
@@ -838,6 +840,7 @@ def build_argv(
     session_binding_id: str | None = None,
     oracle_browser_engine: bool = False,
     timeout_seconds: int | float | None = None,
+    antigravity_print_timeout_supported: bool | None = None,
 ) -> List[str]:
     if resume_session_id is not None:
         if cli_ref != "grok":
@@ -876,10 +879,12 @@ def build_argv(
             "copilot, qwen, kimi, adal, openhands, grok, amp, crush, ollama:<model>, "
             "codex-cloud:<env-id>)"
         )
+    builder_kwargs: dict[str, object] = {}
     if _accepts_keyword(builder, "timeout_seconds"):
-        argv = builder(prompt, read_only, sandbox, cwd, timeout_seconds=timeout_seconds)
-    else:
-        argv = builder(prompt, read_only, sandbox, cwd)
+        builder_kwargs["timeout_seconds"] = timeout_seconds
+    if _accepts_keyword(builder, "print_timeout_supported"):
+        builder_kwargs["print_timeout_supported"] = antigravity_print_timeout_supported
+    argv = builder(prompt, read_only, sandbox, cwd, **builder_kwargs)
     if cli_ref == "oracle" and oracle_browser_engine:
         argv = [argv[0], "--engine", "browser", *argv[1:]]
     if resume_session_id is not None:
@@ -1310,9 +1315,17 @@ def run_agent(
 
     try:
         oracle_browser_engine = False
+        antigravity_print_timeout_supported = None
         if cli_ref == "oracle":
             assert executable.path is not None
             oracle_browser_engine = _oracle_supports_browser_engine(
+                executable.path,
+                env=child_env,
+                process_registry=process_registry,
+            )
+        if cli_ref == "antigravity" and timeout is not None:
+            assert executable.path is not None
+            antigravity_print_timeout_supported = _antigravity_supports_print_timeout(
                 executable.path,
                 env=child_env,
                 process_registry=process_registry,
@@ -1328,6 +1341,8 @@ def run_agent(
             resume_session_id=resume_session_id,
             session_binding_id=session_binding_id,
             oracle_browser_engine=oracle_browser_engine,
+            timeout_seconds=timeout,
+            antigravity_print_timeout_supported=antigravity_print_timeout_supported,
         )
     except UnsupportedSandboxError as exc:
         # A builder rejected the launch before spawning because the requested
