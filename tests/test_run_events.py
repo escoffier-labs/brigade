@@ -108,6 +108,7 @@ def test_schema_two_approval_and_stage_events_validate_and_project(tmp_path):
         "approver_keyid": "SHA256:alice",
         "subject_tree": "a" * 40,
         "nonce": "b" * 32,
+        "decided_at": RECORDED_AT,
         "expires_at": RECORDED_AT,
         "statement_sha256": "c" * 64,
         "attestation_path": "approvals/" + "b" * 32 + ".json",
@@ -145,6 +146,32 @@ def test_schema_two_approval_and_stage_events_validate_and_project(tmp_path):
     assert report.chain_errors == []
     projection = run_projector.project_run_snapshot({"status": "started"}, report.events, journal_present=True)
     assert projection.last_sequence == 3
+
+
+def test_approval_decided_at_must_be_an_exact_utc_timestamp():
+    approval_payload = {
+        "decision": "allow",
+        "scope": "run",
+        "approver_principal": "alice",
+        "approver_keyid": "SHA256:alice",
+        "subject_tree": "a" * 40,
+        "nonce": "b" * 32,
+        "decided_at": "2026-07-27T15:30:45Z",
+        "expires_at": RECORDED_AT,
+        "statement_sha256": "c" * 64,
+        "attestation_path": "approvals/" + "b" * 32 + ".json",
+    }
+
+    with pytest.raises(run_events.CanonicalizationError, match="decided_at"):
+        run_events.build_event(
+            run_id=RUN_ID,
+            sequence=1,
+            event_type="approval",
+            payload=approval_payload,
+            idempotency_key="approval",
+            recorded_at=RECORDED_AT,
+            previous_digest=None,
+        )
 
 
 def test_canonical_bytes_matches_exact_utf8_compact_sorted_form():

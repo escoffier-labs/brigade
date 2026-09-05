@@ -303,6 +303,10 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Path to a brigade.run_budget.v1 JSON declaration persisted with this run.",
     )
+    parser.add_argument(
+        "--requester-key", type=Path, default=None, help="Sign an agent-request/v1 statement before dispatch."
+    )
+    parser.add_argument("--requester-principal", default=None, help="Expected requester allowed_signers principal.")
     parser.add_argument("--no-artifacts", action="store_true", help="Do not write run artifacts.")
     parser.add_argument(
         "--handoff",
@@ -426,6 +430,9 @@ def dispatch(args) -> int:
         return 2
     if args.detach and args.inspect:
         print("error: --detach cannot be used with --inspect", file=sys.stderr)
+        return 2
+    if args.requester_key is not None and args.no_artifacts:
+        print("error: --requester-key requires run artifacts so the signed request can be persisted", file=sys.stderr)
         return 2
     if args.model is not None and args.worker is None:
         print("error: --model requires --worker so the overridden seat is unambiguous", file=sys.stderr)
@@ -753,6 +760,30 @@ def dispatch(args) -> int:
                         on_claim_lost=abort_on_fleet_claim_lost,
                     )
                 )
+            if args.requester_key is not None:
+                from .. import agent_request
+
+                assert output_dir is not None
+                try:
+                    agent_request.record_request(
+                        target=run_cwd,
+                        run_dir=output_dir,
+                        task=args.task,
+                        key=args.requester_key,
+                        principal=args.requester_principal,
+                    )
+                except agent_request.AgentRequestError as exc:
+                    detail = f"requester signing failed: {exc}"
+                    aboyeur_mod.record_run_termination(
+                        output_dir,
+                        status="failed",
+                        failure_phase="startup",
+                        failure_kind="request-signing",
+                        detail=detail,
+                        seat=lifecycle_seat,
+                    )
+                    print(f"error: {detail}", file=sys.stderr)
+                    return 2
             if args.worktree:
                 worktree_cwd = _worktree_checkout_path(runguard.git_root(run_cwd), output_dir)
                 effective_cwd = runguard.create_detached_worktree(run_cwd, worktree_cwd)
@@ -1233,6 +1264,17 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: 
         argv.extend(["--handoff-inbox", str(args.handoff_inbox.expanduser().resolve())])
     if args.run_budget is not None:
         argv.extend(["--run-budget", str(args.run_budget.expanduser().resolve())])
+    requester_key_arg = getattr(args, "requester_key", None)
+    if requester_key_arg is not None:
+        requester_key = requester_key_arg.expanduser()
+        if not requester_key.is_absolute():
+            requester_key = Path.cwd() / requester_key
+        # Keep the final path component unresolved so the child applies the
+        # same private-key symlink rejection as a foreground run.
+        argv.extend(["--requester-key", str(requester_key.absolute())])
+    requester_principal = getattr(args, "requester_principal", None)
+    if requester_principal is not None:
+        argv.extend(["--requester-principal", requester_principal])
     return argv
 
 

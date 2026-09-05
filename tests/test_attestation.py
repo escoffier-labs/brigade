@@ -258,7 +258,43 @@ def test_verify_on_second_tmp_path_reports_signed_ok(tmp_path: Path) -> None:
     assert res.principal == "alice-signer"
     assert res.keyid == envelope["signatures"][0]["keyid"]
     assert res.run_id == receipt["run_id"]
-    assert len(res.subject) == 2
+
+
+def test_targeted_verification_reports_whether_the_receipt_was_rederived(tmp_path: Path) -> None:
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
+    receipt = _sample_receipt(tmp_path)
+    envelope = attestation.export_attestation(receipt, key_path=key_path)
+
+    signature_only = attestation.verify_attestation(envelope, allowed_signers_path=signers_path)
+    assert signature_only.status == attestation.STATUS_SIGNED_OK
+    assert signature_only.rederived is False
+
+    receipt_path = tmp_path / ".brigade" / "work" / "verify-runs" / receipt["run_id"] / "receipt.json"
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    targeted = attestation.verify_attestation(
+        envelope,
+        allowed_signers_path=signers_path,
+        target=tmp_path,
+    )
+    assert targeted.status == attestation.STATUS_SIGNED_OK
+    assert targeted.rederived is True
+
+
+def test_targeted_verification_require_receipt_fails_closed_when_receipt_is_missing(tmp_path: Path) -> None:
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
+    envelope = attestation.export_attestation(_sample_receipt(tmp_path), key_path=key_path)
+
+    result = attestation.verify_attestation(
+        envelope,
+        allowed_signers_path=signers_path,
+        target=tmp_path,
+        require_receipt=True,
+    )
+
+    assert result.status == attestation.STATUS_EVIDENCE_MISSING
+    assert result.rederived is False
+    assert len(result.subject) == 2
 
 
 def test_flipping_one_payload_byte_reports_signature_mismatch(tmp_path: Path) -> None:
@@ -602,6 +638,17 @@ def test_cli_verify_attestation_with_revoked_keys_fails(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 1
     assert captured.out.strip() == attestation.STATUS_UNTRUSTED_KEY
+
+
+def test_cli_verify_attestation_require_receipt_requires_target(tmp_path, capsys):
+    attestation_path = tmp_path / "attestation.json"
+    attestation_path.write_text("{}")
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["receipts", "verify-attestation", str(attestation_path), "--require-receipt"])
+
+    assert exc_info.value.code == 2
+    assert "--require-receipt requires --target" in capsys.readouterr().err
 
 
 def test_cli_verify_attestation_with_missing_revoked_keys_returns_unverifiable(tmp_path, capsys):

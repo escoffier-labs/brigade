@@ -703,6 +703,8 @@ def _approval_state_drift(
             "statement_sha256": last_approval.payload.get("statement_sha256"),
             "attestation_path": last_approval.payload.get("attestation_path"),
         }
+        if "decided_at" in last_approval.payload:
+            expected["decided_at"] = last_approval.payload["decided_at"]
         observed = {key: approval.get(key) for key in expected}
         if expected != observed:
             return Divergence(

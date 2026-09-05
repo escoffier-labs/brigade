@@ -2806,6 +2806,7 @@ def test_run_stage_two_interruption_records_current_stage_seat(monkeypatch, tmp_
         run_aboyeur_guarded(
             "build feature",
             _roster(),
+            cwd=tmp_path,
             output_dir=output_dir,
             code_graph_enabled=False,
             route_enabled=False,
@@ -2826,6 +2827,7 @@ def test_run_stage_two_interruption_records_current_stage_seat(monkeypatch, tmp_
 
 def test_run_terminalizes_keyboard_interrupt_during_planning_without_cli(monkeypatch, tmp_path):
     output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.localio, "tree_fingerprint", lambda path: "d" * 40)
 
     def interrupted_plan(*args, **kwargs):  # noqa: ARG001
         raise KeyboardInterrupt
@@ -2836,6 +2838,7 @@ def test_run_terminalizes_keyboard_interrupt_during_planning_without_cli(monkeyp
         run_aboyeur_guarded(
             "build feature",
             _roster(),
+            cwd=tmp_path,
             output_dir=output_dir,
             code_graph_enabled=False,
             route_enabled=False,
@@ -2850,6 +2853,7 @@ def test_run_terminalizes_keyboard_interrupt_during_planning_without_cli(monkeyp
         "detail": "run canceled by user",
         "seat": "chef",
     }
+    assert run_meta["tree_fingerprint"] == "d" * 40
 
 
 def test_run_terminalizes_unexpected_synthesis_error_without_cli(monkeypatch, tmp_path):
@@ -4625,6 +4629,7 @@ def test_handoff_failure_preserves_final_artifacts(monkeypatch, tmp_path, capsys
 )
 def test_handoff_escape_terminalizes_nonterminal_receipt(monkeypatch, tmp_path, exception, status, kind, detail):
     calls = []
+    monkeypatch.setattr(aboyeur.localio, "tree_fingerprint", lambda path: "e" * 40)
 
     def fake_run_agent(cli_ref, prompt, **kwargs):
         calls.append(cli_ref)
@@ -4651,6 +4656,7 @@ def test_handoff_escape_terminalizes_nonterminal_receipt(monkeypatch, tmp_path, 
         run_aboyeur_guarded(
             "build feature",
             _roster(),
+            cwd=tmp_path,
             output_dir=output_dir,
             handoff_inbox=tmp_path / "handoffs",
             route_enabled=False,
@@ -4665,6 +4671,7 @@ def test_handoff_escape_terminalizes_nonterminal_receipt(monkeypatch, tmp_path, 
         "detail": detail,
         "seat": "chef",
     }
+    assert run_meta["tree_fingerprint"] == "e" * 40
 
 
 def test_handoff_sigterm_terminalizes_nonterminal_receipt(tmp_path):
