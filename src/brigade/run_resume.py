@@ -945,6 +945,7 @@ def _resume_locked(
         receipt_schema.worker_results_document(
             aboyeur._worker_payload(worker_results),
             ground_truth=ground_truth,
+            producer_run_id=run_dir.name,
         ),
     )
 

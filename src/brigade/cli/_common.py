@@ -72,7 +72,19 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
     ),
     (
         "Review, security, and research",
-        ["security", "guard", "scrub", "untrusted", "research", "learn", "outcome", "chat", "context", "projects"],
+        [
+            "security",
+            "guard",
+            "governance",
+            "scrub",
+            "untrusted",
+            "research",
+            "learn",
+            "outcome",
+            "chat",
+            "context",
+            "projects",
+        ],
     ),
     (
         "Wiring and advanced",

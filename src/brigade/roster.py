@@ -387,12 +387,12 @@ def resolve_roster_path(target: Path, explicit: Path | None = None) -> Path:
     return resolve_roster(target, explicit).path
 
 
-def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Roster:
+def load_roster(path: Path, *, resolution: RosterResolution | None = None, text: str | None = None) -> Roster:
     path = path.expanduser().resolve()
-    if not path.exists():
+    if text is None and not path.exists():
         raise FileNotFoundError(f"roster not found: {path}")
 
-    data = toml_compat.loads(path.read_text())
+    data = toml_compat.loads(text if text is not None else path.read_text())
     if not isinstance(data, dict):
         raise ValueError("roster must be a TOML table")
 
