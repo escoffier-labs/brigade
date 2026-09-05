@@ -36,6 +36,7 @@ ACTOR_KINDS = frozenset({"feed", "control", "operator", "implementation-worker",
 ARTIFACT_KINDS = frozenset({"draft-pr", "branch", "report"})
 WORK_STATES = frozenset({"queued", "claimed", "running"})
 TERMINAL_STATES = frozenset({"completed", "failed", "expired", "canceled"})
+IDEMPOTENT_ENQUEUE_REPLAY_STATES = frozenset({"completed", "expired", "canceled"})
 HUB_STATES = WORK_STATES | TERMINAL_STATES
 CREATE_ACTIONS = frozenset({"enqueue"})
 OPERATOR_ACTIONS = frozenset({"list", "status", "whoami", "cancel", "expire", "report-metadata"})
@@ -315,14 +316,19 @@ def handle_grokbot(
     try:
         replayed, mismatch = _replay_operation(conn, request)
         if mismatch:
-            conn.rollback()
-            return 409, {_result_flag(action): False, "error": "operation-mismatch"}
+            recovered = _terminal_enqueue_replay(conn, request, policy) if action == "enqueue" else None
+            if recovered is None:
+                conn.rollback()
+                return 409, {_result_flag(action): False, "error": "operation-mismatch"}
+            conn.commit()
+            return 200, recovered
         if replayed is not None:
             if action == "enqueue":
                 current = _require_job(conn, request["job_id"])
                 if current.get("queue_id") != policy["queue_id"]:
                     conn.rollback()
                     raise FleetHubForbidden("job is outside this actor's queue")
+                replayed = {**replayed, "idempotent": True, "job": _job_payload(current)}
             else:
                 current = _scoped_job(conn, request["job_id"], policy)
                 if action in LEASE_ACTIONS or action == "claim":
@@ -538,6 +544,34 @@ def _scoped_job(conn: sqlite3.Connection, job_id: str, policy: dict[str, Any]) -
     if policy["actor_kind"] in ROLE_VALUES and job["role"] != policy["role"]:
         raise FleetHubForbidden("job is outside this actor's role")
     return job
+
+
+def _terminal_enqueue_replay(
+    conn: sqlite3.Connection, request: dict[str, Any], policy: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Replay enqueue of a finished job when the stored operation digest drifted.
+
+    Completing, expiring, or canceling a job does not consume its idempotency
+    key. A later ``feed --apply`` of the same manifest must skip that row as
+    ``idempotent: true`` and keep walking. Additive request fields (for example
+    ``queue_ttl_seconds`` after #1409) change the stored enqueue digest and
+    would otherwise 409 ``operation-mismatch`` before ``_enqueue`` can see the
+    existing row. Queued and failed rows keep the mismatch refusal.
+    """
+    existing = conn.execute(
+        f"SELECT {_JOB_COLUMNS} FROM grokbot_jobs WHERE idempotency_key_hash = ?",
+        (request["idempotency_key_hash"],),
+    ).fetchone()
+    if existing is None:
+        return None
+    job = _job_dict(existing)
+    if job.get("queue_id") != policy["queue_id"] or job.get("owner_node") != policy["queue_owner_node_id"]:
+        return None
+    if job["state"] not in IDEMPOTENT_ENQUEUE_REPLAY_STATES:
+        return None
+    if job["task_digest"] != request["task_digest"] or job["job_id"] != request["job_id"]:
+        return None
+    return {"enqueued": True, "idempotent": True, "job": _job_payload(job)}
 
 
 def _enqueue(conn: sqlite3.Connection, request: dict[str, Any], policy: dict[str, Any]) -> tuple[int, dict[str, Any]]:

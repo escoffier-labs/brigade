@@ -49,10 +49,40 @@ WORKER_FALLBACK_DONE_PREDICATE = "Implement only the approved issue"
 class FeedError(ValueError):
     """A rejected feed request with a stable machine-readable reason."""
 
-    def __init__(self, reason: str, index: int | None = None):
-        self.reason = reason
+    def __init__(self, reason: str, index: int | None = None, *, detail: str | None = None):
         self.index = index
+        self.detail = detail
+        if detail is not None:
+            reason = f"{reason} index={index} {detail}" if index is not None else f"{reason} {detail}"
+        self.reason = reason
         super().__init__(reason)
+
+
+# Hub refusals the Fleet Hub client already bounded. Safe to name on stderr.
+_BOUNDED_HUB_QUEUE_REASONS = frozenset(
+    {
+        "invalid-request",
+        "invalid-artifact",
+        "invalid-state",
+        "refused",
+        "revision-conflict",
+        "operation-mismatch",
+        "lease-conflict",
+        "lease-expired",
+        "job-expired",
+        "idempotency-conflict",
+        "auth-failed",
+        "missing-digest",
+        "digest-mismatch",
+    }
+)
+
+
+def _queue_error(exc: grokbot_jobs.GrokbotJobError, index: int) -> FeedError:
+    """Translate a queue failure, naming only hub-bounded refusal reasons."""
+    if exc.reason in _BOUNDED_HUB_QUEUE_REASONS:
+        return FeedError("queue-error", index=index, detail=exc.reason)
+    return FeedError("queue-error", index=index)
 
 
 def worker_instructions(*, header: str, issue_number: int, base_ref: str, verification_commands: list[str]) -> str:
@@ -117,6 +147,8 @@ def apply(target: Path, manifest: Path, limit: int = DEFAULT_LIMIT) -> dict[str,
             handle = grokbot_jobs.enqueue(target, spec, key)
         except (KeyboardInterrupt, SystemExit):
             raise
+        except grokbot_jobs.GrokbotJobError as exc:
+            raise _queue_error(exc, index) from exc
         except Exception as exc:
             raise FeedError("queue-error", index=index) from exc
         jobs.append(
