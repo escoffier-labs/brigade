@@ -43,7 +43,7 @@ def parse_cosign_version(output: str) -> tuple[int, int, int]:
     output_str = output.strip()
     raw_ver: str | None = None
     try:
-        data = attestation_input.strict_json_loads(output_str)
+        data = json.loads(output_str)
         if isinstance(data, Mapping):
             val = data.get("gitVersion") or data.get("GitVersion")
             if val is not None:
@@ -122,10 +122,10 @@ def require_safe_cosign(binary: str | None = None) -> tuple[str, tuple[int, int,
 
 def validate_bundle(bundle: Mapping[str, Any], statement: Mapping[str, Any]) -> dict[str, Any]:
     try:
-        attestation_input.validate_json_value(bundle)
-        attestation_input.validate_json_value(statement)
+        bundle = attestation_input.validate_json_value(bundle)
+        statement = attestation_input.validate_json_value(statement)
     except attestation_input.AttestationInputError as exc:
-        raise CosignAttestationError(f"invalid cosign bundle input: {exc}") from exc
+        raise CosignAttestationError("invalid cosign bundle input") from exc
     if not isinstance(bundle, Mapping):
         raise CosignAttestationError("cosign bundle must be a JSON object")
 
@@ -209,7 +209,7 @@ def validate_bundle(bundle: Mapping[str, Any], statement: Mapping[str, Any]) -> 
             max_bytes=attestation_input.MAX_PAYLOAD_BYTES,
         )
     except attestation_input.AttestationInputError as exc:
-        raise CosignAttestationError(f"dsseEnvelope payload is not valid JSON: {exc}") from exc
+        raise CosignAttestationError("dsseEnvelope payload is not valid JSON") from exc
 
     if not isinstance(decoded_statement, Mapping):
         raise CosignAttestationError("dsseEnvelope payload JSON must be an object")

@@ -606,7 +606,11 @@ def verify_attestation(
         run_ref = pred.get("run")
         if run_id is None and isinstance(run_ref, Mapping):
             run_id_candidate = run_ref.get("id")
-            if isinstance(run_id_candidate, str) and re.fullmatch(r"[A-Za-z0-9._-]+", run_id_candidate):
+            if (
+                isinstance(run_id_candidate, str)
+                and re.fullmatch(r"[A-Za-z0-9._-]+", run_id_candidate)
+                and run_id_candidate not in (".", "..")
+            ):
                 run_id = run_id_candidate
 
     # 3. Recompute DSSE PAE

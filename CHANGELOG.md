@@ -12,7 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   duplicate-name, non-finite, malformed-Unicode, over-nested, and cyclic JSON
   inputs before signature processing. DSSE accepts both standard and URL-safe
   base64 alphabets under bounded decoded payload and signature sizes, and file
-  reads use no-follow regular-file descriptors.
+  reads use no-follow regular-file descriptors. Mapping inputs are copied into
+  bounded plain JSON snapshots before use, and dot-only fallback attestation
+  run IDs are discarded.
 - `brigade center report build` rotates old operator report directories automatically under `.brigade/center/reports/` into `reports-archive/` according to retention (default keep newest 20, configurable via `operator_report_retention` in `.brigade/daily.toml` alongside `allow_operator_report_build` or CLI flag `--keep N`), caps `reports-archive/` to the same retention count by deleting the oldest archived directories, never rotates unclosed reports, and supports `--dry-run` to preview rotation without deleting or moving bundles. Fixes #1415.
 - Fixed timing flakes in tests `test_release_with_renew_in_flight_never_resurrects` and `test_concurrent_edge_writes_do_not_lose_dependency_edges`. (#1396)
 

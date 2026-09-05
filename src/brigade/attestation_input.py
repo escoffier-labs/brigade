@@ -29,10 +29,48 @@ class AttestationInputError(ValueError):
 
 
 def _require_unicode_scalars(value: str, *, label: str) -> None:
+    if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+        raise AttestationInputError(f"{label} contains invalid Unicode scalars")
+
+
+def _bounded_utf8_size(value: str, *, limit: int, label: str) -> int:
+    """Measure UTF-8 bytes without allocating an encoded copy beyond a limit."""
+    size = 0
+    for char in value:
+        codepoint = ord(char)
+        if 0xD800 <= codepoint <= 0xDFFF:
+            raise AttestationInputError(f"{label} contains invalid Unicode scalars")
+        size += 1 if codepoint <= 0x7F else 2 if codepoint <= 0x7FF else 3 if codepoint <= 0xFFFF else 4
+        if size > limit:
+            raise AttestationInputError("JSON document exceeds byte limit")
+    return size
+
+
+def _bounded_json_string_size(value: str, *, limit: int, label: str) -> int:
+    """Measure JSON string bytes before serializing an untrusted scalar."""
+    size = 2
+    if size > limit:
+        raise AttestationInputError("JSON document exceeds byte limit")
+    for char in value:
+        codepoint = ord(char)
+        if 0xD800 <= codepoint <= 0xDFFF:
+            raise AttestationInputError(f"{label} contains invalid Unicode scalars")
+        if char in {'"', "\\"} or char in {"\b", "\t", "\n", "\f", "\r"}:
+            size += 2
+        elif codepoint <= 0x1F:
+            size += 6
+        else:
+            size += 1 if codepoint <= 0x7F else 2 if codepoint <= 0x7FF else 3 if codepoint <= 0xFFFF else 4
+        if size > limit:
+            raise AttestationInputError("JSON document exceeds byte limit")
+    return size
+
+
+def _dump_json_scalar(value: Any) -> str:
     try:
-        value.encode("utf-8", "strict")
-    except UnicodeEncodeError as exc:
-        raise AttestationInputError(f"{label} contains invalid Unicode scalars") from exc
+        return json.dumps(value, allow_nan=False, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise AttestationInputError("JSON value cannot be serialized") from exc
 
 
 def _check_container_depth(text: str) -> None:
@@ -62,7 +100,7 @@ def _duplicate_rejecting_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise AttestationInputError(f"JSON contains duplicate property name {key!r}")
+            raise AttestationInputError("JSON contains duplicate property names")
         result[key] = value
     return result
 
@@ -72,7 +110,7 @@ def _reject_constant(value: str) -> None:
 
 
 def validate_json_value(value: Any) -> Any:
-    """Validate a Python value under the JSON input contract without rewriting it."""
+    """Validate and snapshot a Python value under the JSON input contract."""
     nodes = 0
     encoded_bytes = 0
     active: set[int] = set()
@@ -83,65 +121,77 @@ def validate_json_value(value: Any) -> Any:
         if encoded_bytes > MAX_JSON_BYTES:
             raise AttestationInputError("JSON document exceeds byte limit")
 
-    def visit(item: Any, *, label: str) -> None:
+    def reserve_json_string(item: str, *, label: str) -> None:
+        _bounded_json_string_size(item, limit=MAX_JSON_BYTES - encoded_bytes, label=label)
+        reserve_json_bytes(_dump_json_scalar(item))
+
+    def visit(item: Any, *, label: str, depth: int) -> Any:
         nonlocal nodes
         nodes += 1
         if nodes > MAX_JSON_NODES:
             raise AttestationInputError("JSON value node count exceeds limit")
         if item is None or isinstance(item, bool):
-            reserve_json_bytes(json.dumps(item, separators=(",", ":")))
-            return
+            reserve_json_bytes("null" if item is None else "true" if item else "false")
+            return item
         if isinstance(item, str):
-            _require_unicode_scalars(item, label=label)
-            reserve_json_bytes(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
-            return
+            reserve_json_string(item, label=label)
+            return item
         if isinstance(item, int):
-            reserve_json_bytes(json.dumps(item, separators=(",", ":")))
-            return
+            minimum_digits = ((max(item.bit_length() - 1, 0) * 30_102) // 100_000) + 1
+            if minimum_digits + (1 if item < 0 else 0) > MAX_JSON_BYTES - encoded_bytes:
+                raise AttestationInputError("JSON document exceeds byte limit")
+            reserve_json_bytes(_dump_json_scalar(item))
+            return item
         if isinstance(item, float):
             if not math.isfinite(item):
                 raise AttestationInputError("JSON number is not finite")
-            reserve_json_bytes(json.dumps(item, allow_nan=False, separators=(",", ":")))
-            return
+            reserve_json_bytes(_dump_json_scalar(item))
+            return item
         if isinstance(item, Mapping):
+            container_depth = depth + 1
+            if container_depth > MAX_JSON_DEPTH:
+                raise AttestationInputError("JSON nesting depth exceeds limit")
             identity = id(item)
             if identity in active:
                 raise AttestationInputError("JSON mapping contains a cycle")
             active.add(identity)
             try:
                 reserve_json_bytes("{")
+                mapping_snapshot: dict[str, Any] = {}
                 for index, (key, child) in enumerate(item.items()):
                     if not isinstance(key, str):
                         raise AttestationInputError("JSON mapping keys must be strings")
-                    _require_unicode_scalars(key, label="JSON mapping key")
                     if index:
                         reserve_json_bytes(",")
-                    reserve_json_bytes(json.dumps(key, ensure_ascii=False, separators=(",", ":")))
+                    reserve_json_string(key, label="JSON mapping key")
                     reserve_json_bytes(":")
-                    visit(child, label="JSON value")
+                    mapping_snapshot[key] = visit(child, label="JSON value", depth=container_depth)
                 reserve_json_bytes("}")
             finally:
                 active.remove(identity)
-            return
+            return mapping_snapshot
         if isinstance(item, list):
+            container_depth = depth + 1
+            if container_depth > MAX_JSON_DEPTH:
+                raise AttestationInputError("JSON nesting depth exceeds limit")
             identity = id(item)
             if identity in active:
                 raise AttestationInputError("JSON array contains a cycle")
             active.add(identity)
             try:
                 reserve_json_bytes("[")
+                array_snapshot: list[Any] = []
                 for index, child in enumerate(item):
                     if index:
                         reserve_json_bytes(",")
-                    visit(child, label="JSON value")
+                    array_snapshot.append(visit(child, label="JSON value", depth=container_depth))
                 reserve_json_bytes("]")
             finally:
                 active.remove(identity)
-            return
+            return array_snapshot
         raise AttestationInputError(f"JSON value has unsupported type {type(item).__name__}")
 
-    visit(value, label="JSON value")
-    return value
+    return visit(value, label="JSON value", depth=0)
 
 
 def strict_json_loads(source: str | bytes, *, max_bytes: int = MAX_JSON_BYTES) -> Any:
@@ -154,10 +204,7 @@ def strict_json_loads(source: str | bytes, *, max_bytes: int = MAX_JSON_BYTES) -
         except UnicodeDecodeError as exc:
             raise AttestationInputError("JSON document is not valid UTF-8") from exc
     elif isinstance(source, str):
-        _require_unicode_scalars(source, label="JSON document")
-        raw = source.encode("utf-8", "strict")
-        if len(raw) > max_bytes:
-            raise AttestationInputError("JSON document exceeds byte limit")
+        _bounded_utf8_size(source, limit=max_bytes, label="JSON document")
         text = source
     else:
         raise AttestationInputError("JSON document must be text or bytes")
@@ -169,7 +216,9 @@ def strict_json_loads(source: str | bytes, *, max_bytes: int = MAX_JSON_BYTES) -
             object_pairs_hook=_duplicate_rejecting_object,
             parse_constant=_reject_constant,
         )
-    except (json.JSONDecodeError, RecursionError) as exc:
+    except AttestationInputError:
+        raise
+    except (json.JSONDecodeError, RecursionError, ValueError) as exc:
         raise AttestationInputError("JSON document is invalid") from exc
     return validate_json_value(value)
 
@@ -207,11 +256,16 @@ def decode_dsse_base64(value: str, *, label: str, max_bytes: int) -> bytes:
     """Strictly decode standard or URL-safe DSSE base64."""
     if not isinstance(value, str):
         raise AttestationInputError(f"{label} must be a base64 string")
+    max_encoded_bytes = ((max_bytes + 2) // 3) * 4
+    if len(value) > max_encoded_bytes:
+        raise AttestationInputError(f"{label} exceeds decoded byte limit")
     try:
         encoded = value.encode("ascii")
     except UnicodeEncodeError as exc:
         raise AttestationInputError(f"{label} is not valid base64") from exc
     if not _BASE64_RE.fullmatch(value):
+        raise AttestationInputError(f"{label} is not valid base64")
+    if (b"+" in encoded or b"/" in encoded) and (b"-" in encoded or b"_" in encoded):
         raise AttestationInputError(f"{label} is not valid base64")
     if len(encoded) % 4:
         raise AttestationInputError(f"{label} is not valid base64")
