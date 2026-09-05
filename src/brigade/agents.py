@@ -7,11 +7,13 @@ does not store provider keys or import provider SDKs.
 from __future__ import annotations
 
 import functools
+import hashlib
 import inspect
 import json
 import os
 import re
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -651,7 +653,19 @@ def _oracle_supports_browser_engine(
 
 
 _ANTIGRAVITY_PRINT_TIMEOUT_HELP = "--print-timeout"
-_ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED: dict[tuple[str, tuple[tuple[str, str], ...]], bool] = {}
+_ANTIGRAVITY_PRINT_TIMEOUT_CACHE_LIMIT = 16
+_ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED: OrderedDict[tuple[str, str], bool] = OrderedDict()
+
+
+def _antigravity_env_fingerprint(env: dict[str, str] | None) -> str:
+    """Return a non-reversible fingerprint for an environment dict.
+
+    The fingerprint is a SHA-256 hex digest of a deterministic JSON encoding of
+    the sorted env items.  No env keys or values are retained in the returned
+    value, and ``env=None`` is treated as an empty environment.
+    """
+    items = sorted(env.items()) if env is not None else []
+    return hashlib.sha256(json.dumps(items, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _antigravity_supports_print_timeout(
@@ -660,8 +674,14 @@ def _antigravity_supports_print_timeout(
     env: dict[str, str] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
 ) -> bool:
-    """Whether this Antigravity executable advertises --print-timeout in agy --help."""
-    cache_key = (executable, tuple(sorted(env.items())) if env is not None else ())
+    """Whether this Antigravity executable advertises --print-timeout in agy --help.
+
+    Probes are cached per (executable, environment fingerprint) and bounded to
+    ``_ANTIGRAVITY_PRINT_TIMEOUT_CACHE_LIMIT`` entries.  The cache stores only
+    the executable string and a SHA-256 hex digest of the environment; it never
+    retains env keys or values.
+    """
+    cache_key = (executable, _antigravity_env_fingerprint(env))
     if cache_key in _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED:
         return _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED[cache_key]
     result = proc.run(
@@ -675,6 +695,8 @@ def _antigravity_supports_print_timeout(
     else:
         combined = "\n".join((result.stdout, result.stderr))
         supported = _ANTIGRAVITY_PRINT_TIMEOUT_HELP in combined
+    if len(_ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED) >= _ANTIGRAVITY_PRINT_TIMEOUT_CACHE_LIMIT:
+        _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED.popitem(last=False)
     _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED[cache_key] = supported
     return supported
 

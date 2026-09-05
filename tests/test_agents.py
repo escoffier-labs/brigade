@@ -543,6 +543,54 @@ def test_antigravity_supports_print_timeout_probe(monkeypatch):
     assert agents._antigravity_supports_print_timeout() is False
 
 
+def test_antigravity_supports_print_timeout_cache_does_not_retain_environment_values(monkeypatch):
+    if hasattr(agents, "_clear_antigravity_print_timeout_cache"):
+        agents._clear_antigravity_print_timeout_cache()
+    elif hasattr(agents._antigravity_supports_print_timeout, "cache_clear"):
+        agents._antigravity_supports_print_timeout.cache_clear()
+
+    sentinel = "SECRET-VALUE-123"
+    env = {"PATH": "/seat/bin", "AGY_SECRET": sentinel}
+
+    def stub_run(argv, **kwargs):
+        return agents.proc.Result(
+            0,
+            "Usage: agy [options]\n  --print-timeout <duration>  timeout for print mode\n",
+            "",
+        )
+
+    monkeypatch.setattr(agents.proc, "run", stub_run)
+    agents._antigravity_supports_print_timeout("/seat/bin/agy", env=env)
+
+    cache_repr = repr(agents._ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED)
+    assert sentinel not in cache_repr
+
+
+def test_antigravity_supports_print_timeout_cache_bounds_to_sixteen_entries(monkeypatch):
+    if hasattr(agents, "_clear_antigravity_print_timeout_cache"):
+        agents._clear_antigravity_print_timeout_cache()
+    elif hasattr(agents._antigravity_supports_print_timeout, "cache_clear"):
+        agents._antigravity_supports_print_timeout.cache_clear()
+
+    calls = []
+
+    def stub_run(argv, **kwargs):
+        calls.append(argv[0])
+        return agents.proc.Result(0, "Usage: agy [options]\n  --print-timeout <duration>\n", "")
+
+    monkeypatch.setattr(agents.proc, "run", stub_run)
+
+    for i in range(17):
+        assert agents._antigravity_supports_print_timeout(f"/agy/{i}", env={"PATH": "/bin"}) is True
+
+    assert len(calls) == 17
+    assert len(agents._ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED) == 16
+
+    # The first executable should have been evicted, so probing it again re-runs.
+    assert agents._antigravity_supports_print_timeout("/agy/0", env={"PATH": "/bin"}) is True
+    assert len(calls) == 18
+
+
 def test_build_argv_cursor_sandbox_read_only_uses_plan_mode():
     assert agents.build_argv("cursor", "hi", sandbox="read-only") == [
         "cursor-agent",
