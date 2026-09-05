@@ -325,10 +325,8 @@ def _test_name(cmd: Mapping[str, Any]) -> str:
 def build_statement(receipt: Mapping[str, Any] | attestation_receipt.ReceiptSnapshot) -> dict[str, Any]:
     """Build an in-toto Statement v1 with Test Result v0.1 predicate from a verify receipt."""
     try:
-        snapshot = (
-            receipt
-            if isinstance(receipt, attestation_receipt.ReceiptSnapshot)
-            else attestation_receipt.snapshot_receipt(receipt)
+        snapshot = attestation_receipt.snapshot_receipt(
+            receipt.receipt if isinstance(receipt, attestation_receipt.ReceiptSnapshot) else receipt
         )
     except attestation_receipt.ReceiptDigestError as exc:
         raise AttestationExportError(f"cannot export attestation: {exc}") from exc

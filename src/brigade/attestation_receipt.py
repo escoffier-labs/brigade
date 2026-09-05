@@ -110,6 +110,8 @@ def load_selected_receipt(target: Path, run_id: str) -> SelectedReceipt:
                 continue
             if run_id != "latest" and not candidate_run_id.startswith(run_id):
                 continue
+            if run_id != "latest" and selected_order is not None:
+                raise ReceiptSelectionError(f"verification run id is ambiguous: {run_id}")
             order = (str(receipt.get("started_at") or candidate_run_id), candidate_run_id)
             if selected_order is None or order > selected_order:
                 selected_receipt = receipt
@@ -125,14 +127,20 @@ def load_selected_receipt(target: Path, run_id: str) -> SelectedReceipt:
 
 def _read_receipt(path: Path, scanned_bytes: int) -> tuple[dict[str, Any], int]:
     try:
-        size = path.stat().st_size
+        data = attestation_input.read_bounded_file(path, max_bytes=attestation_input.MAX_JSON_BYTES)
+    except attestation_input.AttestationInputError as exc:
+        if "exceeds byte limit" in str(exc):
+            raise ReceiptSelectionError("verification receipt exceeds byte limit") from exc
+        raise ReceiptSelectionError("verification receipt is invalid") from exc
     except OSError as exc:
         raise ReceiptSelectionError("verification receipt is not readable") from exc
-    if size > attestation_input.MAX_JSON_BYTES:
-        raise ReceiptSelectionError("verification receipt exceeds byte limit")
-    if scanned_bytes + size > MAX_RECEIPT_SCAN_BYTES:
+    scanned_bytes += len(data)
+    if scanned_bytes > MAX_RECEIPT_SCAN_BYTES:
         raise ReceiptSelectionError("verification receipt scan exceeds byte limit")
     try:
-        return attestation_input.read_json_object(path), scanned_bytes + size
+        value = attestation_input.strict_json_loads(data, max_bytes=attestation_input.MAX_JSON_BYTES)
     except attestation_input.AttestationInputError as exc:
         raise ReceiptSelectionError("verification receipt is invalid") from exc
+    if not isinstance(value, dict):
+        raise ReceiptSelectionError("verification receipt is invalid")
+    return value, scanned_bytes

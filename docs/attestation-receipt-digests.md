@@ -15,11 +15,20 @@ digestless exports compatible. Approval evidence still requires a stored
 digest and is not changed by this slice.
 
 The export command strictly parses receipts for exact IDs, prefixes, and
-`latest`. It reads no more than 4,096 entries from the verify-runs directory,
-no more than 32 MiB of receipt data in a scan, and no more than 8 MiB per
-receipt. The selected receipt directory is output-placement metadata, not a
-synthetic `path` field in the receipt JSON. A malformed direct receipt is
-refused without falling back to a different prefix match.
+`latest`. Exact IDs and a single unambiguous prefix match resolve; a prefix
+that matches more than one receipt run ID raises an ambiguity error. It reads
+no more than 4,096 entries from the verify-runs directory, no more than 32 MiB
+of receipt data in a scan, and no more than 8 MiB per receipt. The scan budget
+counts bytes actually read from each receipt file, not the stat size. The
+selected receipt directory is output-placement metadata, not a synthetic `path`
+field in the receipt JSON. A malformed direct receipt is refused without falling
+back to a different prefix match.
+
+Statement construction always re-derives the plain receipt snapshot and its
+digest from the mapping it is given at call time, even when the caller passes
+a `ReceiptSnapshot`. It does not rely on a cached digest for signed evidence, so
+mutating the receipt mapping between snapshot creation and statement
+construction is detected instead of silently emitted as a stale subject digest.
 
 The loader uses a target-relative pathname and a no-follow final receipt-file
 read. It does not retain no-follow descriptors for every ancestor directory,

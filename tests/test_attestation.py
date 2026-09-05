@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from brigade import attestation, cli, localio
+from brigade import attestation, attestation_receipt, cli, localio
 from tests.support import PRIVATE_FILE_MODE, assert_private_mode
 
 if not shutil.which("ssh-keygen"):
@@ -152,6 +152,15 @@ def test_export_refuses_a_stale_stored_receipt_digest(tmp_path: Path) -> None:
 
     with pytest.raises(attestation.AttestationExportError, match="receipt digest does not match"):
         attestation.export_attestation(receipt, key_path=key_path)
+
+
+def test_build_statement_rederives_digest_from_mapping_even_when_given_snapshot(tmp_path: Path) -> None:
+    receipt = _sample_receipt(tmp_path)
+    snapshot = attestation_receipt.snapshot_receipt(receipt)
+    snapshot.receipt["path"] = str(tmp_path / "tampered" / "receipt")
+
+    with pytest.raises(attestation.AttestationExportError, match="receipt digest does not match"):
+        attestation.build_statement(snapshot)
 
 
 def test_cli_export_refuses_a_stale_stored_receipt_digest(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
