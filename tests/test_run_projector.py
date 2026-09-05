@@ -92,6 +92,11 @@ def _full_base_snapshot() -> dict:
         "roster": "roster-id",
         "worker": "worker-id",
         "scheduler": "immediate",
+        "requester_keyid": "requester-keyid",
+        "request": {
+            "task": "task-id",
+            "options": {"priority": "normal"},
+        },
         "dry_run": False,
         "read_only": False,
         "cwd": "/tmp",
@@ -551,7 +556,7 @@ def test_dataclasses_replace_mutation_of_typed_run_event_raises_event_chain_erro
 
 def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     base = _full_base_snapshot()
-    assert len(PRESERVED_FIELDS) == 66
+    assert len(PRESERVED_FIELDS) == 68
     assert DERIVED_FIELDS == {
         "status",
         "projector_version",
@@ -584,6 +589,7 @@ def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     assert projection.snapshot["code_graph_brief"] is not base["code_graph_brief"]
     assert projection.snapshot["approval_reference"] is not base["approval_reference"]
     assert projection.snapshot["cloud_environment"] is not base["cloud_environment"]
+    assert projection.snapshot["request"] is not base["request"]
     assert set(projection.snapshot.keys()) <= OWNED_FIELDS
 
 
