@@ -47,6 +47,25 @@ def _allowed_signers_path(target: Path) -> Path:
     return attestation.default_allowed_signers_path(target)
 
 
+def _path_is_under_target(path: Path, target: Path) -> bool:
+    """Return True if path is under target and no intermediate component is a symlink."""
+    try:
+        resolved_target = target.resolve()
+        current = path
+        while current != resolved_target:
+            if not current.is_relative_to(resolved_target):
+                return False
+            if current.is_symlink():
+                return False
+            parent = current.parent
+            if parent == current:
+                return False
+            current = parent
+        return path.resolve().is_relative_to(resolved_target)
+    except OSError:
+        return False
+
+
 def _load_envelope(path: Path) -> tuple[dict[str, Any] | None, str]:
     if path.is_symlink() or not path.is_file():
         return None, "missing"
@@ -88,6 +107,7 @@ def _classify_signature_status(status: str | None) -> str:
         attestation.STATUS_SIGNATURE_MISMATCH,
         attestation.STATUS_SUBJECT_MISMATCH,
         attestation.STATUS_EVIDENCE_MISSING,
+        attestation.STATUS_UNTRUSTED_KEY,
     }:
         return "invalid"
     return "unverifiable"
@@ -303,7 +323,7 @@ def _reference_locator_to_path(
         if sub.is_symlink() or not sub.is_dir():
             return None, "symlink-refused"
         path = sub / "attestation.json"
-        if path.is_symlink() or not path.is_file():
+        if path.is_symlink() or not path.is_file() or not _path_is_under_target(path, target):
             return None, "symlink-refused"
         return path, None
     m = _RUN_ARTIFACT_RE.fullmatch(locator)
@@ -323,7 +343,7 @@ def _reference_locator_to_path(
         if dir_path.is_symlink() or not dir_path.is_dir():
             return None, "symlink-refused"
         path = dir_path / f"{nonce}.json"
-        if path.is_symlink() or not path.is_file():
+        if path.is_symlink() or not path.is_file() or not _path_is_under_target(path, target):
             return None, "symlink-refused"
         return path, None
     return None, "malformed-locator"
@@ -618,17 +638,19 @@ def _overall_status(
 ) -> str:
     if index.get("syntax") == "malformed" or index.get("signature") == "unverifiable" or policy_status == "unavailable":
         return "UNVERIFIABLE"
-    if index.get("signature") == "invalid" or policy_status == "mismatch" or project_status == "mismatch":
+    if index.get("signature") == "invalid":
         return "INVALID"
     if index.get("trust") != "trusted" or index.get("binding") != "bound":
-        return "INVALID"
-    if index.get("policy") != "match":
         return "INVALID"
     for req in required_set:
         if req.get("status") != "satisfied":
             return "INCOMPLETE"
+    if policy_status == "mismatch" or project_status == "mismatch":
+        return "INVALID"
+    if index.get("policy") != "match":
+        return "INVALID"
     for ref in references:
-        if ref.get("kind") == "test-result" and ref.get("policy_outcome") == "fail":
+        if ref.get("policy_outcome") == "fail":
             return "INVALID"
     return "COMPLETE-OK"
 

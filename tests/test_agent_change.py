@@ -1147,31 +1147,19 @@ def test_emitter_records_receipt_digest_invalid(
     key_path = _keygen(target)
     agent_change.init_policy(target)
     run_dir = _run_dir(target, "run-001", "1111111111111111111111111111111111111111")
-    verify_dir = target / ".brigade" / "work" / "verify-runs" / "verify-001"
-    verify_dir.mkdir(parents=True)
-    bad_receipt = {
-        "schema_version": 2,
-        "run_id": "verify-001",
-        "target": str(target / "workspace"),
-        "status": "completed",
-        "started_at": "2026-09-06T12:00:00.000000Z",
-        "completed_at": "2026-09-06T12:00:05.000000Z",
-        "duration_seconds": 5.0,
-        "path": str(verify_dir),
-        "baseline_commit": "2222222222222222222222222222222222222222",
-        "tree_fingerprint": "1111111111111111111111111111111111111111",
-        "changes_patch_sha256": "3" * 64,
-        "producer_run_id": "run-001",
-        "commands": [],
-    }
+    verify_dir = _test_result_envelope(
+        target,
+        run_dir,
+        key_path,
+        "verify-001",
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+        "3" * 64,
+    )
+    # Corrupt the receipt digest so snapshotting fails, leaving the attestation envelope intact.
+    bad_receipt = json.loads((verify_dir / "receipt.json").read_text(encoding="utf-8"))
     bad_receipt["digests"] = {"algorithm": "sha256", "receipt_sha256": "bad"}
     (verify_dir / "receipt.json").write_text(json.dumps(bad_receipt, indent=2, sort_keys=True), encoding="utf-8")
-    statement = attestation.build_statement(bad_receipt)
-    statement["predicate"]["result"] = "PASSED"
-    (verify_dir / "attestation.json").write_text(
-        json.dumps(attestation.create_envelope(statement, key_path), indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
     statement = agent_change.build_statement(target, run_dir.name)
     test_refs = [r for r in statement["predicate"]["references"] if r["kind"] == "test-result"]
     assert any(r.get("reason") == "receipt-digest-invalid" for r in test_refs)
@@ -1223,8 +1211,6 @@ def test_verifier_no_cycle_rule_for_approval_with_non_tree_subject(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     target, run_dir, key_path, _req = _build_full_run(tmp_path)
-    cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name, "--force"])
-    capsys.readouterr()
     # Inject an approval whose subject names an agent-change payload digest instead of a git tree.
     bad_nonce = "09090909090909090909090909090909"
     bad_statement = {
@@ -1252,6 +1238,9 @@ def test_verifier_no_cycle_rule_for_approval_with_non_tree_subject(
         json.dumps(attestation.create_envelope(bad_statement, key_path), indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    # Re-export so the bad approval is included in the index references.
+    cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name, "--force"])
+    capsys.readouterr()
     result = cli.main(["receipts", "verify-agent-change", str(run_dir), "--target", str(target), "--json"])
     assert result != 0
     out = json.loads(capsys.readouterr().out)
