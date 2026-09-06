@@ -287,7 +287,7 @@ def test_resolve_canonicalizes_existing_checkout_and_rejects_git_urls(monkeypatc
             "--consumer",
             "t3-code",
             "--repo",
-            "https://user:super-secret-token@github.com/example/brigade.git",
+            "https://user:super-secret-token@github.com/example/brigade.git",  # content-guard: allow email
             "--session-id",
             "session-1",
             "--origin",

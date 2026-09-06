@@ -7,7 +7,7 @@ operator credential, no live provider probe: the provider inventory is a static
 injected snapshot so the page's ``available`` / ``retired`` / ``policy-blocked``
 / ``missing`` / ``unavailable`` states can all be seen without a login.
 
-    python tests/fixtures/fleet_policy_ui_server.py --port 8931
+    python tests/fixtures/fleet_policy_ui_server.py --port PORT
 
 Then open the printed URL. ``--inventory unavailable`` shows the honest
 degraded path where no snapshot could be read.
