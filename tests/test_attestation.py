@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from brigade import attestation, cli
+from brigade import attestation, attestation_receipt, cli, localio
 from tests.support import PRIVATE_FILE_MODE, assert_private_mode
 
 if not shutil.which("ssh-keygen"):
@@ -31,7 +31,7 @@ def _sample_receipt(
 ) -> dict[str, Any]:
     run_id = "20260902-120000-work-verify-xyz12345"
     run_dir = tmp_path / ".brigade" / "work" / "verify-runs" / run_id
-    return {
+    receipt = {
         "schema_version": 2,
         "run_id": run_id,
         "target": str(tmp_path / "workspace" / "secret_project"),
@@ -60,9 +60,15 @@ def _sample_receipt(
         ],
         "digests": {
             "algorithm": "sha256",
-            "receipt_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "receipt_sha256": "",
         },
     }
+    receipt["digests"]["receipt_sha256"] = localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    return receipt
+
+
+def _restamp_receipt(receipt: dict[str, Any]) -> None:
+    receipt["digests"]["receipt_sha256"] = localio.canonical_json_digest(receipt, exclude_keys={"digests"})
 
 
 def test_keygen_writes_private_key_and_allowed_signers_entry(tmp_path: Path) -> None:
@@ -139,12 +145,50 @@ def test_export_from_completed_receipt_produces_identical_payload_without_leakag
     }
 
 
+def test_export_refuses_a_stale_stored_receipt_digest(tmp_path: Path) -> None:
+    key_path, _signers_path = attestation.keygen(tmp_path, principal="alice-signer")
+    receipt = _sample_receipt(tmp_path)
+    receipt["path"] = str(tmp_path / "moved" / "receipt")
+
+    with pytest.raises(attestation.AttestationExportError, match="receipt digest does not match"):
+        attestation.export_attestation(receipt, key_path=key_path)
+
+
+def test_build_statement_rederives_digest_from_mapping_even_when_given_snapshot(tmp_path: Path) -> None:
+    receipt = _sample_receipt(tmp_path)
+    snapshot = attestation_receipt.snapshot_receipt(receipt)
+    snapshot.receipt["path"] = str(tmp_path / "tampered" / "receipt")
+
+    with pytest.raises(attestation.AttestationExportError, match="receipt digest does not match"):
+        attestation.build_statement(snapshot)
+
+
+def test_cli_export_refuses_a_stale_stored_receipt_digest(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    attestation.keygen(tmp_path, principal="alice-signer")
+    receipt = _sample_receipt(tmp_path)
+    receipt["path"] = str(tmp_path / "moved" / "receipt")
+    receipt_path = tmp_path / ".brigade" / "work" / "verify-runs" / str(receipt["run_id"]) / "receipt.json"
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    result = cli.main(
+        ["receipts", "export", "attestation", "--target", str(tmp_path), "--run-id", str(receipt["run_id"])]
+    )
+
+    assert result == 1
+    assert (
+        capsys.readouterr().err.strip()
+        == "error: cannot export attestation: receipt digest does not match receipt content"
+    )
+
+
 def test_ad_hoc_command_name_drops_env_vars_and_paths(tmp_path: Path) -> None:
     key_path, _signers_path = attestation.keygen(tmp_path, principal="alice-signer")
     receipt = _sample_receipt(tmp_path)
     receipt["commands"][0]["check_id"] = None
     receipt["commands"][0]["command"] = "SECRET=abc /tmp/x/bin/pytest -q /tmp/x/tests"
     receipt["commands"][0]["argv"] = None
+    _restamp_receipt(receipt)
 
     envelope = attestation.export_attestation(receipt, key_path=key_path)
     payload_bytes = base64.b64decode(envelope["payload"])
@@ -166,6 +210,7 @@ def test_ad_hoc_command_name_with_unbalanced_quote_still_exports(tmp_path: Path)
     receipt["commands"][0]["check_id"] = None
     receipt["commands"][0]["command"] = "pytest -q tests/test_'foo"
     receipt["commands"][0]["argv"] = None
+    _restamp_receipt(receipt)
 
     envelope = attestation.export_attestation(receipt, key_path=key_path)
     payload_bytes = base64.b64decode(envelope["payload"])
@@ -181,6 +226,7 @@ def test_ad_hoc_command_name_prefers_argv_over_command(tmp_path: Path) -> None:
     receipt["commands"][0]["check_id"] = None
     receipt["commands"][0]["command"] = "SHOULD=ignore /old/path/bin/pytest /old/path/tests"
     receipt["commands"][0]["argv"] = ["TOKEN=xyz", "/new/bin/pytest", "-k", "/new/path/test_x.py"]
+    _restamp_receipt(receipt)
 
     envelope = attestation.export_attestation(receipt, key_path=key_path)
     statement = json.loads(base64.b64decode(envelope["payload"]))
@@ -208,6 +254,7 @@ def test_receipt_with_nonzero_or_null_exit_code_yields_failed(tmp_path: Path) ->
 
     receipt_null = _sample_receipt(tmp_path)
     receipt_null["commands"][0]["exit_code"] = None
+    _restamp_receipt(receipt_null)
     stmt_null = attestation.build_statement(receipt_null)
     assert stmt_null["predicate"]["result"] == "FAILED"
     assert stmt_null["predicate"]["passedTests"] == []
@@ -258,7 +305,43 @@ def test_verify_on_second_tmp_path_reports_signed_ok(tmp_path: Path) -> None:
     assert res.principal == "alice-signer"
     assert res.keyid == envelope["signatures"][0]["keyid"]
     assert res.run_id == receipt["run_id"]
-    assert len(res.subject) == 2
+
+
+def test_targeted_verification_reports_whether_the_receipt_was_rederived(tmp_path: Path) -> None:
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
+    receipt = _sample_receipt(tmp_path)
+    envelope = attestation.export_attestation(receipt, key_path=key_path)
+
+    signature_only = attestation.verify_attestation(envelope, allowed_signers_path=signers_path)
+    assert signature_only.status == attestation.STATUS_SIGNED_OK
+    assert signature_only.rederived is False
+
+    receipt_path = tmp_path / ".brigade" / "work" / "verify-runs" / receipt["run_id"] / "receipt.json"
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    targeted = attestation.verify_attestation(
+        envelope,
+        allowed_signers_path=signers_path,
+        target=tmp_path,
+    )
+    assert targeted.status == attestation.STATUS_SIGNED_OK
+    assert targeted.rederived is True
+
+
+def test_targeted_verification_require_receipt_fails_closed_when_receipt_is_missing(tmp_path: Path) -> None:
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
+    envelope = attestation.export_attestation(_sample_receipt(tmp_path), key_path=key_path)
+
+    result = attestation.verify_attestation(
+        envelope,
+        allowed_signers_path=signers_path,
+        target=tmp_path,
+        require_receipt=True,
+    )
+
+    assert result.status == attestation.STATUS_EVIDENCE_MISSING
+    assert result.rederived is False
+    assert len(result.subject) == 2
 
 
 def test_flipping_one_payload_byte_reports_signature_mismatch(tmp_path: Path) -> None:
@@ -602,6 +685,17 @@ def test_cli_verify_attestation_with_revoked_keys_fails(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 1
     assert captured.out.strip() == attestation.STATUS_UNTRUSTED_KEY
+
+
+def test_cli_verify_attestation_require_receipt_requires_target(tmp_path, capsys):
+    attestation_path = tmp_path / "attestation.json"
+    attestation_path.write_text("{}")
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["receipts", "verify-attestation", str(attestation_path), "--require-receipt"])
+
+    assert exc_info.value.code == 2
+    assert "--require-receipt requires --target" in capsys.readouterr().err
 
 
 def test_cli_verify_attestation_with_missing_revoked_keys_returns_unverifiable(tmp_path, capsys):

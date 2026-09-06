@@ -407,6 +407,8 @@ def resolve_orchestrator_health_routing(
     else:
         detail = f"seat {requested} is unhealthy [{typed_cause}]{rejected_detail}"
     failure = unhealthy_result.failure
+    if failure is not None and failure.detail:
+        detail = f"{detail}: {seat_health.safe_detail(failure.detail)}"
     return OrchestratorHealthRoutingDecision(
         roster=effective,
         warning="\n".join(warnings) or None,
@@ -702,6 +704,12 @@ def run(
                         kwargs["handoff_inbox"] = existing["handoff_inbox"]
                     if "causal_receipt_payload" not in kwargs and isinstance(existing.get("causal_receipt"), dict):
                         kwargs["causal_receipt_payload"] = dict(existing["causal_receipt"])
+                    if "requester_principal" not in kwargs and isinstance(existing.get("requester_principal"), str):
+                        kwargs["requester_principal"] = existing["requester_principal"]
+                    if "requester_keyid" not in kwargs and isinstance(existing.get("requester_keyid"), str):
+                        kwargs["requester_keyid"] = existing["requester_keyid"]
+                    if "request_payload" not in kwargs and isinstance(existing.get("request"), dict):
+                        kwargs["request_payload"] = dict(existing["request"])
                     existing_retry = existing.get("retry_decisions")
                     if isinstance(existing_retry, list):
                         prior = [dict(entry) for entry in existing_retry if isinstance(entry, dict)]
@@ -1532,7 +1540,7 @@ def run(
             run_io.write_sidecar_revision(
                 output_dir,
                 "worker-results.json",
-                receipt_schema.worker_results_document(_worker_payload([result])),
+                receipt_schema.worker_results_document(_worker_payload([result]), producer_run_id=output_dir.name),
             )
         except OSError as exc:
             print(f"error: worker attempt receipt failed: {exc}", file=sys.stderr)
@@ -1706,6 +1714,7 @@ def run(
             receipt_schema.worker_results_document(
                 _worker_payload(worker_results),
                 ground_truth=ground_truth,
+                producer_run_id=output_dir.name,
             ),
         )
     isolation_detail = _run_isolation_check()

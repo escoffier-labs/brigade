@@ -73,6 +73,7 @@ from . import (
     node as _node_group,
     fleet as _fleet_group,
     guard as _guard_group,
+    governance as _governance_group,
     scrub as _scrub_group,
     security as _security_group,
     tools as _tools_group,
@@ -197,6 +198,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _node_group.register(sub)
     _fleet_group.register(sub)
     _guard_group.register(sub)
+    _governance_group.register(sub)
     _scrub_group.register(sub)
     _security_group.register(sub)
     _tools_group.register(sub)

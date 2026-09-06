@@ -6,10 +6,8 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
 
-from . import attestation
-from .work_cmd import verification as verify_mod
+from . import attestation, attestation_receipt, cosign_attestation
 
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -21,8 +19,15 @@ def export_attestation(
     run_id: str,
     out: str | None = None,
     key: Path | None = None,
+    profile: str = "sshsig",
     force: bool = False,
 ) -> int:
+    if profile not in {"sshsig", "cosign"}:
+        print(
+            f"error: unsupported attestation profile '{profile}' (supported profiles: 'sshsig', 'cosign')",
+            file=sys.stderr,
+        )
+        return 1
     if run_id != "latest" and (not _RUN_ID_RE.fullmatch(run_id) or run_id in {".", ".."}):
         print(
             "error: run id must be 'latest' or contain only letters, digits, dot, underscore, or hyphen",
@@ -34,55 +39,61 @@ def export_attestation(
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
 
-    receipt_data: dict[str, Any] | None = None
-    direct_receipt = target / ".brigade" / "work" / "verify-runs" / run_id / "receipt.json"
-    if run_id != "latest" and direct_receipt.is_file():
-        try:
-            data = json.loads(direct_receipt.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                data.setdefault("path", str(direct_receipt.parent))
-                receipt_data = data
-        except Exception:
-            pass
-
-    if receipt_data is None:
-        resolved, error = verify_mod._resolve_verify_receipt(target, run_id)
-        if resolved is None:
-            print(f"error: {error}", file=sys.stderr)
-            return 1
-        receipt_data = resolved
-
-    key_path = attestation.resolve_signing_key_path(target, key_file=key)
-    if not key_path.is_file():
-        print(f"error: signing key not found: {key_path}", file=sys.stderr)
-        return 1
-
     try:
-        envelope = attestation.export_attestation(receipt_data, key_path=key_path)
-    except attestation.AttestationError as exc:
+        selected_receipt = attestation_receipt.load_selected_receipt(target, run_id)
+    except attestation_receipt.ReceiptDigestError as exc:
+        print(f"error: cannot export attestation: {exc}", file=sys.stderr)
+        return 1
+    except attestation_receipt.ReceiptSelectionError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except Exception as exc:
-        print(f"error: failed to export attestation: {exc}", file=sys.stderr)
-        return 1
+    receipt_data = selected_receipt.snapshot
+
+    if profile == "cosign":
+        key_path = cosign_attestation.resolve_cosign_key_path(target, key_file=key)
+        if not key_path.is_file():
+            print(
+                f"error: cosign private key not found: {key_path} (use --key to select a cosign private key)",
+                file=sys.stderr,
+            )
+            return 1
+        default_name = "attestation.sigstore.json"
+        try:
+            artifact = cosign_attestation.export_attestation(receipt_data, key_path=key_path)
+        except attestation.AttestationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"error: failed to export attestation: {exc}", file=sys.stderr)
+            return 1
+    elif profile == "sshsig":
+        key_path = attestation.resolve_signing_key_path(target, key_file=key)
+        if not key_path.is_file():
+            print(f"error: signing key not found: {key_path}", file=sys.stderr)
+            return 1
+        default_name = "attestation.json"
+        try:
+            artifact = attestation.export_attestation(receipt_data, key_path=key_path)
+        except attestation.AttestationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"error: failed to export attestation: {exc}", file=sys.stderr)
+            return 1
+    else:
+        raise AssertionError(f"unhandled attestation profile: {profile}")
 
     if out == "-":
-        print(json.dumps(envelope, indent=2, sort_keys=True))
+        print(json.dumps(artifact, indent=2, sort_keys=True))
         return 0
 
     if out is not None:
         out_path = Path(out).expanduser().resolve()
     else:
-        run_dir_str = receipt_data.get("path")
-        if run_dir_str:
-            run_dir = Path(run_dir_str)
-        else:
-            resolved_run_id = str(receipt_data.get("run_id") or run_id)
-            run_dir = target / ".brigade" / "work" / "verify-runs" / resolved_run_id
-        out_path = run_dir / "attestation.json"
+        out_path = selected_receipt.directory / default_name
 
     try:
-        attestation.write_attestation_file(envelope, out_path, force=force)
+        attestation.write_attestation_file(artifact, out_path, force=force)
     except FileExistsError as exc:
         print(f"error: {exc} (use --force to overwrite)", file=sys.stderr)
         return 1
@@ -101,6 +112,7 @@ def verify_attestation(
     principal: str | None = None,
     krl_path: Path | None = None,
     json_output: bool = False,
+    require_receipt: bool = False,
 ) -> int:
     effective_krl = krl_path
     if effective_krl is None and target is not None:
@@ -114,6 +126,7 @@ def verify_attestation(
         principal=principal,
         target=target,
         krl_path=effective_krl,
+        require_receipt=require_receipt,
     )
     if json_output:
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))

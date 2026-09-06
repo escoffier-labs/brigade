@@ -438,7 +438,7 @@ def _terminalize(run_dir: Path, meta: dict[str, Any], *, workspace: Path, now: d
     here, so ``brigade doctor``'s recovery-checkpoint check keeps omitting it
     as ``no-journal`` instead of failing on a journal with no checkpoint.
     """
-    from . import aboyeur, receipt_schema
+    from . import aboyeur, localio, receipt_schema
 
     last_status = _public_status(meta.get("status"))
     dirty = _count_uncommitted_changes(workspace)
@@ -453,6 +453,10 @@ def _terminalize(run_dir: Path, meta: dict[str, Any], *, workspace: Path, now: d
             "finished_at": orphaned_at,
         }
     )
+    if updated.get("dry_run") is not True:
+        tree_fingerprint = localio.tree_fingerprint(workspace)
+        if tree_fingerprint is not None:
+            updated["tree_fingerprint"] = tree_fingerprint
     aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(updated))
     return {
         "run_id": _public_run_id(run_dir.name),

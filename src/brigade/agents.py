@@ -7,11 +7,13 @@ does not store provider keys or import provider SDKs.
 from __future__ import annotations
 
 import functools
+import hashlib
 import inspect
 import json
 import os
 import re
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -210,12 +212,25 @@ def _opencode_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path 
     return ["opencode", "run", prompt]
 
 
-def _antigravity_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
+def _antigravity_argv(
+    prompt: str,
+    read_only: bool,
+    sandbox: str | None,
+    cwd: Path | None,
+    timeout_seconds: int | float | None = None,
+    print_timeout_supported: bool | None = None,
+) -> List[str]:
+    timeout_flags: List[str] = []
+    if timeout_seconds is not None and (
+        _antigravity_supports_print_timeout() if print_timeout_supported is None else print_timeout_supported
+    ):
+        seconds = max(60, int(timeout_seconds) - 30)
+        timeout_flags = ["--print-timeout", f"{seconds}s"]
     if read_only or sandbox == "read-only":
-        return ["agy", "--sandbox", "--print", prompt]
+        return ["agy", "--sandbox", *timeout_flags, "--print", prompt]
     effective_cwd = cwd if cwd is not None else Path.cwd().resolve()
     argv = ["agy", "--add-dir", str(effective_cwd)]
-    argv.extend(["--dangerously-skip-permissions", "--print", prompt])
+    argv.extend(["--dangerously-skip-permissions", *timeout_flags, "--print", prompt])
     return argv
 
 
@@ -313,7 +328,7 @@ def _oracle_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | 
     return ["oracle", "-p", prompt]
 
 
-_ADAPTERS: dict[str, Callable[[str, bool, str | None, Path | None], List[str]]] = {
+_ADAPTERS: dict[str, Callable[..., List[str]]] = {
     "claude": _claude_argv,
     "codex": _codex_argv,
     "opencode": _opencode_argv,
@@ -637,6 +652,62 @@ def _oracle_supports_browser_engine(
     return bool(_ORACLE_BROWSER_ENGINE_HELP_RE.search("\n".join((result.stdout, result.stderr))))
 
 
+_ANTIGRAVITY_PRINT_TIMEOUT_HELP = "--print-timeout"
+_ANTIGRAVITY_PRINT_TIMEOUT_CACHE_LIMIT = 16
+_ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED: OrderedDict[tuple[str, str], bool] = OrderedDict()
+
+
+def _antigravity_env_fingerprint(env: dict[str, str] | None) -> str:
+    """Return a non-reversible fingerprint for an environment dict.
+
+    The fingerprint is a SHA-256 hex digest of a deterministic JSON encoding of
+    the sorted env items.  No env keys or values are retained in the returned
+    value, and ``env=None`` is treated as an empty environment.
+    """
+    items = sorted(env.items()) if env is not None else []
+    return hashlib.sha256(json.dumps(items, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _antigravity_supports_print_timeout(
+    executable: str = "agy",
+    *,
+    env: dict[str, str] | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
+) -> bool:
+    """Whether this Antigravity executable advertises --print-timeout in agy --help.
+
+    Probes are cached per (executable, environment fingerprint) and bounded to
+    ``_ANTIGRAVITY_PRINT_TIMEOUT_CACHE_LIMIT`` entries.  The cache stores only
+    the executable string and a SHA-256 hex digest of the environment; it never
+    retains env keys or values.
+    """
+    cache_key = (executable, _antigravity_env_fingerprint(env))
+    if cache_key in _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED:
+        return _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED[cache_key]
+    result = proc.run(
+        [executable, "--help"],
+        timeout=5.0,
+        env=env,
+        process_registry=process_registry,
+    )
+    if result.code != 0:
+        supported = False
+    else:
+        combined = "\n".join((result.stdout, result.stderr))
+        supported = _ANTIGRAVITY_PRINT_TIMEOUT_HELP in combined
+    if len(_ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED) >= _ANTIGRAVITY_PRINT_TIMEOUT_CACHE_LIMIT:
+        _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED.popitem(last=False)
+    _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED[cache_key] = supported
+    return supported
+
+
+def _clear_antigravity_print_timeout_cache() -> None:
+    _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED.clear()
+
+
+_antigravity_supports_print_timeout.cache_clear = _clear_antigravity_print_timeout_cache  # type: ignore[attr-defined]
+
+
 def _oracle_auth_detail(cli_ref: str, stdout: str, stderr: str) -> str | None:
     """Turn an oracle browser-session auth failure into a pantry next step.
 
@@ -790,6 +861,8 @@ def build_argv(
     resume_session_id: str | None = None,
     session_binding_id: str | None = None,
     oracle_browser_engine: bool = False,
+    timeout_seconds: int | float | None = None,
+    antigravity_print_timeout_supported: bool | None = None,
 ) -> List[str]:
     if resume_session_id is not None:
         if cli_ref != "grok":
@@ -828,7 +901,12 @@ def build_argv(
             "copilot, qwen, kimi, adal, openhands, grok, amp, crush, ollama:<model>, "
             "codex-cloud:<env-id>)"
         )
-    argv = builder(prompt, read_only, sandbox, cwd)
+    builder_kwargs: dict[str, object] = {}
+    if _accepts_keyword(builder, "timeout_seconds"):
+        builder_kwargs["timeout_seconds"] = timeout_seconds
+    if _accepts_keyword(builder, "print_timeout_supported"):
+        builder_kwargs["print_timeout_supported"] = antigravity_print_timeout_supported
+    argv = builder(prompt, read_only, sandbox, cwd, **builder_kwargs)
     if cli_ref == "oracle" and oracle_browser_engine:
         argv = [argv[0], "--engine", "browser", *argv[1:]]
     if resume_session_id is not None:
@@ -1274,9 +1352,17 @@ def run_agent(
 
     try:
         oracle_browser_engine = False
+        antigravity_print_timeout_supported = None
         if cli_ref == "oracle":
             assert executable.path is not None
             oracle_browser_engine = _oracle_supports_browser_engine(
+                executable.path,
+                env=child_env,
+                process_registry=process_registry,
+            )
+        if cli_ref == "antigravity" and timeout is not None:
+            assert executable.path is not None
+            antigravity_print_timeout_supported = _antigravity_supports_print_timeout(
                 executable.path,
                 env=child_env,
                 process_registry=process_registry,
@@ -1292,6 +1378,8 @@ def run_agent(
             resume_session_id=resume_session_id,
             session_binding_id=session_binding_id,
             oracle_browser_engine=oracle_browser_engine,
+            timeout_seconds=timeout,
+            antigravity_print_timeout_supported=antigravity_print_timeout_supported,
         )
     except UnsupportedSandboxError as exc:
         # A builder rejected the launch before spawning because the requested

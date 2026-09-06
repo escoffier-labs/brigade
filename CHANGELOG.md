@@ -8,10 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Test Result attestation export now rederives verify-receipt SHA-256 values
+  from the writer's compact sorted-key JSON contract, including receipt
+  `path`, and refuses stale or malformed stored digest evidence. Legacy
+  digestless exports remain supported. Export receipt lookup is strict and
+  bounded. Approval collector integration remains deferred. (#1404)
+- Attestation, cosign bundle, and approval verification now reject oversized,
+  duplicate-name, non-finite, malformed-Unicode, over-nested, and cyclic JSON
+  inputs before signature processing. DSSE accepts both standard and URL-safe
+  base64 alphabets under bounded decoded payload and signature sizes, and file
+  reads use no-follow regular-file descriptors. Mapping inputs are copied into
+  bounded plain JSON snapshots before use, and dot-only fallback attestation
+  run IDs are discarded.
 - `brigade center report build` rotates old operator report directories automatically under `.brigade/center/reports/` into `reports-archive/` according to retention (default keep newest 20, configurable via `operator_report_retention` in `.brigade/daily.toml` alongside `allow_operator_report_build` or CLI flag `--keep N`), caps `reports-archive/` to the same retention count by deleting the oldest archived directories, never rotates unclosed reports, and supports `--dry-run` to preview rotation without deleting or moving bundles. Fixes #1415.
 - Fixed timing flakes in tests `test_release_with_renew_in_flight_never_resurrects` and `test_concurrent_edge_writes_do_not_lose_dependency_edges`. (#1396)
 
 ### Added
+- `brigade governance inventory` now exports one canonical workspace-scoped inventory with bounded observed worker use, node-local Fleet policy facts, and optional CycloneDX machine-learning-model components. Remote MCP endpoints retain only scheme and authority; user-home rosters are never substituted. Fixes #1408.
 - Fleet hub roster page at `/deck/roster`: roles (impl, review, chef, research, security, scout), seat and cloud lane toggles, consumer defaults, and notes saved in one revisioned transaction; `brigade work brief` prints the `fleet_routing` block; `fleet preference set` gains `--research`, `--security`, `--scout`; hub schema v19.
 - `brigade receipts trailer --run <run-id>` prints `Brigade-Run` and `Brigade-Receipt` trailer lines for a local run receipt so a conductor can pass them to `git commit --trailer`. `brigade receipts verify --commit <sha>` reads the trailers from that commit's message, resolves the run receipt, and recomputes the digest to check for mismatches. (#1407)
 - `brigade run cloud` is a native parser branch; `brigade run-cloud` still works and prints a one-line deprecation notice. `brigade harness fragments --harness {openclaw,hermes}` fronts the shared fragment backend, with `openclaw fragments` and `hermes fragments` kept as aliases. `tests/test_cli_inventory_contract.py` asserts the parser, `docs/command-inventory.md`, and the roadmap missing-command check agree after alias normalization, and reports (without failing) parser paths that have no direct test invocation (#1229).

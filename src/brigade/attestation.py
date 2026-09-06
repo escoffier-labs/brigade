@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import localio
+from . import attestation_input, attestation_receipt, localio
 
 IN_TOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 IN_TOTO_TEST_RESULT_PREDICATE_TYPE = "https://in-toto.io/attestation/test-result/v0.1"
@@ -35,6 +35,7 @@ STATUS_SIGNATURE_MISMATCH = "SIGNATURE-MISMATCH"
 STATUS_UNTRUSTED_KEY = "UNTRUSTED-KEY"
 STATUS_UNVERIFIABLE_SIGNATURE = "UNVERIFIABLE-SIGNATURE"
 STATUS_SUBJECT_MISMATCH = "SUBJECT-MISMATCH"
+STATUS_EVIDENCE_MISSING = "EVIDENCE-MISSING"
 
 VERIFY_STATUSES = {
     STATUS_SIGNED_OK,
@@ -42,6 +43,7 @@ VERIFY_STATUSES = {
     STATUS_UNTRUSTED_KEY,
     STATUS_UNVERIFIABLE_SIGNATURE,
     STATUS_SUBJECT_MISMATCH,
+    STATUS_EVIDENCE_MISSING,
 }
 
 
@@ -60,6 +62,7 @@ class AttestationVerifyResult:
     keyid: str | None = None
     subject: list[dict[str, Any]] = field(default_factory=list)
     run_id: str | None = None
+    rederived: bool = False
 
     def __getitem__(self, item: str) -> Any:
         if hasattr(self, item):
@@ -77,6 +80,7 @@ class AttestationVerifyResult:
             "keyid": self.keyid,
             "subject": self.subject,
             "run_id": self.run_id,
+            "rederived": self.rederived,
         }
 
 
@@ -282,10 +286,6 @@ def find_principals(
     return [line for line in lines if line != "No principal matched."]
 
 
-def _compute_receipt_sha256(receipt: Mapping[str, Any]) -> str:
-    return localio.canonical_json_digest(receipt, exclude_keys={"digests", "path"})
-
-
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
@@ -322,8 +322,15 @@ def _test_name(cmd: Mapping[str, Any]) -> str:
     return " ".join(cleaned)
 
 
-def build_statement(receipt: Mapping[str, Any]) -> dict[str, Any]:
+def build_statement(receipt: Mapping[str, Any] | attestation_receipt.ReceiptSnapshot) -> dict[str, Any]:
     """Build an in-toto Statement v1 with Test Result v0.1 predicate from a verify receipt."""
+    try:
+        snapshot = attestation_receipt.snapshot_receipt(
+            receipt.receipt if isinstance(receipt, attestation_receipt.ReceiptSnapshot) else receipt
+        )
+    except attestation_receipt.ReceiptDigestError as exc:
+        raise AttestationExportError(f"cannot export attestation: {exc}") from exc
+    receipt = snapshot.receipt
     tree_fingerprint = receipt.get("tree_fingerprint")
     changes_patch_sha256 = receipt.get("changes_patch_sha256")
 
@@ -334,12 +341,7 @@ def build_statement(receipt: Mapping[str, Any]) -> dict[str, Any]:
 
     run_id = str(receipt.get("run_id", "")).strip()
 
-    digests = receipt.get("digests")
-    receipt_sha256 = (
-        digests.get("receipt_sha256")
-        if isinstance(digests, Mapping) and digests.get("receipt_sha256")
-        else _compute_receipt_sha256(receipt)
-    )
+    receipt_sha256 = snapshot.digest
 
     passed_tests: list[str] = []
     failed_tests: list[str] = []
@@ -502,16 +504,10 @@ def write_attestation_file(
 
 
 def _decode_sig_armored(sig_value: str) -> str | None:
-    cleaned = sig_value.strip()
-    if "-----BEGIN SSH SIGNATURE-----" in cleaned:
-        return cleaned
     try:
-        decoded = base64.b64decode(cleaned).decode("utf-8", errors="replace")
-        if "-----BEGIN SSH SIGNATURE-----" in decoded:
-            return decoded
-    except Exception:
-        pass
-    return None
+        return attestation_input.decode_ssh_signature(sig_value)
+    except attestation_input.AttestationInputError:
+        return None
 
 
 def verify_attestation(
@@ -523,6 +519,7 @@ def verify_attestation(
     krl_path: Path | None = None,
     namespace: str = ATTESTATION_NAMESPACE,
     expected_predicate_type: str = IN_TOTO_TEST_RESULT_PREDICATE_TYPE,
+    require_receipt: bool = False,
 ) -> AttestationVerifyResult:
     """Verify an attestation envelope against OpenSSH allowed_signers policy."""
     binary = shutil.which("ssh-keygen")
@@ -531,19 +528,20 @@ def verify_attestation(
 
     # 1. Parse envelope
     if isinstance(envelope_data, Path):
-        if not envelope_data.is_file():
-            return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE)
         try:
-            envelope = json.loads(envelope_data.read_text(encoding="utf-8"))
-        except Exception:
+            envelope = attestation_input.read_json_object(envelope_data)
+        except (OSError, attestation_input.AttestationInputError):
             return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE)
     elif isinstance(envelope_data, (str, bytes)):
         try:
-            envelope = json.loads(envelope_data)
-        except Exception:
+            envelope = attestation_input.strict_json_loads(envelope_data)
+        except attestation_input.AttestationInputError:
             return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE)
     elif isinstance(envelope_data, Mapping):
-        envelope = envelope_data
+        try:
+            envelope = attestation_input.validate_json_value(envelope_data)
+        except attestation_input.AttestationInputError:
+            return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE)
     else:
         return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE)
 
@@ -566,9 +564,16 @@ def verify_attestation(
 
     # 2. Decode payload & parse Statement
     try:
-        payload_bytes = base64.b64decode(payload_b64)
-        statement = json.loads(payload_bytes.decode("utf-8"))
-    except Exception:
+        payload_bytes = attestation_input.decode_dsse_base64(
+            payload_b64,
+            label="attestation payload",
+            max_bytes=attestation_input.MAX_PAYLOAD_BYTES,
+        )
+        statement = attestation_input.strict_json_loads(
+            payload_bytes,
+            max_bytes=attestation_input.MAX_PAYLOAD_BYTES,
+        )
+    except attestation_input.AttestationInputError:
         return AttestationVerifyResult(status=STATUS_UNVERIFIABLE_SIGNATURE)
 
     if not isinstance(statement, Mapping):
@@ -599,7 +604,11 @@ def verify_attestation(
         run_ref = pred.get("run")
         if run_id is None and isinstance(run_ref, Mapping):
             run_id_candidate = run_ref.get("id")
-            if isinstance(run_id_candidate, str) and re.fullmatch(r"[A-Za-z0-9._-]+", run_id_candidate):
+            if (
+                isinstance(run_id_candidate, str)
+                and re.fullmatch(r"[A-Za-z0-9._-]+", run_id_candidate)
+                and run_id_candidate not in (".", "..")
+            ):
                 run_id = run_id_candidate
 
     # 3. Recompute DSSE PAE
@@ -762,14 +771,14 @@ def verify_attestation(
                     run_id=run_id,
                 )
 
-        # 7. Check target receipt re-derivation (step 4)
+        # 7. Check target receipt re-derivation when local evidence is requested.
         if target is not None and run_id and expected_predicate_type == IN_TOTO_TEST_RESULT_PREDICATE_TYPE:
             resolved_target = target.expanduser().resolve()
             run_dir = resolved_target / ".brigade" / "work" / "verify-runs" / run_id
             receipt_file = run_dir / "receipt.json"
             if receipt_file.is_file():
                 try:
-                    receipt_data = json.loads(receipt_file.read_text(encoding="utf-8"))
+                    receipt_data = attestation_input.read_json_object(receipt_file)
                     rederived_statement = build_statement(receipt_data)
                     rederived_bytes = canonical_statement_bytes(rederived_statement)
                     if rederived_bytes != payload_bytes:
@@ -779,6 +788,7 @@ def verify_attestation(
                             keyid=actual_keyid,
                             subject=subject,
                             run_id=run_id,
+                            rederived=False,
                         )
                 except Exception:
                     return AttestationVerifyResult(
@@ -787,7 +797,35 @@ def verify_attestation(
                         keyid=actual_keyid,
                         subject=subject,
                         run_id=run_id,
+                        rederived=False,
                     )
+                return AttestationVerifyResult(
+                    status=STATUS_SIGNED_OK,
+                    principal=verified_principal,
+                    keyid=actual_keyid,
+                    subject=subject,
+                    run_id=run_id,
+                    rederived=True,
+                )
+            if require_receipt:
+                return AttestationVerifyResult(
+                    status=STATUS_EVIDENCE_MISSING,
+                    principal=verified_principal,
+                    keyid=actual_keyid,
+                    subject=subject,
+                    run_id=run_id,
+                    rederived=False,
+                )
+
+        if require_receipt:
+            return AttestationVerifyResult(
+                status=STATUS_EVIDENCE_MISSING,
+                principal=verified_principal,
+                keyid=actual_keyid,
+                subject=subject,
+                run_id=run_id,
+                rederived=False,
+            )
 
         return AttestationVerifyResult(
             status=STATUS_SIGNED_OK,
@@ -795,4 +833,5 @@ def verify_attestation(
             keyid=actual_keyid,
             subject=subject,
             run_id=run_id,
+            rederived=False,
         )
