@@ -530,6 +530,19 @@ class TestPureRendering:
         assert "Fleet: Repos" in page
 
 
+def test_boards_render_through_the_shared_deck_shell():
+    page = fleet_dashboard.render_page(
+        view="machines", query_string="", runs=[], claims=[], nodes=[], started_at={}, nonce="abc"
+    )
+    assert "--canvas: #111617;" in page
+    assert '<body class="deck"' in page
+    assert '<nav aria-label="Command Deck">' in page
+    assert 'href="/deck"' in page and 'href="/view/repos"' in page
+    assert '<a href="/view/machines" aria-current="page">machines board</a>' in page
+    assert "Command Deck &middot; Machines" in page
+    assert "background: #fff" not in page
+
+
 def test_interactive_sessions_stay_off_legacy_boards_and_station_capacity(tmp_path):
     config_path = tmp_path / "deck.json"
     config_path.write_text(

@@ -30,6 +30,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode
 
 from .fleet_command_deck import is_terminal_state
+from . import ui_theme
 
 REFRESH_SECONDS = 10
 # A non-terminal run whose latest event is older than this has no heartbeat
@@ -417,12 +418,29 @@ def _legend() -> str:
     return f'<div class="state-legend" aria-label="State legend">{entries}</div>'
 
 
+def _board_href(query: DashboardQuery, view: str) -> str:
+    """Explicit /view/<board> path with the query's filters; never the bare '/'."""
+    href = _href(query, view=view)
+    if href == "/" or href.startswith("/?"):
+        return f"/view/{view}{href[1:]}"
+    return href
+
+
 def _nav(query: DashboardQuery) -> str:
+    links = [
+        ("/deck", "deck"),
+        ("/deck/repos", "repos"),
+        ("/deck/roster", "roster"),
+        ("/deck/policy", "policy"),
+        (_board_href(query, "machines"), "machines board"),
+        (_board_href(query, "repos"), "repos board"),
+    ]
     items = []
-    for view, label in (("machines", "Machines"), ("repos", "Repos")):
-        current = ' aria-current="page"' if view == query.view else ""
-        items.append(f'<li><a href="{esc(_href(query, view=view))}"{current}>{esc(label)}</a></li>')
-    return f'<nav class="dashboard-nav" aria-label="Boards"><ul>{"".join(items)}</ul></nav>'
+    for href, label in links:
+        is_board = label.endswith("board")
+        current = ' aria-current="page"' if is_board and label.startswith(query.view) else ""
+        items.append(f'<a href="{esc(href)}"{current}>{esc(label)}</a>')
+    return f'<nav aria-label="Command Deck">{" ".join(items)}</nav>'
 
 
 def _controls(query: DashboardQuery) -> str:
@@ -710,194 +728,99 @@ def render_page(
         board = _machine_board(visible, nodes, claim_rows, query, now=current)
         title = "Fleet: Machines"
     stamp = current.astimezone(timezone.utc).strftime("%H:%M:%S UTC")
-    freshness = (
-        f'<p class="center-freshness">{esc(f"data as of {stamp}, refreshes every {REFRESH_SECONDS}s")}, '
-        f'<a href="{esc(_href(query))}">{esc("refresh")}</a></p>'
-    )
     more = f'<p class="fleet-more"><a href="{esc(more_href)}">{esc("more")}</a></p>' if more_href else ""
+    heading = "Machines" if query.view != "repos" else "Repos"
+    nav = _nav(query)
     body = (
-        f'<h1 class="page-title">{esc(title)}</h1>'
-        f"{freshness}{_summary(all_rows, node_ids, claim_rows)}{_legend()}{_controls(query)}"
+        '<main class="deck-shell">'
+        '<header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
+        f"<h1>Command Deck &middot; {esc(heading)}</h1>"
+        f'<p class="station-meta">{esc(f"data as of {stamp}, refreshes every {REFRESH_SECONDS}s")}, '
+        f'<a href="{esc(_href(query))}">{esc("refresh")}</a></p></div>'
+        f'<p class="header-meta">{esc(stamp)}</p></header>'
+        f"{nav}"
+        f"{_summary(all_rows, node_ids, claim_rows)}{_legend()}{_controls(query)}"
         f'<label class="fleet-quick-filter">{esc("filter rows")} '
         f'<input type="search" data-filter-all="1" placeholder="{esc("type to narrow (needs JS)")}"></label>'
         f"{board}{more}"
+        "</main>"
     )
-    return _document(f"{title} - Brigade Fleet", nonce, _nav(query), body)
+    return _document(f"{title} - Brigade Fleet", nonce, body, stamp=stamp)
 
 
-def _document(title: str, nonce: str, nav: str, body: str) -> str:
-    nonce_attr = esc(nonce)
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="{REFRESH_SECONDS}">
-<meta name="theme-color" content="#111617">
-<meta name="application-name" content="Fleet Hub">
-<meta name="apple-mobile-web-app-title" content="Fleet Hub">
-<link rel="icon" type="image/x-icon" href="/favicon.ico">
-<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
-<link rel="manifest" href="/site.webmanifest">
-<title>{esc(title)}</title>
-<style nonce="{nonce_attr}">
-body {{
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  line-height: 1.5;
-  margin: 0;
-  color: #111;
-  background: #fff;
-}}
-a {{ color: #0066cc; text-decoration: none; }}
-a:hover {{ text-decoration: underline; }}
-nav.dashboard-nav {{
-  border-bottom: 1px solid #ddd;
-  padding: 0.75rem 1.5rem;
-  background: #f8f8f8;
-}}
-nav.dashboard-nav ul {{
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1rem;
-}}
-nav.dashboard-nav a {{ font-weight: 500; }}
-nav.dashboard-nav a[aria-current="page"] {{ font-weight: 700; text-decoration: underline; }}
-main.dashboard-main {{ padding: 1.5rem; }}
-h1.page-title {{ font-size: 1.5rem; margin: 0 0 1rem; color: #0066cc; }}
-.center-freshness {{ margin: 0 0 1rem; color: #333; font-size: 0.9rem; }}
-.page-summary {{ margin-bottom: 0.5rem; font-weight: 600; color: #111; }}
-.state-legend {{
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.6rem;
-  margin-bottom: 0.75rem;
-  font-size: 0.8rem;
-  color: #333;
-}}
-.legend-entry {{ white-space: nowrap; }}
-.fleet-controls {{
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.6rem 1rem;
-  align-items: center;
-  margin-bottom: 0.75rem;
-  font-size: 0.9rem;
-}}
-.fleet-controls input[type="search"] {{ width: 9rem; }}
-.fleet-quick {{ color: #333; }}
-.fleet-quick-filter {{ display: block; margin-bottom: 1rem; font-size: 0.9rem; }}
-.machine-board {{
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 1rem;
-  margin-bottom: 1rem;
-}}
-.machine-card {{
-  border: 1px solid #ddd;
-  border-radius: 0.35rem;
-  background: #fafafa;
-  padding: 0.75rem;
-  color: #111;
-  min-width: 0;
-}}
-.machine-card-header {{
-  display: flex;
-  gap: 0.75rem;
-  align-items: center;
-  margin-bottom: 0.75rem;
-}}
-.machine-glyph {{ flex: 0 0 auto; stroke: #333; fill: none; stroke-width: 1.6; }}
-.machine-card-meta {{ min-width: 0; flex: 1; }}
-.machine-card-title {{
-  margin: 0;
-  font-size: 1rem;
-  font-weight: 650;
-  color: #111;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}}
-.machine-card-line {{ color: #333; font-size: 0.85rem; }}
-.state-strip {{ display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.35rem; }}
-.state-chip {{
-  border: 1px solid #666;
-  border-radius: 999px;
-  padding: 0.05rem 0.4rem;
-  font-size: 0.8rem;
-  color: #111;
-  background: #fff;
-}}
-.fleet-holds {{ font-size: 0.85rem; color: #333; margin-bottom: 0.5rem; }}
-.fleet-holds ul {{ margin: 0; padding-left: 1.2rem; }}
-table.data-table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; background: #fff; }}
-table.data-table th, table.data-table td {{
-  border: 1px solid #ddd;
-  padding: 0.4rem 0.6rem;
-  text-align: left;
-  vertical-align: top;
-}}
-table.data-table th {{ background: #f0f0f0; }}
-.fleet-run-id, .fleet-node {{
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.85rem;
-  word-break: break-all;
-}}
-.fleet-where {{ margin: 0; padding-left: 1.1rem; }}
-.fleet-state {{
-  border: 1px solid #666;
-  border-radius: 999px;
-  padding: 0.1rem 0.45rem;
-  font-weight: 600;
-  white-space: nowrap;
-  color: #111;
-  background: #fff;
-}}
-.fleet-state-running {{ border-color: #1769aa; }}
-.fleet-state-succeeded {{ border-color: #2e7d32; }}
-.fleet-state-awaiting-approval {{ border-color: #b35c00; background: #fff4e5; }}
-.fleet-state-failed {{ border-color: #8b0000; background: #fdecea; }}
-.fleet-state-stale {{ border-style: dashed; border-color: #8b0000; }}
-.fleet-state-queued, .fleet-state-interrupted {{ border-style: dashed; }}
-.machine-empty {{ margin: 0; color: #333; font-size: 0.9rem; }}
-.fleet-more {{ margin: 1rem 0 0; font-size: 0.9rem; }}
-</style>
-</head>
-<body>
-{nav}
-<main class="dashboard-main">
-{body}
-</main>
-<script nonce="{nonce_attr}">
-(function () {{
-  function fmt(s) {{
+_BOARD_CSS = """
+.page-summary { margin: 16px 0 8px; font-weight: 600; color: var(--ink); }
+.state-legend { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 12px; font-size: 12px; color: var(--muted); }
+.legend-entry { white-space: nowrap; }
+.fleet-controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: end; margin-bottom: 12px; font-size: 12px; color: var(--muted); }
+.fleet-controls label { display: grid; gap: 6px; }
+.fleet-controls input[type="search"], .fleet-controls select { min-height: 36px; padding: 8px 10px; border: 1px solid var(--line); background: var(--surface-raised); color: var(--ink); font: inherit; width: 10rem; }
+.fleet-controls button { min-height: 36px; padding: 0 14px; border: 1px solid var(--signal); background: var(--signal-quiet); color: var(--ink); font: inherit; font-weight: 700; cursor: pointer; }
+.fleet-quick { color: var(--muted); }
+.fleet-quick-filter { display: grid; gap: 6px; margin-bottom: 16px; font-size: 12px; color: var(--muted); }
+.fleet-quick-filter input { min-height: 36px; padding: 8px 10px; border: 1px solid var(--line); background: var(--surface-raised); color: var(--ink); font: inherit; max-width: 24rem; }
+.machine-board { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-bottom: 16px; }
+.machine-card { min-width: 0; padding: 16px; border: 1px solid var(--line-quiet); background: var(--surface); }
+.machine-card-header { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+.machine-glyph { flex: 0 0 auto; stroke: var(--muted); fill: none; stroke-width: 1.6; }
+.machine-card-meta { min-width: 0; flex: 1; }
+.machine-card-title { margin: 0; font-size: 14px; font-weight: 700; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.machine-card-line { color: var(--muted); font-size: 12px; }
+.state-strip { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.state-chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; font-size: 11px; color: var(--muted); }
+.fleet-holds { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+.fleet-holds ul { margin: 0; padding-left: 1.2rem; }
+table.data-table { table-layout: auto; }
+table.data-table th:nth-child(n) { width: auto; }
+.fleet-run-id, .fleet-node { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+.fleet-where { margin: 0; padding-left: 1.1rem; }
+.fleet-state { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 700; white-space: nowrap; color: var(--ink); }
+.fleet-state-running { border-color: var(--signal); color: var(--signal); }
+.fleet-state-succeeded { border-color: var(--ok); color: var(--ok); }
+.fleet-state-awaiting-approval { border-color: var(--signal); background: var(--signal-quiet); }
+.fleet-state-failed { border-color: var(--bad); color: var(--bad); }
+.fleet-state-stale { border-style: dashed; border-color: var(--bad); }
+.fleet-state-queued, .fleet-state-interrupted { border-style: dashed; }
+.machine-empty { margin: 0; color: var(--muted); font-size: 12px; }
+.fleet-more { margin: 16px 0 0; font-size: 12px; }
+"""
+
+_SCRIPT = """(function () {
+  function fmt(s) {
     s = Math.max(0, Math.floor(s));
     if (s < 60) return s + "s";
     if (s < 3600) return Math.floor(s / 60) + "m " + String(s % 60).padStart(2, "0") + "s";
     if (s < 86400) return Math.floor(s / 3600) + "h " + String(Math.floor((s % 3600) / 60)).padStart(2, "0") + "m";
     return Math.floor(s / 86400) + "d " + Math.floor((s % 86400) / 3600) + "h";
-  }}
-  function tick() {{
+  }
+  function tick() {
     var now = Date.now() / 1000;
     var els = document.querySelectorAll("[data-since]");
-    for (var i = 0; i < els.length; i++) {{
+    for (var i = 0; i < els.length; i++) {
       els[i].textContent = fmt(now - Number(els[i].getAttribute("data-since")));
-    }}
-  }}
+    }
+  }
   setInterval(tick, 1000);
-  document.addEventListener("input", function (e) {{
+  document.addEventListener("input", function (e) {
     var input = e.target;
     if (!input || !input.getAttribute || !input.hasAttribute("data-filter-all")) return;
     var query = (input.value || "").toLowerCase();
     var rows = document.querySelectorAll("table.data-table tbody tr");
-    for (var i = 0; i < rows.length; i++) {{
+    for (var i = 0; i < rows.length; i++) {
       var text = (rows[i].textContent || "").toLowerCase();
       rows[i].hidden = query !== "" && text.indexOf(query) === -1;
-    }}
-  }});
-}})();
-</script>
-</body>
-</html>
-"""
+    }
+  });
+})();"""
+
+
+def _document(title: str, nonce: str, body: str, *, stamp: str) -> str:
+    return ui_theme.document(
+        title,
+        nonce,
+        body,
+        as_of=stamp,
+        refresh_seconds=REFRESH_SECONDS,
+        extra_css=_BOARD_CSS,
+        script=_SCRIPT,
+    )
