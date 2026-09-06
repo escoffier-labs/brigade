@@ -28,6 +28,7 @@ AGENT_CHANGE_POLICY_SCHEMA = "brigade.agent_change_policy.v1"
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _APPROVAL_NONCE_RE = re.compile(r"^[0-9a-f]{32}$")
+_APPROVAL_FILENAME_RE = re.compile(r"^[0-9a-f]{32}\.json$")
 _VERIFY_RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _HEX40_OR_64_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -50,10 +51,6 @@ class AgentChangeError(RuntimeError):
 
 def default_policy_path(target: Path) -> Path:
     return target.expanduser().resolve() / ".brigade" / "attestation" / "agent-change-policy.json"
-
-
-def _utc_now_iso_z() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _canonical_json_bytes(value: object) -> bytes:
@@ -212,20 +209,7 @@ def _participants_from_run(run_meta: Mapping[str, Any], roster: Mapping[str, Any
     return participants
 
 
-def _journal_chain_head(run_dir: Path) -> dict[str, Any]:
-    path = run_dir / "events" / "lifecycle.jsonl"
-    if not path.is_file() or path.is_symlink():
-        return {"status": "unavailable"}
-    try:
-        report = run_journal.read_journal_bounded(path)
-    except (OSError, run_journal.RunJournalError):
-        return {"status": "unavailable"}
-    if report.partial_tail is not None or report.chain_errors or not report.events:
-        return {"status": "unavailable"}
-    return {"sha256": report.events[-1].event_digest}
-
-
-def _latest_approval_event(run_dir: Path) -> run_journal.RunEvent | None:
+def _read_lifecycle_report(run_dir: Path) -> run_journal.JournalReport | None:
     path = run_dir / "events" / "lifecycle.jsonl"
     if not path.is_file() or path.is_symlink():
         return None
@@ -235,27 +219,36 @@ def _latest_approval_event(run_dir: Path) -> run_journal.RunEvent | None:
         return None
     if report.partial_tail is not None or report.chain_errors:
         return None
-    return next((event for event in reversed(report.events) if event.event_type == "approval"), None)
+    return report
+
+
+def _journal_chain_head(events: Sequence[run_journal.RunEvent]) -> dict[str, Any]:
+    if not events:
+        return {"status": "unavailable"}
+    return {"sha256": events[-1].event_digest}
+
+
+def _latest_approval_event(events: Sequence[run_journal.RunEvent]) -> run_journal.RunEvent | None:
+    return next((event for event in reversed(events) if event.event_type == "approval"), None)
+
+
+def _request_event(run_dir: Path, events: Sequence[run_journal.RunEvent] | None = None) -> run_journal.RunEvent | None:
+    if events is None:
+        report = _read_lifecycle_report(run_dir)
+        if report is None:
+            return None
+        events = report.events
+    request_events = [event for event in events if event.event_type == "request.signed"]
+    if len(request_events) != 1:
+        return None
+    return request_events[0]
 
 
 def _request_event_for_nonce(run_dir: Path, nonce: str) -> run_journal.RunEvent | None:
-    path = run_dir / "events" / "lifecycle.jsonl"
-    if not path.is_file() or path.is_symlink():
+    event = _request_event(run_dir)
+    if event is None or event.payload.get("nonce") != nonce:
         return None
-    try:
-        report = run_journal.read_journal_bounded(path)
-    except (OSError, run_journal.RunJournalError):
-        return None
-    if report.partial_tail is not None or report.chain_errors:
-        return None
-    for event in report.events:
-        if (
-            event.event_type == "request.signed"
-            and isinstance(event.payload, dict)
-            and event.payload.get("nonce") == nonce
-        ):
-            return event
-    return None
+    return event
 
 
 def _decode_envelope_payload(
@@ -335,6 +328,8 @@ def _verify_reference_envelope(
     target: Path,
     expected_predicate_type: str,
     label: str,
+    require_receipt: bool = False,
+    receipt: Mapping[str, Any] | None = None,
 ) -> tuple[attestation.AttestationVerifyResult, dict[str, Any] | None, bytes | None]:
     statement, payload_bytes, _ = _decode_envelope_payload(envelope, label)
     if statement is None or payload_bytes is None:
@@ -354,6 +349,8 @@ def _verify_reference_envelope(
         allowed_signers_path=attestation.default_allowed_signers_path(target),
         target=target,
         expected_predicate_type=expected_predicate_type,
+        require_receipt=require_receipt,
+        receipt=receipt,
     )
     return result, statement, payload_bytes
 
@@ -361,25 +358,48 @@ def _verify_reference_envelope(
 def _build_request_reference(
     run_dir: Path,
     target: Path,
-    run_meta: Mapping[str, Any],
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    request_payload = run_meta.get("request")
-    if not isinstance(request_payload, dict):
-        return None, {"kind": "agent-request", "reason": "required reference absent"}
-    nonce = request_payload.get("nonce")
-    attestation_path = request_payload.get("attestation_path")
-    task_sha256 = request_payload.get("task_sha256")
-    if not isinstance(nonce, str) or not _APPROVAL_NONCE_RE.fullmatch(nonce):
-        return None, {"kind": "agent-request", "reason": "run request nonce is invalid"}
-    if not isinstance(attestation_path, str) or attestation_path != f"requests/{nonce}.json":
-        return None, {"kind": "agent-request", "reason": "run request attestation path is invalid"}
+    required_kinds: set[str],
+    events: Sequence[run_journal.RunEvent],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any]]:
+    event = _request_event(run_dir, events)
+    if event is None:
+        missing = None
+        if "agent-request" in required_kinds:
+            missing = {"kind": "agent-request", "reason": "required reference absent"}
+        return None, missing, {"status": "absent"}
+    payload = event.payload
+    nonce = payload.get("nonce")
+    attestation_path = payload.get("attestation_path")
+    task_sha256 = payload.get("task_sha256")
+    if (
+        not isinstance(nonce, str)
+        or not _APPROVAL_NONCE_RE.fullmatch(nonce)
+        or not isinstance(attestation_path, str)
+        or attestation_path != f"requests/{nonce}.json"
+    ):
+        missing = None
+        if "agent-request" in required_kinds:
+            missing = {"kind": "agent-request", "reason": "signed request event is invalid"}
+        return None, missing, {"status": "absent"}
+    requests_dir = run_dir / "requests"
+    if requests_dir.is_symlink() or not requests_dir.is_dir():
+        missing = None
+        if "agent-request" in required_kinds:
+            missing = {"kind": "agent-request", "reason": "signed request envelope is missing"}
+        return None, missing, {"status": "absent"}
     request_file = run_dir / attestation_path
     if request_file.is_symlink() or not request_file.is_file():
-        return None, {"kind": "agent-request", "reason": "signed request envelope is missing"}
+        missing = None
+        if "agent-request" in required_kinds:
+            missing = {"kind": "agent-request", "reason": "signed request envelope is missing"}
+        return None, missing, {"status": "absent"}
     try:
         envelope = attestation_input.read_json_object(request_file)
     except (OSError, attestation_input.AttestationInputError):
-        return None, {"kind": "agent-request", "reason": "signed request envelope is not readable JSON"}
+        missing = None
+        if "agent-request" in required_kinds:
+            missing = {"kind": "agent-request", "reason": "signed request envelope is not readable JSON"}
+        return None, missing, {"status": "absent"}
 
     result, statement, payload_bytes = _verify_reference_envelope(
         envelope,
@@ -388,6 +408,14 @@ def _build_request_reference(
         "signed request",
     )
     subject_baseline = _extract_baseline(statement) if statement is not None else None
+    envelope_nonce = None
+    if statement is not None:
+        pred = statement.get("predicate")
+        if isinstance(pred, dict):
+            envelope_nonce = pred.get("nonce")
+    reference_nonce = (
+        envelope_nonce if isinstance(envelope_nonce, str) and _APPROVAL_NONCE_RE.fullmatch(envelope_nonce) else nonce
+    )
     verified = result.status == attestation.STATUS_SIGNED_OK
     keyids = sorted({result.keyid}) if verified and isinstance(result.keyid, str) else []
     reference: dict[str, Any] = {
@@ -403,7 +431,7 @@ def _build_request_reference(
         "signerKeyids": keyids,
         "verified": verified,
         "locator": f".brigade/runs/{run_dir.name}/requests/{nonce}.json",
-        "nonce": nonce,
+        "nonce": reference_nonce,
         "taskSha256": task_sha256 if isinstance(task_sha256, str) else None,
     }
     if not verified:
@@ -412,7 +440,10 @@ def _build_request_reference(
         del reference["predicateVersion"]
     if subject_baseline is None:
         del reference["subjectBaseline"]
-    return reference, None
+    request_field: dict[str, Any] = {"nonce": nonce}
+    if isinstance(task_sha256, str):
+        request_field["taskSha256"] = task_sha256
+    return reference, None, request_field
 
 
 def _build_test_result_references(
@@ -428,7 +459,11 @@ def _build_test_result_references(
     if not root.is_dir() or root.is_symlink():
         return [], [], {"status": "unknown"}
     entries: list[Path] = []
+    count = 0
     for child in root.iterdir():
+        count += 1
+        if count > attestation_receipt.MAX_RECEIPT_DIRECTORY_ENTRIES:
+            raise AgentChangeError("verify receipt directory scan exceeds entry limit")
         if child.is_symlink():
             raise AgentChangeError("verify receipt directory must not be a symlink")
         if not child.is_dir():
@@ -528,6 +563,8 @@ def _build_test_result_references(
             target,
             attestation.IN_TOTO_TEST_RESULT_PREDICATE_TYPE,
             "Test Result",
+            require_receipt=True,
+            receipt=snapshot.receipt,
         )
         verified = result.status == attestation.STATUS_SIGNED_OK
         subject_tree = _extract_tree(statement) if statement is not None else None
@@ -551,7 +588,10 @@ def _build_test_result_references(
             "result": result_value,
         }
         if not verified:
-            reference["reason"] = result.status.lower().replace("_", "-")
+            reason = result.status.lower().replace("_", "-")
+            if result.status == attestation.STATUS_SUBJECT_MISMATCH:
+                reason = "rederivation-failed"
+            reference["reason"] = reason
         references.append(reference)
 
     baseline_out: dict[str, Any]
@@ -640,7 +680,6 @@ def _build_approval_reference(
         predicate_type,
         label,
     )
-    # Re-derive payload bytes from the verified statement to ensure canonical form.
     if payload_bytes2 is not None:
         payload_bytes = payload_bytes2
         statement = statement2
@@ -674,32 +713,34 @@ def _build_approval_reference(
 def _build_approval_references(
     run_dir: Path,
     target: Path,
+    events: Sequence[run_journal.RunEvent],
 ) -> list[dict[str, Any]]:
     approvals_dir = run_dir / "approvals"
-    if approvals_dir.is_symlink():
+    if approvals_dir.is_symlink() or not approvals_dir.is_dir():
         raise AgentChangeError("approval directory must not contain symlinks")
-    if not approvals_dir.is_dir():
-        return []
-    latest = _latest_approval_event(run_dir)
+    latest = _latest_approval_event(events)
     latest_nonce = latest.payload.get("nonce") if latest is not None and isinstance(latest.payload, dict) else None
     references: list[dict[str, Any]] = []
     for path in sorted(approvals_dir.iterdir()):
         if path.is_symlink():
             raise AgentChangeError("approval directory must not contain symlinks")
-        if not path.is_file() or not _APPROVAL_NONCE_RE.fullmatch(path.name.removesuffix(".json")):
+        if not path.is_file() or not _APPROVAL_FILENAME_RE.fullmatch(path.name):
             continue
-        if path.name == f"{latest_nonce}.json" if latest_nonce else False:
-            # The latest journal-bound approval is processed first; journalBound True for it.
-            pass
         references.append(_build_approval_reference(run_dir, target, path, latest_nonce))
     return references
 
 
 def _deduplicate_references(references: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    key_to_refs: dict[tuple[str, str, str | None], list[dict[str, Any]]] = {}
+    key_to_refs: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    nondedup: list[dict[str, Any]] = []
     for ref in references:
-        key = (ref["kind"], ref.get("payloadSha256") or "", ref.get("subjectTree") or ref.get("subjectBaseline") or "")
-        key_to_refs.setdefault(key, []).append(ref)
+        payload_sha256 = ref.get("payloadSha256")
+        if isinstance(payload_sha256, str) and payload_sha256:
+            subject = ref.get("subjectTree") or ref.get("subjectBaseline") or ""
+            key = (ref["kind"], payload_sha256, subject)
+            key_to_refs.setdefault(key, []).append(ref)
+        else:
+            nondedup.append(ref)
     deduped: list[dict[str, Any]] = []
     for key in sorted(key_to_refs):
         group = key_to_refs[key]
@@ -708,8 +749,9 @@ def _deduplicate_references(references: list[dict[str, Any]]) -> list[dict[str, 
         if len(group) > 1:
             base["locators"] = [r["locator"] for r in group]
         deduped.append(base)
-    deduped.sort(key=lambda r: (r["kind"], r.get("payloadSha256") or ""))
-    return deduped
+    combined = deduped + sorted(nondedup, key=lambda r: (r["kind"], r.get("locator") or ""))
+    combined.sort(key=lambda r: (r["kind"], r.get("payloadSha256") or r.get("locator") or ""))
+    return combined
 
 
 def _collect_references(
@@ -718,10 +760,16 @@ def _collect_references(
     run_dir: Path,
     run_meta: Mapping[str, Any],
     final_tree: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
-    request_ref, request_missing = _build_request_reference(run_dir, target, run_meta)
+    policy: Mapping[str, Any],
+    events: Sequence[run_journal.RunEvent],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    required_kinds: set[str] = set()
+    for item in policy.get("required_references", []):
+        if isinstance(item, dict) and isinstance(item.get("kind"), str):
+            required_kinds.add(item["kind"])
+    request_ref, request_missing, request_field = _build_request_reference(run_dir, target, required_kinds, events)
     test_refs, other_tree, identity = _build_test_result_references(target, run_id, final_tree)
-    approval_refs = _build_approval_references(run_dir, target)
+    approval_refs = _build_approval_references(run_dir, target, events)
 
     references: list[dict[str, Any]] = []
     if request_ref is not None:
@@ -733,7 +781,12 @@ def _collect_references(
     missing: list[dict[str, Any]] = []
     if request_missing is not None:
         missing.append(request_missing)
-    return references, other_tree, missing, identity
+    present_kinds = {r.get("kind") for r in references if isinstance(r.get("kind"), str)}
+    missing_kinds = required_kinds - present_kinds
+    for kind in sorted(missing_kinds, key=str):
+        if not any(m.get("kind") == kind for m in missing if isinstance(m, dict)):
+            missing.append({"kind": kind, "reason": "required reference absent"})
+    return references, other_tree, missing, identity, request_field
 
 
 def _required_set_satisfied(
@@ -794,25 +847,18 @@ def build_statement(
 
     roster = _read_roster(run_dir)
     participants = _participants_from_run(run_meta, roster)
-    journal_head = _journal_chain_head(run_dir)
-    references, other_tree, missing, identity = _collect_references(target, run_id, run_dir, run_meta, tree_fingerprint)
-    # Record missing entries for any required reference kind that has no present reference.
-    required_kinds = {
-        item.get("kind")
-        for item in policy.get("required_references", [])
-        if isinstance(item, dict) and isinstance(item.get("kind"), str)
-    }
-    present_kinds = {r.get("kind") for r in references if isinstance(r.get("kind"), str)}
-    missing_kinds = required_kinds - present_kinds
-    for kind in sorted(missing_kinds, key=str):
-        if not any(m.get("kind") == kind for m in missing if isinstance(m, dict)):
-            missing.append({"kind": kind, "reason": "required reference absent"})
+    report = _read_lifecycle_report(run_dir)
+    events = report.events if report is not None else []
+    journal_head = _journal_chain_head(events)
+    references, other_tree, missing, identity, request_field = _collect_references(
+        target, run_id, run_dir, run_meta, tree_fingerprint, policy, events
+    )
     complete = _required_set_satisfied(policy, references, missing) and not missing
 
     baseline = identity.get("baseline", {"status": "unknown"})
     patch = identity.get("patch", {"status": "unknown"})
 
-    instant = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    instant = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
     emitted_at = instant.isoformat().replace("+00:00", "Z")
 
     return {
@@ -829,7 +875,9 @@ def build_statement(
                 "orchestratorSeat": run_meta.get("orchestrator")
                 if isinstance(run_meta.get("orchestrator"), str)
                 else None,
-                "workerSeats": [p["seat"] for p in participants if p.get("seat")],
+                "workerSeats": [
+                    p["seat"] for p in participants if p.get("seat") and p["seat"] != run_meta.get("orchestrator")
+                ],
             },
             "participants": participants,
             "baseline": baseline,
@@ -842,6 +890,7 @@ def build_statement(
             },
             "project": {"scope": policy["project_scope"]},
             "signerIndependence": "shared-workspace-key",
+            "request": request_field,
             "references": references,
             "missing": missing,
             "otherTreeReceipts": other_tree,
@@ -855,7 +904,6 @@ def export_agent_change(
     run_id: str,
     *,
     key: Path | None = None,
-    principal: str | None = None,
     policy: Path | None = None,
     out: str | None = None,
     force: bool = False,

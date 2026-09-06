@@ -1420,6 +1420,7 @@ Predicate carried by the agent-change evidence index.
 | `participants` | array of object | yes | `{seat, harness, modelDeclared, source, providerObserved}` |
 | `baseline` | object | yes | `{"gitCommit": <sha>}` or `{"status": "unknown"}` |
 | `patch` | object | yes | `{"sha256": <sha256>}` or `{"status": "unknown"}` |
+| `request` | object | yes | `{"nonce": <32 hex>, "taskSha256": <64 hex>}` or `{"status": "absent"}` |
 | `emittedAt` | string (ISO-8601) | yes | UTC Z timestamp, second precision |
 | `nonce` | string | yes | 32 hex characters |
 | `policy` | object | yes | `{"name": "brigade.agent_change_policy.v1", "digest": {"sha256": ...}}` |
@@ -1498,6 +1499,7 @@ Per-reference observations:
 | `binding` | string | `bound` or `conflicted` |
 | `rederivation` | string | `reproduced`, `failed`, or `not-applicable` |
 | `policy_outcome` | string | `pass`, `fail`, `unevaluated`, or `not-applicable` |
+| `reason` | string \| null | Refusal reason when `availability` is `partial` or `syntax` is `malformed` |
 
 ---
 

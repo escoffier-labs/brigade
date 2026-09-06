@@ -13,8 +13,7 @@ orchestrated agent change in one signed, in-toto Statement. It is produced by
   unless `--force` is given.
 
 - `brigade receipts export agent-change --target <dir> --run-id <run-id>
-  [--key <path>] [--principal <name>] [--policy <file>] [--out <path>]
-  [--force] [--json]`
+  [--key <path>] [--policy <file>] [--out <path>] [--force] [--json]`
   Build and sign the index statement for `<run-id>`. The default output is
   `<run-dir>/agent-change.json`. Exit is `0` when the index is complete under
   the policy and nonzero when it is incomplete.
@@ -64,6 +63,8 @@ Predicate fields:
   always `{"status": "unknown"}` in this slice.
 - `baseline`: `{"gitCommit": <sha>}` or `{"status": "unknown"}`.
 - `patch`: `{"sha256": <sha256>}` or `{"status": "unknown"}`.
+- `request`: `{"nonce": <32 hex>, "taskSha256": <64 hex>}` or `{"status": "absent"}`.
+  The nonce is resolved from the run journal's `request.signed` event.
 - `emittedAt`: UTC Z timestamp, second precision.
 - `nonce`: 32 hex characters from `secrets.token_hex(16)`.
 - `policy`: `{"name": "brigade.agent_change_policy.v1", "digest": {"sha256": ...}}`.
@@ -76,7 +77,8 @@ Predicate fields:
   `test-result`, `journalBound` for `human-approval`, and `reason` or `locators`
   as needed.
 - `missing`: list of `{"kind", "reason"}` entries for required references that
-  are absent at emit time.
+  are absent at emit time. Only kinds listed in the policy's `required_references`
+  are included; a policy that does not require `agent-request` will not list it.
 - `otherTreeReceipts`: test-result receipts whose `producer_run_id` matches
   but whose `tree_fingerprint` differs from the final tree.
 - `complete`: boolean. The emitter sets this from the policy, but verifiers

@@ -145,7 +145,6 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_agent_change.add_argument(
         "--key", metavar="PATH", type=Path, default=None, help="Path to the attestation signing key."
     )
-    p_agent_change.add_argument("--principal", metavar="NAME", default=None, help="Expected signer principal name.")
     p_agent_change.add_argument(
         "--policy", metavar="PATH", type=Path, default=None, help="Path to agent-change policy file."
     )
@@ -245,7 +244,6 @@ def dispatch(args) -> int:
             target=args.target,
             run_id=args.run_id,
             key=args.key,
-            principal=args.principal,
             policy=policy_path,
             out=args.out,
             force=args.force,

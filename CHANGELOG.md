@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching verify receipt, validate the digest before any tree fingerprint
   filter, and re-derive the Test Result attestation from the same snapshot so
   `receipt.json` is read exactly once. (#1404)
+- Agent-change evidence index hardening: run ids are validated against
+  `^[A-Za-z0-9._-]+$`, run directories and reference locators are resolved and
+  contained under `<target>`, symlinked components are refused, Test Result
+  references pass `require_receipt=True` with the snapshot receipt, the
+  `request` predicate field is resolved from the journal's `request.signed`
+  event, `missing` entries are only emitted for kinds required by the policy,
+  and the verifier checks allowed profiles, no-approval cycles, and bounded
+  verify-run scans. (#1404)
 - Attestation, cosign bundle, and approval verification now reject oversized,
   duplicate-name, non-finite, malformed-Unicode, over-nested, and cyclic JSON
   inputs before signature processing. DSSE accepts both standard and URL-safe

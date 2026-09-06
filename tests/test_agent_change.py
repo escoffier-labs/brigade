@@ -12,7 +12,17 @@ from typing import Any
 
 import pytest
 
-from brigade import agent_change, agent_change_verify, approval, approval_v2, attestation, cli, localio, run_journal
+from brigade import (
+    agent_change,
+    agent_change_verify,
+    approval,
+    approval_v2,
+    attestation,
+    attestation_receipt,
+    cli,
+    localio,
+    run_journal,
+)
 
 if not shutil.which("ssh-keygen"):
     pytest.skip("ssh-keygen is required for agent-change tests", allow_module_level=True)
@@ -103,11 +113,29 @@ def _signed_request(
     principal = "test-signer"
     keyid = _key_fingerprint(key_path)
     statement_sha256 = hashlib.sha256(attestation.canonical_statement_bytes(statement)).hexdigest()
+    task_sha256 = hashlib.sha256(task.encode("utf-8")).hexdigest()
+    run_journal.append_event(
+        run_dir / "events" / "lifecycle.jsonl",
+        run_id=run_id,
+        event_type="request.signed",
+        payload={
+            "requester_principal": principal,
+            "requester_keyid": keyid,
+            "baseline_commit": baseline_commit,
+            "task_sha256": task_sha256,
+            "nonce": nonce,
+            "statement_sha256": statement_sha256,
+            "attestation_path": f"requests/{nonce}.json",
+        },
+        idempotency_key=f"request:{nonce}",
+        expected_previous_sequence=0,
+        recorded_at="2026-09-06T00:00:00.000000Z",
+    )
     return {
         "requester_principal": principal,
         "requester_keyid": keyid,
         "baseline_commit": baseline_commit,
-        "task_sha256": hashlib.sha256(task.encode("utf-8")).hexdigest(),
+        "task_sha256": task_sha256,
         "nonce": nonce,
         "statement_sha256": statement_sha256,
         "attestation_path": f"requests/{nonce}.json",
@@ -218,7 +246,9 @@ def _approval_envelope(
     return approval_path
 
 
-def _append_approval_event(run_dir: Path, nonce: str, statement_sha256: str) -> None:
+def _append_approval_event(
+    run_dir: Path, nonce: str, statement_sha256: str, expected_previous_sequence: int = 0
+) -> None:
     journal_path = run_dir / "events" / "lifecycle.jsonl"
     journal_path.parent.mkdir(parents=True, exist_ok=True)
     run_journal.append_event(
@@ -239,7 +269,7 @@ def _append_approval_event(run_dir: Path, nonce: str, statement_sha256: str) -> 
             "producer_keyids": [],
         },
         idempotency_key=f"approval:{nonce}",
-        expected_previous_sequence=0,
+        expected_previous_sequence=expected_previous_sequence,
         recorded_at="2026-09-06T13:00:00.000000Z",
     )
 
@@ -329,7 +359,7 @@ def _build_full_run(
             "producer_keyids": [],
         },
         idempotency_key=f"approval:{approval_nonce}",
-        expected_previous_sequence=0,
+        expected_previous_sequence=1,
         recorded_at="2026-09-06T13:00:00.000000Z",
     )
     _ = _approval_envelope(run_dir, key_path, tree, approval_nonce, "a" * 64, version=approval_version)
@@ -366,6 +396,8 @@ def test_statement_lists_references_with_correct_digests_and_sorted_order(tmp_pa
     assert _HEX64_RE.match(req_ref["payloadSha256"])
     assert _HEX64_RE.match(req_ref["envelopeSha256"])
     assert req_ref["signerKeyids"] == [_key_fingerprint(key_path)]
+    assert statement["predicate"]["request"]["nonce"] == request_info["nonce"]
+    assert statement["predicate"]["request"]["taskSha256"] == request_info["task_sha256"]
     test_ref = refs[2]
     assert test_ref["predicateType"] == attestation.IN_TOTO_TEST_RESULT_PREDICATE_TYPE
     assert test_ref["predicateVersion"] == "v0.1"
@@ -405,7 +437,7 @@ def test_duplicate_payload_references_deduplicated_with_both_locators(tmp_path: 
             "producer_keyids": [],
         },
         idempotency_key=f"approval:{approval_nonce2}",
-        expected_previous_sequence=1,
+        expected_previous_sequence=2,
         recorded_at="2026-09-06T13:00:01.000000Z",
     )
     statement = agent_change.build_statement(target, run_dir.name)
@@ -578,6 +610,7 @@ def test_verifier_untrusted_signer_reports_untrusted_and_fail(
     assert result != 0
     out = json.loads(capsys.readouterr().out)
     assert out["index"]["trust"] == "untrusted"
+    assert out["status"] == "INVALID"
 
 
 def test_verifier_absent_allowed_signers_reports_trust_unknown(
@@ -695,10 +728,16 @@ def test_verifier_request_nonce_conflict_with_run_request_event(
     env = attestation.create_envelope(agent_change.build_statement(target, run_dir.name), key_path)
     index_path = run_dir / "agent-change.json"
     index_path.write_text(json.dumps(env, indent=2, sort_keys=True), encoding="utf-8")
-    # Mutate the run.json request nonce so it differs from the request reference.
-    run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-    run_json["request"]["nonce"] = "05050505050505050505050505050505"
-    (run_dir / "run.json").write_text(json.dumps(run_json, indent=2, sort_keys=True), encoding="utf-8")
+    # Mutate the journal request.signed event nonce so it differs from the request reference.
+    journal_path = run_dir / "events" / "lifecycle.jsonl"
+    lines = journal_path.read_text(encoding="utf-8").splitlines()
+    new_lines = []
+    for line in lines:
+        event = json.loads(line)
+        if event.get("event_type") == "request.signed":
+            event["payload"]["nonce"] = "05050505050505050505050505050505"
+        new_lines.append(json.dumps(event, sort_keys=True))
+    journal_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
     result = cli.main(["receipts", "verify-agent-change", str(index_path), "--target", str(target), "--json"])
     assert result != 0
     out = json.loads(capsys.readouterr().out)
@@ -835,3 +874,430 @@ def test_verifier_untrusted_reference_signer_reports_trust_untrusted_and_policy_
     test_ref = [r for r in out["references"] if r["kind"] == "test-result"][0]
     assert test_ref["trust"] == "untrusted"
     assert test_ref["policy_outcome"] == "fail"
+
+
+def test_verifier_request_reference_nonce_differs_from_journal_nonce(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path)
+    # Mutate the request envelope's nonce to a different value and re-sign.
+    request_path = run_dir / "requests" / "01010101010101010101010101010101.json"
+    env = json.loads(request_path.read_text(encoding="utf-8"))
+    statement = json.loads(base64.b64decode(env["payload"]))
+    statement["predicate"]["nonce"] = "06060606060606060606060606060606"
+    request_path.write_text(
+        json.dumps(attestation.create_envelope(statement, key_path), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    # Re-export so the reference nonce reflects the mutated envelope.
+    cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name, "--force"])
+    capsys.readouterr()
+    result = cli.main(["receipts", "verify-agent-change", str(run_dir), "--target", str(target), "--json"])
+    assert result != 0
+    out = json.loads(capsys.readouterr().out)
+    req_ref = [r for r in out["references"] if r["kind"] == "agent-request"][0]
+    assert req_ref["binding"] == "conflicted"
+
+
+def test_verifier_rejects_traversal_run_id_and_does_not_read_outside_target(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / "ws"
+    target.mkdir()
+    agent_change.init_policy(target)
+    key_path = _keygen(target)
+    run_id = "run-001"
+    tree = "1111111111111111111111111111111111111111"
+    run_dir = _run_dir(target, run_id, tree)
+    # Canary file outside the target workspace; the verifier must not read it.
+    canary = tmp_path / "canary"
+    canary.write_text("secret", encoding="utf-8")
+    statement = agent_change.build_statement(target, run_id)
+    statement["predicate"]["run"]["id"] = "../../../etc"
+    env = attestation.create_envelope(statement, key_path)
+    index_path = run_dir / "agent-change.json"
+    index_path.write_text(json.dumps(env, indent=2, sort_keys=True), encoding="utf-8")
+    result = cli.main(["receipts", "verify-agent-change", str(index_path), "--target", str(target), "--json"])
+    assert result != 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["index"]["binding"] == "unavailable"
+    assert canary.read_text() == "secret"
+
+
+def test_verifier_refuses_symlinked_verify_run_attestation_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path)
+    cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name, "--force"])
+    capsys.readouterr()
+    attestation_path = target / ".brigade" / "work" / "verify-runs" / "verify-001" / "attestation.json"
+    real_path = tmp_path / "real-attestation.json"
+    real_path.write_text(attestation_path.read_text(encoding="utf-8"), encoding="utf-8")
+    attestation_path.unlink()
+    attestation_path.symlink_to(real_path)
+    result = cli.main(["receipts", "verify-agent-change", str(run_dir), "--target", str(target), "--json"])
+    assert result != 0
+    out = json.loads(capsys.readouterr().out)
+    test_ref = [r for r in out["references"] if r["kind"] == "test-result"][0]
+    assert test_ref["availability"] == "partial"
+    assert test_ref["reason"] == "symlink-refused"
+
+
+def test_verifier_refuses_symlinked_verify_run_directory(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path)
+    cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name, "--force"])
+    capsys.readouterr()
+    root = target / ".brigade" / "work" / "verify-runs"
+    verify_dir = root / "verify-001"
+    real_dir = tmp_path / "real-verify"
+    real_dir.mkdir()
+    for child in list(verify_dir.iterdir()):
+        shutil.move(str(child), str(real_dir / child.name))
+    verify_dir.rmdir()
+    verify_dir.symlink_to(real_dir)
+    result = cli.main(["receipts", "verify-agent-change", str(run_dir), "--target", str(target), "--json"])
+    assert result != 0
+    out = json.loads(capsys.readouterr().out)
+    test_ref = [r for r in out["references"] if r["kind"] == "test-result"][0]
+    assert test_ref["availability"] == "partial"
+    assert test_ref["reason"] == "symlink-refused"
+
+
+def test_policy_without_agent_request_no_request_file_complete_true(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / "ws"
+    target.mkdir()
+    policy_path = agent_change.init_policy(target)
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    policy["required_references"] = [
+        {"kind": "test-result", "min_count": 1},
+        {"kind": "human-approval"},
+    ]
+    policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True), encoding="utf-8")
+    key_path = _keygen(target)
+    run_id = "run-001"
+    tree = "1111111111111111111111111111111111111111"
+    baseline = "2222222222222222222222222222222222222222"
+    patch = "3" * 64
+    run_dir = _run_dir(target, run_id, tree, request=None)
+    _test_result_envelope(target, run_dir, key_path, "verify-001", tree, baseline, patch)
+    approval_nonce = "02" * 16
+    _approval_envelope(run_dir, key_path, tree, approval_nonce, "a" * 64, version=2)
+    run_journal.append_event(
+        run_dir / "events" / "lifecycle.jsonl",
+        run_id=run_id,
+        event_type="approval",
+        payload={
+            "decision": "allow",
+            "scope": "run",
+            "approver_principal": "test-signer",
+            "approver_keyid": _key_fingerprint(key_path),
+            "subject_tree": tree,
+            "nonce": approval_nonce,
+            "decided_at": "2026-09-06T13:00:00.000000Z",
+            "expires_at": "2027-09-06T13:00:00.000000Z",
+            "statement_sha256": "a" * 64,
+            "attestation_path": f"approvals/{approval_nonce}.json",
+            "producer_keyids": [],
+        },
+        idempotency_key=f"approval:{approval_nonce}",
+        expected_previous_sequence=0,
+        recorded_at="2026-09-06T13:00:00.000000Z",
+    )
+    result = cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_id, "--force"])
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "incomplete" not in out.lower()
+    index_path = run_dir / "agent-change.json"
+    envelope = json.loads(index_path.read_text(encoding="utf-8"))
+    payload = json.loads(base64.b64decode(envelope["payload"]))
+    assert payload["predicate"]["complete"] is True
+    assert not any(m["kind"] == "agent-request" for m in payload["predicate"]["missing"])
+    assert payload["predicate"]["request"]["status"] == "absent"
+
+
+def test_verify_reference_envelope_rederives_test_result_with_snapshot_receipt_even_if_receipt_json_missing(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "ws"
+    target.mkdir()
+    key_path = _keygen(target)
+    tree = "1111111111111111111111111111111111111111"
+    run_dir = _run_dir(target, "run-001", tree)
+    baseline = "2222222222222222222222222222222222222222"
+    patch = "3" * 64
+    verify_dir = _test_result_envelope(target, run_dir, key_path, "verify-001", tree, baseline, patch)
+    receipt = json.loads((verify_dir / "receipt.json").read_text(encoding="utf-8"))
+    snapshot = attestation_receipt.snapshot_stored_receipt(receipt)
+    (verify_dir / "receipt.json").unlink()
+    envelope = json.loads((verify_dir / "attestation.json").read_text(encoding="utf-8"))
+    result, statement, payload_bytes = agent_change._verify_reference_envelope(
+        envelope,
+        target,
+        attestation.IN_TOTO_TEST_RESULT_PREDICATE_TYPE,
+        "Test Result",
+        require_receipt=True,
+        receipt=snapshot.receipt,
+    )
+    assert result.status == attestation.STATUS_SIGNED_OK
+    assert result.rederived is True
+
+
+def test_verify_reference_envelope_reports_rederivation_failed_when_snapshot_digest_differs(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "ws"
+    target.mkdir()
+    key_path = _keygen(target)
+    tree = "1111111111111111111111111111111111111111"
+    run_dir = _run_dir(target, "run-001", tree)
+    baseline = "2222222222222222222222222222222222222222"
+    patch = "3" * 64
+    verify_dir = _test_result_envelope(target, run_dir, key_path, "verify-001", tree, baseline, patch)
+    receipt = json.loads((verify_dir / "receipt.json").read_text(encoding="utf-8"))
+    receipt["baseline_commit"] = "4444444444444444444444444444444444444444"
+    receipt["digests"]["receipt_sha256"] = localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    snapshot = attestation_receipt.snapshot_stored_receipt(receipt)
+    envelope = json.loads((verify_dir / "attestation.json").read_text(encoding="utf-8"))
+    result, statement, payload_bytes = agent_change._verify_reference_envelope(
+        envelope,
+        target,
+        attestation.IN_TOTO_TEST_RESULT_PREDICATE_TYPE,
+        "Test Result",
+        require_receipt=True,
+        receipt=snapshot.receipt,
+    )
+    assert result.status == attestation.STATUS_SUBJECT_MISMATCH
+    assert result.rederived is False
+
+
+def test_complete_ok_round_trip_with_v1_approval(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path, approval_version=1)
+    result = cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name])
+    assert result == 0
+    capsys.readouterr()
+    result = cli.main(["receipts", "verify-agent-change", str(run_dir), "--target", str(target), "--json"])
+    assert result == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "COMPLETE-OK"
+
+
+def test_emitter_records_unsupported_predicate_approval_reference(
+    tmp_path: Path,
+) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path)
+    bad_statement = {
+        "_type": attestation.IN_TOTO_STATEMENT_TYPE,
+        "subject": [{"name": "git:tree", "digest": {"gitTree": "1111111111111111111111111111111111111111"}}],
+        "predicateType": agent_change.AGENT_CHANGE_PREDICATE_TYPE,
+        "predicate": {"schemaVersion": 1},
+    }
+    bad_nonce = "07070707070707070707070707070707"
+    bad_path = run_dir / "approvals" / f"{bad_nonce}.json"
+    bad_path.write_text(
+        json.dumps(attestation.create_envelope(bad_statement, key_path), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    statement = agent_change.build_statement(target, run_dir.name)
+    bad_refs = [
+        r for r in statement["predicate"]["references"] if r["kind"] == "human-approval" and r.get("nonce") == bad_nonce
+    ]
+    assert len(bad_refs) == 1
+    assert bad_refs[0]["verified"] is False
+    assert bad_refs[0]["reason"] == "unsupported-predicate"
+
+
+def test_emitter_records_malformed_payload_approval_reference(
+    tmp_path: Path,
+) -> None:
+    target, run_dir, _key, _req = _build_full_run(tmp_path)
+    bad_nonce = "08080808080808080808080808080808"
+    bad_path = run_dir / "approvals" / f"{bad_nonce}.json"
+    bad_path.write_text(
+        json.dumps({"payload": "not-base64!!!", "payloadType": "application/vnd.in-toto+json"}), encoding="utf-8"
+    )
+    statement = agent_change.build_statement(target, run_dir.name)
+    bad_refs = [
+        r for r in statement["predicate"]["references"] if r["kind"] == "human-approval" and r.get("nonce") == bad_nonce
+    ]
+    assert len(bad_refs) == 1
+    assert bad_refs[0]["verified"] is False
+    assert bad_refs[0]["reason"] == "malformed-payload"
+
+
+def test_other_tree_receipts_recorded(
+    tmp_path: Path,
+) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path)
+    other_tree = "4444444444444444444444444444444444444444"
+    baseline = "2222222222222222222222222222222222222222"
+    patch = "3" * 64
+    _test_result_envelope(target, run_dir, key_path, "verify-002", other_tree, baseline, patch)
+    statement = agent_change.build_statement(target, run_dir.name)
+    other_trees = statement["predicate"]["otherTreeReceipts"]
+    assert any(item.get("verifyRunId") == "verify-002" for item in other_trees)
+
+
+def test_emitter_records_receipt_digest_invalid(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "ws"
+    target.mkdir()
+    key_path = _keygen(target)
+    agent_change.init_policy(target)
+    run_dir = _run_dir(target, "run-001", "1111111111111111111111111111111111111111")
+    verify_dir = target / ".brigade" / "work" / "verify-runs" / "verify-001"
+    verify_dir.mkdir(parents=True)
+    bad_receipt = {
+        "schema_version": 2,
+        "run_id": "verify-001",
+        "target": str(target / "workspace"),
+        "status": "completed",
+        "started_at": "2026-09-06T12:00:00.000000Z",
+        "completed_at": "2026-09-06T12:00:05.000000Z",
+        "duration_seconds": 5.0,
+        "path": str(verify_dir),
+        "baseline_commit": "2222222222222222222222222222222222222222",
+        "tree_fingerprint": "1111111111111111111111111111111111111111",
+        "changes_patch_sha256": "3" * 64,
+        "producer_run_id": "run-001",
+        "commands": [],
+    }
+    bad_receipt["digests"] = {"algorithm": "sha256", "receipt_sha256": "bad"}
+    (verify_dir / "receipt.json").write_text(json.dumps(bad_receipt, indent=2, sort_keys=True), encoding="utf-8")
+    statement = attestation.build_statement(bad_receipt)
+    statement["predicate"]["result"] = "PASSED"
+    (verify_dir / "attestation.json").write_text(
+        json.dumps(attestation.create_envelope(statement, key_path), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    statement = agent_change.build_statement(target, run_dir.name)
+    test_refs = [r for r in statement["predicate"]["references"] if r["kind"] == "test-result"]
+    assert any(r.get("reason") == "receipt-digest-invalid" for r in test_refs)
+
+
+def test_verifier_refuses_absolute_path_locator(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path)
+    cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name, "--force"])
+    capsys.readouterr()
+    index_path = run_dir / "agent-change.json"
+    env = json.loads(index_path.read_text(encoding="utf-8"))
+    payload = json.loads(base64.b64decode(env["payload"]))
+    payload["predicate"]["references"][0]["locator"] = "/tmp/evil.json"
+    env["payload"] = base64.b64encode(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    index_path.write_text(json.dumps(env, indent=2, sort_keys=True), encoding="utf-8")
+    result = cli.main(["receipts", "verify-agent-change", str(index_path), "--target", str(target), "--json"])
+    assert result != 0
+    out = json.loads(capsys.readouterr().out)
+    ref = out["references"][0]
+    assert ref["availability"] == "partial"
+    assert ref["reason"] == "malformed-locator"
+
+
+def test_verifier_untrusted_signer_reports_policy_outcome_fail(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, run_dir, _key, _req = _build_full_run(tmp_path)
+    other_key_path = tmp_path / "other-signer-key"
+    attestation.keygen(
+        tmp_path,
+        principal="other-signer",
+        key_file=other_key_path,
+        allowed_signers_file=tmp_path / "other-allowed-signers",
+    )
+    statement = agent_change.build_statement(target, run_dir.name)
+    env = attestation.create_envelope(statement, other_key_path)
+    index_path = run_dir / "agent-change.json"
+    index_path.write_text(json.dumps(env, indent=2, sort_keys=True), encoding="utf-8")
+    result = cli.main(["receipts", "verify-agent-change", str(index_path), "--target", str(target), "--json"])
+    assert result != 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["index"]["trust"] == "untrusted"
+    assert out["status"] == "INVALID"
+
+
+def test_verifier_no_cycle_rule_for_approval_with_non_tree_subject(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path)
+    cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name, "--force"])
+    capsys.readouterr()
+    # Inject an approval whose subject names an agent-change payload digest instead of a git tree.
+    bad_nonce = "09090909090909090909090909090909"
+    bad_statement = {
+        "_type": attestation.IN_TOTO_STATEMENT_TYPE,
+        "subject": [{"name": "https://brigade.dev/attestation/agent-change/v1", "digest": {"sha256": "a" * 64}}],
+        "predicateType": approval_v2.HUMAN_APPROVAL_PREDICATE_TYPE,
+        "predicate": {
+            "schemaVersion": 2,
+            "run": {"id": run_dir.name, "journalChainHead": {"sha256": "a" * 64}},
+            "decision": "allow",
+            "scope": "run",
+            "approver": {"principal": "test-signer", "keyid": _key_fingerprint(key_path), "kind": "human"},
+            "requester": {"status": "unknown"},
+            "decidedAt": "2026-09-06T13:00:00.000000Z",
+            "expiresAt": "2027-09-06T13:00:00.000000Z",
+            "nonce": bad_nonce,
+            "reasonCode": "reviewed-tests",
+            "reasonSha256": "b" * 64,
+            "evidence": {"testResultPayloadSha256": [], "envelopes": []},
+            "policy": {"name": "brigade.sod.v2", "digest": {"sha256": "c" * 64}},
+        },
+    }
+    bad_path = run_dir / "approvals" / f"{bad_nonce}.json"
+    bad_path.write_text(
+        json.dumps(attestation.create_envelope(bad_statement, key_path), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    result = cli.main(["receipts", "verify-agent-change", str(run_dir), "--target", str(target), "--json"])
+    assert result != 0
+    out = json.loads(capsys.readouterr().out)
+    bad_ref = [
+        r
+        for r in out["references"]
+        if r.get("kind") == "human-approval" and r.get("locator", "").endswith(f"{bad_nonce}.json")
+    ][0]
+    assert bad_ref["binding"] == "conflicted"
+    assert bad_ref["policy_outcome"] == "fail"
+
+
+def test_emitter_requests_directory_symlink_refused(
+    tmp_path: Path,
+) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path)
+    requests_dir = run_dir / "requests"
+    real_dir = tmp_path / "real-requests"
+    real_dir.mkdir()
+    for child in list(requests_dir.iterdir()):
+        shutil.move(str(child), str(real_dir / child.name))
+    requests_dir.rmdir()
+    requests_dir.symlink_to(real_dir)
+    statement = agent_change.build_statement(target, run_dir.name)
+    req_refs = [r for r in statement["predicate"]["references"] if r["kind"] == "agent-request"]
+    assert not req_refs
+    assert any(
+        m["kind"] == "agent-request" and m["reason"] == "signed request envelope is missing"
+        for m in statement["predicate"]["missing"]
+    )
+
+
+def test_worker_seats_excludes_orchestrator(
+    tmp_path: Path,
+) -> None:
+    target, run_dir, _key, _req = _build_full_run(tmp_path)
+    statement = agent_change.build_statement(target, run_dir.name)
+    worker_seats = statement["predicate"]["run"]["workerSeats"]
+    assert "cursor_worker" not in worker_seats
+    assert "codex_coder" in worker_seats
+
+
+def test_emitted_at_second_precision(
+    tmp_path: Path,
+) -> None:
+    target, run_dir, _key, _req = _build_full_run(tmp_path)
+    statement = agent_change.build_statement(target, run_dir.name)
+    emitted_at = statement["predicate"]["emittedAt"]
+    assert "." not in emitted_at.split("Z")[0]
