@@ -205,8 +205,12 @@ def _legacy_bindings(seat: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     cli = brigade.get("cli") or None
     instance_id = t3_fleet.get("instance_id") or None
     service_tier = t3_fleet.get("service_tier") or None
+    brigade_binding: dict[str, Any] = {"cli": cli}
+    launch_model = brigade.get("model")
+    if isinstance(launch_model, str) and launch_model:
+        brigade_binding["model"] = launch_model
     return {
-        "brigade": {"cli": cli},
+        "brigade": brigade_binding,
         "t3_fleet": {"instance_id": instance_id, "service_tier": service_tier},
     }
 

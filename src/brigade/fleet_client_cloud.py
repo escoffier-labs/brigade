@@ -100,6 +100,7 @@ _MODEL_POLICY_FIELDS = frozenset(
         "notes",
         "reasoning",
         "brigade_cli",
+        "brigade_model",
         "t3_instance_id",
         "t3_service_tier",
     }
@@ -219,9 +220,10 @@ def _preserved_field(
         return current
     bindings = existing.get("bindings")
     if isinstance(bindings, dict):
-        if key == "brigade_cli":
+        if key in {"brigade_cli", "brigade_model"}:
             brigade = bindings.get("brigade")
-            bound = brigade.get("cli") if isinstance(brigade, dict) else None
+            nested = "cli" if key == "brigade_cli" else "model"
+            bound = brigade.get(nested) if isinstance(brigade, dict) else None
         elif key in {"t3_instance_id", "t3_service_tier"}:
             t3_fleet = bindings.get("t3_fleet")
             nested_key = "instance_id" if key == "t3_instance_id" else "service_tier"
@@ -448,6 +450,7 @@ def set_model_policy(
     notes: str | None = None,
     reasoning: str | None = None,
     brigade_cli: str | None = None,
+    brigade_model: str | None = None,
     t3_instance_id: str | None = None,
     t3_service_tier: str | None = None,
     expected_revision: int,
@@ -473,6 +476,7 @@ def set_model_policy(
         existing = _existing_seat(snapshot, seat)
         resolved_reasoning = _preserved_field(reasoning, existing, "reasoning", default="none")
         resolved_cli = _preserved_field(brigade_cli, existing, "brigade_cli")
+        resolved_launch_model = _preserved_field(brigade_model, existing, "brigade_model")
         resolved_t3 = _preserved_field(t3_instance_id, existing, "t3_instance_id")
         resolved_tier = _preserved_field(t3_service_tier, existing, "t3_service_tier")
         body = {
@@ -485,6 +489,7 @@ def set_model_policy(
             "notes": notes,
             "reasoning": resolved_reasoning,
             "brigade_cli": resolved_cli,
+            "brigade_model": resolved_launch_model,
             "t3_instance_id": resolved_t3,
             "t3_service_tier": resolved_tier,
             "expected_revision": revision,
