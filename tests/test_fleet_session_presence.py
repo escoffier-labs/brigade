@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 
 from types import SimpleNamespace
 
+from brigade import fleet_hub, fleet_hub_sessions
 from brigade import fleet_session_presence as presence
 
 
@@ -310,10 +312,14 @@ def test_publish_presence_maps_events_and_swallows_errors(git_repo, monkeypatch)
         "brigade.fleet_client.end_session",
         lambda snap: calls.append(("end", snap)) or True,
     )
-    presence._publish_presence("SessionStart", git_repo, "s1")
-    presence._publish_presence("PostToolUse", git_repo, "s1")
-    presence._publish_presence("Stop", git_repo, "s1")
-    assert [item[0] for item in calls] == ["upsert", "upsert", "end"]
+    assert presence._publish_presence("SessionStart", git_repo, "s1") is None
+    assert presence._publish_presence("UserPromptSubmit", git_repo, "s1") is None
+    assert presence._publish_presence("PreToolUse", git_repo, "s1") is None
+    assert presence._publish_presence("PostToolUse", git_repo, "s1") is None
+    # Stop fires once per assistant turn and must not end a still-open thread.
+    assert presence._publish_presence("Stop", git_repo, "s1") is None
+    assert presence._publish_presence("SessionEnd", git_repo, "s1") is None
+    assert [item[0] for item in calls] == ["upsert", "upsert", "upsert", "upsert", "end"]
     assert all(item[1].harness == "claude" and item[1].session_id == "s1" for item in calls)
 
     monkeypatch.setattr(
@@ -321,3 +327,65 @@ def test_publish_presence_maps_events_and_swallows_errors(git_repo, monkeypatch)
         lambda snap: (_ for _ in ()).throw(RuntimeError("hub down")),
     )
     presence._publish_presence("SessionStart", git_repo, "s2")
+
+
+HUB_NODE = "22222222-2222-4222-8222-222222222222"
+HUB_T0 = 1_700_000_000.0
+
+
+@pytest.fixture()
+def hub_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    fleet_hub_sessions.init_schema(conn)
+    yield conn
+    conn.close()
+
+
+def _upsert_at(conn: sqlite3.Connection, monkeypatch, when: float) -> None:
+    """Apply one presence upsert as if the Hub clock read ``when``."""
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: when)
+    status, _payload = fleet_hub_sessions.handle_session(
+        conn,
+        {
+            "action": "upsert",
+            "harness": "claude",
+            "session_id": "sess-ttl",
+            "repo_identity": "github.com/example/project",
+            "identity_scope": "fleet",
+            "repo_label": "project",
+            "checkout_path": "/tmp/project",
+            "branch": "main",
+            "dirty_paths": ["src/a.py"],
+            "dirty_truncated": False,
+            "ttl_seconds": presence.DEFAULT_TTL_SECONDS,
+        },
+        caller_node=HUB_NODE,
+    )
+    assert status == 200
+
+
+def test_session_without_heartbeats_expires_one_ttl_after_its_last_write(hub_conn, monkeypatch):
+    ttl = presence.DEFAULT_TTL_SECONDS
+    _upsert_at(hub_conn, monkeypatch, HUB_T0)
+
+    assert [row["session_id"] for row in fleet_hub_sessions.list_sessions(hub_conn, now_epoch=HUB_T0 + ttl - 1)] == [
+        "sess-ttl"
+    ]
+    assert fleet_hub_sessions.list_sessions(hub_conn, now_epoch=HUB_T0 + ttl + 1) == []
+    # The row is still on record; only the active view drops it.
+    assert len(fleet_hub_sessions.list_sessions(hub_conn, include_all=True, now_epoch=HUB_T0 + ttl + 1)) == 1
+
+
+def test_heartbeat_cadence_keeps_a_long_session_listed_past_the_ttl(hub_conn, monkeypatch):
+    ttl = presence.DEFAULT_TTL_SECONDS
+    interval = 300
+    _upsert_at(hub_conn, monkeypatch, HUB_T0)
+    for step in range(1, (2 * ttl) // interval + 1):
+        _upsert_at(hub_conn, monkeypatch, HUB_T0 + step * interval)
+
+    rows = fleet_hub_sessions.list_sessions(hub_conn, now_epoch=HUB_T0 + 2 * ttl)
+
+    assert [row["session_id"] for row in rows] == ["sess-ttl"]
+    assert rows[0]["expires_at"] == HUB_T0 + 2 * ttl + ttl
+    # A refreshed session keeps its original start; heartbeats are not restarts.
+    assert rows[0]["started_at"] == fleet_hub._epoch_to_iso(HUB_T0)

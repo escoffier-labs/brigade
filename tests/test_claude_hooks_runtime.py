@@ -3104,6 +3104,11 @@ def test_claude_presence_start_refresh_and_accepted_stop(target, monkeypatch):
         + "\n"
     )
     runtime.handle_payload("Stop", _payload(target, "Stop", session_id="s1", stop_hook_active=False))
+    # Stop fires once per assistant turn; the thread is still open.
+    assert [call.action for call in calls] == ["upsert", "upsert"]
+    assert all(call.action != "end" for call in calls)
+
+    runtime.handle_payload("SessionEnd", _payload(target, "SessionEnd", session_id="s1", reason="clear"))
     assert [call.action for call in calls] == ["upsert", "upsert", "end"]
     assert Path(calls[-1].snapshot.checkout_path) == target.resolve()
     end_calls = [call for call in calls if call.action == "end"]
@@ -3115,3 +3120,49 @@ def test_blocked_stop_does_not_end_presence(target, monkeypatch):
     result = runtime.handle_payload("Stop", _unverified_write_stop(target, session_id="s1"))
     assert result["decision"] == "block"
     assert all(call.action != "end" for call in calls)
+
+
+def _capture_heartbeat(monkeypatch) -> list[tuple[str, str]]:
+    """Record the heartbeat events handle_payload dispatches, without a Hub."""
+    events: list[tuple[str, str]] = []
+
+    def on_event(event, target, session_id, **_kwargs):
+        events.append((event, session_id))
+        return None
+
+    monkeypatch.setattr(runtime.heartbeat, "on_event", on_event)
+    monkeypatch.setattr(runtime.presence, "emit_presence", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "work brief: test")
+    monkeypatch.setattr(runtime, "_run_recall", lambda *_args, **_kwargs: "")
+    return events
+
+
+def test_handle_payload_routes_live_events_to_the_heartbeat(target, monkeypatch):
+    events = _capture_heartbeat(monkeypatch)
+
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id="s1"))
+    runtime.handle_payload("UserPromptSubmit", _payload(target, "UserPromptSubmit", session_id="s1"))
+    runtime.handle_payload(
+        "PreToolUse",
+        _payload(target, "PreToolUse", session_id="s1", tool_name="Read", tool_input={"file_path": str(target)}),
+    )
+
+    assert events == [
+        ("SessionStart", "s1"),
+        ("UserPromptSubmit", "s1"),
+        ("PreToolUse", "s1"),
+    ]
+
+
+def test_session_end_reaches_the_heartbeat_and_stop_never_ends_the_session(target, monkeypatch):
+    """Stop fires once per assistant turn; only SessionEnd closes the thread."""
+    events = _capture_heartbeat(monkeypatch)
+
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id="s1"))
+    stop = runtime.handle_payload("Stop", _payload(target, "Stop", session_id="s1", stop_hook_active=False))
+
+    assert stop is None
+    assert ("SessionEnd", "s1") not in events
+
+    assert runtime.handle_payload("SessionEnd", _payload(target, "SessionEnd", session_id="s1", reason="clear")) is None
+    assert events[-1] == ("SessionEnd", "s1")

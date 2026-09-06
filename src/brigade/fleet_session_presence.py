@@ -59,8 +59,10 @@ _CURSOR_HOOK_EVENTS = {
     "postToolUse": "heartbeat",
     "sessionEnd": "end",
 }
-_UPSERT_EVENTS = frozenset({"SessionStart", "PostToolUse", "start", "heartbeat"})
-_END_EVENTS = frozenset({"Stop", "end"})
+# Stop fires once per assistant turn, so it must never end a session row; the
+# thread is still open. SessionEnd is the only Claude event that ends presence.
+_UPSERT_EVENTS = frozenset({"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "start", "heartbeat"})
+_END_EVENTS = frozenset({"SessionEnd", "end"})
 
 _SCP_REMOTE = re.compile(r"^(?:(?P<user>[^@/]+)@)?(?P<host>[^:/\s]+):(?P<path>.+)$")
 _SECRET_LIKE_IDENTITY = re.compile(r"(?i)(://|token=|password=|[^/]+:[^/@]+@)")
@@ -513,20 +515,25 @@ def _hub_url_configured() -> bool:
         return False
 
 
-def _publish_presence(event: str, target: Path, session_id: str, *, harness: str = "claude") -> None:
-    """Best-effort Hub publication. Exceptions never escape to hook callers."""
+def _publish_presence(event: str, target: Path, session_id: str, *, harness: str = "claude") -> str | None:
+    """Best-effort Hub publication. Exceptions never escape to hook callers.
+
+    Returns a bounded failure reason, or None when the write landed, the event
+    carries no presence effect, or no Hub is configured.
+    """
     try:
         from . import fleet_client
 
         if not _hub_url_configured():
-            return
+            return None
         snapshot = build_snapshot(target, harness=harness, session_id=session_id)
         if event in _END_EVENTS:
-            fleet_client.end_session(snapshot)
-        elif event in _UPSERT_EVENTS:
-            fleet_client.upsert_session(snapshot)
-    except Exception:
-        return
+            return None if fleet_client.end_session(snapshot) else "end_unpublished"
+        if event in _UPSERT_EVENTS:
+            return None if fleet_client.upsert_session(snapshot) else "unpublished"
+        return None
+    except Exception as exc:
+        return _bounded_presence_error(exc)
 
 
 def run_presence_hook(

@@ -19,7 +19,7 @@ from typing import Any, BinaryIO, Callable, Iterator
 from .. import localio
 from ..component_paths import cache_root
 from ..wiring import resolve_wired_target
-from . import compaction_marker, envelope, presence
+from . import compaction_marker, envelope, heartbeat, presence
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
 from .session_state import (
@@ -2318,19 +2318,20 @@ def _handle_pre_compact(payload: dict[str, Any], *, pin: Path | None = None) -> 
 
 
 def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
-    """Restore the brief once after compaction; absent markers stay near-free."""
+    """Heartbeat Hub presence, then restore the brief once after compaction."""
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return None
     workspace = compaction_marker.cheap_workspace_root(payload.get("cwd"))
     if workspace is None:
         return None
-    key = compaction_marker.marker_key(session_id, workspace)
-    if not compaction_marker.marker_present(key):
-        return None
+    marker = compaction_marker.marker_present(compaction_marker.marker_key(session_id, workspace))
     # Confirm the workspace is still a Claude-wired Brigade repo before claiming.
     target = effective_hook_target(payload, pin=pin)
     if target is None:
+        return None
+    heartbeat.on_event("UserPromptSubmit", target, session_id)
+    if not marker:
         return None
     try:
         claim = compaction_marker.try_claim(session_id, target)
@@ -2374,10 +2375,14 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
     state = _normalize_state(target, session_id, persisted_state, task_epoch=task_epoch)
     if persisted_state != state:
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
-    if event != "Stop":
+    if event not in {"Stop", "SessionEnd"}:
         _touch_session_targets(session_id, target, payload, task_epoch=task_epoch)
+    if event == "SessionEnd":
+        heartbeat.on_event("SessionEnd", target, session_id)
+        return None
     if event == "SessionStart":
         presence.emit_presence("SessionStart", target, session_id)
+        heartbeat.on_event("SessionStart", target, session_id)
         # True starts and Claude's inject-capable compact source both clear any
         # leftover marker so UserPromptSubmit does not double-inject.
         try:
@@ -2421,6 +2426,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
         )
 
     if event == "PreToolUse":
+        heartbeat.on_event("PreToolUse", target, session_id)
         tool_name = payload.get("tool_name")
         if tool_name in _WRITE_TOOLS:
             # Heartbeat so a concurrent session can attribute the coming write
@@ -2612,7 +2618,6 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
                     "If this work produced durable knowledge, write a Memory Handoff in "
                     "`.claude/memory-handoffs/` before finishing."
                 )
-            presence.emit_presence("Stop", target, session_id)
             return _additional_context(
                 "Stop",
                 "",
@@ -2621,7 +2626,6 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
                 records=records,
             )
         if handoff_target is not None:
-            presence.emit_presence("Stop", target, session_id)
             return _additional_context(
                 "Stop",
                 "",
@@ -2632,7 +2636,6 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
                     "`.claude/memory-handoffs/` before finishing.",
                 ],
             )
-        presence.emit_presence("Stop", target, session_id)
     return None
 
 

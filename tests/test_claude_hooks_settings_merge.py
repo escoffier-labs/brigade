@@ -128,8 +128,34 @@ def test_hooks_status_reports_complete_stale_package_as_installed(tmp_path: Path
         "PostToolUseFailure",
         "PreCompact",
         "Stop",
+        "SessionEnd",
     ]
     assert status["missing_events"] == []
+
+
+def test_hooks_status_reports_a_pre_session_end_install_as_incomplete(tmp_path: Path):
+    """A 1.2.0-era install has no SessionEnd group, so presence never ends."""
+    target = _wired_claude(tmp_path)
+    assert hooks_install(target=target) == 0
+    settings = target / ".claude" / "settings.json"
+    payload = json.loads(settings.read_text())
+    payload["hooks"].pop("SessionEnd")
+    settings.write_text(json.dumps(payload, indent=2) + "\n")
+
+    status = status_payload(target)
+
+    assert status["missing_events"] == ["SessionEnd"]
+    assert status["current"] is False
+
+    assert hooks_update(target=target) == 0
+    restored = json.loads(settings.read_text())
+    session_end = [
+        h["command"] for group in restored["hooks"]["SessionEnd"] for h in group.get("hooks", []) if isinstance(h, dict)
+    ]
+    assert managed_command("SessionEnd") in session_end
+    assert status_payload(target)["current"] is True
+    sidecar = json.loads((target / ".brigade" / "claude-hooks.json").read_text())
+    assert sidecar["package_version"] == PACKAGE_VERSION == "1.3.0"
 
 
 def test_hooks_status_reports_matcher_drift_as_stale(tmp_path: Path):
