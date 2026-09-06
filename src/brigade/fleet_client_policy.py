@@ -338,6 +338,14 @@ def route_work(
     return post_policy(body, admin=False)
 
 
+def work_next(*, consumer: str = "brigade-run", workload: str = "general") -> dict[str, Any]:
+    """Read-only next eligible burn item with a dry-run route. Never reserves or dispatches."""
+    return post_policy(
+        {"action": "work-next", "consumer": consumer, "workload": workload},
+        admin=False,
+    )
+
+
 def renew_reservation(*, reservation_id: str, decision_id: str, session_id: str) -> dict[str, Any]:
     return post_policy(
         {
