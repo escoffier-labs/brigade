@@ -33,12 +33,12 @@ _STATUS_GOOD = "#0ca30c"
 _STATUS_WARNING = "#fab219"
 _STATUS_SERIOUS = "#ec835a"
 _STATUS_CRITICAL = "#d03b3b"
-_TEXT_PRIMARY = "#0b0b0b"
-_TEXT_SECONDARY = "#52514e"
-_SURFACE = "#fcfcfb"
+_TEXT_PRIMARY = "#e5ece8"
+_TEXT_SECONDARY = "#a4b1ad"
+_SURFACE = "#182022"
 _BORDER = "rgba(11,11,11,0.10)"
-_BOX_FILL = "#f3f3f1"
-_BOX_STROKE = "#c3c2b7"
+_BOX_FILL = "#202a2c"
+_BOX_STROKE = "#3a4849"
 
 _HEALTH_KEYS = (
     ("care_scan", "Care scan"),
@@ -1286,25 +1286,26 @@ def _stylesheet(nonce: str) -> str:
 }}
 .mo-mode {{
   font: inherit;
+  min-height: 36px;
   padding: 0.4rem 0.75rem;
-  border: 1px solid #666;
+  border: 1px solid var(--line);
   border-radius: 0.25rem;
-  background: #f8f8f8;
+  background: var(--surface-raised);
   color: {_TEXT_PRIMARY};
   cursor: pointer;
   text-decoration: none;
 }}
 .mo-mode:hover {{
-  background: #eee;
+  background: var(--surface-raised);
 }}
 .mo-mode:focus {{
-  outline: 2px solid #0066cc;
+  outline: 2px solid var(--signal);
   outline-offset: 2px;
 }}
 .mo-mode[aria-selected="true"] {{
-  background: #0066cc;
-  border-color: #0066cc;
-  color: #fff;
+  background: var(--signal-quiet);
+  border-color: var(--signal);
+  color: var(--ink);
   font-weight: 600;
 }}
 .mo-mode:disabled,
@@ -1372,7 +1373,7 @@ def _stylesheet(nonce: str) -> str:
   width: 1.1rem;
   height: 1.1rem;
   border-radius: 999px;
-  color: #fff;
+  color: var(--canvas);
   font-size: 0.7rem;
   line-height: 1;
 }}
@@ -1402,7 +1403,7 @@ def _stylesheet(nonce: str) -> str:
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }}
 .mo-svg-chip-icon {{
-  fill: #fff;
+  fill: var(--canvas);
   font-size: 8px;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }}
@@ -1422,16 +1423,17 @@ def _stylesheet(nonce: str) -> str:
 .mo-filters input[type="search"] {{
   font: inherit;
   min-width: 9rem;
+  min-height: 36px;
   padding: 0.25rem 0.4rem;
-  border: 1px solid #666;
+  border: 1px solid var(--line);
   border-radius: 0.2rem;
-  background: #fff;
+  background: var(--surface-raised);
   color: {_TEXT_PRIMARY};
 }}
 .mo-filters select:focus,
 .mo-filters input:focus,
 .mo-pager button:focus {{
-  outline: 2px solid #0066cc;
+  outline: 2px solid var(--signal);
   outline-offset: 2px;
 }}
 .mo-pager {{
@@ -1443,10 +1445,11 @@ def _stylesheet(nonce: str) -> str:
 }}
 .mo-pager button {{
   font: inherit;
+  min-height: 36px;
   padding: 0.3rem 0.7rem;
-  border: 1px solid #666;
+  border: 1px solid var(--line);
   border-radius: 0.2rem;
-  background: #f8f8f8;
+  background: var(--surface-raised);
   color: {_TEXT_PRIMARY};
   cursor: pointer;
 }}
@@ -1491,7 +1494,7 @@ def _stylesheet(nonce: str) -> str:
   font: inherit;
   font-size: 0.78rem;
   line-height: 1.2;
-  padding: 0.28rem 0.55rem;
+  padding: 2px 8px;
 }}
 .mo-stat-chip {{
   font-weight: 600;
@@ -1500,12 +1503,12 @@ def _stylesheet(nonce: str) -> str:
   cursor: pointer;
 }}
 .mo-filter-chip[aria-pressed="true"] {{
-  background: #0066cc;
-  border-color: #0066cc;
-  color: #fff;
+  background: var(--signal-quiet);
+  border-color: var(--signal);
+  color: var(--ink);
 }}
 .mo-filter-chip:focus {{
-  outline: 2px solid #0066cc;
+  outline: 2px solid var(--signal);
   outline-offset: 2px;
 }}
 .mo-tag-cloud {{
@@ -1517,10 +1520,11 @@ def _stylesheet(nonce: str) -> str:
 .mo-card-search input {{
   font: inherit;
   min-width: 16rem;
+  min-height: 36px;
   padding: 0.25rem 0.4rem;
-  border: 1px solid #666;
+  border: 1px solid var(--line);
   border-radius: 0.2rem;
-  background: #fff;
+  background: var(--surface-raised);
   color: {_TEXT_PRIMARY};
 }}
 .mo-master-index,

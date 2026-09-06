@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 from collections.abc import Sequence
+from datetime import datetime, timezone
 
 from brigade.center_cmd.dashboard.snapshot import Snapshot
 
@@ -56,118 +57,28 @@ def table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
     return f'<table class="data-table"><thead><tr>{head_cells}</tr></thead><tbody>{body}</tbody></table>'
 
 
-def page(title: str, nonce: str, nav: str, body: str, *, reload_ms: int = 15000) -> str:
-    """Render a full HTML document. *title*, *nav*, and *body* must already be escaped."""
-    nonce_attr = esc(nonce)
-    reload_delay = max(500, int(reload_ms))
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<style nonce="{nonce_attr}">
-body {{
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  line-height: 1.5;
-  margin: 0;
-  color: #111;
-  background: #fff;
-}}
-a {{
-  color: #0066cc;
-  text-decoration: none;
-}}
-a:hover {{
-  text-decoration: underline;
-}}
-nav.dashboard-nav {{
-  border-bottom: 1px solid #ddd;
-  padding: 0.75rem 1.5rem;
-  background: #f8f8f8;
-}}
-nav.dashboard-nav ul {{
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1rem;
-}}
-nav.dashboard-nav a {{
-  font-weight: 500;
-}}
-nav.dashboard-nav a[aria-current="page"] {{
-  font-weight: 700;
-  text-decoration: underline;
-}}
-main.dashboard-main {{
-  padding: 1.5rem;
-}}
-h1.page-title {{
-  font-size: 1.5rem;
-  margin: 0 0 1rem;
-  color: #0066cc;
-}}
-.panel {{
-  border: 1px solid #ddd;
-  border-radius: 0.25rem;
-  margin-bottom: 1rem;
-}}
-.panel-title {{
-  font-size: 1rem;
-  margin: 0;
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid #ddd;
-  background: #f8f8f8;
-}}
-.panel-body {{
-  padding: 1rem;
-}}
-.panel-body p {{
-  margin: 0;
-}}
-p.error {{
-  color: #8b0000;
-}}
-table.data-table {{
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.9rem;
-}}
-table.data-table th,
-table.data-table td {{
-  border: 1px solid #ddd;
-  padding: 0.4rem 0.6rem;
-  text-align: left;
-}}
-table.data-table th {{
-  background: #f0f0f0;
-}}
-.center-freshness {{
-  margin: 0 0 1rem;
-  color: #333;
-  font-size: 0.9rem;
-}}
-</style>
-</head>
-<body>
-{nav}
-<main class="dashboard-main">
-{body}
-</main>
-<script nonce="{nonce_attr}">
-(function () {{
-  var pollMs = {reload_delay};
-  if (document.querySelector("[data-center-loading]")) {{
-    setTimeout(function () {{ location.reload(); }}, pollMs);
+_CENTER_CSS = """
+table details { margin: 0; padding: 0; border: 0; background: transparent; }
+table summary { font-weight: 600; }
+.panel-title { margin: 0 0 12px; font-size: 15px; }
+.panel-body p { margin: 0; }
+p.error { color: var(--bad); }
+table.data-table { table-layout: auto; }
+table.data-table th:nth-child(n) { width: auto; }
+.center-freshness { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+"""
+
+_CENTER_SCRIPT = """(function () {
+  var pollMs = %d;
+  if (document.querySelector("[data-center-loading]")) {
+    setTimeout(function () { location.reload(); }, pollMs);
     return;
-  }}
-  setInterval(function () {{
+  }
+  setInterval(function () {
     location.reload();
-  }}, pollMs);
-}})();
-document.addEventListener("input", function (e) {{
+  }, pollMs);
+})();
+document.addEventListener("input", function (e) {
   var input = e.target;
   if (!input || !input.getAttribute) return;
   var targetId = input.getAttribute("data-filter-target");
@@ -176,13 +87,32 @@ document.addEventListener("input", function (e) {{
   if (!table) return;
   var query = (input.value || "").toLowerCase();
   var rows = table.querySelectorAll("tbody tr");
-  for (var i = 0; i < rows.length; i++) {{
+  for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
     var text = (row.textContent || "").toLowerCase();
     row.hidden = query !== "" && text.indexOf(query) === -1;
-  }}
-}});
-</script>
-</body>
-</html>
-"""
+  }
+});"""
+
+
+def page(title: str, nonce: str, nav: str, body: str, *, reload_ms: int = 15000) -> str:
+    """Render a full HTML document. *title*, *nav*, and *body* must already be escaped."""
+    from brigade import ui_theme
+
+    reload_delay = max(500, int(reload_ms))
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    heading = title.split(" - ", 1)[0]
+    shell = (
+        '<main class="deck-shell">'
+        f'<header class="masthead"><div><p class="eyebrow">Center</p><h1>{heading}</h1></div>'
+        f'<p class="header-meta">{esc(stamp)}</p></header>'
+        f"{nav}{body}</main>"
+    )
+    return ui_theme.document(
+        html.unescape(title),
+        nonce,
+        shell,
+        as_of=stamp,
+        extra_css=_CENTER_CSS,
+        script=_CENTER_SCRIPT % reload_delay,
+    )

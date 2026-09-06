@@ -22,9 +22,9 @@ ORDER = 1
 _STATUS_GOOD = "#0ca30c"
 _STATUS_WARNING = "#fab219"
 _STATUS_SERIOUS = "#ec835a"
-_TEXT_PRIMARY = "#0b0b0b"
-_TEXT_SECONDARY = "#52514e"
-_SURFACE = "#fcfcfb"
+_TEXT_PRIMARY = "#e5ece8"
+_TEXT_SECONDARY = "#a4b1ad"
+_SURFACE = "#182022"
 _BORDER = "rgba(11,11,11,0.10)"
 
 _TILES = (
@@ -337,7 +337,7 @@ def _stylesheet(nonce: str) -> str:
   width: 1.1rem;
   height: 1.1rem;
   border-radius: 999px;
-  color: #fff;
+  color: var(--canvas);
   font-size: 0.7rem;
   line-height: 1;
 }}

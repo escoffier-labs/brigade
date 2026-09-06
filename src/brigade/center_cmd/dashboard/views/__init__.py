@@ -68,9 +68,6 @@ def render_nav(current: str) -> str:
     for module in all_views():
         href = render.esc(f"/view/{module.NAME}")
         label = render.esc(module.TITLE)
-        if module.NAME == current:
-            items.append(f'<li><a href="{href}" aria-current="page">{label}</a></li>')
-        else:
-            items.append(f'<li><a href="{href}">{label}</a></li>')
-    links = "".join(items)
-    return f'<nav class="dashboard-nav"><ul>{links}</ul></nav>'
+        current_attr = ' aria-current="page"' if module.NAME == current else ""
+        items.append(f'<a href="{href}"{current_attr}>{label}</a>')
+    return f'<nav aria-label="Center">{" ".join(items)}</nav>'
