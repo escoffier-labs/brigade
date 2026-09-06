@@ -30,6 +30,10 @@ WAKE_SCHEMA = "brigade.grokbot.wake.v1"
 WAKE_CONFIG_NAME = "wake.json"
 WAKE_LOG_NAME = "wake-notify.jsonl"
 WAKE_REQUIRED_KEYS = frozenset({"schema", "webhook_url", "sender_key_file"})
+WAKE_OPTIONAL_KEYS = frozenset({"webhooks"})
+WAKE_ACCEPTED_KEYS = WAKE_REQUIRED_KEYS | WAKE_OPTIONAL_KEYS
+WAKE_WEBHOOK_ROLES = frozenset({"implementation-worker", "repository-scout"})
+WAKE_ROLE_ENTRY_KEYS = frozenset({"webhook_url", "sender_key_file"})
 WAKE_BODY_KEYS = ("job_id", "role", "label", "repository")
 WAKE_TIMEOUT_SECONDS = 8
 WAKE_URL_MAXIMUM = 2048
@@ -351,8 +355,9 @@ def notify_enqueue(target: Path, job: dict[str, Any]) -> None:
         config = _load_wake_config(target)
         if config is None:
             return
-        key = _read_wake_sender_key(Path(config["sender_key_file"]))
-        status = _post_wake(config["webhook_url"], key, _wake_body(job))
+        url, key_file = _wake_target_for_role(config, job.get("role"))
+        key = _read_wake_sender_key(Path(key_file))
+        status = _post_wake(url, key, _wake_body(job))
         _append_wake_status(target, status)
     except (KeyboardInterrupt, SystemExit):
         raise
@@ -367,7 +372,59 @@ def _wake_body(job: dict[str, Any]) -> dict[str, str]:
     return body
 
 
-def _load_wake_config(target: Path) -> dict[str, str] | None:
+def _wake_target_for_role(config: dict[str, Any], role: object) -> tuple[str, str]:
+    url = str(config["webhook_url"])
+    key_file = str(config["sender_key_file"])
+    webhooks = config.get("webhooks")
+    if not isinstance(role, str) or not isinstance(webhooks, dict):
+        return url, key_file
+    entry = webhooks.get(role)
+    if not isinstance(entry, dict):
+        return url, key_file
+    return str(entry["webhook_url"]), str(entry["sender_key_file"])
+
+
+def _expand_wake_key_file(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    expanded = Path(value).expanduser()
+    if not expanded.is_absolute():
+        return None
+    return str(expanded)
+
+
+def _parse_wake_webhooks(value: object, default_key_file: str) -> dict[str, dict[str, str]] | None:
+    """Normalize optional per-role targets. None means ignore the map."""
+    if not isinstance(value, dict):
+        return None
+    parsed: dict[str, dict[str, str]] = {}
+    for role, entry in value.items():
+        if role not in WAKE_WEBHOOK_ROLES:
+            return None
+        if isinstance(entry, str):
+            if not _valid_wake_url(entry):
+                return None
+            parsed[role] = {"webhook_url": entry, "sender_key_file": default_key_file}
+            continue
+        if not isinstance(entry, dict):
+            return None
+        keys = set(entry)
+        if "webhook_url" not in keys or not keys.issubset(WAKE_ROLE_ENTRY_KEYS):
+            return None
+        url = entry.get("webhook_url")
+        if not isinstance(url, str) or not _valid_wake_url(url):
+            return None
+        if "sender_key_file" in entry:
+            key_file = _expand_wake_key_file(entry.get("sender_key_file"))
+            if key_file is None:
+                return None
+        else:
+            key_file = default_key_file
+        parsed[role] = {"webhook_url": url, "sender_key_file": key_file}
+    return parsed
+
+
+def _load_wake_config(target: Path) -> dict[str, Any] | None:
     path = wake_config_path(target)
     try:
         info = path.lstat()
@@ -386,20 +443,23 @@ def _load_wake_config(target: Path) -> dict[str, str] | None:
         payload = json.loads(_read_owner_regular_file(path, maximum=4096))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, FeedError):
         return None
-    if not isinstance(payload, dict) or set(payload) != WAKE_REQUIRED_KEYS:
+    if not isinstance(payload, dict):
+        return None
+    keys = set(payload)
+    if not WAKE_REQUIRED_KEYS.issubset(keys) or not keys.issubset(WAKE_ACCEPTED_KEYS):
         return None
     if payload.get("schema") != WAKE_SCHEMA:
         return None
     url = payload.get("webhook_url")
-    key_file = payload.get("sender_key_file")
-    if not isinstance(url, str) or not _valid_wake_url(url):
+    key_file = _expand_wake_key_file(payload.get("sender_key_file"))
+    if not isinstance(url, str) or not _valid_wake_url(url) or key_file is None:
         return None
-    if not isinstance(key_file, str) or not key_file:
-        return None
-    expanded = Path(key_file).expanduser()
-    if not expanded.is_absolute():
-        return None
-    return {"schema": WAKE_SCHEMA, "webhook_url": url, "sender_key_file": str(expanded)}
+    config: dict[str, Any] = {"schema": WAKE_SCHEMA, "webhook_url": url, "sender_key_file": key_file}
+    if "webhooks" in payload:
+        webhooks = _parse_wake_webhooks(payload.get("webhooks"), key_file)
+        if webhooks:
+            config["webhooks"] = webhooks
+    return config
 
 
 def _valid_wake_url(value: object) -> bool:
