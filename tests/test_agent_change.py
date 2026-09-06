@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from brigade import agent_change, agent_change_verify, attestation, cli, localio, run_journal
+from brigade import agent_change, agent_change_verify, approval, approval_v2, attestation, cli, localio, run_journal
 
 if not shutil.which("ssh-keygen"):
     pytest.skip("ssh-keygen is required for agent-change tests", allow_module_level=True)
@@ -194,7 +194,6 @@ def _approval_envelope(
             "producers": [],
         }
     else:
-        from brigade import approval_v2
         statement["predicateType"] = approval_v2.HUMAN_APPROVAL_PREDICATE_TYPE
         statement["predicate"] = {
             "schemaVersion": 2,
@@ -333,7 +332,7 @@ def _build_full_run(
         expected_previous_sequence=0,
         recorded_at="2026-09-06T13:00:00.000000Z",
     )
-    approval_path = _approval_envelope(run_dir, key_path, tree, approval_nonce, "a" * 64, version=approval_version)
+    _ = _approval_envelope(run_dir, key_path, tree, approval_nonce, "a" * 64, version=approval_version)
     return target, run_dir, key_path, request_info
 
 
@@ -383,8 +382,6 @@ def test_duplicate_payload_references_deduplicated_with_both_locators(tmp_path: 
     target, run_dir, key_path, _req = _build_full_run(tmp_path)
     # Add a second approval envelope with the same canonical payload bytes but different file name.
     approval_path1 = run_dir / "approvals" / "02020202020202020202020202020202.json"
-    env1 = json.loads(approval_path1.read_text(encoding="utf-8"))
-    payload1 = base64.b64decode(env1["payload"])
     approval_nonce2 = "03" * 16
     approval_path2 = run_dir / "approvals" / f"{approval_nonce2}.json"
     approval_path2.write_bytes(approval_path1.read_bytes())
@@ -416,7 +413,9 @@ def test_duplicate_payload_references_deduplicated_with_both_locators(tmp_path: 
     # The two identical payloads should be collapsed to one reference with two locators.
     assert len(approval_refs) == 1
     locators = approval_refs[0].get("locators", [])
-    assert sorted(locators) == sorted([str(approval_path1.relative_to(target)), str(approval_path2.relative_to(target))])
+    assert sorted(locators) == sorted(
+        [str(approval_path1.relative_to(target)), str(approval_path2.relative_to(target))]
+    )
 
 
 def test_unverifiable_reference_is_listed_with_verified_false(tmp_path: Path) -> None:
@@ -433,11 +432,13 @@ def test_unverifiable_reference_is_listed_with_verified_false(tmp_path: Path) ->
     assert isinstance(test_ref.get("reason"), str) and test_ref["reason"]
 
 
-def test_missing_required_reference_recorded_complete_false_and_nonzero_exit(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_missing_required_reference_recorded_complete_false_and_nonzero_exit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     target = tmp_path / "ws"
     target.mkdir()
     agent_change.init_policy(target)
-    key_path = _keygen(target)
+    _ = _keygen(target)
     run_id = "run-001"
     tree = "1111111111111111111111111111111111111111"
     run_dir = _run_dir(target, run_id, tree)
@@ -504,7 +505,9 @@ def test_verifier_rejects_locator_with_dotdot(tmp_path: Path, capsys: pytest.Cap
     env = json.loads(index_path.read_text(encoding="utf-8"))
     payload = json.loads(base64.b64decode(env["payload"]))
     payload["predicate"]["references"][0]["locator"] = ".brigade/runs/../evil.json"
-    env["payload"] = base64.b64encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).decode("ascii")
+    env["payload"] = base64.b64encode(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
     index_path.write_text(json.dumps(env, indent=2, sort_keys=True), encoding="utf-8")
     result = cli.main(["receipts", "verify-agent-change", str(index_path), "--target", str(target), "--json"])
     assert result != 0
@@ -514,7 +517,9 @@ def test_verifier_rejects_locator_with_dotdot(tmp_path: Path, capsys: pytest.Cap
     assert output["references"][0]["availability"] == "partial"
 
 
-def test_verifier_binding_conflicted_on_tampered_reference_artifact(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_verifier_binding_conflicted_on_tampered_reference_artifact(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     target, run_dir, key_path, _req = _build_full_run(tmp_path)
     cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name, "--force"])
     capsys.readouterr()
@@ -530,18 +535,21 @@ def test_verifier_binding_conflicted_on_tampered_reference_artifact(tmp_path: Pa
     assert req_ref["binding"] == "conflicted"
 
 
-def test_verifier_binding_conflicted_for_test_result_on_other_tree(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_verifier_binding_conflicted_for_test_result_on_other_tree(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     target, run_dir, key_path, _req = _build_full_run(tmp_path)
     cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name, "--force"])
     capsys.readouterr()
-    # Tamper the local test-result attestation so its subject tree differs from the index.
+    # Re-sign the test-result attestation with a different subject tree so the reference is for another tree.
     att_path = target / ".brigade" / "work" / "verify-runs" / "verify-001" / "attestation.json"
-    att_text = att_path.read_text(encoding="utf-8")
-    att_text = att_text.replace(
-        '"tree_fingerprint": "b2cdf2c8aaaa8407c51f2d9ac2b6f3f934b3e9d1a6e7b8f9c0d1e2f3a4b5c6d7e8"',
-        '"tree_fingerprint": "4444444444444444444444444444444444444444"',
+    att_env = json.loads(att_path.read_text(encoding="utf-8"))
+    att_statement = json.loads(base64.b64decode(att_env["payload"]))
+    att_statement["subject"][0]["digest"]["gitTree"] = "4444444444444444444444444444444444444444"
+    att_path.write_text(
+        json.dumps(attestation.create_envelope(att_statement, key_path), indent=2, sort_keys=True),
+        encoding="utf-8",
     )
-    att_path.write_text(att_text, encoding="utf-8")
     result = cli.main(["receipts", "verify-agent-change", str(run_dir), "--target", str(target), "--json"])
     assert result != 0
     out = json.loads(capsys.readouterr().out)
@@ -550,11 +558,18 @@ def test_verifier_binding_conflicted_for_test_result_on_other_tree(tmp_path: Pat
     assert test_ref["binding"] == "conflicted"
 
 
-def test_verifier_untrusted_signer_reports_untrusted_and_fail(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_verifier_untrusted_signer_reports_untrusted_and_fail(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     target, run_dir, _key, _req = _build_full_run(tmp_path)
     # Generate a second key outside the target's allowed_signers and re-sign the index.
     other_key_path = tmp_path / "other-signer-key"
-    attestation.keygen(tmp_path, principal="other-signer", key_file=other_key_path, allowed_signers_file=tmp_path / "other-allowed-signers")
+    attestation.keygen(
+        tmp_path,
+        principal="other-signer",
+        key_file=other_key_path,
+        allowed_signers_file=tmp_path / "other-allowed-signers",
+    )
     statement = agent_change.build_statement(target, run_dir.name)
     env = attestation.create_envelope(statement, other_key_path)
     index_path = run_dir / "agent-change.json"
@@ -565,7 +580,9 @@ def test_verifier_untrusted_signer_reports_untrusted_and_fail(tmp_path: Path, ca
     assert out["index"]["trust"] == "untrusted"
 
 
-def test_verifier_absent_allowed_signers_reports_trust_unknown(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_verifier_absent_allowed_signers_reports_trust_unknown(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     target, run_dir, key_path, _req = _build_full_run(tmp_path)
     # Create a fresh target without the allowed_signers file.
     fresh_target = tmp_path / "fresh"
@@ -576,10 +593,18 @@ def test_verifier_absent_allowed_signers_reports_trust_unknown(tmp_path: Path, c
     env = attestation.create_envelope(agent_change.build_statement(target, run_dir.name), key_path)
     index_path = run_dir / "agent-change.json"
     index_path.write_text(json.dumps(env, indent=2, sort_keys=True), encoding="utf-8")
-    result = cli.main([
-        "receipts", "verify-agent-change", str(index_path),
-        "--target", str(fresh_target), "--policy", str(policy_path), "--json"
-    ])
+    result = cli.main(
+        [
+            "receipts",
+            "verify-agent-change",
+            str(index_path),
+            "--target",
+            str(fresh_target),
+            "--policy",
+            str(policy_path),
+            "--json",
+        ]
+    )
     assert result != 0
     out = json.loads(capsys.readouterr().out)
     assert out["index"]["trust"] == "unknown"
@@ -627,13 +652,16 @@ def test_verifier_project_scope_mismatch(tmp_path: Path, capsys: pytest.CaptureF
     assert out["project"]["status"] == "mismatch"
 
 
-def test_verifier_binding_unavailable_when_run_dir_absent_but_signature_verifies(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_verifier_binding_unavailable_when_run_dir_absent_but_signature_verifies(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     target, run_dir, key_path, _req = _build_full_run(tmp_path)
     env = attestation.create_envelope(agent_change.build_statement(target, run_dir.name), key_path)
     index_path = tmp_path / "agent-change.json"
     index_path.write_text(json.dumps(env, indent=2, sort_keys=True), encoding="utf-8")
     # Remove the run directory so binding is unavailable but the signature still verifies.
     import shutil
+
     shutil.rmtree(run_dir)
     result = cli.main(["receipts", "verify-agent-change", str(index_path), "--target", str(target), "--json"])
     assert result != 0
@@ -642,7 +670,9 @@ def test_verifier_binding_unavailable_when_run_dir_absent_but_signature_verifies
     assert out["index"]["binding"] == "unavailable"
 
 
-def test_verifier_rederivation_failed_when_receipt_digest_invalid(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_verifier_rederivation_failed_when_receipt_digest_invalid(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     target, run_dir, key_path, _req = _build_full_run(tmp_path)
     env = attestation.create_envelope(agent_change.build_statement(target, run_dir.name), key_path)
     index_path = run_dir / "agent-change.json"
@@ -658,7 +688,9 @@ def test_verifier_rederivation_failed_when_receipt_digest_invalid(tmp_path: Path
     assert test_ref["rederivation"] == "failed"
 
 
-def test_verifier_request_nonce_conflict_with_run_request_event(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_verifier_request_nonce_conflict_with_run_request_event(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     target, run_dir, key_path, _req = _build_full_run(tmp_path)
     env = attestation.create_envelope(agent_change.build_statement(target, run_dir.name), key_path)
     index_path = run_dir / "agent-change.json"
@@ -674,7 +706,9 @@ def test_verifier_request_nonce_conflict_with_run_request_event(tmp_path: Path, 
     assert req_ref["binding"] == "conflicted"
 
 
-def test_verifier_ignores_statement_complete_when_policy_requires_more(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_verifier_ignores_statement_complete_when_policy_requires_more(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     target, run_dir, key_path, _req = _build_full_run(tmp_path)
     cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name, "--force"])
     capsys.readouterr()
@@ -693,7 +727,9 @@ def test_verifier_ignores_statement_complete_when_policy_requires_more(tmp_path:
     assert out["status"] == "INCOMPLETE"
 
 
-def test_complete_ok_round_trip_with_request_test_result_and_v2_approval(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_complete_ok_round_trip_with_request_test_result_and_v2_approval(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     target, run_dir, key_path, _req = _build_full_run(tmp_path, approval_version=2)
     result = cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name])
     assert result == 0
@@ -710,7 +746,9 @@ def test_complete_ok_round_trip_with_request_test_result_and_v2_approval(tmp_pat
     assert out["project"]["status"] == "match"
 
 
-def test_no_absolute_path_env_argv_or_task_text_in_statement_or_verifier_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_no_absolute_path_env_argv_or_task_text_in_statement_or_verifier_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     target, run_dir, key_path, _req = _build_full_run(tmp_path)
     statement = agent_change.build_statement(target, run_dir.name)
     statement_json = json.dumps(statement)
@@ -739,3 +777,61 @@ def test_cli_agent_change_policy_init_idempotent_with_force(tmp_path: Path) -> N
     assert cli.main(["receipts", "agent-change-policy", "init", "--target", str(target)]) == 0
     assert cli.main(["receipts", "agent-change-policy", "init", "--target", str(target)]) == 1
     assert cli.main(["receipts", "agent-change-policy", "init", "--target", str(target), "--force"]) == 0
+
+
+def test_verifier_index_binding_conflicted_when_run_json_tree_differs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path)
+    cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name, "--force"])
+    capsys.readouterr()
+    run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    run_json["tree_fingerprint"] = "4444444444444444444444444444444444444444"
+    (run_dir / "run.json").write_text(json.dumps(run_json, indent=2, sort_keys=True), encoding="utf-8")
+    result = cli.main(["receipts", "verify-agent-change", str(run_dir), "--target", str(target), "--json"])
+    assert result != 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["index"]["binding"] == "conflicted"
+
+
+def test_verifier_json_output_is_sorted_and_uses_documented_schema(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path)
+    cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name, "--force"])
+    capsys.readouterr()
+    result = cli.main(["receipts", "verify-agent-change", str(run_dir), "--target", str(target), "--json"])
+    assert result == 0
+    raw = capsys.readouterr().out
+    out = json.loads(raw)
+    assert out["schema"] == agent_change_verify.AGENT_CHANGE_VERIFICATION_SCHEMA
+    assert raw.strip() == json.dumps(out, indent=2, sort_keys=True)
+
+
+def test_verifier_untrusted_reference_signer_reports_trust_untrusted_and_policy_fail(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path)
+    cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name, "--force"])
+    capsys.readouterr()
+    # Re-sign the test-result attestation with a key that is not in the target's allowed_signers.
+    other_key_path = tmp_path / "other-signer-key"
+    attestation.keygen(
+        tmp_path,
+        principal="other-signer",
+        key_file=other_key_path,
+        allowed_signers_file=tmp_path / "other-allowed-signers",
+    )
+    att_path = target / ".brigade" / "work" / "verify-runs" / "verify-001" / "attestation.json"
+    att_env = json.loads(att_path.read_text(encoding="utf-8"))
+    att_statement = json.loads(base64.b64decode(att_env["payload"]))
+    att_path.write_text(
+        json.dumps(attestation.create_envelope(att_statement, other_key_path), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    result = cli.main(["receipts", "verify-agent-change", str(run_dir), "--target", str(target), "--json"])
+    assert result != 0
+    out = json.loads(capsys.readouterr().out)
+    test_ref = [r for r in out["references"] if r["kind"] == "test-result"][0]
+    assert test_ref["trust"] == "untrusted"
+    assert test_ref["policy_outcome"] == "fail"

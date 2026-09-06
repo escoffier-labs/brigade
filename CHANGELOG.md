@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed timing flakes in tests `test_release_with_renew_in_flight_never_resurrects` and `test_concurrent_edge_writes_do_not_lose_dependency_edges`. (#1396)
 
 ### Added
+- Agent-change evidence index emitter (`brigade receipts export agent-change`), verifier (`brigade receipts verify-agent-change`), and policy initializer (`brigade receipts agent-change-policy init`), with external policy schema, in-toto predicate, and machine-readable verification output. (#1404)
 - `brigade governance inventory` now exports one canonical workspace-scoped inventory with bounded observed worker use, node-local Fleet policy facts, and optional CycloneDX machine-learning-model components. Remote MCP endpoints retain only scheme and authority; user-home rosters are never substituted. Fixes #1408.
 - Fleet hub roster page at `/deck/roster`: roles (impl, review, chef, research, security, scout), seat and cloud lane toggles, consumer defaults, and notes saved in one revisioned transaction; `brigade work brief` prints the `fleet_routing` block; `fleet preference set` gains `--research`, `--security`, `--scout`; hub schema v19.
 - `brigade receipts trailer --run <run-id>` prints `Brigade-Run` and `Brigade-Receipt` trailer lines for a local run receipt so a conductor can pass them to `git commit --trailer`. `brigade receipts verify --commit <sha>` reads the trailers from that commit's message, resolves the run receipt, and recomputes the digest to check for mismatches. (#1407)

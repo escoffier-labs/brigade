@@ -32,14 +32,16 @@ _VERIFY_RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _HEX40_OR_64_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
-_POLICY_REQUIRED_KEYS = frozenset({
-    "schema",
-    "schema_version",
-    "project_scope",
-    "required_references",
-    "allowed_profiles",
-    "policy_version",
-})
+_POLICY_REQUIRED_KEYS = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "project_scope",
+        "required_references",
+        "allowed_profiles",
+        "policy_version",
+    }
+)
 
 
 class AgentChangeError(RuntimeError):
@@ -198,13 +200,15 @@ def _participants_from_run(run_meta: Mapping[str, Any], roster: Mapping[str, Any
             if isinstance(row, dict):
                 harness = row.get("cli") if isinstance(row.get("cli"), str) else None
                 model_declared = row.get("model") if isinstance(row.get("model"), str) else None
-        participants.append({
-            "seat": seat,
-            "harness": harness,
-            "modelDeclared": model_declared,
-            "source": "roster_snapshot",
-            "providerObserved": {"status": "unknown"},
-        })
+        participants.append(
+            {
+                "seat": seat,
+                "harness": harness,
+                "modelDeclared": model_declared,
+                "source": "roster_snapshot",
+                "providerObserved": {"status": "unknown"},
+            }
+        )
     return participants
 
 
@@ -245,12 +249,18 @@ def _request_event_for_nonce(run_dir: Path, nonce: str) -> run_journal.RunEvent 
     if report.partial_tail is not None or report.chain_errors:
         return None
     for event in report.events:
-        if event.event_type == "request.signed" and isinstance(event.payload, dict) and event.payload.get("nonce") == nonce:
+        if (
+            event.event_type == "request.signed"
+            and isinstance(event.payload, dict)
+            and event.payload.get("nonce") == nonce
+        ):
             return event
     return None
 
 
-def _decode_envelope_payload(envelope: Mapping[str, Any], label: str) -> tuple[dict[str, Any] | None, bytes | None, str | None]:
+def _decode_envelope_payload(
+    envelope: Mapping[str, Any], label: str
+) -> tuple[dict[str, Any] | None, bytes | None, str | None]:
     payload_b64 = envelope.get("payload")
     if not isinstance(payload_b64, str):
         return None, None, "malformed-payload"
@@ -383,7 +393,9 @@ def _build_request_reference(
     reference: dict[str, Any] = {
         "kind": "agent-request",
         "predicateType": agent_request.AGENT_REQUEST_PREDICATE_TYPE,
-        "predicateVersion": _predicate_version(statement, agent_request.AGENT_REQUEST_PREDICATE_TYPE) if statement is not None else None,
+        "predicateVersion": _predicate_version(statement, agent_request.AGENT_REQUEST_PREDICATE_TYPE)
+        if statement is not None
+        else None,
         "profile": attestation.ATTESTATION_PROFILE,
         "subjectBaseline": subject_baseline,
         "payloadSha256": hashlib.sha256(payload_bytes).hexdigest() if payload_bytes is not None else None,
@@ -441,27 +453,31 @@ def _build_test_result_references(
         try:
             snapshot = attestation_receipt.snapshot_stored_receipt(receipt)
         except attestation_receipt.ReceiptDigestError:
-            references.append({
-                "kind": "test-result",
-                "predicateType": attestation.IN_TOTO_TEST_RESULT_PREDICATE_TYPE,
-                "predicateVersion": "v0.1",
-                "profile": attestation.ATTESTATION_PROFILE,
-                "subjectTree": None,
-                "payloadSha256": None,
-                "envelopeSha256": None,
-                "signerKeyids": [],
-                "verified": False,
-                "locator": f".brigade/work/verify-runs/{verify_dir.name}/attestation.json",
-                "reason": "receipt-digest-invalid",
-            })
+            references.append(
+                {
+                    "kind": "test-result",
+                    "predicateType": attestation.IN_TOTO_TEST_RESULT_PREDICATE_TYPE,
+                    "predicateVersion": "v0.1",
+                    "profile": attestation.ATTESTATION_PROFILE,
+                    "subjectTree": None,
+                    "payloadSha256": None,
+                    "envelopeSha256": None,
+                    "signerKeyids": [],
+                    "verified": False,
+                    "locator": f".brigade/work/verify-runs/{verify_dir.name}/attestation.json",
+                    "reason": "receipt-digest-invalid",
+                }
+            )
             continue
         receipt = snapshot.receipt
         tree = receipt.get("tree_fingerprint")
         if tree != final_tree:
-            other_tree.append({
-                "verifyRunId": verify_dir.name,
-                "tree": tree if isinstance(tree, str) else None,
-            })
+            other_tree.append(
+                {
+                    "verifyRunId": verify_dir.name,
+                    "tree": tree if isinstance(tree, str) else None,
+                }
+            )
             continue
         baseline = receipt.get("baseline_commit")
         patch = receipt.get("changes_patch_sha256")
@@ -471,36 +487,40 @@ def _build_test_result_references(
             patches.add(patch)
 
         if not attestation_path.is_file() or attestation_path.is_symlink():
-            references.append({
-                "kind": "test-result",
-                "predicateType": attestation.IN_TOTO_TEST_RESULT_PREDICATE_TYPE,
-                "predicateVersion": "v0.1",
-                "profile": attestation.ATTESTATION_PROFILE,
-                "subjectTree": tree,
-                "payloadSha256": None,
-                "envelopeSha256": None,
-                "signerKeyids": [],
-                "verified": False,
-                "locator": f".brigade/work/verify-runs/{verify_dir.name}/attestation.json",
-                "reason": "attestation envelope missing",
-            })
+            references.append(
+                {
+                    "kind": "test-result",
+                    "predicateType": attestation.IN_TOTO_TEST_RESULT_PREDICATE_TYPE,
+                    "predicateVersion": "v0.1",
+                    "profile": attestation.ATTESTATION_PROFILE,
+                    "subjectTree": tree,
+                    "payloadSha256": None,
+                    "envelopeSha256": None,
+                    "signerKeyids": [],
+                    "verified": False,
+                    "locator": f".brigade/work/verify-runs/{verify_dir.name}/attestation.json",
+                    "reason": "attestation envelope missing",
+                }
+            )
             continue
         try:
             envelope = attestation_input.read_json_object(attestation_path)
         except (OSError, attestation_input.AttestationInputError):
-            references.append({
-                "kind": "test-result",
-                "predicateType": attestation.IN_TOTO_TEST_RESULT_PREDICATE_TYPE,
-                "predicateVersion": "v0.1",
-                "profile": attestation.ATTESTATION_PROFILE,
-                "subjectTree": tree,
-                "payloadSha256": None,
-                "envelopeSha256": None,
-                "signerKeyids": [],
-                "verified": False,
-                "locator": f".brigade/work/verify-runs/{verify_dir.name}/attestation.json",
-                "reason": "attestation envelope is not readable JSON",
-            })
+            references.append(
+                {
+                    "kind": "test-result",
+                    "predicateType": attestation.IN_TOTO_TEST_RESULT_PREDICATE_TYPE,
+                    "predicateVersion": "v0.1",
+                    "profile": attestation.ATTESTATION_PROFILE,
+                    "subjectTree": tree,
+                    "payloadSha256": None,
+                    "envelopeSha256": None,
+                    "signerKeyids": [],
+                    "verified": False,
+                    "locator": f".brigade/work/verify-runs/{verify_dir.name}/attestation.json",
+                    "reason": "attestation envelope is not readable JSON",
+                }
+            )
             continue
 
         result, statement, payload_bytes = _verify_reference_envelope(
@@ -760,7 +780,7 @@ def build_statement(
     target = target.expanduser().resolve()
     if not target.is_dir():
         raise AgentChangeError(f"--target is not a directory: {target}")
-    policy_path = (policy_path.expanduser().resolve() if policy_path is not None else default_policy_path(target))
+    policy_path = policy_path.expanduser().resolve() if policy_path is not None else default_policy_path(target)
     if not policy_path.is_file() or policy_path.is_symlink():
         raise AgentChangeError("agent-change policy file is missing; run 'brigade receipts agent-change-policy init'")
     policy = _load_policy(policy_path)
@@ -784,7 +804,7 @@ def build_statement(
     }
     present_kinds = {r.get("kind") for r in references if isinstance(r.get("kind"), str)}
     missing_kinds = required_kinds - present_kinds
-    for kind in sorted(missing_kinds):
+    for kind in sorted(missing_kinds, key=str):
         if not any(m.get("kind") == kind for m in missing if isinstance(m, dict)):
             missing.append({"kind": kind, "reason": "required reference absent"})
     complete = _required_set_satisfied(policy, references, missing) and not missing
@@ -806,7 +826,9 @@ def build_statement(
             "run": {
                 "id": run_id,
                 "journalChainHead": journal_head,
-                "orchestratorSeat": run_meta.get("orchestrator") if isinstance(run_meta.get("orchestrator"), str) else None,
+                "orchestratorSeat": run_meta.get("orchestrator")
+                if isinstance(run_meta.get("orchestrator"), str)
+                else None,
                 "workerSeats": [p["seat"] for p in participants if p.get("seat")],
             },
             "participants": participants,
@@ -860,7 +882,7 @@ def export_agent_change(
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    policy_path = (policy.expanduser().resolve() if policy is not None else None)
+    policy_path = policy.expanduser().resolve() if policy is not None else None
     key_path = attestation.resolve_signing_key_path(target, key_file=key)
     if not key_path.is_file():
         print(f"error: signing key not found: {key_path}", file=sys.stderr)
@@ -904,12 +926,18 @@ def export_agent_change(
     except ValueError:
         rel_path = str(out_path)
     if json_output:
-        print(json.dumps({
-            "schema": "brigade.agent_change_export_result.v1",
-            "status": "complete" if statement["predicate"]["complete"] else "incomplete",
-            "path": rel_path,
-            "run_id": run_id,
-        }, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "schema": "brigade.agent_change_export_result.v1",
+                    "status": "complete" if statement["predicate"]["complete"] else "incomplete",
+                    "path": rel_path,
+                    "run_id": run_id,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
     else:
         print(f"agent-change index: {rel_path}")
         if not statement["predicate"]["complete"]:

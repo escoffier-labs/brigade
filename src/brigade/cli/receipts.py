@@ -116,9 +116,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         dest="agent_change_policy_command", metavar="<agent-change-policy-command>"
     )
     agent_change_policy_sub.required = True
-    p_acp_init = agent_change_policy_sub.add_parser(
-        "init", help="Initialize a default agent-change policy file."
-    )
+    p_acp_init = agent_change_policy_sub.add_parser("init", help="Initialize a default agent-change policy file.")
     p_acp_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_acp_init.add_argument("--force", action="store_true", help="Overwrite an existing policy file.")
     p_acp_init.set_defaults(func=dispatch)
@@ -141,23 +139,17 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_verify_agent_change.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_verify_agent_change.set_defaults(func=dispatch)
 
-    p_agent_change = export_sub.add_parser(
-        "agent-change", help="Export an agent-change evidence index for a run."
-    )
+    p_agent_change = export_sub.add_parser("agent-change", help="Export an agent-change evidence index for a run.")
     p_agent_change.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_agent_change.add_argument("--run-id", metavar="<run-id>", required=True, help="Run id to export.")
     p_agent_change.add_argument(
         "--key", metavar="PATH", type=Path, default=None, help="Path to the attestation signing key."
     )
-    p_agent_change.add_argument(
-        "--principal", metavar="NAME", default=None, help="Expected signer principal name."
-    )
+    p_agent_change.add_argument("--principal", metavar="NAME", default=None, help="Expected signer principal name.")
     p_agent_change.add_argument(
         "--policy", metavar="PATH", type=Path, default=None, help="Path to agent-change policy file."
     )
-    p_agent_change.add_argument(
-        "--out", metavar="PATH|-", default=None, help="Output path, or '-' for stdout."
-    )
+    p_agent_change.add_argument("--out", metavar="PATH|-", default=None, help="Output path, or '-' for stdout.")
     p_agent_change.add_argument("--force", action="store_true", help="Overwrite an existing index file.")
     p_agent_change.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_agent_change.set_defaults(func=dispatch)

@@ -56,10 +56,9 @@ def _load_envelope(path: Path) -> tuple[dict[str, Any] | None, str]:
         return None, "unreadable"
     if not isinstance(envelope, dict):
         return None, "malformed"
-    if not all(
-        isinstance(envelope.get(k), str)
-        for k in ("payloadType", "payload")
-    ) or not isinstance(envelope.get("signatures"), list):
+    if not all(isinstance(envelope.get(k), str) for k in ("payloadType", "payload")) or not isinstance(
+        envelope.get("signatures"), list
+    ):
         return None, "malformed"
     return envelope, "ok"
 
@@ -85,7 +84,11 @@ def _verify_envelope_signature(
 def _classify_signature_status(status: str | None) -> str:
     if status == attestation.STATUS_SIGNED_OK:
         return "valid"
-    if status in {attestation.STATUS_SIGNATURE_MISMATCH, attestation.STATUS_SUBJECT_MISMATCH, attestation.STATUS_EVIDENCE_MISSING}:
+    if status in {
+        attestation.STATUS_SIGNATURE_MISMATCH,
+        attestation.STATUS_SUBJECT_MISMATCH,
+        attestation.STATUS_EVIDENCE_MISSING,
+    }:
         return "invalid"
     return "unverifiable"
 
@@ -187,9 +190,7 @@ def _extract_baseline(statement: Mapping[str, Any] | None) -> str | None:
 
 
 def _policy_digest(policy: Mapping[str, Any]) -> str:
-    return hashlib.sha256(
-        json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _load_policy(target: Path, policy_path: Path | None) -> tuple[dict[str, Any] | None, str, str]:
@@ -307,7 +308,7 @@ def _reference_locator_to_path(
         prefix = f".brigade/runs/{run_id}/"
         if not locator.startswith(prefix):
             return None
-        rest = locator[len(prefix):]
+        rest = locator[len(prefix) :]
         return (target / ".brigade" / "runs" / run_id / rest).resolve()
     if locator.startswith(".brigade/work/verify-runs/"):
         return (target / locator).resolve()
@@ -489,7 +490,7 @@ def _verify_reference(
                 policy_outcome = "pass"
             else:
                 policy_outcome = "fail"
-        elif signature == "invalid":
+        elif signature == "invalid" or trust == "untrusted":
             policy_outcome = "fail"
 
     return {
@@ -532,7 +533,8 @@ def _evaluate_required_set(
         if not isinstance(min_count, int) or isinstance(min_count, bool) or min_count < 1:
             min_count = 1
         satisfied = [
-            vref for vref in by_kind.get(kind, [])
+            vref
+            for vref in by_kind.get(kind, [])
             if vref.get("availability") == "present"
             and vref.get("syntax") == "wellformed"
             and vref.get("cryptographic") == "valid"
@@ -542,18 +544,22 @@ def _evaluate_required_set(
             and vref.get("policy_outcome") in {"pass", "not-applicable"}
         ]
         if len(satisfied) >= min_count:
-            observations.append({
-                "kind": kind,
-                "status": "satisfied",
-                "count": len(satisfied),
-            })
+            observations.append(
+                {
+                    "kind": kind,
+                    "status": "satisfied",
+                    "count": len(satisfied),
+                }
+            )
         else:
-            observations.append({
-                "kind": kind,
-                "status": "missing",
-                "reason": f"required {min_count} verified {kind} reference(s), found {len(satisfied)}",
-                "count": len(satisfied),
-            })
+            observations.append(
+                {
+                    "kind": kind,
+                    "status": "missing",
+                    "reason": f"required {min_count} verified {kind} reference(s), found {len(satisfied)}",
+                    "count": len(satisfied),
+                }
+            )
     return observations
 
 
