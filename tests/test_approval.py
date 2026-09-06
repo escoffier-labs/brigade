@@ -18,6 +18,7 @@ from brigade import (
     approval,
     approval_v2,
     attestation,
+    attestation_input,
     cli,
     localio,
     run_audit,
@@ -40,6 +41,41 @@ PATCH = hashlib.sha256(PATCH_BYTES).hexdigest()
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_bad_verify_receipt(
+    target: Path,
+    *,
+    verify_id: str = VERIFY_ID,
+    producer_run_id: str = RUN_ID,
+    tree_fingerprint: str = TREE,
+    bad_digest: str | None = "0" * 64,
+    pop_digests: bool = False,
+) -> None:
+    """Write a verify receipt whose stored digest is intentionally wrong or absent."""
+    receipt_dir = target / ".brigade" / "work" / "verify-runs" / verify_id
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    receipt: dict[str, Any] = {
+        "schema_version": 2,
+        "run_id": verify_id,
+        "producer_run_id": producer_run_id,
+        "target": str(target),
+        "status": "completed",
+        "started_at": "2026-09-03T12:00:00Z",
+        "completed_at": "2026-09-03T12:00:05Z",
+        "baseline_commit": BASELINE,
+        "tree_fingerprint": tree_fingerprint,
+        "changes_patch_sha256": PATCH,
+        "commands": [],
+    }
+    if pop_digests:
+        receipt.pop("digests", None)
+    else:
+        receipt["digests"] = {
+            "algorithm": "sha256",
+            "receipt_sha256": bad_digest or "0" * 64,
+        }
+    _write_json(receipt_dir / "receipt.json", receipt)
 
 
 def _write_verify_receipt(
@@ -412,6 +448,36 @@ def test_v1_approval_verification_stays_receipt_bound(tmp_path: Path) -> None:
 
     assert verified.status == "APPROVED"
     assert verified.binding == "receipt"
+
+
+def test_v1_collect_receipts_raises_digest_mismatch_before_tree_filter(tmp_path: Path) -> None:
+    target = tmp_path / "workspace"
+    target.mkdir()
+    _write_bad_verify_receipt(target, tree_fingerprint="9" * 40, bad_digest="0" * 64)
+
+    with pytest.raises(approval.ApprovalError, match="matching verify receipt digest does not match receipt content"):
+        approval.collect_verify_receipts(target, RUN_ID, tree_fingerprint=TREE)
+
+
+@pytest.mark.parametrize(
+    ("bad_digest", "pop_digests", "message"),
+    [
+        ("0" * 64, False, "digest does not match receipt content"),
+        (None, True, "has no valid receipt_sha256"),
+    ],
+)
+def test_v1_collect_receipts_raises_for_invalid_digest_when_tree_matches(
+    tmp_path: Path,
+    bad_digest: str | None,
+    pop_digests: bool,
+    message: str,
+) -> None:
+    target = tmp_path / "workspace"
+    target.mkdir()
+    _write_bad_verify_receipt(target, tree_fingerprint=TREE, bad_digest=bad_digest, pop_digests=pop_digests)
+
+    with pytest.raises(approval.ApprovalError, match=message):
+        approval.collect_verify_receipts(target, RUN_ID, tree_fingerprint=TREE)
 
 
 def test_v1_backdated_approval_after_ship_is_late_by_common_sequence_rule(tmp_path: Path) -> None:
@@ -1035,6 +1101,35 @@ def test_v2_exact_test_result_set_makes_missing_or_extra_receipt_stale(
 
     assert cli.main(["receipts", "verify", "--target", str(target)]) == 0
     assert "APPROVAL-STALE (allow)" in capsys.readouterr().out
+
+
+def test_v2_collect_test_result_evidence_raises_digest_mismatch_before_tree_filter(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "workspace"
+    target.mkdir()
+    _write_bad_verify_receipt(target, tree_fingerprint="9" * 40, bad_digest="0" * 64)
+
+    with pytest.raises(approval_v2.ApprovalV2Error, match="matching verify receipt identity or digest is invalid"):
+        approval_v2.collect_test_result_evidence(target, RUN_ID, final_tree=TREE)
+
+
+def test_v2_collect_test_result_evidence_reads_receipt_json_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target, _key, _signers = _workspace(tmp_path)
+    reads = 0
+    original_read = attestation_input.read_json_object
+
+    def _counting_read(path: Path) -> Any:
+        nonlocal reads
+        if path.name == "receipt.json":
+            reads += 1
+        return original_read(path)
+
+    monkeypatch.setattr(attestation_input, "read_json_object", _counting_read)
+    approval_v2.collect_test_result_evidence(target, RUN_ID, final_tree=TREE)
+    assert reads == 1
 
 
 def test_deny_stays_non_exit_changing_when_the_tree_is_stale(tmp_path: Path, capsys: pytest.CaptureFixture[str]):

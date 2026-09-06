@@ -59,6 +59,20 @@ def test_snapshot_computes_digest_when_receipt_has_no_stored_digest() -> None:
     assert snapshot.digest == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
 
 
+def test_snapshot_stored_receipt_requires_receipt_sha256() -> None:
+    receipt = _stamp(_receipt())
+    assert attestation_receipt.snapshot_stored_receipt(receipt).digest == receipt["digests"]["receipt_sha256"]
+
+    no_digests = _receipt()
+    no_digests.pop("digests")
+    with pytest.raises(attestation_receipt.ReceiptDigestError, match="receipt has no stored digest"):
+        attestation_receipt.snapshot_stored_receipt(no_digests)
+
+    missing_sha = _receipt()
+    with pytest.raises(attestation_receipt.ReceiptDigestError, match="receipt has no stored digest"):
+        attestation_receipt.snapshot_stored_receipt(missing_sha)
+
+
 def test_selected_receipt_keeps_directory_metadata_outside_receipt_content(tmp_path: Path) -> None:
     receipt = _receipt()
     receipt.pop("path")

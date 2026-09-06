@@ -12,7 +12,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import approval_v2, attestation, attestation_input, localio, run_events, run_journal, run_projector
+from . import (
+    approval_v2,
+    attestation,
+    attestation_input,
+    attestation_receipt,
+    localio,
+    run_events,
+    run_journal,
+    run_projector,
+)
 
 HUMAN_APPROVAL_PREDICATE_TYPE = "https://brigade.dev/attestation/human-approval/v1"
 HUMAN_APPROVAL_V2_PREDICATE_TYPE = approval_v2.HUMAN_APPROVAL_PREDICATE_TYPE
@@ -214,24 +223,31 @@ def collect_verify_receipts(
             continue
         if receipt.get("producer_run_id") != producer_run_id:
             continue
+        try:
+            snapshot = attestation_receipt.snapshot_stored_receipt(receipt)
+        except attestation_receipt.ReceiptDigestError as exc:
+            if "receipt has no stored digest" in str(exc):
+                raise ApprovalError("matching verify receipt has no valid receipt_sha256") from exc
+            raise ApprovalError("matching verify receipt digest does not match receipt content") from exc
+        receipt = snapshot.receipt
         receipt_tree = receipt.get("tree_fingerprint")
         if tree_fingerprint is not None and receipt_tree != tree_fingerprint:
             continue
         verify_run_id = receipt.get("run_id")
-        digests = receipt.get("digests")
-        receipt_sha256 = digests.get("receipt_sha256") if isinstance(digests, Mapping) else None
+        receipt_sha256 = snapshot.digest
         if not isinstance(verify_run_id, str) or not _RUN_ID_RE.fullmatch(verify_run_id):
             raise ApprovalError("matching verify receipt has an invalid run_id")
-        if not isinstance(receipt_sha256, str) or not _HEX64_RE.fullmatch(receipt_sha256):
-            raise ApprovalError("matching verify receipt has no valid receipt_sha256")
         keyids: set[str] = set()
+        digests = receipt.get("digests")
         hmac_keyid = digests.get("key_id") if isinstance(digests, Mapping) else None
         if isinstance(hmac_keyid, str) and hmac_keyid:
             keyids.add(hmac_keyid)
         attestation_path = receipt_path.parent / "attestation.json"
         attestation_unparseable = False
         if attestation_path.exists():
-            verified_attestation = attestation.verify_attestation(attestation_path, target=target)
+            verified_attestation = attestation.verify_attestation(
+                attestation_path, target=target, receipt=snapshot.receipt
+            )
             if verified_attestation.status == attestation.STATUS_SIGNED_OK and verified_attestation.keyid:
                 keyids.add(verified_attestation.keyid)
             else:

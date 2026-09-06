@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `path`, and refuses stale or malformed stored digest evidence. Legacy
   digestless exports remain supported. Export receipt lookup is strict and
   bounded. Approval collector integration remains deferred. (#1404)
+- Approval v1 and v2 collectors now require a stored receipt digest on every
+  matching verify receipt, validate the digest before any tree fingerprint
+  filter, and re-derive the Test Result attestation from the same snapshot so
+  `receipt.json` is read exactly once. (#1404)
 - Attestation, cosign bundle, and approval verification now reject oversized,
   duplicate-name, non-finite, malformed-Unicode, over-nested, and cyclic JSON
   inputs before signature processing. DSSE accepts both standard and URL-safe
