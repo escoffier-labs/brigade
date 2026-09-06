@@ -28,9 +28,9 @@ _RECENT_STRIP_LIMIT = 8
 _STATUS_GOOD = "#0ca30c"
 _STATUS_WARNING = "#fab219"
 _STATUS_SERIOUS = "#ec835a"
-_TEXT_PRIMARY = "#0b0b0b"
-_TEXT_SECONDARY = "#52514e"
-_SURFACE = "#fcfcfb"
+_TEXT_PRIMARY = "#e5ece8"
+_TEXT_SECONDARY = "#a4b1ad"
+_SURFACE = "#182022"
 _BORDER = "rgba(11,11,11,0.10)"
 
 
@@ -240,7 +240,7 @@ def _dependency_diagram(ready: dict) -> str:
             elif kind == "blocked":
                 stroke = _STATUS_SERIOUS
             else:
-                stroke = "#888780"
+                stroke = "#75837f"
             positions[task_id] = (x, y, box_w, box_h)
             boxes.append(
                 f'<g class="wk-node wk-node-{html.esc(kind)}">'
@@ -602,7 +602,7 @@ def _stylesheet(nonce: str) -> str:
   width: 1.1rem;
   height: 1.1rem;
   border-radius: 999px;
-  color: #fff;
+  color: var(--canvas);
   font-size: 0.7rem;
 }}
 .wk-chip-good {{ background: {_STATUS_GOOD}; }}
@@ -622,7 +622,7 @@ def _stylesheet(nonce: str) -> str:
 .wk-lanes {{ display: flex; flex-direction: column; gap: 0.75rem; }}
 .wk-lane {{
   border: 1px solid {_BORDER};
-  border-left: 4px solid #0066cc;
+  border-left: 4px solid var(--signal);
   background: {_SURFACE};
   padding: 0.75rem 1rem;
 }}

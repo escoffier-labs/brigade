@@ -32,13 +32,13 @@ _BLAST_ZONE_CAP = 10
 _BLAST_MODES = frozenset({"map", "blast", "impact"})
 
 _STATUS_WARNING = "#fab219"
-_TEXT_PRIMARY = "#0b0b0b"
-_TEXT_SECONDARY = "#52514e"
-_SURFACE = "#fcfcfb"
+_TEXT_PRIMARY = "#e5ece8"
+_TEXT_SECONDARY = "#a4b1ad"
+_SURFACE = "#182022"
 _BORDER = "rgba(11,11,11,0.10)"
-_BOX_FILL = "#f3f3f1"
-_BOX_STROKE = "#c3c2b7"
-_CHANGED_FILL = "#fff4e0"
+_BOX_FILL = "#202a2c"
+_BOX_STROKE = "#3a4849"
+_CHANGED_FILL = "#382f22"
 _CHANGED_STROKE = "#fab219"
 
 _COLS = 5
@@ -1278,10 +1278,10 @@ def _stylesheet(nonce: str) -> str:
     return f"""<style nonce="{html.esc(nonce)}">
 .cg-modes {{ display:flex; flex-wrap:wrap; gap:0.5rem; margin:0 0 1rem; }}
 .cg-mode {{
-  font:inherit; padding:0.4rem 0.75rem; border:1px solid #666; border-radius:0.25rem;
-  background:#f8f8f8; color:{_TEXT_PRIMARY}; cursor:pointer; text-decoration:none;
+  font:inherit; min-height: 36px; padding:0.4rem 0.75rem; border: 1px solid var(--line); border-radius:0.25rem;
+  background: var(--surface-raised); color: var(--ink); cursor:pointer; text-decoration:none;
 }}
-.cg-mode[aria-selected="true"] {{ background:#0066cc; border-color:#0066cc; color:#fff; font-weight:600; }}
+.cg-mode[aria-selected="true"] {{ background: var(--signal-quiet); border-color: var(--signal); color: var(--ink); font-weight:600; }}
 .cg-summary {{
   margin:0 0 1rem; padding:0.85rem 1rem; border:1px solid {_BORDER}; border-radius:0.35rem;
   background:{_SURFACE}; color:{_TEXT_PRIMARY};
@@ -1318,11 +1318,11 @@ def _stylesheet(nonce: str) -> str:
 .cg-svg-label {{ fill:{_TEXT_PRIMARY}; font-size:12px; font-family:system-ui,sans-serif; }}
 .cg-svg-heading {{ fill:{_TEXT_SECONDARY}; font-size:11px; font-weight:700; font-family:system-ui,sans-serif; }}
 .cg-svg-chip-word {{ fill:{_TEXT_PRIMARY}; font-size:8px; font-weight:700; font-family:system-ui,sans-serif; }}
-.cg-svg-chip-icon {{ fill:#fff; font-size:7px; font-family:system-ui,sans-serif; }}
+.cg-svg-chip-icon {{ fill: var(--canvas); font-size:7px; font-family:system-ui,sans-serif; }}
 .cg-search {{ display:flex; flex-wrap:wrap; gap:0.75rem; align-items:flex-end; margin:0 0 1rem; }}
 .cg-search label {{ display:flex; flex-direction:column; gap:0.25rem; font-size:0.9rem; }}
-.cg-search input {{ font:inherit; min-width:16rem; padding:0.35rem 0.5rem; }}
-.cg-search button {{ font:inherit; padding:0.4rem 0.75rem; }}
+.cg-search input {{ font:inherit; min-width:16rem; min-height: 36px; padding:0.35rem 0.5rem; border: 1px solid var(--line); border-radius:0.2rem; background: var(--surface-raised); color: var(--ink); }}
+.cg-search button {{ font:inherit; min-height: 36px; padding:0.4rem 0.75rem; border: 1px solid var(--line); border-radius:0.2rem; background: var(--surface-raised); color: var(--ink); cursor: pointer; }}
 .cg-impact-intro {{ color:{_TEXT_PRIMARY}; }}
 .cg-impact-diagram {{ display:block; margin:0 0 1rem; min-height:160px; }}
 .cg-scroll {{ overflow-x:auto; max-width:100%; }}

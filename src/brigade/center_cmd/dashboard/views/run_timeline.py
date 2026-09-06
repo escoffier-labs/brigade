@@ -288,18 +288,18 @@ def _stylesheet(nonce: str) -> str:
 }}
 .mo-chip {{
   display: inline-block;
-  padding: 0.05rem 0.5rem;
+  padding: 2px 8px;
   border-radius: 999px;
-  border: 1px solid #666;
+  border: 1px solid var(--line);
   font-size: 0.85em;
 }}
 .mo-chip-pass {{
-  color: #0a5c0a;
-  border-color: #0a5c0a;
+  color: var(--ok);
+  border-color: var(--ok);
 }}
 .mo-chip-fail {{
-  color: #8a1010;
-  border-color: #8a1010;
+  color: var(--bad);
+  border-color: var(--bad);
 }}
 .mo-pager {{
   display: flex;
@@ -310,10 +310,12 @@ def _stylesheet(nonce: str) -> str:
 }}
 .mo-pager button {{
   font: inherit;
+  min-height: 36px;
   padding: 0.3rem 0.7rem;
-  border: 1px solid #666;
+  border: 1px solid var(--line);
   border-radius: 0.2rem;
-  background: #f8f8f8;
+  background: var(--surface-raised);
+  color: var(--ink);
   cursor: pointer;
 }}
 .mo-pager button:disabled {{

@@ -1428,3 +1428,32 @@ def test_memory_operations_partial_inventory_warns_with_loaded_and_contract_tota
     assert len(inv2.get("items") or []) == 1
     assert inv2.get("warning")
     assert inv2.get("contract_total") == 777 or "777" in html2
+
+
+def test_center_pages_render_through_the_shared_deck_shell():
+    from brigade.center_cmd.dashboard import render
+    from brigade.center_cmd.dashboard.views import render_nav
+
+    html = render.page("Status", "n0nce", render_nav("status"), "<p>hello</p>")
+    assert "--canvas: #111617;" in html
+    assert '<body class="deck"' in html
+    assert '<p class="eyebrow">Center</p>' in html
+    assert "<h1>Status</h1>" in html
+    assert '<nav aria-label="Center">' in html
+    assert '<a href="/view/status" aria-current="page">Status</a>' in html
+    assert "location.reload" in html
+    assert "background: #fff" not in html and "#0066cc" not in html
+
+
+def test_center_views_carry_no_light_mode_literals(tmp_target):
+    import re
+    from brigade.center_cmd.dashboard.views import all_views
+
+    banned = re.compile(
+        r"#(?:fff|ffffff|fafafa|f8f8f8|f5f5f5|f0f0f0|eee|ddd|ccc|666|333|111|0066cc|fcfcfb|f3f3f1|c3c2b7|fff4e0|0b0b0b|52514e)\b",
+        re.IGNORECASE,
+    )
+    for module in all_views():
+        html = module.render(module.fetch(tmp_target), nonce="n")
+        hit = banned.search(html)
+        assert hit is None, f"{module.NAME}: {hit.group(0)!r} at {hit.start()}"

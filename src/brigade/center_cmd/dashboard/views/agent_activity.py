@@ -334,17 +334,17 @@ def _svg(body: str, *, view_box: str = "0 0 32 32") -> str:
 def _cursor_glyph() -> str:
     """Isometric cube with a north-east arrow - Cursor's private-dashboard mark."""
     return _svg(
-        '<polygon points="16,3 29,10.5 16,18 3,10.5" fill="#1a1a1a"/>'
-        '<polygon points="3,10.5 16,18 16,29 3,21.5" fill="#555"/>'
-        '<polygon points="16,18 29,10.5 29,21.5 16,29" fill="#111"/>'
-        '<path d="M13.5 18.5 L22 8.5 L22 13 L27 13 L18.5 23 Z" fill="#fff"/>'
+        '<polygon points="16,3 29,10.5 16,18 3,10.5" class="glyph-ink"/>'
+        '<polygon points="3,10.5 16,18 16,29 3,21.5" class="glyph-muted"/>'
+        '<polygon points="16,18 29,10.5 29,21.5 16,29" class="glyph-ink"/>'
+        '<path d="M13.5 18.5 L22 8.5 L22 13 L27 13 L18.5 23 Z" class="glyph-canvas"/>'
     )
 
 
 def _codex_glyph() -> str:
     """OpenAI hexagonal knot, scaled to the badge box."""
     return _svg(
-        '<path fill="#111" d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>',
+        '<path class="glyph-ink" d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>',
         view_box="0 0 24 24",
     )
 
@@ -369,9 +369,9 @@ def _anthropic_glyph() -> str:
 def _t3_glyph() -> str:
     """Geometric T3 wordmark - no font dependency."""
     return _svg(
-        '<path fill="none" stroke="#111" stroke-width="2.6" stroke-linecap="round" '
+        '<path fill="none" class="glyph-ink" stroke-width="2.6" stroke-linecap="round" '
         'stroke-linejoin="round" d="M3 8.8h12.2M9.1 8.8v15"/>'
-        '<path fill="none" stroke="#111" stroke-width="2.6" stroke-linecap="round" '
+        '<path fill="none" class="glyph-ink" stroke-width="2.6" stroke-linecap="round" '
         'stroke-linejoin="round" d="M17.4 9.2h9.2a3.6 3.6 0 0 1 0 7.1H20.4m0 0h6.6a3.9 3.9 0 0 1 0 8.1H17.2"/>'
     )
 
@@ -470,10 +470,13 @@ def _machine_glyph(kind: str) -> str:
 
 def _stylesheet(nonce: str) -> str:
     return f'''<style nonce="{html.esc(nonce)}">
+.glyph-ink {{ fill: var(--ink); stroke: var(--ink); }}
+.glyph-canvas {{ fill: var(--canvas); }}
+.glyph-muted {{ fill: var(--muted); }}
 .page-summary {{
   margin-bottom: 0.5rem;
   font-weight: 600;
-  color: #111;
+  color: var(--ink);
 }}
 .state-legend {{
   display: flex;
@@ -481,7 +484,7 @@ def _stylesheet(nonce: str) -> str:
   gap: 0.6rem;
   margin-bottom: 0.75rem;
   font-size: 0.8rem;
-  color: #333;
+  color: var(--muted);
 }}
 .legend-entry {{ white-space: nowrap; }}
 .machine-board {{
@@ -491,11 +494,11 @@ def _stylesheet(nonce: str) -> str:
   margin-bottom: 1rem;
 }}
 .machine-card {{
-  border: 1px solid #ddd;
+  border: 1px solid var(--line);
   border-radius: 0.35rem;
-  background: #fafafa;
-  padding: 0.75rem;
-  color: #111;
+  background: var(--surface-raised);
+  padding: 16px;
+  color: var(--ink);
 }}
 .machine-card-header {{
   display: flex;
@@ -505,7 +508,7 @@ def _stylesheet(nonce: str) -> str:
 }}
 .machine-glyph {{
   flex: 0 0 auto;
-  stroke: #333;
+  stroke: var(--muted);
   fill: none;
   stroke-width: 1.6;
 }}
@@ -513,7 +516,7 @@ def _stylesheet(nonce: str) -> str:
   margin: 0;
   font-size: 1rem;
   font-weight: 650;
-  color: #111;
+  color: var(--ink);
   max-width: 12rem;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -530,12 +533,12 @@ def _stylesheet(nonce: str) -> str:
   margin-top: 0.35rem;
 }}
 .state-chip {{
-  border: 1px solid #666;
+  border: 1px solid var(--line);
   border-radius: 999px;
-  padding: 0.05rem 0.4rem;
+  padding: 2px 8px;
   font-size: 0.8rem;
-  color: #111;
-  background: #fff;
+  color: var(--ink);
+  background: var(--surface-raised);
 }}
 .agent-tile-list {{
   display: flex;
@@ -543,15 +546,15 @@ def _stylesheet(nonce: str) -> str:
   gap: 0.5rem;
 }}
 .agent-tile {{
-  border: 1px solid #ddd;
+  border: 1px solid var(--line);
   border-radius: 0.3rem;
-  background: #fff;
-  padding: 0.55rem 0.65rem;
-  color: #111;
+  background: var(--surface-raised);
+  padding: 12px;
+  color: var(--ink);
 }}
 .agent-tile-child {{
   margin-left: 1rem;
-  border-left: 2px solid #ccc;
+  border-left: 2px solid var(--signal);
 }}
 .agent-tile-main {{
   display: flex;
@@ -563,11 +566,11 @@ def _stylesheet(nonce: str) -> str:
   flex: 0 0 auto;
   width: 2.6rem;
   text-align: center;
-  border: 1px solid #666;
+  border: 1px solid var(--line);
   border-radius: 0.35rem;
   padding: 0.25rem 0.15rem;
-  background: #f5f5f5;
-  color: #111;
+  background: var(--surface-raised);
+  color: var(--ink);
   font-weight: 700;
   font-size: 0.85rem;
   display: flex;
@@ -583,7 +586,7 @@ def _stylesheet(nonce: str) -> str:
   margin-top: 0.15rem;
   font-size: 0.65rem;
   font-weight: 500;
-  color: #333;
+  color: var(--muted);
   max-width: 2.4rem;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -595,7 +598,7 @@ def _stylesheet(nonce: str) -> str:
 }}
 .agent-tile-task {{
   font-weight: 550;
-  color: #111;
+  color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -609,7 +612,7 @@ def _stylesheet(nonce: str) -> str:
   align-items: center;
 }}
 .agent-elapsed {{
-  color: #333;
+  color: var(--muted);
   font-size: 0.85rem;
 }}
 .agent-tile-children {{
@@ -619,20 +622,20 @@ def _stylesheet(nonce: str) -> str:
   gap: 0.45rem;
 }}
 .agent-state {{
-  border: 1px solid #666;
+  border: 1px solid var(--line);
   border-radius: 999px;
-  padding: 0.1rem 0.45rem;
+  padding: 2px 8px;
   font-weight: 600;
   white-space: nowrap;
-  color: #111;
-  background: #fff;
+  color: var(--ink);
+  background: var(--surface-raised);
 }}
-.agent-state-running {{ border-color: #1769aa; }}
+.agent-state-running {{ border-color: var(--ok); }}
 .agent-state-stale, .agent-state-unknown {{ border-style: dashed; }}
-.agent-state-failed, .agent-state-blocked {{ border-color: #8b0000; }}
+.agent-state-failed, .agent-state-blocked {{ border-color: var(--bad); }}
 .completed-expander {{
   margin-top: 0.75rem;
-  color: #333;
+  color: var(--muted);
 }}
 .completed-expander > summary {{
   cursor: pointer;
@@ -640,7 +643,7 @@ def _stylesheet(nonce: str) -> str:
 }}
 .machine-empty, .cloud-placeholder {{
   margin: 0;
-  color: #333;
+  color: var(--muted);
   font-size: 0.9rem;
 }}
 </style>'''

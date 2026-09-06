@@ -49,9 +49,9 @@ _FAILED_STATUSES = frozenset({"failed", "error", "timeout", "incomplete"})
 _STATUS_GOOD = "#0ca30c"
 _STATUS_WARNING = "#fab219"
 _STATUS_SERIOUS = "#ec835a"
-_TEXT_PRIMARY = "#0b0b0b"
-_TEXT_SECONDARY = "#52514e"
-_SURFACE = "#fcfcfb"
+_TEXT_PRIMARY = "#e5ece8"
+_TEXT_SECONDARY = "#a4b1ad"
+_SURFACE = "#182022"
 _BORDER = "rgba(11,11,11,0.10)"
 
 
@@ -799,7 +799,7 @@ def _stylesheet(nonce: str) -> str:
   width: 1.1rem;
   height: 1.1rem;
   border-radius: 999px;
-  color: #fff;
+  color: var(--canvas);
   font-size: 0.7rem;
 }}
 .rs-chip-good {{ background: {_STATUS_GOOD}; }}
@@ -808,11 +808,11 @@ def _stylesheet(nonce: str) -> str:
 .rs-chip-neutral {{ background: {_TEXT_SECONDARY}; }}
 .rs-state {{
   display: inline-block;
-  padding: 0 0.4rem;
+  padding: 2px 8px;
   border-radius: 999px;
   font-size: 0.8rem;
   font-weight: 700;
-  color: #fff;
+  color: var(--canvas);
 }}
 .rs-state-good {{ background: {_STATUS_GOOD}; }}
 .rs-state-warning {{ background: {_STATUS_WARNING}; }}
@@ -827,7 +827,7 @@ def _stylesheet(nonce: str) -> str:
   padding: 0;
 }}
 .rs-phase {{
-  padding: 0.15rem 0.6rem;
+  padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid {_BORDER};
   font-size: 0.85rem;
@@ -835,7 +835,7 @@ def _stylesheet(nonce: str) -> str:
   color: {_TEXT_SECONDARY};
 }}
 .rs-phase-done {{ border-color: {_STATUS_GOOD}; color: {_TEXT_PRIMARY}; }}
-.rs-phase-running {{ border-color: #0066cc; color: #0066cc; font-weight: 700; }}
+.rs-phase-running {{ border-color: var(--signal); color: var(--signal); font-weight: 700; }}
 .rs-phase-failed {{ border-color: {_STATUS_SERIOUS}; color: {_STATUS_SERIOUS}; font-weight: 700; }}
 .rs-run-head {{ margin: 0 0 0.35rem; }}
 .rs-reasons {{ margin: 0 0 0.75rem; padding-left: 1.2rem; color: {_TEXT_SECONDARY}; }}
