@@ -26,7 +26,7 @@ def _wired_claude(tmp_path: Path) -> Path:
 def _cache_env(tmp_path: Path) -> dict[str, str]:
     cache = tmp_path / "xdg-cache"
     cache.mkdir(parents=True, exist_ok=True)
-    return {"XDG_CACHE_HOME": str(cache), "HOME": str(tmp_path / "home")}
+    return {"XDG_CACHE_HOME": str(cache), "HOME": str(tmp_path / "home"), "USERPROFILE": str(tmp_path / "home")}
 
 
 def _payload(target: Path, event: str, *, session_id: str = "session-1", **extra):

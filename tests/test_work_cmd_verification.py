@@ -23,6 +23,7 @@ from tests.work_cmd_test_helpers import (
     _init_git_repo,
 )
 from tests.support import PRIVATE_FILE_MODE
+from tests._home import set_home
 
 
 def _init_git_repo_with_head(path):
@@ -1652,7 +1653,7 @@ def test_work_verify_receipt_digests_recompute_from_payload_and_logs(tmp_path, c
     _init_git_repo(tmp_path)
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
     monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
 
     assert (
         work_cmd.verify_run(
@@ -1699,7 +1700,7 @@ def test_work_verify_receipt_compacts_prior_nested_evidence(tmp_path, capsys, mo
         },
     )
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
 
     assert (
         work_cmd.verify_run(
@@ -1725,7 +1726,7 @@ def test_work_verify_receipt_captures_git_state_before_digest(tmp_path, capsys, 
     _init_git_repo_with_head(tmp_path)
     (tmp_path / "dirty.txt").write_text("dirty\n")
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
 
     assert (
         work_cmd.verify_run(
@@ -1751,7 +1752,7 @@ def test_work_verify_receipt_captures_git_state_before_digest(tmp_path, capsys, 
 
 def test_work_verify_receipt_omits_git_state_outside_git_repo(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
 
     assert (
         work_cmd.verify_run(
@@ -1965,7 +1966,7 @@ def test_work_verify_graphtrail_delta_missing_binary_fails_open(tmp_path, capsys
     _init_git_repo(tmp_path)
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
     monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
 
     assert (
         work_cmd.verify_run(target=tmp_path, commands=[f"{sys.executable} -c \"print('ok')\""], json_output=True) == 0
@@ -2658,6 +2659,12 @@ def test_run_verify_child_process_catches_keyboard_interrupt(tmp_path, monkeypat
     child_processes: list[subprocess.Popen[bytes]] = []
 
     def interrupting_popen(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args", [])
+        argv0 = ""
+        if isinstance(argv, (list, tuple)) and argv:
+            argv0 = os.path.basename(str(argv[0])).lower()
+        if argv0 in ("taskkill", "taskkill.exe"):
+            return real_popen(*args, **kwargs)
         process = real_popen(*args, **kwargs)
         child_processes.append(process)
 

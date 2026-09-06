@@ -7,6 +7,7 @@ import stat
 from pathlib import Path
 
 from brigade import component_bins
+from tests._home import set_home
 
 _SHA = "0" * 64
 
@@ -43,7 +44,12 @@ def _write_installed_state(data_home: Path, components: dict[str, Path]) -> None
 
 
 def _env(tmp_path: Path, **extra: str) -> dict[str, str]:
-    return {"HOME": str(tmp_path), "XDG_DATA_HOME": str(tmp_path / "data"), **extra}
+    return {
+        "HOME": str(tmp_path),
+        "USERPROFILE": str(tmp_path),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        **extra,
+    }
 
 
 def test_managed_path_returns_installed_executable(tmp_path):
@@ -95,7 +101,7 @@ def test_resolve_falls_back_to_supplied_path(tmp_path, monkeypatch):
 
 def test_resolve_falls_back_to_legacy_location(tmp_path, monkeypatch):
     legacy = _write_executable(tmp_path / ".cargo" / "bin" / "graphtrail")
-    monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
+    set_home(monkeypatch, str(tmp_path / "host-home"))
     monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
     env = _env(tmp_path, PATH=str(tmp_path / "empty"))
     assert component_bins.resolve("graphtrail", env=env) == str(legacy)
@@ -110,16 +116,17 @@ def test_resolve_unknown_name_uses_path_only(tmp_path, monkeypatch):
 
 def test_resolve_override_tilde_uses_supplied_home(tmp_path, monkeypatch):
     override_bin = _write_executable(tmp_path / "supplied-home" / "tools" / "graphtrail")
-    monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
+    set_home(monkeypatch, str(tmp_path / "host-home"))
     env = _env(tmp_path, GRAPHTRAIL_BIN="~/tools/graphtrail")
     env["HOME"] = str(tmp_path / "supplied-home")
+    env["USERPROFILE"] = str(tmp_path / "supplied-home")
     assert component_bins.resolve("graphtrail", env=env) == str(override_bin)
 
 
 def test_resolve_argv_rewrites_engine_head(tmp_path, monkeypatch):
     managed = _write_executable(tmp_path / "managed" / "miseledger")
     _write_installed_state(tmp_path / "data", {"miseledger": managed})
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     assert component_bins.resolve_argv(("miseledger", "doctor", "--json")) == [
         str(managed),
@@ -162,7 +169,7 @@ def test_resolve_agent_notify_prefers_managed_over_legacy_go_bin(tmp_path, monke
 
 def test_resolve_agent_notify_falls_back_to_legacy_go_bin(tmp_path, monkeypatch):
     legacy = _write_executable(tmp_path / "go" / "bin" / "agent-notify")
-    monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
+    set_home(monkeypatch, str(tmp_path / "host-home"))
     monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
     env = _env(tmp_path, PATH=str(tmp_path / "empty"))
     assert component_bins.resolve("agent-notify", env=env) == str(legacy)
@@ -178,7 +185,7 @@ def test_resolve_agent_notify_falls_back_to_supplied_path(tmp_path, monkeypatch)
 def test_resolve_argv_rewrites_agent_notify_head(tmp_path, monkeypatch):
     managed = _write_executable(tmp_path / "managed" / "agent-notify")
     _write_installed_state(tmp_path / "data", {"agent-notify": managed})
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     assert component_bins.resolve_argv(("agent-notify", "version", "--json")) == [
         str(managed),

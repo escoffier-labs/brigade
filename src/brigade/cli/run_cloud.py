@@ -1190,9 +1190,12 @@ def _dispatch_grokbot_feed(args, target: Path) -> int:
     """Validate or apply an approved feed without printing private task context."""
     from .. import grokbot_feed, grokbot_mcp
 
+    actor_kind: str | None = None
     try:
         if args.apply:
-            with _feed_hub_identity(target).context:
+            identity = _feed_hub_identity(target)
+            actor_kind = identity.actor_kind
+            with identity.context:
                 result = grokbot_feed.apply(target, args.manifest, limit=args.limit)
         else:
             result = grokbot_feed.preflight(target, args.manifest, limit=args.limit)
@@ -1200,10 +1203,9 @@ def _dispatch_grokbot_feed(args, target: Path) -> int:
         print("error: Grok Bot feed configuration is invalid", file=sys.stderr)
         return 2
     except grokbot_feed.FeedError as exc:
-        if exc.reason == "queue-error" and exc.index is not None:
-            print(f"error: queue-error index={exc.index}", file=sys.stderr)
-        else:
-            print(f"error: {exc.reason}", file=sys.stderr)
+        if exc.action is not None and exc.actor_kind is None:
+            exc.actor_kind = actor_kind
+        print(f"error: {exc.public_detail()}", file=sys.stderr)
         return 2
 
     if args.json:

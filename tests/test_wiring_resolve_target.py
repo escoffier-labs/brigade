@@ -9,6 +9,7 @@ from brigade import cli
 from brigade.config import Config, write_config
 from brigade.selection import Selection
 from brigade.wiring import resolve_wired_target
+from tests._home import set_home
 
 
 def _write_config(target: Path, harnesses: list[str]) -> None:
@@ -29,7 +30,7 @@ def test_home_roster_without_config_is_not_a_wired_target(tmp_path: Path, monkey
     (roster / "roster.toml").write_text("# user-level roster\n")
     plain = home / "plain"
     plain.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
 
     assert resolve_wired_target(str(home), harness=None) is None
     assert resolve_wired_target(str(plain), harness=None) is None
@@ -55,7 +56,7 @@ def test_home_roster_does_not_shadow_child_project(tmp_path: Path, monkeypatch):
     repo = home / "repos" / "app"
     repo.mkdir(parents=True)
     _write_config(repo, ["grok"])
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
 
     assert resolve_wired_target(str(repo), harness="grok") == repo.resolve()
     assert resolve_wired_target(str(home), harness="grok") is None

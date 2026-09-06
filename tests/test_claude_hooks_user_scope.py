@@ -24,6 +24,7 @@ from brigade.claude_hooks.package import (
     managed_user_command,
 )
 from brigade.claude_hooks.paths import resolve_claude_home
+from tests._home import set_home
 
 
 FOREIGN_SETTINGS = {
@@ -61,7 +62,7 @@ def claude_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     claude = home / ".claude-config"
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
     assert resolve_claude_home() == claude.resolve()
     return claude
@@ -205,7 +206,7 @@ def test_resolve_claude_home_falls_back_to_dot_claude(tmp_path: Path, monkeypatc
     home.mkdir()
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     assert resolve_claude_home() == (home / ".claude").resolve()
 
 

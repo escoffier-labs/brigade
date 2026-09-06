@@ -12,7 +12,7 @@ _VALID_SHA = "a" * 64
 
 
 def test_unsupported_system_raises_actionable_error():
-    env = {"HOME": "/home/alice"}
+    env = {"HOME": "/home/alice", "USERPROFILE": "/home/alice"}
     with pytest.raises(
         ValueError,
         match="unsupported component path platform system 'freebsd'; supported systems: darwin, linux, windows",
@@ -26,7 +26,7 @@ def test_unsupported_system_raises_actionable_error():
 
 
 def test_linux_defaults_use_xdg_paths():
-    env = {"HOME": "/home/alice"}
+    env = {"HOME": "/home/alice", "USERPROFILE": "/home/alice"}
     data = component_paths.data_root(env=env, system="linux")
     cache = component_paths.cache_root(env=env, system="linux")
     config = component_paths.config_root(env=env, system="linux")
@@ -38,6 +38,7 @@ def test_linux_defaults_use_xdg_paths():
 def test_linux_honors_xdg_overrides():
     env = {
         "HOME": "/home/alice",
+        "USERPROFILE": "/home/alice",
         "XDG_DATA_HOME": "/data",
         "XDG_CACHE_HOME": "/cache",
         "XDG_CONFIG_HOME": "/config",
@@ -48,7 +49,7 @@ def test_linux_honors_xdg_overrides():
 
 
 def test_macos_defaults_use_library_paths():
-    env = {"HOME": "/Users/alice"}
+    env = {"HOME": "/Users/alice", "USERPROFILE": "/Users/alice"}
     data = component_paths.data_root(env=env, system="darwin")
     cache = component_paths.cache_root(env=env, system="darwin")
     assert data == "/Users/alice/Library/Application Support"
@@ -57,7 +58,7 @@ def test_macos_defaults_use_library_paths():
 
 @patch("brigade.component_paths.host_platform.system", return_value="Darwin")
 def test_default_detection_uses_platform_system_for_macos(_mock_system):
-    env = {"HOME": "/Users/alice"}
+    env = {"HOME": "/Users/alice", "USERPROFILE": "/Users/alice"}
     data = component_paths.data_root(env=env)
     cache = component_paths.cache_root(env=env)
     assert data == "/Users/alice/Library/Application Support"
@@ -94,7 +95,11 @@ def test_component_paths_never_use_repo_brigade(tmp_path):
     repo = tmp_path / "project"
     repo.mkdir()
     (repo / ".brigade").mkdir()
-    env = {"HOME": str(tmp_path / "home"), "XDG_DATA_HOME": str(tmp_path / "xdg-data")}
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "USERPROFILE": str(tmp_path / "home"),
+        "XDG_DATA_HOME": str(tmp_path / "xdg-data"),
+    }
     data = component_paths.data_root(env=env, system="linux")
     installed = component_paths.installed_state_path(data)
     previous = component_paths.installed_previous_state_path(data)
@@ -112,7 +117,7 @@ def test_component_paths_never_use_repo_brigade(tmp_path):
 
 
 def test_installed_previous_state_path_uses_brigade_subdir():
-    env = {"HOME": "/home/alice"}
+    env = {"HOME": "/home/alice", "USERPROFILE": "/home/alice"}
     data = component_paths.data_root(env=env, system="linux")
     path = component_paths.installed_previous_state_path(data)
     assert path.endswith("brigade/installed.previous.json")

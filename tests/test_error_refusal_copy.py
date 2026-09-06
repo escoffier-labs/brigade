@@ -19,6 +19,7 @@ from brigade.work_cmd import edges as edges_mod
 from brigade.work_cmd.session import briefing as briefing_mod
 
 from tests.work_cmd_test_helpers import _init_git_repo
+from tests._home import set_home
 
 
 _BYPASS_TOKENS = (
@@ -97,7 +98,7 @@ def test_workflow_rules_missing_templates_remediation_omits_force(tmp_path):
 def test_mcp_user_scope_stdio_gate_omits_allow_flag(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     _seed_mcp(repo)

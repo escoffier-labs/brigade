@@ -182,10 +182,14 @@ Store the webhook URL and a sender-key *file path* (never the key itself) in
 an owner-only file at `.brigade/cloud/grokbot/wake.json`. Top-level
 `webhook_url` and `sender_key_file` stay required and are the default. An
 optional `webhooks` object may override the target per role
-(`implementation-worker`, `repository-scout`). Each value is either a URL
-string or an object with `webhook_url` and optional `sender_key_file`.
-`notify_enqueue` uses the role entry first and falls back to the default.
-An invalid or partial map is ignored and the default is still used. The
+(`implementation-worker`, `repository-scout`). Each value is a URL string,
+an object with `webhook_url` and optional `sender_key_file`, or a list of
+up to eight of those. `notify_enqueue` uses the role entry first and falls
+back to the default. A list posts the same bounded body to each valid
+target in order; each target gets its own eight-second single try and its
+own status line in `wake-notify.jsonl`. An invalid list entry skips only
+that target. Extra entries past eight are ignored. An invalid or partial
+map (not a list-item skip) is ignored and the default is still used. The
 accepted top-level keys are only `schema`, `webhook_url`, `sender_key_file`,
 and `webhooks`.
 
@@ -203,7 +207,13 @@ and `webhooks`.
   "webhook_url": "https://api2.cursor.sh/automations/webhook/",
   "sender_key_file": "/etc/brigade/grokbot-wake.key",
   "webhooks": {
-    "implementation-worker": "https://api2.cursor.sh/automations/webhook/",
+    "implementation-worker": [
+      "https://api2.cursor.sh/automations/webhook/",
+      {
+        "webhook_url": "https://api2.cursor.sh/automations/webhook/",
+        "sender_key_file": "/etc/brigade/grokbot-builder-b-wake.key"
+      }
+    ],
     "repository-scout": {
       "webhook_url": "https://api2.cursor.sh/automations/webhook/",
       "sender_key_file": "/etc/brigade/grokbot-scout-wake.key"
@@ -214,22 +224,23 @@ and `webhooks`.
 
 ```bash
 chmod 600 /etc/brigade/grokbot-wake.key
+chmod 600 /etc/brigade/grokbot-builder-b-wake.key
 chmod 600 /etc/brigade/grokbot-scout-wake.key
 chmod 600 /path/to/target/.brigade/cloud/grokbot/wake.json
 ```
 
 The sender key is read from that 0600 file at POST time and sent as both
 `Authorization: Bearer <key>` and `X-Automation-Key: <key>`. Every key file,
-including a per-role `sender_key_file`, must be owner-only 0600. The key
-never enters queue state, receipts, the notify log, stdout, or stderr. The
-POST body is exactly `{job_id, role, label, repository}`: no instructions,
-no verification commands, and no paths. Treat those four fields as untrusted
-context, then run the claim skill for that role. The request uses the
-standard library, waits at most eight seconds, and is not retried. HTTP 200
-means the routine woke. Any other status, a timeout, or a missing/invalid
-config leaves the enqueue result unchanged. The local notify log
-`.brigade/cloud/grokbot/wake-notify.jsonl` records the HTTP status code only
-(`0` when no status arrived).
+including a per-role or per-target `sender_key_file`, must be owner-only
+0600. The key never enters queue state, receipts, the notify log, stdout, or
+stderr. The POST body is exactly `{job_id, role, label, repository}`: no
+instructions, no verification commands, and no paths. Treat those four
+fields as untrusted context, then run the claim skill for that role. The
+request uses the standard library, waits at most eight seconds per target,
+and is not retried. HTTP 200 means that target woke. Any other status, a
+timeout, or a missing/invalid config leaves the enqueue result unchanged.
+The local notify log `.brigade/cloud/grokbot/wake-notify.jsonl` records one
+HTTP status line per attempted target (`0` when no status arrived).
 
 A 60-minute drain remains useful as a safety net: if a POST failed, the
 routine can still list the queue and claim anything that was missed. Do not
@@ -534,7 +545,9 @@ the idempotency key hash and the lease token digest.
 
 The goal is that a scheduled routine and an interactive session both end with a
 finding in the owner's review inbox, with no manual pickup from the Bot's cloud
-workspace. Nine configuration rules get you there.
+workspace. Nine configuration rules get you there. When a routine or skill text
+changes, compare two candidates on the same organic job with the
+[blinded eval procedure](grokbot-blinded-evals.md).
 
 **1. Put the submit step in a Skill, not in the Bot description.** A Skill is
 the documented container that carries result validation, a return format, and

@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from brigade import __version__, update_notify
+from tests._home import set_home
 
 
 class _Tty(io.StringIO):
@@ -15,7 +16,11 @@ class _Tty(io.StringIO):
 
 
 def _env(tmp_path: Path, **extra: str) -> dict[str, str]:
-    env = {"HOME": str(tmp_path), "XDG_CACHE_HOME": str(tmp_path / "cache")}
+    env = {
+        "HOME": str(tmp_path),
+        "USERPROFILE": str(tmp_path),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+    }
     env.update(extra)
     return env
 
@@ -309,7 +314,7 @@ def _run_brief(tmp_path, cache_home: Path, monkeypatch, capsys) -> str:
 
     from tests.work_cmd_test_helpers import _init_git_repo
 
-    monkeypatch.setenv("HOME", str(cache_home))
+    set_home(monkeypatch, str(cache_home))
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home / "cache"))
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)

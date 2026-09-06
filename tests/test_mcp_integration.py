@@ -7,6 +7,7 @@ import json
 import pytest
 
 from brigade import cli, doctor, mcp_cmd, operator_cmd, registry
+from tests._home import set_home
 
 
 def _seed(target):
@@ -28,7 +29,7 @@ def _seed(target):
 def test_user_scope_antigravity_writes_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     _seed(repo)
@@ -47,7 +48,7 @@ def test_user_scope_antigravity_writes_home(tmp_path, monkeypatch):
 def test_cursor_user_scope_uses_home_config_and_reports_paths(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     _seed(repo)
@@ -78,7 +79,7 @@ def test_cursor_user_scope_uses_home_config_and_reports_paths(tmp_path, monkeypa
 def test_broad_user_scope_does_not_select_cursor_global_config(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     _seed(repo)
@@ -93,7 +94,7 @@ def test_broad_user_scope_does_not_select_cursor_global_config(tmp_path, monkeyp
 def test_cursor_user_scope_accepts_global_target_alias(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     mcp_cmd.init(target=repo, json_output=True)
@@ -128,7 +129,7 @@ def test_cursor_user_scope_normalizes_repo_graphtrail_pin_and_preserves_config(t
             }
         )
     )
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     mcp_cmd.init(target=repo, json_output=True)
@@ -176,7 +177,7 @@ def test_cursor_user_scope_normalizes_repo_graphtrail_pin_and_preserves_config(t
 def test_cursor_user_scope_preserves_relative_graphtrail_pin(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     mcp_cmd.init(target=repo, json_output=True)
@@ -202,7 +203,7 @@ def test_cursor_user_scope_preserves_relative_graphtrail_pin(tmp_path, monkeypat
 def test_cursor_user_scope_preserves_remote_graphtrail_shape(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     mcp_cmd.init(target=repo, json_output=True)
@@ -247,7 +248,7 @@ def test_cursor_user_scope_rejects_invalid_existing_config(tmp_path, monkeypatch
     cursor_config = home / ".cursor" / "mcp.json"
     cursor_config.parent.mkdir(parents=True)
     cursor_config.write_text(invalid)
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     _seed(repo)
@@ -269,7 +270,7 @@ def test_cursor_user_scope_import_reads_home_config(tmp_path, monkeypatch, capsy
     cursor_config = home / ".cursor" / "mcp.json"
     cursor_config.parent.mkdir(parents=True)
     cursor_config.write_text(json.dumps({"mcpServers": {"global": {"command": "global-mcp"}}}))
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     mcp_cmd.init(target=repo, json_output=True)
@@ -292,7 +293,7 @@ def test_cursor_user_scope_import_reads_home_config(tmp_path, monkeypatch, capsy
 def test_user_scope_grok_writes_home(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     _seed(repo)
@@ -342,7 +343,7 @@ def test_codex_user_stdio_no_args_never_stays_conflicted(tmp_path, monkeypatch, 
     """
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     mcp_cmd.init(target=repo, json_output=True)
@@ -474,7 +475,7 @@ def test_mcp_station_doctor_info_when_uninitialized(tmp_path):
 def _seed_user_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     _seed(repo)
@@ -539,7 +540,7 @@ def test_user_scope_stdio_sync_interactive_decline_aborts(tmp_path, monkeypatch,
 def test_user_scope_remote_only_sync_does_not_gate(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     mcp_cmd.init(target=repo, json_output=True)

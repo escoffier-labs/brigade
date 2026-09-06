@@ -13,6 +13,7 @@ import pytest
 from brigade import authority_broker, authority_key, authority_marker, cli, scanner_isolation
 from brigade.security_cmd import AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY
 from brigade.work_cmd import constants, helpers, ledger
+from tests._home import set_home
 
 
 def _disable_external_key_isolation(tmp_path: Path) -> None:
@@ -1431,7 +1432,7 @@ def test_default_home_brigade_marker_is_created_and_blocks_strip(
 
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.delenv("BRIGADE_USER_DIR", raising=False)
     workspace = tmp_path / "ws"
     workspace.mkdir()
