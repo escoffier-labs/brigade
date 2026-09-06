@@ -51,11 +51,13 @@ Brigade does not infer them from a model name or an external provider.
 Observed use comes only from a schema-versioned `worker-results.json` whose
 `producer_run_id` matches its containing run directory, plus a schema-versioned
 companion `run.json` for the timestamp. Legacy or unbound records are reported
-as bounded errors rather than observed facts. Seat names are joined to the
-configured workspace roster for provider attribution. An unconfigured seat
-remains explicitly unknown. When a valid node-local Fleet model-policy LKG is
-present, the model-provider registry labels its cached time, revision,
-admissions, and denials. It never contacts Fleet to create this projection.
+as bounded errors rather than observed facts. Observed-run `provider` stays
+`unknown`, with an explicit unknown reason, unless the worker row itself carries
+dated, authenticated provider attribution. Current roster or Fleet configuration
+is not observed history and is never copied into `provider`. When a valid
+node-local Fleet model-policy LKG is present, the model-provider registry labels
+its cached time, revision, admissions, and denials. It never contacts Fleet to
+create this projection.
 
 ## Privacy and input handling
 

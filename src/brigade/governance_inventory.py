@@ -560,11 +560,16 @@ def _open_runs_directory(target: Path) -> int:
     return runs_fd
 
 
+_OBSERVED_PROVIDER_UNKNOWN = _unknown(
+    "provider attribution requires dated, authenticated provider evidence in the run receipt; "
+    "current configuration is not observed history"
+)
+
+
 def _observed_runs(
     target: Path,
     since: datetime | None,
     until: datetime | None,
-    configured_agents: dict[str, Any],
     budget: _InputBudget,
 ) -> dict[str, Any]:
     try:
@@ -670,22 +675,8 @@ def _observed_runs(
                     ):
                         errors.append("run-receipts: worker-results-malformed-row")
                         continue
-                    configured = configured_agents.get(seat)
-                    if (
-                        isinstance(configured, dict)
-                        and model == configured.get("model")
-                        and isinstance(configured.get("provider"), str)
-                    ):
-                        provider = configured["provider"]
-                        unknown = configured.get("unknown", {}).get("provider") if provider == "unknown" else None
-                    elif isinstance(configured, dict):
-                        provider = "unknown"
-                        unknown = _unknown(
-                            "observed model does not match the authenticated Fleet model fact for this configured seat"
-                        )
-                    else:
-                        provider = "unknown"
-                        unknown = _unknown("observed seat is not configured in the workspace roster")
+                    # Current roster or Fleet configuration is not observed history.
+                    provider, unknown = "unknown", _OBSERVED_PROVIDER_UNKNOWN
                     aggregate = observations.setdefault(
                         (seat, provider, model),
                         {"first_seen": observed_at, "last_seen": observed_at, "run_count": 0, "unknown": unknown},
@@ -739,10 +730,9 @@ def build_inventory(
         and isinstance(item.get("provider"), str)
     }
     agents = _agent_registry(target, budget, provider_facts)
-    configured_agents = {item["name"]: item for item in agents["items"] if isinstance(item.get("name"), str)}
     inventory = {
         "generated_at": _iso(clock),
-        "observed_runs": _observed_runs(target, parsed_since, parsed_until, configured_agents, budget),
+        "observed_runs": _observed_runs(target, parsed_since, parsed_until, budget),
         "registries": {
             "agents": agents,
             "mcp_servers": _mcp_registry(target, budget),
