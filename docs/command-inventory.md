@@ -26,7 +26,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade daily`: 26 command path(s)
 - `brigade doctor`: 1 command path(s)
 - `brigade dogfood` (extras): 1 command path(s)
-- `brigade evidence`: 11 command path(s)
+- `brigade evidence`: 12 command path(s)
 - `brigade extras`: 3 command path(s)
 - `brigade fleet`: 33 command path(s)
 - `brigade friction` (extras): 3 command path(s)
@@ -51,7 +51,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade profiles`: 2 command path(s)
 - `brigade projection`: 1 command path(s)
 - `brigade projects` (extras): 10 command path(s)
-- `brigade receipts`: 12 command path(s)
+- `brigade receipts`: 11 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release` (extras): 23 command path(s)
 - `brigade repos` (extras): 74 command path(s)
@@ -176,6 +176,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade daily unblock`
 - `brigade doctor`
 - `brigade dogfood` (extras)
+- `brigade evidence controls`
 - `brigade evidence crawl`
 - `brigade evidence crawl plan`
 - `brigade evidence doctor`
@@ -371,18 +372,17 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade projects readiness plan` (extras)
 - `brigade projects readiness record` (extras)
 - `brigade projects readiness show` (extras)
-- `brigade receipts agent-change-policy init`
 - `brigade receipts attestation-keygen`
-- `brigade receipts export agent-change`
 - `brigade receipts export attestation`
 - `brigade receipts export miseledger`
 - `brigade receipts export openinference`
 - `brigade receipts export otel-genai`
+- `brigade receipts export package`
 - `brigade receipts keygen`
 - `brigade receipts trailer`
 - `brigade receipts verify`
-- `brigade receipts verify-agent-change`
 - `brigade receipts verify-attestation`
+- `brigade receipts verify-package`
 - `brigade reconfigure`
 - `brigade release candidate archive` (extras)
 - `brigade release candidate audit` (extras)

@@ -116,9 +116,12 @@ def worker_instructions(*, header: str, issue_number: int, base_ref: str, verifi
         f"Time cap: stop within {WORKER_TIME_CAP_MINUTES} minutes of claiming this job, whatever state the work "
         "is in.\n\n"
         "Proof rule: run exactly the verification commands named above and nothing else; never run the full suite "
-        "unless it is named there. Open exactly one draft pull request against the base ref whose body carries "
-        f"Fixes #{issue_number}, the done predicate, each verification command with its exit code, and the receipt "
-        f"id. {NO_MERGE_SENTENCE} Complete the job with the pull request URL. On failure, push the branch and fail "
+        "unless it is named there. Open exactly one pull request against the base ref marked ready for review when "
+        "every verification command exited 0, and open it as a draft only when a command failed or the work is "
+        "blocked, saying which in the body; the body carries "
+        f"Fixes #{issue_number}, the done predicate, each verification command with its exit code, the receipt "
+        "id, the job id, and a pasted command transcript, screenshot, or log for any user-visible surface. "
+        f"{NO_MERGE_SENTENCE} Complete the job with the pull request URL. On failure, push the branch and fail "
         "the job with the exact failing command."
     )
 

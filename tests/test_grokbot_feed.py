@@ -12,7 +12,16 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, fleet_client_grokbot, fleet_hub, fleet_hub_grokbot, grokbot_feed, grokbot_jobs
+from brigade import (
+    cli,
+    fleet_client_grokbot,
+    fleet_hub,
+    fleet_hub_grokbot,
+    grokbot_build_feed,
+    grokbot_feed,
+    grokbot_jobs,
+    grokbot_scout_feed,
+)
 
 
 SECRET_INSTRUCTIONS = "SECRET_INSTRUCTION_DO_NOT_PRINT"
@@ -846,6 +855,19 @@ def test_cli_feed_apply_omits_wake_key_from_output(tmp_path: Path, capsys):
         server.server_close()
 
 
+READY_PR_CONTRACT = (
+    "Open exactly one pull request against the base ref marked ready for review when every "
+    "verification command exited 0, and open it as a draft only when a command failed or the "
+    "work is blocked, saying which in the body; the body carries"
+)
+READY_PR_BODY_REQUIREMENTS = (
+    "Fixes #7, the done predicate, each verification command with its exit code, the receipt "
+    "id, the job id, and a pasted command transcript, screenshot, or log for any user-visible "
+    "surface"
+)
+DRAFT_ONLY_CONTRACT = "Open exactly one draft pull request against the base ref whose body carries"
+
+
 def test_worker_instructions_carry_the_five_swarm_contract_rules():
     """One helper renders the contract, so no feed can drift away from it."""
     instructions = grokbot_feed.worker_instructions(
@@ -878,10 +900,62 @@ def test_worker_instructions_carry_the_five_swarm_contract_rules():
     assert "Final report: exactly one of PASS, ISSUES, or BLOCKED, with the evidence behind it." in instructions
     assert "A lease-expired or job-expired answer is a stop signal" in instructions
     assert "never run the full suite unless it is named there" in instructions
-    assert "Open exactly one draft pull request against the base ref whose body carries Fixes #7" in instructions
-    assert "each verification command with its exit code, and the receipt id" in instructions
+    assert f"{READY_PR_CONTRACT} {READY_PR_BODY_REQUIREMENTS}" in instructions
+    assert DRAFT_ONLY_CONTRACT not in instructions
     assert "Complete the job with the pull request URL." in instructions
     assert "push the branch and fail the job with the exact failing command" in instructions
+
+
+def test_contract_asks_for_a_ready_pull_request_when_green():
+    """Feed and build-feed envelopes ask for a ready PR when green; scout-feed stays read-only."""
+    feed_envelope = grokbot_feed.worker_instructions(
+        header="Repository: example/brigade\nIssue number: 7\n",
+        issue_number=7,
+        base_ref="main",
+        verification_commands=[SECRET_VERIFY],
+    )
+    build_envelope = grokbot_build_feed._worker_instructions(
+        {
+            "repository": "example/brigade",
+            "approval_label": "grokbot-build-approved",
+            "base_ref": "main",
+            "verification_commands": [SECRET_VERIFY],
+        },
+        7,
+        None,
+    )
+    scout_envelope = grokbot_scout_feed._scout_spec(
+        {
+            "repository": "example/brigade",
+            "approval_label": "grokbot-scout-approved",
+            "base_ref": "main",
+            "ownership_paths": ["src/brigade"],
+            "verification_commands": [SECRET_VERIFY],
+            "timeout_seconds": 900,
+        },
+        7,
+    )["instructions"]
+
+    for envelope in (feed_envelope, build_envelope):
+        assert READY_PR_CONTRACT in envelope
+        assert READY_PR_BODY_REQUIREMENTS in envelope
+        assert DRAFT_ONLY_CONTRACT not in envelope
+        assert grokbot_feed.UNTRUSTED_CONTEXT_SENTENCE in envelope
+        assert grokbot_feed.NO_MERGE_SENTENCE in envelope
+
+    assert grokbot_feed.UNTRUSTED_CONTEXT_SENTENCE in scout_envelope
+    assert READY_PR_CONTRACT not in scout_envelope
+    assert DRAFT_ONLY_CONTRACT not in scout_envelope
+    assert "Coordinator rule:" not in scout_envelope
+    assert "Proof rule:" not in scout_envelope
+    assert scout_envelope == (
+        "Repository: example/brigade\n"
+        "Approval label: grokbot-scout-approved\n"
+        "Issue number: 7\n\n"
+        f"{grokbot_feed.UNTRUSTED_CONTEXT_SENTENCE} "
+        "Perform read-only repository scout work. Do not modify repository files, issue state, labels, comments, "
+        "pull requests, or remote settings. Return a read-only report only."
+    )
 
 
 def test_worker_instructions_name_every_verification_command():
