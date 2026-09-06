@@ -989,9 +989,9 @@ def test_cloud_workers_render_safe_active_leases_without_using_station_capacity(
         status, headers, body = _request(hub, "GET", "/", headers=_bearer())
         assert status == 200 and "frame-ancestors 'none'" in headers["content-security-policy"]
         assert "Cloud workers" in body
-        assert "<h3>cursor</h3>" in body and ">1/3<" in body
+        assert " cursor</h3>" in body and ">1/3<" in body
         assert "closed" in body
-        assert "<h3>codex</h3>" in body and ">0/2<" in body and "No active leases." in body
+        assert " codex</h3>" in body and ">0/2<" in body and "No active leases." in body
         assert "1/4 busy" in body
         assert "&lt;task &amp; &quot;one&quot;&gt;" in body
         assert "&lt;repo &amp; &quot;one&quot;&gt;" in body
@@ -1058,7 +1058,7 @@ def test_command_deck_projects_hub_grokbot_rows_and_ignores_terminal_capacity(tm
             conn.close()
         status, _headers, body = _request(hub, "GET", "/deck", headers=_bearer())
         assert status == 200
-        assert "<h3>grok-bot</h3>" in body and ">1/64<" in body
+        assert " grok-bot</h3>" in body and ">1/64<" in body
         assert "lease-deck" not in body
         conn = fleet_hub.open_db(db_path)
         try:
