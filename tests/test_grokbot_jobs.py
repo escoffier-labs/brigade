@@ -1581,6 +1581,107 @@ def test_hub_complete_report_accepts_claimed_and_cleans_failed_orphan_only(tmp_p
     assert artifact_path.read_bytes() == report.encode()
 
 
+def _hub_running_job(job_id: str, *, role: str, artifact_kind: str) -> dict[str, object]:
+    return {
+        "job_id": job_id,
+        "state": "running",
+        "role": role,
+        "artifact_kind": artifact_kind,
+        "item_revision": 3,
+        "lease_generation": 1,
+        "private_snapshot_id": job_id,
+    }
+
+
+@pytest.mark.parametrize("artifact_kind", ["draft-pr", "branch"])
+def test_hub_complete_report_rejects_non_report_kind_without_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, artifact_kind: str
+):
+    from brigade import fleet_client_grokbot
+
+    spec = grokbot_jobs._validate_spec({**_spec(), "artifact": {"kind": artifact_kind}})
+    job_id = "grokbot-" + hashlib.sha256(f"hub-report-{artifact_kind}".encode()).hexdigest()[:24]
+    artifact_path = tmp_path / ".brigade" / "cloud" / "grokbot" / "artifacts" / f"{job_id}.md"
+    grokbot_jobs._store_task_snapshot(tmp_path, job_id, spec, grokbot_jobs._idempotency_key_hash(f"hub-{artifact_kind}"))
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    running = _hub_running_job(job_id, role="implementation-worker", artifact_kind=artifact_kind)
+    hub_complete_calls: list[str] = []
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "status",
+        lambda *args, **kwargs: fleet_client_grokbot.GrokbotHubDecision(True, "ok", job=running),
+    )
+
+    def record_complete(*args: object, **kwargs: object):
+        hub_complete_calls.append("complete")
+        return fleet_client_grokbot.GrokbotHubDecision(True, "ok", job={**running, "state": "completed"})
+
+    monkeypatch.setattr(fleet_client_grokbot, "complete", record_complete)
+    artifact = (
+        {"kind": "draft-pr", "url": "https://github.com/example/brigade/pull/1", "branch": "grokbot/job"}
+        if artifact_kind == "draft-pr"
+        else {"kind": "branch", "branch": "grokbot/job", "commit": "a" * 40}
+    )
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^report-not-allowed$") as exc:
+        grokbot_jobs.complete_report(
+            tmp_path,
+            job_id,
+            "grokbot-implementation-worker",
+            "lease-a",
+            artifact,
+            REPORT_TEXT,
+        )
+
+    assert exc.value.reason == "report-not-allowed"
+    assert REPORT_TEXT not in str(exc.value)
+    assert not artifact_path.exists()
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "running"
+    assert hub_complete_calls == []
+
+
+def test_hub_complete_report_still_completes_report_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from brigade import fleet_client_grokbot
+
+    spec = grokbot_jobs._validate_spec(
+        {
+            **_spec(),
+            "role": "repository-scout",
+            "artifact": {"kind": "report"},
+        }
+    )
+    job_id = "grokbot-" + hashlib.sha256(b"hub-report-ok").hexdigest()[:24]
+    report = "Private scout findings."
+    digest = hashlib.sha256(report.encode()).hexdigest()
+    artifact_path = tmp_path / ".brigade" / "cloud" / "grokbot" / "artifacts" / f"{job_id}.md"
+    grokbot_jobs._store_task_snapshot(tmp_path, job_id, spec, grokbot_jobs._idempotency_key_hash("hub-report-ok"))
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    running = _hub_running_job(job_id, role="repository-scout", artifact_kind="report")
+    completed = {**running, "state": "completed", "artifact_digest": digest, "artifact_size": len(report.encode())}
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "status",
+        lambda *args, **kwargs: fleet_client_grokbot.GrokbotHubDecision(True, "ok", job=running),
+    )
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "complete",
+        lambda *args, **kwargs: fleet_client_grokbot.GrokbotHubDecision(True, "ok", job=completed),
+    )
+
+    result = grokbot_jobs.complete_report(
+        tmp_path,
+        job_id,
+        "grokbot-repository-scout",
+        "lease-a",
+        {"kind": "report", "path": "docs/scout.md", "sha256": digest},
+        report,
+    )
+
+    assert result["state"] == "completed"
+    assert artifact_path.read_bytes() == report.encode()
+
+
 def test_hub_report_snapshot_requires_digest(tmp_path: Path, monkeypatch):
     from brigade import fleet_client_grokbot
 

@@ -1622,6 +1622,71 @@ def test_hub_authority_mcp_does_not_call_generic_fleet_paths(tmp_path: Path, mon
     assert calls == []
 
 
+def test_hub_complete_with_report_text_on_draft_pr_returns_report_not_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from brigade import fleet_client_grokbot
+
+    spec = grokbot_jobs._validate_spec(_spec("implementation-worker"))
+    job_id = "grokbot-" + hashlib.sha256(b"mcp-draft-pr-report").hexdigest()[:24]
+    grokbot_jobs._store_task_snapshot(tmp_path, job_id, spec, grokbot_jobs._idempotency_key_hash("mcp-draft"))
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    running = {
+        "job_id": job_id,
+        "state": "running",
+        "role": "implementation-worker",
+        "artifact_kind": "draft-pr",
+        "item_revision": 3,
+        "lease_generation": 1,
+        "private_snapshot_id": job_id,
+    }
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "status",
+        lambda *args, **kwargs: fleet_client_grokbot.GrokbotHubDecision(True, "ok", job=running),
+    )
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "whoami",
+        lambda: fleet_client_grokbot.GrokbotHubDecision(
+            True,
+            "ok",
+            job={"actor_kind": "implementation-worker", "role": "implementation-worker"},
+        ),
+    )
+
+    def refuse_complete(*args: object, **kwargs: object):
+        raise AssertionError("hub complete must not run")
+
+    monkeypatch.setattr(fleet_client_grokbot, "complete", refuse_complete)
+    adapter = _adapter(tmp_path, hub_token="listener-node-token")
+
+    with pytest.raises(grokbot_mcp.AdapterError) as error:
+        adapter.call_tool(
+            "grokbot_queue_complete",
+            {
+                "job_id": job_id,
+                "lease_id": "lease-a",
+                "artifact": {
+                    "kind": "draft-pr",
+                    "url": "https://github.com/example/brigade/pull/1",
+                    "branch": "grokbot/job",
+                },
+                "report_text": REPORT_TEXT,
+            },
+        )
+
+    payload = error.value.public_error()
+    rendered = json.dumps(payload)
+    assert error.value.reason == "report-not-allowed"
+    assert payload == {"error": {"code": "invalid_request", "message": "report-not-allowed"}}
+    assert "Traceback" not in rendered
+    assert "UnexpectedToolError" not in rendered
+    assert REPORT_TEXT not in rendered
+    assert not (tmp_path / ".brigade" / "cloud" / "grokbot" / "artifacts" / f"{job_id}.md").exists()
+    assert adapter.call_tool("grokbot_queue_status", {"job_id": job_id})["state"] == "running"
+
+
 def _write_hub_token_file(path: Path, token: str) -> Path:
     path.write_text(token + "\n", encoding="utf-8")
     path.chmod(0o600)
