@@ -1022,6 +1022,159 @@ def test_wake_per_role_sender_key_file_honored(tmp_path: Path, capsys):
         role_server.server_close()
 
 
+def test_wake_role_list_posts_same_body_to_each_target(tmp_path: Path, capsys):
+    first = _WakeRecorder()
+    second = _WakeRecorder()
+    first_server = _start_wake_server(first)
+    second_server = _start_wake_server(second)
+    try:
+        default_url = f"http://127.0.0.1:{first_server.server_address[1]}/unused"
+        first_url = f"http://127.0.0.1:{first_server.server_address[1]}/builder-a"
+        second_url = f"http://127.0.0.1:{second_server.server_address[1]}/builder-b"
+        key_file = _write_wake_key(tmp_path / "wake.key")
+        _write_wake_config(
+            tmp_path,
+            default_url,
+            key_file,
+            webhooks={"implementation-worker": [first_url, {"webhook_url": second_url}]},
+        )
+        job = _wake_job(role="implementation-worker", label="Build")
+
+        grokbot_feed.notify_enqueue(tmp_path, job)
+        captured = capsys.readouterr()
+
+        assert len(first.requests) == 1
+        assert len(second.requests) == 1
+        assert first.requests[0]["path"] == "/builder-a"
+        assert second.requests[0]["path"] == "/builder-b"
+        assert json.loads(first.requests[0]["body"]) == job
+        assert json.loads(second.requests[0]["body"]) == job
+        assert first.requests[0]["authorization"] == f"Bearer {SECRET_WAKE_KEY}"
+        assert second.requests[0]["authorization"] == f"Bearer {SECRET_WAKE_KEY}"
+        log = _notify_log_text(tmp_path)
+        lines = [json.loads(line) for line in log.splitlines() if line]
+        assert lines == [{"status": 200}, {"status": 200}]
+        _assert_wake_secret_absent(captured.out, captured.err, log)
+    finally:
+        first_server.shutdown()
+        first_server.server_close()
+        second_server.shutdown()
+        second_server.server_close()
+
+
+def test_wake_role_list_skips_invalid_target_and_posts_the_rest(tmp_path: Path, capsys):
+    recorder = _WakeRecorder()
+    server = _start_wake_server(recorder)
+    try:
+        valid_url = f"http://127.0.0.1:{server.server_address[1]}/builder"
+        default_url = f"http://127.0.0.1:{server.server_address[1]}/unused"
+        key_file = _write_wake_key(tmp_path / "wake.key")
+        _write_wake_config(
+            tmp_path,
+            default_url,
+            key_file,
+            webhooks={
+                "implementation-worker": [
+                    "ftp://example.invalid/wake",
+                    {"sender_key_file": str(key_file)},
+                    valid_url,
+                ]
+            },
+        )
+        job = _wake_job(role="implementation-worker")
+
+        grokbot_feed.notify_enqueue(tmp_path, job)
+        captured = capsys.readouterr()
+
+        assert [request["path"] for request in recorder.requests] == ["/builder"]
+        assert json.loads(recorder.requests[0]["body"]) == job
+        log = _notify_log_text(tmp_path)
+        lines = [json.loads(line) for line in log.splitlines() if line]
+        assert lines == [{"status": 200}]
+        _assert_wake_secret_absent(captured.out, captured.err, log)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_wake_role_list_caps_at_eight_targets(tmp_path: Path, capsys):
+    recorder = _WakeRecorder()
+    server = _start_wake_server(recorder)
+    try:
+        port = server.server_address[1]
+        urls = [f"http://127.0.0.1:{port}/t{index}" for index in range(9)]
+        key_file = _write_wake_key(tmp_path / "wake.key")
+        _write_wake_config(
+            tmp_path,
+            urls[0],
+            key_file,
+            webhooks={"implementation-worker": urls},
+        )
+        job = _wake_job(role="implementation-worker")
+
+        grokbot_feed.notify_enqueue(tmp_path, job)
+        captured = capsys.readouterr()
+
+        paths = [request["path"] for request in recorder.requests]
+        assert paths == [f"/t{index}" for index in range(8)]
+        assert all(json.loads(request["body"]) == job for request in recorder.requests)
+        log = _notify_log_text(tmp_path)
+        lines = [json.loads(line) for line in log.splitlines() if line]
+        assert lines == [{"status": 200}] * 8
+        _assert_wake_secret_absent(captured.out, captured.err, log)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_wake_role_list_writes_per_target_status_lines(tmp_path: Path, capsys):
+    ok = _WakeRecorder()
+    failed = _WakeRecorder()
+    failed.status = 503
+    ok_server = _start_wake_server(ok)
+    failed_server = _start_wake_server(failed)
+    try:
+        default_url = f"http://127.0.0.1:{ok_server.server_address[1]}/unused"
+        ok_url = f"http://127.0.0.1:{ok_server.server_address[1]}/ok"
+        failed_url = f"http://127.0.0.1:{failed_server.server_address[1]}/fail"
+        second_key = _write_wake_key(tmp_path / "builder-b.key", SECRET_WAKE_ROLE_KEY)
+        key_file = _write_wake_key(tmp_path / "wake.key")
+        _write_wake_config(
+            tmp_path,
+            default_url,
+            key_file,
+            webhooks={
+                "implementation-worker": [
+                    ok_url,
+                    {"webhook_url": failed_url, "sender_key_file": str(second_key)},
+                ]
+            },
+        )
+        job = _wake_job(role="implementation-worker")
+
+        grokbot_feed.notify_enqueue(tmp_path, job)
+        captured = capsys.readouterr()
+
+        assert json.loads(ok.requests[0]["body"]) == job
+        assert json.loads(failed.requests[0]["body"]) == job
+        assert ok.requests[0]["authorization"] == f"Bearer {SECRET_WAKE_KEY}"
+        assert failed.requests[0]["authorization"] == f"Bearer {SECRET_WAKE_ROLE_KEY}"
+        log = _notify_log_text(tmp_path)
+        lines = [json.loads(line) for line in log.splitlines() if line]
+        assert lines == [{"status": 200}, {"status": 503}]
+        _assert_wake_secret_absent(
+            captured.out,
+            captured.err,
+            log,
+            secrets=(SECRET_WAKE_KEY, SECRET_WAKE_ROLE_KEY),
+        )
+    finally:
+        ok_server.shutdown()
+        ok_server.server_close()
+        failed_server.shutdown()
+        failed_server.server_close()
+
+
 READY_PR_CONTRACT = (
     "Open exactly one pull request against the base ref marked ready for review when every "
     "verification command exited 0, and open it as a draft only when a command failed or the "
