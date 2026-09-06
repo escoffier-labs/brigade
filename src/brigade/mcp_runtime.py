@@ -531,10 +531,10 @@ def _kill_process_group(proc: subprocess.Popen[str], *, pgid: int | None = None)
             pass
     elif os.name == "nt":
         # No process groups on Windows: use the shared job-object/taskkill
-        # termination path in proc.py instead of killing only the direct child.
+        # termination path in proc.py, then fall through to the shared
+        # poll/wait tail below so the handle is reaped.
         try:
             proc_mod.terminate_process_tree(proc)  # type: ignore[arg-type]
-            return
         except OSError:
             pass
     if proc.poll() is None:

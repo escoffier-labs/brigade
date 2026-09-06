@@ -461,7 +461,7 @@ def _write_exclusive_json(path: Path, record: Mapping[str, Any]) -> None:
     handle = None
     created = False
     try:
-        handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        handle = os.open(path, dirfd_mod.file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL), 0o600)
         created = True
         os.fchmod(handle, 0o600)
         _write_all(handle, json.dumps(record).encode("utf-8"))
@@ -511,7 +511,7 @@ def _replace_json(path: Path, record: Mapping[str, Any]) -> None:
 def _read_safe_json(path: Path) -> Any:
     handle = None
     try:
-        handle = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        handle = os.open(path, dirfd_mod.file_flags(os.O_RDONLY))
         info = os.fstat(handle)
         _assert_owner_file(info)
         raw = os.read(handle, 1_048_576)

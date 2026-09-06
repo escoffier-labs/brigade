@@ -67,6 +67,21 @@ def directory_flags(*, nofollow: bool = True) -> int:
     return flags
 
 
+def file_flags(mode: int) -> int:
+    """Return ``mode`` plus ``O_NOFOLLOW``/``O_CLOEXEC``.
+
+    Fail-closed on platforms without ``O_NOFOLLOW`` (Windows has none):
+    raises the module's typed :func:`unavailable` ``OSError`` instead of
+    opening without the symlink guard, so non-``dir_fd`` callers that
+    would otherwise degrade via ``getattr(os, "O_NOFOLLOW", 0)`` stay
+    fail-closed too.
+    """
+    o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not o_nofollow:
+        raise unavailable("file operations")
+    return mode | o_nofollow | getattr(os, "O_CLOEXEC", 0)
+
+
 def root_directory_flags() -> int:
     """Return anchor flags (``O_PATH`` when present) plus directory guards.
 

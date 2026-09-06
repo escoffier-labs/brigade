@@ -484,7 +484,10 @@ def _parent_containment_available() -> bool:
 
 
 def _directory_flags() -> int:
-    return dirfd_mod.directory_flags()
+    try:
+        return dirfd_mod.directory_flags()
+    except OSError as exc:
+        raise PlanError("unsafe symlink destination") from exc
 
 
 def _dir_identity(fd: int) -> tuple[int, int]:

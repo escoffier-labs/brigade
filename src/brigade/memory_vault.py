@@ -1096,7 +1096,7 @@ def _directory_flags() -> int:
 
 
 def _file_flags(mode: int) -> int:
-    return mode | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    return dirfd_mod.file_flags(mode)
 
 
 def _path_has_projection_folder(relative: str) -> bool:
@@ -1164,8 +1164,8 @@ def _open_vault_dir(vault: Path) -> int:
 
 def _openat_nofollow(parent_fd: int, name: str, *, directory: bool) -> int | None:
     """openat(2) a child with O_NOFOLLOW and confirm the type via fstat."""
-    flags = _directory_flags() if directory else _file_flags(os.O_RDONLY)
     try:
+        flags = _directory_flags() if directory else _file_flags(os.O_RDONLY)
         descriptor = os.open(name, flags, dir_fd=parent_fd)
     except OSError:
         return None
@@ -1247,7 +1247,7 @@ def _reject_existing_note(inbox_fd: int, filename: str) -> None:
     try:
         existing = os.open(
             filename,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            _file_flags(os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)),
             dir_fd=inbox_fd,
         )
     except FileNotFoundError:
@@ -1314,8 +1314,8 @@ def _stage_proposal(staging_dir: Path, data: bytes) -> tuple[int, Path, bytes]:
     if not _containment_primitives_available():
         raise VaultProposeError("vault containment checks are unavailable on this platform")
     path = staging_dir / f"{uuid.uuid4().hex}.md"
-    flags = _file_flags(os.O_RDWR | os.O_CREAT | os.O_EXCL)
     try:
+        flags = _file_flags(os.O_RDWR | os.O_CREAT | os.O_EXCL)
         descriptor = os.open(path, flags, 0o600)
     except OSError as exc:
         raise VaultProposeError(f"could not create staged proposal: {exc}") from exc
@@ -1340,7 +1340,10 @@ def _stage_proposal(staging_dir: Path, data: bytes) -> tuple[int, Path, bytes]:
 def _write_via_held_parent(parent_fd: int, filename: str, data: bytes) -> None:
     if not _containment_primitives_available():
         raise VaultProposeError("vault containment checks are unavailable on this platform")
-    flags = _file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    try:
+        flags = _file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    except OSError as exc:
+        raise VaultProposeError("vault containment checks are unavailable on this platform") from exc
     try:
         descriptor = os.open(filename, flags, 0o644, dir_fd=parent_fd)
     except OSError as exc:
