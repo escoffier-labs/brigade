@@ -11,11 +11,11 @@ or native components, then publishes its state only after both commands succeed.
 | Machine profile | Channel | Use |
 | --- | --- | --- |
 | Production or operator | `stable` | Default. Pins the latest published non-prerelease Brigade release. |
-| Brigade development | `beta` | Intentional development-machine opt-in. Pins the newest non-yanked `brigade-cli==0.27.0.devYYYYMMDD` wheel from PyPI. |
+| Brigade development | `beta` | Intentional development-machine opt-in. Pins the newest non-yanked `brigade-cli==0.28.0.devYYYYMMDD` wheel from PyPI. |
 
 Daily development wheels are built from `main` on a schedule and published as PyPI
 prereleases with versions of the form `X.Y.Z.devYYYYMMDD` (for example
-`0.27.0.dev20260808`). That delivery channel is separate from stable `vX.Y.Z` releases:
+`0.28.0.dev20260907`). That delivery channel is separate from stable `vX.Y.Z` releases:
 it builds only the wheel, does not create a GitHub release or native assets, and does not require
 the development version to be committed into Brigade's stable version declarations. Stable tags
 continue to require every declared version to match before the native release matrix can run.
@@ -24,17 +24,17 @@ Development wheels are not promoted to stable and PyPI's default resolver does n
 Install a chosen daily build with an exact version pin:
 
 ```bash
-pipx install 'brigade-cli==0.27.0.dev20260808'
+pipx install 'brigade-cli==0.28.0.dev20260907'
 ```
 
-The same pin works with `pip install 'brigade-cli==0.27.0.dev20260808'`. Bare
+The same pin works with `pip install 'brigade-cli==0.28.0.dev20260907'`. Bare
 `pipx install brigade-cli` or `pip install brigade-cli` resolves the latest stable
 release only; prerelease wheels are never selected as `latest`.
 
 Run `brigade update` for the production default. `brigade update --channel beta`
-selects the newest non-yanked exact `0.27.0.devYYYYMMDD` wheel for the `0.27`
+selects the newest non-yanked exact `0.28.0.devYYYYMMDD` wheel for the `0.28`
 preview line from PyPI release records (never from `info.version`, which stays
-on the latest stable release such as `0.26.1`), ignores yanked uploads, unrelated
+on the latest stable release such as `0.27.0`), ignores yanked uploads, unrelated
 preview lines, unrelated prereleases, Git refs, and native release assets, and
 force-reinstalls that pin into the existing user-global pipx Brigade environment
 (one active CLI environment; no second installer). A machine already owned by the
@@ -53,7 +53,7 @@ publication semantics unchanged.
 
 ## State, lock, and native components
 
-The user-global state is `<Brigade data root>/brigade/update-state.json`, separate from component `installed.json`. Its strict schema records the selected channel, owner, exact CLI version (stable release or beta `0.27.0.devYYYYMMDD`), release id and tag, manifest URL and digest, and timestamp. The shared sibling lock `update.lock` covers both channels. A live owner causes a clear failure. Stale metadata is removed only after its recorded process is confirmed dead.
+The user-global state is `<Brigade data root>/brigade/update-state.json`, separate from component `installed.json`. Its strict schema records the selected channel, owner, exact CLI version (stable release or beta `0.28.0.devYYYYMMDD`), release id and tag, manifest URL and digest, and timestamp. The shared sibling lock `update.lock` covers both channels. A live owner causes a clear failure. Stale metadata is removed only after its recorded process is confirmed dead.
 
 Prior beta state that recorded a full Git `main` SHA is migrated on the next
 successful `brigade update --channel beta` to the selected wheel version and
@@ -65,7 +65,7 @@ Stable resolves `releases/latest` once, verifies the exact `component-manifest-v
 The daily wheel channel does not change that beta/pre-pin native contract. Its build stamps only the
 wheel's Python distribution and runtime version; bundled template and component pins remain the
 committed stable values. Operators who use `brigade update --channel beta` receive the
-selected `0.27.0.devYYYYMMDD` wheel plus native bytes from the latest verified stable manifest.
+selected `0.28.0.devYYYYMMDD` wheel plus native bytes from the latest verified stable manifest.
 
 The updater runs `pipx install --force` with an exact requirement, then calls the newly installed absolute `brigade` executable with `setup --manifest <verified-cache-path>`. It does not use the prior executable for setup. This sequence is not an atomic installation transaction: pipx replacement happens before component setup. State publication is transactional, so a failed pipx install or setup leaves the prior update state untouched; rerun the same update to repair components.
 

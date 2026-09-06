@@ -21,7 +21,7 @@ Execution model: Brigade runs only on explicit invocation. An external scheduler
 
 ## Where things stand
 
-**v0.27.x on main** carries the product core plus the provenance, dashboard, and memory work that closed through mid-August 2026:
+**v0.28.x on main** is the beta line after v0.27.0, which shipped on 2026-09-06 and carries the product core plus the provenance, dashboard, and memory work that closed through early September 2026:
 
 - Portable setup (`operator quickstart`), handoffs with lint and source coverage, daily operator loop, work inbox, fleet and release receipts, tool catalog, skill registry, research, runbooks, chat sweeps, backup visibility, station manifests.
 - **Receipts and learning**: verify/run receipts with digests and optional HMAC signing, code-graph deltas, outcome capture from verify and run receipts, Wilson ranking, reconcile promote/rollback, git provenance, MiseLedger export/import of receipts.

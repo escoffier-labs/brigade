@@ -79,6 +79,10 @@ The generated manifest and all component URLs must point to
 checksum, release-page manifest, or `gh attestation verify` checks fail. PyPI wheel and sdist builds
 copy the final generated manifest into package data after that gate.
 
+## 5b. Bump to the next minor
+
+Set `version` in `pyproject.toml` to the next minor, run `.venv/bin/python scripts/version_sync.py --write`, set `BETA_PREVIEW_BASE` to the same value in `src/brigade/update_cmd.py`, update `docs/update-channels.md` and `docs/component-manifest-policy.md`, and open a PR. Note that `brigade update --channel beta` fails closed until the first dev wheel of the new base publishes at 12:00 UTC.
+
 ## 6. Verify the published package
 
 ```bash
