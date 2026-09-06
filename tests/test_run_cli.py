@@ -1796,6 +1796,7 @@ def test_run_cli_records_requested_scheduler_before_dispatch(tmp_path, monkeypat
     }
 
 
+@pytest.mark.skipif(os.name == "nt", reason="SIGTERM handler is POSIX-only")
 def test_run_cli_terminalizes_sigterm_during_roster_snapshot(tmp_path, monkeypatch):
     repo = _git_repo_with_roster(tmp_path)
     output_dir = repo / ".brigade" / "runs" / "roster-signal"

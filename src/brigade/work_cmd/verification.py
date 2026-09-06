@@ -347,13 +347,19 @@ def _terminate_verify_child(process: subprocess.Popen[bytes]) -> None:
     try:
         proc._terminate_processes((process,), terminate_grace=0.5, kill_grace=0.5)
     except KeyboardInterrupt:
-        proc._terminate_processes((process,), terminate_grace=0.0, kill_grace=0.0)
+        try:
+            proc._terminate_processes((process,), terminate_grace=0.0, kill_grace=0.0)
+        except KeyboardInterrupt:
+            pass
     survivors = tuple(verify_reaper._survivor_mocks(b | verify_reaper._collect_descendants(process.pid)))
     if survivors:
         try:
             proc._terminate_processes(survivors, terminate_grace=0.5, kill_grace=0.5)  # type: ignore
         except KeyboardInterrupt:
-            proc._terminate_processes(survivors, terminate_grace=0.0, kill_grace=0.0)  # type: ignore
+            try:
+                proc._terminate_processes(survivors, terminate_grace=0.0, kill_grace=0.0)  # type: ignore
+            except KeyboardInterrupt:
+                pass
 
 
 def _run_verify_child_process(
