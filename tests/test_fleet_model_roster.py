@@ -993,3 +993,23 @@ def test_validate_roster_rows_requires_strict_authority_metadata_when_present():
         fleet_policy={"active": True, "version": 4, "digest": "sha256:" + ("ab" * 32), "token": "secret"},
     )
     assert fleet_model_roster.validate_roster_rows(extra) == "malformed-roster"
+
+
+def test_v21_database_gains_brigade_model_column_on_init(tmp_path):
+    """#1483 added model_policy.brigade_model. A live hub already at user_version 21
+    skipped the ALTER because _init_schema returns early at the current version;
+    the version bump to 22 makes init_db migrate it."""
+    db = tmp_path / "hub.db"
+    conn = fleet_hub.init_db(db)
+    conn.execute("ALTER TABLE model_policy DROP COLUMN brigade_model")
+    conn.execute("PRAGMA user_version=21")
+    conn.commit()
+    conn.close()
+    stale = sqlite3.connect(db)
+    assert "brigade_model" not in [row[1] for row in stale.execute("PRAGMA table_info(model_policy)")]
+    stale.close()
+    migrated = fleet_hub.init_db(db)
+    columns = [row[1] for row in migrated.execute("PRAGMA table_info(model_policy)")]
+    assert "brigade_model" in columns
+    assert migrated.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
+    migrated.close()

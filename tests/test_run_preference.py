@@ -217,7 +217,7 @@ def test_hub_preference_v18_row_survives_v19_migration(tmp_path) -> None:
     old.commit()
     old.close()
     conn = fleet_hub.init_db(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 21
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 22
     pref = fleet_hub.get_run_preference(conn)
     assert pref["impl"] == "coder" and pref["notes"] == "kept"
     assert pref["research"] is None and pref["security"] is None and pref["scout"] is None
