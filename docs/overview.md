@@ -10,8 +10,8 @@ The full tour: every station, diagram, and workflow. The [README](../README.md) 
 | Website | [brigade.tools](https://brigade.tools) |
 | PyPI | [`brigade-cli`](https://pypi.org/project/brigade-cli/) |
 | Command | `brigade` |
-| Stable release | v0.26.1 |
-| Preview line | 0.27 beta (`0.27.0.devYYYYMMDD` wheels) |
+| Stable release | v0.27.0 |
+| Preview line | 0.28 beta (`0.28.0.devYYYYMMDD` wheels, after the post-tag bump) |
 
 This Brigade is the AI-agent operator CLI from Escoffier Labs. It is not the archived CNCF/Microsoft Kubernetes Brigade, Spinabot Brigade, or the 2017 Python package that became Nornir.
 

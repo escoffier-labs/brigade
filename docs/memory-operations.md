@@ -1,6 +1,6 @@
 # Memory operations
 
-Memory Operations is the read-only topology and inventory surface for Brigade-wired memory. Current main / **0.27 beta**. Stable v0.26.1 still has handoffs, care scan/plan, and owner-mediated filing. This page covers the operations facade added on the 0.27 line.
+Memory Operations is the read-only topology and inventory surface for Brigade-wired memory. Stable in v0.27.0. Earlier releases still have handoffs, care scan/plan, and owner-mediated filing. This page covers the operations facade added on the 0.27 line.
 
 ## Topology
 
