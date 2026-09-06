@@ -1,0 +1,143 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta http-equiv="refresh" content="10"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#111617"><meta name="application-name" content="Fleet Hub"><meta name="apple-mobile-web-app-title" content="Fleet Hub"><link rel="icon" type="image/x-icon" href="/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="manifest" href="/site.webmanifest"><title>Command Deck</title><style nonce="nonce">
+:root {
+  color-scheme: dark;
+  --canvas: #111617;
+  --surface: #182022;
+  --surface-raised: #202a2c;
+  --line: #3a4849;
+  --line-quiet: #293536;
+  --ink: #e5ece8;
+  --muted: #a4b1ad;
+  --faint: #75837f;
+  --signal: #d5ab69;
+  --signal-quiet: #382f22;
+}
+* { box-sizing: border-box; }
+body.deck {
+  margin: 0;
+  min-width: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.deck { max-width: 100%; overflow-wrap: anywhere; }
+.deck-shell { width: min(1480px, 100%); margin: 0 auto; padding: 18px; }
+.masthead {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 0 14px;
+  border-bottom: 1px solid var(--line);
+}
+.eyebrow { margin: 0 0 3px; color: var(--faint); font-size: 11px; font-weight: 700; letter-spacing: .11em; text-transform: uppercase; }
+h1, h2, h3, p { margin-top: 0; }
+h1 { margin-bottom: 3px; font-size: 22px; line-height: 1.1; letter-spacing: -.02em; }
+h2 { margin-bottom: 0; font-size: 15px; line-height: 1.25; }
+h3 { margin-bottom: 0; font-size: 13px; }
+.header-meta { margin: 0; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+.verdict { color: var(--signal); font-size: 12px; font-weight: 800; letter-spacing: .08em; }
+nav { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+a { color: var(--ink); text-underline-offset: 3px; }
+nav a { border: 1px solid var(--line); padding: 4px 8px; color: var(--muted); text-decoration: none; }
+nav a:hover, nav a:focus-visible { border-color: var(--signal); color: var(--ink); outline: none; }
+.stations { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.stations { gap: 12px; align-items: start; }
+.station-card, .panel, .repo-panel, details {
+  min-width: 0;
+  border: 1px solid var(--line-quiet);
+  background: var(--surface);
+}
+.station-card { padding: 12px; }
+.station-card > header { display: flex; align-items: start; justify-content: space-between; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line-quiet); }
+.station-meta { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.capacity { color: var(--signal); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.not-enrolled { color: var(--faint); }
+.run-stack { display: grid; gap: 8px; margin-top: 10px; }
+.empty { margin: 0; padding: 10px; color: var(--muted); background: #141b1c; font-size: 12px; }
+.tile { min-width: 0; }
+.tile { padding: 10px; border: 1px solid var(--line); border-left: 3px solid var(--signal); background: var(--surface-raised); }
+.tile--failed, .tile--awaiting-approval, .tile--stale { border-color: var(--signal); background: var(--signal-quiet); }
+.tile-head { display: flex; align-items: start; justify-content: space-between; gap: 8px; }
+.repo-name { margin: 0; font-weight: 750; }
+.state { margin: 0; color: var(--signal); font-size: 11px; font-weight: 800; letter-spacing: .06em; text-align: right; text-transform: uppercase; }
+.tile-side { margin: 0; text-align: right; }
+.tile-badges { display: flex; gap: 4px; justify-content: flex-end; margin: 4px 0 0; }
+.badge { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; min-height: 22px; padding: 2px 6px; border-radius: 999px; color: #fff; font-size: 11px; font-weight: 800; letter-spacing: .04em; text-align: center; white-space: nowrap; }
+.badge svg { width: 18px; height: 18px; display: block; }
+.tile-model { margin: 4px 0 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; text-align: right; }
+.cloud-worker-card h3 .badge, .attention-list li .badge { margin-right: 6px; }
+.tile-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 9px; margin: 9px 0 0; color: var(--muted); font-size: 12px; }
+.tile-facts dt { color: var(--faint); }
+.tile-facts dd { min-width: 0; margin: 0; }
+.claim, .collision { margin: 9px 0 0; font-size: 12px; }
+.collision { color: var(--signal); font-weight: 800; }
+.dashboard-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 12px; margin-top: 12px; }
+.cloud-workers { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 12px; }
+.cloud-worker-card { min-width: 0; padding: 12px; border: 1px solid var(--line-quiet); background: var(--surface); }
+.cloud-worker-card > header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.cloud-capacity { margin: 0; color: var(--signal); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cloud-state { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+.cloud-lease-list { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.cloud-lease-list li { padding-top: 7px; border-top: 1px solid var(--line-quiet); color: var(--muted); font-size: 12px; }
+.panel, .repo-panel { padding: 12px; }
+.panel > header, .repo-panel > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.panel-count { margin: 0; color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+.attention-panel { border-color: #6d5635; }
+.attention-list, .timeline, .observer-list { margin: 0; padding: 0; list-style: none; }
+.attention-list { display: grid; gap: 7px; }
+.attention-list li { padding: 8px 0; border-top: 1px solid var(--line-quiet); color: var(--muted); }
+.attention-list li:first-child { border-top: 0; padding-top: 0; }
+.attention-kind { color: var(--signal); font-size: 11px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.timeline { display: grid; gap: 0; }
+.timeline li { display: grid; grid-template-columns: 140px minmax(0, 1fr) auto; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line-quiet); color: var(--muted); font-size: 12px; }
+.timeline li:first-child { border-top: 0; padding-top: 0; }
+.timeline-state { color: var(--ink); font-weight: 700; }
+details { margin-top: 12px; padding: 10px 12px; color: var(--muted); }
+summary { cursor: pointer; color: var(--ink); font-weight: 700; }
+.observer-list { display: grid; gap: 6px; margin-top: 10px; font-size: 12px; }
+.table-wrap { overflow: hidden; }
+table { width: 100%; table-layout: fixed; }
+th, td { padding: 8px; border-bottom: 1px solid var(--line-quiet); overflow-wrap: anywhere; text-align: left; vertical-align: top; }
+th { color: var(--faint); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+td { color: var(--muted); font-size: 12px; }
+th:nth-child(1) { width: 22%; } th:nth-child(2) { width: 20%; } th:nth-child(3) { width: 13%; } th:nth-child(4) { width: 34%; } th:nth-child(5) { width: 11%; }
+.flag { color: var(--signal); font-weight: 800; }
+footer { margin-top: 18px; color: var(--faint); font-size: 12px; }
+footer a { margin-right: 12px; color: var(--muted); }
+.roster-form label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+.roster-form select, .roster-form textarea { width: 100%; padding: 6px; border: 1px solid var(--line); background: var(--surface-raised); color: var(--ink); font: inherit; }
+.roster-form textarea { margin-top: 10px; }
+.roster-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.roster-table th:nth-child(n) { width: auto; }
+.seat--off td { color: var(--faint); }
+details:target { border-color: var(--signal); }
+.confirm-save { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.roster-actions .hint { display: block; margin-top: 6px; color: var(--faint); font-size: 11px; }
+.banner { margin: 12px 0 0; padding: 10px; border: 1px solid var(--signal); color: var(--ink); font-size: 12px; }
+.banner--error { border-color: #b0553a; }
+.roster-actions button { padding: 8px 18px; border: 1px solid var(--signal); background: var(--signal-quiet); color: var(--ink); font: inherit; font-weight: 700; cursor: pointer; }
+.panel + .panel { margin-top: 12px; }
+@media (max-width: 700px) {
+  .stations { grid-template-columns: 1fr; }
+  .tile { width: 100%; }
+  .deck-shell { padding: 12px; }
+  .masthead, .station-card > header { align-items: start; flex-direction: column; }
+  .header-meta, .capacity { text-align: left; }
+  .dashboard-grid { grid-template-columns: 1fr; }
+  .timeline li { grid-template-columns: 1fr; gap: 2px; }
+  th, td { padding: 7px 4px; font-size: 11px; }
+}
+</style><script nonce="nonce">function tickElapsed() {document.querySelectorAll('[data-elapsed]').forEach(function (el) {var value = parseInt(el.getAttribute('data-elapsed'), 10);if (!isNaN(value)) { el.setAttribute('data-elapsed', String(value + 10)); }});}setInterval(tickElapsed, 10000);</script></head><body class="deck" data-as-of="2026-09-06 12:00:00 UTC"><main class="deck-shell">
+<header class="masthead"><div><p class="eyebrow">Fleet operations</p><h1>Command Deck</h1>
+<p class="verdict">COVERAGE UNKNOWN (1)</p></div><p class="header-meta">2/10 slots busy<br>2026-09-06 12:00:00 UTC</p></header>
+<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> <a href="/view/machines">machines board</a></nav>
+<section class="stations" aria-label="Fleet stations"><section aria-labelledby="station-0" class="station-card"><header><div><h2 id="station-0" title="11111111-1111-4111-8111-111111111111">Alpha</h2><p class="station-meta">never heard</p></div><p class="capacity">2/10 busy</p></header><div class="run-stack"><article class="tile tile--running" data-elapsed="0"><header class="tile-head"><p class="repo-name">example-project</p><div class="tile-side"><p class="state">running</p><p class="tile-badges"><span class="badge" style="background:#8a5a2b" title="claude" aria-label="Claude"><svg viewBox="0 0 256 257" preserveAspectRatio="xMidYMid" fill="currentColor"><path d="m50.228 170.321 50.357-28.257.843-2.463-.843-1.361h-2.462l-8.426-.518-28.775-.778-24.952-1.037-24.175-1.296-6.092-1.297L0 125.796l.583-3.759 5.12-3.434 7.324.648 16.202 1.101 24.304 1.685 17.629 1.037 26.118 2.722h4.148l.583-1.685-1.426-1.037-1.101-1.037-25.147-17.045-27.22-18.017-14.258-10.37-7.713-5.25-3.888-4.925-1.685-10.758 7-7.713 9.397.649 2.398.648 9.527 7.323 20.35 15.75L94.817 91.9l3.889 3.24 1.555-1.102.195-.777-1.75-2.917-14.453-26.118-15.425-26.572-6.87-11.018-1.814-6.61c-.648-2.723-1.102-4.991-1.102-7.778l7.972-10.823L71.42 0 82.05 1.426l4.472 3.888 6.61 15.101 10.694 23.786 16.591 32.34 4.861 9.592 2.592 8.879.973 2.722h1.685v-1.556l1.36-18.211 2.528-22.36 2.463-28.776.843-8.1 4.018-9.722 7.971-5.25 6.222 2.981 5.12 7.324-.713 4.73-3.046 19.768-5.962 30.98-3.889 20.739h2.268l2.593-2.593 10.499-13.934 17.628-22.036 7.778-8.749 9.073-9.657 5.833-4.601h11.018l8.1 12.055-3.628 12.443-11.342 14.388-9.398 12.184-13.48 18.147-8.426 14.518.778 1.166 2.01-.194 30.46-6.481 16.462-2.982 19.637-3.37 8.88 4.148.971 4.213-3.5 8.62-20.998 5.184-24.628 4.926-36.682 8.685-.454.324.519.648 16.526 1.555 7.065.389h17.304l32.21 2.398 8.426 5.574 5.055 6.805-.843 5.184-12.962 6.611-17.498-4.148-40.83-9.721-14-3.5h-1.944v1.167l11.666 11.406 21.387 19.314 26.767 24.887 1.36 6.157-3.434 4.86-3.63-.518-23.526-17.693-9.073-7.972-20.545-17.304h-1.36v1.814l4.73 6.935 25.017 37.59 1.296 11.536-1.814 3.76-6.481 2.268-7.13-1.297-14.647-20.544-15.1-23.138-12.185-20.739-1.49.843-7.194 77.448-3.37 3.953-7.778 2.981-6.48-4.925-3.436-7.972 3.435-15.749 4.148-20.544 3.37-16.333 3.046-20.285 1.815-6.74-.13-.454-1.49.194-15.295 20.999-23.267 31.433-18.406 19.702-4.407 1.75-7.648-3.954.713-7.064 4.277-6.286 25.47-32.405 15.36-20.092 9.917-11.6-.065-1.686h-.583L44.07 198.125l-12.055 1.555-5.185-4.86.648-7.972 2.463-2.593 20.35-13.999-.064.065Z" /></svg></span><span class="badge" style="background:#9a6a2f" title="anthropic" aria-label="Anthropic"><svg viewBox="0 0 256 257" preserveAspectRatio="xMidYMid" fill="currentColor"><path d="m50.228 170.321 50.357-28.257.843-2.463-.843-1.361h-2.462l-8.426-.518-28.775-.778-24.952-1.037-24.175-1.296-6.092-1.297L0 125.796l.583-3.759 5.12-3.434 7.324.648 16.202 1.101 24.304 1.685 17.629 1.037 26.118 2.722h4.148l.583-1.685-1.426-1.037-1.101-1.037-25.147-17.045-27.22-18.017-14.258-10.37-7.713-5.25-3.888-4.925-1.685-10.758 7-7.713 9.397.649 2.398.648 9.527 7.323 20.35 15.75L94.817 91.9l3.889 3.24 1.555-1.102.195-.777-1.75-2.917-14.453-26.118-15.425-26.572-6.87-11.018-1.814-6.61c-.648-2.723-1.102-4.991-1.102-7.778l7.972-10.823L71.42 0 82.05 1.426l4.472 3.888 6.61 15.101 10.694 23.786 16.591 32.34 4.861 9.592 2.592 8.879.973 2.722h1.685v-1.556l1.36-18.211 2.528-22.36 2.463-28.776.843-8.1 4.018-9.722 7.971-5.25 6.222 2.981 5.12 7.324-.713 4.73-3.046 19.768-5.962 30.98-3.889 20.739h2.268l2.593-2.593 10.499-13.934 17.628-22.036 7.778-8.749 9.073-9.657 5.833-4.601h11.018l8.1 12.055-3.628 12.443-11.342 14.388-9.398 12.184-13.48 18.147-8.426 14.518.778 1.166 2.01-.194 30.46-6.481 16.462-2.982 19.637-3.37 8.88 4.148.971 4.213-3.5 8.62-20.998 5.184-24.628 4.926-36.682 8.685-.454.324.519.648 16.526 1.555 7.065.389h17.304l32.21 2.398 8.426 5.574 5.055 6.805-.843 5.184-12.962 6.611-17.498-4.148-40.83-9.721-14-3.5h-1.944v1.167l11.666 11.406 21.387 19.314 26.767 24.887 1.36 6.157-3.434 4.86-3.63-.518-23.526-17.693-9.073-7.972-20.545-17.304h-1.36v1.814l4.73 6.935 25.017 37.59 1.296 11.536-1.814 3.76-6.481 2.268-7.13-1.297-14.647-20.544-15.1-23.138-12.185-20.739-1.49.843-7.194 77.448-3.37 3.953-7.778 2.981-6.48-4.925-3.436-7.972 3.435-15.749 4.148-20.544 3.37-16.333 3.046-20.285 1.815-6.74-.13-.454-1.49.194-15.295 20.999-23.267 31.433-18.406 19.702-4.407 1.75-7.648-3.954.713-7.064 4.277-6.286 25.47-32.405 15.36-20.092 9.917-11.6-.065-1.686h-.583L44.07 198.125l-12.055 1.555-5.185-4.86.648-7.972 2.463-2.593 20.35-13.999-.064.065Z" /></svg></span></p><p class="tile-model">opus</p></div></header><dl class="tile-facts"><dt>seat</dt><dd>claude_standby/claude</dd><dt>model</dt><dd>opus</dd><dt>elapsed</dt><dd class="elapsed">0s</dd><dt>run</dt><dd class="run-id" title="run-claude-1">run-claude-1</dd></dl></article><article class="tile tile--running" data-elapsed="0"><header class="tile-head"><p class="repo-name">example-project</p><div class="tile-side"><p class="state">running</p><p class="tile-badges"><span class="badge" style="background:#2b6cb0" title="opencode" aria-label="OpenCode"><svg viewBox="0 0 32 40"><g clip-path="url(#opencode__clip0_1311_94969)"><path d="M24 32H8V16H24V32Z" fill="#4B4646" /><path d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="#F1ECEC" /></g><defs><clipPath id="opencode__clip0_1311_94969"><rect width="32" height="40" fill="white" /></clipPath></defs></svg></span><span class="badge" style="background:#2b6cb0" title="opencode" aria-label="OpenCode"><svg viewBox="0 0 32 40"><g clip-path="url(#opencode__clip0_1311_94969)"><path d="M24 32H8V16H24V32Z" fill="#4B4646" /><path d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="#F1ECEC" /></g><defs><clipPath id="opencode__clip0_1311_94969"><rect width="32" height="40" fill="white" /></clipPath></defs></svg></span></p><p class="tile-model">opencode/muse-spark-1.3-contributor-free</p></div></header><dl class="tile-facts"><dt>seat</dt><dd>muse13/opencode</dd><dt>model</dt><dd>opencode/muse-spark-1.3-contributor-free</dd><dt>elapsed</dt><dd class="elapsed">0s</dd><dt>run</dt><dd class="run-id" title="run-muse13-1">run-muse13-1</dd></dl></article></div></section></section>
+<section class="panel" aria-labelledby="control-plane"><header><h2 id="control-plane">Control plane</h2></header><p class="collision">no telemetry for: control-plane telemetry</p><p class="empty">No control-plane projection is attached to this Deck yet, so policy version, machine capacity, quota, routing receipts, queue eligibility, and integration readiness are all unknown. That is not the same as nothing being wrong.</p></section>
+<section class="panel" aria-labelledby="cloud-workers"><header><h2 id="cloud-workers">Cloud workers</h2><p class="panel-count">0 provider(s)</p></header><p class="empty">No cloud providers configured.</p></section>
+<section class="panel" aria-labelledby="interactive-sessions"><header><h2 id="interactive-sessions">Interactive sessions</h2><p class="panel-count">0 session(s)</p></header><p class="empty">No interactive sessions.</p></section>
+<div class="dashboard-grid"><section class="panel attention-panel" aria-labelledby="rail"><header><h2 id="rail">Needs you</h2><p class="panel-count">0 item(s)</p></header><p class="empty">No open run or claim signals. Coverage is incomplete, so this is not an all-clear: control-plane telemetry unknown.</p></section><section class="panel" aria-labelledby="timeline"><header><h2 id="timeline">Recent outcomes</h2><p class="panel-count">0 shown</p></header><p class="empty">No recent outcomes.</p></section></div>
+<details><summary>Other observers (0)</summary><ul class="observer-list"></ul></details>
+<footer><a href="/view/machines">machines board</a> <a href="/view/repos">repos board</a></footer></main></body></html>

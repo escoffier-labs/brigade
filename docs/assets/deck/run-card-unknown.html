@@ -1,0 +1,143 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta http-equiv="refresh" content="10"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#111617"><meta name="application-name" content="Fleet Hub"><meta name="apple-mobile-web-app-title" content="Fleet Hub"><link rel="icon" type="image/x-icon" href="/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="manifest" href="/site.webmanifest"><title>Command Deck</title><style nonce="nonce">
+:root {
+  color-scheme: dark;
+  --canvas: #111617;
+  --surface: #182022;
+  --surface-raised: #202a2c;
+  --line: #3a4849;
+  --line-quiet: #293536;
+  --ink: #e5ece8;
+  --muted: #a4b1ad;
+  --faint: #75837f;
+  --signal: #d5ab69;
+  --signal-quiet: #382f22;
+}
+* { box-sizing: border-box; }
+body.deck {
+  margin: 0;
+  min-width: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.deck { max-width: 100%; overflow-wrap: anywhere; }
+.deck-shell { width: min(1480px, 100%); margin: 0 auto; padding: 18px; }
+.masthead {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 0 14px;
+  border-bottom: 1px solid var(--line);
+}
+.eyebrow { margin: 0 0 3px; color: var(--faint); font-size: 11px; font-weight: 700; letter-spacing: .11em; text-transform: uppercase; }
+h1, h2, h3, p { margin-top: 0; }
+h1 { margin-bottom: 3px; font-size: 22px; line-height: 1.1; letter-spacing: -.02em; }
+h2 { margin-bottom: 0; font-size: 15px; line-height: 1.25; }
+h3 { margin-bottom: 0; font-size: 13px; }
+.header-meta { margin: 0; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+.verdict { color: var(--signal); font-size: 12px; font-weight: 800; letter-spacing: .08em; }
+nav { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+a { color: var(--ink); text-underline-offset: 3px; }
+nav a { border: 1px solid var(--line); padding: 4px 8px; color: var(--muted); text-decoration: none; }
+nav a:hover, nav a:focus-visible { border-color: var(--signal); color: var(--ink); outline: none; }
+.stations { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.stations { gap: 12px; align-items: start; }
+.station-card, .panel, .repo-panel, details {
+  min-width: 0;
+  border: 1px solid var(--line-quiet);
+  background: var(--surface);
+}
+.station-card { padding: 12px; }
+.station-card > header { display: flex; align-items: start; justify-content: space-between; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line-quiet); }
+.station-meta { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.capacity { color: var(--signal); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.not-enrolled { color: var(--faint); }
+.run-stack { display: grid; gap: 8px; margin-top: 10px; }
+.empty { margin: 0; padding: 10px; color: var(--muted); background: #141b1c; font-size: 12px; }
+.tile { min-width: 0; }
+.tile { padding: 10px; border: 1px solid var(--line); border-left: 3px solid var(--signal); background: var(--surface-raised); }
+.tile--failed, .tile--awaiting-approval, .tile--stale { border-color: var(--signal); background: var(--signal-quiet); }
+.tile-head { display: flex; align-items: start; justify-content: space-between; gap: 8px; }
+.repo-name { margin: 0; font-weight: 750; }
+.state { margin: 0; color: var(--signal); font-size: 11px; font-weight: 800; letter-spacing: .06em; text-align: right; text-transform: uppercase; }
+.tile-side { margin: 0; text-align: right; }
+.tile-badges { display: flex; gap: 4px; justify-content: flex-end; margin: 4px 0 0; }
+.badge { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; min-height: 22px; padding: 2px 6px; border-radius: 999px; color: #fff; font-size: 11px; font-weight: 800; letter-spacing: .04em; text-align: center; white-space: nowrap; }
+.badge svg { width: 18px; height: 18px; display: block; }
+.tile-model { margin: 4px 0 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; text-align: right; }
+.cloud-worker-card h3 .badge, .attention-list li .badge { margin-right: 6px; }
+.tile-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 9px; margin: 9px 0 0; color: var(--muted); font-size: 12px; }
+.tile-facts dt { color: var(--faint); }
+.tile-facts dd { min-width: 0; margin: 0; }
+.claim, .collision { margin: 9px 0 0; font-size: 12px; }
+.collision { color: var(--signal); font-weight: 800; }
+.dashboard-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 12px; margin-top: 12px; }
+.cloud-workers { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 12px; }
+.cloud-worker-card { min-width: 0; padding: 12px; border: 1px solid var(--line-quiet); background: var(--surface); }
+.cloud-worker-card > header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.cloud-capacity { margin: 0; color: var(--signal); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cloud-state { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+.cloud-lease-list { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.cloud-lease-list li { padding-top: 7px; border-top: 1px solid var(--line-quiet); color: var(--muted); font-size: 12px; }
+.panel, .repo-panel { padding: 12px; }
+.panel > header, .repo-panel > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.panel-count { margin: 0; color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+.attention-panel { border-color: #6d5635; }
+.attention-list, .timeline, .observer-list { margin: 0; padding: 0; list-style: none; }
+.attention-list { display: grid; gap: 7px; }
+.attention-list li { padding: 8px 0; border-top: 1px solid var(--line-quiet); color: var(--muted); }
+.attention-list li:first-child { border-top: 0; padding-top: 0; }
+.attention-kind { color: var(--signal); font-size: 11px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.timeline { display: grid; gap: 0; }
+.timeline li { display: grid; grid-template-columns: 140px minmax(0, 1fr) auto; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line-quiet); color: var(--muted); font-size: 12px; }
+.timeline li:first-child { border-top: 0; padding-top: 0; }
+.timeline-state { color: var(--ink); font-weight: 700; }
+details { margin-top: 12px; padding: 10px 12px; color: var(--muted); }
+summary { cursor: pointer; color: var(--ink); font-weight: 700; }
+.observer-list { display: grid; gap: 6px; margin-top: 10px; font-size: 12px; }
+.table-wrap { overflow: hidden; }
+table { width: 100%; table-layout: fixed; }
+th, td { padding: 8px; border-bottom: 1px solid var(--line-quiet); overflow-wrap: anywhere; text-align: left; vertical-align: top; }
+th { color: var(--faint); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+td { color: var(--muted); font-size: 12px; }
+th:nth-child(1) { width: 22%; } th:nth-child(2) { width: 20%; } th:nth-child(3) { width: 13%; } th:nth-child(4) { width: 34%; } th:nth-child(5) { width: 11%; }
+.flag { color: var(--signal); font-weight: 800; }
+footer { margin-top: 18px; color: var(--faint); font-size: 12px; }
+footer a { margin-right: 12px; color: var(--muted); }
+.roster-form label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+.roster-form select, .roster-form textarea { width: 100%; padding: 6px; border: 1px solid var(--line); background: var(--surface-raised); color: var(--ink); font: inherit; }
+.roster-form textarea { margin-top: 10px; }
+.roster-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.roster-table th:nth-child(n) { width: auto; }
+.seat--off td { color: var(--faint); }
+details:target { border-color: var(--signal); }
+.confirm-save { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.roster-actions .hint { display: block; margin-top: 6px; color: var(--faint); font-size: 11px; }
+.banner { margin: 12px 0 0; padding: 10px; border: 1px solid var(--signal); color: var(--ink); font-size: 12px; }
+.banner--error { border-color: #b0553a; }
+.roster-actions button { padding: 8px 18px; border: 1px solid var(--signal); background: var(--signal-quiet); color: var(--ink); font: inherit; font-weight: 700; cursor: pointer; }
+.panel + .panel { margin-top: 12px; }
+@media (max-width: 700px) {
+  .stations { grid-template-columns: 1fr; }
+  .tile { width: 100%; }
+  .deck-shell { padding: 12px; }
+  .masthead, .station-card > header { align-items: start; flex-direction: column; }
+  .header-meta, .capacity { text-align: left; }
+  .dashboard-grid { grid-template-columns: 1fr; }
+  .timeline li { grid-template-columns: 1fr; gap: 2px; }
+  th, td { padding: 7px 4px; font-size: 11px; }
+}
+</style><script nonce="nonce">function tickElapsed() {document.querySelectorAll('[data-elapsed]').forEach(function (el) {var value = parseInt(el.getAttribute('data-elapsed'), 10);if (!isNaN(value)) { el.setAttribute('data-elapsed', String(value + 10)); }});}setInterval(tickElapsed, 10000);</script></head><body class="deck" data-as-of="2026-09-06 12:00:00 UTC"><main class="deck-shell">
+<header class="masthead"><div><p class="eyebrow">Fleet operations</p><h1>Command Deck</h1>
+<p class="verdict">COVERAGE UNKNOWN (1)</p></div><p class="header-meta">1/10 slots busy<br>2026-09-06 12:00:00 UTC</p></header>
+<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> <a href="/view/machines">machines board</a></nav>
+<section class="stations" aria-label="Fleet stations"><section aria-labelledby="station-0" class="station-card"><header><div><h2 id="station-0" title="11111111-1111-4111-8111-111111111111">Alpha</h2><p class="station-meta">never heard</p></div><p class="capacity">1/10 busy</p></header><div class="run-stack"><article class="tile tile--running" data-elapsed="0"><header class="tile-head"><p class="repo-name">example-project</p><div class="tile-side"><p class="state">running</p><p class="tile-badges"><span class="badge" style="background:#4b5563" title="unknown">??</span><span class="badge" style="background:#4b5563" title="unknown">??</span></p><p class="tile-model">unknown</p></div></header><dl class="tile-facts"><dt>seat</dt><dd>unknown/unknown</dd><dt>model</dt><dd>unknown</dd><dt>elapsed</dt><dd class="elapsed">0s</dd><dt>run</dt><dd class="run-id" title="ghost-1">ghost-1</dd></dl></article></div></section></section>
+<section class="panel" aria-labelledby="control-plane"><header><h2 id="control-plane">Control plane</h2></header><p class="collision">no telemetry for: control-plane telemetry</p><p class="empty">No control-plane projection is attached to this Deck yet, so policy version, machine capacity, quota, routing receipts, queue eligibility, and integration readiness are all unknown. That is not the same as nothing being wrong.</p></section>
+<section class="panel" aria-labelledby="cloud-workers"><header><h2 id="cloud-workers">Cloud workers</h2><p class="panel-count">0 provider(s)</p></header><p class="empty">No cloud providers configured.</p></section>
+<section class="panel" aria-labelledby="interactive-sessions"><header><h2 id="interactive-sessions">Interactive sessions</h2><p class="panel-count">0 session(s)</p></header><p class="empty">No interactive sessions.</p></section>
+<div class="dashboard-grid"><section class="panel attention-panel" aria-labelledby="rail"><header><h2 id="rail">Needs you</h2><p class="panel-count">0 item(s)</p></header><p class="empty">No open run or claim signals. Coverage is incomplete, so this is not an all-clear: control-plane telemetry unknown.</p></section><section class="panel" aria-labelledby="timeline"><header><h2 id="timeline">Recent outcomes</h2><p class="panel-count">0 shown</p></header><p class="empty">No recent outcomes.</p></section></div>
+<details><summary>Other observers (0)</summary><ul class="observer-list"></ul></details>
+<footer><a href="/view/machines">machines board</a> <a href="/view/repos">repos board</a></footer></main></body></html>

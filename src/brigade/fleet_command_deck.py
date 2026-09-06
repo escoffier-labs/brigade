@@ -15,6 +15,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from brigade.fleet_deck_brands import (
+    UNKNOWN_BRAND,
+    Brand,
+    harness_brand,
+    provider_brand,
+)
+
 CLAIM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
@@ -115,6 +122,9 @@ class LiveRun:
     age_seconds: int | None
     elapsed_seconds: int | None
     repo_identity: str = ""
+    provider: str = ""
+    model: str = ""
+    launch_model: str = ""
 
 
 @dataclass(frozen=True)
@@ -201,6 +211,34 @@ class CloudWorker:
 
 UNKNOWN = "unknown"
 CONTROL_PLANE_SECTIONS = ("policy", "sessions", "machines", "quota", "routes", "queue", "integrations")
+
+
+# Badge rendering over the vendor brand table in ``fleet_deck_brands``: the
+# SVG geometry is a constant per brand, never built from user data. Unknown
+# brands render the neutral "??" monogram; every label and title below goes
+# through _esc, so hostile names never reach the markup unescaped.
+def _badge_html(brand: Brand, raw_name: str) -> str:
+    title = raw_name.strip() or UNKNOWN
+    if brand.svg:
+        return (
+            f'<span class="badge" style="background:{_esc(brand.accent)}" '
+            f'title="{_esc(title)}" aria-label="{_esc(brand.label)}">'
+            f"{brand.svg}</span>"
+        )
+    return (
+        f'<span class="badge" style="background:{_esc(UNKNOWN_BRAND.accent)}" '
+        f'title="{_esc(title)}">{_esc(UNKNOWN_BRAND.label)}</span>'
+    )
+
+
+def harness_badge_html(harness: str) -> str:
+    """One compact harness vendor-mark badge, safe for hostile names."""
+    return _badge_html(harness_brand(harness), harness)
+
+
+def provider_badge_html(provider: str) -> str:
+    """One compact provider vendor-mark badge, safe for hostile names."""
+    return _badge_html(provider_brand(provider), provider)
 
 
 @dataclass(frozen=True)
@@ -471,6 +509,128 @@ _INTERNAL_OUTCOME_PARAMS = tuple(sorted(INTERNAL_OUTCOME_STATES))
 _INTERNAL_OUTCOME_PLACEHOLDERS = ",".join("?" for _ in _INTERNAL_OUTCOME_PARAMS)
 _REPO_IDENTITY_SQL = "COALESCE(NULLIF(repo_identity, ''), NULLIF(repo, ''))"
 
+_NON_EMPTY_FIELD = "IS NOT NULL AND trim({column}) != '' AND trim({column}) != '-'"
+
+
+def _last_known_field(conn: sqlite3.Connection, *, node_id: str, run_id: str, column: str, grokbot: bool) -> str:
+    """Last non-empty ``column`` for a run.
+
+    Root cause for ``seat /`` cards: status lifecycle events carry no
+    seat/harness payload, so the latest event row for a
+    ``brigade run --worker <seat>`` run is blank even though an earlier
+    ``run.dispatch.requested`` event named the seat. The status projection
+    (``fleet_hub_status``) backfills the seat; the Deck did not, for seat or
+    harness. A genuinely absent field stays absent (""), never a guess.
+    """
+    if column not in ("seat", "harness"):
+        raise ValueError(f"deck backfill supports seat/harness, not {column!r}")
+    if grokbot:
+        row = conn.execute(
+            f"SELECT {column} FROM events WHERE harness = 'grokbot' AND run_id = ? "
+            f"AND {column} {_NON_EMPTY_FIELD.format(column=column)} "
+            "ORDER BY sequence DESC, received_at DESC, digest DESC LIMIT 1",
+            (run_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            f"SELECT {column} FROM events WHERE node_id = ? AND run_id = ? "
+            f"AND {column} {_NON_EMPTY_FIELD.format(column=column)} "
+            "ORDER BY sequence DESC, received_at DESC, digest DESC LIMIT 1",
+            (node_id, run_id),
+        ).fetchone()
+    return str(row[0]) if row else ""
+
+
+def _model_policy_for_seats(conn: sqlite3.Connection, seats: Sequence[str]) -> dict[str, dict[str, str]]:
+    """Seat policy rows keyed by seat: provider, model, harness CLI, launch id.
+
+    The events journal records seat/harness only; provider, canonical model,
+    and the native launch id (``bindings.brigade.model``) live in the hub's
+    ``model_policy`` table. Absent table or columns means unknown, never a
+    guess. ``sqlite3.Error`` covers both (older hub DBs predate the columns).
+    """
+    wanted = sorted({seat for seat in seats if seat})
+    if not wanted:
+        return {}
+    placeholders = ",".join("?" for _ in wanted)
+    try:
+        rows = conn.execute(
+            "SELECT seat, provider, model, brigade_cli, brigade_model "
+            f"FROM model_policy WHERE seat IN ({placeholders})",
+            wanted,
+        ).fetchall()
+        fields = ("provider", "model", "brigade_cli", "brigade_model")
+    except sqlite3.Error:
+        try:
+            rows = conn.execute(
+                f"SELECT seat, provider, model FROM model_policy WHERE seat IN ({placeholders})",
+                wanted,
+            ).fetchall()
+        except sqlite3.Error:
+            return {}
+        fields = ("provider", "model", "", "")
+    policy: dict[str, dict[str, str]] = {}
+    for row in rows:
+        policy[str(row[0])] = {name: str(value or "") for name, value in zip(fields, row[1:], strict=True)}
+    return policy
+
+
+def _enrich_runs(conn: sqlite3.Connection, runs: list[LiveRun]) -> list[LiveRun]:
+    """Backfill blank seat/harness from earlier events; join model policy."""
+    if not runs:
+        return runs
+    backfilled: list[LiveRun] = []
+    for run in runs:
+        grokbot = run.harness == "grokbot"
+        seat = run.seat or _last_known_field(
+            conn, node_id=run.node_id, run_id=run.run_id, column="seat", grokbot=grokbot
+        )
+        harness = run.harness or _last_known_field(
+            conn, node_id=run.node_id, run_id=run.run_id, column="harness", grokbot=grokbot
+        )
+        backfilled.append(
+            run
+            if seat == run.seat and harness == run.harness
+            else LiveRun(
+                node_id=run.node_id,
+                run_id=run.run_id,
+                repo=run.repo,
+                seat=seat,
+                harness=harness,
+                state=run.state,
+                bucket=run.bucket,
+                age_seconds=run.age_seconds,
+                elapsed_seconds=run.elapsed_seconds,
+                repo_identity=run.repo_identity,
+            )
+        )
+    policy = _model_policy_for_seats(conn, [run.seat for run in backfilled])
+    enriched: list[LiveRun] = []
+    for run in backfilled:
+        row = policy.get(run.seat)
+        if not row:
+            enriched.append(run)
+            continue
+        harness = run.harness or row.get("brigade_cli", "")
+        enriched.append(
+            LiveRun(
+                node_id=run.node_id,
+                run_id=run.run_id,
+                repo=run.repo,
+                seat=run.seat,
+                harness=harness,
+                state=run.state,
+                bucket=run.bucket,
+                age_seconds=run.age_seconds,
+                elapsed_seconds=run.elapsed_seconds,
+                repo_identity=run.repo_identity,
+                provider=row.get("provider", ""),
+                model=row.get("model", ""),
+                launch_model=row.get("brigade_model", "") or row.get("model", ""),
+            )
+        )
+    return enriched
+
 
 def fetch_live_runs(conn: sqlite3.Connection, *, now: datetime, stale_after_seconds: int) -> list[LiveRun]:
     rank_sql = (
@@ -502,7 +662,7 @@ def fetch_live_runs(conn: sqlite3.Connection, *, now: datetime, stale_after_seco
                 repo_identity=repo_identity or "",
             )
         )
-    return runs
+    return _enrich_runs(conn, runs)
 
 
 def fetch_started_at(
@@ -553,7 +713,7 @@ def fetch_outcomes(conn: sqlite3.Connection, *, outcome_window: int) -> list[Liv
         f" AND state NOT IN ({_INTERNAL_OUTCOME_PLACEHOLDERS}) ORDER BY ts DESC LIMIT ?",
         (*TERMINAL_STATES, *_INTERNAL_OUTCOME_PARAMS, int(outcome_window)),
     ).fetchall()
-    return [_live_run_from_row(row) for row in rows]
+    return _enrich_runs(conn, [_live_run_from_row(row) for row in rows])
 
 
 def fetch_failed_outcomes(
@@ -585,7 +745,7 @@ def fetch_failed_outcomes(
         f") ORDER BY received_at DESC, run_id DESC LIMIT {RAIL_FAILURE_LIMIT}",
         (cutoff, *TERMINAL_STATES, stale_cutoff, *_INTERNAL_OUTCOME_PARAMS),
     ).fetchall()
-    return [_live_run_from_row(row, bucket="failed") for row in rows]
+    return _enrich_runs(conn, [_live_run_from_row(row, bucket="failed") for row in rows])
 
 
 def cloud_workers_from_snapshot(snapshot: Mapping[str, object]) -> tuple[CloudWorker, ...]:
@@ -1373,6 +1533,12 @@ nav a:hover, nav a:focus-visible { border-color: var(--signal); color: var(--ink
 .tile-head { display: flex; align-items: start; justify-content: space-between; gap: 8px; }
 .repo-name { margin: 0; font-weight: 750; }
 .state { margin: 0; color: var(--signal); font-size: 11px; font-weight: 800; letter-spacing: .06em; text-align: right; text-transform: uppercase; }
+.tile-side { margin: 0; text-align: right; }
+.tile-badges { display: flex; gap: 4px; justify-content: flex-end; margin: 4px 0 0; }
+.badge { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; min-height: 22px; padding: 2px 6px; border-radius: 999px; color: #fff; font-size: 11px; font-weight: 800; letter-spacing: .04em; text-align: center; white-space: nowrap; }
+.badge svg { width: 18px; height: 18px; display: block; }
+.tile-model { margin: 4px 0 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; text-align: right; }
+.cloud-worker-card h3 .badge, .attention-list li .badge { margin-right: 6px; }
 .tile-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 9px; margin: 9px 0 0; color: var(--muted); font-size: 12px; }
 .tile-facts dt { color: var(--faint); }
 .tile-facts dd { min-width: 0; margin: 0; }
@@ -1582,11 +1748,20 @@ def _tile_html(tile: Tile) -> str:
     collision_html = '<p class="collision">! collision</p>' if tile.collision else ""
     elapsed = f"{tile.run.elapsed_seconds}s" if tile.run.elapsed_seconds is not None else "&mdash;"
     tile_class = tile.run.bucket.replace(" ", "-")
+    # The claim line knows the seat even when the latest event row does not:
+    # fall back to the claim conductor before admitting unknown.
+    seat = tile.run.seat or (tile.claim.owner_conductor if tile.claim is not None else "") or UNKNOWN
+    harness = tile.run.harness or UNKNOWN
+    model_text = tile.run.launch_model or tile.run.model or UNKNOWN
+    badges = harness_badge_html(tile.run.harness) + provider_badge_html(tile.run.provider)
     return (
         f'<article class="tile tile--{_esc(tile_class)}" data-elapsed="{_esc(str(tile.run.elapsed_seconds or 0))}">'
         f'<header class="tile-head"><p class="repo-name">{_esc(tile.run.repo)}</p>'
-        f'<p class="state">{_esc(tile.run.bucket)}</p></header><dl class="tile-facts">'
-        f"<dt>seat</dt><dd>{_esc(tile.run.seat)}/{_esc(tile.run.harness)}</dd>"
+        f'<div class="tile-side"><p class="state">{_esc(tile.run.bucket)}</p>'
+        f'<p class="tile-badges">{badges}</p>'
+        f'<p class="tile-model">{_esc(model_text)}</p></div></header><dl class="tile-facts">'
+        f"<dt>seat</dt><dd>{_esc(seat)}/{_esc(harness)}</dd>"
+        f"<dt>model</dt><dd>{_esc(model_text)}</dd>"
         f'<dt>elapsed</dt><dd class="elapsed">{elapsed}</dd>'
         f'<dt>run</dt><dd class="run-id" title="{_esc(tile.run.run_id)}">{_esc(tile.run.run_id[:12])}</dd></dl>'
         + claim_html
@@ -1598,10 +1773,12 @@ def _tile_html(tile: Tile) -> str:
 def _interactive_session_html(session: InteractiveSession) -> str:
     dirty = f"{len(session.dirty_paths)}+" if session.dirty_truncated else str(len(session.dirty_paths))
     branch = session.branch or "-"
+    badge = harness_badge_html(session.harness)
     return (
         "<li>"
+        f"{badge} "
         f"{_esc(session.repo_label or session.repo_identity)} &middot; "
-        f"{_esc(session.harness)}/{_esc(session.session_id)} &middot; "
+        f"{_esc(session.harness or UNKNOWN)}/{_esc(session.session_id)} &middot; "
         f"{_esc(session.checkout_path)} &middot; "
         f"{_esc(branch)} &middot; {_esc(dirty)} dirty"
         "</li>"
@@ -1629,7 +1806,8 @@ def _cloud_worker_html(worker: CloudWorker) -> str:
     )
     return (
         '<article class="cloud-worker-card"><header>'
-        f'<h3>{_esc(worker.provider)}</h3><p class="cloud-capacity">{worker.used}/{worker.limit}</p>'
+        f"<h3>{provider_badge_html(worker.provider)} {_esc(worker.provider)}</h3>"
+        f'<p class="cloud-capacity">{worker.used}/{worker.limit}</p>'
         f'</header><p class="cloud-state">circuit: {_esc(worker.circuit_state)}</p>'
         + (
             f'<ul class="cloud-lease-list">{lease_items}</ul>'
