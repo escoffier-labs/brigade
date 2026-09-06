@@ -1553,6 +1553,112 @@ Per-reference observations:
 
 ---
 
+## `https://brigade.dev/attestation/commit-linkage/v1`: `schemaVersion: 1`
+
+**Envelope:** DSSE over an in-toto Statement v1, signed with
+`brigade.sshsig-dsse.v1` and written to `<run-dir>/linkage/<commit-sha>.json`.
+
+Predicate carried by the commit-linkage statement.
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `schemaVersion` | integer | yes | Always `1` for this contract |
+| `run` | object | yes | `{"id", "journalChainHead"}` |
+| `attestedTree` | object | yes | `{"gitTree": <tree-sha>}` |
+| `commitTree` | object | yes | `{"gitTree": <tree-sha>}` |
+| `commitParents` | array of object | yes | `{"gitCommit": <sha>}` in order |
+| `commitKind` | string | yes | `root`, `linear`, or `merge` |
+| `comparison` | object | yes | See below |
+| `equivalence` | string | yes | `exact`, `normalized`, or `none` |
+| `git` | object | yes | `{"objectFormat", "shallow"}` |
+| `baseline` | object | no | Present when `run.json` has a `baseline_commit` |
+| `references` | object | yes | `{"status": "absent"}` or agent-change index reference |
+| `trailers` | object | yes | Trailer observations |
+| `forgeEvidence` | object | yes | `{"status": "not-included"}` |
+| `emittedAt` | string (ISO-8601) | yes | UTC Z timestamp, second precision |
+| `nonce` | string | yes | 32 hex characters |
+| `policy` | object | yes | `{"name": "brigade.agent_change_policy.v1", "digest": {"sha256": ...}}` |
+| `project` | object | yes | `{"scope": <project_scope>}` |
+| `signerIndependence` | string | yes | Always `"shared-workspace-key"` in this slice |
+
+**`comparison` object**
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `rule` | string | `brigade.tree_fingerprint.v1` |
+| `exclusions` | array of string | Evidence paths excluded from the fingerprint |
+| `normalizationBase` | object | `{"gitCommit": <sha>, "source": "run-baseline" \| "first-parent-assumed"}` or `{"status": "unavailable"}` |
+| `normalizedCommitTree` | object | `{"gitTree": <sha>}` or `{"status": "unavailable"}` |
+
+**`trailers` object**
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `run` | string \| null | `Brigade-Run` trailer value |
+| `receipt` | string \| null | `Brigade-Receipt` trailer digest |
+| `runMatches` | boolean \| null | Whether `run` equals the statement run id |
+| `receiptResolves` | boolean \| null | Whether the receipt digest resolves to the local run receipt |
+| `evaluatedAt` | string | When the trailers were read |
+
+**`baseline` object**
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `gitCommit` | string | The run's baseline commit |
+| `baselineRelation` | string | `same-as-parent`, `ancestor-of-parent`, `unrelated`, `unknown`, or `unavailable` |
+| `baselineMoved` | boolean \| null | Whether the first parent is not the baseline |
+
+**`references` object**
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `status` | string | `absent` when the agent-change index is missing |
+| `kind` | string | `agent-change` |
+| `payloadSha256` | string | SHA-256 of the decoded agent-change payload |
+| `envelopeSha256` | string | SHA-256 of the canonical agent-change envelope |
+| `subjectTree` | string \| null | The agent-change subject tree |
+
+---
+
+## `brigade.commit_linkage_verification.v1`
+
+**Output:** printed by `brigade receipts verify-commit-linkage --json`.
+
+Machine-readable audit observations produced by the commit-linkage verifier.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schema` | string | Always `brigade.commit_linkage_verification.v1` |
+| `status` | string | `LINKED-EXACT`, `LINKED-NORMALIZED`, `NOT-EQUIVALENT`, `INVALID`, or `UNVERIFIABLE` |
+| `evaluatedAt` | string (ISO-8601) | UTC Z timestamp |
+| `policy` | object | `{"path", "status", "digest"}` where `status` is `match`, `mismatch`, or `unavailable` |
+| `project` | object | `{"scope", "status"}` where `status` is `match` or `mismatch` |
+| `envelope` | object | See below |
+| `commitAvailable` | string | `present` or `missing` |
+| `objectFormat` | string | `match` or `mismatch` |
+| `attestedTreeObject` | string | `present` or `missing` |
+| `commitTree` | string | `match`, `mismatch`, or `unavailable` |
+| `normalizedTree` | string | `match`, `mismatch`, or `unavailable` |
+| `ruleDrift` | boolean | Whether the statement's exclusion list differs from the verifier's |
+| `equivalence` | string | `confirmed`, `contradicted`, or `unavailable` |
+| `runBinding` | string | `bound`, `conflicted`, or `unavailable` |
+| `indexBinding` | string | `bound`, `conflicted`, or `absent` |
+| `baselineRelation` | string | `confirmed`, `contradicted`, or `unavailable` |
+| `disclaimer` | string | States that the result confirms tree equivalence for one commit object and nothing about merge order, branch state, or review |
+
+**Envelope object**
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `syntax` | string | `wellformed` or `malformed` |
+| `signature` | string | `valid`, `invalid`, or `unverifiable` |
+| `trust` | string | `trusted`, `untrusted`, or `unknown` |
+| `freshness` | string | `revocation-checked` or `revocation-absent`, plus `timestamp-absent` |
+| `policy` | string | `match`, `mismatch`, or `unavailable` |
+| `project` | string | `match` or `mismatch` |
+
+---
+
 ## Related commands
 
 - `brigade receipts verify`: digest chain checks for verify receipts and outcome rows

@@ -176,6 +176,44 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_agent_change.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_agent_change.set_defaults(func=dispatch)
 
+    p_commit_linkage = export_sub.add_parser(
+        "commit-linkage", help="Export a post-commit linkage statement for a run and a commit."
+    )
+    p_commit_linkage.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_commit_linkage.add_argument("--run-id", metavar="<run-id>", required=True, help="Run id to link.")
+    p_commit_linkage.add_argument("--commit", metavar="<sha>", required=True, help="Full git commit sha to link.")
+    p_commit_linkage.add_argument(
+        "--key", metavar="PATH", type=Path, default=None, help="Path to the attestation signing key."
+    )
+    p_commit_linkage.add_argument(
+        "--principal", metavar="NAME", default=None, help="Signer principal name (unused, accepted for compatibility)."
+    )
+    p_commit_linkage.add_argument(
+        "--policy", metavar="PATH", type=Path, default=None, help="Path to agent-change policy file."
+    )
+    p_commit_linkage.add_argument("--out", metavar="PATH|-", default=None, help="Output path, or '-' for stdout.")
+    p_commit_linkage.add_argument("--force", action="store_true", help="Overwrite an existing linkage envelope.")
+    p_commit_linkage.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_commit_linkage.set_defaults(func=dispatch)
+
+    p_verify_commit_linkage = receipts_sub.add_parser(
+        "verify-commit-linkage", help="Verify a post-commit linkage statement envelope."
+    )
+    p_verify_commit_linkage.add_argument(
+        "envelope_or_run_dir",
+        metavar="<envelope-or-run-dir>",
+        type=Path,
+        help="Path to the linkage envelope or run directory.",
+    )
+    p_verify_commit_linkage.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
+    )
+    p_verify_commit_linkage.add_argument(
+        "--commit", metavar="<sha>", default=None, help="Full git commit sha to select from a run directory."
+    )
+    p_verify_commit_linkage.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_verify_commit_linkage.set_defaults(func=dispatch)
+
 
 def dispatch(args) -> int:
     from .. import receipts_cmd
@@ -297,6 +335,29 @@ def dispatch(args) -> int:
             path=args.envelope_or_run_dir,
             target=args.target,
             policy=policy_path,
+            json_output=args.json,
+        )
+    if args.receipts_command == "export" and args.receipts_export_command == "commit-linkage":
+        from .. import commit_linkage
+
+        policy_path = Path(args.policy) if args.policy is not None else None
+        return commit_linkage.export_commit_linkage(
+            target=args.target,
+            run_id=args.run_id,
+            commit_sha=args.commit,
+            key=args.key,
+            policy=policy_path,
+            out=args.out,
+            force=args.force,
+            json_output=args.json,
+        )
+    if args.receipts_command == "verify-commit-linkage":
+        from .. import commit_linkage_verify
+
+        return commit_linkage_verify.verify_commit_linkage(
+            path=args.envelope_or_run_dir,
+            target=args.target,
+            commit=args.commit,
             json_output=args.json,
         )
     args._brigade_parser.error(f"unknown receipts command: {args.receipts_command}")
