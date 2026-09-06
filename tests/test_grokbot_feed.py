@@ -28,6 +28,7 @@ SECRET_INSTRUCTIONS = "SECRET_INSTRUCTION_DO_NOT_PRINT"
 SECRET_VERIFY = "SECRET_VERIFY_CMD"
 SECRET_OWNERSHIP = "SECRET_OWNERSHIP_PATH/file.py"
 SECRET_WAKE_KEY = "SECRET_WAKE_SENDER_KEY_DO_NOT_PRINT"
+SECRET_WAKE_ROLE_KEY = "SECRET_WAKE_ROLE_KEY_DO_NOT_PRINT"
 
 
 def _spec(*, label: str = "Approved worker task") -> dict[str, object]:
@@ -709,20 +710,24 @@ def _write_wake_key(path: Path, value: str = SECRET_WAKE_KEY) -> Path:
     return path
 
 
-def _write_wake_config(target: Path, url: str, key_file: Path) -> Path:
+def _write_wake_config(
+    target: Path,
+    url: str,
+    key_file: Path,
+    *,
+    webhooks: dict[str, object] | None = None,
+) -> Path:
     root = _queue_root(target)
     root.mkdir(parents=True, exist_ok=True)
     path = grokbot_feed.wake_config_path(target)
-    path.write_text(
-        json.dumps(
-            {
-                "schema": grokbot_feed.WAKE_SCHEMA,
-                "webhook_url": url,
-                "sender_key_file": str(key_file),
-            }
-        ),
-        encoding="utf-8",
-    )
+    payload: dict[str, object] = {
+        "schema": grokbot_feed.WAKE_SCHEMA,
+        "webhook_url": url,
+        "sender_key_file": str(key_file),
+    }
+    if webhooks is not None:
+        payload["webhooks"] = webhooks
+    path.write_text(json.dumps(payload), encoding="utf-8")
     path.chmod(0o600)
     return path
 
@@ -734,12 +739,22 @@ def _notify_log_text(target: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _assert_wake_secret_absent(*payloads: object) -> None:
+def _assert_wake_secret_absent(*payloads: object, secrets: tuple[str, ...] = (SECRET_WAKE_KEY,)) -> None:
     for payload in payloads:
         text = payload if isinstance(payload, str) else json.dumps(payload)
-        assert SECRET_WAKE_KEY not in text
+        for secret in secrets:
+            assert secret not in text
         assert "X-Automation-Key" not in text
         assert "Authorization" not in text
+
+
+def _wake_job(*, role: str, label: str = "Wake job") -> dict[str, str]:
+    return {
+        "job_id": "grokbot-" + "a" * 24,
+        "role": role,
+        "label": label,
+        "repository": "example/brigade",
+    }
 
 
 def test_apply_wake_notify_posts_bounded_body_on_success(tmp_path: Path):
@@ -853,6 +868,158 @@ def test_cli_feed_apply_omits_wake_key_from_output(tmp_path: Path, capsys):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_wake_role_entry_wins_over_default(tmp_path: Path, capsys):
+    default = _WakeRecorder()
+    role = _WakeRecorder()
+    default_server = _start_wake_server(default)
+    role_server = _start_wake_server(role)
+    try:
+        default_url = f"http://127.0.0.1:{default_server.server_address[1]}/wake"
+        role_url = f"http://127.0.0.1:{role_server.server_address[1]}/scout"
+        key_file = _write_wake_key(tmp_path / "wake.key")
+        _write_wake_config(
+            tmp_path,
+            default_url,
+            key_file,
+            webhooks={"repository-scout": role_url},
+        )
+        job = _wake_job(role="repository-scout", label="Scout")
+
+        grokbot_feed.notify_enqueue(tmp_path, job)
+        captured = capsys.readouterr()
+
+        assert default.requests == []
+        assert len(role.requests) == 1
+        request = role.requests[0]
+        assert request["path"] == "/scout"
+        assert request["authorization"] == f"Bearer {SECRET_WAKE_KEY}"
+        assert json.loads(request["body"]) == job
+        log = _notify_log_text(tmp_path)
+        assert json.loads(log.strip()) == {"status": 200}
+        _assert_wake_secret_absent(captured.out, captured.err, log)
+    finally:
+        default_server.shutdown()
+        default_server.server_close()
+        role_server.shutdown()
+        role_server.server_close()
+
+
+def test_wake_default_used_when_role_is_missing(tmp_path: Path, capsys):
+    default = _WakeRecorder()
+    scout = _WakeRecorder()
+    default_server = _start_wake_server(default)
+    scout_server = _start_wake_server(scout)
+    try:
+        default_url = f"http://127.0.0.1:{default_server.server_address[1]}/wake"
+        scout_url = f"http://127.0.0.1:{scout_server.server_address[1]}/scout"
+        key_file = _write_wake_key(tmp_path / "wake.key")
+        _write_wake_config(
+            tmp_path,
+            default_url,
+            key_file,
+            webhooks={"repository-scout": scout_url},
+        )
+        job = _wake_job(role="implementation-worker")
+
+        grokbot_feed.notify_enqueue(tmp_path, job)
+        captured = capsys.readouterr()
+
+        assert scout.requests == []
+        assert len(default.requests) == 1
+        assert json.loads(default.requests[0]["body"]) == job
+        log = _notify_log_text(tmp_path)
+        assert json.loads(log.strip()) == {"status": 200}
+        _assert_wake_secret_absent(captured.out, captured.err, log)
+    finally:
+        default_server.shutdown()
+        default_server.server_close()
+        scout_server.shutdown()
+        scout_server.server_close()
+
+
+def test_wake_invalid_map_ignored_default_still_used(tmp_path: Path, capsys):
+    default = _WakeRecorder()
+    other = _WakeRecorder()
+    default_server = _start_wake_server(default)
+    other_server = _start_wake_server(other)
+    try:
+        default_url = f"http://127.0.0.1:{default_server.server_address[1]}/wake"
+        other_url = f"http://127.0.0.1:{other_server.server_address[1]}/other"
+        key_file = _write_wake_key(tmp_path / "wake.key")
+        _write_wake_config(
+            tmp_path,
+            default_url,
+            key_file,
+            webhooks={
+                "implementation-worker": {"sender_key_file": str(key_file)},
+                "not-a-role": other_url,
+            },
+        )
+        job = _wake_job(role="implementation-worker")
+
+        grokbot_feed.notify_enqueue(tmp_path, job)
+        captured = capsys.readouterr()
+
+        assert other.requests == []
+        assert len(default.requests) == 1
+        assert json.loads(default.requests[0]["body"]) == job
+        log = _notify_log_text(tmp_path)
+        assert json.loads(log.strip()) == {"status": 200}
+        _assert_wake_secret_absent(captured.out, captured.err, log)
+    finally:
+        default_server.shutdown()
+        default_server.server_close()
+        other_server.shutdown()
+        other_server.server_close()
+
+
+def test_wake_per_role_sender_key_file_honored(tmp_path: Path, capsys):
+    default = _WakeRecorder()
+    role = _WakeRecorder()
+    default_server = _start_wake_server(default)
+    role_server = _start_wake_server(role)
+    try:
+        default_url = f"http://127.0.0.1:{default_server.server_address[1]}/wake"
+        role_url = f"http://127.0.0.1:{role_server.server_address[1]}/scout"
+        default_key = _write_wake_key(tmp_path / "wake.key")
+        role_key = _write_wake_key(tmp_path / "scout.key", SECRET_WAKE_ROLE_KEY)
+        _write_wake_config(
+            tmp_path,
+            default_url,
+            default_key,
+            webhooks={
+                "repository-scout": {
+                    "webhook_url": role_url,
+                    "sender_key_file": str(role_key),
+                }
+            },
+        )
+        job = _wake_job(role="repository-scout", label="Scout")
+
+        grokbot_feed.notify_enqueue(tmp_path, job)
+        captured = capsys.readouterr()
+
+        assert default.requests == []
+        assert len(role.requests) == 1
+        request = role.requests[0]
+        assert request["authorization"] == f"Bearer {SECRET_WAKE_ROLE_KEY}"
+        assert request["automation_key"] == SECRET_WAKE_ROLE_KEY
+        assert json.loads(request["body"]) == job
+        log = _notify_log_text(tmp_path)
+        assert json.loads(log.strip()) == {"status": 200}
+        _assert_wake_secret_absent(
+            captured.out,
+            captured.err,
+            log,
+            secrets=(SECRET_WAKE_KEY, SECRET_WAKE_ROLE_KEY),
+        )
+    finally:
+        default_server.shutdown()
+        default_server.server_close()
+        role_server.shutdown()
+        role_server.server_close()
 
 
 READY_PR_CONTRACT = (
