@@ -1278,10 +1278,53 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: 
     return argv
 
 
+def _hub_synthesized_agent(worker: str, loaded_roster) -> tuple[object | None, str | None]:
+    """Resolve a worker absent from the local roster from the Hub roster row.
+
+    Returns ``(agent, error)`` mirroring ``synthesize_hub_worker``: ``agent``
+    is set when the Hub row yields a usable seat (full admission still happens
+    later in Fleet model-policy resolution); ``error`` carries the Hub
+    remediation when the row exists but cannot be used; both None when the Hub
+    carries no such row. A missing Hub keeps the generic unknown-worker error;
+    an unreachable Hub refuses honestly instead of guessing.
+    """
+    from .. import aboyeur_model_policy as hub_seats
+
+    try:
+        from .. import fleet_client as fleet_client_mod
+
+        snapshot = fleet_client_mod.load_model_policy_snapshot()
+    except Exception:
+        return None, (
+            f"fleet model policy hub is unavailable; cannot resolve worker {worker!r} "
+            "without the Hub roster; refusing new dispatch"
+        )
+    if not isinstance(snapshot, dict) or not hub_seats._is_versioned_snapshot(snapshot):
+        state = (
+            snapshot.get("state")
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("state"), str)
+            else "unavailable"
+        )
+        if state == "unconfigured":
+            return None, None
+        return None, (
+            f"fleet model policy hub is unavailable ({state}); cannot resolve worker {worker!r} "
+            "without the Hub roster; refusing new dispatch"
+        )
+    from .. import aboyeur as aboyeur_mod
+
+    return hub_seats.synthesize_hub_worker(aboyeur_mod, loaded_roster, snapshot, worker)
+
+
 def _direct_worker_error(worker: str, loaded_roster, roster_mod, *, read_only: bool = False) -> str | None:
     agent = loaded_roster.agents.get(worker)
     if agent is None:
-        return f"unknown worker: {worker}"
+        hub_agent, hub_error = _hub_synthesized_agent(worker, loaded_roster)
+        if hub_error is not None:
+            return hub_error
+        if hub_agent is None:
+            return f"unknown worker: {worker}"
+        agent = hub_agent
     if worker == loaded_roster.orchestrator:
         return f"--worker cannot target orchestrator seat: {worker}"
     if read_only:

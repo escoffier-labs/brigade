@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from . import fleet_model_admission, fleet_model_roster
-from .roster import Agent, Roster
+from .roster import Agent, Roster, is_cli_allowed
 
 
 def _aboyeur():
@@ -125,6 +125,91 @@ def _local_cli_matches_hub_binding(aboyeur: Any, agent: Agent, binding: Mapping[
     return aboyeur.agents.command_for(local) == instance_id
 
 
+def _hub_seat_row(snapshot: Mapping[str, Any], seat_name: str) -> dict[str, Any] | None:
+    """Return the Hub roster row for a seat, or None when the Hub carries no such row."""
+    raw_seats = snapshot.get("seats")
+    if not isinstance(raw_seats, list):
+        return None
+    for item in raw_seats:
+        if isinstance(item, Mapping) and item.get("seat") == seat_name:
+            return dict(item)
+    return None
+
+
+def synthesize_hub_worker(
+    aboyeur: Any,
+    roster: Roster,
+    snapshot: Mapping[str, Any],
+    seat_name: str,
+) -> tuple[Agent | None, str | None]:
+    """Build a hub-derived Agent for a seat absent from the local roster.
+
+    Returns ``(agent, error)``: ``agent`` is set on success with the canonical
+    slug as its model (``_resolve_versioned`` then applies
+    ``effective_brigade_launch_model`` exactly as the local-seat path does);
+    ``error`` names the ``brigade fleet models set ...`` remediation (or the
+    ``limits.allow_models`` edit) when the Hub row exists but cannot be used;
+    both are None when the Hub carries no such row. Callers only invoke this
+    for seats missing locally, so a locally declared seat always wins. The
+    native launch id is only ever read from an explicit binding leaf; nothing
+    is inferred from the slug.
+    """
+    row = _hub_seat_row(snapshot, seat_name)
+    if row is None:
+        return None, None
+    revision = snapshot.get("roster_revision", snapshot.get("revision"))
+    provider = row.get("provider")
+    canonical = row.get("model")
+    if not isinstance(provider, str) or not provider or not isinstance(canonical, str) or not canonical:
+        return None, (
+            f"hub seat {seat_name!r} registry entry is missing exact provider/model "
+            f"in roster revision {revision if isinstance(revision, int) else 'N'}; "
+            f"repair it with: brigade fleet models set PROVIDER MODEL {seat_name} "
+            f"--brigade-cli CLI --expect-revision {revision if isinstance(revision, int) else 'N'}"
+        )
+    if row.get("enabled") is not True:
+        return None, (
+            f"hub seat {seat_name!r} is disabled in roster revision "
+            f"{revision if isinstance(revision, int) else 'N'}; enable it with:"
+            + _set_remediation_detail(row, revision, fallback_seat=seat_name)
+        )
+    launch_groups = fleet_model_roster.consumer_launch_groups(snapshot, "brigade-run", seat_name)
+    binding = fleet_model_admission._binding_for("brigade-run", row, launch_groups=launch_groups)
+    raw_cli = binding.get("instance_id") if isinstance(binding, Mapping) else None
+    if not isinstance(raw_cli, str) or not raw_cli:
+        return None, (
+            f"hub seat {seat_name!r} has no brigade-run cli binding "
+            f"in roster revision {revision if isinstance(revision, int) else 'N'}; "
+            "nothing to launch without an explicit binding leaf (the native id is never "
+            "inferred from the slug); bind it with:" + _set_remediation_detail(row, revision, fallback_seat=seat_name)
+        )
+    resolved_cli = _cli_from_binding(aboyeur, raw_cli)
+    if resolved_cli is None:
+        return None, (
+            f"hub seat {seat_name!r} binds {raw_cli!r}, which is not a supported Brigade harness; rebind it with:"
+            + _set_remediation_detail(row, revision, fallback_seat=seat_name)
+        )
+    if not is_cli_allowed(resolved_cli, roster):
+        detail = _set_remediation_detail(row, revision, fallback_seat=seat_name)
+        return None, (
+            f"hub seat {seat_name!r} uses {resolved_cli!r}, which is not allowed by limits.allow_models "
+            f"({', '.join(roster.allow_models)}); add {resolved_cli!r} to limits.allow_models in "
+            f"{roster.resolution.path if roster.resolution is not None else 'the local roster'}"
+            + (f"; or rebind the Hub row:{detail}" if detail else "")
+        )
+    reasoning = row.get("reasoning")
+    return (
+        Agent(
+            name=seat_name,
+            cli=resolved_cli,
+            role=f"hub-derived worker ({provider}/{canonical})",
+            model=canonical,
+            reasoning=reasoning if isinstance(reasoning, str) and reasoning else None,
+        ),
+        None,
+    )
+
+
 def _set_remediation_detail(
     row: Mapping[str, Any],
     revision: object,
@@ -162,6 +247,7 @@ def resolve_fleet_model_policy(
     """Resolve one immutable Fleet Hub policy snapshot into an effective roster."""
     aboyeur = _aboyeur()
     effective = roster
+    raw_snapshot = dict(snapshot) if snapshot is not None else aboyeur.fleet_client.load_model_policy_snapshot()
     cleaned_override: str | None = None
     if model_override is not None:
         cleaned_override = model_override.strip()
@@ -171,13 +257,22 @@ def resolve_fleet_model_policy(
                 receipt={"state": "invalid", "authoritative": False, "models": [], "decisions": []},
                 error="--model requires --worker so the overridden seat is unambiguous",
             )
-        agent = roster.agents.get(worker)
+        agent = effective.agents.get(worker)
         if agent is None:
-            return aboyeur.FleetModelPolicyResolution(
-                roster=roster,
-                receipt={"state": "invalid", "authoritative": False, "models": [], "decisions": []},
-                error=f"unknown worker: {worker}",
-            )
+            # Validation-only synthesis: _resolve_versioned performs the real
+            # admission below, so error-path rosters never carry an unadmitted
+            # hub-derived seat.
+            hub_error: str | None = None
+            if _is_versioned_snapshot(raw_snapshot):
+                hub_agent, hub_error = synthesize_hub_worker(aboyeur, effective, raw_snapshot, worker)
+                if hub_agent is not None:
+                    agent = hub_agent
+            if agent is None:
+                return aboyeur.FleetModelPolicyResolution(
+                    roster=roster,
+                    receipt={"state": "invalid", "authoritative": False, "models": [], "decisions": []},
+                    error=hub_error or f"unknown worker: {worker}",
+                )
         if not cleaned_override:
             return aboyeur.FleetModelPolicyResolution(
                 roster=roster,
@@ -192,7 +287,6 @@ def resolve_fleet_model_policy(
                 error=f"seat {worker!r} uses {cli!r}, which does not support a per-run model override",
             )
 
-    raw_snapshot = dict(snapshot) if snapshot is not None else aboyeur.fleet_client.load_model_policy_snapshot()
     if _is_versioned_snapshot(raw_snapshot):
         return _resolve_versioned(
             aboyeur,
@@ -416,6 +510,27 @@ def _resolve_versioned(
         [dict(row) for row in raw_retired if isinstance(row, Mapping)] if isinstance(raw_retired, list) else []
     )
     seat_rows = {row.get("seat"): row for row in seats if isinstance(row.get("seat"), str) and row.get("seat")}
+    if worker is not None and worker not in effective.agents:
+        hub_agent, hub_error = synthesize_hub_worker(aboyeur, effective, raw_snapshot, worker)
+        if hub_agent is not None:
+            effective = replace(effective, agents={**effective.agents, worker: hub_agent})
+        else:
+            receipt["decisions"] = []
+            receipt["admissions"] = []
+            if hub_error is not None:
+                return aboyeur.FleetModelPolicyResolution(
+                    roster=effective,
+                    receipt=receipt,
+                    error=hub_error,
+                )
+            return aboyeur.FleetModelPolicyResolution(
+                roster=effective,
+                receipt=receipt,
+                error=(
+                    f"unknown worker: {worker} (absent from the local roster and from Hub roster "
+                    f"revision {revision}; see current rows: brigade fleet models list --seat {worker})"
+                ),
+            )
     kept_agents = dict(effective.agents)
     decisions: list[dict[str, object]] = []
     denied: dict[str, str] = {}
