@@ -25,7 +25,12 @@ from .fleet_model_roster import canonical_json
 ROUTE_SCHEMA = "brigade.fleet_route.v1"
 RESERVATION_SCHEMA = "brigade.fleet_reservation.v1"
 CONTROL_PLANE_SCHEMA = "brigade.fleet_control_plane.v1"
-WORKLORE_INTEGRATION = "pending-root"
+WORK_NEXT_SCHEMA = "brigade.fleet_work_next.v1"
+WORKLORE_INTEGRATION = "work-next"
+# One work-next read walks the burn order and stops at the first eligible item.
+# The scan budget matches the burn page budget; only the first
+# WORK_NEXT_CONSIDERED_MAX exclusions are reported, the scan itself continues.
+WORK_NEXT_CONSIDERED_MAX = 100
 TELEMETRY_STATUSES = ("available", "busy", "draining", "unavailable", "unknown")
 CREDENTIAL_STATES = ("ok", "missing", "stale", "error")
 INTENT_STATES = ("pending", "accepted", "unknown", "released")
@@ -998,6 +1003,81 @@ def _revalidate(conn: sqlite3.Connection, request: Mapping[str, Any], caller_nod
     return _public(stored)
 
 
+def _collect_candidates(
+    conn: sqlite3.Connection,
+    *,
+    document: Mapping[str, Any],
+    routing: Mapping[str, Any],
+    workload: str,
+    requirements: Mapping[str, Any],
+    resolution: Mapping[str, Any],
+    now: datetime,
+    machine: str | None = None,
+    seat: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None, str | None]:
+    """Evaluate every seat/machine pair. Never writes; shared by ``route`` and dry-run previews."""
+    start_seat = seat or (resolution.get("effective", {}).get("roles", {}) or {}).get("impl")
+    seats = _chain(start_seat, document["seats"], "fallback")
+    if not seats:
+        return [], [], None, "unknown-role"
+    candidates: list[dict[str, Any]] = []
+    eligible: list[dict[str, Any]] = []
+    for seat_name in seats:
+        seat_record = document["seats"][seat_name]
+        machine_names = list(seat_record.get("eligible_machines") or []) or list(document["machines"])
+        if machine and machine not in machine_names:
+            machine_names = [machine, *machine_names]
+        if machine and machine in machine_names:
+            ordered = [machine] + [name for name in machine_names if name != machine]
+        else:
+            preferred = None
+            for name in machine_names:
+                record = document["machines"].get(name) or {}
+                if workload in (record.get("preferred_workloads") or []):
+                    preferred = name
+                    break
+            start_machine = preferred or (machine_names[0] if machine_names else None)
+            chained = _chain(
+                start_machine,
+                {name: document["machines"][name] for name in machine_names if name in document["machines"]},
+                "fallback",
+            )
+            extra = [name for name in machine_names if name not in chained]
+            ordered = chained + extra
+        ordered = sorted(
+            ordered,
+            key=lambda name: _rank(document, name, workload) if name in document["machines"] else (9, 9, 0),
+        )
+        for machine_name in ordered:
+            row = _evaluate_pair(
+                conn,
+                document=document,
+                routing=routing,
+                machine_name=machine_name,
+                seat_name=seat_name,
+                workload=workload,
+                requirements=requirements,
+                resolution=resolution,
+                now=now,
+            )
+            candidates.append(row)
+            if row["eligible"]:
+                eligible.append(row)
+    selected_row = None
+    if machine or seat:
+        matching = [
+            row for row in eligible if (not machine or row["machine"] == machine) and (not seat or row["seat"] == seat)
+        ]
+        if not matching:
+            return candidates, eligible, None, "machine-override-ineligible"
+        selected_row = matching[0]
+    elif eligible:
+        selected_row = eligible[0]
+    if selected_row is None:
+        return candidates, eligible, None, "no-eligible-candidate"
+    return candidates, eligible, selected_row, None
+
+
 def route(conn: sqlite3.Connection, request: Any, caller_node: str) -> dict[str, Any]:
     """Select a machine/seat under the current policy, or record a structured denial."""
     ensure_schema(conn)
@@ -1148,108 +1228,25 @@ def route(conn: sqlite3.Connection, request: Any, caller_node: str) -> dict[str,
             parsed["repo_identity"],
             override_reason=parsed["override_reason"],
         )
-        start_seat = parsed["seat"] or (resolution.get("effective", {}).get("roles", {}) or {}).get("impl")
-        seats = _chain(start_seat, document["seats"], "fallback")
-        if not seats:
+        candidates, _eligible, selected_row, denial = _collect_candidates(
+            conn,
+            document=document,
+            routing=routing,
+            workload=parsed["workload"],
+            requirements=requirements,
+            resolution=resolution,
+            now=now,
+            machine=parsed["machine"],
+            seat=parsed["seat"],
+        )
+        if denial is not None:
             payload = _store_decision(
                 conn,
                 request=parsed,
                 caller_node=caller,
                 current=current,
                 selected=None,
-                reason="unknown-role",
-                candidates=[],
-                override_reason=parsed["override_reason"],
-                reservation_id=None,
-                expires_at=None,
-                decision_id=_mint("dec-"),
-                generation=generation,
-            )
-            if opened:
-                conn.commit()
-            return payload
-        candidates: list[dict[str, Any]] = []
-        eligible: list[dict[str, Any]] = []
-        for seat_name in seats:
-            seat = document["seats"][seat_name]
-            machine_names = list(seat.get("eligible_machines") or []) or list(document["machines"])
-            if parsed["machine"] and parsed["machine"] not in machine_names:
-                machine_names = [parsed["machine"], *machine_names]
-            if parsed["machine"] and parsed["machine"] in machine_names:
-                ordered = [parsed["machine"]] + [name for name in machine_names if name != parsed["machine"]]
-            else:
-                preferred = None
-                for name in machine_names:
-                    record = document["machines"].get(name) or {}
-                    if parsed["workload"] in (record.get("preferred_workloads") or []):
-                        preferred = name
-                        break
-                start_machine = preferred or (machine_names[0] if machine_names else None)
-                chained = _chain(
-                    start_machine,
-                    {name: document["machines"][name] for name in machine_names if name in document["machines"]},
-                    "fallback",
-                )
-                extra = [name for name in machine_names if name not in chained]
-                ordered = chained + extra
-            ordered = sorted(
-                ordered,
-                key=lambda name: (
-                    _rank(document, name, parsed["workload"]) if name in document["machines"] else (9, 9, 0)
-                ),
-            )
-            for machine_name in ordered:
-                row = _evaluate_pair(
-                    conn,
-                    document=document,
-                    routing=routing,
-                    machine_name=machine_name,
-                    seat_name=seat_name,
-                    workload=parsed["workload"],
-                    requirements=requirements,
-                    resolution=resolution,
-                    now=now,
-                )
-                candidates.append(row)
-                if row["eligible"]:
-                    eligible.append(row)
-        selected_row = None
-        if parsed["machine"] or parsed["seat"]:
-            matching = [
-                row
-                for row in eligible
-                if (not parsed["machine"] or row["machine"] == parsed["machine"])
-                and (not parsed["seat"] or row["seat"] == parsed["seat"])
-            ]
-            if not matching:
-                payload = _store_decision(
-                    conn,
-                    request=parsed,
-                    caller_node=caller,
-                    current=current,
-                    selected=None,
-                    reason="machine-override-ineligible",
-                    candidates=candidates,
-                    override_reason=parsed["override_reason"],
-                    reservation_id=None,
-                    expires_at=None,
-                    decision_id=_mint("dec-"),
-                    generation=generation,
-                )
-                if opened:
-                    conn.commit()
-                return payload
-            selected_row = matching[0]
-        elif eligible:
-            selected_row = eligible[0]
-        if selected_row is None:
-            payload = _store_decision(
-                conn,
-                request=parsed,
-                caller_node=caller,
-                current=current,
-                selected=None,
-                reason="no-eligible-candidate",
+                reason=denial,
                 candidates=candidates,
                 override_reason=parsed["override_reason"],
                 reservation_id=None,
@@ -1260,6 +1257,7 @@ def route(conn: sqlite3.Connection, request: Any, caller_node: str) -> dict[str,
             if opened:
                 conn.commit()
             return payload
+        assert selected_row is not None
         decision_id = _mint("dec-")
         reservation_id = _mint("rsv-")
         expires_at = _iso(now + timedelta(seconds=int(routing["reservation_ttl_seconds"])))
@@ -1316,6 +1314,146 @@ def route(conn: sqlite3.Connection, request: Any, caller_node: str) -> dict[str,
         if opened:
             conn.rollback()
         raise
+
+
+def preview_route_for_work(
+    conn: sqlite3.Connection,
+    *,
+    consumer: str,
+    workload: str,
+) -> dict[str, Any]:
+    """Dry-run candidate evaluation for one work item.
+
+    Runs the same pair evaluation as :func:`route` but never writes: no
+    ``fleet_reservations`` row, no persisted decision, no claim.
+    """
+    ensure_schema(conn)
+    consumer_name = _bounded(consumer, "consumer")
+    workload_name = _bounded(workload, "workload")
+    assert consumer_name is not None and workload_name is not None
+    current = fleet_hub_policy.current_policy(conn)
+    document = current["document"]
+    routing = document.get("routing") or fleet_policy.empty_routing()
+    now = _now()
+    if consumer_name not in (document.get("consumers") or {}):
+        return {"selected": None, "candidates": [], "reason": "enrollment-required"}
+    if not routing.get("enabled"):
+        return {"selected": None, "candidates": [], "reason": "routing-disabled"}
+    requirements = (routing.get("workload_requirements") or {}).get(workload_name)
+    if requirements is None:
+        return {"selected": None, "candidates": [], "reason": "unknown-workload"}
+    resolution = fleet_policy.resolve_policy(document, consumer_name, None)
+    candidates, _eligible, selected_row, denial = _collect_candidates(
+        conn,
+        document=document,
+        routing=routing,
+        workload=workload_name,
+        requirements=requirements,
+        resolution=resolution,
+        now=now,
+    )
+    if denial is not None:
+        return {"selected": None, "candidates": candidates, "reason": denial}
+    assert selected_row is not None
+    return {
+        "selected": {"machine": selected_row["machine"], "seat": selected_row["seat"]},
+        "candidates": candidates,
+        "reason": "selected",
+    }
+
+
+def _work_next_summary(item: Mapping[str, Any], work_id: str) -> dict[str, Any]:
+    """Bounded item facts for work-next. Never carries description, prompt, or body text."""
+    try:
+        rank = int(item.get("burn_rank") or 0)
+    except (TypeError, ValueError):
+        rank = 0
+    title = item.get("title")
+    return {
+        "work_id": work_id,
+        "title": str(title)[:240] if title is not None else "",
+        "kind": str(item.get("kind") or ""),
+        "status": str(item.get("status") or ""),
+        "priority": str(item.get("priority") or ""),
+        "burn_rank": rank,
+    }
+
+
+def _work_next_empty(reason: str) -> dict[str, Any]:
+    return {
+        "schema": WORK_NEXT_SCHEMA,
+        "work_id": None,
+        "item": None,
+        "route": {"selected": None, "candidates": [], "reason": reason},
+        "considered": [],
+    }
+
+
+def work_next(
+    conn: sqlite3.Connection,
+    *,
+    consumer: str = "brigade-run",
+    workload: str = "general",
+    caller_node: str = "",
+) -> dict[str, Any]:
+    """First eligible burn item in burn order with a dry-run route decision.
+
+    Read-only: no ``fleet_reservations`` row, no persisted decision, no claim,
+    and no Worklore transition. Items the lookup cannot produce are reported as
+    the structured ``unknown``/``unreadable`` bucket, never invented as eligible.
+    """
+    ensure_schema(conn)
+    consumer_name = _bounded(consumer, "consumer")
+    workload_name = _bounded(workload, "workload")
+    assert consumer_name is not None and workload_name is not None
+    try:
+        from .worklore_store import BURN_SCAN_MAX, _BURN_ORDER_SQL
+    except Exception:
+        return _work_next_empty("worklore-unavailable")
+    try:
+        rows = conn.execute(
+            f"SELECT work_id FROM work_items ORDER BY {_BURN_ORDER_SQL} LIMIT ?",
+            (int(BURN_SCAN_MAX),),
+        ).fetchall()
+    except sqlite3.Error:
+        return _work_next_empty("worklore-unavailable")
+    considered: list[dict[str, str]] = []
+    for row in rows:
+        work_id = str(row[0])
+        try:
+            item = _lookup_work(conn, work_id)
+        except Exception:
+            item = None
+        if item is None:
+            bucket = "unreadable" if _lookup_failed(conn, work_id) else "unknown"
+            if len(considered) < WORK_NEXT_CONSIDERED_MAX:
+                considered.append({"work_id": work_id, "bucket": bucket})
+            continue
+        verdict = evaluate_work_item(item)
+        if verdict["ok"]:
+            preview = preview_route_for_work(conn, consumer=consumer_name, workload=workload_name)
+            return {
+                "schema": WORK_NEXT_SCHEMA,
+                "work_id": work_id,
+                "item": _work_next_summary(item, work_id),
+                "route": preview,
+                "considered": considered,
+            }
+        if len(considered) < WORK_NEXT_CONSIDERED_MAX:
+            considered.append(
+                {"work_id": work_id, "bucket": str(verdict.get("detail") or verdict.get("reason") or "work-held")}
+            )
+    payload = _work_next_empty("no-eligible-work")
+    payload["considered"] = considered
+    return payload
+
+
+def _lookup_failed(conn: sqlite3.Connection, work_id: str) -> bool:
+    """True when the id names a row the lookup could not produce (unreadable vs unknown)."""
+    try:
+        return conn.execute("SELECT 1 FROM work_items WHERE work_id = ?", (work_id,)).fetchone() is not None
+    except sqlite3.Error:
+        return False
 
 
 def _reservation_request(raw: Any) -> dict[str, str]:

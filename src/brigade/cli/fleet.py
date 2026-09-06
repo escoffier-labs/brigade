@@ -10,6 +10,7 @@ import sys
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from .. import worklore_brigade_sync, worklore_github_sync
 
@@ -458,6 +459,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_work_burn.add_argument("--cursor", default=None, help="Page cursor from a previous burn read.")
     p_work_burn.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     p_work_burn.set_defaults(func=_dispatch_work_burn)
+    p_work_next = work_sub.add_parser(
+        "next", help="Show the first eligible burn item with a dry-run route (read-only, never reserves)."
+    )
+    p_work_next.add_argument("--consumer", default="brigade-run", help="Routing consumer (default brigade-run).")
+    p_work_next.add_argument("--workload", default="general", help="Routing workload (default general).")
+    p_work_next.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_work_next.set_defaults(func=_dispatch_work_next)
     p_work_patch = work_sub.add_parser(
         "patch", help="Patch scheduling fields on a Worklore item (operator node token)."
     )
@@ -1763,6 +1771,49 @@ def _dispatch_work_burn(args: argparse.Namespace) -> int:
         args,
         lambda: worklore_client.burn_queue(limit=getattr(args, "limit", None), cursor=getattr(args, "cursor", None)),
     )
+
+
+def _dispatch_work_next(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import fleet_client_policy
+
+    try:
+        payload = fleet_client_policy.work_next(
+            consumer=getattr(args, "consumer", None) or "brigade-run",
+            workload=getattr(args, "workload", None) or "general",
+        )
+    except fleet_client_policy.FleetPolicyClientError as exc:
+        if bool(getattr(args, "json", False)):
+            print(_json.dumps({"error": {"code": exc.code, "message": str(exc)}}, sort_keys=True))
+        else:
+            print(f"error: {exc.code}: {exc}", file=sys.stderr)
+        return 1
+    except fleet_client_policy.FleetClientError as exc:
+        if bool(getattr(args, "json", False)):
+            print(_json.dumps({"error": {"code": "network", "message": str(exc)}}, sort_keys=True))
+        else:
+            print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if bool(getattr(args, "json", False)):
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload.get("work_id") else 1
+    raw_item = payload.get("item")
+    item: dict[str, Any] = raw_item if isinstance(raw_item, dict) else {}
+    raw_route = payload.get("route")
+    route: dict[str, Any] = raw_route if isinstance(raw_route, dict) else {}
+    raw_selected = route.get("selected")
+    selected: dict[str, Any] = raw_selected if isinstance(raw_selected, dict) else {}
+    work_id = payload.get("work_id") or item.get("work_id")
+    if not work_id:
+        print(f"no eligible work: {route.get('reason') or 'empty queue'}")
+        return 1
+    title = _safe_table_cell(item.get("title") or "")
+    machine = _safe_table_cell(selected.get("machine") or "-")
+    seat = _safe_table_cell(selected.get("seat") or "-")
+    reason = _safe_table_cell(route.get("reason") or "-")
+    print(f'{work_id} "{title}" -> {machine} / {seat} ({reason})')
+    return 0
 
 
 def _dispatch_work_patch(args: argparse.Namespace) -> int:

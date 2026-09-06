@@ -31,6 +31,7 @@ NODE_ACTIONS = frozenset(
         "prepare",
         "acknowledge",
         "route",
+        "work-next",
         "reservation-renew",
         "reservation-release",
         "telemetry-observe",
@@ -627,6 +628,16 @@ def _ack_payload(
     return {key: payload[key] for key in ACK_PUBLIC_KEYS}
 
 
+def _work_next(conn: Any, body: Mapping[str, Any]) -> dict[str, Any]:
+    """Read-only next-burn-item lookup. Never reserves, persists, or dispatches."""
+    unknown = sorted(set(body).difference({"action", "consumer", "workload"}))
+    if unknown:
+        raise _error("invalid-request", f"unknown work-next field(s): {', '.join(unknown)}")
+    consumer = _text(body.get("consumer"), "consumer", required=False) or "brigade-run"
+    workload = _text(body.get("workload"), "workload", required=False) or "general"
+    return fleet_hub_routing.work_next(conn, consumer=consumer, workload=workload)
+
+
 def handle_policy(
     conn: Any,
     raw: Any,
@@ -779,6 +790,10 @@ def handle_policy(
                 raise _error("auth-failed", "a node token is required to route", status=403)
             routed = {key: value for key, value in body.items() if key != "action"}
             status_payload = (200, fleet_hub_routing.public_route(fleet_hub_routing.route(conn, routed, caller_node)))
+        elif action == "work-next":
+            if caller_node is None:
+                raise _error("auth-failed", "a node token is required to read the next burn item", status=403)
+            status_payload = (200, _work_next(conn, body))
         elif action == "reservation-renew":
             if caller_node is None:
                 raise _error("auth-failed", "a node token is required to renew a reservation", status=403)
