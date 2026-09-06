@@ -188,7 +188,7 @@ def evaluate_work_item(item: Mapping[str, Any] | None) -> dict[str, Any]:
     if not isinstance(source_policies, list):
         return {"ok": False, "reason": "work-held", "detail": "source-policy"}
     try:
-        bucket = exclusion_bucket(item, source_policies)
+        bucket = exclusion_bucket(item, source_policies, now=_now())
     except Exception:
         return {"ok": False, "reason": "work-held", "detail": "worklore-unavailable"}
     if bucket is not None:
