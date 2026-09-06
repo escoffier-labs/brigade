@@ -868,7 +868,9 @@ def test_evaluate_work_item_uses_canonical_exclusion_and_does_not_default_missin
         **not_burn,
         "work_id": "wl-3",
         "burn_eligible": True,
-        "review_after": _iso(_now() + timedelta(days=1)),
+        # exclusion_bucket compares review_after against the real clock, so the
+        # hold must be anchored to wall time rather than the frozen test clock.
+        "review_after": _iso(datetime.now(timezone.utc) + timedelta(days=1)),
         "attempt_count": 0,
     }
     delayed = fleet_hub_routing.evaluate_work_item(future)
