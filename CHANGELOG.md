@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Test Result attestation export now rederives verify-receipt SHA-256 values
+  from the writer's compact sorted-key JSON contract, including receipt
+  `path`, and refuses stale or malformed stored digest evidence. Legacy
+  digestless exports remain supported. Export receipt lookup is strict and
+  bounded. Approval collector integration remains deferred. (#1404)
 - Attestation, cosign bundle, and approval verification now reject oversized,
   duplicate-name, non-finite, malformed-Unicode, over-nested, and cyclic JSON
   inputs before signature processing. DSSE accepts both standard and URL-safe

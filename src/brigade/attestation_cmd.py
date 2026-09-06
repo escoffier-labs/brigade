@@ -6,10 +6,8 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
 
-from . import attestation, cosign_attestation
-from .work_cmd import verification as verify_mod
+from . import attestation, attestation_receipt, cosign_attestation
 
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -41,23 +39,15 @@ def export_attestation(
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
 
-    receipt_data: dict[str, Any] | None = None
-    direct_receipt = target / ".brigade" / "work" / "verify-runs" / run_id / "receipt.json"
-    if run_id != "latest" and direct_receipt.is_file():
-        try:
-            data = json.loads(direct_receipt.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                data.setdefault("path", str(direct_receipt.parent))
-                receipt_data = data
-        except Exception:
-            pass
-
-    if receipt_data is None:
-        resolved, error = verify_mod._resolve_verify_receipt(target, run_id)
-        if resolved is None:
-            print(f"error: {error}", file=sys.stderr)
-            return 1
-        receipt_data = resolved
+    try:
+        selected_receipt = attestation_receipt.load_selected_receipt(target, run_id)
+    except attestation_receipt.ReceiptDigestError as exc:
+        print(f"error: cannot export attestation: {exc}", file=sys.stderr)
+        return 1
+    except attestation_receipt.ReceiptSelectionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    receipt_data = selected_receipt.snapshot
 
     if profile == "cosign":
         key_path = cosign_attestation.resolve_cosign_key_path(target, key_file=key)
@@ -100,13 +90,7 @@ def export_attestation(
     if out is not None:
         out_path = Path(out).expanduser().resolve()
     else:
-        run_dir_str = receipt_data.get("path")
-        if run_dir_str:
-            run_dir = Path(run_dir_str)
-        else:
-            resolved_run_id = str(receipt_data.get("run_id") or run_id)
-            run_dir = target / ".brigade" / "work" / "verify-runs" / resolved_run_id
-        out_path = run_dir / default_name
+        out_path = selected_receipt.directory / default_name
 
     try:
         attestation.write_attestation_file(artifact, out_path, force=force)
