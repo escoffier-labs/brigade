@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 
@@ -107,6 +108,60 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_att_keygen.add_argument("--force", action="store_true", help="Overwrite an existing attestation signing key.")
     p_att_keygen.set_defaults(func=dispatch)
 
+    p_agent_change_policy = receipts_sub.add_parser(
+        "agent-change-policy",
+        help="Manage the agent-change evidence index policy.",
+    )
+    agent_change_policy_sub = p_agent_change_policy.add_subparsers(
+        dest="agent_change_policy_command", metavar="<agent-change-policy-command>"
+    )
+    agent_change_policy_sub.required = True
+    p_acp_init = agent_change_policy_sub.add_parser(
+        "init", help="Initialize a default agent-change policy file."
+    )
+    p_acp_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_acp_init.add_argument("--force", action="store_true", help="Overwrite an existing policy file.")
+    p_acp_init.set_defaults(func=dispatch)
+
+    p_verify_agent_change = receipts_sub.add_parser(
+        "verify-agent-change", help="Verify an agent-change evidence index envelope."
+    )
+    p_verify_agent_change.add_argument(
+        "envelope_or_run_dir",
+        metavar="<envelope-or-run-dir>",
+        type=Path,
+        help="Path to the agent-change envelope or run directory.",
+    )
+    p_verify_agent_change.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
+    )
+    p_verify_agent_change.add_argument(
+        "--policy", metavar="PATH", type=Path, default=None, help="Path to agent-change policy file."
+    )
+    p_verify_agent_change.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_verify_agent_change.set_defaults(func=dispatch)
+
+    p_agent_change = export_sub.add_parser(
+        "agent-change", help="Export an agent-change evidence index for a run."
+    )
+    p_agent_change.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_agent_change.add_argument("--run-id", metavar="<run-id>", required=True, help="Run id to export.")
+    p_agent_change.add_argument(
+        "--key", metavar="PATH", type=Path, default=None, help="Path to the attestation signing key."
+    )
+    p_agent_change.add_argument(
+        "--principal", metavar="NAME", default=None, help="Expected signer principal name."
+    )
+    p_agent_change.add_argument(
+        "--policy", metavar="PATH", type=Path, default=None, help="Path to agent-change policy file."
+    )
+    p_agent_change.add_argument(
+        "--out", metavar="PATH|-", default=None, help="Output path, or '-' for stdout."
+    )
+    p_agent_change.add_argument("--force", action="store_true", help="Overwrite an existing index file.")
+    p_agent_change.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_agent_change.set_defaults(func=dispatch)
+
 
 def dispatch(args) -> int:
     from .. import receipts_cmd
@@ -177,6 +232,42 @@ def dispatch(args) -> int:
             target=args.target,
             principal=args.principal,
             force=args.force,
+        )
+    if args.receipts_command == "agent-change-policy" and args.agent_change_policy_command == "init":
+        from .. import agent_change
+
+        try:
+            agent_change.init_policy(args.target, force=args.force)
+        except agent_change.AgentChangeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except FileExistsError as exc:
+            print(f"error: {exc} (use --force to overwrite)", file=sys.stderr)
+            return 1
+        return 0
+    if args.receipts_command == "export" and args.receipts_export_command == "agent-change":
+        from .. import agent_change
+
+        policy_path = Path(args.policy) if args.policy is not None else None
+        return agent_change.export_agent_change(
+            target=args.target,
+            run_id=args.run_id,
+            key=args.key,
+            principal=args.principal,
+            policy=policy_path,
+            out=args.out,
+            force=args.force,
+            json_output=args.json,
+        )
+    if args.receipts_command == "verify-agent-change":
+        from .. import agent_change_verify
+
+        policy_path = Path(args.policy) if args.policy is not None else None
+        return agent_change_verify.verify_agent_change(
+            path=args.envelope_or_run_dir,
+            target=args.target,
+            policy=policy_path,
+            json_output=args.json,
         )
     args._brigade_parser.error(f"unknown receipts command: {args.receipts_command}")
     return 2
