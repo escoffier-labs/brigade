@@ -15,7 +15,17 @@ from importlib import resources as importlib_resources
 from pathlib import Path
 from typing import Any
 
-from . import attestation_input, localio
+from . import (
+    agent_request,
+    approval,
+    attestation,
+    attestation_input,
+    causal_receipt,
+    cosign_attestation,
+    localio,
+    receipts_trailer,
+    run_journal,
+)
 
 SCHEMA = "brigade.control_crosswalk.v1"
 EVIDENCE_CONTROLS_SCHEMA = "brigade.evidence_controls.v1"
@@ -27,6 +37,7 @@ HEADER_NOTICE = (
 VALID_RELATIONSHIPS = frozenset({"supports", "partially-supports", "no-relationship"})
 VALID_OBLIGATION_BEARERS = frozenset({"provider", "deployer", "service-organisation", "supplier", "any"})
 VALID_STATES = frozenset({"evidenced_passed", "evidenced_failed", "untested", "not_applicable"})
+VALID_MAPPING_STATUSES = frozenset({"mapped", "identifiers-not-sourced"})
 
 _STATE_RULES: dict[str, str] = {
     "EC-01": "verify-receipt-completed",
@@ -129,7 +140,7 @@ def _evaluate_verify_receipt_completed(target: Path, run_id: str | None) -> str:
 
 
 def _evaluate_sshsig_test_result_signed_ok(target: Path, run_id: str | None) -> str:
-    """EC-02 state: any SSHSIG Test Result attestation exists and looks signed."""
+    """EC-02 state: signed SSHSIG Test Result attestation with rederived receipt."""
     dirs = _verify_receipt_dirs(target)
     if not dirs:
         return "untested"
@@ -137,16 +148,23 @@ def _evaluate_sshsig_test_result_signed_ok(target: Path, run_id: str | None) -> 
         receipt = _read_json_object(run_dir / "receipt.json")
         if receipt is not None and not _receipt_matches_scope(receipt, run_id):
             continue
-        attestation = _read_json_object(run_dir / "attestation.json")
-        if attestation is None:
+        attestation_path = run_dir / "attestation.json"
+        if not attestation_path.is_file():
             continue
-        if isinstance(attestation.get("signatures"), list) and attestation.get("payloadType"):
+        result = attestation.verify_attestation(
+            attestation_path,
+            target=target,
+            require_receipt=True,
+        )
+        if result.status == attestation.STATUS_SIGNED_OK and result.rederived:
             return "evidenced_passed"
+        # A present but unverifiable attestation is a failed control.
+        return "evidenced_failed"
     return "untested"
 
 
 def _evaluate_cosign_bundle_exists(target: Path, run_id: str | None) -> str:
-    """EC-03 state: any cosign Sigstore bundle exists."""
+    """EC-03 state: cosign Sigstore bundle with correct mediaType and dsseEnvelope."""
     dirs = _verify_receipt_dirs(target)
     if not dirs:
         return "untested"
@@ -155,46 +173,68 @@ def _evaluate_cosign_bundle_exists(target: Path, run_id: str | None) -> str:
         if receipt is not None and not _receipt_matches_scope(receipt, run_id):
             continue
         path = run_dir / "attestation.sigstore.json"
-        if path.is_file() and _read_json_object(path) is not None:
+        if not path.is_file():
+            continue
+        bundle = _read_json_object(path)
+        if (
+            isinstance(bundle, dict)
+            and bundle.get("mediaType") == cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE
+            and isinstance(bundle.get("dsseEnvelope"), dict)
+        ):
             return "evidenced_passed"
+        return "evidenced_failed"
     return "untested"
 
 
 def _evaluate_agent_request_signed(target: Path, run_id: str | None) -> str:
-    """EC-04 state: any signed agent-request artifact exists."""
+    """EC-04 state: a signed agent-request envelope verifies."""
     for run_dir in _run_dirs(target):
         if run_id is not None and run_dir.name != run_id:
             continue
         for candidate in ("agent-request.json", "request.json"):
             path = run_dir / candidate
-            if path.is_file() and _read_json_object(path) is not None:
+            if not path.is_file():
+                continue
+            result = attestation.verify_attestation(
+                path,
+                target=target,
+                expected_predicate_type=agent_request.AGENT_REQUEST_PREDICATE_TYPE,
+            )
+            if result.status == attestation.STATUS_SIGNED_OK:
                 return "evidenced_passed"
+            return "evidenced_failed"
     return "untested"
 
 
 def _evaluate_human_approval_allow_with_sod(target: Path, run_id: str | None) -> str:
-    """EC-05 state: any run has an allow approval with SOD passed."""
+    """EC-05 state: a run has a verified allow approval with SOD passed."""
     for run_dir in _run_dirs(target):
         if run_id is not None and run_dir.name != run_id:
             continue
-        receipt = _read_json_object(run_dir / "run.json")
-        if receipt is None:
-            continue
-        approval = receipt.get("approval")
-        if isinstance(approval, dict):
-            if approval.get("decision") == "allow":
-                sod = approval.get("sod") or {}
-                if sod.get("result") == "PASSED":
-                    return "evidenced_passed"
+        verification = approval.verify_run_approval(target, run_dir)
+        if verification.status == "APPROVED":
+            sod = verification.sod or {}
+            if sod.get("result") == "PASSED":
+                return "evidenced_passed"
+            return "evidenced_failed"
+        if verification.status != "UNAPPROVED":
+            # An approval artifact exists but did not pass.
+            return "evidenced_failed"
     return "untested"
 
 
 def _evaluate_run_event_journal_exists(target: Path, run_id: str | None) -> str:
-    """EC-06 state: any run lifecycle journal exists."""
+    """EC-06 state: a run lifecycle journal with a valid chain exists."""
     for run_dir in _run_dirs(target):
         if run_id is not None and run_dir.name != run_id:
             continue
-        if (run_dir / "events" / "lifecycle.jsonl").is_file():
+        journal_path = run_dir / "events" / "lifecycle.jsonl"
+        if not journal_path.is_file():
+            continue
+        report = run_journal.read_journal(journal_path)
+        if report.chain_errors:
+            return "evidenced_failed"
+        if report.events:
             return "evidenced_passed"
     return "untested"
 
@@ -212,13 +252,13 @@ def _evaluate_governance_inventory_exists(target: Path, run_id: str | None) -> s
 
 
 def _evaluate_commit_trailer_receipts(target: Path, run_id: str | None) -> str:
-    """EC-08 state: recent Git history contains Brigade trailers."""
+    """EC-08 state: recent Git history contains matching Brigade-Run/Receipt trailers."""
     del run_id  # whole-workspace artifact
     if not _is_git_repo(target):
         return "not_applicable"
     try:
         result = subprocess.run(
-            ["git", "log", "-20", "--format=%B"],
+            ["git", "log", "-20", "--format=%H"],
             cwd=str(target),
             capture_output=True,
             text=True,
@@ -227,11 +267,51 @@ def _evaluate_commit_trailer_receipts(target: Path, run_id: str | None) -> str:
         )
         if result.returncode != 0:
             return "untested"
-        if "Brigade-Run:" in result.stdout and "Brigade-Receipt:" in result.stdout:
-            return "evidenced_passed"
-        return "untested"
     except (OSError, subprocess.TimeoutExpired):
         return "untested"
+
+    commits = [sha for sha in result.stdout.splitlines() if sha]
+    any_trailer = False
+    for sha in commits:
+        try:
+            msg_out = subprocess.run(
+                ["git", "log", "-1", "--format=%B", sha],
+                cwd=str(target),
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if msg_out.returncode != 0:
+                continue
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        msg = msg_out.stdout
+        run_id_value: str | None = None
+        expected_digest: str | None = None
+        for line in msg.splitlines():
+            if line.startswith("Brigade-Run: "):
+                run_id_value = line[len("Brigade-Run: ") :].strip()
+            elif line.startswith("Brigade-Receipt: sha256:"):
+                expected_digest = line[len("Brigade-Receipt: sha256:") :].strip()
+        if not run_id_value or not expected_digest:
+            continue
+        any_trailer = True
+        if not receipts_trailer._is_bare_run_id(run_id_value):
+            continue
+        run_json = target / ".brigade" / "runs" / run_id_value / "run.json"
+        if not run_json.is_file():
+            continue
+        receipt = _read_json_object(run_json)
+        if receipt is None:
+            continue
+        try:
+            actual_digest = causal_receipt.receipt_digest(receipt)
+        except Exception:
+            continue
+        if actual_digest == expected_digest:
+            return "evidenced_passed"
+    return "evidenced_failed" if any_trailer else "untested"
 
 
 def _evaluate_guard_audit_allow(target: Path, run_id: str | None) -> str:
@@ -241,9 +321,12 @@ def _evaluate_guard_audit_allow(target: Path, run_id: str | None) -> str:
     if not path.is_file():
         return "untested"
     payload = _read_json_object(path)
-    if payload is None:
-        return "evidenced_failed"
-    summary = payload.get("summary") or {}
+    # Missing summary or malformed artifact is "untested", not a failing control.
+    if not isinstance(payload, dict):
+        return "untested"
+    summary = payload.get("summary")
+    if not isinstance(summary, dict):
+        return "untested"
     if summary.get("blocked") is True:
         return "evidenced_failed"
     return "evidenced_passed"
@@ -265,10 +348,13 @@ def _evaluate_outcome_record_exists(target: Path, run_id: str | None) -> str:
 
 
 def _evaluate_verify_archive_index_exists(target: Path, run_id: str | None) -> str:
-    """EC-11 state: verify archive index exists."""
+    """EC-11 state: verify archive index exists and is parseable JSONL."""
     del run_id  # whole-workspace artifact
     path = target / ".brigade" / "work" / "verify-archive" / "index.jsonl"
-    if path.is_file() and _read_json_object(path) is not None:
+    if not path.is_file():
+        return "untested"
+    records = localio.read_jsonl_dicts(path)
+    if records:
         return "evidenced_passed"
     return "untested"
 
@@ -329,6 +415,9 @@ def evaluate_controls(
             continue
         claim = claims_by_id[mapping["claim_id"]]
         framework = frameworks_by_id[mapping["framework_id"]]
+        state = states[mapping["claim_id"]]
+        if mapping["relationship"] == "no-relationship":
+            state = "not_applicable"
         mappings.append(
             {
                 "claim_id": mapping["claim_id"],
@@ -341,7 +430,7 @@ def evaluate_controls(
                 "applicability_condition": mapping["applicability_condition"],
                 "rationale": mapping["rationale"],
                 "source_locator": mapping["source_locator"],
-                "state": states[mapping["claim_id"]],
+                "state": state,
             }
         )
     mappings.sort(key=lambda m: (m["framework_id"], m["control_id"], m["claim_id"]))
@@ -370,23 +459,28 @@ def render_doc(evaluated: dict[str, Any]) -> str:
     by_framework: dict[str, list[dict[str, Any]]] = {}
     for mapping in evaluated["mappings"]:
         by_framework.setdefault(mapping["framework_id"], []).append(mapping)
-    for fw_id in sorted(by_framework):
-        rows = by_framework[fw_id]
-        first = rows[0]
-        lines.append(f"## {first['framework_name']} (`{fw_id}`)")
+    crosswalk = load_crosswalk()
+    frameworks_by_id = {f["id"]: f for f in crosswalk["frameworks"]}
+    for fw_id in sorted(frameworks_by_id):
+        rows = by_framework.get(fw_id, [])
+        framework = frameworks_by_id[fw_id]
+        lines.append(f"## {framework['name']} (`{fw_id}`)")
         lines.append("")
-        lines.append("| Control | Claim | Relationship | Obligation | Applicability | State | Rationale | Source |")
-        lines.append("|---------|-------|--------------|------------|---------------|-------|-----------|--------|")
-        for row in rows:
-            control = f"`{row['control_id']}`"
-            claim = f"{row['claim_id']}"
-            rel = row["relationship"]
-            obl = row["obligation_bearer"]
-            app = row["applicability_condition"]
-            state = row["state"]
-            rationale = row["rationale"]
-            source = row["source_locator"]
-            lines.append(f"| {control} | {claim} | {rel} | {obl} | {app} | {state} | {rationale} | {source} |")
+        if not rows:
+            lines.append(f"Not mapped in crosswalk version {evaluated['crosswalk_version']}.")
+        else:
+            lines.append("| Control | Claim | Relationship | Obligation | Applicability | State | Rationale | Source |")
+            lines.append("|---------|-------|--------------|------------|---------------|-------|-----------|--------|")
+            for row in rows:
+                control = f"`{row['control_id']}`"
+                claim = f"{row['claim_id']}"
+                rel = row["relationship"]
+                obl = row["obligation_bearer"]
+                app = row["applicability_condition"]
+                state = row["state"]
+                rationale = row["rationale"]
+                source = row["source_locator"]
+                lines.append(f"| {control} | {claim} | {rel} | {obl} | {app} | {state} | {rationale} | {source} |")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -418,12 +512,17 @@ def controls(
     by_framework: dict[str, list[dict[str, Any]]] = {}
     for mapping in evaluated["mappings"]:
         by_framework.setdefault(mapping["framework_id"], []).append(mapping)
-    for fw_id in sorted(by_framework):
-        rows = by_framework[fw_id]
-        print(f"\n{rows[0]['framework_name']} ({fw_id})")
-        for row in rows:
-            print(
-                f"  [{row['state']}] {row['control_id']} -> {row['claim_id']} "
-                f"({row['relationship']}, {row['obligation_bearer']}, {row['applicability_condition']})"
-            )
+    crosswalk = load_crosswalk()
+    frameworks_by_id = {f["id"]: f for f in crosswalk["frameworks"]}
+    for fw_id in sorted(frameworks_by_id):
+        rows = by_framework.get(fw_id, [])
+        print(f"\n{frameworks_by_id[fw_id]['name']} ({fw_id})")
+        if not rows:
+            print(f"  not mapped in crosswalk version {evaluated['crosswalk_version']}")
+        else:
+            for row in rows:
+                print(
+                    f"  [{row['state']}] {row['control_id']} -> {row['claim_id']} "
+                    f"({row['relationship']}, {row['obligation_bearer']}, {row['applicability_condition']})"
+                )
     return 0

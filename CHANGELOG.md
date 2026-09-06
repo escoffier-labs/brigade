@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Control crosswalk review fixes on `docs/1406-control-crosswalk`: corrected ISO 42001 clause/Annex control identifiers, ISO 27001 A.5.9 and A.8.12 mappings, SSDF practice IDs, SP 800-53 AU-11 and SOC 2 CC8.1/CC7.2 mappings, EU AI Act applicability/bearer metadata, removed Art. 50 and added an explicit Art. 9 no-relationship row, removed unsourced NIST AI 600-1 and CSA AICM mappings with `identifiers-not-sourced` status, and corrected framework publication dates/editions. Strengthened `brigade evidence controls` state rules for EC-02 through EC-11 to use existing verifiers and journal readers, and no-relationship rows now render `not_applicable`. (#1406)
 - Test Result attestation export now rederives verify-receipt SHA-256 values
   from the writer's compact sorted-key JSON contract, including receipt
   `path`, and refuses stale or malformed stored digest evidence. Legacy
