@@ -52,6 +52,18 @@ def trailer(run_id: str) -> int:
     return 0
 
 
+def parse_trailers(message: str) -> tuple[str | None, str | None]:
+    """Return the Brigade-Run id and Brigade-Receipt sha256 digest from a commit message."""
+    run_id = None
+    expected_digest = None
+    for line in message.splitlines():
+        if line.startswith("Brigade-Run: "):
+            run_id = line[len("Brigade-Run: ") :].strip()
+        elif line.startswith("Brigade-Receipt: sha256:"):
+            expected_digest = line[len("Brigade-Receipt: sha256:") :].strip()
+    return run_id, expected_digest
+
+
 def verify_commit(commit_sha: str, target: Path = Path(".")) -> int:
     from .causal_receipt import receipt_digest
 
@@ -66,14 +78,7 @@ def verify_commit(commit_sha: str, target: Path = Path(".")) -> int:
         return 1
 
     msg = out.decode("utf-8", errors="replace")
-    run_id = None
-    expected_digest = None
-
-    for line in msg.splitlines():
-        if line.startswith("Brigade-Run: "):
-            run_id = line[len("Brigade-Run: ") :].strip()
-        elif line.startswith("Brigade-Receipt: sha256:"):
-            expected_digest = line[len("Brigade-Receipt: sha256:") :].strip()
+    run_id, expected_digest = parse_trailers(msg)
 
     if not run_id or not expected_digest:
         print("missing trailer")
