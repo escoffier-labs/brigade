@@ -1380,3 +1380,51 @@ def test_cli_feed_reports_bounded_hub_error_detail(tmp_path: Path, capsys, monke
     assert captured.out == ""
     assert captured.err.strip() == "error: queue-error index=0 operation-mismatch"
     assert SECRET_INSTRUCTIONS not in captured.err
+
+
+def test_apply_surfaces_the_refused_hub_action_on_queue_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    manifest = _write_manifest(tmp_path / "feed.json", _manifest(_entry("task-a")))
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "enqueue",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(grokbot_jobs.GrokbotJobError("auth-failed", action="enqueue")),
+    )
+
+    with pytest.raises(grokbot_feed.FeedError) as raised:
+        grokbot_feed.apply(tmp_path, manifest, limit=1)
+
+    assert raised.value.action == "enqueue"
+    assert raised.value.actor_kind is None
+    assert raised.value.detail == "auth-failed"
+    assert raised.value.index == 0
+    assert raised.value.public_detail() == "queue-error index=0 action=enqueue auth-failed"
+    assert "auth-failed" in raised.value.reason
+
+
+@pytest.mark.parametrize("json_flag", [(), ("--json",)])
+def test_cli_feed_prints_hub_queue_error_action_and_actor_without_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, json_flag: tuple[str, ...]
+):
+    token = "dedicated-feed-token"
+    token_file = tmp_path / "feed.hub-token"
+    token_file.write_text(token + "\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    monkeypatch.setenv("BRIGADE_GROKBOT_FEED_HUB_TOKEN_FILE", str(token_file))
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: True)
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "enqueue",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(grokbot_jobs.GrokbotJobError("auth-failed", action="enqueue")),
+    )
+    manifest = _write_manifest(tmp_path / "feed.json", _manifest(_entry("task-a")))
+
+    assert _run_feed(tmp_path, "--manifest", str(manifest), "--apply", *json_flag) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error: queue-error index=0 action=enqueue actor=feed auth-failed\n"
+    assert "/" not in captured.err
+    assert "feed.json" not in captured.err
+    assert token not in captured.err
+    assert SECRET_INSTRUCTIONS not in captured.err
+    assert "dedicated-feed-token" not in captured.out + captured.err
