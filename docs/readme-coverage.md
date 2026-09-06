@@ -46,9 +46,9 @@ The root README is a short landing page. Every topic that left the previous READ
 - One-checkout performance snapshots, source line numbers, and outcome scores that become stale as the repository changes
 - The volatile memory-card count from the origin story
 
-## Stable vs 0.27 beta labeling
+## Stable vs 0.28 beta labeling
 
 | Line | Meaning |
 | --- | --- |
-| Stable v0.26.1 | Published PyPI release `brigade-cli==0.26.1` |
-| Current main / 0.27 beta | Features on origin/main and `0.27.0.devYYYYMMDD` wheels. Labeled in README tables and this docs set |
+| Stable v0.27.0 | Published PyPI release `brigade-cli==0.27.0` |
+| Current main / 0.28 beta | Features on origin/main after v0.27.0 and `0.28.0.devYYYYMMDD` wheels. Labeled in README tables and this docs set |

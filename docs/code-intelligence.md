@@ -31,7 +31,7 @@ Not every Brigade command writes a receipt. Ad hoc shell commands outside `work 
 
 ## Export and Center
 
-Current main / 0.27 beta adds a bounded JSON export contract and a Center view:
+v0.27.0 adds a bounded JSON export contract and a Center view:
 
 ```bash
 brigade code export --target . --json

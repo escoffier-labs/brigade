@@ -4,7 +4,7 @@ Date: 2026-08-27
 
 This page backs the four README matrices. Cells use "Not documented" when the capability was not found in that project's official README or docs on the dated source pass. That is not proof of absence.
 
-Brigade stable claims refer to published **v0.26.1**. Current-main / **0.27 beta** cells are labeled as such.
+Brigade stable claims refer to published **v0.27.0**. Anything newer on main is labeled current main / **0.28 beta**.
 
 ## How to read the tables
 

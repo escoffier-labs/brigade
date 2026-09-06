@@ -23,15 +23,15 @@
   <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
 </p>
 
-Published **v0.26.1** is the stable install (`brigade-cli==0.26.1`). Current main / **0.27 beta** adds per-repo parallel-safe work waves, cross-repo ready-work campaigns with query-time wave composition, Memory Operations, an optional fleet hub, vault projection, run lineage, activity and cloud status, code-graph views, bounded recall, and declared budgets. Cells below mark that split.
+Published **v0.27.0** is the stable install (`brigade-cli==0.27.0`). It adds per-repo parallel-safe work waves, cross-repo ready-work campaigns, Memory Operations, an optional fleet hub, care-managed memory jobs, cloud seats with receipts, vault projection, run lineage, code-graph views, bounded recall, declared budgets, and a machine-readable control crosswalk. Main is now the **0.28 beta** line.
 
 ## What it does
 
-- **Ready work and claim safety.** Brigade lists unblocked tasks and uses atomic claims so two agents cannot take the same item. Stable in v0.26.1.
-- **Declared run limits, optional fleet hub, and registered cloud activity.** Current main / 0.27 beta enforces declared wall-clock and worker-dispatch ceilings, records named retry and reroute decisions, can report runs, repo claims, and external harness sessions through an operator-owned fleet hub, and reconciles registered cloud work against provider and GitHub state.
-- **Verification receipts.** A check run through Brigade writes the command, the real exit code, and the Git state. Stable in v0.26.1. Not every Brigade command writes a receipt.
-- **Owner-mediated handoffs and bounded recall.** Handoffs are linted and routed by the memory owner. Safe targeted notes may auto-file, while ambiguous or risky notes wait for review. Current main / 0.27 beta adds capped session-start recall and vault project, search, and propose.
-- **Explicit dry-run-first harness projection.** MCP servers, tools, and skills are previewed before Brigade writes them into a harness. Stable in v0.26.1.
+- **Ready work and claim safety.** Brigade lists unblocked tasks and uses atomic claims so two agents cannot take the same item.
+- **Declared run limits, optional fleet hub, and registered cloud activity.** Brigade enforces declared wall-clock and worker-dispatch ceilings, records named retry and reroute decisions, can report runs, repo claims, and external harness sessions through an operator-owned fleet hub, and reconciles registered cloud work against provider and GitHub state.
+- **Verification receipts.** A check run through Brigade writes the command, the real exit code, and the Git state. Not every Brigade command writes a receipt.
+- **Owner-mediated handoffs and bounded recall.** Handoffs are linted and routed by the memory owner. Safe targeted notes may auto-file, while ambiguous or risky notes wait for review. Session-start recall is capped, and vault project, search, and propose are bounded.
+- **Explicit dry-run-first harness projection.** MCP servers, tools, and skills are previewed before Brigade writes them into a harness.
 
 Learning in Brigade is outcome-based skill scoring, promotion, and rollback from captured verification receipts. It is not autonomous reflective memory learning.
 
@@ -39,7 +39,7 @@ Learning in Brigade is outcome-based skill scoring, promotion, and rollback from
 
 Install with `pipx install brigade-cli` or `uv tool install brigade-cli`, then follow the [install guide](https://brigade.tools/docs/getting-started/install), [QUICKSTART.md](QUICKSTART.md), or give [first 10 minutes](docs/first-10-minutes.md) and [docs/agents-guide.md](docs/agents-guide.md) to your coding agent.
 
-Stable channel: published v0.26.1. Preview channel: `brigade update --channel beta` for `0.27.0.devYYYYMMDD` wheels. Details: [update channels](docs/update-channels.md).
+Stable channel: published v0.27.0. Preview channel: `brigade update --channel beta` for `0.28.0.devYYYYMMDD` wheels once the first 0.28 dev wheel publishes. Details: [update channels](docs/update-channels.md).
 
 ## How it compares
 
