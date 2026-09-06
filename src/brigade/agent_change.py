@@ -490,7 +490,6 @@ def _collect_references(
     target: Path,
     run_id: str,
     run_dir: Path,
-    run_meta: Mapping[str, Any],
     final_tree: str,
     policy: Mapping[str, Any],
     events: Sequence[run_journal.RunEvent],
@@ -583,7 +582,7 @@ def build_statement(
     events = report.events if report is not None else []
     journal_head = _journal_chain_head(events)
     references, other_tree, missing, identity, request_field = _collect_references(
-        target, run_id, run_dir, run_meta, tree_fingerprint, policy, events
+        target, run_id, run_dir, tree_fingerprint, policy, events
     )
     complete = _required_set_satisfied(policy, references, missing) and not missing
 

@@ -18,6 +18,7 @@ from . import (
     approval_v2,
     attestation,
     attestation_input,
+    attestation_receipt,
     localio,
 )
 
@@ -103,11 +104,15 @@ def _verify_envelope_signature(
 def _classify_signature_status(status: str | None) -> str:
     if status == attestation.STATUS_SIGNED_OK:
         return "valid"
+    # STATUS_UNTRUSTED_KEY means the signature verified cryptographically over the
+    # PAE bytes but the key is not in allowed_signers; report it as signature-valid
+    # and let the trust axis carry the untrusted result.
+    if status == attestation.STATUS_UNTRUSTED_KEY:
+        return "valid"
     if status in {
         attestation.STATUS_SIGNATURE_MISMATCH,
         attestation.STATUS_SUBJECT_MISMATCH,
         attestation.STATUS_EVIDENCE_MISSING,
-        attestation.STATUS_UNTRUSTED_KEY,
     }:
         return "invalid"
     return "unverifiable"
@@ -164,30 +169,6 @@ def _extract_index_tree(statement: Mapping[str, Any]) -> str | None:
         value = digest.get("gitTree")
         if isinstance(value, str) and _HEX40_OR_64_RE.fullmatch(value):
             return value
-    return None
-
-
-def _extract_tree(statement: Mapping[str, Any] | None) -> str | None:
-    if statement is None:
-        return None
-    subjects = statement.get("subject")
-    if not isinstance(subjects, list):
-        return None
-    for subject in subjects:
-        if not isinstance(subject, dict):
-            continue
-        name = subject.get("name")
-        digest = subject.get("digest")
-        if not isinstance(digest, dict):
-            continue
-        if name == "git:tree":
-            value = digest.get("gitTree")
-            if isinstance(value, str) and _HEX40_OR_64_RE.fullmatch(value):
-                return value
-        elif name == "git:baseline":
-            value = digest.get("gitCommit")
-            if isinstance(value, str) and _HEX40_OR_64_RE.fullmatch(value):
-                return value
     return None
 
 
@@ -431,7 +412,7 @@ def _verify_reference(
             "policy_outcome": "not-applicable" if kind != "test-result" else "unevaluated",
         }
 
-    envelope, load_status = _load_envelope(path)
+    envelope, _ = _load_envelope(path)
     if envelope is None:
         return {
             "kind": kind,
@@ -484,13 +465,17 @@ def _verify_reference(
 
     require_receipt = kind == "test-result"
     receipt: Mapping[str, Any] | None = None
+    receipt_reason: str | None = None
     if require_receipt:
         receipt_path = path.parent / "receipt.json"
         if receipt_path.is_file() and not receipt_path.is_symlink():
             try:
-                receipt = attestation_input.read_json_object(receipt_path)
-            except (OSError, attestation_input.AttestationInputError):
+                raw_receipt = attestation_input.read_json_object(receipt_path)
+                snapshot = attestation_receipt.snapshot_stored_receipt(raw_receipt)
+                receipt = snapshot.receipt
+            except (OSError, attestation_input.AttestationInputError, attestation_receipt.ReceiptDigestError):
                 receipt = None
+                receipt_reason = "receipt-digest-invalid"
 
     result = _verify_envelope_signature(envelope, target, expected_predicate, receipt=receipt)
     signature = _classify_signature_status(result.status)
@@ -522,7 +507,7 @@ def _verify_reference(
         ):
             binding = "bound"
     else:
-        local_tree = _extract_tree(statement)
+        local_tree = _extract_index_tree(statement) if statement is not None else None
         if digests_match and isinstance(local_tree, str) and local_tree == index_tree:
             binding = "bound"
 
@@ -560,7 +545,7 @@ def _verify_reference(
     elif binding == "conflicted":
         policy_outcome = "fail"
 
-    return {
+    observation = {
         "kind": kind,
         "locator": locator,
         "availability": "present",
@@ -572,6 +557,9 @@ def _verify_reference(
         "rederivation": rederivation,
         "policy_outcome": policy_outcome,
     }
+    if receipt_reason:
+        observation["reason"] = receipt_reason
+    return observation
 
 
 def _evaluate_required_set(
@@ -640,18 +628,24 @@ def _overall_status(
         return "UNVERIFIABLE"
     if index.get("signature") == "invalid":
         return "INVALID"
+    # Positive evidence of tampering or a foreign project (untrusted index key,
+    # binding conflict, a reference that failed policy, or a mismatched project
+    # scope) must be reported as INVALID, never as merely INCOMPLETE.
     if index.get("trust") != "trusted" or index.get("binding") != "bound":
         return "INVALID"
+    if project_status == "mismatch":
+        return "INVALID"
+    for ref in references:
+        if ref.get("policy_outcome") == "fail" or ref.get("binding") == "conflicted":
+            return "INVALID"
+    # A stricter verifier policy always mismatches the emitted digest, so completeness
+    # must be evaluated before the digest comparison. Missing references therefore
+    # surface as INCOMPLETE even when the policy digest would otherwise mismatch.
     for req in required_set:
         if req.get("status") != "satisfied":
             return "INCOMPLETE"
-    if policy_status == "mismatch" or project_status == "mismatch":
+    if policy_status == "mismatch":
         return "INVALID"
-    if index.get("policy") != "match":
-        return "INVALID"
-    for ref in references:
-        if ref.get("policy_outcome") == "fail":
-            return "INVALID"
     return "COMPLETE-OK"
 
 

@@ -18,6 +18,7 @@ from brigade import (
     approval,
     approval_v2,
     attestation,
+    attestation_input,
     attestation_receipt,
     cli,
     localio,
@@ -238,6 +239,41 @@ def _approval_envelope(
             "evidence": {"testResultPayloadSha256": [], "envelopes": []},
             "policy": {"name": "brigade.sod.v2", "digest": {"sha256": "c" * 64}},
         }
+    envelope = attestation.create_envelope(statement, key_path)
+    approvals_dir = run_dir / "approvals"
+    approvals_dir.mkdir(parents=True, exist_ok=True)
+    approval_path = approvals_dir / f"{nonce}.json"
+    approval_path.write_text(json.dumps(envelope, indent=2, sort_keys=True), encoding="utf-8")
+    return approval_path
+
+
+def _approval_envelope_baseline(
+    run_dir: Path,
+    key_path: Path,
+    baseline_commit: str,
+    nonce: str,
+    journal_head: str,
+) -> Path:
+    statement: dict[str, Any] = {
+        "_type": attestation.IN_TOTO_STATEMENT_TYPE,
+        "subject": [{"name": "git:baseline", "digest": {"gitCommit": baseline_commit}}],
+        "predicateType": approval_v2.HUMAN_APPROVAL_PREDICATE_TYPE,
+        "predicate": {
+            "schemaVersion": 2,
+            "run": {"id": run_dir.name, "journalChainHead": {"sha256": journal_head}},
+            "decision": "allow",
+            "scope": "run",
+            "approver": {"principal": "test-signer", "keyid": _key_fingerprint(key_path), "kind": "human"},
+            "requester": {"status": "unknown"},
+            "decidedAt": "2026-09-06T13:00:00.000000Z",
+            "expiresAt": "2027-09-06T13:00:00.000000Z",
+            "nonce": nonce,
+            "reasonCode": "reviewed-tests",
+            "reasonSha256": "b" * 64,
+            "evidence": {"testResultPayloadSha256": [], "envelopes": []},
+            "policy": {"name": "brigade.sod.v2", "digest": {"sha256": "c" * 64}},
+        },
+    }
     envelope = attestation.create_envelope(statement, key_path)
     approvals_dir = run_dir / "approvals"
     approvals_dir.mkdir(parents=True, exist_ok=True)
@@ -609,6 +645,7 @@ def test_verifier_untrusted_signer_reports_untrusted_and_fail(
     result = cli.main(["receipts", "verify-agent-change", str(index_path), "--target", str(target), "--json"])
     assert result != 0
     out = json.loads(capsys.readouterr().out)
+    assert out["index"]["signature"] == "valid"
     assert out["index"]["trust"] == "untrusted"
     assert out["status"] == "INVALID"
 
@@ -685,6 +722,81 @@ def test_verifier_project_scope_mismatch(tmp_path: Path, capsys: pytest.CaptureF
     assert out["project"]["status"] == "mismatch"
 
 
+def test_verifier_tampered_reference_takes_priority_over_missing_required(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path)
+    env = attestation.create_envelope(agent_change.build_statement(target, run_dir.name), key_path)
+    index_path = run_dir / "agent-change.json"
+    index_path.write_text(json.dumps(env, indent=2, sort_keys=True), encoding="utf-8")
+    # Tamper the request envelope signature so the reference fails policy.
+    request_path = run_dir / "requests" / "01010101010101010101010101010101.json"
+    req_env = json.loads(request_path.read_text(encoding="utf-8"))
+    req_env["signatures"][0]["sig"] = base64.b64encode(b"tampered").decode("ascii")
+    request_path.write_text(json.dumps(req_env, indent=2, sort_keys=True), encoding="utf-8")
+    # Require a second test-result so the required set is unmet.
+    policy_path = agent_change.default_policy_path(target)
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    policy["required_references"] = [
+        {"kind": "agent-request"},
+        {"kind": "test-result", "min_count": 2},
+        {"kind": "human-approval"},
+    ]
+    policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True), encoding="utf-8")
+    result = cli.main(["receipts", "verify-agent-change", str(index_path), "--target", str(target), "--json"])
+    assert result != 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "INVALID"
+    req_ref = [r for r in out["references"] if r["kind"] == "agent-request"][0]
+    assert req_ref["policy_outcome"] == "fail"
+
+
+def test_verifier_project_scope_mismatch_takes_priority_over_missing_required(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path)
+    env = attestation.create_envelope(agent_change.build_statement(target, run_dir.name), key_path)
+    index_path = run_dir / "agent-change.json"
+    index_path.write_text(json.dumps(env, indent=2, sort_keys=True), encoding="utf-8")
+    policy_path = agent_change.default_policy_path(target)
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    policy["project_scope"] = "different-scope"
+    policy["required_references"] = [
+        {"kind": "agent-request"},
+        {"kind": "test-result", "min_count": 2},
+        {"kind": "human-approval"},
+    ]
+    policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True), encoding="utf-8")
+    result = cli.main(["receipts", "verify-agent-change", str(index_path), "--target", str(target), "--json"])
+    assert result != 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["project"]["status"] == "mismatch"
+    assert out["status"] == "INVALID"
+
+
+def test_verifier_missing_required_reports_incomplete_before_policy_digest_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path)
+    env = attestation.create_envelope(agent_change.build_statement(target, run_dir.name), key_path)
+    index_path = run_dir / "agent-change.json"
+    index_path.write_text(json.dumps(env, indent=2, sort_keys=True), encoding="utf-8")
+    policy_path = agent_change.default_policy_path(target)
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    policy["policy_version"] = 999
+    policy["required_references"] = [
+        {"kind": "agent-request"},
+        {"kind": "test-result", "min_count": 2},
+        {"kind": "human-approval"},
+    ]
+    policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True), encoding="utf-8")
+    result = cli.main(["receipts", "verify-agent-change", str(index_path), "--target", str(target), "--json"])
+    assert result != 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["index"]["policy"] == "mismatch"
+    assert out["status"] == "INCOMPLETE"
+
+
 def test_verifier_binding_unavailable_when_run_dir_absent_but_signature_verifies(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -719,6 +831,7 @@ def test_verifier_rederivation_failed_when_receipt_digest_invalid(
     out = json.loads(capsys.readouterr().out)
     test_ref = [r for r in out["references"] if r["kind"] == "test-result"][0]
     assert test_ref["rederivation"] == "failed"
+    assert test_ref["reason"] == "receipt-digest-invalid"
 
 
 def test_verifier_request_nonce_conflict_with_run_request_event(
@@ -900,7 +1013,7 @@ def test_verifier_request_reference_nonce_differs_from_journal_nonce(
 
 
 def test_verifier_rejects_traversal_run_id_and_does_not_read_outside_target(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target = tmp_path / "ws"
     target.mkdir()
@@ -909,19 +1022,29 @@ def test_verifier_rejects_traversal_run_id_and_does_not_read_outside_target(
     run_id = "run-001"
     tree = "1111111111111111111111111111111111111111"
     run_dir = _run_dir(target, run_id, tree)
-    # Canary file outside the target workspace; the verifier must not read it.
+    # Canary file outside the target workspace; reading it as JSON would fail.
     canary = tmp_path / "canary"
-    canary.write_text("secret", encoding="utf-8")
+    canary.write_text("not valid json {", encoding="utf-8")
     statement = agent_change.build_statement(target, run_id)
     statement["predicate"]["run"]["id"] = "../../../etc"
     env = attestation.create_envelope(statement, key_path)
     index_path = run_dir / "agent-change.json"
     index_path.write_text(json.dumps(env, indent=2, sort_keys=True), encoding="utf-8")
+    read_paths: list[Path] = []
+    original_read = attestation_input.read_json_object
+
+    def _recording_read(path: Path, *, max_bytes: int = attestation_input.MAX_JSON_BYTES) -> dict[str, Any]:
+        read_paths.append(Path(path).expanduser().resolve())
+        return original_read(path, max_bytes=max_bytes)
+
+    monkeypatch.setattr(attestation_input, "read_json_object", _recording_read)
     result = cli.main(["receipts", "verify-agent-change", str(index_path), "--target", str(target), "--json"])
     assert result != 0
     out = json.loads(capsys.readouterr().out)
     assert out["index"]["binding"] == "unavailable"
-    assert canary.read_text() == "secret"
+    target_resolved = target.resolve()
+    for p in read_paths:
+        assert p.resolve().is_relative_to(target_resolved), f"read outside target: {p}"
 
 
 def test_verifier_refuses_symlinked_verify_run_attestation_file(
@@ -1185,7 +1308,7 @@ def test_verifier_refuses_absolute_path_locator(tmp_path: Path, capsys: pytest.C
     assert ref["reason"] == "malformed-locator"
 
 
-def test_verifier_untrusted_signer_reports_policy_outcome_fail(
+def test_verifier_untrusted_index_signer_reports_trust_untrusted_and_status_invalid(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     target, run_dir, _key, _req = _build_full_run(tmp_path)
@@ -1251,6 +1374,46 @@ def test_verifier_no_cycle_rule_for_approval_with_non_tree_subject(
     ][0]
     assert bad_ref["binding"] == "conflicted"
     assert bad_ref["policy_outcome"] == "fail"
+
+
+def test_verifier_approval_baseline_only_subject_reports_binding_conflicted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target, run_dir, key_path, _req = _build_full_run(tmp_path)
+    baseline_nonce = "04040404040404040404040404040404"
+    _approval_envelope_baseline(run_dir, key_path, "2222222222222222222222222222222222222222", baseline_nonce, "a" * 64)
+    run_journal.append_event(
+        run_dir / "events" / "lifecycle.jsonl",
+        run_id=run_dir.name,
+        event_type="approval",
+        payload={
+            "decision": "allow",
+            "scope": "run",
+            "approver_principal": "test-signer",
+            "approver_keyid": _key_fingerprint(key_path),
+            "subject_tree": "1111111111111111111111111111111111111111",
+            "nonce": baseline_nonce,
+            "decided_at": "2026-09-06T13:00:00.000000Z",
+            "expires_at": "2027-09-06T13:00:00.000000Z",
+            "statement_sha256": "a" * 64,
+            "attestation_path": f"approvals/{baseline_nonce}.json",
+            "producer_keyids": [],
+        },
+        idempotency_key=f"approval:{baseline_nonce}",
+        expected_previous_sequence=2,
+        recorded_at="2026-09-06T13:00:00.000000Z",
+    )
+    cli.main(["receipts", "export", "agent-change", "--target", str(target), "--run-id", run_dir.name, "--force"])
+    capsys.readouterr()
+    result = cli.main(["receipts", "verify-agent-change", str(run_dir), "--target", str(target), "--json"])
+    assert result != 0
+    out = json.loads(capsys.readouterr().out)
+    baseline_ref = [
+        r
+        for r in out["references"]
+        if r.get("kind") == "human-approval" and r.get("locator", "").endswith(f"{baseline_nonce}.json")
+    ][0]
+    assert baseline_ref["binding"] == "conflicted"
 
 
 def test_emitter_requests_directory_symlink_refused(
