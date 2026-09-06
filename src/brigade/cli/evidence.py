@@ -18,6 +18,18 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
+    p_controls = evidence_sub.add_parser(
+        "controls",
+        help="Versioned control crosswalk and evidence-state index for configured artifacts.",
+    )
+    p_controls.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_controls.add_argument("--run-id", default=None, help="Scope to one run's artifacts.")
+    p_controls.add_argument("--framework", default=None, help="Filter to one framework id.")
+    p_controls.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_controls.add_argument(
+        "--render-doc", type=Path, default=None, help="Write docs/control-crosswalk.md from the JSON output."
+    )
+
     p_doctor = evidence_sub.add_parser(
         "doctor",
         help="Advisory evidence health. Exits 1 on engine fail/incomplete/timeout.",
@@ -102,6 +114,16 @@ def dispatch(args) -> int:
 
     if args.evidence_command == "status":
         return evidence_cmd.status(target=args.target, json_output=args.json)
+    if args.evidence_command == "controls":
+        from .. import control_crosswalk
+
+        return control_crosswalk.controls(
+            target=args.target,
+            run_id=args.run_id,
+            framework_id=args.framework,
+            json_output=args.json,
+            render_doc_path=args.render_doc,
+        )
     if args.evidence_command == "doctor":
         return evidence_cmd.doctor(target=args.target, json_output=args.json)
     if args.evidence_command == "memory":
