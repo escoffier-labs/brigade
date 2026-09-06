@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- The fleet boards at `/view/machines` and `/view/repos` render in the Command Deck theme through a shared `ui_theme` module, and Deck forms gain a spacing scale (16px panels, 36px controls, 8px helper-text gap, 40px buttons). Routes are unchanged. (#1495)
 - Declared version and beta preview base move to 0.28.0 after the v0.27.0 tag so publish-dev wheels sort above stable. (#1468)
 
 ## [0.27.0] - 2026-09-06
