@@ -53,13 +53,39 @@ WORKER_FALLBACK_DONE_PREDICATE = "Implement only the approved issue"
 class FeedError(ValueError):
     """A rejected feed request with a stable machine-readable reason."""
 
-    def __init__(self, reason: str, index: int | None = None, *, detail: str | None = None):
+    def __init__(
+        self,
+        reason: str,
+        index: int | None = None,
+        *,
+        detail: str | None = None,
+        action: str | None = None,
+        actor_kind: str | None = None,
+    ):
         self.index = index
         self.detail = detail
+        self.action = action
+        self.actor_kind = actor_kind
+        self._base_reason = reason
         if detail is not None:
             reason = f"{reason} index={index} {detail}" if index is not None else f"{reason} {detail}"
         self.reason = reason
         super().__init__(reason)
+
+    def public_detail(self) -> str:
+        """Stable, path-free, credential-free diagnostic for CLI stderr."""
+        if self._base_reason != "queue-error":
+            return self.reason
+        parts = ["queue-error"]
+        if self.index is not None:
+            parts.append(f"index={self.index}")
+        if self.action:
+            parts.append(f"action={self.action}")
+        if self.actor_kind:
+            parts.append(f"actor={self.actor_kind}")
+        if self.detail:
+            parts.append(self.detail)
+        return " ".join(parts)
 
 
 # Hub refusals the Fleet Hub client already bounded. Safe to name on stderr.
@@ -83,7 +109,14 @@ _BOUNDED_HUB_QUEUE_REASONS = frozenset(
 
 
 def _queue_error(exc: grokbot_jobs.GrokbotJobError, index: int) -> FeedError:
-    """Translate a queue failure, naming only hub-bounded refusal reasons."""
+    """Translate a queue failure, naming only hub-bounded refusal reasons.
+
+    A refused hub action carries a reason the Fleet Hub client already bounded,
+    so it is safe to name together with the action. Private local storage
+    reasons stay redacted.
+    """
+    if exc.action is not None:
+        return FeedError("queue-error", index=index, detail=exc.reason, action=exc.action)
     if exc.reason in _BOUNDED_HUB_QUEUE_REASONS:
         return FeedError("queue-error", index=index, detail=exc.reason)
     return FeedError("queue-error", index=index)
