@@ -216,6 +216,7 @@ def _verify_baseline_relation(
     target: Path,
     statement: Mapping[str, Any],
     commit_sha: str,
+    shallow: bool,
 ) -> str:
     predicate = statement.get("predicate")
     if not isinstance(predicate, dict):
@@ -227,11 +228,11 @@ def _verify_baseline_relation(
     stated_relation = baseline.get("baselineRelation")
     if not isinstance(baseline_commit, str) or not isinstance(stated_relation, str):
         return "unavailable"
-    parents = commit_linkage._commit_parents(target, commit_sha)
+    parents = commit_linkage._commit_parents(target, commit_sha, shallow)
     if parents is None:
         return "unavailable"
     first_parent = parents[0] if parents else None
-    relation, _moved = commit_linkage._baseline_relation(target, baseline_commit, first_parent)
+    relation, _moved = commit_linkage._baseline_relation(target, baseline_commit, first_parent, shallow)
     if relation is None:
         return "unavailable"
     if relation == stated_relation:
@@ -247,19 +248,20 @@ def _evaluate_status(
     equivalence: str | None,
     equivalence_obs: str,
     normalization_base: Mapping[str, Any] | None,
+    local_baseline_commit: str | None,
+    recomputed_first_parent: str | None,
+    rule_drift: bool,
 ) -> str:
+    # Signature or trust failures are INVALID before any availability evaluation.
+    if envelope.get("signature") == "invalid" or envelope.get("trust") != "trusted":
+        return _STATUS_INVALID
     if (
         envelope.get("syntax") == "malformed"
         or envelope.get("signature") == "unverifiable"
         or policy_status == "unavailable"
     ):
         return _STATUS_UNVERIFIABLE
-    if (
-        envelope.get("signature") == "invalid"
-        or envelope.get("trust") != "trusted"
-        or policy_status == "mismatch"
-        or project_status == "mismatch"
-    ):
+    if policy_status == "mismatch" or project_status == "mismatch":
         return _STATUS_INVALID
     if run_binding != "bound":
         return _STATUS_INVALID
@@ -268,7 +270,16 @@ def _evaluate_status(
     if equivalence == "exact":
         return _STATUS_LINKED_EXACT
     if equivalence == "normalized":
-        if isinstance(normalization_base, dict) and normalization_base.get("source") == "run-baseline":
+        # LINKED-NORMALIZED is granted only when the normalization base is the
+        # run baseline, matches the local run.json baseline, matches the actual
+        # first parent, and the rule has not drifted.
+        if (
+            isinstance(normalization_base, dict)
+            and normalization_base.get("source") == "run-baseline"
+            and not rule_drift
+            and normalization_base.get("gitCommit") == local_baseline_commit
+            and normalization_base.get("gitCommit") == recomputed_first_parent
+        ):
             return _STATUS_LINKED_NORMALIZED
         return _STATUS_NOT_EQUIVALENT
     return _STATUS_NOT_EQUIVALENT
@@ -289,6 +300,17 @@ def verify_commit_linkage(
     if not (target / ".git").exists() and not (target / ".git").is_file():
         print(f"error: --target is not a git work tree: {target}", file=sys.stderr)
         return 2
+
+    local_object_format = commit_linkage._git_object_format(target)
+    if commit is not None:
+        if local_object_format is None:
+            print("error: could not determine git object format", file=sys.stderr)
+            return 2
+        try:
+            commit_linkage._validate_commit_sha(commit, local_object_format)
+        except commit_linkage.CommitLinkageError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     input_path = path.expanduser().resolve()
     envelope_path, requested_commit, error = _find_linkage_envelope(input_path, commit)
@@ -406,7 +428,6 @@ def verify_commit_linkage(
         print("error: envelope subject does not match --commit", file=sys.stderr)
         return 2
 
-    local_object_format = commit_linkage._git_object_format(target)
     stated_object_format = None
     if isinstance(statement, dict):
         predicate = statement.get("predicate")
@@ -502,9 +523,34 @@ def verify_commit_linkage(
                     else:
                         index_binding = "conflicted"
 
+    local_shallow = commit_linkage._git_is_shallow(target)
+    if local_shallow is None:
+        local_shallow = True
+
+    local_baseline_commit = None
+    recomputed_first_parent = None
+    if commit_sha is not None and isinstance(statement, dict):
+        parents = commit_linkage._commit_parents(target, commit_sha, local_shallow)
+        if parents is not None:
+            recomputed_first_parent = parents[0] if parents else None
+        predicate = statement.get("predicate")
+        if isinstance(predicate, dict):
+            run_ref = predicate.get("run")
+            if isinstance(run_ref, dict):
+                run_id = run_ref.get("id")
+                if isinstance(run_id, str) and agent_change._RUN_ID_RE.fullmatch(run_id) and run_id not in {".", ".."}:
+                    try:
+                        run_dir = agent_change._resolve_run_dir(target, run_id)
+                        run_meta = agent_change._read_run_json(run_dir)
+                        local_baseline = run_meta.get("baseline_commit")
+                        if isinstance(local_baseline, str) and commit_linkage._HEX40_OR_64_RE.fullmatch(local_baseline):
+                            local_baseline_commit = local_baseline
+                    except agent_change.AgentChangeError:
+                        pass
+
     baseline_relation = "unavailable"
     if commit_sha is not None and isinstance(statement, dict):
-        baseline_relation = _verify_baseline_relation(target, statement, commit_sha)
+        baseline_relation = _verify_baseline_relation(target, statement, commit_sha, local_shallow)
 
     normalization_base = _extract_predicate_field(statement, "comparison", "normalizationBase")
 
@@ -516,7 +562,12 @@ def verify_commit_linkage(
         recomputed_equivalence,
         equivalence_obs,
         normalization_base,
+        local_baseline_commit,
+        recomputed_first_parent,
+        rule_drift,
     )
+    if object_format_status == "mismatch":
+        status = _STATUS_INVALID
 
     evaluated_at = agent_change_verify._utc_now_iso_z()
     output = {

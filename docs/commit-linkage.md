@@ -20,7 +20,9 @@ not who authored them, and not whether any review occurred.
 - `brigade receipts verify-commit-linkage <envelope-or-run-dir> --target <dir> [--commit <sha>] [--json]`
 
 With a run directory, `--commit` selects among `linkage/*.json`; when exactly
-one linkage envelope exists, `--commit` is optional.
+one linkage envelope exists, `--commit` is optional. `--commit` accepts a full
+SHA only (40 or 64 lowercase hex characters matching the repository's object
+format).
 
 ## Statement envelope
 
@@ -36,13 +38,18 @@ Predicate type `https://brigade.dev/attestation/commit-linkage/v1`,
 - `attestedTree`: `{gitTree}` — the run's terminal `tree_fingerprint` from
   `run.json`.
 - `commitTree`: `{gitTree}` — `git rev-parse <sha>^{tree}`.
-- `commitParents`: `[{"gitCommit": ...}]` in order.
-- `commitKind`: `root`, `linear`, or `merge`.
+- `commitParents`: `[{"gitCommit": ...}]` in order, or `{"status": "unknown"}` at a
+  shallow-repository boundary where the parents are cut off.
+- `commitKind`: `root`, `linear`, `merge`, or `unknown` when the parents are
+  unknown.
 - `comparison`: rule, exclusion list, normalization base, and normalized tree.
 - `equivalence`: `exact`, `normalized`, or `none`.
 - `git`: `{objectFormat, shallow}` from the local repository.
 - `baseline`: run baseline commit and its relationship to the commit's first
-  parent, when available.
+  parent. `baselineRelation` is one of `same-as-parent`, `ancestor-of-parent`,
+  `unrelated`, or `unknown`; any missing information (including a root commit
+  with a recorded baseline, or a shallow boundary where ancestry cannot be
+  determined) is recorded as `unknown`, never guessed.
 - `references`: the agent-change index envelope reference, when present.
 - `trailers`: the `Brigade-Run` and `Brigade-Receipt` trailers from the commit
   message, with a flag for whether the run id matches and whether the receipt
@@ -95,11 +102,14 @@ are:
 Overall `status`:
 
 - `LINKED-EXACT`: the commit tree equals the attested tree.
-- `LINKED-NORMALIZED`: the normalized commit tree equals the attested tree, and
-  the normalization base is `run-baseline`.
+- `LINKED-NORMALIZED`: the normalized commit tree equals the attested tree, the
+  normalization base source is `run-baseline`, the base commit equals both the
+  local `run.json` `baseline_commit` and the recomputed first parent, and the
+  exclusion rule has not drifted.
 - `NOT-EQUIVALENT`: trees do not match, or normalized equivalence was based on
-  an assumed base.
-- `INVALID`: envelope signature or trust failure, or policy/project mismatch.
+  an assumed base, or the rule drifted.
+- `INVALID`: envelope signature or trust failure, policy/project mismatch,
+  object-format mismatch, or `--commit` format mismatch.
 - `UNVERIFIABLE`: missing policy, malformed envelope, or missing git objects.
 
 ## Exit codes

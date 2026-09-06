@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -223,6 +224,9 @@ def test_normal_commit_of_attested_tree_is_exact(tmp_path: Path) -> None:
     verify_rc, output = _verify_json(ws, run_dir / "linkage" / f"{sha}.json")
     assert verify_rc == 0
     assert output["status"] == "LINKED-EXACT"
+    assert output["commitAvailable"] == "present"
+    assert output["attestedTreeObject"] == "present"
+    assert output["objectFormat"] == "match"
     assert output["commitTree"] == "match"
     assert output["equivalence"] == "confirmed"
 
@@ -435,28 +439,25 @@ def test_exclusion_change_with_assumed_base_is_normalized_but_not_equivalent(tmp
             exclusion_path: "baseline-content",
         },
     )
-    _baseline = subprocess.run(
-        ["git", "-C", str(ws), "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    # Add an intermediate commit on a different path so the exclusion-change parent is not the baseline,
-    # but the exclusion file still matches the baseline content.
-    _git_commit(ws, "intermediate", {"src.txt": "changed"})
+    # Add an empty intermediate commit so the first parent is not the baseline but
+    # has the same tree. The child changes only the excluded path, so the normalized
+    # tree equals the baseline, but the normalization base is first-parent-assumed
+    # and must not be promoted to LINKED-NORMALIZED.
+    _git_commit(ws, "intermediate", allow_empty=True)
     child = _git_commit(ws, "exclusion-change", {exclusion_path: "changed-content"})
 
     rc, envelope = _export(ws, "run-001", child, key_path)
-    assert rc == 3
+    assert rc == 0
     predicate = _decode_predicate(envelope)
-    assert predicate["equivalence"] == "none"
+    assert predicate["equivalence"] == "normalized"
     assert predicate["comparison"]["normalizationBase"]["source"] == "first-parent-assumed"
     assert predicate["baseline"]["baselineMoved"] is True
+    assert predicate["baseline"]["baselineRelation"] == "ancestor-of-parent"
 
     verify_rc, output = _verify_json(ws, run_dir / "linkage" / f"{child}.json")
     assert verify_rc == 1
     assert output["status"] == "NOT-EQUIVALENT"
-    assert output["normalizedTree"] == "mismatch"
+    assert output["normalizedTree"] == "match"
 
 
 def test_root_commit_records_normalized_tree_unavailable(tmp_path: Path) -> None:
@@ -650,7 +651,7 @@ def test_tampered_attested_tree_reports_run_binding_conflicted(tmp_path: Path) -
 
     verify_rc, output = _verify_json(ws, tampered_path)
     assert verify_rc == 1
-    assert output["status"] in {"INVALID", "UNVERIFIABLE"}
+    assert output["status"] == "INVALID"
     assert output["runBinding"] == "conflicted"
 
 
@@ -694,8 +695,9 @@ def test_foreign_exclusion_list_reports_rule_drift(tmp_path: Path) -> None:
     )
 
     verify_rc, output = _verify_json(ws, foreign_path)
+    assert verify_rc == 0
     assert output["ruleDrift"] is True
-    assert output["status"] in {"LINKED-EXACT", "NOT-EQUIVALENT"}
+    assert output["status"] == "LINKED-EXACT"
 
 
 def test_trailer_present_and_matching_reports_run_matches_true(tmp_path: Path) -> None:
@@ -772,8 +774,13 @@ def test_no_private_paths_author_or_message_in_statement_or_output(
     assert "Test User" not in payload_decoded
     assert str(ws) not in payload_decoded
 
-    verify_rc, _output = _verify_json(ws, run_dir / "linkage" / f"{sha}.json")
+    verify_rc, output = _verify_json(ws, run_dir / "linkage" / f"{sha}.json")
     assert verify_rc == 0
+    output_text = json.dumps(output, sort_keys=True)
+    assert "secret message" not in output_text
+    assert "test@example.com" not in output_text
+    assert "Test User" not in output_text
+    assert str(ws) not in output_text
 
 
 def test_json_sorted_and_uses_documented_schema_strings(tmp_path: Path) -> None:
@@ -851,9 +858,11 @@ def test_shallow_clone_marks_baseline_relation_unknown(tmp_path: Path) -> None:
     )
 
     rc, envelope = _export(shallow, "run-001", head, key_path)
-    assert rc in {0, 3}
+    assert rc == 3
     predicate = _decode_predicate(envelope)
     assert predicate["git"]["shallow"] is True
+    assert predicate["commitParents"] == {"status": "unknown"}
+    assert predicate["commitKind"] == "unknown"
     assert predicate["baseline"]["baselineRelation"] == "unknown"
 
 
@@ -877,3 +886,204 @@ def test_index_binding_bound_when_agent_change_envelope_present(tmp_path: Path) 
     verify_rc, output = _verify_json(ws, run_dir / "linkage" / f"{sha}.json")
     assert verify_rc == 0
     assert output["indexBinding"] == "bound"
+
+
+def test_normalize_commit_tree_with_bogus_sha_returns_none(tmp_path: Path) -> None:
+    ws, _run_dir, _key_path = _workspace(tmp_path)
+    baseline = subprocess.run(
+        ["git", "-C", str(ws), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    bogus_sha = "0" * 40
+    assert (
+        commit_linkage._normalize_commit_tree(
+            ws,
+            bogus_sha,
+            baseline,
+            localio.TREE_FINGERPRINT_EVIDENCE_PATHS,
+        )
+        is None
+    )
+
+
+def test_export_unknown_run_id_exits_2(tmp_path: Path) -> None:
+    ws, _run_dir, key_path = _workspace(tmp_path)
+    sha = subprocess.run(
+        ["git", "-C", str(ws), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    import sys as _sys
+    import io
+
+    old_stderr = _sys.stderr
+    _sys.stderr = buffer = io.StringIO()
+    try:
+        rc = commit_linkage.export_commit_linkage(ws, "no-such-run", sha, key=key_path)
+    finally:
+        _sys.stderr = old_stderr
+    stderr = buffer.getvalue()
+    assert rc == 2
+    assert "run directory not found" in stderr
+
+
+def test_export_malformed_run_json_exits_2(tmp_path: Path) -> None:
+    ws, run_dir, key_path = _workspace(tmp_path)
+    (run_dir / "run.json").write_text("not json", encoding="utf-8")
+    sha = subprocess.run(
+        ["git", "-C", str(ws), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    import sys as _sys
+    import io
+
+    old_stderr = _sys.stderr
+    _sys.stderr = buffer = io.StringIO()
+    try:
+        rc = commit_linkage.export_commit_linkage(ws, "run-001", sha, key=key_path)
+    finally:
+        _sys.stderr = old_stderr
+    stderr = buffer.getvalue()
+    assert rc == 2
+    assert "run.json" in stderr or "JSON" in stderr
+
+
+def test_missing_predicate_policy_on_invalid_signature_reports_invalid(tmp_path: Path) -> None:
+    ws, run_dir, key_path = _workspace(tmp_path)
+    sha = _git_commit(ws, "same tree", allow_empty=True)
+    rc, envelope = _export(ws, "run-001", sha, key_path)
+    assert rc == 0
+
+    statement = _decode_statement(envelope)
+    del statement["predicate"]["policy"]
+    # Re-encode the tampered payload without re-signing so the signature becomes invalid.
+    payload_bytes = json.dumps(statement, indent=2, sort_keys=True).encode("utf-8")
+    envelope["payload"] = base64.b64encode(payload_bytes).decode("utf-8")
+    tampered_path = run_dir / "linkage" / "tampered-no-policy.json"
+    tampered_path.write_text(
+        json.dumps(envelope, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    verify_rc, output = _verify_json(ws, tampered_path)
+    assert verify_rc == 1
+    assert output["status"] == "INVALID"
+
+
+def test_rule_drift_blocks_linked_normalized(tmp_path: Path) -> None:
+    exclusion_path = ".brigade/work/miseledger-export-cursor.json"
+    ws, run_dir, key_path = _workspace(
+        tmp_path,
+        initial_files={
+            "src.txt": "hello",
+            exclusion_path: "baseline-content",
+        },
+    )
+    child = _git_commit(ws, "exclusion-change", {exclusion_path: "changed-content"})
+
+    statement = commit_linkage.build_statement(ws, "run-001", child)
+    # Mutate the exclusion list to a foreign value while still using the baseline.
+    statement["predicate"]["comparison"]["exclusions"] = ["foreign-path"]
+    envelope = attestation.create_envelope(statement, key_path)
+    drift_path = run_dir / "linkage" / "drift.json"
+    drift_path.parent.mkdir(parents=True, exist_ok=True)
+    drift_path.write_text(
+        json.dumps(envelope, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    verify_rc, output = _verify_json(ws, drift_path)
+    assert verify_rc == 1
+    assert output["ruleDrift"] is True
+    assert output["status"] == "NOT-EQUIVALENT"
+
+
+def test_symlinked_linkage_dir_refused(tmp_path: Path) -> None:
+    ws, run_dir, key_path = _workspace(tmp_path)
+    sha = _git_commit(ws, "same tree", allow_empty=True)
+    linkage_dir = run_dir / "linkage"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linkage_dir.symlink_to(outside)
+
+    import sys as _sys
+    import io
+
+    old_stderr = _sys.stderr
+    _sys.stderr = buffer = io.StringIO()
+    try:
+        rc = commit_linkage.export_commit_linkage(ws, "run-001", sha, key=key_path)
+    finally:
+        _sys.stderr = old_stderr
+    stderr = buffer.getvalue()
+    assert rc == 2
+    assert "symlinked or out-of-run linkage path refused" in stderr
+
+
+def test_planted_pathspec_env_does_not_change_normalized_tree(tmp_path: Path) -> None:
+    exclusion_path = ".brigade/work/miseledger-export-cursor.json"
+    ws, run_dir, key_path = _workspace(
+        tmp_path,
+        initial_files={
+            "src.txt": "hello",
+            exclusion_path: "baseline-content",
+        },
+    )
+    child = _git_commit(ws, "exclusion-change", {exclusion_path: "changed-content"})
+
+    statement_clean = commit_linkage.build_statement(ws, "run-001", child)
+    os.environ["GIT_NOGLOB_PATHSPECS"] = "1"
+    try:
+        statement_with_env = commit_linkage.build_statement(ws, "run-001", child)
+    finally:
+        del os.environ["GIT_NOGLOB_PATHSPECS"]
+
+    assert statement_clean["predicate"]["equivalence"] == "normalized"
+    assert statement_with_env["predicate"]["equivalence"] == "normalized"
+    assert (
+        statement_clean["predicate"]["comparison"]["normalizedCommitTree"]["gitTree"]
+        == statement_with_env["predicate"]["comparison"]["normalizedCommitTree"]["gitTree"]
+    )
+
+
+def test_verifier_commit_argument_format_validation(tmp_path: Path) -> None:
+    ws, run_dir, key_path = _workspace(tmp_path)
+    sha = _git_commit(ws, "same tree", allow_empty=True)
+    rc, envelope = _export(ws, "run-001", sha, key_path)
+    assert rc == 0
+
+    verify_rc = commit_linkage_verify.verify_commit_linkage(
+        run_dir / "linkage" / f"{sha}.json",
+        ws,
+        commit="bad-sha",
+        json_output=False,
+    )
+    assert verify_rc == 2
+
+
+def test_object_format_mismatch_reports_invalid(tmp_path: Path) -> None:
+    ws, run_dir, key_path = _workspace(tmp_path)
+    sha = _git_commit(ws, "same tree", allow_empty=True)
+    rc, envelope = _export(ws, "run-001", sha, key_path)
+    assert rc == 0
+
+    statement = _decode_statement(envelope)
+    statement["predicate"]["git"]["objectFormat"] = "sha256"
+    statement["subject"][0]["digest"]["gitCommit"] = "a" * 64
+    # Re-sign the tampered statement with a valid 64-char sha.
+    mismatch_envelope = attestation.create_envelope(statement, key_path)
+    mismatch_path = run_dir / "linkage" / "mismatch.json"
+    mismatch_path.write_text(
+        json.dumps(mismatch_envelope, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    verify_rc, output = _verify_json(ws, mismatch_path)
+    assert verify_rc == 1
+    assert output["objectFormat"] == "mismatch"
+    assert output["status"] == "INVALID"

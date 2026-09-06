@@ -37,7 +37,17 @@ _REMOVE_GIT_ENV = {
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_COMMON_DIR",
     "GIT_NAMESPACE",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
 }
+
+_REMOVE_GIT_ENV_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 
 
 class CommitLinkageError(RuntimeError):
@@ -45,7 +55,9 @@ class CommitLinkageError(RuntimeError):
 
 
 def _git_env(extra: Mapping[str, str] | None = None) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k not in _REMOVE_GIT_ENV}
+    env = {
+        k: v for k, v in os.environ.items() if k not in _REMOVE_GIT_ENV and not k.startswith(_REMOVE_GIT_ENV_PREFIXES)
+    }
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -112,8 +124,12 @@ def _commit_tree(target: Path, sha: str) -> str | None:
     return lines[0] if lines else None
 
 
-def _commit_parents(target: Path, sha: str) -> list[str] | None:
-    """Return ordered parent commit hashes, or None on failure."""
+def _commit_parents(target: Path, sha: str, shallow: bool) -> list[str] | None:
+    """Return ordered parent commit hashes, or None on failure/boundary.
+
+    In a shallow repository, a commit whose parents are cut off by the
+    shallow boundary is reported as ``None`` (unknown) rather than guessed.
+    """
     result = _git(target, "rev-list", "--parents", "-1", sha)
     lines = _git_stdout_lines(result)
     if not lines:
@@ -121,7 +137,10 @@ def _commit_parents(target: Path, sha: str) -> list[str] | None:
     parts = lines[0].split()
     if len(parts) < 1:
         return None
-    return parts[1:]
+    parents = parts[1:]
+    if shallow and not parents:
+        return None
+    return parents
 
 
 def _commit_message(target: Path, sha: str) -> str | None:
@@ -157,9 +176,11 @@ def _normalize_commit_tree(
     index_file = Path(tmp_path)
     env = {"GIT_INDEX_FILE": str(index_file)}
     try:
-        if _git(target, "read-tree", "--", sha, env_extra=env) is None:
+        read_tree = _git(target, "read-tree", "--", sha, env_extra=env)
+        if read_tree is None or read_tree.returncode != 0:
             return None
-        if _git(target, "reset", "-q", base, "--", *exclusions, env_extra=env) is None:
+        reset = _git(target, "reset", "-q", base, "--", *exclusions, env_extra=env)
+        if reset is None or reset.returncode != 0:
             return None
         result = _git(target, "write-tree", env_extra=env)
         lines = _git_stdout_lines(result)
@@ -184,18 +205,26 @@ def _baseline_relation(
     target: Path,
     baseline: str | None,
     first_parent: str | None,
+    shallow: bool,
 ) -> tuple[str, bool | None]:
-    """Return (baselineRelation, baselineMoved)."""
+    """Return (baselineRelation, baselineMoved).
+
+    Relation is one of: same-as-parent, ancestor-of-parent, unrelated,
+    unknown. Any missing local information is recorded as ``unknown`` rather
+    than guessed, especially at a shallow-repository boundary.
+    """
     if baseline is None or first_parent is None:
-        if first_parent is None and _git_is_shallow(target):
-            return "unknown", None
-        return "unavailable", None
+        return "unknown", None
     if baseline == first_parent:
         return "same-as-parent", False
     is_ancestor = _is_ancestor(target, baseline, first_parent)
     if is_ancestor is True:
         return "ancestor-of-parent", True
     if is_ancestor is False:
+        # In a shallow repository, exit 1 may mean the missing parent is not
+        # an ancestor *or* is simply not available; never guess.
+        if shallow:
+            return "unknown", True
         return "unrelated", True
     return "unknown", True
 
@@ -327,17 +356,22 @@ def build_statement(
     commit_tree = _commit_tree(target, commit_sha)
     if commit_tree is None:
         raise CommitLinkageError(f"could not resolve commit tree for {commit_sha}")
-    parents = _commit_parents(target, commit_sha)
+    parents = _commit_parents(target, commit_sha, shallow)
     if parents is None:
-        raise CommitLinkageError(f"could not resolve commit parents for {commit_sha}")
-    kind = _commit_kind(parents)
+        # Shallow boundary: parents are unknown.
+        commit_parents_obs: dict[str, Any] | list[dict[str, str]] = {"status": "unknown"}
+        commit_kind = "unknown"
+        first_parent = None
+    else:
+        commit_parents_obs = [{"gitCommit": p} for p in parents]
+        commit_kind = _commit_kind(parents)
+        first_parent = parents[0] if parents else None
 
-    first_parent = parents[0] if parents else None
     baseline_commit = run_meta.get("baseline_commit")
     baseline_commit = (
         baseline_commit if isinstance(baseline_commit, str) and _HEX40_OR_64_RE.fullmatch(baseline_commit) else None
     )
-    baseline_relation, baseline_moved = _baseline_relation(target, baseline_commit, first_parent)
+    baseline_relation, baseline_moved = _baseline_relation(target, baseline_commit, first_parent, shallow)
 
     if first_parent is None:
         normalization_base: dict[str, Any] = {"status": "unavailable"}
@@ -385,8 +419,8 @@ def build_statement(
         },
         "attestedTree": {"gitTree": tree_fingerprint},
         "commitTree": {"gitTree": commit_tree},
-        "commitParents": [{"gitCommit": p} for p in parents],
-        "commitKind": kind,
+        "commitParents": commit_parents_obs,
+        "commitKind": commit_kind,
         "comparison": {
             "rule": "brigade.tree_fingerprint.v1",
             "exclusions": list(localio.TREE_FINGERPRINT_EVIDENCE_PATHS),
@@ -427,6 +461,31 @@ def build_statement(
     }
 
 
+def _safe_linkage_path(run_dir: Path, commit_sha: str) -> Path | None:
+    """Return the default linkage path only if it stays under the run directory.
+
+    Refuses a symlinked run directory, linkage directory, or any intermediate
+    component, using a per-component lstat check that does not follow links.
+    """
+    linkage_dir = run_dir / "linkage"
+    out_path = linkage_dir / f"{commit_sha}.json"
+    try:
+        resolved_run_dir = run_dir.resolve()
+        current = out_path
+        while current != resolved_run_dir:
+            if not current.is_relative_to(resolved_run_dir):
+                return None
+            if current.is_symlink():
+                return None
+            parent = current.parent
+            if parent == current:
+                return None
+            current = parent
+    except OSError:
+        return None
+    return out_path
+
+
 def export_commit_linkage(
     target: Path,
     run_id: str,
@@ -460,7 +519,7 @@ def export_commit_linkage(
 
     try:
         statement = build_statement(target, run_id, commit_sha, policy_path=policy_path)
-    except CommitLinkageError as exc:
+    except (CommitLinkageError, agent_change.AgentChangeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except FileExistsError as exc:
@@ -477,11 +536,21 @@ def export_commit_linkage(
         print(json.dumps(envelope, indent=2, sort_keys=True))
         return 0 if statement["predicate"]["equivalence"] in {"exact", "normalized"} else 3
 
+    out_path: Path | None
     if out is not None:
         out_path = Path(out).expanduser().resolve()
     else:
-        out_path = target / ".brigade" / "runs" / run_id / "linkage" / f"{commit_sha}.json"
+        try:
+            run_dir = agent_change._resolve_run_dir(target, run_id)
+        except agent_change.AgentChangeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        out_path = _safe_linkage_path(run_dir, commit_sha)
+        if out_path is None:
+            print("error: symlinked or out-of-run linkage path refused", file=sys.stderr)
+            return 2
 
+    assert out_path is not None
     try:
         attestation.write_attestation_file(envelope, out_path, force=force)
     except FileExistsError as exc:
