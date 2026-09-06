@@ -245,7 +245,9 @@ def test_apply_enqueues_one_bounded_draft_pr_implementation_worker_and_redacts_r
         "- Final report: exactly one of PASS, ISSUES, or BLOCKED, with the evidence behind it.\n\n"
         "Lease rule: renew the lease at least every 5 minutes. A lease-expired or job-expired answer is a stop "
         "signal: push the branch and fail the job with a bounded reason, and do not keep working.\n\n"
-        "Time cap: stop within 60 minutes of claiming this job, whatever state the work is in.\n\n"
+        "Time cap: stop within 60 minutes of claiming this job, whatever state the work is in. Stop as soon as "
+        "the pull request is open and the job is completed with its URL. The time cap is the latest you may still "
+        "be running, not a target; never wait for CI, review, merge, or a timer.\n\n"
         "Proof rule: run exactly the verification commands named above and nothing else; never run the full suite "
         "unless it is named there. Open exactly one pull request against the base ref marked ready for review when "
         "every verification command exited 0, and open it as a draft only when a command failed or the work is "
@@ -1442,6 +1444,8 @@ def test_worker_envelope_carries_the_swarm_job_contract(tmp_path: Path, monkeypa
         "Job contract:",
         "Lease rule: renew the lease at least every 5 minutes.",
         "Time cap: stop within 60 minutes of claiming this job",
+        "Stop as soon as the pull request is open and the job is completed with its URL. The time cap is the "
+        "latest you may still be running, not a target; never wait for CI, review, merge, or a timer.",
         "Proof rule: run exactly the verification commands named above",
         "a branch cut from main named cursor/issue-7-<slug>",
         "Fixes #7",

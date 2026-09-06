@@ -143,7 +143,9 @@ worker job is a coordination job, not a coding job:
    `job-expired` answer is a stop signal: push the branch, fail the job with a
    bounded reason, and stop working.
 4. **Time cap.** Stop within 60 minutes of claiming the job, whatever state the
-   work is in.
+   work is in. Stop as soon as the pull request is open and the job is completed
+   with its URL. The time cap is the latest you may still be running, not a
+   target; never wait for CI, review, merge, or a timer.
 5. **Proof rule.** Run exactly the named verification commands and nothing
    else; never the full suite unless it is named. Open exactly one pull
    request against the base ref marked ready for review when every
