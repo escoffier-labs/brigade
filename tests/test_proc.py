@@ -1126,3 +1126,37 @@ def test_run_exposes_no_descriptor_passing_plumbing():
     import inspect
 
     assert "pass_fds" not in inspect.signature(proc.run).parameters
+
+
+def test_terminate_processes_windows_tolerates_taskkill_keyboard_interrupt(monkeypatch):
+    """
+    Regression test for #1473: _terminate_processes should tolerate KeyboardInterrupt
+    from the taskkill subprocess.run call on Windows and fall through to process.kill().
+    """
+    monkeypatch.setattr(proc.os, "name", "nt")
+
+    class FakeProcess:
+        def __init__(self):
+            self.pid = 9999
+            self.kill_called = False
+            self.poll_result = None
+
+        def poll(self):
+            return self.poll_result
+
+        def kill(self):
+            self.kill_called = True
+
+    fake_process = FakeProcess()
+
+    def fake_run(args, **kwargs):
+        if args and args[0] == "taskkill":
+            raise KeyboardInterrupt()
+
+    monkeypatch.setattr(proc.subprocess, "run", fake_run)
+
+    # Should not raise exception
+    proc._terminate_processes((fake_process,), terminate_grace=0.0, kill_grace=0.0)
+
+    # And process.kill() should have been called
+    assert fake_process.kill_called is True

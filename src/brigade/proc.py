@@ -351,7 +351,7 @@ def _bind_suspended_windows_child(
         pass
     try:
         process.wait(timeout=_TIMED_OUT_DRAIN_SECONDS)
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
         pass
     try:
         job.close()
@@ -371,7 +371,7 @@ def _terminate_windows_process_tree(process: subprocess.Popen[bytes], *, timeout
             check=False,
             timeout=max(timeout, 0.1),
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
         pass
     if process.poll() is None:
         try:
@@ -400,7 +400,9 @@ def _terminate_processes(
     if os.name == "nt":
         timeout = terminate_grace + kill_grace
         for process in processes:
-            _terminate_windows_process_tree(process, timeout=timeout)
+            if not getattr(process, "_windows_tree_terminated", False):
+                _terminate_windows_process_tree(process, timeout=timeout)
+                process._windows_tree_terminated = True  # type: ignore[attr-defined]
         _wait_for_processes(processes, kill_grace)
         return
     for process in processes:

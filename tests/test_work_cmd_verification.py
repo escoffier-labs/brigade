@@ -2659,6 +2659,9 @@ def test_run_verify_child_process_catches_keyboard_interrupt(tmp_path, monkeypat
 
     def interrupting_popen(*args, **kwargs):
         process = real_popen(*args, **kwargs)
+        if args and args[0] and args[0][0] == "taskkill":
+            return process
+
         child_processes.append(process)
 
         def communicate(*communicate_args, **communicate_kwargs):
