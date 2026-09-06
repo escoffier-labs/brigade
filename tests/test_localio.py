@@ -234,3 +234,34 @@ def test_write_text_exclusive_writes_lf_not_platform_newline(tmp_path: Path):
     localio.write_text_exclusive(path, "first\nsecond\n")
 
     assert path.read_bytes() == b"first\nsecond\n"
+
+
+def test_tree_fingerprint_with_head_returns_current_head_and_same_tree_as_tree_fingerprint(
+    tmp_path: Path,
+):
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    (repo / "file.txt").write_text("content")
+    subprocess.run(["git", "-C", str(repo), "add", "file.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "init"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    tree = localio.tree_fingerprint(repo)
+    tree_with_head, head_from_helper = localio.tree_fingerprint_with_head(repo)
+
+    assert tree_with_head == tree
+    assert head_from_helper == head
+
+
+def test_tree_fingerprint_with_head_returns_none_on_failure(tmp_path: Path):
+    assert localio.tree_fingerprint_with_head(tmp_path) == (None, None)

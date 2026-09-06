@@ -454,9 +454,11 @@ def _terminalize(run_dir: Path, meta: dict[str, Any], *, workspace: Path, now: d
         }
     )
     if updated.get("dry_run") is not True:
-        tree_fingerprint = localio.tree_fingerprint(workspace)
+        tree_fingerprint, tree_fingerprint_head = localio.tree_fingerprint_with_head(workspace)
         if tree_fingerprint is not None:
             updated["tree_fingerprint"] = tree_fingerprint
+        if tree_fingerprint_head is not None:
+            updated["tree_fingerprint_head"] = tree_fingerprint_head
     aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(updated))
     return {
         "run_id": _public_run_id(run_dir.name),

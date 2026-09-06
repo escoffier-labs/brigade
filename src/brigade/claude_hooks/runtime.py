@@ -18,7 +18,6 @@ from typing import Any, BinaryIO, Callable, Iterator
 
 from .. import localio
 from ..component_paths import cache_root
-from ..work_cmd.verification import _tree_fingerprint
 from ..wiring import resolve_wired_target
 from . import compaction_marker, envelope, presence
 from .package import PACKAGE_REF
@@ -2169,7 +2168,7 @@ def _receipt_since(target: Path, started_at: object, *, session_fingerprint: str
     target = target.expanduser().resolve()
     # Snapshotting is an optional strengthening signal.  ``None`` preserves
     # hook operation in non-Git workspaces and on local Git/tool errors.
-    audited_tree = _tree_fingerprint(target)
+    audited_tree = localio.tree_fingerprint(target)
     session_id = (
         _session_id_for_fingerprint(target, session_fingerprint) if isinstance(session_fingerprint, str) else None
     )

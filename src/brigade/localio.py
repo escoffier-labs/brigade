@@ -52,8 +52,15 @@ def read_json_dict(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def tree_fingerprint(target: Path) -> str | None:
-    """Return the Git tree for the live workspace, excluding generated evidence."""
+def tree_fingerprint_with_head(target: Path) -> tuple[str | None, str | None]:
+    """Return the Git tree for the live workspace and the HEAD commit that fed it.
+
+    The tree is built from ``read-tree HEAD``, ``add -A``, ``reset -q HEAD --``
+    over the excluded evidence paths, and ``write-tree``. The excluded paths
+    therefore carry the content of the HEAD commit that was checked out when the
+    fingerprint was taken; returning that HEAD makes the normalization base
+    provable later.
+    """
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             index_file = Path(tmpdir) / "index"
@@ -71,14 +78,26 @@ def tree_fingerprint(target: Path) -> str | None:
                     env=env,
                 )
 
+            head = git("rev-parse", "HEAD")
+            head_sha = head.stdout.strip() if head.returncode == 0 and head.stdout.strip() else None
+            if head_sha is None:
+                return None, None
             if git("read-tree", "HEAD").returncode != 0 or git("add", "-A").returncode != 0:
-                return None
+                return None, None
             if git("reset", "-q", "HEAD", "--", *TREE_FINGERPRINT_EVIDENCE_PATHS).returncode != 0:
-                return None
+                return None, None
             value = git("write-tree")
-            return value.stdout.strip() if value.returncode == 0 and value.stdout.strip() else None
+            tree_sha = value.stdout.strip() if value.returncode == 0 and value.stdout.strip() else None
+            if tree_sha is None:
+                return None, None
+            return tree_sha, head_sha
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return None, None
+
+
+def tree_fingerprint(target: Path) -> str | None:
+    """Return the Git tree for the live workspace, excluding generated evidence."""
+    return tree_fingerprint_with_head(target)[0]
 
 
 def _active_bound_target(path: Path) -> tuple[Any, tuple[str, ...], str] | None:

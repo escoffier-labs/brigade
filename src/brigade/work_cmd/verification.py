@@ -1503,29 +1503,25 @@ def _stamp_harness_session(receipt: dict[str, Any]) -> None:
         receipt["harness_session"] = {"harness": "claude", "fingerprint": claude_session}
 
 
-def _tree_fingerprint(target: Path) -> str | None:
-    """Compatibility alias for the shared live-workspace fingerprint helper."""
-    return localio.tree_fingerprint(target)
-
-
 def _capture_verify_identity(target: Path, run_dir: Path) -> dict[str, Any]:
     unavailable: dict[str, Any] = {
         "schema_version": receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION,
         "baseline_commit": None,
         "tree_fingerprint": None,
+        "tree_fingerprint_head": None,
         "changes_patch_sha256": None,
     }
     patch_path = run_dir / "changes.patch"
     try:
         baseline_commit = helpers._git_value(target, "rev-parse", "HEAD")
-        tree_fingerprint = _tree_fingerprint(target)
-        if baseline_commit is None or tree_fingerprint is None:
+        tree_fingerprint, tree_fingerprint_head = localio.tree_fingerprint_with_head(target)
+        if baseline_commit is None or tree_fingerprint is None or tree_fingerprint_head is None:
             return unavailable
         runguard.collect_changes_patch(target, patch_path)
         patch_bytes = patch_path.read_bytes()
         if (
             helpers._git_value(target, "rev-parse", "HEAD") != baseline_commit
-            or _tree_fingerprint(target) != tree_fingerprint
+            or localio.tree_fingerprint(target) != tree_fingerprint
         ):
             patch_path.unlink(missing_ok=True)
             return unavailable
@@ -1536,6 +1532,7 @@ def _capture_verify_identity(target: Path, run_dir: Path) -> dict[str, Any]:
         "schema_version": receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION,
         "baseline_commit": baseline_commit,
         "tree_fingerprint": tree_fingerprint,
+        "tree_fingerprint_head": tree_fingerprint_head,
         "changes_patch_sha256": hashlib.sha256(patch_bytes).hexdigest(),
     }
 
@@ -2023,7 +2020,7 @@ def verify_run(
     try:
         receipt = None
         if reuse and manifest is None:
-            fingerprint = _tree_fingerprint(target)
+            fingerprint = localio.tree_fingerprint(target)
             latest = _latest_verify_receipt(target)
             if (
                 fingerprint is not None

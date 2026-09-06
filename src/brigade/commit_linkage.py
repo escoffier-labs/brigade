@@ -385,13 +385,21 @@ def build_statement(
     baseline_commit = (
         baseline_commit if isinstance(baseline_commit, str) and _HEX40_OR_64_RE.fullmatch(baseline_commit) else None
     )
+    tree_fingerprint_head = run_meta.get("tree_fingerprint_head")
+    tree_fingerprint_head = (
+        tree_fingerprint_head
+        if isinstance(tree_fingerprint_head, str) and _HEX40_OR_64_RE.fullmatch(tree_fingerprint_head)
+        else None
+    )
     baseline_relation, baseline_moved = _baseline_relation(target, baseline_commit, first_parent, shallow)
 
     if first_parent is None:
         normalization_base: dict[str, Any] = {"status": "unavailable"}
         normalized_tree: dict[str, Any] = {"status": "unavailable"}
     else:
-        if baseline_commit is not None and baseline_commit == first_parent:
+        if tree_fingerprint_head is not None:
+            normalization_base = {"gitCommit": tree_fingerprint_head, "source": "receipt-head"}
+        elif baseline_commit is not None and baseline_commit == first_parent:
             normalization_base = {"gitCommit": first_parent, "source": "run-baseline"}
         else:
             normalization_base = {"gitCommit": first_parent, "source": "first-parent-assumed"}

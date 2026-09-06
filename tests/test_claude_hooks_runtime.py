@@ -857,9 +857,7 @@ def test_stop_does_not_block_when_concurrent_session_dirties_audited_tree(tmp_pa
             tool_input={"file_path": str(target / "owned.py"), "content": "owned = 2\n"},
         ),
     )
-    from brigade.work_cmd.verification import _tree_fingerprint
-
-    receipt_tree = _tree_fingerprint(target)
+    receipt_tree = localio.tree_fingerprint(target)
     assert receipt_tree is not None
     _write_session_receipt(target, reader, tree_fingerprint=receipt_tree)
 
@@ -874,7 +872,7 @@ def test_stop_does_not_block_when_concurrent_session_dirties_audited_tree(tmp_pa
             tool_input={"file_path": str(target / "foreign.py"), "content": "foreign\n"},
         ),
     )
-    assert _tree_fingerprint(target) != receipt_tree
+    assert localio.tree_fingerprint(target) != receipt_tree
 
     result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader, stop_hook_active=False))
     assert result is None or result.get("decision") != "block"
@@ -1219,9 +1217,7 @@ def test_receipt_since_accepts_tree_drift_when_foreign_session_wrote(tmp_path: P
     monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
     runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
     fingerprint = runtime._session_fingerprint(session_id)
-    from brigade.work_cmd.verification import _tree_fingerprint
-
-    receipt_tree = _tree_fingerprint(target)
+    receipt_tree = localio.tree_fingerprint(target)
     threshold = localio.utc_now() - timedelta(seconds=10)
     run_dir = target / ".brigade" / "work" / "verify-runs" / "matching"
     run_dir.mkdir(parents=True)
@@ -1251,7 +1247,7 @@ def test_receipt_since_accepts_tree_drift_when_foreign_session_wrote(tmp_path: P
             tool_input={"file_path": str(target / "foreign.py"), "content": "other session\n"},
         ),
     )
-    assert _tree_fingerprint(target) != receipt_tree
+    assert localio.tree_fingerprint(target) != receipt_tree
     assert runtime._receipt_since(target, threshold.isoformat(), session_fingerprint=fingerprint) is True
 
 
@@ -2107,9 +2103,7 @@ def test_receipt_since_requires_exact_completed_audit_boundary(tmp_path: Path):
 
     threshold = localio.utc_now()
     fingerprint = runtime._session_fingerprint("audited-session")
-    from brigade.work_cmd.verification import _tree_fingerprint
-
-    receipt_tree = _tree_fingerprint(target)
+    receipt_tree = localio.tree_fingerprint(target)
     assert receipt_tree is not None
     root = target / ".brigade" / "work" / "verify-runs"
 
@@ -2184,9 +2178,7 @@ def _tracked_verify_capture_boundary(tmp_path: Path) -> tuple[Path, Path, dateti
     source.write_text("value = 2\n")
     threshold = localio.utc_now()
     fingerprint = runtime._session_fingerprint("captured-session")
-    from brigade.work_cmd.verification import _tree_fingerprint
-
-    receipt_tree = _tree_fingerprint(target)
+    receipt_tree = localio.tree_fingerprint(target)
     assert receipt_tree is not None
     receipt_path.write_text(
         json.dumps(

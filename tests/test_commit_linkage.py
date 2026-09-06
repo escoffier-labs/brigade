@@ -79,6 +79,7 @@ def _workspace(
     *,
     tree: str | None = None,
     baseline_commit: str | None = None,
+    tree_fingerprint_head: str | None = None,
     initial_files: dict[str, str] | None = None,
 ) -> tuple[Path, Path, Path]:
     ws = tmp_path / "ws"
@@ -109,7 +110,7 @@ def _workspace(
 
     run_dir = ws / ".brigade" / "runs" / run_id
     run_dir.mkdir(parents=True)
-    run_json = {
+    run_json: dict[str, Any] = {
         "schema": "brigade.run.v1",
         "schema_version": 1,
         "task": "test task",
@@ -124,6 +125,8 @@ def _workspace(
         "read_only": False,
         "suspected_noop": False,
     }
+    if tree_fingerprint_head is not None:
+        run_json["tree_fingerprint_head"] = tree_fingerprint_head
     (run_dir / "run.json").write_text(
         json.dumps(run_json, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -458,6 +461,51 @@ def test_exclusion_change_with_assumed_base_is_normalized_but_not_equivalent(tmp
     assert verify_rc == 1
     assert output["status"] == "NOT-EQUIVALENT"
     assert output["normalizedTree"] == "match"
+
+
+def test_exclusion_change_with_receipt_head_is_linked_normalized_when_first_parent_not_baseline(
+    tmp_path: Path,
+) -> None:
+    exclusion_path = ".brigade/work/miseledger-export-cursor.json"
+    ws, run_dir, key_path = _workspace(
+        tmp_path,
+        initial_files={
+            "src.txt": "hello",
+            exclusion_path: "baseline-content",
+        },
+    )
+    baseline = subprocess.run(
+        ["git", "-C", str(ws), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    # Add an empty intermediate commit so the first parent is not the baseline.
+    _git_commit(ws, "intermediate", allow_empty=True)
+    child = _git_commit(ws, "exclusion-change", {exclusion_path: "changed-content"})
+
+    # Record the fingerprint-time HEAD, which is the baseline, alongside the run.
+    run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    run_json["tree_fingerprint_head"] = baseline
+    (run_dir / "run.json").write_text(
+        json.dumps(run_json, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    rc, envelope = _export(ws, "run-001", child, key_path)
+    assert rc == 0
+    predicate = _decode_predicate(envelope)
+    assert predicate["equivalence"] == "normalized"
+    assert predicate["comparison"]["normalizationBase"]["source"] == "receipt-head"
+    assert predicate["comparison"]["normalizedCommitTree"]["gitTree"] == _git_tree(ws, baseline)
+    assert predicate["baseline"]["baselineMoved"] is True
+    assert predicate["baseline"]["baselineRelation"] == "ancestor-of-parent"
+
+    verify_rc, output = _verify_json(ws, run_dir / "linkage" / f"{child}.json")
+    assert verify_rc == 0
+    assert output["status"] == "LINKED-NORMALIZED"
+    assert output["normalizedTree"] == "match"
+    assert output["ruleDrift"] is False
 
 
 def test_root_commit_records_normalized_tree_unavailable(tmp_path: Path) -> None:

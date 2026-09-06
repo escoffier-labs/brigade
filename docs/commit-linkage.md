@@ -66,16 +66,22 @@ the run fingerprint. To compare a commit tree against that fingerprint, the
 excluded paths must be reset to the state that existed when the fingerprint was
 taken. The statement records the base used and how it was chosen.
 
-The normalization base can come from one of three sources:
+The normalization base can come from one of four sources:
 
-1. `run-baseline`: when the run's `baseline_commit` equals the linked commit's
-   first parent. This is the only source that can prove a `LINKED-NORMALIZED`
-   result, because it faithfully reproduces the HEAD that was checked out when
-   the run fingerprint was taken.
-2. `first-parent-assumed`: when the first parent is used but the run baseline is
-   absent or differs. The verifier still records the comparison, but reports
-   `NOT-EQUIVALENT` because an assumed base can produce false negatives.
-3. `unavailable`: the linked commit is a root commit and has no parent. The
+1. `receipt-head`: when the run receipt records `tree_fingerprint_head`, the
+   HEAD commit that was checked out when the fingerprint was taken. This is the
+   strongest source because it proves the exact state used to reset excluded
+   evidence paths, even when the linked commit's first parent is not the
+   baseline.
+2. `run-baseline`: when the run's `baseline_commit` equals the linked commit's
+   first parent. This faithfully reproduces the HEAD that was checked out when
+   the run fingerprint was taken, but is only available on linear commits that
+   start from the recorded baseline.
+3. `first-parent-assumed`: when the first parent is used but neither the
+   receipt head nor the run baseline is available or matches. The verifier still
+   records the comparison, but reports `NOT-EQUIVALENT` because an assumed base
+   can produce false negatives.
+4. `unavailable`: the linked commit is a root commit and has no parent. The
    normalized tree cannot be computed.
 
 The normalized tree is computed with a temporary `GIT_INDEX_FILE` by reading
@@ -105,9 +111,11 @@ Overall `status`:
 
 - `LINKED-EXACT`: the commit tree equals the attested tree.
 - `LINKED-NORMALIZED`: the normalized commit tree equals the attested tree, the
-  normalization base source is `run-baseline`, the base commit equals both the
-  local `run.json` `baseline_commit` and the recomputed first parent, and the
-  exclusion rule has not drifted.
+  exclusion rule has not drifted, and the normalization base is provable: either
+  its source is `run-baseline`, the base commit equals the local `run.json`
+  `baseline_commit`, and the base commit equals the recomputed first parent; or
+  its source is `receipt-head` and the base commit equals the local `run.json`
+  `tree_fingerprint_head`.
 - `NOT-EQUIVALENT`: trees do not match, or normalized equivalence was based on
   an assumed base, or the rule drifted.
 - `INVALID`: envelope signature or trust failure, policy/project mismatch,

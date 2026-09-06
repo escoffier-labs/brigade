@@ -1222,8 +1222,6 @@ def test_tree_fingerprint_distinguishes_untracked_name_content_boundary(tmp_path
     # concatenate to the same byte stream ({"a": "bc"} vs {"ab": "c"}) must
     # fingerprint to distinct non-None values: the name/content boundary is
     # part of the hashed identity, not just the raw concatenation.
-    from brigade.work_cmd import verification
-
     target_a = tmp_path / "repo-a"
     target_b = tmp_path / "repo-b"
     target_a.mkdir()
@@ -1238,8 +1236,8 @@ def test_tree_fingerprint_distinguishes_untracked_name_content_boundary(tmp_path
     (target_a / "a").write_text("bc")
     (target_b / "ab").write_text("c")
 
-    fp_a = verification._tree_fingerprint(target_a)
-    fp_b = verification._tree_fingerprint(target_b)
+    fp_a = localio.tree_fingerprint(target_a)
+    fp_b = localio.tree_fingerprint(target_b)
 
     assert fp_a is not None
     assert fp_b is not None
@@ -2866,8 +2864,6 @@ def test_tree_fingerprint_distinguishes_tracked_binary_changes(tmp_path):
     # `git diff HEAD` elides binary content ("Binary files differ"), so two
     # different modifications of a tracked binary would collide without
     # --binary. The fingerprint must include the binary delta.
-    from brigade.work_cmd import verification
-
     target_a = tmp_path / "repo-a"
     target_b = tmp_path / "repo-b"
     env = {
@@ -2895,8 +2891,8 @@ def test_tree_fingerprint_distinguishes_tracked_binary_changes(tmp_path):
     (target_a / "blob.bin").write_bytes(b"\x00\x01\x02changed-one-way")
     (target_b / "blob.bin").write_bytes(b"\x00\x01\x02changed-another")
 
-    fp_a = verification._tree_fingerprint(target_a)
-    fp_b = verification._tree_fingerprint(target_b)
+    fp_a = localio.tree_fingerprint(target_a)
+    fp_b = localio.tree_fingerprint(target_b)
 
     assert fp_a is not None
     assert fp_b is not None

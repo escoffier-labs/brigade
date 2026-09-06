@@ -123,7 +123,8 @@ def test_parse_older_than_default_and_units():
 def test_reap_terminalizes_stale_owner_as_orphaned(tmp_path, capsys, monkeypatch):
     repo = _repo(tmp_path)
     expected_tree = "f" * 40
-    monkeypatch.setattr(localio, "tree_fingerprint", lambda path: expected_tree)
+    expected_head = "h" * 40
+    monkeypatch.setattr(localio, "tree_fingerprint_with_head", lambda path: (expected_tree, expected_head))
     (repo / "secret-name.txt").write_text("dirty\n")
     (repo / "tracked.txt").write_text("changed\n")
     run_dir = _write_run(repo, "20260820-120000-orphan01", extra=dict(JOURNAL_REQUESTED))
@@ -145,6 +146,7 @@ def test_reap_terminalizes_stale_owner_as_orphaned(tmp_path, capsys, monkeypatch
     assert meta["orphaned_at"]
     assert meta["finished_at"]
     assert meta["tree_fingerprint"] == expected_tree
+    assert meta["tree_fingerprint_head"] == expected_head
     assert "secret-name.txt" not in json.dumps(meta)
 
     journal = run_dir / "events" / "lifecycle.jsonl"

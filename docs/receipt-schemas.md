@@ -16,9 +16,10 @@ JSON Schema files.
 3. **Absent vs null:** optional fields are **omitted** when unset. Producers should
    not write JSON `null` for optional top-level fields unless the field's presence
    carries semantic meaning. Intentional nullable shapes:
-   - Verify version 2 always includes `baseline_commit`, `tree_fingerprint`, and
-     `changes_patch_sha256`. All three are `null` when identity capture is
-     unavailable, keeping the binding tuple structurally complete.
+   - Verify version 2 always includes `baseline_commit`, `tree_fingerprint`,
+     `tree_fingerprint_head`, and `changes_patch_sha256`. All four are `null`
+     when identity capture is unavailable, keeping the binding tuple structurally
+     complete.
    - Verify `commands[].exit_code` may be `null` when an interrupted or timed-out
      child has no exit status. A command rejected before execution uses exit code `2`.
    - Run `scheduler.used` may be `null` while a run is in flight.
@@ -63,6 +64,7 @@ use schema version 2. Readers older than version 2 refuse these events with
 | `evidence` | object | no | Workspace evidence snapshot |
 | `baseline_commit` | string \| null | yes | Verified Git baseline, or `null` when identity capture is unavailable |
 | `tree_fingerprint` | string \| null | yes | Verified Git tree hash, or `null` with the unavailable identity tuple |
+| `tree_fingerprint_head` | string \| null | yes | Fingerprint-time HEAD commit used to reset excluded evidence paths, or `null` with the unavailable identity tuple |
 | `changes_patch_sha256` | string \| null | yes | SHA-256 of `changes.patch`, or `null` with the unavailable identity tuple |
 | `git` | object | no | `{head, branch, dirty_files}` |
 | `code_graph_delta` | object | no | GraphTrail summary |
@@ -337,6 +339,9 @@ original file is missing, corrupt, or not an object.
 | `code_graph_delta` | object | no | |
 | `context_eval` | object | no | |
 | `artifacts` | string | no | Output directory |
+| `tree_fingerprint` | string \| null | no | Final Git tree fingerprint for the run, or `null` when not captured |
+| `tree_fingerprint_head` | string \| null | no | Fingerprint-time HEAD commit used to reset excluded evidence paths, or `null` when not captured |
+| `baseline_commit` | string \| null | no | Verified Git baseline for the run, or `null` when not captured |
 | `handoff` | string | no | Handoff path |
 | `error` | string | no | |
 | `failure_phase`, `failure_kind` | string | no | |
@@ -1587,7 +1592,7 @@ Predicate carried by the commit-linkage statement.
 | --- | --- | --- |
 | `rule` | string | `brigade.tree_fingerprint.v1` |
 | `exclusions` | array of string | Evidence paths excluded from the fingerprint |
-| `normalizationBase` | object | `{"gitCommit": <sha>, "source": "run-baseline" \| "first-parent-assumed"}` or `{"status": "unavailable"}` |
+| `normalizationBase` | object | `{"gitCommit": <sha>, "source": "receipt-head" \| "run-baseline" \| "first-parent-assumed"}` or `{"status": "unavailable"}` |
 | `normalizedCommitTree` | object | `{"gitTree": <sha>}` or `{"status": "unavailable"}` |
 
 **`trailers` object**

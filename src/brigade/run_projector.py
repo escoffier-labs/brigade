@@ -66,6 +66,7 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "requester_keyid",
         "request",
         "tree_fingerprint",
+        "tree_fingerprint_head",
         "verification_contract",
         "run_budget",
         "run_budget_projection",
