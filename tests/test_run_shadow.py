@@ -1135,7 +1135,7 @@ def test_version_one_shadow_artifact_is_stale(enabled, tmp_path):
 def test_signed_approval_semantics_v7_quarantines_old_v6_shadow_artifact(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
-    assert run_projector.PROJECTOR_VERSION == 7
+    assert run_projector.PROJECTOR_VERSION == 8
 
     _write_run_json(run_dir, "started")
     _write_run_json_locked(repo, run_dir, "started")
@@ -1153,7 +1153,7 @@ def test_signed_approval_semantics_v7_quarantines_old_v6_shadow_artifact(enabled
     assert quarantined
     assert quarantined[0].read_bytes() == stale_bytes
     fresh = json.loads(artifact.read_text())
-    assert fresh["projector_version"] == 7
+    assert fresh["projector_version"] == 8
     assert fresh["errors"] == 0
 
 

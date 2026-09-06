@@ -13,13 +13,13 @@ import hashlib
 import hmac
 import html
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs
 
 from . import fleet_command_deck, fleet_hub, fleet_hub_model_roster, fleet_hub_preference, fleet_model_roster
-from . import run_preference
+from . import fleet_hub_policy, fleet_policy_page, run_preference
 
 CSRF_PURPOSE = b"brigade.fleet-roster-form.v1"
 MAX_FORM_BYTES = 64 * 1024
@@ -65,6 +65,22 @@ class CloudRow:
 
 
 @dataclass(frozen=True)
+class PolicyContext:
+    """What the authoritative policy document says about the fields on this page.
+
+    Read-only here. Once the authority is active the dropdowns stay usable but
+    submit a scoped policy preview instead of a legacy write, so they need the
+    document's own revision, roles, and seat names to render honestly.
+    """
+
+    revision: int = 0
+    roles: dict[str, str] = field(default_factory=dict)
+    admission_defaults: dict[str, str] = field(default_factory=dict)
+    seats: tuple[str, ...] = ()
+    available: bool = False
+
+
+@dataclass(frozen=True)
 class RosterView:
     revision: int
     revision_updated_at: str
@@ -76,6 +92,8 @@ class RosterView:
     retired: tuple[dict[str, Any], ...]
     preference: dict[str, str | None]
     preference_updated_at: str
+    activation: fleet_policy_page.Activation = fleet_policy_page.UNKNOWN_ACTIVATION
+    policy: PolicyContext = field(default_factory=PolicyContext)
 
 
 @dataclass(frozen=True)
@@ -101,7 +119,12 @@ class ApplyResult:
 # --- projection --------------------------------------------------------------
 
 
-def load_view(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig) -> RosterView:
+def load_view(
+    conn: sqlite3.Connection,
+    config: fleet_command_deck.DeckConfig,
+    *,
+    activation: fleet_policy_page.Activation | None = None,
+) -> RosterView:
     meta = conn.execute("SELECT revision, updated_at, updated_by FROM model_roster_meta WHERE singleton=1").fetchone()
     if meta is None:
         raise fleet_hub.FleetHubError("model roster revision metadata is missing")
@@ -143,6 +166,7 @@ def load_view(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig) -
     ).hexdigest()
     pref_meta = fleet_hub_preference.get_run_preference_meta(conn)
     return RosterView(
+        policy=_policy_context(conn),
         revision=int(meta[0]),
         revision_updated_at=str(meta[1]),
         updated_by=str(meta[2] or ""),
@@ -153,7 +177,33 @@ def load_view(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig) -
         retired=tuple(retired_rows),
         preference=fleet_hub_preference.get_run_preference(conn),
         preference_updated_at=str(pref_meta["updated_at"] or ""),
+        activation=activation if activation is not None else fleet_policy_page.UNKNOWN_ACTIVATION,
     )
+
+
+def _policy_context(conn: sqlite3.Connection) -> PolicyContext:
+    """Read the authoritative document. An unreadable authority stays unavailable."""
+    try:
+        current = fleet_hub_policy.current_policy(conn)
+        document = current["document"]
+        consumers = document["consumers"]
+        return PolicyContext(
+            revision=int(current["revision"]),
+            roles={key: str(value) for key, value in (document["defaults"].get("roles") or {}).items()},
+            admission_defaults={
+                consumer: str(
+                    ((consumers.get(consumer) or {}).get("default_patches") or {})
+                    .get("roles", {})
+                    .get(fleet_policy_page.ADMISSION_ROLE, "")
+                    or ""
+                )
+                for consumer in CONSUMERS
+            },
+            seats=tuple(sorted(document["seats"])),
+            available=True,
+        )
+    except (fleet_hub.FleetHubError, sqlite3.Error, KeyError, TypeError, ValueError):
+        return PolicyContext()
 
 
 # --- render ------------------------------------------------------------------
@@ -193,6 +243,117 @@ def _checkbox(name: str, checked: bool, *, editable: bool) -> str:
     )
 
 
+def _policy_select(name: str, current: str, seats: tuple[str, ...]) -> str:
+    """A seat dropdown backed by the policy document's own seat names."""
+    options = [f'<option value=""{" selected" if not current else ""}>(unset)</option>']
+    options.extend(
+        f'<option value="{_esc(seat)}"{" selected" if seat == current else ""}>{_esc(seat)}</option>' for seat in seats
+    )
+    if current and current not in seats:
+        options.append(f'<option value="{_esc(current)}" selected>{_esc(current)} (not in policy)</option>')
+    return f'<select name="{_esc(name)}">{"".join(options)}</select>'
+
+
+def _policy_hidden(scope: str, target: str, revision: int, csrf: str) -> str:
+    return (
+        f'<input type="hidden" name="scope" value="{_esc(scope)}">'
+        f'<input type="hidden" name="target" value="{_esc(target)}">'
+        f'<input type="hidden" name="expected_version" value="{revision}">'
+        f'<input type="hidden" name="csrf" value="{_esc(csrf)}">'
+    )
+
+
+def _policy_preview_actions(reason: str) -> str:
+    """Preview only: the policy page renders the diff and the confirm-save step."""
+    return (
+        '<p class="roster-actions"><input type="hidden" name="reason" '
+        f'value="{_esc(reason)}">'
+        '<button type="submit" name="action" value="preview">Preview change</button>'
+        '<span class="hint">Opens the policy page with the exact diff, the affected consumers and repositories, '
+        "and the live sessions. Saving is a separate confirmation there.</span></p>"
+    )
+
+
+ADMISSION_HINT = (
+    '<p class="hint">This is the seat the low-level admission call falls back to when a caller asks to admit '
+    "work without naming a seat. Ordinary <code>brigade run</code> passes an explicit worker, or resolves a "
+    "seat from the run role preferences above, so it does not reach this fallback; the t3-fleet controller "
+    "normally requires an explicit seat too. It only affects callers that omit the seat. It is not a model, "
+    "not a default model, and not a replacement global roster. Left unset, an omitted-seat admission is "
+    "refused as <code>default-missing</code> rather than silently picking a seat. The authoritative policy "
+    "name for this fallback is <code>admission_default</code>, edited on the "
+    '<a href="/deck/policy">policy page</a>; it is a distinct role from <code>impl</code>.</p>'
+)
+
+
+def _authoritative_roles_panel(view: RosterView, policy_csrf: str) -> str:
+    """The same Roles dropdowns, submitting one scoped ``defaults.roles`` preview."""
+    cells = "".join(
+        f"<label>{_esc(fleet_policy_page.ROLE_LABELS.get(role, role))} ({_esc(role)})"
+        f"{_policy_select(f'field.role_{role}', view.policy.roles.get(role) or '', view.policy.seats)}</label>"
+        for role in ROLES
+    )
+    return (
+        '<section class="panel" aria-labelledby="roles"><header><h2 id="roles">Roles</h2>'
+        f'<p class="panel-count">policy revision {view.policy.revision}</p></header>'
+        '<form method="post" action="/deck/policy" class="roster-form">'
+        + _policy_hidden("defaults", "", view.policy.revision, policy_csrf)
+        + f'<div class="roster-grid">{cells}</div>'
+        '<p class="hint">These write <code>defaults.roles</code> in the fleet policy document, which is what '
+        "dispatch resolves once the authority is active. The keys (impl, review, research, scout, security, "
+        "chef) are what consumers read; the names beside them are labels only. Seats come from the policy "
+        'document; the full editor is on the <a href="/deck/policy">policy page</a>.</p>'
+        + _policy_preview_actions("role change from the roster page")
+        + "</form></section>"
+    )
+
+
+def _authoritative_admission_panel(view: RosterView, policy_csrf: str) -> str:
+    """One scoped consumer preview per consumer for ``admission_default``."""
+    blocks = "".join(
+        '<form method="post" action="/deck/policy" class="roster-form">'
+        + _policy_hidden("consumer", consumer, view.policy.revision, policy_csrf)
+        + f"<label>{_esc(consumer)}"
+        + _policy_select(
+            f"field.role_{fleet_policy_page.ADMISSION_ROLE}",
+            view.policy.admission_defaults.get(consumer) or "",
+            view.policy.seats,
+        )
+        + "</label>"
+        + _policy_preview_actions(f"admission fallback for {consumer}")
+        + "</form>"
+        for consumer in CONSUMERS
+    )
+    return (
+        '<section class="panel" aria-labelledby="defaults"><header>'
+        '<h2 id="defaults">Admission fallback seat</h2>'
+        f'<p class="panel-count">policy revision {view.policy.revision}</p></header>'
+        f'<div class="roster-grid">{blocks}</div>{ADMISSION_HINT}'
+        '<p class="hint">Under an active authority this is the consumer\'s '
+        "<code>default_patches.roles.admission_default</code> leaf, not the legacy consumer-defaults table.</p>"
+        "</section>"
+    )
+
+
+def _authority_banner(activation: fleet_policy_page.Activation) -> str:
+    """State plainly which store these dropdowns write, and link the expert path."""
+    if activation.active:
+        return (
+            '<p class="banner">Policy authority is <strong>active</strong>: role assignments are owned by the '
+            "fleet policy document, so the dropdowns below now edit that document. Changing one opens a preview "
+            'on the <a href="/deck/policy">policy page</a>, where the diff is confirmed and written under a '
+            "compare-and-swap. This page no longer writes run preference directly.</p>"
+        )
+    staged = "not activated" if activation.state == "staged" else "unknown"
+    return (
+        f'<p class="banner">Policy authority is {_esc(staged)}. The Roles dropdowns below still write the legacy '
+        "run preference, which is what dispatch reads today. The fleet policy document is a "
+        "<strong>staged policy</strong> until the migration reports activation; edit it on the "
+        '<a href="/deck/policy">policy page</a> for authoritative roles, seats, consumer overrides, and repository '
+        "overrides.</p>"
+    )
+
+
 def render(
     view: RosterView,
     *,
@@ -203,8 +364,14 @@ def render(
     banner: str | None = None,
     error: str | None = None,
     submission: Submission | None = None,
+    policy_csrf: str = "",
 ) -> str:
-    """The roster page. ``submission`` re-selects what the operator sent on a 409 or 422."""
+    """The roster page. ``submission`` re-selects what the operator sent on a 409 or 422.
+
+    ``policy_csrf`` is the policy page's form token. It is only used once the
+    authority is active, when the role and admission-fallback dropdowns post a
+    scoped policy preview instead of a legacy run-preference write.
+    """
     roles = dict(view.preference)
     notes = view.preference.get("notes") or ""
     seats_on = {row.seat for row in view.seats if row.enabled}
@@ -216,7 +383,12 @@ def render(
         seats_on = set(submission.seats_on)
         cloud_on = set(submission.cloud_on)
         defaults.update(submission.defaults)
-    d = "" if editable else " disabled"
+    # A live policy authority owns roles and the admission fallback. The
+    # controls stay usable, but they stop writing the legacy store: they submit
+    # a scoped preview against the policy document instead. If the document
+    # cannot be read, the controls go read-only rather than write anywhere.
+    authoritative = editable and view.activation.active and view.policy.available
+    legacy_editable = editable and not view.activation.active
     parts: list[str] = ['<main class="deck-shell">']
     parts.append(
         '<header class="masthead"><div><p class="eyebrow">Fleet operations</p><h1>Command Deck &middot; Roster</h1>'
@@ -226,14 +398,21 @@ def render(
     )
     parts.append(
         '<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> '
-        '<a href="/deck/roster">roster</a> <a href="/view/machines">machines board</a></nav>'
+        '<a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> '
+        '<a href="/view/machines">machines board</a></nav>'
     )
+    parts.append(_authority_banner(view.activation))
     if banner:
         parts.append(f'<p class="banner">{_esc(banner)}</p>')
     if error:
         parts.append(f'<p class="banner banner--error">{_esc(error)}</p>')
     if not editable:
         parts.append('<p class="banner">read-only: enroll with the fleet token to edit</p>')
+    # 1. roles. Under an active authority this panel is its own policy form, so
+    # it is emitted before the legacy form opens rather than nested inside it.
+    if authoritative:
+        parts.append(_authoritative_roles_panel(view, policy_csrf))
+        parts.append(_authoritative_admission_panel(view, policy_csrf))
     parts.append('<form method="post" action="/deck/roster" class="roster-form">')
     parts.append(f'<input type="hidden" name="expected_revision" value="{view.revision}">')
     parts.append(
@@ -242,16 +421,28 @@ def render(
     parts.append(f'<input type="hidden" name="expected_cloud_state" value="{_esc(view.cloud_state)}">')
     if editable:
         parts.append(f'<input type="hidden" name="csrf" value="{_esc(csrf)}">')
-    # 1. roles
-    role_cells = "".join(
-        f"<label>{_esc(role)}{_select(f'role.{role}', roles.get(role) or '', view.seats, editable=editable)}</label>"
-        for role in ROLES
-    )
-    parts.append(
-        '<section class="panel" aria-labelledby="roles"><header><h2 id="roles">Roles</h2></header>'
-        f'<div class="roster-grid">{role_cells}</div>'
-        f'<label>notes<textarea name="notes" maxlength="240" rows="2"{d}>{_esc(notes)}</textarea></label></section>'
-    )
+    if not authoritative:
+        role_cells = "".join(
+            f"<label>{_esc(fleet_policy_page.ROLE_LABELS.get(role, role))} ({_esc(role)})"
+            f"{_select(f'role.{role}', roles.get(role) or '', view.seats, editable=legacy_editable)}</label>"
+            for role in ROLES
+        )
+        notes_disabled = "" if legacy_editable else " disabled"
+        unreadable = (
+            '<p class="hint">The policy authority is active but its document could not be read, so these '
+            "controls are read-only rather than writing a store that no longer owns them.</p>"
+            if view.activation.active
+            else ""
+        )
+        parts.append(
+            '<section class="panel" aria-labelledby="roles"><header><h2 id="roles">Roles</h2></header>'
+            f'<div class="roster-grid">{role_cells}</div>'
+            '<p class="hint">These are the run preference roles a dispatch reads when it does not name a seat '
+            "explicitly. The keys (impl, review, research, scout, security, chef) are what consumers read; the "
+            f"names beside them are labels only.</p>{unreadable}"
+            f'<label>notes<textarea name="notes" maxlength="240" rows="2"{notes_disabled}>'
+            f"{_esc(notes)}</textarea></label></section>"
+        )
     # 2. seats
     seat_rows = []
     for row in view.seats:
@@ -282,15 +473,18 @@ def render(
         '<div class="table-wrap"><table class="roster-table"><thead><tr><th>Provider</th><th>On</th><th>Limit</th>'
         f"<th>Hosted</th><th>Circuit</th></tr></thead><tbody>{cloud_rows}</tbody></table></div></section>"
     )
-    # 4. consumer defaults
+    # 4. admission fallback seat (the old "consumer defaults")
     default_cells = "".join(
-        f"<label>{_esc(consumer)}{_select(f'default.{consumer}', defaults.get(consumer) or '', view.seats, editable=editable, binding='brigade_cli' if consumer == 'brigade-run' else 't3_instance_id')}</label>"
+        f"<label>{_esc(consumer)}{_select(f'default.{consumer}', defaults.get(consumer) or '', view.seats, editable=legacy_editable, binding='brigade_cli' if consumer == 'brigade-run' else 't3_instance_id')}</label>"
         for consumer in CONSUMERS
     )
-    parts.append(
-        '<section class="panel" aria-labelledby="defaults"><header><h2 id="defaults">Consumer defaults</h2></header>'
-        f'<div class="roster-grid">{default_cells}</div></section>'
-    )
+    if not authoritative:
+        parts.append(
+            '<section class="panel" aria-labelledby="defaults"><header>'
+            '<h2 id="defaults">Admission fallback seat (legacy)</h2></header>'
+            f'<div class="roster-grid">{default_cells}</div>'
+            f"{ADMISSION_HINT}</section>"
+        )
     # 5. retired
     retired_items = "".join(
         f"<li>{_esc(item['provider'])}/{_esc(item['family'])} &middot; "
@@ -403,11 +597,41 @@ def _write_cloud_enabled(conn: sqlite3.Connection, row: CloudRow, enabled: bool)
     )
 
 
-def apply(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig, submission: Submission) -> ApplyResult:
+def _authority_refusal(view: RosterView, submission: Submission) -> str | None:
+    """Once the policy authority is active, this form must not be a second writer."""
+    if not view.activation.active:
+        return None
+    wanted = {role: seat for role, seat in submission.roles.items() if seat}
+    current = {role: seat for role, seat in view.preference.items() if seat and role in ROLES}
+    if wanted != current or submission.notes != (view.preference.get("notes") or ""):
+        return (
+            "policy authority is active: role assignments are saved on the policy page, which routes them "
+            "through preview and a compare-and-swap. This form no longer writes run preference."
+        )
+    for consumer, seat in submission.defaults.items():
+        if seat != (view.defaults.get(consumer) or ""):
+            return (
+                "policy authority is active: the admission fallback seat is the admission_default role in the "
+                "policy document. Change it on the policy page."
+            )
+    return None
+
+
+def apply(
+    conn: sqlite3.Connection,
+    config: fleet_command_deck.DeckConfig,
+    submission: Submission,
+    *,
+    activation: fleet_policy_page.Activation | None = None,
+) -> ApplyResult:
     """One Save: fences, validation, then only the differences, in one transaction."""
     conn.execute("BEGIN IMMEDIATE")
     try:
-        view = load_view(conn, config)
+        view = load_view(conn, config, activation=activation)
+        refusal = _authority_refusal(view, submission)
+        if refusal is not None:
+            conn.rollback()
+            return ApplyResult("invalid", refusal, view.revision)
         if view.revision != submission.expected_revision:
             conn.rollback()
             return ApplyResult(

@@ -12,6 +12,7 @@ from contextlib import contextmanager
 import pytest
 
 from brigade import fleet_command_deck as deck
+from brigade import fleet_repo_policy_page as repos_page
 from brigade import fleet_hub
 from brigade import fleet_hub_status
 from brigade import fleet_hub_sessions
@@ -274,7 +275,7 @@ def test_unrelated_brigade_basename_does_not_attach_session_overlap(conn, now):
     assert session_row.target != run_row.target
     assert session_row.repo_identity == session_identity
     assert session_row.live == ()
-    html = deck.render_repos(view, nonce="nonce", now=now)
+    html = repos_page.render(view, nonce="nonce", now=now)
     assert ">brigade<" in html
     assert session_row.target in html
     assert html.count("! overlap") == 1
@@ -1147,3 +1148,376 @@ class TestDeckCli:
         monkeypatch.setenv("BRIGADE_FLEET_DECK_CONFIG", "   ")
         assert cli.main(argv) == 0
         assert captured["deck_config_path"] is None
+
+
+# --- control plane projection (#fleet policy UI) ------------------------------
+
+
+def _control_plane_snapshot(**overrides):
+    snapshot = {
+        "policy": {"version": "7", "digest": "sha256:abc", "updated_at": "2026-09-05T11:00:00Z"},
+        "sessions": [],
+        "machines": [
+            {
+                "id": "worker-linux-1",
+                "os": "linux",
+                "state": "online",
+                "last_observed_at": "2026-09-05T11:59:00Z",
+                "load": 1,
+                "capacity": 4,
+                "active_claims": 1,
+                "available_slots": 3,
+                "eligible_queued_work": 0,
+                "unused_reason": "no eligible queued work",
+            }
+        ],
+        "quota": [{"pool": "pool-one", "used": 3, "limit": 10, "observed_at": "2026-09-05T11:00:00Z"}],
+        "routes": [
+            {
+                "decision_id": "d-1",
+                "policy_version": "7",
+                "origin": "brigade-run",
+                "selected": "seat-alpha",
+                "reason": "role impl",
+                "candidates": ["seat-alpha", "seat-beta"],
+                "created_at": "2026-09-05T11:30:00Z",
+                "override_reason": "",
+                "state": "dispatched",
+            }
+        ],
+        "queue": {"eligible_count": 0, "queued_count": 0, "blocked": []},
+        "integrations": [
+            {
+                "id": "routine-one",
+                "routine_state": "active",
+                "last_pickup": "2026-09-05T11:40:00Z",
+                "last_report": "2026-09-05T11:45:00Z",
+                "queued_age": "0s",
+                "detail": "",
+            }
+        ],
+    }
+    snapshot.update(overrides)
+    return snapshot
+
+
+def _empty_view(control_plane=None, rail=()):
+    return deck.DeckView(
+        stations=(),
+        rail=tuple(rail),
+        repos=(),
+        outcomes=(),
+        observers=(),
+        control_plane=control_plane,
+    )
+
+
+def test_empty_rail_without_telemetry_is_not_all_clear():
+    view = _empty_view()
+    assert deck.deck_verdict(view) == "COVERAGE UNKNOWN (1)"
+    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    assert "ALL CLEAR" not in html
+    assert "COVERAGE UNKNOWN" in html
+    assert "not the same as nothing being wrong" in html
+
+
+def test_full_telemetry_with_no_signals_is_all_clear():
+    view = _empty_view(deck.control_plane_from_snapshot(_control_plane_snapshot()))
+    assert deck.coverage_gaps(view.control_plane) == ()
+    assert deck.deck_verdict(view) == "ALL CLEAR"
+
+
+def test_partial_telemetry_names_the_missing_sections():
+    snapshot = _control_plane_snapshot()
+    del snapshot["quota"]
+    del snapshot["routes"]
+    view = _empty_view(deck.control_plane_from_snapshot(snapshot))
+    assert set(deck.coverage_gaps(view.control_plane)) == {"quota", "routes"}
+    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    assert "no telemetry for: quota, routes" in html
+    assert "unknown, not unlimited" in html
+    assert "unknown, not unrouted" in html
+
+
+def test_existing_run_and_claim_signals_survive_the_verdict_change():
+    entry = deck.RailEntry(kind="failed", node_id=NODE_A, repo="acme/tool", run_id="r-1", detail="exit 1")
+    view = _empty_view(deck.control_plane_from_snapshot(_control_plane_snapshot()), rail=[entry])
+    assert deck.deck_verdict(view) == "NEEDS ATTENTION (1)"
+    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    assert "acme/tool" in html
+    assert "exit 1" in html
+
+
+def test_integration_needing_attention_is_not_reported_as_paused():
+    snapshot = _control_plane_snapshot(
+        integrations=[
+            {
+                "id": "routine-one",
+                "routine_state": "needs-attention",
+                "last_pickup": "2026-09-05T11:40:00Z",
+                "last_report": None,
+                "queued_age": "40m",
+                "detail": "away confirmation pending",
+            }
+        ]
+    )
+    view = _empty_view(deck.control_plane_from_snapshot(snapshot))
+    assert deck.deck_verdict(view) == "NEEDS ATTENTION (1)"
+    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    assert "needs-attention" in html
+    assert "paused" not in html.replace("never proof it is paused", "")
+    assert "unknown" in html  # last_report was absent
+
+
+def test_unknown_integration_state_is_a_coverage_gap_not_active():
+    snapshot = _control_plane_snapshot(integrations=[{"id": "routine-one", "routine_state": "running"}])
+    plane = deck.control_plane_from_snapshot(snapshot)
+    assert plane.integrations[0].routine_state == "unknown"
+    assert "integration readiness" in deck.coverage_gaps(plane)
+
+
+def test_machine_capacity_and_idle_reasons_render():
+    view = _empty_view(deck.control_plane_from_snapshot(_control_plane_snapshot()))
+    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    assert "worker-linux-1" in html
+    assert "1/4" in html
+    assert "no eligible queued work" in html
+
+
+def test_quota_headroom_is_separated_from_execution_availability():
+    view = _empty_view(deck.control_plane_from_snapshot(_control_plane_snapshot()))
+    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    assert "pool-one" in html
+    assert "not evidence that a bot or runner will execute" in html
+
+
+def _quota_effective_rows():
+    return [
+        {
+            "account_id": "account-one",
+            "pool_id": "pool-one",
+            "provider": "provider-a",
+            "admitted": False,
+            "reasons": ["window exhausted"],
+            "windows": [
+                {
+                    "window_id": "5h",
+                    "state": "exhausted",
+                    "used": 10,
+                    "limit": 10,
+                    "remaining": 0,
+                    "resets_at": "2026-09-05T16:00:00Z",
+                    "source": "provider-report",
+                    "observation_id": "obs-7",
+                    "reason": "hard limit reached",
+                }
+            ],
+        }
+    ]
+
+
+def test_effective_quota_is_preferred_over_raw_observations():
+    snapshot = _control_plane_snapshot(quota_effective=_quota_effective_rows())
+    plane = deck.control_plane_from_snapshot(snapshot)
+    assert plane.quota_effective_present is True
+    row = plane.quota_effective[0]
+    assert row.account_id == "account-one"
+    assert row.admitted == "no"
+    assert row.windows[0].remaining == "0"
+    assert row.windows[0].observation_id == "obs-7"
+    html = deck.render_deck(_empty_view(plane), nonce="nonce", now=NOW)
+    assert "Effective capacity" in html
+    assert "obs-7" in html
+    assert "window exhausted" in html
+    # The raw rows are still shown, but only as history.
+    assert "Quota observation history" in html
+    assert "not available subscription headroom" in html
+
+
+def test_absent_effective_quota_is_unknown_and_raw_rows_stay_history():
+    plane = deck.control_plane_from_snapshot(_control_plane_snapshot())
+    assert plane.quota_effective_present is False
+    html = deck.render_deck(_empty_view(plane), nonce="nonce", now=NOW)
+    assert "Effective headroom is <strong>unknown</strong>" in html
+    assert "no centrally computed quota projection is attached" in html
+    assert "pool-one" in html  # the raw observation is still visible
+    assert "Quota observation history" in html
+
+
+def test_the_deck_applies_no_quota_precedence_of_its_own():
+    """Freshness and override precedence belong to the central projection."""
+    rows = _quota_effective_rows()
+    rows[0]["windows"][0]["remaining"] = 4
+    rows[0]["windows"][0]["state"] = "open"
+    rows[0]["admitted"] = True
+    snapshot = _control_plane_snapshot(
+        quota_effective=rows,
+        # A raw observation that disagrees, and is newer.
+        quota=[{"pool": "pool-one", "used": 10, "limit": 10, "observed_at": "2026-09-05T11:59:00Z"}],
+    )
+    html = deck.render_deck(_empty_view(deck.control_plane_from_snapshot(snapshot)), nonce="nonce", now=NOW)
+    effective = html.split("Effective capacity", 1)[1].split("Quota observation history", 1)[0]
+    assert "remaining <strong>4</strong>" in effective
+    assert "used 10 of 10" not in effective
+
+
+def test_integration_health_separates_scheduling_pickup_age_and_auth():
+    snapshot = _control_plane_snapshot(
+        integrations=[
+            {
+                "id": "grokbot",
+                "routine_state": "needs-attention",
+                "last_pickup": "2026-09-05T11:40:00Z",
+                "last_report": None,
+                "queued_age": "40m",
+                "auth_state": "unauthenticated",
+                "detail": "away confirmation pending",
+            }
+        ]
+    )
+    plane = deck.control_plane_from_snapshot(snapshot)
+    item = plane.integrations[0]
+    assert (item.routine_state, item.auth_state) == ("needs-attention", "unauthenticated")
+    assert item.last_pickup == "2026-09-05T11:40:00Z"
+    assert item.last_report == deck.UNKNOWN
+    html = deck.render_deck(_empty_view(plane), nonce="nonce", now=NOW)
+    assert "routine needs-attention" in html
+    assert "auth unauthenticated" in html
+    assert "queued for 40m" in html
+    assert "away confirmation pending" in html
+    assert "not harness capacity" in html
+    assert "four separate facts" in html
+
+
+def test_an_unrecognised_auth_state_is_unknown_not_authenticated():
+    snapshot = _control_plane_snapshot(integrations=[{"id": "grokbot", "auth_state": "probably fine"}])
+    plane = deck.control_plane_from_snapshot(snapshot)
+    assert plane.integrations[0].auth_state == deck.UNKNOWN
+
+
+def test_routing_receipts_and_overrides_render():
+    snapshot = _control_plane_snapshot()
+    snapshot["routes"][0]["override_reason"] = "operator pinned seat-beta"
+    view = _empty_view(deck.control_plane_from_snapshot(snapshot))
+    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    assert "d-1" in html
+    assert "seat-alpha" in html
+    assert "operator pinned seat-beta" in html
+
+
+def test_blocked_queue_reasons_are_attention_not_zero():
+    snapshot = _control_plane_snapshot(
+        queue={"eligible_count": 2, "queued_count": 5, "blocked": [{"id": "job-1", "reason": "no eligible machine"}]}
+    )
+    view = _empty_view(deck.control_plane_from_snapshot(snapshot))
+    assert deck.deck_verdict(view) == "NEEDS ATTENTION (1)"
+    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    assert "no eligible machine" in html
+
+
+def test_control_plane_values_are_escaped():
+    snapshot = _control_plane_snapshot()
+    snapshot["machines"][0]["unused_reason"] = "<script>alert(1)</script>"
+    view = _empty_view(deck.control_plane_from_snapshot(snapshot))
+    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_control_plane_adapter_tolerates_a_missing_snapshot():
+    assert deck.control_plane_from_snapshot(None) is None
+    assert deck.coverage_gaps(None) == ("control-plane telemetry",)
+
+
+def test_build_view_carries_the_control_plane(conn, now):
+    plane = deck.control_plane_from_snapshot(_control_plane_snapshot())
+    view = deck.build_view(
+        deck.DeckConfig(stations=(deck.StationConfig(NODE_A, "Alpha", 10),)),
+        live_runs=[],
+        claims=[],
+        enrolled_labels={NODE_A: "Alpha"},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=now,
+        control_plane=plane,
+    )
+    assert view.control_plane is plane
+    assert 'href="/deck/policy"' in deck.render_deck(view, nonce="nonce", now=now)
+
+
+def _policy_machines():
+    from brigade import fleet_policy
+
+    return {
+        "schema": fleet_policy.POLICY_SCHEMA,
+        "defaults": {},
+        "machines": {
+            "worker-idle": {"os": "linux", "node_id": NODE_A, "concurrency": 4},
+            "worker-stale": {"os": "linux", "node_id": NODE_B, "concurrency": 2},
+            "worker-queued": {"os": "linux", "node_id": NODE_C, "concurrency": 1},
+            "worker-unknown": {"os": "linux", "node_id": "44444444-4444-4444-8444-444444444444", "concurrency": 2},
+        },
+        "seats": {"seat-alpha": {"provider": "provider-a", "model": "model-a-1"}},
+        "consumers": {},
+        "repositories": {},
+    }
+
+
+def _insert_telemetry(db, node_id, *, observed_at, status="available", running=None, load=0.1):
+    conn = fleet_hub.open_db(db)
+    try:
+        conn.execute(
+            "INSERT INTO fleet_machine_telemetry (node_id, machine, observed_at, ttl_seconds, status, load, "
+            "running, active_claims, usable_seats, credential_state, observed_id, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                node_id,
+                node_id,
+                observed_at,
+                300,
+                status,
+                load,
+                json.dumps(running or {"session_ids": [], "run_ids": []}),
+                "[]",
+                '["seat-alpha"]',
+                "ok",
+                f"obs-{node_id[:8]}",
+                observed_at,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_deck_http_renders_fresh_stale_queued_idle_and_unknown_slots(tmp_path):
+    from brigade import fleet_hub_policy
+
+    with _start_hub(tmp_path, CONFIG) as (hub, db):
+        conn = fleet_hub.open_db(db)
+        try:
+            fleet_hub_policy.save_policy(
+                conn, _policy_machines(), expected_version=1, actor="operator", reason="seed machines"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        fresh = now.isoformat()
+        stale = (now - timedelta(hours=2)).isoformat()
+        _insert_telemetry(db, NODE_A, observed_at=fresh, running={"session_ids": [], "run_ids": []})
+        _insert_telemetry(db, NODE_B, observed_at=stale, running={"session_ids": [], "run_ids": []})
+        _insert_telemetry(db, NODE_C, observed_at=fresh, running={"session_ids": ["session-busy"], "run_ids": []})
+        status, _headers, page = _request(hub, "GET", "/deck", headers=_bearer())
+        assert status == 200, page
+        assert "worker-idle" in page
+        assert "idle-capacity" in page
+        assert "worker-stale" in page
+        assert "stale-telemetry" in page
+        assert "worker-queued" in page
+        assert ">0<" in page
+        assert "worker-unknown" in page
+        assert "unknown-telemetry" in page
+        assert "ALL CLEAR" not in page or "unknown" in page.lower()

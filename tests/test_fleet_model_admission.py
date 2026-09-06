@@ -581,6 +581,33 @@ def test_versioned_resolution_selects_hub_row_over_local_retired_default():
     assert decision["policy_model"] == "gpt-5.6-terra"
 
 
+def test_versioned_resolution_launches_verified_brigade_model_binding():
+    seat = _versioned_seat("coder", "openai", "model-hyphen-slug", reasoning="medium", instance_id="codex")
+    seat["bindings"]["brigade"] = {"cli": "codex", "model": "openai/model-slash-id"}
+    snapshot = _versioned_snapshot(seat)
+    snapshot["fleet_policy"] = {"active": True, "version": 2, "digest": snapshot["document_sha256"]}
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan", model="opus-5"),
+            "coder": Agent("coder", "codex", "code", model="model-hyphen-slug"),
+        },
+    )
+    resolution = aboyeur.resolve_fleet_model_policy(roster, worker="coder", snapshot=snapshot)
+    assert resolution.error is None
+    agent = resolution.roster.agents["coder"]
+    assert agent.model == "openai/model-slash-id"
+    decision = next(item for item in resolution.receipt["decisions"] if item["seat"] == "coder")
+    assert decision["policy_model"] == "model-hyphen-slug"
+    assert decision["launch_model"] == "openai/model-slash-id"
+    assert resolution.receipt["fleet_policy"]["active"] is True
+    mismatch = aboyeur.resolve_fleet_model_policy(
+        roster, worker="coder", model_override="model-contrib-train-1", snapshot=snapshot
+    )
+    assert mismatch.error is not None
+    assert "does not match Hub model" in mismatch.error
+
+
 def test_inconsistent_binding_rejected_before_lease_or_process(tmp_path, monkeypatch):
     snapshot = _versioned_snapshot(
         _versioned_seat("cursor_grok", "cursor", "cursor-grok-4.6-high-fast", instance_id="codex"),
@@ -2957,7 +2984,9 @@ def test_lkg_cache_omits_legacy_models_projection(tmp_path, monkeypatch):
         assert fleet_model_admission.fetch_versioned_roster().ok is True
         record = json.loads(fleet_model_admission.lkg_path().read_text(encoding="utf-8"))
         assert "models" not in record["roster"]
-        assert set(record["roster"]) <= set(fleet_model_roster.CACHE_ENVELOPE_KEYS) | {"mac"}
+        assert set(record["roster"]) <= set(fleet_model_roster.CACHE_ENVELOPE_KEYS) | set(
+            fleet_model_roster.OPTIONAL_CACHE_ENVELOPE_KEYS
+        ) | {"mac"}
 
 
 def test_audit_spool_bounds_replay_and_fails_closed_on_corrupt(tmp_path, monkeypatch):
@@ -3385,6 +3414,72 @@ def test_validate_roster_rows_requires_nonempty_reasoning_and_hub_lkg_schema_mat
     )
     assert hub_ok.ok is True and lkg_ok.ok is True
     assert set(hub_ok.payload) == set(lkg_ok.payload)
+
+
+def test_resolve_from_roster_retired_guards_native_launch_model():
+    seat = _versioned_seat("seat-alpha", "openai", "model-ok-1", instance_id="cli-alpha")
+    seat["bindings"]["brigade"] = {"cli": "cli-alpha", "model": "gpt-5.5"}
+    roster = {
+        "revision": 2,
+        "document_sha256": "sha256:" + ("ab" * 32),
+        "expires_at": "2026-08-30T14:15:00Z",
+        "seats": [seat],
+        "consumer_defaults": {"brigade-run": "seat-alpha"},
+        "retired_models": [],
+    }
+    decision = fleet_model_admission._resolve_from_roster(
+        roster, consumer="brigade-run", seat="seat-alpha", source="hub"
+    )
+    assert not decision.ok
+    assert decision.reason == "retired-model"
+
+
+def test_load_model_policy_snapshot_propagates_authority_and_launch_model(monkeypatch):
+    payload = {
+        "schema": fleet_model_roster.ROSTER_SCHEMA,
+        "revision": 4,
+        "document_sha256": "sha256:" + ("ab" * 32),
+        "expires_at": "2026-08-30T14:15:00Z",
+        "seats": [
+            {
+                "seat": "seat-alpha",
+                "provider": "provider-a",
+                "model": "model-hyphen-slug",
+                "reasoning": "high",
+                "enabled": True,
+                "limit": 1,
+                "bindings": {
+                    "brigade": {"cli": "cli-alpha", "model": "provider-a/model-slash-id"},
+                    "t3_fleet": {"instance_id": "inst-alpha", "service_tier": None},
+                },
+            }
+        ],
+        "consumer_defaults": {"brigade-run": "seat-alpha"},
+        "retired_models": [],
+        "fleet_policy": {"active": True, "version": 4, "digest": "sha256:" + ("cd" * 32)},
+    }
+
+    def _decision():
+        return fleet_model_admission.ModelAdmissionDecision(True, 0, "authoritative", payload)
+
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_config",
+        lambda: {"hub_url": "https://hub.invalid", "token": "node-token"},
+    )
+    monkeypatch.setattr(
+        "brigade.fleet_model_admission.fetch_versioned_roster",
+        lambda **_kwargs: _decision(),
+    )
+    snapshot = fleet_client.load_model_policy_snapshot()
+    assert snapshot["state"] == "authoritative"
+    assert snapshot["fleet_policy"] == payload["fleet_policy"]
+    assert snapshot["seats"][0]["bindings"]["brigade"]["model"] == "provider-a/model-slash-id"
+
+    payload["fleet_policy"] = {"active": True, "version": "4", "digest": "sha256:" + ("cd" * 32)}
+    snapshot = fleet_client.load_model_policy_snapshot()
+    assert snapshot["state"] == "malformed-policy"
+    assert snapshot["state"] != "unconfigured"
 
 
 def test_versioned_run_enforces_roster_declared_retirements_before_dispatch(tmp_path, monkeypatch):

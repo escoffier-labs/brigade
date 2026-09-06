@@ -22,6 +22,7 @@ from typing import Any, Callable, ContextManager, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 from .. import agents
+from .. import fleet_session_bootstrap
 from .. import codex_appserver
 from .. import context_eval
 from .. import evidence_brief as evidence_brief_mod
@@ -927,6 +928,22 @@ def _run_codex_appserver_worker(
     effective_sandbox = sandbox if sandbox is not None else ("read-only" if read_only else None)
     active_turn_id: str | None = None
     try:
+        try:
+            prompt = fleet_session_bootstrap.ensure_prompt(
+                prompt, cli_ref=agent.cli or "codex", model=agent.model, cwd=cwd
+            )
+        except fleet_session_bootstrap.PreflightDenial as exc:
+            return agents.AgentResult(
+                text="",
+                ok=False,
+                detail=str(exc)[:200],
+                failure_phase="preflight",
+                failure_kind=exc.code,
+                status="failed",
+                transport="codex-app-server",
+                requested_model=agent.model,
+                reasoning=agent.reasoning,
+            )
         thread = appserver.start_thread(cwd=cwd, model=agent.model, sandbox=effective_sandbox)
 
         def on_turn_start(turn_id: str) -> None:
@@ -1211,6 +1228,7 @@ def dispatch(
     run_id: str | None = None,
     output_dir: Path | None = None,
     model_lease: Callable[[Agent], ContextManager[str | None]] | None = None,
+    remote_transport: Any | None = None,
 ) -> list[WorkerResult]:
     from .. import run_transport
 
@@ -1258,4 +1276,5 @@ def dispatch(
         run_id=run_id,
         output_dir=output_dir,
         model_lease=model_lease,
+        remote_transport=remote_transport,
     )

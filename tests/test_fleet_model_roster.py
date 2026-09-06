@@ -46,6 +46,8 @@ def _digest_body(payload: dict[str, object]) -> dict[str, object]:
             "seats",
             "consumer_defaults",
             "retired_models",
+            "fleet_policy",
+            "consumer_launch_bindings",
         )
         if key in payload
     }
@@ -65,6 +67,8 @@ def _cache_envelope(payload: dict[str, object]) -> dict[str, object]:
             "seats",
             "consumer_defaults",
             "retired_models",
+            "fleet_policy",
+            "consumer_launch_bindings",
         )
         if key in payload
     }
@@ -931,3 +935,61 @@ def test_admin_token_cannot_acquire_or_release_model_lease(tmp_path):
             assert db.execute("SELECT COUNT(*) FROM model_leases WHERE released_at IS NULL").fetchone()[0] == 1
         finally:
             db.close()
+
+
+def _roster_rows_payload(brigade: dict, *, fleet_policy=None) -> dict:
+    payload = {
+        "seats": [
+            {
+                "seat": "seat-alpha",
+                "provider": "provider-a",
+                "model": "model-hyphen-slug",
+                "reasoning": "high",
+                "enabled": True,
+                "bindings": {
+                    "brigade": brigade,
+                    "t3_fleet": {"instance_id": "inst-alpha", "service_tier": None},
+                },
+            }
+        ],
+        "consumer_defaults": {"brigade-run": "seat-alpha"},
+        "retired_models": [],
+    }
+    if fleet_policy is not None:
+        payload["fleet_policy"] = fleet_policy
+    return payload
+
+
+def test_validate_roster_rows_accepts_optional_brigade_launch_model():
+    assert fleet_model_roster.validate_roster_rows(_roster_rows_payload({"cli": "cli-alpha"})) is None
+    assert (
+        fleet_model_roster.validate_roster_rows(
+            _roster_rows_payload({"cli": "cli-alpha", "model": "provider-a/model-slash-id"})
+        )
+        is None
+    )
+    assert (
+        fleet_model_roster.validate_roster_rows(_roster_rows_payload({"cli": "cli-alpha", "model": ""}))
+        == "malformed-roster"
+    )
+    assert (
+        fleet_model_roster.validate_roster_rows(
+            _roster_rows_payload({"cli": "cli-alpha", "model": "provider-a/model-slash-id", "alias": "fuzzy"})
+        )
+        == "malformed-roster"
+    )
+
+
+def test_validate_roster_rows_requires_strict_authority_metadata_when_present():
+    valid = _roster_rows_payload(
+        {"cli": "cli-alpha"},
+        fleet_policy={"active": True, "version": 4, "digest": "sha256:" + ("ab" * 32)},
+    )
+    assert fleet_model_roster.validate_roster_rows(valid) is None
+    malformed = _roster_rows_payload({"cli": "cli-alpha"}, fleet_policy={"active": "yes", "version": 4})
+    assert fleet_model_roster.validate_roster_rows(malformed) == "malformed-roster"
+    extra = _roster_rows_payload(
+        {"cli": "cli-alpha"},
+        fleet_policy={"active": True, "version": 4, "digest": "sha256:" + ("ab" * 32), "token": "secret"},
+    )
+    assert fleet_model_roster.validate_roster_rows(extra) == "malformed-roster"

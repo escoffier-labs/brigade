@@ -24,6 +24,7 @@ from .. import codex_appserver
 from .. import context_eval
 from .. import evidence_brief as evidence_brief_mod
 from .. import fleet_client
+from .. import fleet_session_bootstrap
 from .. import graphtrail_delta
 from .. import causal_receipt
 from .. import localio
@@ -93,6 +94,32 @@ def resolve_fleet_model_policy(
     from ..aboyeur_model_policy import resolve_fleet_model_policy as _resolve
 
     return _resolve(roster, worker=worker, model_override=model_override, snapshot=snapshot)
+
+
+def _worker_remote_transport(
+    *,
+    cwd: Path | None,
+    run_id: str,
+    model_policy: FleetModelPolicyResolution,
+) -> Any | None:
+    """Build the worker-only fleet remote transport, or ``None`` for local runs.
+
+    A standalone Brigade, an unenrolled fleet, a routing-disabled policy, or an
+    unreadable policy document all keep every seat on the existing local lease
+    and provider path. Only the worker dispatch receives this; the orchestrator
+    keeps its own local capacity.
+    """
+    from .. import fleet_t3_transport
+
+    try:
+        return fleet_t3_transport.build_source_transport(
+            cwd=cwd,
+            run_id=run_id,
+            snapshot=model_policy.receipt,
+        )
+    except Exception as exc:  # never let transport wiring break a local run
+        print(f"warning: fleet remote transport unavailable: {exc}", file=sys.stderr)
+        return None
 
 
 _roster_with_admission = model_admission.roster_payload
@@ -564,19 +591,46 @@ def run(
         if runtime.error is not None:
             yield f"fleet model policy denied seat {agent.name!r}: {runtime.error}"
             return
-        decision = fleet_client.acquire_model_lease(
-            agent.name,
-            agents.model_policy_provider(agent.cli or ""),
-            agents.model_policy_model(agent.cli or "", agent.model),
-        )
-        if not decision.granted:
-            yield f"fleet model policy denied seat {agent.name!r}: {decision.reason}"
-            return
+        enrolled = fleet_session_bootstrap.classify_enrollment(model_policy.receipt) == "enrolled"
+        token = None
+        decision = None
+        session_ctx = None
         try:
-            yield None
+            if enrolled:
+                session_ctx = fleet_session_bootstrap.prepare_bound_launch(
+                    agent=agent,
+                    snapshot=model_policy.receipt,
+                    cwd=cwd,
+                    output_dir=output_dir,
+                    run_key=admission_coordinator.run_key,
+                    attempt=admission_coordinator.attempts.get(agent.name, 1),
+                )
+                if session_ctx is not None:
+                    token = fleet_session_bootstrap.bind_context(session_ctx)
+                yield None
+            else:
+                decision = fleet_client.acquire_model_lease(
+                    agent.name,
+                    agents.model_policy_provider(agent.cli or ""),
+                    agents.model_policy_model(agent.cli or "", agent.model),
+                )
+                if not decision.granted:
+                    yield f"fleet model policy denied seat {agent.name!r}: {decision.reason}"
+                    return
+                yield None
+        except fleet_session_bootstrap.PreflightDenial as exc:
+            yield f"fleet session policy denied seat {agent.name!r}: {exc.message}"
         finally:
-            if decision.lease_id is not None and decision.holder is not None:
-                fleet_client.release_model_lease(decision.lease_id, holder=decision.holder)
+            if token is not None:
+                fleet_session_bootstrap.reset_context(token)
+            lease_id = None
+            holder = None
+            if session_ctx is not None and session_ctx.lease_id and session_ctx.lease_holder:
+                lease_id, holder = session_ctx.lease_id, session_ctx.lease_holder
+            elif decision is not None and decision.lease_id is not None and decision.holder is not None:
+                lease_id, holder = decision.lease_id, decision.holder
+            if lease_id is not None and holder is not None:
+                fleet_client.release_model_lease(lease_id, holder=holder)
 
     def scheduler_resolved(used: str, fallback_reason: str | None) -> None:
         scheduler_resolution["used"] = used
@@ -1490,6 +1544,13 @@ def run(
         run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
         to_seat=roster.orchestrator,
     )
+    # Worker-only: the orchestrator's own attempt keeps its local capacity and
+    # is never delegated, so a chef can never recurse into a T3 delegate.
+    remote_transport = _worker_remote_transport(
+        cwd=cwd,
+        run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
+        model_policy=model_policy,
+    )
     try:
         try:
             worker_results = planning._call_with_process_registry(
@@ -1528,6 +1589,7 @@ def run(
                 run_id=output_dir.name if output_dir is not None else None,
                 output_dir=output_dir,
                 model_lease=lease_model_agent,
+                remote_transport=remote_transport,
             )
         except runguard.RetainRunLockError:
             raise

@@ -199,6 +199,129 @@ class CloudWorker:
     leases: tuple[CloudLease, ...]
 
 
+UNKNOWN = "unknown"
+CONTROL_PLANE_SECTIONS = ("policy", "sessions", "machines", "quota", "routes", "queue", "integrations")
+
+
+@dataclass(frozen=True)
+class PolicyStamp:
+    """Which policy revision the control plane believes is current."""
+
+    version: str = UNKNOWN
+    digest: str = UNKNOWN
+    updated_at: str = UNKNOWN
+
+
+@dataclass(frozen=True)
+class MachineState:
+    """One machine's observed capacity. Every field defaults to ``unknown``."""
+
+    id: str
+    os: str = UNKNOWN
+    state: str = UNKNOWN
+    last_observed_at: str = UNKNOWN
+    load: str = UNKNOWN
+    capacity: str = UNKNOWN
+    active_claims: str = UNKNOWN
+    available_slots: str = UNKNOWN
+    eligible_queued_work: str = UNKNOWN
+    unused_reason: str = UNKNOWN
+
+
+@dataclass(frozen=True)
+class RouteDecision:
+    """One routing receipt, including any operator override reason."""
+
+    decision_id: str
+    policy_version: str = UNKNOWN
+    origin: str = UNKNOWN
+    selected: str = UNKNOWN
+    reason: str = UNKNOWN
+    candidates: tuple[str, ...] = ()
+    created_at: str = UNKNOWN
+    override_reason: str = ""
+    state: str = UNKNOWN
+
+
+@dataclass(frozen=True)
+class QueueState:
+    eligible_count: str = UNKNOWN
+    queued_count: str = UNKNOWN
+    blocked: tuple[Mapping[str, object], ...] = ()
+    blocked_known: bool = False
+
+
+@dataclass(frozen=True)
+class IntegrationState:
+    """A routine-driven integration. ``needs-attention`` is never 'paused'.
+
+    Four separate facts, deliberately not collapsed into one health word:
+    whether the *routine* is scheduled (``routine_state``), whether work was
+    observed being picked up and reported, how long the oldest item has waited,
+    and whether the integration is authenticated. An unauthenticated bot with a
+    scheduled routine still executes nothing, and a scheduled routine with no
+    observed pickup is unproven, not healthy.
+    """
+
+    id: str
+    routine_state: str = UNKNOWN
+    last_pickup: str = UNKNOWN
+    last_report: str = UNKNOWN
+    queued_age: str = UNKNOWN
+    detail: str = ""
+    auth_state: str = UNKNOWN
+
+
+@dataclass(frozen=True)
+class QuotaWindow:
+    """One quota window inside a centrally computed effective-capacity row."""
+
+    window_id: str = UNKNOWN
+    state: str = UNKNOWN
+    used: str = UNKNOWN
+    limit: str = UNKNOWN
+    remaining: str = UNKNOWN
+    resets_at: str = UNKNOWN
+    source: str = UNKNOWN
+    observation_id: str = UNKNOWN
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class QuotaEffective:
+    """``fleet_quota``'s verdict for one account/pool/provider.
+
+    This projection is the only thing the Deck may present as available
+    headroom. Raw observations stay history: they carry no override or
+    freshness precedence, and the Deck must not re-derive one.
+    """
+
+    account_id: str = UNKNOWN
+    pool_id: str = UNKNOWN
+    provider: str = UNKNOWN
+    admitted: str = UNKNOWN
+    reasons: tuple[str, ...] = ()
+    windows: tuple[QuotaWindow, ...] = ()
+
+
+@dataclass(frozen=True)
+class ControlPlane:
+    """Policy, capacity, routing, and integration telemetry, or its stated absence."""
+
+    policy: PolicyStamp = field(default_factory=PolicyStamp)
+    sessions: tuple[Mapping[str, object], ...] = ()
+    machines: tuple[MachineState, ...] = ()
+    quota: tuple[Mapping[str, object], ...] = ()
+    routes: tuple[RouteDecision, ...] = ()
+    queue: QueueState = field(default_factory=QueueState)
+    integrations: tuple[IntegrationState, ...] = ()
+    present: frozenset[str] = frozenset()
+    # Optional and centrally computed. Absent means effective headroom is
+    # unknown, never that the raw observations can stand in for it.
+    quota_effective: tuple[QuotaEffective, ...] = ()
+    quota_effective_present: bool = False
+
+
 @dataclass(frozen=True)
 class DeckView:
     stations: tuple[StationView, ...]
@@ -208,6 +331,7 @@ class DeckView:
     observers: tuple[tuple[str, str], ...]
     cloud_workers: tuple[CloudWorker, ...] = ()
     interactive_sessions: tuple[InteractiveSession, ...] = ()
+    control_plane: ControlPlane | None = None
 
 
 def resolve_config_path(flag_value: str | Path | None, environ: Mapping[str, str]) -> Path | None:
@@ -735,6 +859,7 @@ def build_view(
     now: datetime,
     cloud_workers: Sequence[CloudWorker] = (),
     interactive_sessions: Sequence[Mapping[str, object]] = (),
+    control_plane: ControlPlane | None = None,
 ) -> DeckView:
     del now
     active_runs = tuple(run for run in live_runs if not is_terminal_state(run.state) and run.bucket != "stale")
@@ -835,7 +960,352 @@ def build_view(
         observers=tuple(observers),
         cloud_workers=tuple(cloud_workers[:CLOUD_PROVIDER_LIMIT]),
         interactive_sessions=session_rows,
+        control_plane=control_plane,
     )
+
+
+def _cp_text(raw: object, *, limit: int = CLOUD_TEXT_LIMIT) -> str:
+    """A telemetry scalar, or ``unknown``. Absent is never rendered as 0 or free.
+
+    A real ``0`` is kept: an observed zero and an unobserved value are
+    different answers and the Deck must not collapse them.
+    """
+    if raw is None or raw == "":
+        return UNKNOWN
+    if isinstance(raw, bool):
+        return "yes" if raw else "no"
+    if isinstance(raw, (int, float)):
+        return str(raw)[:limit]
+    return _safe_display_text(raw, limit=limit) or UNKNOWN
+
+
+def _cp_list(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return ()
+    return tuple(_safe_display_text(item) for item in list(raw)[:CLOUD_LEASE_LIMIT])
+
+
+def _cp_records(raw: Mapping[str, object], key: str) -> list[Mapping[str, object]]:
+    """The mapping rows under ``key``. A non-sequence or scalar yields nothing."""
+    value = raw.get(key)
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
+
+
+def control_plane_from_snapshot(raw: Mapping[str, object] | None) -> ControlPlane | None:
+    """Adapt a routing/telemetry snapshot into the Deck's projection.
+
+    The adapter records which sections the snapshot actually supplied. A
+    section that is absent stays absent, so the Deck can say ``unknown``
+    instead of inventing an all-clear from silence. This is the seam a future
+    ``fleet_hub_routing.snapshot`` attaches to.
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    present = {name for name in CONTROL_PLANE_SECTIONS if raw.get(name) is not None}
+
+    policy_raw = raw.get("policy")
+    policy = PolicyStamp()
+    if isinstance(policy_raw, Mapping):
+        policy = PolicyStamp(
+            version=_cp_text(policy_raw.get("version")),
+            digest=_cp_text(policy_raw.get("digest")),
+            updated_at=_cp_text(policy_raw.get("updated_at")),
+        )
+
+    machines: list[MachineState] = []
+    for item in _cp_records(raw, "machines"):
+        machines.append(
+            MachineState(
+                id=_cp_text(item.get("id")),
+                os=_cp_text(item.get("os")),
+                state=_cp_text(item.get("state")),
+                last_observed_at=_cp_text(item.get("last_observed_at")),
+                load=_cp_text(item.get("load")),
+                capacity=_cp_text(item.get("capacity")),
+                active_claims=_cp_text(item.get("active_claims")),
+                available_slots=_cp_text(item.get("available_slots")),
+                eligible_queued_work=_cp_text(item.get("eligible_queued_work")),
+                unused_reason=_cp_text(item.get("unused_reason")),
+            )
+        )
+
+    routes: list[RouteDecision] = []
+    for item in _cp_records(raw, "routes"):
+        routes.append(
+            RouteDecision(
+                decision_id=_cp_text(item.get("decision_id")),
+                policy_version=_cp_text(item.get("policy_version")),
+                origin=_cp_text(item.get("origin")),
+                selected=_cp_text(item.get("selected")),
+                reason=_cp_text(item.get("reason")),
+                candidates=_cp_list(item.get("candidates")),
+                created_at=_cp_text(item.get("created_at")),
+                override_reason=_safe_display_text(item.get("override_reason") or ""),
+                state=_cp_text(item.get("state")),
+            )
+        )
+
+    queue_raw = raw.get("queue")
+    queue = QueueState()
+    if isinstance(queue_raw, Mapping):
+        blocked = tuple(_cp_records(queue_raw, "blocked"))
+        queue = QueueState(
+            eligible_count=_cp_text(queue_raw.get("eligible_count")),
+            queued_count=_cp_text(queue_raw.get("queued_count")),
+            blocked=blocked,
+            blocked_known=queue_raw.get("blocked") is not None,
+        )
+
+    integrations: list[IntegrationState] = []
+    for item in _cp_records(raw, "integrations"):
+        state = item.get("routine_state")
+        auth = item.get("auth_state")
+        integrations.append(
+            IntegrationState(
+                id=_cp_text(item.get("id")),
+                routine_state=state if state in ("active", "needs-attention") else UNKNOWN,
+                last_pickup=_cp_text(item.get("last_pickup")),
+                last_report=_cp_text(item.get("last_report")),
+                queued_age=_cp_text(item.get("queued_age")),
+                detail=_safe_display_text(item.get("detail") or ""),
+                auth_state=auth if auth in ("authenticated", "unauthenticated", "expired") else UNKNOWN,
+            )
+        )
+
+    sessions = tuple(_cp_records(raw, "sessions"))
+    quota = tuple(_cp_records(raw, "quota"))
+    return ControlPlane(
+        policy=policy,
+        sessions=sessions,
+        machines=tuple(machines),
+        quota=quota,
+        routes=tuple(routes),
+        queue=queue,
+        integrations=tuple(integrations),
+        present=frozenset(present),
+        quota_effective=_quota_effective(raw),
+        quota_effective_present=raw.get("quota_effective") is not None,
+    )
+
+
+def _quota_effective(raw: Mapping[str, object]) -> tuple[QuotaEffective, ...]:
+    """Adapt ``quota_effective`` rows. The Deck computes no precedence of its own."""
+    rows: list[QuotaEffective] = []
+    for item in _cp_records(raw, "quota_effective"):
+        windows = tuple(
+            QuotaWindow(
+                window_id=_cp_text(window.get("window_id")),
+                state=_cp_text(window.get("state")),
+                used=_cp_text(window.get("used")),
+                limit=_cp_text(window.get("limit")),
+                remaining=_cp_text(window.get("remaining")),
+                resets_at=_cp_text(window.get("resets_at")),
+                source=_cp_text(window.get("source")),
+                observation_id=_cp_text(window.get("observation_id")),
+                reason=_safe_display_text(window.get("reason") or ""),
+            )
+            for window in _cp_records(item, "windows")
+        )
+        rows.append(
+            QuotaEffective(
+                account_id=_cp_text(item.get("account_id")),
+                pool_id=_cp_text(item.get("pool_id")),
+                provider=_cp_text(item.get("provider")),
+                admitted=_cp_text(item.get("admitted")),
+                reasons=_cp_list(item.get("reasons")),
+                windows=windows,
+            )
+        )
+    return tuple(rows)
+
+
+def coverage_gaps(control_plane: ControlPlane | None) -> tuple[str, ...]:
+    """Telemetry the Deck does not have. A gap is never an all-clear."""
+    if control_plane is None:
+        return ("control-plane telemetry",)
+    gaps = [section for section in CONTROL_PLANE_SECTIONS if section not in control_plane.present]
+    if "machines" in control_plane.present and any(
+        machine.capacity == UNKNOWN or machine.state == UNKNOWN for machine in control_plane.machines
+    ):
+        gaps.append("machine capacity")
+    if "queue" in control_plane.present and (
+        control_plane.queue.eligible_count == UNKNOWN or not control_plane.queue.blocked_known
+    ):
+        gaps.append("queue eligibility")
+    if any(item.routine_state == UNKNOWN for item in control_plane.integrations):
+        gaps.append("integration readiness")
+    return tuple(dict.fromkeys(gaps))
+
+
+def attention_items(view: DeckView) -> tuple[str, ...]:
+    """Real signals that need someone: rail entries plus flagged integrations."""
+    items = [f"{entry.kind}:{entry.repo}" for entry in view.rail]
+    control_plane = view.control_plane
+    if control_plane is not None:
+        items.extend(
+            f"integration:{item.id}" for item in control_plane.integrations if item.routine_state == "needs-attention"
+        )
+        items.extend(f"blocked:{item.get('reason', UNKNOWN)}" for item in control_plane.queue.blocked)
+    return tuple(items)
+
+
+def deck_verdict(view: DeckView) -> str:
+    """``NEEDS ATTENTION`` beats ``COVERAGE UNKNOWN`` beats ``ALL CLEAR``.
+
+    An empty attention rail is not an all-clear on its own: with no telemetry
+    the Deck cannot see whether anything needs anyone, and says so.
+    """
+    attention = attention_items(view)
+    if attention:
+        return f"NEEDS ATTENTION ({len(attention)})"
+    gaps = coverage_gaps(view.control_plane)
+    if gaps:
+        return f"COVERAGE UNKNOWN ({len(gaps)})"
+    return "ALL CLEAR"
+
+
+def render_control_plane(control_plane: ControlPlane | None) -> str:
+    """The control-plane panel. Missing telemetry renders as ``unknown``."""
+    gaps = coverage_gaps(control_plane)
+    gap_html = (
+        '<p class="collision">no telemetry for: ' + _esc(", ".join(gaps)) + "</p>"
+        if gaps
+        else '<p class="station-meta">all control-plane sections reported.</p>'
+    )
+    if control_plane is None:
+        return (
+            '<section class="panel" aria-labelledby="control-plane"><header>'
+            '<h2 id="control-plane">Control plane</h2></header>'
+            f"{gap_html}"
+            '<p class="empty">No control-plane projection is attached to this Deck yet, so policy version, '
+            "machine capacity, quota, routing receipts, queue eligibility, and integration readiness are all "
+            "unknown. That is not the same as nothing being wrong.</p></section>"
+        )
+    policy = control_plane.policy
+    machine_rows = "".join(
+        f"<tr><td>{_esc(machine.id)}</td><td>{_esc(machine.os)}</td><td>{_esc(machine.state)}</td>"
+        f"<td>{_esc(machine.load)}/{_esc(machine.capacity)}</td><td>{_esc(machine.active_claims)}</td>"
+        f"<td>{_esc(machine.available_slots)}</td><td>{_esc(machine.eligible_queued_work)}</td>"
+        f"<td>{_esc(machine.unused_reason)}</td><td>{_esc(machine.last_observed_at)}</td></tr>"
+        for machine in control_plane.machines
+    )
+    machines_html = (
+        '<div class="table-wrap"><table class="roster-table"><thead><tr><th>Machine</th><th>OS</th><th>State</th>'
+        "<th>Load/capacity</th><th>Claims</th><th>Free slots</th><th>Eligible queued</th><th>Why idle</th>"
+        f"<th>Observed</th></tr></thead><tbody>{machine_rows}</tbody></table></div>"
+        if machine_rows
+        else '<p class="empty">No machine capacity reported (unknown, not idle).</p>'
+    )
+    quota_rows = "".join(
+        f"<li>{_esc(row.get('pool', UNKNOWN))} &middot; used {_esc(_cp_text(row.get('used')))} of "
+        f"{_esc(_cp_text(row.get('limit')))} &middot; observed {_esc(_cp_text(row.get('observed_at')))}</li>"
+        for row in control_plane.quota
+    )
+    quota_html = (
+        f'<ul class="attention-list">{quota_rows}</ul>'
+        if quota_rows
+        else '<p class="empty">No quota observations (unknown, not unlimited).</p>'
+    )
+    effective_html = _quota_effective_html(control_plane)
+    route_rows = "".join(
+        f"<li>{_esc(route.decision_id)} &middot; policy {_esc(route.policy_version)} &middot; "
+        f"{_esc(route.origin)} &rarr; {_esc(route.selected)} &middot; {_esc(route.reason)} &middot; "
+        f"state {_esc(route.state)} &middot; candidates {_esc(', '.join(route.candidates) or UNKNOWN)}"
+        + (f" &middot; override: {_esc(route.override_reason)}" if route.override_reason else "")
+        + "</li>"
+        for route in control_plane.routes
+    )
+    routes_html = (
+        f'<ul class="attention-list">{route_rows}</ul>'
+        if route_rows
+        else '<p class="empty">No routing receipts (unknown, not unrouted).</p>'
+    )
+    blocked_rows = "".join(
+        f"<li>{_esc(item.get('id', UNKNOWN))} &middot; {_esc(item.get('reason', UNKNOWN))}</li>"
+        for item in control_plane.queue.blocked
+    )
+    queue_html = (
+        f"<p>eligible {_esc(control_plane.queue.eligible_count)} &middot; queued "
+        f"{_esc(control_plane.queue.queued_count)}</p>"
+        + (
+            f'<ul class="attention-list">{blocked_rows}</ul>'
+            if blocked_rows
+            else (
+                '<p class="empty">No blocked reasons reported.</p>'
+                if control_plane.queue.blocked_known
+                else '<p class="empty">Blocked reasons unknown.</p>'
+            )
+        )
+    )
+    integration_rows = "".join(
+        f"<li>{_esc(item.id)} &middot; routine {_esc(item.routine_state)} &middot; auth {_esc(item.auth_state)} "
+        f"&middot; last pickup {_esc(item.last_pickup)} "
+        f"&middot; last report {_esc(item.last_report)} &middot; queued for {_esc(item.queued_age)}"
+        + (f" &middot; {_esc(item.detail)}" if item.detail else "")
+        + "</li>"
+        for item in control_plane.integrations
+    )
+    integrations_html = (
+        f'<ul class="attention-list">{integration_rows}</ul>'
+        if integration_rows
+        else '<p class="empty">No integrations reported.</p>'
+    )
+    return (
+        '<section class="panel" aria-labelledby="control-plane"><header><h2 id="control-plane">Control plane</h2>'
+        f'<p class="panel-count">policy {_esc(policy.version)} &middot; {_esc(policy.digest)} &middot; '
+        f"updated {_esc(policy.updated_at)}</p></header>{gap_html}"
+        f"<h3>Machines</h3>{machines_html}"
+        f"<h3>Effective capacity</h3>{effective_html}"
+        f"<h3>Quota observation history</h3>{quota_html}"
+        '<p class="station-meta">These are raw observations kept as history. They are not available '
+        "subscription headroom: only the effective projection above answers that, and the Deck applies no "
+        "override or freshness precedence of its own.</p>"
+        f"<h3>Routing</h3>{routes_html}"
+        f"<h3>Queue</h3>{queue_html}"
+        f"<h3>Integrations</h3>{integrations_html}"
+        '<p class="station-meta">Quota headroom is a subscription number. It is not evidence that a bot or '
+        "runner will execute, and it is not harness capacity: an integration that has not confirmed is "
+        "<em>needs-attention</em> or <em>unknown</em>, never proof it is paused, and an observed pickup proves "
+        "only that pickup. Routine scheduling, observed pickup and report, queue age, and authentication are "
+        "four separate facts; a pending away prompt is evidence that something needs attention.</p>"
+        "</section>"
+    )
+
+
+def _quota_effective_html(control_plane: ControlPlane) -> str:
+    """Effective remaining capacity, or an honest unknown. Never derived here."""
+    if not control_plane.quota_effective_present:
+        return (
+            '<p class="empty">Effective headroom is <strong>unknown</strong>: no centrally computed quota '
+            "projection is attached. Raw observations below are history, not available headroom.</p>"
+        )
+    rows = "".join(
+        f"<li>{_esc(row.account_id)} &middot; pool {_esc(row.pool_id)} &middot; {_esc(row.provider)} &middot; "
+        f"admitted {_esc(row.admitted)}"
+        + (f" &middot; {_esc(', '.join(row.reasons))}" if row.reasons else "")
+        + (
+            "<ul>"
+            + "".join(
+                f"<li>{_esc(window.window_id)} &middot; {_esc(window.state)} &middot; "
+                f"{_esc(window.used)}/{_esc(window.limit)} used &middot; remaining "
+                f"<strong>{_esc(window.remaining)}</strong> &middot; resets {_esc(window.resets_at)} &middot; "
+                f"source {_esc(window.source)} &middot; observation {_esc(window.observation_id)}"
+                + (f" &middot; {_esc(window.reason)}" if window.reason else "")
+                + "</li>"
+                for window in row.windows
+            )
+            + "</ul>"
+            if row.windows
+            else '<p class="empty">No windows reported for this row.</p>'
+        )
+        + "</li>"
+        for row in control_plane.quota_effective
+    )
+    if not rows:
+        return '<p class="empty">The effective quota projection reported no rows.</p>'
+    return f'<ul class="attention-list">{rows}</ul>'
 
 
 _STYLE = """
@@ -947,6 +1417,9 @@ footer a { margin-right: 12px; color: var(--muted); }
 .roster-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
 .roster-table th:nth-child(n) { width: auto; }
 .seat--off td { color: var(--faint); }
+details:target { border-color: var(--signal); }
+.confirm-save { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.roster-actions .hint { display: block; margin-top: 6px; color: var(--faint); font-size: 11px; }
 .banner { margin: 12px 0 0; padding: 10px; border: 1px solid var(--signal); color: var(--ink); font-size: 12px; }
 .banner--error { border-color: #b0553a; }
 .roster-actions button { padding: 8px 18px; border: 1px solid var(--signal); background: var(--signal-quiet); color: var(--ink); font: inherit; font-weight: 700; cursor: pointer; }
@@ -973,16 +1446,28 @@ _SCRIPT = (
 )
 
 
+def _empty_rail_text(view: DeckView) -> str:
+    """An empty rail with no telemetry is 'cannot see', not 'nothing is wrong'."""
+    gaps = coverage_gaps(view.control_plane)
+    if not gaps:
+        return "Nothing needs you."
+    return (
+        "No open run or claim signals. Coverage is incomplete, so this is not an all-clear: "
+        + ", ".join(gaps)
+        + " unknown."
+    )
+
+
 def render_deck(view: DeckView, *, nonce: str, now: datetime) -> str:
     total_capacity = sum(station.station.capacity for station in view.stations)
     total_busy = sum(station.busy for station in view.stations)
-    verdict = f"NEEDS ATTENTION ({len(view.rail)})" if view.rail else "ALL CLEAR"
+    verdict = deck_verdict(view)
     parts: list[str] = [
         '<main class="deck-shell">',
         '<header class="masthead"><div><p class="eyebrow">Fleet operations</p><h1>Command Deck</h1>',
         f'<p class="verdict">{_esc(verdict)}</p></div><p class="header-meta">'
         f"{total_busy}/{total_capacity} slots busy<br>{_esc(_stamp(now))}</p></header>",
-        '<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/deck/roster">roster</a> <a href="/view/machines">machines board</a></nav>',
+        '<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> <a href="/view/machines">machines board</a></nav>',
     ]
     if not view.stations:
         parts.append(
@@ -1003,6 +1488,7 @@ def render_deck(view: DeckView, *, nonce: str, now: datetime) -> str:
                 f'{station.busy}/{station.station.capacity} busy</p></header><div class="run-stack">{tiles_html}</div></section>'
             )
         parts.append('<section class="stations" aria-label="Fleet stations">' + "".join(station_cards) + "</section>")
+    parts.append(render_control_plane(view.control_plane))
     cloud_cards = "".join(_cloud_worker_html(worker) for worker in view.cloud_workers)
     parts.append(
         '<section class="panel" aria-labelledby="cloud-workers"><header><h2 id="cloud-workers">Cloud workers</h2>'
@@ -1041,7 +1527,11 @@ def render_deck(view: DeckView, *, nonce: str, now: datetime) -> str:
     parts.append(
         '<div class="dashboard-grid"><section class="panel attention-panel" aria-labelledby="rail"><header><h2 id="rail">Needs you</h2>'
         f'<p class="panel-count">{len(view.rail)} item(s)</p></header>'
-        + (f'<ul class="attention-list">{rail_items}</ul>' if rail_items else '<p class="empty">Nothing needs you.</p>')
+        + (
+            f'<ul class="attention-list">{rail_items}</ul>'
+            if rail_items
+            else f'<p class="empty">{_esc(_empty_rail_text(view))}</p>'
+        )
         + '</section><section class="panel" aria-labelledby="timeline"><header><h2 id="timeline">Recent outcomes</h2>'
         f'<p class="panel-count">{len(view.outcomes)} shown</p></header>'
         + (f'<ul class="timeline">{timeline}</ul>' if timeline else '<p class="empty">No recent outcomes.</p>')
@@ -1061,7 +1551,8 @@ def render_deck(view: DeckView, *, nonce: str, now: datetime) -> str:
     return _document("\n".join(parts), nonce=nonce, now=now)
 
 
-def render_repos(view: DeckView, *, nonce: str, now: datetime) -> str:
+def repo_coordination_table(view: DeckView) -> str:
+    """The claim/run coordination table. ``fleet_repo_policy_page`` frames it."""
     rows = "".join(
         "<tr>"
         f"<td>{_esc(row.target)}</td>"
@@ -1072,22 +1563,12 @@ def render_repos(view: DeckView, *, nonce: str, now: datetime) -> str:
         "</tr>"
         for row in view.repos
     )
-    table = (
-        '<div class="table-wrap"><table><thead><tr><th>Target</th><th>Owner</th><th>TTL</th><th>Live now</th><th>Flags</th></tr></thead>'
-        f"<tbody>{rows}</tbody></table></div>"
-        if rows
-        else "<p>No claims or live repos.</p>"
+    if not rows:
+        return "<p>No claims or live repos.</p>"
+    return (
+        '<div class="table-wrap"><table><thead><tr><th>Target</th><th>Owner</th><th>TTL</th><th>Live now</th>'
+        f"<th>Flags</th></tr></thead><tbody>{rows}</tbody></table></div>"
     )
-    body = (
-        '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
-        "<h1>Command Deck &middot; Repos</h1></div>"
-        f'<p class="header-meta">{_esc(_stamp(now))}</p></header>'
-        '<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/roster">roster</a> <a href="/view/machines">machines board</a></nav>'
-        '<section class="repo-panel" aria-label="Repository coordination">'
-        + table
-        + '</section><footer><a href="/view/machines">machines board</a> <a href="/view/repos">repos board</a></footer></main>'
-    )
-    return _document(body, nonce=nonce, now=now)
 
 
 def _tile_html(tile: Tile) -> str:

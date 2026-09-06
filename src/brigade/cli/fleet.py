@@ -220,13 +220,38 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_models_set.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     p_models_set.set_defaults(func=_dispatch_models_set)
+    p_models_plan = models_sub.add_parser("plan", help="Read-only Hub model plan. Never admits and never uses LKG.")
+    p_models_plan.add_argument("--consumer", required=True, help="brigade-run or t3-fleet.")
+    p_models_plan.add_argument("--seat", required=True, help="Seat to project from the verified Hub roster.")
+    p_models_plan.add_argument("--delegation-id", default=None, dest="delegation_id", help="Reserved; fails closed.")
+    p_models_plan.add_argument("--json", action="store_true", help="Emit JSON.")
+    p_models_plan.set_defaults(func=_dispatch_models_plan)
+    p_models_bindings = models_sub.add_parser(
+        "bindings",
+        help="Read Hub-only verified consumer launch bindings. Never uses LKG.",
+    )
+    p_models_bindings.add_argument("--consumer", required=True, help="brigade-run or t3-fleet.")
+    p_models_bindings.add_argument("--json", action="store_true", help="Emit JSON.")
+    p_models_bindings.set_defaults(func=_dispatch_models_bindings)
     p_models_admit = models_sub.add_parser("admit", help="Admit one consumer/seat from the hub roster.")
     p_models_admit.add_argument("--consumer", required=True, help="brigade-run or t3-fleet.")
     p_models_admit.add_argument("--request-id", required=True, help="Caller-generated idempotency key.")
-    p_models_admit.add_argument("--phase", required=True, help="controller, target, or brigade-run.")
+    p_models_admit.add_argument("--phase", required=True, help="controller, target, brigade-run, or launch.")
     p_models_admit.add_argument("--seat", default=None, help="Optional explicit seat instead of the consumer default.")
     p_models_admit.add_argument("--expect-revision", type=int, default=None, help="Bind replay to this revision.")
     p_models_admit.add_argument("--expect-digest", default=None, help="Bind replay to this roster digest.")
+    p_models_admit.add_argument("--policy-session-id", default=None, dest="policy_session_id")
+    p_models_admit.add_argument("--policy-version", type=int, default=None, dest="policy_version")
+    p_models_admit.add_argument("--policy-digest", default=None, dest="policy_digest")
+    p_models_admit.add_argument("--decision-id", default=None, dest="decision_id")
+    p_models_admit.add_argument("--repo", default=None, dest="repo_identity")
+    p_models_admit.add_argument("--delegation-id", default=None, dest="delegation_id", help="Reserved; fails closed.")
+    p_models_admit.add_argument(
+        "--policy-context-hash",
+        default=None,
+        dest="policy_context_hash",
+        help="Exact prepared context hash required for phase=launch.",
+    )
     p_models_admit.add_argument("--no-lkg", action="store_true", help="Disable last-known-good fallback.")
     p_models_admit.add_argument("--json", action="store_true", help="Emit JSON.")
     p_models_admit.set_defaults(func=_dispatch_models_admit)
@@ -500,6 +525,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_work_sync_brigade.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     p_work_sync_brigade.set_defaults(func=_dispatch_work_sync_brigade)
+
+    from .fleet_policy import register as register_policy
+
+    register_policy(fleet_sub)
 
 
 def _dispatch_serve(args: argparse.Namespace, *, environ: Mapping[str, str] | None = None) -> int:
@@ -1481,6 +1510,31 @@ def _print_admission_json(payload: object, *, reason: str | None = None, include
     print(_json.dumps(body, indent=2, sort_keys=True))
 
 
+def _dispatch_models_plan(args: argparse.Namespace) -> int:
+    from .. import fleet_model_admission, fleet_model_roster
+
+    if args.consumer not in fleet_model_roster.CONSUMERS:
+        if args.json:
+            _print_admission_json({"reason": "unsupported-schema", "error": "unsupported-schema"})
+        else:
+            print("error: unsupported consumer", file=sys.stderr)
+        return 2
+    decision = fleet_model_admission.plan_model(
+        consumer=args.consumer,
+        seat=args.seat,
+        delegation_id=args.delegation_id,
+    )
+    if args.json:
+        _print_admission_json(
+            decision.payload,
+            reason=None if decision.ok else decision.reason,
+            include_error=not decision.ok,
+        )
+    elif not decision.ok:
+        print(f"error: {decision.reason}", file=sys.stderr)
+    return decision.exit_code
+
+
 def _dispatch_models_admit(args: argparse.Namespace) -> int:
     from .. import fleet_model_admission, fleet_model_roster
 
@@ -1497,7 +1551,14 @@ def _dispatch_models_admit(args: argparse.Namespace) -> int:
         seat=args.seat,
         expect_revision=args.expect_revision,
         expect_digest=args.expect_digest,
-        allow_lkg=False if args.phase == "target" else not args.no_lkg,
+        allow_lkg=False if args.phase in fleet_model_roster.PROOF_PHASES else not args.no_lkg,
+        policy_session_id=args.policy_session_id,
+        policy_version=args.policy_version,
+        policy_digest=args.policy_digest,
+        decision_id=args.decision_id,
+        repo_identity=args.repo_identity,
+        delegation_id=args.delegation_id,
+        policy_context_hash=args.policy_context_hash,
     )
     if args.json:
         if decision.ok:
@@ -1509,6 +1570,32 @@ def _dispatch_models_admit(args: argparse.Namespace) -> int:
         remediation = decision.payload.get("remediation")
         if isinstance(remediation, str) and remediation:
             print(remediation, file=sys.stderr)
+    return decision.exit_code
+
+
+def _dispatch_models_bindings(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import fleet_model_admission, fleet_model_roster
+
+    if args.consumer not in fleet_model_roster.CONSUMERS:
+        if args.json:
+            print(
+                _json.dumps(
+                    {
+                        "schema": fleet_model_roster.BINDINGS_SCHEMA,
+                        "error": "unsupported-schema",
+                        "source": "unknown",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print("error: unsupported consumer", file=sys.stderr)
+        return 2
+    decision = fleet_model_admission.project_model_bindings(consumer=args.consumer)
+    print(_json.dumps(decision.payload, indent=2, sort_keys=True))
     return decision.exit_code
 
 

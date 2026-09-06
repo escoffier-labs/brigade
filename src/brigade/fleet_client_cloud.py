@@ -405,7 +405,18 @@ def load_model_policy_snapshot(*, hub_url: str | None = None) -> dict[str, Any]:
     source = payload.get("source")
     if not isinstance(source, str) or not source:
         source = decision.reason if decision.reason in {"hub", "lkg"} else "hub"
-    return {
+    from . import fleet_model_roster
+
+    authority, authority_error = fleet_model_roster.parse_fleet_policy_authority(payload.get("fleet_policy"))
+    if authority_error is not None:
+        return {
+            "schema": payload.get("schema"),
+            "state": "malformed-policy",
+            "source": source,
+            "models": [],
+            "error": authority_error,
+        }
+    snapshot = {
         "schema": payload.get("schema"),
         "state": "authoritative",
         "source": source,
@@ -419,6 +430,12 @@ def load_model_policy_snapshot(*, hub_url: str | None = None) -> dict[str, Any]:
         "retired_models": payload.get("retired_models"),
         "models": safe_models,
     }
+    if authority is not None:
+        snapshot["fleet_policy"] = authority
+    launch_bindings = payload.get("consumer_launch_bindings")
+    if isinstance(launch_bindings, dict):
+        snapshot["consumer_launch_bindings"] = launch_bindings
+    return snapshot
 
 
 def set_model_policy(
@@ -495,6 +512,16 @@ def _model_lease_op(
     lease_id: str | None = None,
     holder: str | None = None,
     ttl_seconds: int = 3600,
+    policy_session_id: str | None = None,
+    policy_version: int | None = None,
+    policy_digest: str | None = None,
+    decision_id: str | None = None,
+    request_id: str | None = None,
+    delegation_id: str | None = None,
+    repo_identity: str | None = None,
+    launch_model: str | None = None,
+    policy_context_hash: str | None = None,
+    consumer: str | None = None,
 ) -> ModelLeaseDecision:
     lease = lease_id or uuid4().hex
     fence = holder or uuid4().hex
@@ -508,6 +535,26 @@ def _model_lease_op(
         body: dict[str, Any] = {"action": action, "lease_id": lease, "node_id": node, "holder": fence}
         if action == "acquire":
             body.update(seat=seat, provider=provider, model=model, ttl_seconds=ttl_seconds)
+            if policy_session_id:
+                body["policy_session_id"] = policy_session_id
+            if policy_version is not None:
+                body["policy_version"] = policy_version
+            if policy_digest:
+                body["policy_digest"] = policy_digest
+            if decision_id:
+                body["decision_id"] = decision_id
+            if request_id:
+                body["request_id"] = request_id
+            if delegation_id:
+                body["delegation_id"] = delegation_id
+            if repo_identity:
+                body["repo_identity"] = repo_identity
+            if launch_model:
+                body["launch_model"] = launch_model
+            if policy_context_hash:
+                body["policy_context_hash"] = policy_context_hash
+            if consumer:
+                body["consumer"] = consumer
         status, payload = _run_with_deadline(
             lambda: _post_model_policy_blocking(
                 config["hub_url"], config["token"], body, timeout=CLOUD_TIMEOUT_SECONDS
@@ -535,9 +582,35 @@ def acquire_model_lease(
     lease_id: str | None = None,
     holder: str | None = None,
     ttl_seconds: int = 3600,
+    policy_session_id: str | None = None,
+    policy_version: int | None = None,
+    policy_digest: str | None = None,
+    decision_id: str | None = None,
+    request_id: str | None = None,
+    delegation_id: str | None = None,
+    repo_identity: str | None = None,
+    launch_model: str | None = None,
+    policy_context_hash: str | None = None,
+    consumer: str | None = None,
 ) -> ModelLeaseDecision:
     return _model_lease_op(
-        "acquire", seat=seat, provider=provider, model=model, lease_id=lease_id, holder=holder, ttl_seconds=ttl_seconds
+        "acquire",
+        seat=seat,
+        provider=provider,
+        model=model,
+        lease_id=lease_id,
+        holder=holder,
+        ttl_seconds=ttl_seconds,
+        policy_session_id=policy_session_id,
+        policy_version=policy_version,
+        policy_digest=policy_digest,
+        decision_id=decision_id,
+        request_id=request_id,
+        delegation_id=delegation_id,
+        repo_identity=repo_identity,
+        launch_model=launch_model,
+        policy_context_hash=policy_context_hash,
+        consumer=consumer,
     )
 
 

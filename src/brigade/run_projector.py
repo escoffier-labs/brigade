@@ -26,7 +26,7 @@ from typing import Any, Mapping, Sequence
 
 from brigade import run_checkpoint, run_events, run_journal
 
-PROJECTOR_VERSION: int = 7
+PROJECTOR_VERSION: int = 8
 
 # Field ownership over the run.json contract. Every current run.json key is
 # in exactly one of these two sets; see the ownership inventory in
@@ -116,6 +116,7 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         # Artifact references
         "artifacts",
         "handoff",
+        "handoff_inbox",
         "orphaned_at",
         "last_observed_status",
         "uncommitted_change_count",

@@ -46,8 +46,8 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def get_run_preference(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Return the one-row fleet run preference, or empty fields when unset."""
+def raw_run_preference(conn: sqlite3.Connection) -> dict[str, Any]:
+    """SQL row only. Used by migration preview so projection cannot recurse."""
     columns = ", ".join(_FIELDS)
     row = conn.execute(f"SELECT {columns} FROM run_preference WHERE id = 1").fetchone()
     if row is None:
@@ -55,8 +55,26 @@ def get_run_preference(conn: sqlite3.Connection) -> dict[str, Any]:
     return {field: row[index] for index, field in enumerate(_FIELDS)}
 
 
+def get_run_preference(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return the one-row fleet run preference, or empty fields when unset."""
+    from . import fleet_policy_migration
+
+    if fleet_policy_migration.is_activated(conn):
+        return fleet_policy_migration.projected_run_preference(conn)
+    return raw_run_preference(conn)
+
+
 def get_run_preference_meta(conn: sqlite3.Connection) -> dict[str, str | None]:
-    """``updated_at`` and ``updated_by`` of the pin; both ``None`` when unset."""
+    """``updated_at`` and ``updated_by`` of the pin; both ``None`` when unset.
+
+    After fleet-policy activation this is the current policy revision's
+    ``created_at`` / ``actor``, not the pre-activation preference row.
+    """
+    from . import fleet_hub_policy, fleet_policy_migration
+
+    if fleet_policy_migration.is_activated(conn):
+        current = fleet_hub_policy.current_policy(conn)
+        return {"updated_at": current["created_at"], "updated_by": current["actor"]}
     row = conn.execute("SELECT updated_at, updated_by FROM run_preference WHERE id = 1").fetchone()
     if row is None:
         return {"updated_at": None, "updated_by": None}
@@ -65,8 +83,10 @@ def get_run_preference_meta(conn: sqlite3.Connection) -> dict[str, str | None]:
 
 def upsert_run_preference(conn: sqlite3.Connection, raw: Any, *, updated_by: str | None) -> dict[str, Any]:
     """Validate and write the pin inside the caller's transaction. No commit."""
+    from . import fleet_policy_migration
     from .fleet_hub import FleetHubError
 
+    fleet_policy_migration.refuse_legacy_write(conn)
     try:
         parsed = run_preference.parse_preference(raw)
     except run_preference.RunPreferenceError as exc:
@@ -82,7 +102,7 @@ def upsert_run_preference(conn: sqlite3.Connection, raw: Any, *, updated_by: str
         "updated_by=excluded.updated_by",
         (*[payload.get(field) for field in _FIELDS], _utc_now(), updated_by),
     )
-    return get_run_preference(conn)
+    return raw_run_preference(conn)
 
 
 def set_run_preference(conn: sqlite3.Connection, raw: Any, *, updated_by: str | None = None) -> dict[str, Any]:

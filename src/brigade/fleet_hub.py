@@ -123,7 +123,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 21
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -357,7 +357,30 @@ _CLOUD_PROVIDER_COLUMNS = (
 _POLICY_COLUMNS = "seat, provider, model, enabled, limit_count, notes"
 _MODEL_POLICY_SAFE_FIELDS = frozenset({"provider", "model", "seat", "enabled", "limit", "notes"})
 _MODEL_POLICY_REQUEST_FIELDS = frozenset(
-    {"action", "provider", "model", "seat", "enabled", "limit", "notes", "lease_id", "node_id", "holder", "ttl_seconds"}
+    {
+        "action",
+        "provider",
+        "model",
+        "seat",
+        "enabled",
+        "limit",
+        "notes",
+        "lease_id",
+        "node_id",
+        "holder",
+        "ttl_seconds",
+        "policy_session_id",
+        "policy_version",
+        "policy_digest",
+        "decision_id",
+        "request_id",
+        "delegation_id",
+        "repo_identity",
+        "launch_model",
+        "policy_context_hash",
+        "consumer",
+        "context_hash",
+    }
 )
 MODEL_ACTIONS = frozenset({"set", "set-default", "retire", "admit", "acquire", "release"})
 CLOUD_ACTIONS = frozenset({"admit", "bind", "renew", "release", "policy"})
@@ -370,6 +393,7 @@ CLOUD_PROVIDER_ALIASES = {
 }
 CLOUD_LEASE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MODEL_POLICY_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
+MODEL_IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,255}$")
 CLOUD_TTL_MIN_SECONDS = 1
 CLOUD_TTL_MAX_SECONDS = 86400
 DEFAULT_CLOUD_SUBMISSION_TTL_SECONDS = 300
@@ -554,6 +578,21 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # running hub rather than needing one that will not start.
     # v18 -> v19: research/security/scout role columns on run_preference (roster page).
     worklore_store.ensure_schema(conn)
+    # v19 -> v20: control-plane policy revisions, the CAS pointer, and session
+    # policy receipts. Additive tables only; the legacy model_policy roster and
+    # its admission path are untouched and still authoritative for launches.
+    from . import fleet_hub_policy
+
+    fleet_hub_policy.ensure_schema(conn)
+    # v20 -> v21: routing telemetry, reservations, dispatch intents, and quota
+    # observations. Additive tables only; policy revisions stay the authority
+    # for static configuration and are never incremented by telemetry.
+    from . import fleet_hub_routing
+
+    fleet_hub_routing.ensure_schema(conn)
+    from . import fleet_policy_delegation
+
+    fleet_policy_delegation.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -1245,6 +1284,15 @@ def _model_policy_name(raw: Any, field: str) -> str:
     return value
 
 
+def _model_identity_name(raw: Any, field: str) -> str | None:
+    if raw is None or raw == "":
+        return None
+    value = _safe_cloud_text(raw, field, required=True, limit=256)
+    if value is None or not MODEL_IDENTITY_PATTERN.fullmatch(value):
+        raise FleetHubError(f"model policy field {field!r} is not a valid launch identity")
+    return value
+
+
 def _validate_model_policy_request(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise FleetHubError("model policy request must be a JSON object")
@@ -1292,10 +1340,42 @@ def _validate_model_lease_request(raw: Any) -> dict[str, Any]:
             provider=_cloud_provider(raw.get("provider")),
             model=_model_policy_name(raw.get("model"), "model"),
         )
+        request["launch_model"] = _model_identity_name(raw.get("launch_model"), "launch_model")
         ttl = raw.get("ttl_seconds", 3600)
         if type(ttl) is not int or not 1 <= ttl <= CLOUD_TTL_MAX_SECONDS:
             raise FleetHubError("model lease field 'ttl_seconds' must be an integer in 1..86400")
         request["ttl_seconds"] = ttl
+        consumer = raw.get("consumer")
+        if consumer is not None and consumer != "":
+            request["consumer"] = _model_policy_name(consumer, "consumer")
+        else:
+            request["consumer"] = None
+        for field in (
+            "policy_session_id",
+            "policy_digest",
+            "decision_id",
+            "request_id",
+            "delegation_id",
+            "repo_identity",
+            "policy_context_hash",
+            "context_hash",
+        ):
+            value = raw.get(field)
+            if value is None or value == "":
+                request[field] = None
+                continue
+            text = _safe_cloud_text(value, field, required=True, limit=128)
+            request[field] = text
+        version = raw.get("policy_version")
+        if version is not None and type(version) is not int:
+            raise FleetHubError("model lease field 'policy_version' must be an integer")
+        request["policy_version"] = version
+        from . import fleet_model_roster
+
+        for digest_field in ("policy_digest", "policy_context_hash", "context_hash"):
+            digest = request.get(digest_field)
+            if digest is not None and fleet_model_roster.SHA256_DIGEST_PATTERN.fullmatch(digest) is None:
+                raise FleetHubError(f"model lease field {digest_field!r} must be a sha256:64hex digest")
     return request
 
 

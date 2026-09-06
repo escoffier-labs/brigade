@@ -38,6 +38,37 @@ _CONFLICTS = frozenset(
         "roster_digest_conflict",
         "admission-conflict",
         "revision-conflict",
+        "launch-proof-replay",
+        "policy-stale",
+        "policy-proof-mismatch",
+    }
+)
+_PROOF_DENIALS = frozenset(
+    {
+        "policy-proof-missing",
+        "policy-proof-not-prepared",
+        "policy-proof-node-mismatch",
+        "policy-proof-consumer-mismatch",
+        "policy-proof-repo-mismatch",
+        "policy-proof-seat-mismatch",
+        "policy-proof-identity-mismatch",
+        "policy-ack-missing",
+        "decision-proof-missing",
+        "decision-unknown",
+        "decision-not-owned",
+        "decision-consumer-mismatch",
+        "decision-session-mismatch",
+        "decision-repo-mismatch",
+        "decision-seat-mismatch",
+        "decision-workload-missing",
+        "reservation-expired",
+        "reservation-released",
+        "reservation-invalid",
+        "delegation-unavailable",
+        "training-disallowed",
+        "policy-blocked",
+        "enrollment-downgrade",
+        "bindings-unavailable",
     }
 )
 _SAFE_ADMISSION_KEYS = (
@@ -55,6 +86,8 @@ _SAFE_ADMISSION_KEYS = (
     "error",
     "reason",
     "remediation",
+    "launch_authorized",
+    "consumer",
 )
 _SUCCESS_ADMISSION_KEYS = (
     "schema",
@@ -308,17 +341,43 @@ def _encode_record(payload: Mapping[str, Any]) -> bytes:
     return raw
 
 
-def _read_high_water(*, dir_fd: int | None) -> int:
+def _read_high_water_record(*, dir_fd: int | None) -> dict[str, Any]:
     raw = _read_leaf_bytes(high_water_path(), dir_fd=dir_fd, missing_ok=True)
     if raw is None:
-        return 0
+        return {}
     try:
         parsed = json.loads(raw.decode("ascii"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise FleetClientError("high-water file was not valid JSON") from exc
-    if isinstance(parsed, dict) and type(parsed.get("revision")) is int:
+    if not isinstance(parsed, dict):
+        raise FleetClientError("high-water file is malformed")
+    return parsed
+
+
+def _read_high_water(*, dir_fd: int | None) -> int:
+    parsed = _read_high_water_record(dir_fd=dir_fd)
+    if not parsed:
+        return 0
+    if type(parsed.get("revision")) is int:
         return int(parsed["revision"])
     raise FleetClientError("high-water file is malformed")
+
+
+def _read_enrollment_high_water(*, dir_fd: int | None = None) -> dict[str, Any]:
+    if dir_fd is None:
+        if not nofollow_supported():
+            return {}
+        try:
+            with _client._spool_lock(high_water_path()) as locked_fd:
+                return _read_high_water_record(dir_fd=locked_fd)
+        except Exception:
+            return {}
+    return _read_high_water_record(dir_fd=dir_fd)
+
+
+def enrollment_activation_observed() -> bool:
+    record = _read_enrollment_high_water()
+    return record.get("authority_active") is True
 
 
 def _cached_roster(envelope: Mapping[str, Any]) -> dict[str, Any]:
@@ -342,8 +401,19 @@ def _write_cache_locked(envelope: Mapping[str, Any], *, revision: int, dir_fd: i
         raise FleetClientError("revision-rollback")
     _read_leaf_bytes(lkg, dir_fd=dir_fd, missing_ok=True)
     highest = max(current, revision)
+    authority, _error = fleet_model_roster.parse_fleet_policy_authority(envelope.get("fleet_policy"))
+    high_water_record: dict[str, Any] = {"revision": highest}
+    prior = _read_enrollment_high_water(dir_fd=dir_fd)
+    if authority is not None and authority.get("active") is True:
+        high_water_record["authority_active"] = True
+        high_water_record["authority_version"] = authority.get("version")
+        high_water_record["authority_digest"] = authority.get("digest")
+    elif prior.get("authority_active") is True:
+        high_water_record["authority_active"] = True
+        high_water_record["authority_version"] = prior.get("authority_version")
+        high_water_record["authority_digest"] = prior.get("authority_digest")
     _atomic_replace(lkg, _encode_record(record), dir_fd=dir_fd)
-    _atomic_replace(high_water, _encode_record({"revision": highest}), dir_fd=dir_fd)
+    _atomic_replace(high_water, _encode_record(high_water_record), dir_fd=dir_fd)
 
 
 def _load_lkg_record() -> dict[str, Any]:
@@ -352,7 +422,10 @@ def _load_lkg_record() -> dict[str, Any]:
     lkg = lkg_path()
     with _client._spool_lock(lkg) as dir_fd:
         raw = _read_leaf_bytes(lkg, dir_fd=dir_fd, missing_ok=False)
-        high_water = _read_high_water(dir_fd=dir_fd)
+        high_water_record = _read_high_water_record(dir_fd=dir_fd)
+    high_water = int(high_water_record["revision"]) if type(high_water_record.get("revision")) is int else 0
+    if high_water_record and type(high_water_record.get("revision")) is not int:
+        raise FleetClientError("high-water file is malformed")
     if raw is None:
         raise FleetClientError("lkg is missing")
     try:
@@ -366,6 +439,7 @@ def _load_lkg_record() -> dict[str, Any]:
     except (TypeError, ValueError) as exc:
         raise FleetClientError("lkg is malformed") from exc
     record["highest_revision"] = max(cached_highest, high_water)
+    record["high_water_record"] = high_water_record
     return record
 
 
@@ -412,7 +486,25 @@ def _validate_envelope(payload: Mapping[str, Any], *, token: str, audience: str)
         return "malformed-roster"
     if (expires - issued).total_seconds() > fleet_model_roster.LKG_TTL_SECONDS:
         return "malformed-roster"
-    return fleet_model_roster.validate_roster_rows(payload)
+    rows_error = fleet_model_roster.validate_roster_rows(payload)
+    if rows_error is not None:
+        return rows_error
+    _authority, authority_error = fleet_model_roster.parse_fleet_policy_authority(payload.get("fleet_policy"))
+    if authority_error is not None:
+        return "malformed-roster"
+    return None
+
+
+def _enrollment_downgraded(payload: Mapping[str, Any], *, dir_fd: int | None) -> bool:
+    """True when a legacy-shaped roster arrives after activation was durably observed.
+
+    Reads the high-water record through the caller's already-validated spool
+    descriptor so the check never re-resolves the cache directory by path.
+    """
+    authority, _error = fleet_model_roster.parse_fleet_policy_authority(payload.get("fleet_policy"))
+    if authority is not None:
+        return False
+    return _read_enrollment_high_water(dir_fd=dir_fd).get("authority_active") is True
 
 
 def _validate_inspection_roster(payload: Mapping[str, Any]) -> str | None:
@@ -455,6 +547,9 @@ def _accept_lkg(*, token: str, audience: str) -> ModelAdmissionDecision:
         reason = _validate_envelope(envelope, token=token, audience=audience)
         if reason is not None:
             return _fail(reason)
+        authority, _error = fleet_model_roster.parse_fleet_policy_authority(envelope.get("fleet_policy"))
+        if authority is None and record["high_water_record"].get("authority_active") is True:
+            return _fail("enrollment-downgrade")
         cached_at = _parse_iso(record.get("cached_at"))
         if cached_at is None:
             return _fail("malformed-roster")
@@ -544,10 +639,13 @@ def fetch_versioned_roster(
     )
     if reason is not None:
         return _fail(reason, 2 if reason == "unsupported-schema" else 1)
-    if cache_write and cache_supported and not admin_read:
+    if cache_supported and not admin_read:
         try:
             with _client._spool_lock(lkg_path()) as dir_fd:
-                _write_cache_locked(payload, revision=int(payload["revision"]), dir_fd=dir_fd)
+                if _enrollment_downgraded(payload, dir_fd=dir_fd):
+                    return _fail("enrollment-downgrade")
+                if cache_write:
+                    _write_cache_locked(payload, revision=int(payload["revision"]), dir_fd=dir_fd)
         except FleetClientError as exc:
             text = str(exc)
             if text == "revision-rollback":
@@ -566,15 +664,35 @@ def fetch_versioned_roster(
 def _request_digest(body: Mapping[str, Any]) -> str:
     digest_body = {
         "consumer": body.get("consumer"),
+        "decision_id": body.get("decision_id"),
+        "delegation_id": body.get("delegation_id"),
         "expect_digest": body.get("expect_digest"),
         "expect_revision": body.get("expect_revision"),
         "phase": body.get("phase"),
+        "policy_digest": body.get("policy_digest"),
+        "policy_session_id": body.get("policy_session_id"),
+        "policy_version": body.get("policy_version"),
+        "policy_context_hash": body.get("policy_context_hash"),
+        "repo_identity": body.get("repo_identity"),
         "seat": body.get("seat"),
     }
     return hashlib.sha256(fleet_model_roster.canonical_json(digest_body).encode("ascii")).hexdigest()
 
 
-def _binding_for(consumer: str, seat: Mapping[str, Any]) -> dict[str, Any] | None:
+def _binding_for(
+    consumer: str,
+    seat: Mapping[str, Any],
+    *,
+    launch_groups: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    groups = launch_groups
+    if groups is None:
+        groups = seat.get("bindings") if isinstance(seat.get("bindings"), Mapping) else None
+    planned = fleet_model_roster.adapter_plan_binding(
+        consumer, groups, canonical_model=str(seat.get("model") or "") or None
+    )
+    if planned is not None:
+        return planned
     raw_bindings = seat.get("bindings")
     bindings: Mapping[str, Any] = raw_bindings if isinstance(raw_bindings, Mapping) else {}
     if consumer == "t3-fleet":
@@ -594,7 +712,11 @@ def _binding_for(consumer: str, seat: Mapping[str, Any]) -> dict[str, Any] | Non
     instance_id = str(brigade.get("cli") or "")
     if not instance_id:
         return None
-    return {"instance_id": instance_id, "service_tier": None}
+    payload = {"instance_id": instance_id, "service_tier": None}
+    launch_model = brigade.get("model")
+    if isinstance(launch_model, str) and launch_model:
+        payload["model"] = launch_model
+    return payload
 
 
 def _resolve_from_roster(
@@ -630,14 +752,21 @@ def _resolve_from_roster(
         reason = "seat-missing"
     elif not match.get("enabled"):
         reason = "seat-disabled"
-    elif fleet_model_roster.retired_reason(
-        str(match.get("provider") or ""), str(match.get("model") or ""), retired_rows
+    elif any(
+        fleet_model_roster.retired_reason(str(match.get("provider") or ""), identity, retired_rows)
+        for identity in fleet_model_roster.binding_launch_models(match)
     ):
         reason = "retired-model"
     elif not isinstance(match.get("reasoning"), str) or not str(match.get("reasoning") or "").strip():
         reason = "binding-missing"
     else:
-        binding = _binding_for(consumer, match)
+        launch_map = roster.get("consumer_launch_bindings")
+        groups = None
+        if isinstance(launch_map, Mapping):
+            consumer_map = launch_map.get(consumer)
+            if isinstance(consumer_map, Mapping):
+                groups = consumer_map.get(seat_name)
+        binding = _binding_for(consumer, match, launch_groups=groups if isinstance(groups, Mapping) else None)
         if binding is None:
             reason = "binding-missing"
         else:
@@ -960,7 +1089,14 @@ def _map_hub_admission(status: int, payload: Any) -> ModelAdmissionDecision:
         expires = _parse_iso(exact.get("expires_at"))
         if expires is not None and expires <= utc_now():
             return _fail("admission-expired")
-        if fleet_model_roster.retired_reason(provider, model):
+        binding = exact.get("binding") if isinstance(exact.get("binding"), Mapping) else {}
+        launch_model = binding.get("model") if isinstance(binding, Mapping) else None
+        retired = fleet_model_roster.retired_reason(provider, model) or (
+            fleet_model_roster.retired_reason(provider, launch_model)
+            if isinstance(launch_model, str) and launch_model
+            else None
+        )
+        if retired:
             denied = dict(exact)
             denied["state"] = "denied"
             denied["error"] = "retired-model"
@@ -972,7 +1108,7 @@ def _map_hub_admission(status: int, payload: Any) -> ModelAdmissionDecision:
         return _fail("auth-failed")
     if status == 400:
         return _fail("unsupported-schema", 2)
-    if error in _POLICY_DENIALS:
+    if error in _POLICY_DENIALS or error in _PROOF_DENIALS:
         return _fail(error, 3, body)
     if error in _CONFLICTS:
         return _fail(error, 4, body)
@@ -981,6 +1117,224 @@ def _map_hub_admission(status: int, payload: Any) -> ModelAdmissionDecision:
     if status >= 500:
         return _fail("hub-unavailable")
     return _fail("hub-unavailable")
+
+
+def _plan_binding(consumer: str, seat: Mapping[str, Any]) -> dict[str, Any] | None:
+    binding = _binding_for(consumer, seat)
+    payload = dict(binding) if isinstance(binding, dict) else {}
+    bindings = seat.get("bindings") if isinstance(seat.get("bindings"), Mapping) else {}
+    native = bindings.get("native") if isinstance(bindings, Mapping) else None
+    native_model = native.get("model") if isinstance(native, Mapping) else None
+    if isinstance(native_model, str) and native_model and native_model != seat.get("model"):
+        payload["model"] = native_model
+    return payload or None
+
+
+def _bounded_plan_expiry(raw: object, now: datetime) -> str:
+    cap = now + timedelta(seconds=fleet_model_roster.PLAN_MAX_TTL_SECONDS)
+    parsed = _parse_iso(raw)
+    chosen = cap if parsed is None or parsed > cap else parsed
+    return _iso_z(chosen)
+
+
+def plan_model(*, consumer: str, seat: str | None = None, delegation_id: str | None = None) -> ModelAdmissionDecision:
+    """Read-only Hub model plan. Never admits and never falls back to LKG."""
+    if consumer not in fleet_model_roster.CONSUMERS:
+        return _fail("unsupported-schema", 2)
+    if seat is not None and seat != "":
+        if not isinstance(seat, str) or not fleet_model_roster.SEAT_NAME_PATTERN.fullmatch(seat):
+            return _fail("unsupported-schema", 2)
+    if delegation_id:
+        return _fail(
+            "delegation-unavailable",
+            3,
+            {
+                "error": "delegation-unavailable",
+                "launch_authorized": False,
+                "reason": "delegation helper has no adapter-aware client plan projection",
+            },
+        )
+    fetched = fetch_versioned_roster(allow_lkg=False, cache_write=False)
+    if not fetched.ok:
+        return fetched
+    roster = fetched.payload
+    resolved = _resolve_from_roster(roster, consumer=consumer, seat=seat, source="hub")
+    if not resolved.ok:
+        payload = dict(resolved.payload)
+        payload["schema"] = fleet_model_roster.PLAN_SCHEMA
+        payload["launch_authorized"] = False
+        payload.pop("state", None)
+        return _fail(resolved.reason, resolved.exit_code, payload)
+    body = resolved.payload
+    match = next(
+        (item for item in roster.get("seats") or [] if isinstance(item, dict) and item.get("seat") == body.get("seat")),
+        None,
+    )
+    launch_map = roster.get("consumer_launch_bindings")
+    groups = None
+    if isinstance(launch_map, Mapping) and isinstance(match, Mapping):
+        consumer_map = launch_map.get(consumer)
+        if not isinstance(consumer_map, Mapping):
+            payload = dict(body)
+            payload["schema"] = fleet_model_roster.PLAN_SCHEMA
+            payload["launch_authorized"] = False
+            payload["error"] = "binding-missing"
+            payload.pop("state", None)
+            return _fail("binding-missing", 3, payload)
+        groups = consumer_map.get(match.get("seat"))
+        if not isinstance(groups, Mapping):
+            payload = dict(body)
+            payload["schema"] = fleet_model_roster.PLAN_SCHEMA
+            payload["launch_authorized"] = False
+            payload["error"] = "binding-missing"
+            payload.pop("state", None)
+            return _fail("binding-missing", 3, payload)
+        binding = fleet_model_roster.adapter_plan_binding(
+            consumer, groups, canonical_model=str(match.get("model") or "") or None
+        )
+    else:
+        binding = _plan_binding(consumer, match) if isinstance(match, Mapping) else body.get("binding")
+    if binding is None:
+        payload = dict(body)
+        payload["schema"] = fleet_model_roster.PLAN_SCHEMA
+        payload["launch_authorized"] = False
+        payload["error"] = "binding-missing"
+        payload.pop("state", None)
+        return _fail("binding-missing", 3, payload)
+    plan = {
+        "schema": fleet_model_roster.PLAN_SCHEMA,
+        "launch_authorized": False,
+        "consumer": consumer,
+        "roster_revision": body.get("roster_revision"),
+        "roster_digest": body.get("roster_digest"),
+        "seat": body.get("seat"),
+        "provider": body.get("provider"),
+        "model": body.get("model"),
+        "reasoning": body.get("reasoning"),
+        "binding": binding,
+        "source": "hub",
+        "expires_at": _bounded_plan_expiry(body.get("expires_at"), utc_now()),
+    }
+    return _ok("planned", plan)
+
+
+def project_model_bindings(*, consumer: str) -> ModelAdmissionDecision:
+    """Hub-only verified consumer launch bindings. No LKG and no launch authority."""
+    if consumer not in fleet_model_roster.CONSUMERS:
+        return ModelAdmissionDecision(
+            False,
+            2,
+            "unsupported-schema",
+            {"schema": fleet_model_roster.BINDINGS_SCHEMA, "error": "unsupported-schema", "source": "unknown"},
+        )
+    fetched = fetch_versioned_roster(allow_lkg=False, cache_write=False)
+    if not fetched.ok:
+        return ModelAdmissionDecision(
+            False,
+            fetched.exit_code,
+            fetched.reason,
+            {
+                "schema": fleet_model_roster.BINDINGS_SCHEMA,
+                "source": "unknown",
+                "consumer": consumer,
+                "error": fetched.reason,
+            },
+        )
+    roster = fetched.payload
+    if roster.get("source") != "hub":
+        return ModelAdmissionDecision(
+            False,
+            3,
+            "bindings-unavailable",
+            {
+                "schema": fleet_model_roster.BINDINGS_SCHEMA,
+                "source": roster.get("source") or "unknown",
+                "consumer": consumer,
+                "error": "bindings-unavailable",
+            },
+        )
+    authority, authority_error = fleet_model_roster.parse_fleet_policy_authority(roster.get("fleet_policy"))
+    if authority_error is not None:
+        return ModelAdmissionDecision(
+            False,
+            1,
+            "malformed-authority",
+            {
+                "schema": fleet_model_roster.BINDINGS_SCHEMA,
+                "source": "hub",
+                "consumer": consumer,
+                "error": "malformed-authority",
+            },
+        )
+    if authority is None or authority.get("active") is not True:
+        return ModelAdmissionDecision(
+            False,
+            3,
+            "bindings-unavailable",
+            {
+                "schema": fleet_model_roster.BINDINGS_SCHEMA,
+                "source": "hub",
+                "consumer": consumer,
+                "error": "bindings-unavailable",
+            },
+        )
+    launch_map = roster.get("consumer_launch_bindings")
+    if not isinstance(launch_map, Mapping):
+        return ModelAdmissionDecision(
+            False,
+            3,
+            "bindings-unavailable",
+            {
+                "schema": fleet_model_roster.BINDINGS_SCHEMA,
+                "source": "hub",
+                "consumer": consumer,
+                "error": "bindings-unavailable",
+            },
+        )
+    consumer_map = launch_map.get(consumer)
+    if not isinstance(consumer_map, Mapping):
+        return ModelAdmissionDecision(
+            False,
+            3,
+            "binding-missing",
+            {
+                "schema": fleet_model_roster.BINDINGS_SCHEMA,
+                "source": "hub",
+                "consumer": consumer,
+                "error": "binding-missing",
+            },
+        )
+    seats = {item.get("seat"): item for item in roster.get("seats") or [] if isinstance(item, dict)}
+    bindings: dict[str, Any] = {}
+    for seat_name, groups in consumer_map.items():
+        if not isinstance(seat_name, str) or not isinstance(groups, Mapping):
+            continue
+        row = seats.get(seat_name)
+        if not isinstance(row, Mapping):
+            continue
+        compacted = fleet_model_roster.compact_launch_groups(groups)
+        bindings[seat_name] = {
+            "provider": row.get("provider"),
+            "model": row.get("model"),
+            "enabled": bool(row.get("enabled")),
+            "brigade": compacted.get("brigade") or {},
+            "t3_fleet": compacted.get("t3_fleet") or {},
+            "native": compacted.get("native") or {},
+        }
+    digest = roster.get("document_sha256")
+    policy_digest = authority.get("digest")
+    payload = {
+        "schema": fleet_model_roster.BINDINGS_SCHEMA,
+        "source": "hub",
+        "consumer": consumer,
+        "revision": roster.get("revision"),
+        "digest": digest,
+        "expires_at": roster.get("expires_at"),
+        "policy_version": authority.get("version"),
+        "policy_digest": policy_digest,
+        "bindings": bindings,
+    }
+    return ModelAdmissionDecision(True, 0, "ok", payload)
 
 
 def admit_model(
@@ -992,6 +1346,13 @@ def admit_model(
     expect_revision: int | None = None,
     expect_digest: str | None = None,
     allow_lkg: bool = True,
+    policy_session_id: str | None = None,
+    policy_version: int | None = None,
+    policy_digest: str | None = None,
+    decision_id: str | None = None,
+    repo_identity: str | None = None,
+    delegation_id: str | None = None,
+    policy_context_hash: str | None = None,
 ) -> ModelAdmissionDecision:
     """Admit one consumer/seat from Hub or a valid LKG."""
     if consumer not in fleet_model_roster.CONSUMERS or phase not in fleet_model_roster.ADMISSION_PHASES:
@@ -1001,7 +1362,18 @@ def admit_model(
     if seat is not None and seat != "":
         if not isinstance(seat, str) or not fleet_model_roster.SEAT_NAME_PATTERN.fullmatch(seat):
             return _fail("unsupported-schema", 2)
-    if phase == "target":
+    if delegation_id:
+        return _fail("delegation-unavailable", 3, {"error": "delegation-unavailable"})
+    if policy_digest is not None and fleet_model_roster.SHA256_DIGEST_PATTERN.fullmatch(policy_digest) is None:
+        return _fail("unsupported-schema", 2)
+    if policy_version is not None and (type(policy_version) is not int or policy_version <= 0):
+        return _fail("unsupported-schema", 2)
+    if (
+        policy_context_hash is not None
+        and fleet_model_roster.SHA256_DIGEST_PATTERN.fullmatch(policy_context_hash) is None
+    ):
+        return _fail("unsupported-schema", 2)
+    if phase in fleet_model_roster.PROOF_PHASES:
         allow_lkg = False
     fetched = fetch_versioned_roster(allow_lkg=allow_lkg)
     if not fetched.ok and fetched.reason in {
@@ -1042,6 +1414,20 @@ def admit_model(
         "expect_revision": expect_revision,
         "expect_digest": expect_digest,
     }
+    if policy_session_id:
+        body["policy_session_id"] = policy_session_id
+    if policy_version is not None:
+        body["policy_version"] = policy_version
+    if policy_digest:
+        body["policy_digest"] = policy_digest
+    if decision_id:
+        body["decision_id"] = decision_id
+    if repo_identity:
+        body["repo_identity"] = repo_identity
+    if delegation_id:
+        body["delegation_id"] = delegation_id
+    if policy_context_hash:
+        body["policy_context_hash"] = policy_context_hash
     if hub and token:
         try:
             status, payload = _client._run_with_deadline(
