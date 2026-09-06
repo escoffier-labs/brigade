@@ -1387,9 +1387,7 @@ def test_apply_surfaces_the_refused_hub_action_on_queue_error(tmp_path: Path, mo
     monkeypatch.setattr(
         grokbot_jobs,
         "enqueue",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            grokbot_jobs.GrokbotJobError("auth-failed", action="enqueue")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(grokbot_jobs.GrokbotJobError("auth-failed", action="enqueue")),
     )
 
     with pytest.raises(grokbot_feed.FeedError) as raised:
@@ -1416,9 +1414,7 @@ def test_cli_feed_prints_hub_queue_error_action_and_actor_without_tokens(
     monkeypatch.setattr(
         grokbot_jobs,
         "enqueue",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            grokbot_jobs.GrokbotJobError("auth-failed", action="enqueue")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(grokbot_jobs.GrokbotJobError("auth-failed", action="enqueue")),
     )
     manifest = _write_manifest(tmp_path / "feed.json", _manifest(_entry("task-a")))
 
