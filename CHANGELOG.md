@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Declared version and beta preview base move to 0.28.0 after the v0.27.0 tag so publish-dev wheels sort above stable. (#1468)
+
 ## [0.27.0] - 2026-09-06
 
 ### Fixed

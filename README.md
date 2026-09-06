@@ -39,7 +39,7 @@ Learning in Brigade is outcome-based skill scoring, promotion, and rollback from
 
 Install with `pipx install brigade-cli` or `uv tool install brigade-cli`, then follow the [install guide](https://brigade.tools/docs/getting-started/install), [QUICKSTART.md](QUICKSTART.md), or give [first 10 minutes](docs/first-10-minutes.md) and [docs/agents-guide.md](docs/agents-guide.md) to your coding agent.
 
-Stable channel: published v0.27.0. Preview channel: `brigade update --channel beta` for `0.28.0.devYYYYMMDD` wheels once the first 0.28 dev wheel publishes. Details: [update channels](docs/update-channels.md).
+Stable channel: published v0.27.0. Preview channel: `brigade update --channel beta` for `0.28.0.devYYYYMMDD` wheels. Details: [update channels](docs/update-channels.md).
 
 ## How it compares
 

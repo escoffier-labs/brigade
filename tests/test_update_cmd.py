@@ -164,7 +164,7 @@ class _PypiHttp(_Http):
         manifest,
         *,
         pypi_releases=None,
-        info_version: str = "0.26.1",
+        info_version: str = "0.27.0",
         tag_ref=None,
         tag_objects=None,
     ):
@@ -176,7 +176,7 @@ class _PypiHttp(_Http):
         self.urls.append(url)
         if url == update_cmd.PYPI_PROJECT_JSON_URL:
             # Mirror live PyPI: info.version stays on the latest stable release
-            # even when releases contains 0.27.0.devYYYYMMDD wheels.
+            # even when releases contains 0.28.0.devYYYYMMDD wheels.
             return {"info": {"version": self.info_version}, "releases": self.pypi_releases}
         if url.endswith("/releases/latest"):
             return self.release
@@ -188,11 +188,11 @@ class _PypiHttp(_Http):
 
 
 def _default_beta_releases() -> dict:
-    version = "0.27.0.dev20260808"
+    version = "0.28.0.dev20260808"
     return {version: [_wheel_file(version)]}
 
 
-BETA_VERSION = "0.27.0.dev20260808"
+BETA_VERSION = "0.28.0.dev20260808"
 
 
 class _Response:
@@ -372,27 +372,27 @@ def test_cache_manifest_rejects_existing_bytes_for_the_same_digest_path(tmp_path
         update_cmd._cache_manifest(paths, release)
 
 
-def test_resolve_beta_cli_version_selects_newest_non_yanked_0_27_dev_wheel():
+def test_resolve_beta_cli_version_selects_newest_non_yanked_0_28_dev_wheel():
     releases = {
-        "0.27.0.dev20260801": [_wheel_file("0.27.0.dev20260801")],
-        "0.27.0.dev20260810": [_wheel_file("0.27.0.dev20260810", yanked=True)],
-        "0.27.0.dev20260809": [_wheel_file("0.27.0.dev20260809")],
-        "0.27.0.dev20260808": [_sdist_file("0.27.0.dev20260808")],
-        "0.26.0.dev20260811": [_wheel_file("0.26.0.dev20260811")],
-        "0.28.0.dev20260811": [_wheel_file("0.28.0.dev20260811")],
-        "0.27.0.dev2026080": [_wheel_file("0.27.0.dev2026080")],
-        "0.27.0.dev202608091": [_wheel_file("0.27.0.dev202608091")],
-        "0.27.0a1": [_wheel_file("0.27.0a1")],
-        "0.27.0rc1": [_wheel_file("0.27.0rc1")],
-        "0.27.0.dev20260809.post1": [_wheel_file("0.27.0.dev20260809.post1")],
-        "0.27.1.dev20260811": [_wheel_file("0.27.1.dev20260811")],
+        "0.28.0.dev20260801": [_wheel_file("0.28.0.dev20260801")],
+        "0.28.0.dev20260810": [_wheel_file("0.28.0.dev20260810", yanked=True)],
+        "0.28.0.dev20260809": [_wheel_file("0.28.0.dev20260809")],
+        "0.28.0.dev20260808": [_sdist_file("0.28.0.dev20260808")],
+        "0.27.0.dev20260811": [_wheel_file("0.27.0.dev20260811")],
+        "0.29.0.dev20260811": [_wheel_file("0.29.0.dev20260811")],
+        "0.28.0.dev2026080": [_wheel_file("0.28.0.dev2026080")],
+        "0.28.0.dev202608091": [_wheel_file("0.28.0.dev202608091")],
+        "0.28.0a1": [_wheel_file("0.28.0a1")],
+        "0.28.0rc1": [_wheel_file("0.28.0rc1")],
+        "0.28.0.dev20260809.post1": [_wheel_file("0.28.0.dev20260809.post1")],
+        "0.28.1.dev20260811": [_wheel_file("0.28.1.dev20260811")],
         "1.2.3": [_wheel_file("1.2.3")],
         "main": [_wheel_file("main")],
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [_wheel_file("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")],
     }
     http = _PypiHttp(_release(_manifest()), _manifest(), pypi_releases=releases)
 
-    assert update_cmd.resolve_beta_cli_version(http) == "0.27.0.dev20260809"
+    assert update_cmd.resolve_beta_cli_version(http) == "0.28.0.dev20260809"
     assert update_cmd.PYPI_PROJECT_JSON_URL in http.urls
 
 
@@ -400,13 +400,13 @@ def test_resolve_beta_cli_version_selects_newest_non_yanked_0_27_dev_wheel():
     "releases",
     (
         {},
-        {"0.27.0.dev20260808": []},
-        {"0.27.0.dev20260808": [_wheel_file("0.27.0.dev20260808", yanked=True)]},
-        {"0.27.0.dev20260808": [_sdist_file("0.27.0.dev20260808")]},
-        {"0.27.0.dev20260808": "not-a-list"},
-        {"0.27.0.dev2026080": [_wheel_file("0.27.0.dev2026080")]},
-        {"0.28.0.dev20260808": [_wheel_file("0.28.0.dev20260808")]},
-        {"0.27.0a1": [_wheel_file("0.27.0a1")]},
+        {"0.28.0.dev20260808": []},
+        {"0.28.0.dev20260808": [_wheel_file("0.28.0.dev20260808", yanked=True)]},
+        {"0.28.0.dev20260808": [_sdist_file("0.28.0.dev20260808")]},
+        {"0.28.0.dev20260808": "not-a-list"},
+        {"0.28.0.dev2026080": [_wheel_file("0.28.0.dev2026080")]},
+        {"0.29.0.dev20260808": [_wheel_file("0.29.0.dev20260808")]},
+        {"0.28.0a1": [_wheel_file("0.28.0a1")]},
     ),
 )
 def test_resolve_beta_cli_version_fails_closed_without_installable_preview_wheel(releases):
@@ -418,33 +418,33 @@ def test_resolve_beta_cli_version_fails_closed_without_installable_preview_wheel
 def test_resolve_beta_cli_version_scans_releases_not_info_version():
     """Live PyPI shape after workflow 31422458576: info.version stays stable."""
     releases = {
-        "0.26.1": [_wheel_file("0.26.1")],
-        "0.27.0.dev20260810": [_wheel_file("0.27.0.dev20260810")],
+        "0.27.0": [_wheel_file("0.27.0")],
+        "0.28.0.dev20260810": [_wheel_file("0.28.0.dev20260810")],
     }
     http = _PypiHttp(
         _release(_manifest()),
         _manifest(),
         pypi_releases=releases,
-        info_version="0.26.1",
+        info_version="0.27.0",
     )
 
-    assert update_cmd.resolve_beta_cli_version(http) == "0.27.0.dev20260810"
-    assert http.info_version == "0.26.1"
+    assert update_cmd.resolve_beta_cli_version(http) == "0.28.0.dev20260810"
+    assert http.info_version == "0.27.0"
 
 
 def test_resolve_beta_cli_version_ignores_info_version_even_when_it_looks_like_a_dev_wheel():
     releases = {
-        "0.26.1": [_wheel_file("0.26.1")],
-        "0.27.0.dev20260810": [_wheel_file("0.27.0.dev20260810")],
+        "0.27.0": [_wheel_file("0.27.0")],
+        "0.28.0.dev20260810": [_wheel_file("0.28.0.dev20260810")],
     }
     http = _PypiHttp(
         _release(_manifest()),
         _manifest(),
         pypi_releases=releases,
-        info_version="0.27.0.dev20991231",
+        info_version="0.28.0.dev20991231",
     )
 
-    assert update_cmd.resolve_beta_cli_version(http) == "0.27.0.dev20260810"
+    assert update_cmd.resolve_beta_cli_version(http) == "0.28.0.dev20260810"
 
 
 def test_resolve_beta_cli_version_fails_closed_when_releases_map_missing():
@@ -457,7 +457,7 @@ def test_resolve_beta_cli_version_fails_closed_when_releases_map_missing():
         def json(self, url: str):
             self.urls.append(url)
             assert url == update_cmd.PYPI_PROJECT_JSON_URL
-            return {"info": {"version": "0.26.1"}}
+            return {"info": {"version": "0.27.0"}}
 
         def bytes(self, url: str) -> bytes:
             raise AssertionError(url)
@@ -468,22 +468,23 @@ def test_resolve_beta_cli_version_fails_closed_when_releases_map_missing():
 
 def test_resolve_beta_cli_version_ignores_yanked_sibling_and_keeps_older_wheel():
     releases = {
-        "0.27.0.dev20260810": [_wheel_file("0.27.0.dev20260810", yanked=True)],
-        "0.27.0.dev20260809": [
-            _wheel_file("0.27.0.dev20260809", yanked=True),
-            _wheel_file("0.27.0.dev20260809"),
+        "0.28.0.dev20260810": [_wheel_file("0.28.0.dev20260810", yanked=True)],
+        "0.28.0.dev20260809": [
+            _wheel_file("0.28.0.dev20260809", yanked=True),
+            _wheel_file("0.28.0.dev20260809"),
         ],
-        "0.27.0.dev20260801": [_wheel_file("0.27.0.dev20260801")],
+        "0.28.0.dev20260801": [_wheel_file("0.28.0.dev20260801")],
     }
     http = _PypiHttp(_release(_manifest()), _manifest(), pypi_releases=releases)
-    assert update_cmd.resolve_beta_cli_version(http) == "0.27.0.dev20260809"
+    assert update_cmd.resolve_beta_cli_version(http) == "0.28.0.dev20260809"
 
 
-def test_parse_beta_dev_version_accepts_only_exact_0_27_daily_form():
-    assert update_cmd._parse_beta_dev_version("0.27.0.dev20260808") == "20260808"
-    assert update_cmd._parse_beta_dev_version("0.27.0.dev2026080") is None
-    assert update_cmd._parse_beta_dev_version("0.28.0.dev20260808") is None
-    assert update_cmd._parse_beta_dev_version("0.27.0a1") is None
+def test_parse_beta_dev_version_accepts_only_exact_0_28_daily_form():
+    assert update_cmd._parse_beta_dev_version("0.28.0.dev20260808") == "20260808"
+    assert update_cmd._parse_beta_dev_version("0.28.0.dev2026080") is None
+    assert update_cmd._parse_beta_dev_version("0.29.0.dev20260808") is None
+    assert update_cmd._parse_beta_dev_version("0.27.0.dev20260808") is None
+    assert update_cmd._parse_beta_dev_version("0.28.0a1") is None
     assert update_cmd._parse_beta_dev_version("b" * 40) is None
     assert update_cmd.is_legacy_beta_git_sha("b" * 40)
     assert not update_cmd.is_legacy_beta_git_sha(BETA_VERSION)
@@ -837,7 +838,7 @@ def test_beta_setup_failure_leaves_prior_update_state_unchanged(tmp_path):
             1,
             "beta",
             "brigade update",
-            "0.27.0.dev20260701",
+            "0.28.0.dev20260701",
             41,
             "v1.2.2",
             "a" * 40,

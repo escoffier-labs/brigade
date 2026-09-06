@@ -1,3 +1,3 @@
 """Brigade: local operator-system CLI for agent workspaces."""
 
-__version__ = "0.27.0"
+__version__ = "0.28.0"

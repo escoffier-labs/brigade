@@ -316,14 +316,14 @@ def test_next_minor_version_rejects_invalid_stable_bases(stable_version):
 
 
 def test_derive_dev_version_stamps_the_declared_line():
+    assert derive_dev_version("0.28.0", "20260808") == "0.28.0.dev20260808"
     assert derive_dev_version("0.27.0", "20260808") == "0.27.0.dev20260808"
-    assert derive_dev_version("0.26.1", "20260808") == "0.26.1.dev20260808"
 
 
 def test_source_tree_version_sorts_at_or_above_publish_dev_wheel_scheme():
     """Source / pipx-from-checkout versions must not sort below publish-dev wheels.
 
-    Field trap: pyproject 0.26.1 < 0.27.0.devYYYYMMDD (PEP 440), so a main
+    Field trap: pyproject 0.27.0 < 0.28.0.devYYYYMMDD (PEP 440), so a main
     checkout looks older than the daily wheel built from that same tree.
     """
     today = datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -347,8 +347,8 @@ def test_derive_dev_version_rejects_invalid_stable_bases(stable_version):
 def test_update_channels_documents_exact_dev_wheel_install():
     text = (ROOT / "docs" / "update-channels.md").read_text()
 
-    assert "pipx install 'brigade-cli==0.27.0.dev20260808'" in text
-    assert "pip install 'brigade-cli==0.27.0.dev20260808'" in text
+    assert "pipx install 'brigade-cli==0.28.0.dev20260907'" in text
+    assert "pip install 'brigade-cli==0.28.0.dev20260907'" in text
     assert "default resolver does not select them" in text
 
 
