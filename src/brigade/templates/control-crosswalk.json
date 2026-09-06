@@ -1,0 +1,1407 @@
+{
+  "schema": "brigade.control_crosswalk.v1",
+  "crosswalk_version": 1,
+  "generated_by": "brigade",
+  "claims": [
+    {
+      "id": "EC-01",
+      "title": "Verification executed with captured exit status",
+      "artifact_family": "brigade.work_verify_receipt",
+      "producer_command": "brigade work verify run",
+      "verifier_command": "brigade receipts verify",
+      "state_rule": "verify-receipt-completed"
+    },
+    {
+      "id": "EC-02",
+      "title": "Verification result signed and re-derivable",
+      "artifact_family": "brigade.attestation.sshsig-dsse.v1",
+      "producer_command": "brigade receipts export attestation",
+      "verifier_command": "brigade receipts verify-attestation",
+      "state_rule": "sshsig-test-result-signed-ok"
+    },
+    {
+      "id": "EC-03",
+      "title": "Cosign bundle for external verification",
+      "artifact_family": "brigade.attestation.cosign-dsse.v1",
+      "producer_command": "brigade receipts export attestation --profile cosign",
+      "verifier_command": "cosign verify-blob-attestation",
+      "state_rule": "cosign-bundle-exists"
+    },
+    {
+      "id": "EC-04",
+      "title": "Change request signed before dispatch",
+      "artifact_family": "agent-request/v1",
+      "producer_command": "brigade run --requester-key",
+      "verifier_command": "brigade receipts verify-attestation",
+      "state_rule": "agent-request-signed"
+    },
+    {
+      "id": "EC-05",
+      "title": "Human approval bound to the final tree with segregation of duties",
+      "artifact_family": "human-approval/v2",
+      "producer_command": "brigade run approve",
+      "verifier_command": "brigade receipts verify-attestation --strict-approvals",
+      "state_rule": "human-approval-allow-with-sod"
+    },
+    {
+      "id": "EC-06",
+      "title": "Append-only hash-chained run lifecycle journal",
+      "artifact_family": "brigade.run_event.v1",
+      "producer_command": "brigade run",
+      "verifier_command": "brigade run audit",
+      "state_rule": "run-event-journal-exists"
+    },
+    {
+      "id": "EC-07",
+      "title": "Point-in-time agent, model, and tool inventory",
+      "artifact_family": "brigade.governance_inventory.v1",
+      "producer_command": "brigade governance inventory",
+      "verifier_command": "brigade governance inventory",
+      "state_rule": "governance-inventory-exists"
+    },
+    {
+      "id": "EC-08",
+      "title": "Commit trailers resolving to a receipt",
+      "artifact_family": "receipts trailer",
+      "producer_command": "brigade receipts trailer",
+      "verifier_command": "brigade receipts verify --commit",
+      "state_rule": "commit-trailer-receipts"
+    },
+    {
+      "id": "EC-09",
+      "title": "Content-guard redaction verdict",
+      "artifact_family": "brigade.guard.audit",
+      "producer_command": "brigade guard audit",
+      "verifier_command": "brigade guard audit --strict",
+      "state_rule": "guard-audit-allow"
+    },
+    {
+      "id": "EC-10",
+      "title": "Outcome ledger records",
+      "artifact_family": "brigade.outcome_record",
+      "producer_command": "brigade outcome record",
+      "verifier_command": "brigade outcome rebuild-status",
+      "state_rule": "outcome-record-exists"
+    },
+    {
+      "id": "EC-11",
+      "title": "Verify archive index before pruning",
+      "artifact_family": "brigade.verify_archive_index.v1",
+      "producer_command": "brigade work verify run",
+      "verifier_command": "brigade receipts verify",
+      "state_rule": "verify-archive-index-exists"
+    },
+    {
+      "id": "EC-12",
+      "title": "Evidence package with detached manifest",
+      "artifact_family": "brigade.evidence_package.v1",
+      "producer_command": "brigade evidence package",
+      "verifier_command": "brigade evidence package verify",
+      "state_rule": "artifact-absent-until-merged"
+    }
+  ],
+  "frameworks": [
+    {
+      "id": "iso-42001-2023",
+      "name": "ISO/IEC 42001:2023",
+      "edition": "2023",
+      "publication_date": "2023-12",
+      "jurisdiction": "international",
+      "source_locator": "https://www.iso.org/standard/42001",
+      "licensing": "licensed"
+    },
+    {
+      "id": "nist-ai-rmf-1.0",
+      "name": "NIST AI Risk Management Framework",
+      "edition": "1.0",
+      "publication_date": "2023-01-26",
+      "jurisdiction": "US",
+      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework",
+      "licensing": "public"
+    },
+    {
+      "id": "nist-ai-600-1",
+      "name": "NIST AI 600-1 Generative AI Profile",
+      "edition": "1.0",
+      "publication_date": "2024-07-26",
+      "jurisdiction": "US",
+      "source_locator": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence",
+      "licensing": "public"
+    },
+    {
+      "id": "nist-sp-800-218",
+      "name": "NIST SP 800-218 Secure Software Development Framework",
+      "edition": "SSDF v1.1 and SP 800-218A",
+      "publication_date": "2024-07-26",
+      "jurisdiction": "US",
+      "source_locator": "https://csrc.nist.gov/projects/ssdf",
+      "licensing": "public"
+    },
+    {
+      "id": "nist-sp-800-53-r5-1",
+      "name": "NIST SP 800-53 Revision 5.1",
+      "edition": "5.1",
+      "publication_date": "2024-07-26",
+      "jurisdiction": "US",
+      "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads",
+      "licensing": "public"
+    },
+    {
+      "id": "eu-ai-act-2024-1689",
+      "name": "Regulation (EU) 2024/1689 Artificial Intelligence Act",
+      "edition": "consolidated 2026-07-27",
+      "publication_date": "2024-06-13",
+      "jurisdiction": "EU",
+      "source_locator": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689",
+      "licensing": "public"
+    },
+    {
+      "id": "iso-27001-2022",
+      "name": "ISO/IEC 27001:2022",
+      "edition": "2022",
+      "publication_date": "2022-10 amended 2024-02",
+      "jurisdiction": "international",
+      "source_locator": "https://www.iso.org/standard/27001",
+      "licensing": "licensed"
+    },
+    {
+      "id": "soc2-tsc-2017",
+      "name": "AICPA SOC 2 Trust Services Criteria",
+      "edition": "2017 with 2022 points of focus",
+      "publication_date": "2022",
+      "jurisdiction": "US",
+      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022",
+      "licensing": "licensed"
+    },
+    {
+      "id": "owasp-agentic-2026",
+      "name": "OWASP Top 10 for Agentic Applications",
+      "edition": "2026",
+      "publication_date": "unknown",
+      "jurisdiction": "international",
+      "source_locator": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/",
+      "licensing": "public"
+    },
+    {
+      "id": "csa-aicm-v1-1",
+      "name": "CSA AI Controls Matrix",
+      "edition": "v1.1",
+      "publication_date": "unknown",
+      "jurisdiction": "international",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/ai-controls-matrix-v1-1",
+      "licensing": "public"
+    }
+  ],
+  "mappings": [
+    {
+      "claim_id": "EC-01",
+      "framework_id": "iso-42001-2023",
+      "control_id": "A.6.2.8",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Verify receipts capture per-command exit status and are immutable, supporting AI system event log recording.",
+      "source_locator": "https://www.iso.org/standard/42001"
+    },
+    {
+      "claim_id": "EC-01",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "MEASURE-1.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Test execution evidence with captured exit codes supports valid and reliable measurement.",
+      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
+    },
+    {
+      "claim_id": "EC-01",
+      "framework_id": "nist-ai-600-1",
+      "control_id": "MEASURE-2.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Verification receipts evaluate generated code and model behavior with recorded exit status.",
+      "source_locator": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence"
+    },
+    {
+      "claim_id": "EC-01",
+      "framework_id": "nist-sp-800-218",
+      "control_id": "PW.8",
+      "relationship": "supports",
+      "obligation_bearer": "supplier",
+      "applicability_condition": "any",
+      "rationale": "Verify the software and confirm it behaves as intended with captured results.",
+      "source_locator": "https://csrc.nist.gov/projects/ssdf"
+    },
+    {
+      "claim_id": "EC-01",
+      "framework_id": "nist-sp-800-53-r5-1",
+      "control_id": "AU-12",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Audit record generation captures verification events.",
+      "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads"
+    },
+    {
+      "claim_id": "EC-01",
+      "framework_id": "eu-ai-act-2024-1689",
+      "control_id": "Art.12",
+      "relationship": "supports",
+      "obligation_bearer": "provider",
+      "applicability_condition": "deployer of a high-risk AI system under Art. 26",
+      "rationale": "Automatic event logging provides traceability of verification executions.",
+      "source_locator": "https://artificialintelligenceact.eu/article/12/"
+    },
+    {
+      "claim_id": "EC-01",
+      "framework_id": "iso-27001-2022",
+      "control_id": "A.8.32",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Changes are tested and verified before implementation.",
+      "source_locator": "https://www.iso.org/standard/27001"
+    },
+    {
+      "claim_id": "EC-01",
+      "framework_id": "soc2-tsc-2017",
+      "control_id": "CC8.1",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Changes are authorized, tested, and implemented with captured exit status.",
+      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+    },
+    {
+      "claim_id": "EC-01",
+      "framework_id": "owasp-agentic-2026",
+      "control_id": "ASI05",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Unexpected code execution is detected through verification tests.",
+      "source_locator": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/"
+    },
+    {
+      "claim_id": "EC-01",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "AICM-unspecified",
+      "relationship": "no-relationship",
+      "obligation_bearer": "any",
+      "applicability_condition": "any",
+      "rationale": "No specific AICM control identifiers were sourced in the research files.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/ai-controls-matrix-v1-1"
+    },
+    {
+      "claim_id": "EC-02",
+      "framework_id": "iso-42001-2023",
+      "control_id": "A.7.5",
+      "relationship": "partially-supports",
+      "obligation_bearer": "provider",
+      "applicability_condition": "any",
+      "rationale": "Signed Test Result attestation supports integrity of documented verification information.",
+      "source_locator": "https://www.iso.org/standard/42001"
+    },
+    {
+      "claim_id": "EC-02",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "GOVERN-5.2",
+      "relationship": "supports",
+      "obligation_bearer": "provider",
+      "applicability_condition": "any",
+      "rationale": "Signed verification results manage supply-chain risks.",
+      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
+    },
+    {
+      "claim_id": "EC-02",
+      "framework_id": "nist-ai-600-1",
+      "control_id": "MEASURE-3.1",
+      "relationship": "supports",
+      "obligation_bearer": "provider",
+      "applicability_condition": "any",
+      "rationale": "Independent assessment and documentation of verification results.",
+      "source_locator": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence"
+    },
+    {
+      "claim_id": "EC-02",
+      "framework_id": "nist-sp-800-218",
+      "control_id": "PW.7",
+      "relationship": "supports",
+      "obligation_bearer": "supplier",
+      "applicability_condition": "any",
+      "rationale": "Release integrity is supported by signed verification attestations.",
+      "source_locator": "https://csrc.nist.gov/projects/ssdf"
+    },
+    {
+      "claim_id": "EC-02",
+      "framework_id": "nist-sp-800-53-r5-1",
+      "control_id": "CM-3",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Configuration change control with integrity evidence.",
+      "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads"
+    },
+    {
+      "claim_id": "EC-02",
+      "framework_id": "eu-ai-act-2024-1689",
+      "control_id": "Art.12",
+      "relationship": "partially-supports",
+      "obligation_bearer": "provider",
+      "applicability_condition": "deployer of a high-risk AI system under Art. 26",
+      "rationale": "Signed verification results support log integrity for high-risk systems.",
+      "source_locator": "https://artificialintelligenceact.eu/article/12/"
+    },
+    {
+      "claim_id": "EC-02",
+      "framework_id": "iso-27001-2022",
+      "control_id": "A.8.15",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Log protection is supported by signed verification results.",
+      "source_locator": "https://www.iso.org/standard/27001"
+    },
+    {
+      "claim_id": "EC-02",
+      "framework_id": "soc2-tsc-2017",
+      "control_id": "CC7.2",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "System operations monitoring with integrity evidence.",
+      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+    },
+    {
+      "claim_id": "EC-02",
+      "framework_id": "owasp-agentic-2026",
+      "control_id": "ASI04",
+      "relationship": "partially-supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Agentic supply chain integrity through signed verification results.",
+      "source_locator": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/"
+    },
+    {
+      "claim_id": "EC-02",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "AICM-unspecified",
+      "relationship": "no-relationship",
+      "obligation_bearer": "any",
+      "applicability_condition": "any",
+      "rationale": "No specific AICM control identifiers were sourced in the research files.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/ai-controls-matrix-v1-1"
+    },
+    {
+      "claim_id": "EC-03",
+      "framework_id": "iso-42001-2023",
+      "control_id": "A.7.5",
+      "relationship": "partially-supports",
+      "obligation_bearer": "provider",
+      "applicability_condition": "any",
+      "rationale": "Cosign bundle supports external verification of documented information.",
+      "source_locator": "https://www.iso.org/standard/42001"
+    },
+    {
+      "claim_id": "EC-03",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "GOVERN-5.2",
+      "relationship": "supports",
+      "obligation_bearer": "provider",
+      "applicability_condition": "any",
+      "rationale": "Cross-organizational verification through Sigstore bundle.",
+      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
+    },
+    {
+      "claim_id": "EC-03",
+      "framework_id": "nist-ai-600-1",
+      "control_id": "MEASURE-3.1",
+      "relationship": "supports",
+      "obligation_bearer": "provider",
+      "applicability_condition": "any",
+      "rationale": "External assessment of verification results through cosign bundle.",
+      "source_locator": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence"
+    },
+    {
+      "claim_id": "EC-03",
+      "framework_id": "nist-sp-800-218",
+      "control_id": "PW.7",
+      "relationship": "supports",
+      "obligation_bearer": "supplier",
+      "applicability_condition": "any",
+      "rationale": "Release integrity is verifiable by external parties using cosign.",
+      "source_locator": "https://csrc.nist.gov/projects/ssdf"
+    },
+    {
+      "claim_id": "EC-03",
+      "framework_id": "nist-sp-800-53-r5-1",
+      "control_id": "CM-3",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Change control evidence is externally verifiable.",
+      "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads"
+    },
+    {
+      "claim_id": "EC-03",
+      "framework_id": "eu-ai-act-2024-1689",
+      "control_id": "Art.12",
+      "relationship": "partially-supports",
+      "obligation_bearer": "provider",
+      "applicability_condition": "deployer of a high-risk AI system under Art. 26",
+      "rationale": "External verification supports log integrity for high-risk systems.",
+      "source_locator": "https://artificialintelligenceact.eu/article/12/"
+    },
+    {
+      "claim_id": "EC-03",
+      "framework_id": "iso-27001-2022",
+      "control_id": "A.8.15",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Log protection supports external verification.",
+      "source_locator": "https://www.iso.org/standard/27001"
+    },
+    {
+      "claim_id": "EC-03",
+      "framework_id": "soc2-tsc-2017",
+      "control_id": "CC7.2",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Monitoring evidence is externally verifiable.",
+      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+    },
+    {
+      "claim_id": "EC-03",
+      "framework_id": "owasp-agentic-2026",
+      "control_id": "ASI04",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Supply chain verification through cosign bundle.",
+      "source_locator": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/"
+    },
+    {
+      "claim_id": "EC-03",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "AICM-unspecified",
+      "relationship": "no-relationship",
+      "obligation_bearer": "any",
+      "applicability_condition": "any",
+      "rationale": "No specific AICM control identifiers were sourced in the research files.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/ai-controls-matrix-v1-1"
+    },
+    {
+      "claim_id": "EC-04",
+      "framework_id": "iso-42001-2023",
+      "control_id": "A.6.2",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Signed change request supports AI system lifecycle control.",
+      "source_locator": "https://www.iso.org/standard/42001"
+    },
+    {
+      "claim_id": "EC-04",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "GOVERN-1.2",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Roles and responsibilities for change requests are defined.",
+      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
+    },
+    {
+      "claim_id": "EC-04",
+      "framework_id": "nist-ai-600-1",
+      "control_id": "MANAGE-2.2",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Change management for generative AI systems includes signed requests.",
+      "source_locator": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence"
+    },
+    {
+      "claim_id": "EC-04",
+      "framework_id": "nist-sp-800-218",
+      "control_id": "PS.3",
+      "relationship": "supports",
+      "obligation_bearer": "supplier",
+      "applicability_condition": "any",
+      "rationale": "Protect development environments with signed change requests.",
+      "source_locator": "https://csrc.nist.gov/projects/ssdf"
+    },
+    {
+      "claim_id": "EC-04",
+      "framework_id": "nist-sp-800-53-r5-1",
+      "control_id": "AC-2",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Account management for change requesters.",
+      "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads"
+    },
+    {
+      "claim_id": "EC-04",
+      "framework_id": "eu-ai-act-2024-1689",
+      "control_id": "Art.14",
+      "relationship": "partially-supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "deployer of a high-risk AI system under Art. 26",
+      "rationale": "Human oversight can request and authorize changes before dispatch.",
+      "source_locator": "https://artificialintelligenceact.eu/article/14/"
+    },
+    {
+      "claim_id": "EC-04",
+      "framework_id": "iso-27001-2022",
+      "control_id": "A.8.32",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Changes are authorized before implementation.",
+      "source_locator": "https://www.iso.org/standard/27001"
+    },
+    {
+      "claim_id": "EC-04",
+      "framework_id": "soc2-tsc-2017",
+      "control_id": "CC6.1",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Logical access controls for change requesters.",
+      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+    },
+    {
+      "claim_id": "EC-04",
+      "framework_id": "owasp-agentic-2026",
+      "control_id": "ASI03",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Identity and privilege controls for change requests.",
+      "source_locator": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/"
+    },
+    {
+      "claim_id": "EC-04",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "AICM-unspecified",
+      "relationship": "no-relationship",
+      "obligation_bearer": "any",
+      "applicability_condition": "any",
+      "rationale": "No specific AICM control identifiers were sourced in the research files.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/ai-controls-matrix-v1-1"
+    },
+    {
+      "claim_id": "EC-05",
+      "framework_id": "iso-42001-2023",
+      "control_id": "A.3.2",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Segregation of duties for human approval of AI changes.",
+      "source_locator": "https://www.iso.org/standard/42001"
+    },
+    {
+      "claim_id": "EC-05",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "GOVERN-2.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Human oversight and accountability for AI risks.",
+      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
+    },
+    {
+      "claim_id": "EC-05",
+      "framework_id": "nist-ai-600-1",
+      "control_id": "MANAGE-2.2",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Human approval for generative AI changes.",
+      "source_locator": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence"
+    },
+    {
+      "claim_id": "EC-05",
+      "framework_id": "nist-sp-800-218",
+      "control_id": "PW.5",
+      "relationship": "supports",
+      "obligation_bearer": "supplier",
+      "applicability_condition": "any",
+      "rationale": "Review and approval of code changes.",
+      "source_locator": "https://csrc.nist.gov/projects/ssdf"
+    },
+    {
+      "claim_id": "EC-05",
+      "framework_id": "nist-sp-800-53-r5-1",
+      "control_id": "CM-3",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Change approval with segregation of duties.",
+      "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads"
+    },
+    {
+      "claim_id": "EC-05",
+      "framework_id": "eu-ai-act-2024-1689",
+      "control_id": "Art.14",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "deployer of a high-risk AI system under Art. 26",
+      "rationale": "Competent human oversight and approval before changes proceed.",
+      "source_locator": "https://artificialintelligenceact.eu/article/14/"
+    },
+    {
+      "claim_id": "EC-05",
+      "framework_id": "iso-27001-2022",
+      "control_id": "A.8.32",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Changes are approved by authorized personnel.",
+      "source_locator": "https://www.iso.org/standard/27001"
+    },
+    {
+      "claim_id": "EC-05",
+      "framework_id": "soc2-tsc-2017",
+      "control_id": "CC6.1",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Segregation of duties for approval.",
+      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+    },
+    {
+      "claim_id": "EC-05",
+      "framework_id": "owasp-agentic-2026",
+      "control_id": "ASI03",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Identity and privilege abuse prevention through approval.",
+      "source_locator": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/"
+    },
+    {
+      "claim_id": "EC-05",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "AICM-unspecified",
+      "relationship": "no-relationship",
+      "obligation_bearer": "any",
+      "applicability_condition": "any",
+      "rationale": "No specific AICM control identifiers were sourced in the research files.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/ai-controls-matrix-v1-1"
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "iso-42001-2023",
+      "control_id": "A.6.2.8",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Append-only lifecycle journal records AI system events.",
+      "source_locator": "https://www.iso.org/standard/42001"
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "MEASURE-2.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Monitor AI systems for risks and incidents through lifecycle logs.",
+      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "nist-ai-600-1",
+      "control_id": "MANAGE-4.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Post-deployment monitoring and decommissioning logs.",
+      "source_locator": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence"
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "nist-sp-800-218",
+      "control_id": "RV.1",
+      "relationship": "supports",
+      "obligation_bearer": "supplier",
+      "applicability_condition": "any",
+      "rationale": "Respond to vulnerabilities with event logs.",
+      "source_locator": "https://csrc.nist.gov/projects/ssdf"
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "nist-sp-800-53-r5-1",
+      "control_id": "AU-12",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Audit record generation for lifecycle events.",
+      "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads"
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "eu-ai-act-2024-1689",
+      "control_id": "Art.12",
+      "relationship": "supports",
+      "obligation_bearer": "provider",
+      "applicability_condition": "deployer of a high-risk AI system under Art. 26",
+      "rationale": "Automatic logging of events supports traceability.",
+      "source_locator": "https://artificialintelligenceact.eu/article/12/"
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "iso-27001-2022",
+      "control_id": "A.8.15",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Logging of lifecycle events.",
+      "source_locator": "https://www.iso.org/standard/27001"
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "soc2-tsc-2017",
+      "control_id": "CC7.2",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "System activity logging for monitoring.",
+      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "owasp-agentic-2026",
+      "control_id": "ASI05",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Observability of unexpected code execution through lifecycle logs.",
+      "source_locator": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/"
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "AICM-unspecified",
+      "relationship": "no-relationship",
+      "obligation_bearer": "any",
+      "applicability_condition": "any",
+      "rationale": "No specific AICM control identifiers were sourced in the research files.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/ai-controls-matrix-v1-1"
+    },
+    {
+      "claim_id": "EC-07",
+      "framework_id": "iso-42001-2023",
+      "control_id": "A.4",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Inventory of resources including agents, models, and tools.",
+      "source_locator": "https://www.iso.org/standard/42001"
+    },
+    {
+      "claim_id": "EC-07",
+      "framework_id": "iso-42001-2023",
+      "control_id": "A.5",
+      "relationship": "no-relationship",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Impact assessment is outside Brigade scope; no evidence is emitted.",
+      "source_locator": "https://www.iso.org/standard/42001"
+    },
+    {
+      "claim_id": "EC-07",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "GOVERN-5.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Inventory AI systems and supply chain.",
+      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
+    },
+    {
+      "claim_id": "EC-07",
+      "framework_id": "nist-ai-600-1",
+      "control_id": "MAP-1.2",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Categorize AI systems and context including agents and tools.",
+      "source_locator": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence"
+    },
+    {
+      "claim_id": "EC-07",
+      "framework_id": "nist-sp-800-218",
+      "control_id": "PS.1",
+      "relationship": "supports",
+      "obligation_bearer": "supplier",
+      "applicability_condition": "any",
+      "rationale": "Know your software and supply chain inventory.",
+      "source_locator": "https://csrc.nist.gov/projects/ssdf"
+    },
+    {
+      "claim_id": "EC-07",
+      "framework_id": "nist-sp-800-53-r5-1",
+      "control_id": "CM-8",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Information system component inventory.",
+      "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads"
+    },
+    {
+      "claim_id": "EC-07",
+      "framework_id": "eu-ai-act-2024-1689",
+      "control_id": "Art.11",
+      "relationship": "supports",
+      "obligation_bearer": "provider",
+      "applicability_condition": "deployer of a high-risk AI system under Art. 26",
+      "rationale": "Technical documentation includes agent, model, and tool inventory.",
+      "source_locator": "https://artificialintelligenceact.eu/article/11/"
+    },
+    {
+      "claim_id": "EC-07",
+      "framework_id": "iso-27001-2022",
+      "control_id": "A.8.28",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Secure coding inventory of development components.",
+      "source_locator": "https://www.iso.org/standard/27001"
+    },
+    {
+      "claim_id": "EC-07",
+      "framework_id": "soc2-tsc-2017",
+      "control_id": "CC6.1",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Inventory of logical access assets.",
+      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+    },
+    {
+      "claim_id": "EC-07",
+      "framework_id": "owasp-agentic-2026",
+      "control_id": "ASI04",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Agentic supply chain inventory.",
+      "source_locator": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/"
+    },
+    {
+      "claim_id": "EC-07",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "AICM-unspecified",
+      "relationship": "no-relationship",
+      "obligation_bearer": "any",
+      "applicability_condition": "any",
+      "rationale": "No specific AICM control identifiers were sourced in the research files.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/ai-controls-matrix-v1-1"
+    },
+    {
+      "claim_id": "EC-08",
+      "framework_id": "iso-42001-2023",
+      "control_id": "A.7.5",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Commit trailers link documented information to code changes.",
+      "source_locator": "https://www.iso.org/standard/42001"
+    },
+    {
+      "claim_id": "EC-08",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "MANAGE-2.4",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Track changes and communicate risks through commit linkage.",
+      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
+    },
+    {
+      "claim_id": "EC-08",
+      "framework_id": "nist-ai-600-1",
+      "control_id": "MANAGE-2.2",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Change management records linked to commits.",
+      "source_locator": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence"
+    },
+    {
+      "claim_id": "EC-08",
+      "framework_id": "nist-sp-800-218",
+      "control_id": "PW.7",
+      "relationship": "supports",
+      "obligation_bearer": "supplier",
+      "applicability_condition": "any",
+      "rationale": "Release integrity through commit linkage.",
+      "source_locator": "https://csrc.nist.gov/projects/ssdf"
+    },
+    {
+      "claim_id": "EC-08",
+      "framework_id": "nist-sp-800-53-r5-1",
+      "control_id": "CM-3",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Change control records linked to commits.",
+      "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads"
+    },
+    {
+      "claim_id": "EC-08",
+      "framework_id": "eu-ai-act-2024-1689",
+      "control_id": "Art.12",
+      "relationship": "supports",
+      "obligation_bearer": "provider",
+      "applicability_condition": "deployer of a high-risk AI system under Art. 26",
+      "rationale": "Traceability through commit linkage to receipts.",
+      "source_locator": "https://artificialintelligenceact.eu/article/12/"
+    },
+    {
+      "claim_id": "EC-08",
+      "framework_id": "iso-27001-2022",
+      "control_id": "A.8.32",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Change management records linked to commits.",
+      "source_locator": "https://www.iso.org/standard/27001"
+    },
+    {
+      "claim_id": "EC-08",
+      "framework_id": "soc2-tsc-2017",
+      "control_id": "CC8.1",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Changes are documented and linked to receipts.",
+      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+    },
+    {
+      "claim_id": "EC-08",
+      "framework_id": "owasp-agentic-2026",
+      "control_id": "ASI04",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Supply chain traceability through commit trailers.",
+      "source_locator": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/"
+    },
+    {
+      "claim_id": "EC-08",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "AICM-unspecified",
+      "relationship": "no-relationship",
+      "obligation_bearer": "any",
+      "applicability_condition": "any",
+      "rationale": "No specific AICM control identifiers were sourced in the research files.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/ai-controls-matrix-v1-1"
+    },
+    {
+      "claim_id": "EC-09",
+      "framework_id": "iso-42001-2023",
+      "control_id": "A.7",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Data controls protect AI system inputs and outputs from leakage.",
+      "source_locator": "https://www.iso.org/standard/42001"
+    },
+    {
+      "claim_id": "EC-09",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "MAP-2.3",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Categorize risks and impacts including data leakage.",
+      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
+    },
+    {
+      "claim_id": "EC-09",
+      "framework_id": "nist-ai-600-1",
+      "control_id": "MEASURE-2.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Evaluate data privacy risks through content scanning.",
+      "source_locator": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence"
+    },
+    {
+      "claim_id": "EC-09",
+      "framework_id": "nist-sp-800-218",
+      "control_id": "PS.2",
+      "relationship": "supports",
+      "obligation_bearer": "supplier",
+      "applicability_condition": "any",
+      "rationale": "Protect software from tampering and unauthorized access.",
+      "source_locator": "https://csrc.nist.gov/projects/ssdf"
+    },
+    {
+      "claim_id": "EC-09",
+      "framework_id": "nist-sp-800-53-r5-1",
+      "control_id": "AU-6",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Audit record review for content findings.",
+      "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads"
+    },
+    {
+      "claim_id": "EC-09",
+      "framework_id": "eu-ai-act-2024-1689",
+      "control_id": "Art.50",
+      "relationship": "partially-supports",
+      "obligation_bearer": "provider",
+      "applicability_condition": "provider of a GPAI system under Art. 50",
+      "rationale": "Transparency for generated content is supported by redaction scanning.",
+      "source_locator": "https://artificialintelligenceact.eu/article/50/"
+    },
+    {
+      "claim_id": "EC-09",
+      "framework_id": "iso-27001-2022",
+      "control_id": "A.8.15",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Log review for sensitive data findings.",
+      "source_locator": "https://www.iso.org/standard/27001"
+    },
+    {
+      "claim_id": "EC-09",
+      "framework_id": "soc2-tsc-2017",
+      "control_id": "CC7.2",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Monitoring for sensitive data handling.",
+      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+    },
+    {
+      "claim_id": "EC-09",
+      "framework_id": "owasp-agentic-2026",
+      "control_id": "ASI02",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Tool misuse prevention through content scanning.",
+      "source_locator": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/"
+    },
+    {
+      "claim_id": "EC-09",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "AICM-unspecified",
+      "relationship": "no-relationship",
+      "obligation_bearer": "any",
+      "applicability_condition": "any",
+      "rationale": "No specific AICM control identifiers were sourced in the research files.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/ai-controls-matrix-v1-1"
+    },
+    {
+      "claim_id": "EC-10",
+      "framework_id": "iso-42001-2023",
+      "control_id": "A.9.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Monitoring and measurement evidence in outcome ledger.",
+      "source_locator": "https://www.iso.org/standard/42001"
+    },
+    {
+      "claim_id": "EC-10",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "MEASURE-1.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Valid and reliable measurement through outcome records.",
+      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
+    },
+    {
+      "claim_id": "EC-10",
+      "framework_id": "nist-ai-600-1",
+      "control_id": "MANAGE-4.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Post-deployment monitoring records in outcome ledger.",
+      "source_locator": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence"
+    },
+    {
+      "claim_id": "EC-10",
+      "framework_id": "nist-sp-800-218",
+      "control_id": "PW.8",
+      "relationship": "supports",
+      "obligation_bearer": "supplier",
+      "applicability_condition": "any",
+      "rationale": "Verify software behavior and record results.",
+      "source_locator": "https://csrc.nist.gov/projects/ssdf"
+    },
+    {
+      "claim_id": "EC-10",
+      "framework_id": "nist-sp-800-53-r5-1",
+      "control_id": "AU-12",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Audit record content for outcomes.",
+      "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads"
+    },
+    {
+      "claim_id": "EC-10",
+      "framework_id": "eu-ai-act-2024-1689",
+      "control_id": "Art.17",
+      "relationship": "supports",
+      "obligation_bearer": "provider",
+      "applicability_condition": "deployer of a high-risk AI system under Art. 26",
+      "rationale": "Quality management system records.",
+      "source_locator": "https://artificialintelligenceact.eu/article/17/"
+    },
+    {
+      "claim_id": "EC-10",
+      "framework_id": "iso-27001-2022",
+      "control_id": "A.8.15",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Log content protection for outcome records.",
+      "source_locator": "https://www.iso.org/standard/27001"
+    },
+    {
+      "claim_id": "EC-10",
+      "framework_id": "soc2-tsc-2017",
+      "control_id": "CC8.1",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Change management records in outcome ledger.",
+      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+    },
+    {
+      "claim_id": "EC-10",
+      "framework_id": "owasp-agentic-2026",
+      "control_id": "ASI05",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Observability through outcome records.",
+      "source_locator": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/"
+    },
+    {
+      "claim_id": "EC-10",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "AICM-unspecified",
+      "relationship": "no-relationship",
+      "obligation_bearer": "any",
+      "applicability_condition": "any",
+      "rationale": "No specific AICM control identifiers were sourced in the research files.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/ai-controls-matrix-v1-1"
+    },
+    {
+      "claim_id": "EC-11",
+      "framework_id": "iso-42001-2023",
+      "control_id": "A.6.2.8",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Archive index ensures verification evidence is preserved before pruning.",
+      "source_locator": "https://www.iso.org/standard/42001"
+    },
+    {
+      "claim_id": "EC-11",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "MANAGE-2.4",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Change management and record retention through archive index.",
+      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
+    },
+    {
+      "claim_id": "EC-11",
+      "framework_id": "nist-ai-600-1",
+      "control_id": "MANAGE-2.2",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Generative AI change retention through archive index.",
+      "source_locator": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence"
+    },
+    {
+      "claim_id": "EC-11",
+      "framework_id": "nist-sp-800-218",
+      "control_id": "RV.1",
+      "relationship": "supports",
+      "obligation_bearer": "supplier",
+      "applicability_condition": "any",
+      "rationale": "Vulnerability response records are retained in archive index.",
+      "source_locator": "https://csrc.nist.gov/projects/ssdf"
+    },
+    {
+      "claim_id": "EC-11",
+      "framework_id": "nist-sp-800-53-r5-1",
+      "control_id": "AU-12",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Audit record retention through archive index.",
+      "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads"
+    },
+    {
+      "claim_id": "EC-11",
+      "framework_id": "eu-ai-act-2024-1689",
+      "control_id": "Art.26",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "deployer of a high-risk AI system under Art. 26",
+      "rationale": "Deployers keep logs under their control for six months.",
+      "source_locator": "https://artificialintelligenceact.eu/article/26/"
+    },
+    {
+      "claim_id": "EC-11",
+      "framework_id": "iso-27001-2022",
+      "control_id": "A.8.15",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Log retention and protection through archive index.",
+      "source_locator": "https://www.iso.org/standard/27001"
+    },
+    {
+      "claim_id": "EC-11",
+      "framework_id": "soc2-tsc-2017",
+      "control_id": "CC7.2",
+      "relationship": "supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Log retention for monitoring through archive index.",
+      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+    },
+    {
+      "claim_id": "EC-11",
+      "framework_id": "owasp-agentic-2026",
+      "control_id": "ASI05",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Observability through retained verification archives.",
+      "source_locator": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/"
+    },
+    {
+      "claim_id": "EC-11",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "AICM-unspecified",
+      "relationship": "no-relationship",
+      "obligation_bearer": "any",
+      "applicability_condition": "any",
+      "rationale": "No specific AICM control identifiers were sourced in the research files.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/ai-controls-matrix-v1-1"
+    },
+    {
+      "claim_id": "EC-12",
+      "framework_id": "iso-42001-2023",
+      "control_id": "A.7.5",
+      "relationship": "no-relationship",
+      "obligation_bearer": "provider",
+      "applicability_condition": "any",
+      "rationale": "Evidence package is not yet implemented; artifact is absent until issue 1407 merges.",
+      "source_locator": "https://www.iso.org/standard/42001"
+    },
+    {
+      "claim_id": "EC-12",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "GOVERN-5.2",
+      "relationship": "no-relationship",
+      "obligation_bearer": "provider",
+      "applicability_condition": "any",
+      "rationale": "Evidence package is not yet implemented; artifact is absent until issue 1407 merges.",
+      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
+    },
+    {
+      "claim_id": "EC-12",
+      "framework_id": "nist-ai-600-1",
+      "control_id": "MEASURE-3.1",
+      "relationship": "no-relationship",
+      "obligation_bearer": "provider",
+      "applicability_condition": "any",
+      "rationale": "Evidence package is not yet implemented; artifact is absent until issue 1407 merges.",
+      "source_locator": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence"
+    },
+    {
+      "claim_id": "EC-12",
+      "framework_id": "nist-sp-800-218",
+      "control_id": "PW.7",
+      "relationship": "no-relationship",
+      "obligation_bearer": "supplier",
+      "applicability_condition": "any",
+      "rationale": "Evidence package is not yet implemented; artifact is absent until issue 1407 merges.",
+      "source_locator": "https://csrc.nist.gov/projects/ssdf"
+    },
+    {
+      "claim_id": "EC-12",
+      "framework_id": "nist-sp-800-53-r5-1",
+      "control_id": "CM-3",
+      "relationship": "no-relationship",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Evidence package is not yet implemented; artifact is absent until issue 1407 merges.",
+      "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads"
+    },
+    {
+      "claim_id": "EC-12",
+      "framework_id": "eu-ai-act-2024-1689",
+      "control_id": "Art.11",
+      "relationship": "no-relationship",
+      "obligation_bearer": "provider",
+      "applicability_condition": "deployer of a high-risk AI system under Art. 26",
+      "rationale": "Evidence package is not yet implemented; artifact is absent until issue 1407 merges.",
+      "source_locator": "https://artificialintelligenceact.eu/article/11/"
+    },
+    {
+      "claim_id": "EC-12",
+      "framework_id": "iso-27001-2022",
+      "control_id": "A.8.15",
+      "relationship": "no-relationship",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Evidence package is not yet implemented; artifact is absent until issue 1407 merges.",
+      "source_locator": "https://www.iso.org/standard/27001"
+    },
+    {
+      "claim_id": "EC-12",
+      "framework_id": "soc2-tsc-2017",
+      "control_id": "CC7.2",
+      "relationship": "no-relationship",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "any",
+      "rationale": "Evidence package is not yet implemented; artifact is absent until issue 1407 merges.",
+      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+    },
+    {
+      "claim_id": "EC-12",
+      "framework_id": "owasp-agentic-2026",
+      "control_id": "ASI04",
+      "relationship": "no-relationship",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "any",
+      "rationale": "Evidence package is not yet implemented; artifact is absent until issue 1407 merges.",
+      "source_locator": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/"
+    },
+    {
+      "claim_id": "EC-12",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "AICM-unspecified",
+      "relationship": "no-relationship",
+      "obligation_bearer": "any",
+      "applicability_condition": "any",
+      "rationale": "No specific AICM control identifiers were sourced in the research files.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/ai-controls-matrix-v1-1"
+    }
+  ]
+}
