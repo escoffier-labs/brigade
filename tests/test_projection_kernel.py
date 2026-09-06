@@ -12,6 +12,7 @@ import pytest
 
 from brigade.projection import kernel as projection
 from brigade.projection.fixture import mixed_workspace
+from tests._home import set_home
 
 
 def _digest(data: bytes | None) -> str:
@@ -300,7 +301,7 @@ def test_unfinished_recovery_blocks_only_overlapping_destinations(tmp_path: Path
 def test_receipt_redacts_paths_secrets_and_omits_contents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home" / "operator"
     home.mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     workspace = home / "proj"
     workspace.mkdir()

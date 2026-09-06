@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from tests._home import set_home
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -305,7 +306,7 @@ def test_redact_bounded_output_preserves_prefix_when_redaction_expands_at_cap(pr
 def test_redact_text_removes_real_and_temporary_home_segments(probe, monkeypatch, tmp_path: Path) -> None:
     real_home = str(tmp_path / "real-home")
     temp_home = str(tmp_path / "temp-home")
-    monkeypatch.setenv("HOME", real_home)
+    set_home(monkeypatch, real_home)
     sample = f"config={real_home}/.config\nsandbox={temp_home}/probe"
     result = probe.redact_text(sample, temp_home)
     assert real_home not in result
@@ -315,7 +316,7 @@ def test_redact_text_removes_real_and_temporary_home_segments(probe, monkeypatch
 
 def test_redact_text_removes_inherited_path_home_segments(probe, monkeypatch, tmp_path: Path) -> None:
     home_segment = str(tmp_path / "operator" / "bin")
-    monkeypatch.setenv("HOME", str(tmp_path / "operator"))
+    set_home(monkeypatch, str(tmp_path / "operator"))
     monkeypatch.setenv("PATH", f"{home_segment}{os.pathsep}/usr/bin")
     result = probe.redact_text(f"PATH includes {home_segment}", None)
     assert home_segment not in result
@@ -618,7 +619,7 @@ def test_hermes_home_directory_only_never_counts_as_runtime_conformance(
     home = tmp_path / "home"
     (home / ".hermes").mkdir(parents=True)
     (home / ".config" / "hermes").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     with mock.patch.object(probe.shutil, "which", return_value=None):
         result = probe.probe_fixture(fixture, schema, run_version=True, timeout_seconds=1.0)
     for section in (result["availability"], result["version_probe"]):
@@ -732,7 +733,7 @@ def test_antigravity_home_directory_only_never_counts_as_runtime_conformance(
     home = tmp_path / "home"
     (home / ".antigravity").mkdir(parents=True)
     (home / ".config" / "antigravity").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     with mock.patch.object(probe.shutil, "which", return_value=None):
         result = probe.probe_fixture(fixture, schema, run_version=True, timeout_seconds=1.0)
     for section in (result["availability"], result["version_probe"]):
@@ -886,7 +887,7 @@ def test_run_deep_probes_executes_safe_discovery_spec(probe, schema, monkeypatch
     )
     real_home = tmp_path / "real-home"
     real_home.mkdir()
-    monkeypatch.setenv("HOME", str(real_home))
+    set_home(monkeypatch, str(real_home))
     monkeypatch.setenv("USERPROFILE", str(real_home))
     process = _fake_version_process()
     with (
@@ -1179,7 +1180,7 @@ def test_run_deep_probes_nonzero_exit_preserves_bounded_output(probe, schema, mo
     )
     real_home = tmp_path / "real-home"
     real_home.mkdir()
-    monkeypatch.setenv("HOME", str(real_home))
+    set_home(monkeypatch, str(real_home))
     process = _fake_version_process(exit_code=2)
     with (
         mock.patch.object(probe.shutil, "which", return_value="/fake/bin/codex"),
@@ -1300,7 +1301,7 @@ def test_run_deep_probes_output_overflow_redacts_unterminated_json_at_boundary(p
 def test_run_deep_probes_sandbox_routes_writes_away_from_real_home(probe, schema, monkeypatch, tmp_path: Path) -> None:
     real_home = tmp_path / "real-home"
     real_home.mkdir()
-    monkeypatch.setenv("HOME", str(real_home))
+    set_home(monkeypatch, str(real_home))
     monkeypatch.setenv("USERPROFILE", str(real_home))
     helper = tmp_path / "probe-home-check"
     helper.write_text(

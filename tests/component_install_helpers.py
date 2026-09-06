@@ -21,6 +21,7 @@ def linux_env(root: Path) -> dict[str, str]:
     home.mkdir(parents=True, exist_ok=True)
     return {
         "HOME": str(home),
+        "USERPROFILE": str(home),
         "XDG_DATA_HOME": str(root / "xdg-data"),
         "XDG_CACHE_HOME": str(root / "xdg-cache"),
     }

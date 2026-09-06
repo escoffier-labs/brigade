@@ -8,6 +8,7 @@ import json
 
 from brigade import mcp_adapters as A
 from brigade import mcp_cmd
+from tests._home import set_home
 
 
 def _invalid_stdio_url(server: A.CanonicalServer) -> bool:
@@ -90,7 +91,7 @@ def _seed_openclaw_remote(home, url_only_raw):
 def test_doctor_no_false_stdio_without_command_for_pure_url_remote(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     mcp_cmd.init(target=repo, json_output=True)
@@ -117,7 +118,7 @@ def test_doctor_no_false_stdio_without_command_for_pure_url_remote(tmp_path, mon
 def test_import_then_sync_never_emits_stdio_plus_url(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     repo = tmp_path / "repo"
     repo.mkdir()
     mcp_cmd.init(target=repo, json_output=True)

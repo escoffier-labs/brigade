@@ -89,7 +89,7 @@ def test_notify_makefile_install_fails_closed_without_home():
 def test_notify_makefile_install_empty_home_aborts():
     if shutil.which("make") is None:
         pytest.skip("GNU make not available")
-    env = {**os.environ, "HOME": ""}
+    env = {**os.environ, "HOME": "", "USERPROFILE": ""}
     r = subprocess.run(
         ["make", "-n", "install"],
         cwd=NOTIFY,
@@ -105,7 +105,7 @@ def test_notify_makefile_install_nonempty_home_dry_run_succeeds(tmp_path):
     if shutil.which("make") is None:
         pytest.skip("GNU make not available")
     home = str(tmp_path / "home")
-    env = {**os.environ, "HOME": home}
+    env = {**os.environ, "HOME": home, "USERPROFILE": home}
     r = subprocess.run(
         ["make", "-n", "install"],
         cwd=NOTIFY,

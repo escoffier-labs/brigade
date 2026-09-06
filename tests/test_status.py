@@ -10,6 +10,7 @@ from brigade import status as status_mod
 from brigade.install import install_selection
 from brigade.selection import Selection
 from brigade.station import Station
+from tests._home import set_home
 
 
 @pytest.mark.parametrize(
@@ -150,7 +151,7 @@ def _write_update_cache(cache_home: Path, **state) -> Path:
 
 
 def _run_status(tmp_target: Path, cache_home: Path, monkeypatch, capsys, *, json_output: bool = False) -> str:
-    monkeypatch.setenv("HOME", str(cache_home))
+    set_home(monkeypatch, str(cache_home))
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home / "cache"))
     capsys.readouterr()
     assert status_mod.run(tmp_target, json_output=json_output) == 0

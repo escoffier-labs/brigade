@@ -11,6 +11,7 @@ import pytest
 
 from brigade import cli, fleet_model_roster, governance_inventory, receipt_schema, run_receipts
 from brigade.run_transport import WorkerResult
+from tests._home import set_home
 
 
 NOW = datetime(2026, 9, 4, 17, 30, tzinfo=timezone.utc)
@@ -628,7 +629,7 @@ def test_workspace_inventory_never_falls_back_to_the_user_roster(tmp_path, monke
         home / ".brigade" / "roster.toml",
         'orchestrator = "home"\n\n[agents.home]\ncli = "codex"\nrole = "worker"\nmodel = "gpt-5.6"\n',
     )
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     target = tmp_path / "workspace"
     target.mkdir()
 

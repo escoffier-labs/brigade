@@ -14,6 +14,7 @@ from brigade import doctor as doctor_mod
 from brigade.install import install_selection
 from brigade.memory_cmd import MemoryCareConfig
 from brigade.selection import Selection
+from tests._home import set_home
 
 
 def test_doctor_passes_against_workspace_profile(tmp_target: Path, capsys):
@@ -678,7 +679,7 @@ def test_doctor_openclaw_reports_manual_when_config_missing(tmp_target: Path, mo
             includes=[],
         ),
     )
-    monkeypatch.setenv("HOME", str(tmp_target))  # so ~/.openclaw resolves into the temp dir
+    set_home(monkeypatch, str(tmp_target))  # so ~/.openclaw resolves into the temp dir
     monkeypatch.setattr(Path, "home", lambda: tmp_target)
     rc = doctor_mod.run(target=tmp_target, harness="openclaw", full=True, operator=True)
     out = capsys.readouterr().out
@@ -914,7 +915,7 @@ def test_doctor_openclaw_reports_cron_memory_jobs(tmp_target: Path, monkeypatch,
             }
         )
     )
-    monkeypatch.setenv("HOME", str(tmp_target))
+    set_home(monkeypatch, str(tmp_target))
     monkeypatch.setattr(Path, "home", lambda: tmp_target)
 
     rc = doctor_mod.run(target=tmp_target, harness="openclaw", full=True, operator=True)
@@ -1227,7 +1228,7 @@ def _write_openclaw_cron(tmp_target: Path, jobs: list[dict], monkeypatch) -> Non
         entry.setdefault("command", FAKE_CRON_COMMAND)
         payload_jobs.append(entry)
     (cron_dir / "jobs.json").write_text(json.dumps({"jobs": payload_jobs}))
-    monkeypatch.setenv("HOME", str(tmp_target))
+    set_home(monkeypatch, str(tmp_target))
     monkeypatch.setattr(Path, "home", lambda: tmp_target)
 
 
@@ -1508,7 +1509,7 @@ def test_doctor_no_collision_with_shipped_scanners_toml(tmp_target: Path, monkey
     openclaw_dir = tmp_target / ".openclaw"
     (openclaw_dir / "cron").mkdir(parents=True)
     (openclaw_dir / "cron" / "jobs.json").write_text(json.dumps({"jobs": []}))
-    monkeypatch.setenv("HOME", str(tmp_target))
+    set_home(monkeypatch, str(tmp_target))
     monkeypatch.setattr(Path, "home", lambda: tmp_target)
 
     results = _run_producer_collision_check(tmp_target)

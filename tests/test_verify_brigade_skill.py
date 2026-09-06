@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._home import home_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILL_DIR = REPO_ROOT / "registry" / "skills" / "verify-brigade"
 CONTROL = SKILL_DIR / "control-brigade.py"
@@ -98,7 +100,7 @@ def sandbox(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     temp = tmp_path / "sandbox-tmp"
     home.mkdir()
     temp.mkdir()
-    return home, temp, {"HOME": str(home), "TMPDIR": str(temp)}
+    return home, temp, {**home_env(home), "TMPDIR": str(temp)}
 
 
 def test_control_brigade_is_an_executable_helper():
@@ -482,7 +484,7 @@ def test_a_relative_tmpdir_cannot_move_the_temp_base_onto_the_checkout(tmp_path)
     landing = REPO_ROOT / "verify-brigade"
     assert not landing.exists(), "probe precondition: the checkout has no state root"
 
-    code, payload = control("doctor", root=None, env_extra={"HOME": str(home), "TMPDIR": "."}, cwd=REPO_ROOT)
+    code, payload = control("doctor", root=None, env_extra={**home_env(home), "TMPDIR": "."}, cwd=REPO_ROOT)
     assert code == 1, payload
     assert payload["ok"] is False
     assert payload["action"] == "doctor"
@@ -498,7 +500,7 @@ def test_a_temp_base_inside_the_checkout_is_still_refused(tmp_path):
     temp = checkout / "scratch"
     temp.mkdir()
 
-    code, payload = control("doctor", root=None, env_extra={"HOME": str(home), "TMPDIR": str(temp)}, script=script)
+    code, payload = control("doctor", root=None, env_extra={**home_env(home), "TMPDIR": str(temp)}, script=script)
     assert code == 1, payload
     assert payload["ok"] is False
     assert "inside the Brigade checkout" in payload["error"], payload
@@ -512,7 +514,7 @@ def test_a_temp_base_inside_the_operator_home_is_still_allowed(tmp_path):
     temp = home / "scratch"
     temp.mkdir()
 
-    code, payload = control("doctor", root=None, env_extra={"HOME": str(home), "TMPDIR": str(temp)})
+    code, payload = control("doctor", root=None, env_extra={**home_env(home), "TMPDIR": str(temp)})
     assert code in {0, 3}, payload
     assert payload["action"] == "doctor"
     assert "error" not in payload, payload
