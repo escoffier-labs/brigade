@@ -492,7 +492,9 @@ the idempotency key hash and the lease token digest.
 
 The goal is that a scheduled routine and an interactive session both end with a
 finding in the owner's review inbox, with no manual pickup from the Bot's cloud
-workspace. Nine configuration rules get you there.
+workspace. Nine configuration rules get you there. When a routine or skill text
+changes, compare two candidates on the same organic job with the
+[blinded eval procedure](grokbot-blinded-evals.md).
 
 **1. Put the submit step in a Skill, not in the Bot description.** A Skill is
 the documented container that carries result validation, a return format, and
