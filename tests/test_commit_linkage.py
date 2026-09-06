@@ -508,7 +508,7 @@ def test_exclusion_change_with_receipt_head_is_linked_normalized_when_first_pare
     assert output["ruleDrift"] is False
 
 
-def test_root_commit_records_normalized_tree_unavailable(tmp_path: Path) -> None:
+def test_root_commit_records_normalized_tree_unavailable_and_baseline_unknown(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     ws.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "main", str(ws)], check=True)
@@ -576,11 +576,42 @@ def test_root_commit_records_normalized_tree_unavailable(tmp_path: Path) -> None
     assert predicate["comparison"]["normalizationBase"] == {"status": "unavailable"}
     assert predicate["comparison"]["normalizedCommitTree"] == {"status": "unavailable"}
     assert predicate["equivalence"] == "exact"
+    assert predicate["baseline"] == {
+        "baselineRelation": "unknown",
+        "baselineMoved": None,
+    }
 
     verify_rc, output = _verify_json(ws, run_dir / "linkage" / f"{sha}.json")
     assert verify_rc == 0
     assert output["status"] == "LINKED-EXACT"
-    assert output["baselineRelation"] == "unavailable"
+    assert output["baselineRelation"] == "confirmed"
+
+
+def test_run_json_without_baseline_commit_records_baseline_relation_unknown(tmp_path: Path) -> None:
+    ws, run_dir, key_path = _workspace(tmp_path)
+    # Remove the baseline_commit so the exporter records the relation as unknown.
+    run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    del run_json["baseline_commit"]
+    (run_dir / "run.json").write_text(
+        json.dumps(run_json, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    # Add a non-root commit so the commit has a first parent but no run baseline.
+    child = _git_commit(ws, "child", allow_empty=True)
+
+    rc, envelope = _export(ws, "run-001", child, key_path)
+    assert rc == 0
+    predicate = _decode_predicate(envelope)
+    assert predicate["baseline"] == {
+        "baselineRelation": "unknown",
+        "baselineMoved": None,
+    }
+    assert "gitCommit" not in predicate["baseline"]
+
+    verify_rc, output = _verify_json(ws, run_dir / "linkage" / f"{child}.json")
+    assert verify_rc == 0
+    assert output["status"] == "LINKED-EXACT"
+    assert output["baselineRelation"] == "confirmed"
 
 
 def test_mismatched_object_format_sha_is_refused(tmp_path: Path) -> None:

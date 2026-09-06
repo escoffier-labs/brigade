@@ -224,17 +224,15 @@ def _verify_baseline_relation(
     baseline = predicate.get("baseline")
     if not isinstance(baseline, dict):
         return "unavailable"
-    baseline_commit = baseline.get("gitCommit")
     stated_relation = baseline.get("baselineRelation")
-    if not isinstance(baseline_commit, str) or not isinstance(stated_relation, str):
+    if not isinstance(stated_relation, str):
         return "unavailable"
+    baseline_commit = baseline.get("gitCommit")
     parents = commit_linkage._commit_parents(target, commit_sha, shallow)
     if parents is None:
         return "unavailable"
     first_parent = parents[0] if parents else None
     relation, _moved = commit_linkage._baseline_relation(target, baseline_commit, first_parent, shallow)
-    if relation is None:
-        return "unavailable"
     if relation == stated_relation:
         return "confirmed"
     return "contradicted"

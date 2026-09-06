@@ -48,10 +48,12 @@ Predicate type `https://brigade.dev/attestation/commit-linkage/v1`,
 - `equivalence`: `exact`, `normalized`, or `none`.
 - `git`: `{objectFormat, shallow}` from the local repository.
 - `baseline`: run baseline commit and its relationship to the commit's first
-  parent. `baselineRelation` is one of `same-as-parent`, `ancestor-of-parent`,
-  `unrelated`, or `unknown`; any missing information (including a root commit
-  with a recorded baseline, or a shallow boundary where ancestry cannot be
-  determined) is recorded as `unknown`, never guessed.
+  parent. Always present; `baselineRelation` is one of `same-as-parent`,
+  `ancestor-of-parent`, `unrelated`, or `unknown` and is never `null`. Any
+  missing information (including a root commit, a run with no recorded
+  baseline, or a shallow boundary where ancestry cannot be determined) is
+  recorded as `unknown`, never guessed. `gitCommit` is omitted when the run has
+  no recorded baseline.
 - `references`: the agent-change index envelope reference, when present.
 - `trailers`: the `Brigade-Run` and `Brigade-Receipt` trailers from the commit
   message, with a flag for whether the run id matches and whether the receipt

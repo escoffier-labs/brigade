@@ -466,12 +466,12 @@ def build_statement(
         "project": {"scope": policy["project_scope"]},
         "signerIndependence": "shared-workspace-key",
     }
+    predicate["baseline"] = {
+        "baselineRelation": baseline_relation,
+        "baselineMoved": baseline_moved,
+    }
     if baseline_commit is not None:
-        predicate["baseline"] = {
-            "gitCommit": baseline_commit,
-            "baselineRelation": baseline_relation,
-            "baselineMoved": baseline_moved,
-        }
+        predicate["baseline"]["gitCommit"] = baseline_commit
 
     return {
         "_type": attestation.IN_TOTO_STATEMENT_TYPE,
