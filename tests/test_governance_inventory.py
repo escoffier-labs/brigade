@@ -121,7 +121,10 @@ def test_inventory_is_deterministic_and_never_exports_secret_or_path(tmp_path, m
             "seat": "research",
             "unknown": {
                 "provider_attribution": {
-                    "reason": "no authenticated Fleet provider fact is available for this configured seat",
+                    "reason": (
+                        "provider attribution requires dated, authenticated provider evidence in the run receipt; "
+                        "current configuration is not observed history"
+                    ),
                     "value": "unknown",
                 }
             },
@@ -214,12 +217,73 @@ def test_observed_runs_use_worker_results_and_authenticated_provider_attribution
             "first_seen": "2026-09-03T10:00:00Z",
             "last_seen": "2026-09-03T10:00:00Z",
             "model": "gpt-5.6-luna",
-            "provider": "openai",
+            "provider": "unknown",
             "run_count": 1,
             "seat": "research",
-            "unknown": {},
+            "unknown": {
+                "provider_attribution": {
+                    "reason": (
+                        "provider attribution requires dated, authenticated provider evidence in the run receipt; "
+                        "current configuration is not observed history"
+                    ),
+                    "value": "unknown",
+                }
+            },
         }
     ]
+
+
+def test_observed_runs_do_not_inherit_a_reconfigured_provider(tmp_path, monkeypatch):
+    target = _configured_target(tmp_path)
+    monkeypatch.setattr(
+        governance_inventory,
+        "_fleet_policy",
+        lambda _now: {
+            "admissions": [{"model": "gpt-5.6-luna", "provider": "openai", "seat": "research"}],
+            "denials": [],
+            "source": {},
+            "unknown": {},
+        },
+    )
+
+    recorded_under_a = governance_inventory.build_inventory(target=target, now=NOW)
+    research_under_a = next(
+        item for item in recorded_under_a["registries"]["agents"]["items"] if item["name"] == "research"
+    )
+    assert research_under_a["provider"] == "openai"
+    assert recorded_under_a["observed_runs"]["items"]
+
+    monkeypatch.setattr(
+        governance_inventory,
+        "_fleet_policy",
+        lambda _now: {
+            "admissions": [{"model": "gpt-5.6-luna", "provider": "anthropic", "seat": "research"}],
+            "denials": [],
+            "source": {},
+            "unknown": {},
+        },
+    )
+
+    after_reconfigure = governance_inventory.build_inventory(target=target, now=NOW)
+    research_under_b = next(
+        item for item in after_reconfigure["registries"]["agents"]["items"] if item["name"] == "research"
+    )
+    observed = after_reconfigure["observed_runs"]["items"][0]
+
+    assert research_under_b["provider"] == "anthropic"
+    assert observed["seat"] == "research"
+    assert observed["model"] == "gpt-5.6-luna"
+    assert observed["provider"] != "anthropic"
+    assert observed["provider"] == "unknown"
+    assert observed["unknown"] == {
+        "provider_attribution": {
+            "reason": (
+                "provider attribution requires dated, authenticated provider evidence in the run receipt; "
+                "current configuration is not observed history"
+            ),
+            "value": "unknown",
+        }
+    }
 
 
 def test_observed_runs_require_an_authenticated_model_match_for_provider_attribution(tmp_path, monkeypatch):
@@ -255,7 +319,10 @@ def test_observed_runs_require_an_authenticated_model_match_for_provider_attribu
     assert observed[0]["provider"] == "unknown"
     assert observed[0]["unknown"] == {
         "provider_attribution": {
-            "reason": "observed model does not match the authenticated Fleet model fact for this configured seat",
+            "reason": (
+                "provider attribution requires dated, authenticated provider evidence in the run receipt; "
+                "current configuration is not observed history"
+            ),
             "value": "unknown",
         }
     }
@@ -329,7 +396,10 @@ def test_observed_provider_without_a_configured_seat_is_explicitly_unknown(tmp_p
     assert observed[0]["provider"] == "unknown"
     assert observed[0]["unknown"] == {
         "provider_attribution": {
-            "reason": "observed seat is not configured in the workspace roster",
+            "reason": (
+                "provider attribution requires dated, authenticated provider evidence in the run receipt; "
+                "current configuration is not observed history"
+            ),
             "value": "unknown",
         }
     }
