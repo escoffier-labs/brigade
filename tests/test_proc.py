@@ -1126,3 +1126,33 @@ def test_run_exposes_no_descriptor_passing_plumbing():
     import inspect
 
     assert "pass_fds" not in inspect.signature(proc.run).parameters
+
+
+def test_terminate_processes_windows_branch_tolerates_taskkill_keyboard_interrupt(monkeypatch):
+    """Simulate the Windows terminate path on POSIX: taskkill raising KeyboardInterrupt."""
+
+    class StubProcess:
+        pid = 4242
+
+        def __init__(self):
+            self.kill_calls = 0
+            self.returncode: int | None = None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.kill_calls += 1
+            self.returncode = 0
+
+    def raising_run(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(proc.subprocess, "run", raising_run)
+
+    process = StubProcess()
+    proc._terminate_processes((process,), terminate_grace=0.5, kill_grace=0.5)
+    proc._terminate_processes((process,), terminate_grace=0.0, kill_grace=0.0)
+
+    assert process.kill_calls >= 1

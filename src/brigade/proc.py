@@ -371,12 +371,18 @@ def _terminate_windows_process_tree(process: subprocess.Popen[bytes], *, timeout
             check=False,
             timeout=max(timeout, 0.1),
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
         pass
-    if process.poll() is None:
+    try:
+        alive = process.poll() is None
+    except KeyboardInterrupt:
+        alive = True
+    except OSError:
+        alive = False
+    if alive:
         try:
             process.kill()
-        except OSError:
+        except (OSError, KeyboardInterrupt):
             pass
 
 
@@ -400,8 +406,17 @@ def _terminate_processes(
     if os.name == "nt":
         timeout = terminate_grace + kill_grace
         for process in processes:
-            _terminate_windows_process_tree(process, timeout=timeout)
-        _wait_for_processes(processes, kill_grace)
+            try:
+                _terminate_windows_process_tree(process, timeout=timeout)
+            except KeyboardInterrupt:
+                try:
+                    process.kill()
+                except (OSError, KeyboardInterrupt):
+                    pass
+        try:
+            _wait_for_processes(processes, kill_grace)
+        except KeyboardInterrupt:
+            pass
         return
     for process in processes:
         _signal_process_group(process, signal.SIGTERM)

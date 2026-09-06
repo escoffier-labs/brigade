@@ -2659,6 +2659,12 @@ def test_run_verify_child_process_catches_keyboard_interrupt(tmp_path, monkeypat
     child_processes: list[subprocess.Popen[bytes]] = []
 
     def interrupting_popen(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args", [])
+        argv0 = ""
+        if isinstance(argv, (list, tuple)) and argv:
+            argv0 = os.path.basename(str(argv[0])).lower()
+        if argv0 in ("taskkill", "taskkill.exe"):
+            return real_popen(*args, **kwargs)
         process = real_popen(*args, **kwargs)
         child_processes.append(process)
 
