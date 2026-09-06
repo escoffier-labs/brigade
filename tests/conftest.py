@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -108,6 +109,15 @@ def _isolate_user_brigade_dir(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("BRIGADE_USER_DIR", str(user_dir))
     monkeypatch.setenv("BRIGADE_HOME", str(user_dir))
+    # On Windows Path.home() and os.path.expanduser read USERPROFILE before
+    # HOME, with HOMEDRIVE/HOMEPATH as fallback. Point all of them at the
+    # same temp home so the suite never touches the operator real home.
+    # The split keeps one code path: on POSIX the drive is empty and
+    # HOMEPATH is the full path, which is harmless.
+    drive, tail = os.path.splitdrive(str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOMEDRIVE", drive)
+    monkeypatch.setenv("HOMEPATH", tail if drive else str(home))
 
 
 @pytest.fixture(autouse=True)
