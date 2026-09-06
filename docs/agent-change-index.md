@@ -103,7 +103,10 @@ The verifier reports observations on separate axes, not a single boolean.
 Index envelope:
 
 - `syntax`: `wellformed` or `malformed`.
-- `signature`: `valid`, `invalid`, or `unverifiable`.
+- `signature`: `valid`, `invalid`, or `unverifiable`. A signature from an
+  untrusted key is still reported as `valid` because the signature verified
+  cryptographically over the PAE bytes; the `trust` axis reports `untrusted`
+  and the overall status is `INVALID`.
 - `trust`: `trusted`, `untrusted`, or `unknown` (when `allowed_signers` is
   absent or unreadable).
 - `freshness`: `revocation-checked` or `revocation-absent`, plus

@@ -3,7 +3,8 @@
 This is the worker-side twin of :mod:`brigade.grokbot_scout_feed`. The scout
 selector turns an approved issue into a read-only report; this selector turns a
 separately approved issue into one bounded implementation-worker job whose only
-artifact is a draft pull request. Issue title, body, and comment text never
+artifact is a pull request that is ready for review when green and a draft only
+when blocked. Issue title, body, and comment text never
 enter queue state or command output: the queue sees the issue number, the issue
 URL, and the operator's own policy constraints.
 """

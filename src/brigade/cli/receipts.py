@@ -72,6 +72,19 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_attestation.add_argument("--force", action="store_true", help="Overwrite an existing attestation file.")
     p_attestation.set_defaults(func=dispatch)
+
+    p_package = export_sub.add_parser(
+        "package",
+        help="Export one verify run as a portable evidence package.",
+        description="Export one verify run as a portable evidence package.",
+    )
+    p_package.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_package.add_argument("--run-id", metavar="<id|latest>", required=True, help="Verify run id or 'latest'.")
+    p_package.add_argument("--out", metavar="DIR", required=True, help="Output directory for the evidence package.")
+    p_package.add_argument("--force", action="store_true", help="Replace an existing output directory.")
+    p_package.add_argument("--json", action="store_true", help="Print a brigade.evidence_package_export.v1 summary.")
+    p_package.set_defaults(func=dispatch)
+
     for projection in ("otel-genai", "openinference"):
         parser = export_sub.add_parser(projection, help=f"Export privacy-safe {projection} span JSONL.")
         parser.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -107,6 +120,16 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_att_keygen.add_argument("--principal", metavar="NAME", default=None, help="Signer principal name.")
     p_att_keygen.add_argument("--force", action="store_true", help="Overwrite an existing attestation signing key.")
     p_att_keygen.set_defaults(func=dispatch)
+
+    p_verify_pkg = receipts_sub.add_parser(
+        "verify-package",
+        help="Verify content integrity of a portable evidence package.",
+    )
+    p_verify_pkg.add_argument("directory", metavar="<dir>", type=Path, help="Evidence package directory.")
+    p_verify_pkg.add_argument(
+        "--json", action="store_true", help="Print a brigade.evidence_package_verification.v1 summary."
+    )
+    p_verify_pkg.set_defaults(func=dispatch)
 
     p_agent_change_policy = receipts_sub.add_parser(
         "agent-change-policy",
@@ -221,6 +244,16 @@ def dispatch(args) -> int:
             profile=args.profile,
             force=args.force,
         )
+    if args.receipts_command == "export" and args.receipts_export_command == "package":
+        from .. import evidence_package
+
+        return evidence_package.export_package(
+            target=args.target,
+            run_id=args.run_id,
+            out_str=args.out,
+            force=args.force,
+            json_output=args.json,
+        )
     if args.receipts_command == "export" and args.receipts_export_command == "miseledger":
         return receipts_cmd.export_miseledger(
             target=args.target,
@@ -261,6 +294,13 @@ def dispatch(args) -> int:
             target=args.target,
             principal=args.principal,
             force=args.force,
+        )
+    if args.receipts_command == "verify-package":
+        from .. import evidence_package
+
+        return evidence_package.verify_package(
+            directory=args.directory,
+            json_output=args.json,
         )
     if args.receipts_command == "agent-change-policy" and args.agent_change_policy_command == "init":
         from .. import agent_change

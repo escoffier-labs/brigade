@@ -889,6 +889,56 @@ not infer import acceptance from the artifact filename alone.
 
 ---
 
+## `brigade.evidence_package.v1`: `schema_version: 1`
+
+**Path:** `<out>/manifest.json` (written by `brigade receipts export package`)
+
+Detached digest manifest for a portable evidence package that contains a copy
+of one verify run's files. The manifest is written last and is the only file in
+the package that is not copied verbatim from the run directory. It does not
+contain absolute paths, environment values, argv, hostnames, or the target output
+path, and it does not contain its own digest.
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `schema` | string | yes | Always `brigade.evidence_package.v1` |
+| `schema_version` | integer | yes | Always `1` for this contract |
+| `created_at` | string | yes | UTC ISO-8601 with `Z` suffix, second precision |
+| `source` | object | yes | Run identity and receipt digest binding |
+| `entries` | array | yes | Sorted by `path` |
+| `entries_sha256` | string | yes | SHA-256 of the compact sorted-key JSON of `entries` |
+| `limitations` | array of string | yes | `["receipt-contains-local-paths", "integrity-only"]` |
+
+**`source` object**
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `verify_run_id` | string | yes | Directory name of the selected verify run |
+| `producer_run_id` | string \| null | yes | Orchestrator run id from the receipt, or `null` when absent |
+| `tree_fingerprint` | string \| null | yes | Git tree fingerprint from the receipt |
+| `baseline_commit` | string \| null | yes | Baseline commit from the receipt |
+| `changes_patch_sha256` | string \| null | yes | SHA-256 of `changes.patch` from the receipt |
+| `receipt_sha256` | string | yes | Canonical digest from `attestation_receipt.snapshot_receipt` over the copied receipt |
+
+**`entries[]` object**
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `path` | string | yes | Filename only; no separators or `..` |
+| `sha256` | string | yes | SHA-256 of the file bytes |
+| `bytes` | integer | yes | File size in bytes |
+| `media_type` | string | yes | Best-effort media type |
+| `kind` | string | yes | One of `receipt`, `patch`, `attestation`, `cosign-bundle`, `summary` |
+
+The package is integrity-only: `brigade receipts verify-package` checks that the
+copied files still match the manifest, but it does not verify signatures, prove
+retention, or prove provenance from a trusted producer. The copied
+`receipt.json` still contains the local paths that were recorded at verify time,
+so consumers must treat those as opaque evidence rather than actionable file
+references.
+
+---
+
 ## `brigade.causal_receipt.v1`: `schema_version: 1`
 
 Lineage-only companion for plan, run, verify, outcome, handoff, and synthesis
