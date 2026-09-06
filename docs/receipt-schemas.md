@@ -1434,6 +1434,125 @@ Because Rekor transparency log upload is excluded from this profile, `--insecure
 
 ---
 
+## `brigade.agent_change_policy.v1`: `schema_version: 1`
+
+**Path:** `<target>/.brigade/attestation/agent-change-policy.json`
+
+External policy that governs what an agent-change index must contain. The index
+cannot define its own acceptance policy; the emitter refuses to run when this
+file is missing.
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `schema` | string | yes | Always `brigade.agent_change_policy.v1` |
+| `schema_version` | integer | yes | Always `1` for this contract |
+| `project_scope` | string | yes | Opaque operator-chosen scope; never a URL or path |
+| `required_references` | array of object | yes | Each entry has `kind` and optional `min_count` |
+| `allowed_profiles` | array of string | yes | Signer profiles accepted for references |
+| `policy_version` | integer | yes | Bumped for breaking changes |
+
+`required_references` kinds: `agent-request`, `test-result`, `human-approval`.
+`min_count` defaults to `1` and must be a positive integer when present.
+
+---
+
+## `https://brigade.dev/attestation/agent-change/v1`: `schemaVersion: 1`
+
+**Envelope:** DSSE over an in-toto Statement v1, signed with
+`brigade.sshsig-dsse.v1` and written to `<run-dir>/agent-change.json`.
+
+Predicate carried by the agent-change evidence index.
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `schemaVersion` | integer | yes | Always `1` for this contract |
+| `run` | object | yes | `{id, journalChainHead, orchestratorSeat, workerSeats}` |
+| `participants` | array of object | yes | `{seat, harness, modelDeclared, source, providerObserved}` |
+| `baseline` | object | yes | `{"gitCommit": <sha>}` or `{"status": "unknown"}` |
+| `patch` | object | yes | `{"sha256": <sha256>}` or `{"status": "unknown"}` |
+| `request` | object | yes | `{"nonce": <32 hex>, "taskSha256": <64 hex>}` or `{"status": "absent"}` |
+| `emittedAt` | string (ISO-8601) | yes | UTC Z timestamp, second precision |
+| `nonce` | string | yes | 32 hex characters |
+| `policy` | object | yes | `{"name": "brigade.agent_change_policy.v1", "digest": {"sha256": ...}}` |
+| `project` | object | yes | `{"scope": <project_scope>}` |
+| `signerIndependence` | string | yes | Always `"shared-workspace-key"` in this slice |
+| `references` | array of object | yes | Sorted reference entries; see below |
+| `missing` | array of object | yes | `{"kind", "reason"}` for absent required references |
+| `otherTreeReceipts` | array of object | yes | `{"verifyRunId", "tree"}` for matching producer runs on other trees |
+| `complete` | boolean | yes | Emitter-computed completeness; verifiers recompute it |
+
+Reference entry:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `kind` | string | `agent-request`, `test-result`, or `human-approval` |
+| `predicateType` | string | The referenced statement's predicate type |
+| `predicateVersion` | string | Schema version or trailing predicate-type segment |
+| `profile` | string | Signer profile, e.g. `brigade.sshsig-dsse.v1` |
+| `subjectTree` | string \| null | Referenced statement's `git:tree` subject digest |
+| `subjectBaseline` | string \| null | Request baseline commit (agent-request only) |
+| `payloadSha256` | string \| null | SHA-256 of the decoded payload bytes |
+| `envelopeSha256` | string \| null | SHA-256 of the canonical envelope mapping |
+| `signerKeyids` | array of string | Sorted unique verified key ids |
+| `verified` | boolean | Whether the signature verified |
+| `locator` | string | Target-relative path with no `..` component |
+| `locators` | array of string | Present when the same payload appears at multiple locators |
+| `reason` | string \| null | Failure reason when `verified` is false |
+| `nonce` | string \| null | Request nonce (agent-request only) |
+| `taskSha256` | string \| null | Request task digest (agent-request only) |
+| `rederived` | boolean \| null | Test Result re-derivation result (test-result only) |
+| `result` | string \| null | `PASSED` or `FAILED` (test-result only) |
+| `journalBound` | boolean \| null | True for the latest journal-bound approval (human-approval only) |
+
+---
+
+## `brigade.agent_change_verification.v1`: `schemaVersion: 1`
+
+**Output:** printed by `brigade receipts verify-agent-change --json`.
+
+Machine-readable audit observations produced by the agent-change verifier.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schema` | string | Always `brigade.agent_change_verification.v1` |
+| `status` | string | `COMPLETE-OK`, `INCOMPLETE`, `INVALID`, or `UNVERIFIABLE` |
+| `evaluatedAt` | string (ISO-8601) | UTC Z timestamp |
+| `policy` | object | `{"path", "status", "digest"}` where `status` is `match`, `mismatch`, or `unavailable` |
+| `project` | object | `{"scope", "status"}` where `status` is `match` or `mismatch` |
+| `index` | object | Index envelope observations; see below |
+| `references` | array of object | Per-reference observations; see below |
+| `required_set` | array of object | `{"kind", "status", "count"}` for each required reference kind |
+| `disclaimer` | string | States that the result is an audit observation, not an approval or release decision |
+
+Index envelope observations:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `syntax` | string | `wellformed` or `malformed` |
+| `signature` | string | `valid`, `invalid`, or `unverifiable` |
+| `trust` | string | `trusted`, `untrusted`, or `unknown` |
+| `freshness` | string | `revocation-checked` or `revocation-absent`, plus `timestamp-absent` |
+| `binding` | string | `bound`, `conflicted`, or `unavailable` |
+| `policy` | string | `match`, `mismatch`, or `unavailable` |
+
+Per-reference observations:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `kind` | string \| null | Reference kind |
+| `locator` | string \| null | Target-relative locator |
+| `availability` | string | `present`, `missing`, or `partial` |
+| `syntax` | string | `wellformed`, `malformed`, or `unchecked` |
+| `cryptographic` | string | `valid`, `invalid`, `unverifiable`, or `unchecked` |
+| `trust` | string | `trusted`, `untrusted`, or `unknown` |
+| `freshness` | string | `revocation-checked` or `revocation-absent`, plus `timestamp-absent` |
+| `binding` | string | `bound` or `conflicted` |
+| `rederivation` | string | `reproduced`, `failed`, or `not-applicable` |
+| `policy_outcome` | string | `pass`, `fail`, `unevaluated`, or `not-applicable` |
+| `reason` | string \| null | Refusal reason when `availability` is `partial` or `syntax` is `malformed` |
+
+---
+
 ## Related commands
 
 - `brigade receipts verify`: digest chain checks for verify receipts and outcome rows

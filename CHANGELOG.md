@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching verify receipt, validate the digest before any tree fingerprint
   filter, and re-derive the Test Result attestation from the same snapshot so
   `receipt.json` is read exactly once. (#1404)
+- Agent-change evidence index hardening: run ids are validated against
+  `^[A-Za-z0-9._-]+$`, run directories and reference locators are resolved and
+  contained under `<target>`, symlinked components are refused, Test Result
+  references pass `require_receipt=True` with the snapshot receipt, the
+  `request` predicate field is resolved from the journal's `request.signed`
+  event, `missing` entries are only emitted for kinds required by the policy,
+  and the verifier checks allowed profiles, no-approval cycles, and bounded
+  verify-run scans. (#1404)
 - Attestation, cosign bundle, and approval verification now reject oversized,
   duplicate-name, non-finite, malformed-Unicode, over-nested, and cyclic JSON
   inputs before signature processing. DSSE accepts both standard and URL-safe
@@ -29,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed timing flakes in tests `test_release_with_renew_in_flight_never_resurrects` and `test_concurrent_edge_writes_do_not_lose_dependency_edges`. (#1396)
 
 ### Added
+- Agent-change evidence index emitter (`brigade receipts export agent-change`), verifier (`brigade receipts verify-agent-change`), and policy initializer (`brigade receipts agent-change-policy init`), with external policy schema, in-toto predicate, and machine-readable verification output. (#1404)
 - `brigade evidence controls` emits a versioned, machine-readable control crosswalk (`brigade.control_crosswalk.v1` / `brigade.evidence_controls.v1`) mapping Brigade evidence claims to ISO/IEC 42001:2023, NIST AI RMF 1.0, NIST AI 600-1, NIST SP 800-218/SSDF, NIST SP 800-53 Rev. 5.1, EU AI Act, ISO/IEC 27001:2022, AICPA SOC 2, OWASP Agentic Top 10, and CSA AICM identifiers. The normal command and `--json` output compute an evidentiary state per row (`evidenced_passed`, `evidenced_failed`, `untested`, `not_applicable`) from configured workspace artifacts. `--render-doc` regenerates `docs/control-crosswalk.md` as a static mapping (no state column, no scope, no `evaluated_at` line) that is a pure function of the bundled template; evidence states are computed at query time and are not part of the document. The header states that this is an evidence index and design documentation, not evidence that a control operated, and the template does not reproduce licensed ISO or AICPA clause text. Fixes #1406.
 - `brigade governance inventory` now exports one canonical workspace-scoped inventory with bounded observed worker use, node-local Fleet policy facts, and optional CycloneDX machine-learning-model components. Remote MCP endpoints retain only scheme and authority; user-home rosters are never substituted. Fixes #1408.
 - Fleet hub roster page at `/deck/roster`: roles (impl, review, chef, research, security, scout), seat and cloud lane toggles, consumer defaults, and notes saved in one revisioned transaction; `brigade work brief` prints the `fleet_routing` block; `fleet preference set` gains `--research`, `--security`, `--scout`; hub schema v19.
