@@ -235,6 +235,48 @@ A 60-minute drain remains useful as a safety net: if a POST failed, the
 routine can still list the queue and claim anything that was missed. Do not
 rely on a short poll as the primary wake.
 
+### Measuring the queue
+
+Hillclimb uses two per-job latencies for `implementation-worker` work, read
+from hub tables `grokbot_jobs` and `grokbot_operations` with read-only
+queries. Queue-to-first-result is `claimed_at` minus `created_at`. Queue-to-done
+is the `complete` operation `timestamp` minus `created_at`. Paste either query
+against the hub sqlite database; do not write.
+
+```sql
+SELECT job_id,
+       (strftime('%s', replace(claimed_at, 'Z', ''))
+        - strftime('%s', replace(created_at, 'Z', '')))
+         AS queue_to_first_result_seconds
+FROM grokbot_jobs
+WHERE role = 'implementation-worker'
+  AND claimed_at IS NOT NULL
+ORDER BY created_at;
+```
+
+```sql
+SELECT j.job_id,
+       (strftime('%s', replace(o.timestamp, 'Z', ''))
+        - strftime('%s', replace(j.created_at, 'Z', '')))
+         AS queue_to_done_seconds
+FROM grokbot_jobs AS j
+JOIN grokbot_operations AS o
+  ON o.job_id = j.job_id AND o.action = 'complete'
+WHERE j.role = 'implementation-worker'
+ORDER BY j.created_at;
+```
+
+Keep `decision.tsv` under the queue workspace `.brigade` directory on the
+operator host. One row per attempt: date, change, metric before, metric after,
+noise band, accept or revert. Accept one measured change per iteration;
+revert anything that stays inside the noise band.
+
+Frozen baselines from 2026-09-06: poll path 5 minutes to 4 hours 14 minutes
+to claim; webhook path 31 seconds to claim and 6 minutes 8 seconds to PR.
+Those samples include an observed 60-minute completion hold after the PR
+existed. The job-contract stop rule (complete when the PR exists instead of
+waiting out the time cap) removes that hold.
+
 ### Leases
 
 A lease runs from 30 seconds to 3600 seconds and defaults to 300 seconds. The
