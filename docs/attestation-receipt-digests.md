@@ -32,6 +32,14 @@ construction is detected instead of silently emitted as a stale subject digest.
 
 The loader uses a target-relative pathname and a no-follow final receipt-file
 read. It does not retain no-follow descriptors for every ancestor directory,
-so it does not close concurrent ancestor replacement races. Approval collector
-integration, including its receipt-selection and producer-binding rules,
-remains deferred.
+so it does not close concurrent ancestor replacement races.
+
+## Approval collectors
+
+Both approval v1 and v2 require a stored receipt digest on every matching verify
+receipt. They validate the digest before applying any tree fingerprint filter,
+so a mismatched or missing digest is reported as a receipt error rather than
+silently skipped as a non-matching tree. After validation, both collectors use
+the same `ReceiptSnapshot` for identity checks and pass the snapshot receipt to
+Test Result re-derivation, so `receipt.json` is read exactly once and
+re-derivation cannot disagree with the collector's digest.

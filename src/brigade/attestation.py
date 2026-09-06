@@ -520,6 +520,7 @@ def verify_attestation(
     namespace: str = ATTESTATION_NAMESPACE,
     expected_predicate_type: str = IN_TOTO_TEST_RESULT_PREDICATE_TYPE,
     require_receipt: bool = False,
+    receipt: Mapping[str, Any] | None = None,
 ) -> AttestationVerifyResult:
     """Verify an attestation envelope against OpenSSH allowed_signers policy."""
     binary = shutil.which("ssh-keygen")
@@ -773,6 +774,36 @@ def verify_attestation(
 
         # 7. Check target receipt re-derivation when local evidence is requested.
         if target is not None and run_id and expected_predicate_type == IN_TOTO_TEST_RESULT_PREDICATE_TYPE:
+            if receipt is not None:
+                try:
+                    rederived_statement = build_statement(receipt)
+                    rederived_bytes = canonical_statement_bytes(rederived_statement)
+                    if rederived_bytes != payload_bytes:
+                        return AttestationVerifyResult(
+                            status=STATUS_SUBJECT_MISMATCH,
+                            principal=verified_principal,
+                            keyid=actual_keyid,
+                            subject=subject,
+                            run_id=run_id,
+                            rederived=False,
+                        )
+                except Exception:
+                    return AttestationVerifyResult(
+                        status=STATUS_SUBJECT_MISMATCH,
+                        principal=verified_principal,
+                        keyid=actual_keyid,
+                        subject=subject,
+                        run_id=run_id,
+                        rederived=False,
+                    )
+                return AttestationVerifyResult(
+                    status=STATUS_SIGNED_OK,
+                    principal=verified_principal,
+                    keyid=actual_keyid,
+                    subject=subject,
+                    run_id=run_id,
+                    rederived=True,
+                )
             resolved_target = target.expanduser().resolve()
             run_dir = resolved_target / ".brigade" / "work" / "verify-runs" / run_id
             receipt_file = run_dir / "receipt.json"

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import agent_request, attestation, attestation_input, localio, run_journal
+from . import agent_request, attestation, attestation_input, attestation_receipt, localio, run_journal
 
 HUMAN_APPROVAL_PREDICATE_TYPE = "https://brigade.dev/attestation/human-approval/v2"
 SOD_POLICY_NAME = "brigade.sod.v2"
@@ -267,6 +267,11 @@ def collect_test_result_evidence(
         receipt = _load_json_object(receipt_path, "verify receipt")
         if receipt.get("producer_run_id") != producer_run_id:
             continue
+        try:
+            snapshot = attestation_receipt.snapshot_stored_receipt(receipt)
+        except attestation_receipt.ReceiptDigestError as exc:
+            raise ApprovalV2Error("matching verify receipt identity or digest is invalid") from exc
+        receipt = snapshot.receipt
         verify_run_id = receipt.get("run_id")
         baseline_commit = receipt.get("baseline_commit")
         tree_fingerprint = receipt.get("tree_fingerprint")
@@ -276,8 +281,7 @@ def collect_test_result_evidence(
             other_tree_receipt_found = True
             continue
         patch_sha256 = receipt.get("changes_patch_sha256")
-        digests = receipt.get("digests")
-        receipt_sha256 = digests.get("receipt_sha256") if isinstance(digests, Mapping) else None
+        receipt_sha256 = snapshot.digest
         patch_path = receipt_path.parent / "changes.patch"
         if (
             not isinstance(verify_run_id, str)
@@ -289,7 +293,6 @@ def collect_test_result_evidence(
             or not _HEX64_RE.fullmatch(patch_sha256)
             or not isinstance(receipt_sha256, str)
             or not _HEX64_RE.fullmatch(receipt_sha256)
-            or receipt_sha256 != localio.canonical_json_digest(receipt, exclude_keys={"digests"})
             or patch_path.is_symlink()
             or not patch_path.is_file()
             or localio.file_sha256(patch_path) != patch_sha256
@@ -303,6 +306,7 @@ def collect_test_result_evidence(
             target=target,
             expected_predicate_type=attestation.IN_TOTO_TEST_RESULT_PREDICATE_TYPE,
             require_receipt=True,
+            receipt=snapshot.receipt,
         )
         predicate = statement.get("predicate")
         brigade_meta = envelope.get("brigade")

@@ -456,6 +456,34 @@ def test_subject_mismatch_detected_when_target_receipt_differs(tmp_path: Path) -
     assert res_mismatch.status == attestation.STATUS_SUBJECT_MISMATCH
 
 
+def test_verify_attestation_with_receipt_parameter_skips_receipt_json_read(tmp_path: Path) -> None:
+    key_path, signers_path = attestation.keygen(tmp_path, principal="alice-signer")
+    receipt = _sample_receipt(tmp_path)
+    _write_receipt_to_disk(receipt)
+
+    envelope = attestation.export_attestation(receipt, key_path=key_path)
+    receipt_path = Path(receipt["path"]) / "receipt.json"
+    receipt_path.unlink()
+
+    result = attestation.verify_attestation(
+        envelope,
+        allowed_signers_path=signers_path,
+        target=tmp_path,
+        receipt=receipt,
+    )
+    assert result.status == attestation.STATUS_SIGNED_OK
+    assert result.rederived is True
+
+    result_missing = attestation.verify_attestation(
+        envelope,
+        allowed_signers_path=signers_path,
+        target=tmp_path,
+        require_receipt=True,
+    )
+    assert result_missing.status == attestation.STATUS_EVIDENCE_MISSING
+    assert result_missing.rederived is False
+
+
 def _write_receipt_to_disk(receipt: dict[str, Any]) -> None:
     run_dir = Path(receipt["path"])
     run_dir.mkdir(parents=True, exist_ok=True)

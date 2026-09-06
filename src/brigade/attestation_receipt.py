@@ -77,6 +77,14 @@ def snapshot_receipt(receipt: Mapping[str, Any]) -> ReceiptSnapshot:
     return ReceiptSnapshot(receipt=snapshot, digest=digest)
 
 
+def snapshot_stored_receipt(receipt: Mapping[str, Any]) -> ReceiptSnapshot:
+    """Snapshot a receipt and require a stored writer digest."""
+    snapshot = snapshot_receipt(receipt)
+    if not isinstance(snapshot.receipt.get("digests"), Mapping) or "receipt_sha256" not in snapshot.receipt["digests"]:
+        raise ReceiptDigestError("receipt has no stored digest")
+    return snapshot
+
+
 def load_selected_receipt(target: Path, run_id: str) -> SelectedReceipt:
     """Strictly load one verify receipt without placing filesystem data in it."""
     root = target / ".brigade" / "work" / "verify-runs"
