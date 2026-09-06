@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 PACKAGE_ID = "brigade-claude-work-loop"
-PACKAGE_VERSION = "1.2.0"
+PACKAGE_VERSION = "1.3.0"
 PACKAGE_REF = f"{PACKAGE_ID}@{PACKAGE_VERSION}"
 COMMAND_PREFIX = "brigade work hook-run"
 MANAGED_EVENTS = (
@@ -18,6 +18,7 @@ MANAGED_EVENTS = (
     "PostToolUseFailure",
     "PreCompact",
     "Stop",
+    "SessionEnd",
 )
 LEGACY_SCRIPT_NAME = "brigade-work-loop.py"
 MANAGED_MARKER_KEY = "_brigade"
@@ -50,6 +51,7 @@ def managed_groups() -> dict[str, list[dict[str, Any]]]:
         "PostToolUseFailure": [group("PostToolUseFailure", "Bash")],
         "PreCompact": [group("PreCompact")],
         "Stop": [group("Stop")],
+        "SessionEnd": [group("SessionEnd")],
     }
 
 
@@ -108,6 +110,7 @@ def managed_user_groups(script_path: Path) -> dict[str, list[dict[str, Any]]]:
         "PostToolUseFailure": [group("PostToolUseFailure", "Bash")],
         "PreCompact": [group("PreCompact")],
         "Stop": [group("Stop")],
+        "SessionEnd": [group("SessionEnd")],
     }
 
 
