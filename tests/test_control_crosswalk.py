@@ -126,8 +126,7 @@ def test_framework_not_mapped_appears_in_doc():
         f["name"] for f in crosswalk["frameworks"] if f.get("mapping_status") == "identifiers-not-sourced"
     }
     assert not_sourced_names
-    evaluated = control_crosswalk.evaluate_controls(REPO_ROOT)
-    rendered = control_crosswalk.render_doc(evaluated)
+    rendered = control_crosswalk.render_doc()
     assert "Not mapped in crosswalk version 1" in rendered
     for name in not_sourced_names:
         assert name in rendered, f"framework {name} missing from rendered doc"
@@ -225,8 +224,21 @@ def test_json_output_is_sorted_and_includes_schema(tmp_path, capsys):
 
 def test_rendered_doc_matches_committed_doc():
     assert CONTROL_CROSSWALK_DOC.is_file()
-    evaluated = control_crosswalk.evaluate_controls(REPO_ROOT)
-    rendered = control_crosswalk.render_doc(evaluated)
+    rendered = control_crosswalk.render_doc()
+    committed = CONTROL_CROSSWALK_DOC.read_text()
+    assert committed == rendered
+
+
+def test_rendered_doc_matches_committed_doc_without_artifacts(tmp_path):
+    """--render-doc must be a pure function of the template and not read .brigade."""
+    assert CONTROL_CROSSWALK_DOC.is_file()
+    target = tmp_path / "ws"
+    target.mkdir()
+    doc_path = tmp_path / "control-crosswalk.md"
+    rc = control_crosswalk.controls(target, render_doc_path=doc_path)
+    assert rc == 0
+    assert not (target / ".brigade").exists()
+    rendered = doc_path.read_text()
     committed = CONTROL_CROSSWALK_DOC.read_text()
     assert committed == rendered
 

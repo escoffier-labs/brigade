@@ -445,21 +445,28 @@ def evaluate_controls(
     }
 
 
-def render_doc(evaluated: dict[str, Any]) -> str:
-    """Render evaluated crosswalk as markdown documentation."""
+def render_doc() -> str:
+    """Render the static control crosswalk as markdown documentation.
+
+    The document is a pure function of the bundled crosswalk template and does
+    not read workspace artifacts.  Per-row evidence states are computed at query
+    time by `brigade evidence controls` and are not part of this document.
+    """
+    crosswalk = load_crosswalk()
     lines: list[str] = []
     lines.append("# Brigade Control Crosswalk")
     lines.append("")
     lines.append(HEADER_NOTICE)
     lines.append("")
-    lines.append(f"Crosswalk version: {evaluated['crosswalk_version']}. Schema: `{evaluated['schema']}`.")
+    lines.append(
+        "Evidence states are computed at query time by `brigade evidence controls` and are not part of this document."
+    )
     lines.append("")
-    lines.append(f"Scope: {evaluated['scope']}.")
+    lines.append(f"Crosswalk version: {crosswalk['crosswalk_version']}. Schema: `{SCHEMA}`.")
     lines.append("")
     by_framework: dict[str, list[dict[str, Any]]] = {}
-    for mapping in evaluated["mappings"]:
+    for mapping in crosswalk["mappings"]:
         by_framework.setdefault(mapping["framework_id"], []).append(mapping)
-    crosswalk = load_crosswalk()
     frameworks_by_id = {f["id"]: f for f in crosswalk["frameworks"]}
     for fw_id in sorted(frameworks_by_id):
         rows = by_framework.get(fw_id, [])
@@ -467,20 +474,20 @@ def render_doc(evaluated: dict[str, Any]) -> str:
         lines.append(f"## {framework['name']} (`{fw_id}`)")
         lines.append("")
         if not rows:
-            lines.append(f"Not mapped in crosswalk version {evaluated['crosswalk_version']}.")
+            lines.append(f"Not mapped in crosswalk version {crosswalk['crosswalk_version']}.")
         else:
-            lines.append("| Control | Claim | Relationship | Obligation | Applicability | State | Rationale | Source |")
-            lines.append("|---------|-------|--------------|------------|---------------|-------|-----------|--------|")
+            lines.append("| Control | Claim | Relationship | Obligation | Applicability | Rationale | Source |")
+            lines.append("|---------|-------|--------------|------------|---------------|-----------|--------|")
+            rows.sort(key=lambda m: (m["control_id"], m["claim_id"]))
             for row in rows:
                 control = f"`{row['control_id']}`"
-                claim = f"{row['claim_id']}"
+                claim = row["claim_id"]
                 rel = row["relationship"]
                 obl = row["obligation_bearer"]
                 app = row["applicability_condition"]
-                state = row["state"]
                 rationale = row["rationale"]
                 source = row["source_locator"]
-                lines.append(f"| {control} | {claim} | {rel} | {obl} | {app} | {state} | {rationale} | {source} |")
+                lines.append(f"| {control} | {claim} | {rel} | {obl} | {app} | {rationale} | {source} |")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -498,11 +505,15 @@ def controls(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    evaluated = evaluate_controls(target, run_id=run_id, framework_id=framework_id)
+
     if render_doc_path is not None:
         render_doc_path = render_doc_path.expanduser().resolve()
         render_doc_path.parent.mkdir(parents=True, exist_ok=True)
-        localio.write_text_atomic(render_doc_path, render_doc(evaluated))
+        localio.write_text_atomic(render_doc_path, render_doc())
+        if not json_output:
+            return 0
+
+    evaluated = evaluate_controls(target, run_id=run_id, framework_id=framework_id)
     if json_output:
         print(json.dumps(evaluated, indent=2, sort_keys=True))
         return 0
