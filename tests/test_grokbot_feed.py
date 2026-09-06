@@ -866,6 +866,11 @@ READY_PR_BODY_REQUIREMENTS = (
     "surface"
 )
 DRAFT_ONLY_CONTRACT = "Open exactly one draft pull request against the base ref whose body carries"
+TIME_CAP_SENTENCE = "Time cap: stop within 60 minutes of claiming this job, whatever state the work is in."
+STOP_RULE = (
+    "Stop as soon as the pull request is open and the job is completed with its URL. "
+    "The time cap is the latest you may still be running, not a target; never wait for CI, review, merge, or a timer."
+)
 
 
 def test_worker_instructions_carry_the_five_swarm_contract_rules():
@@ -884,9 +889,11 @@ def test_worker_instructions_carry_the_five_swarm_contract_rules():
     coordinator = instructions.index("Coordinator rule: do not write code in your own context.")
     contract = instructions.index("Job contract:")
     lease = instructions.index("Lease rule: renew the lease at least every 5 minutes.")
-    cap = instructions.index("Time cap: stop within 60 minutes of claiming this job")
+    cap = instructions.index(TIME_CAP_SENTENCE)
+    stop = instructions.index(STOP_RULE)
     proof = instructions.index("Proof rule: run exactly the verification commands named above")
-    assert coordinator < contract < lease < cap < proof
+    assert coordinator < contract < lease < cap < stop < proof
+    assert instructions[cap : proof] == f"{TIME_CAP_SENTENCE} {STOP_RULE}\n\n"
 
     assert "Spawn one cloud agent for this job" in instructions
     assert "Prefer a token-efficient worker model" in instructions
@@ -942,10 +949,12 @@ def test_contract_asks_for_a_ready_pull_request_when_green():
         assert DRAFT_ONLY_CONTRACT not in envelope
         assert grokbot_feed.UNTRUSTED_CONTEXT_SENTENCE in envelope
         assert grokbot_feed.NO_MERGE_SENTENCE in envelope
+        assert f"{TIME_CAP_SENTENCE} {STOP_RULE}" in envelope
 
     assert grokbot_feed.UNTRUSTED_CONTEXT_SENTENCE in scout_envelope
     assert READY_PR_CONTRACT not in scout_envelope
     assert DRAFT_ONLY_CONTRACT not in scout_envelope
+    assert STOP_RULE not in scout_envelope
     assert "Coordinator rule:" not in scout_envelope
     assert "Proof rule:" not in scout_envelope
     assert scout_envelope == (
@@ -956,6 +965,49 @@ def test_contract_asks_for_a_ready_pull_request_when_green():
         "Perform read-only repository scout work. Do not modify repository files, issue state, labels, comments, "
         "pull requests, or remote settings. Return a read-only report only."
     )
+
+
+def test_contract_carries_the_stop_rule():
+    """The stop rule sits directly after the time cap on worker envelopes, never on scout envelopes."""
+    feed_envelope = grokbot_feed.worker_instructions(
+        header="Repository: example/brigade\nIssue number: 7\n",
+        issue_number=7,
+        base_ref="main",
+        verification_commands=[SECRET_VERIFY],
+    )
+    build_envelope = grokbot_build_feed._worker_instructions(
+        {
+            "repository": "example/brigade",
+            "approval_label": "grokbot-build-approved",
+            "base_ref": "main",
+            "verification_commands": [SECRET_VERIFY],
+        },
+        7,
+        None,
+    )
+    scout_envelope = grokbot_scout_feed._scout_spec(
+        {
+            "repository": "example/brigade",
+            "approval_label": "grokbot-scout-approved",
+            "base_ref": "main",
+            "ownership_paths": ["src/brigade"],
+            "verification_commands": [SECRET_VERIFY],
+            "timeout_seconds": 900,
+        },
+        7,
+    )["instructions"]
+
+    adjacent = f"{TIME_CAP_SENTENCE} {STOP_RULE}"
+    for envelope in (feed_envelope, build_envelope):
+        assert adjacent in envelope
+        cap = envelope.index(TIME_CAP_SENTENCE)
+        stop = envelope.index(STOP_RULE)
+        assert stop == cap + len(TIME_CAP_SENTENCE) + 1
+        assert envelope[cap : cap + len(adjacent)] == adjacent
+
+    assert STOP_RULE not in scout_envelope
+    assert TIME_CAP_SENTENCE not in scout_envelope
+    assert "Time cap:" not in scout_envelope
 
 
 def test_worker_instructions_name_every_verification_command():
