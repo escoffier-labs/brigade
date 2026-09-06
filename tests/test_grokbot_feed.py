@@ -893,7 +893,7 @@ def test_worker_instructions_carry_the_five_swarm_contract_rules():
     stop = instructions.index(STOP_RULE)
     proof = instructions.index("Proof rule: run exactly the verification commands named above")
     assert coordinator < contract < lease < cap < stop < proof
-    assert instructions[cap : proof] == f"{TIME_CAP_SENTENCE} {STOP_RULE}\n\n"
+    assert instructions[cap:proof] == f"{TIME_CAP_SENTENCE} {STOP_RULE}\n\n"
 
     assert "Spawn one cloud agent for this job" in instructions
     assert "Prefer a token-efficient worker model" in instructions
