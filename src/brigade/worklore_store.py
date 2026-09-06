@@ -458,7 +458,7 @@ def _load_json_list(raw: object) -> list[Any]:
     return parsed if isinstance(parsed, list) else []
 
 
-def _review_after_future(value: object) -> bool:
+def _review_after_future(value: object, *, now: datetime | None = None) -> bool:
     if value is None or value == "":
         return False
     if not isinstance(value, str):
@@ -467,7 +467,7 @@ def _review_after_future(value: object) -> bool:
         parsed = as_datetime(value)
     except ValueError:
         return True
-    return parsed > datetime.now(timezone.utc)
+    return parsed > (now if now is not None else datetime.now(timezone.utc))
 
 
 def _empty_link_summary() -> dict[str, Any]:
@@ -665,8 +665,17 @@ def _parse_patch(item: Mapping[str, Any], raw: object) -> dict[str, Any]:
     return parse_create(merged)
 
 
-def exclusion_bucket(item: Mapping[str, Any], source_policies: Sequence[str]) -> str | None:
-    """Return the first burn-queue exclusion bucket an item falls into, or None when it is eligible."""
+def exclusion_bucket(
+    item: Mapping[str, Any],
+    source_policies: Sequence[str],
+    *,
+    now: datetime | None = None,
+) -> str | None:
+    """Return the first burn-queue exclusion bucket an item falls into, or None when it is eligible.
+
+    ``now`` lets a caller with its own clock (fleet routing) evaluate ``review_after``
+    against that clock instead of the wall clock.
+    """
     if item["status"] != "ready":
         return "not-ready"
     if not item["burn_eligible"]:
@@ -681,7 +690,7 @@ def exclusion_bucket(item: Mapping[str, Any], source_policies: Sequence[str]) ->
         return "blocker"
     if int(item["attempt_count"]) >= 2:
         return "attempt-limit"
-    if _review_after_future(item.get("review_after")):
+    if _review_after_future(item.get("review_after"), now=now):
         return "review-after"
     if any(policy != "eligible" for policy in source_policies):
         return "source-policy"
