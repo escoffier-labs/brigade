@@ -51,7 +51,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade profiles`: 2 command path(s)
 - `brigade projection`: 1 command path(s)
 - `brigade projects` (extras): 10 command path(s)
-- `brigade receipts`: 12 command path(s)
+- `brigade receipts`: 14 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release` (extras): 23 command path(s)
 - `brigade repos` (extras): 74 command path(s)
@@ -375,6 +375,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade receipts attestation-keygen`
 - `brigade receipts export agent-change`
 - `brigade receipts export attestation`
+- `brigade receipts export commit-linkage`
 - `brigade receipts export miseledger`
 - `brigade receipts export openinference`
 - `brigade receipts export otel-genai`
@@ -383,6 +384,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade receipts verify`
 - `brigade receipts verify-agent-change`
 - `brigade receipts verify-attestation`
+- `brigade receipts verify-commit-linkage`
 - `brigade reconfigure`
 - `brigade release candidate archive` (extras)
 - `brigade release candidate audit` (extras)

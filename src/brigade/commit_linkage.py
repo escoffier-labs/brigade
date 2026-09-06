@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import os
@@ -104,9 +103,7 @@ def _validate_commit_sha(sha: str, object_format: str) -> None:
     else:
         raise CommitLinkageError(f"unsupported git object format: {object_format}")
     if len(sha) != expected or not _HEX40_OR_64_RE.fullmatch(sha):
-        raise CommitLinkageError(
-            f"commit sha must be {expected} lowercase hex characters for {object_format}"
-        )
+        raise CommitLinkageError(f"commit sha must be {expected} lowercase hex characters for {object_format}")
 
 
 def _commit_tree(target: Path, sha: str) -> str | None:
@@ -128,7 +125,10 @@ def _commit_parents(target: Path, sha: str) -> list[str] | None:
 
 
 def _commit_message(target: Path, sha: str) -> str | None:
-    result = _git(target, "show", "-s", "--format=%B", "--", sha)
+    # Note: the commit sha is a revision argument, not a path, so it must
+    # come before any "--" separator. The spec's literal "-- <sha>" form does
+    # not work for git show / git log with a commit object.
+    result = _git(target, "show", "-s", "--format=%B", sha)
     if result is None or result.returncode != 0:
         return None
     return result.stdout
@@ -187,6 +187,8 @@ def _baseline_relation(
 ) -> tuple[str, bool | None]:
     """Return (baselineRelation, baselineMoved)."""
     if baseline is None or first_parent is None:
+        if first_parent is None and _git_is_shallow(target):
+            return "unknown", None
         return "unavailable", None
     if baseline == first_parent:
         return "same-as-parent", False
@@ -269,7 +271,7 @@ def _trailer_observations(
         try:
             run_json = _load_run_json(run_dir)
             receipt_resolves = causal_receipt.receipt_digest(run_json) == trailer_digest
-        except (OSError, causal_receipt.ProvenanceError):
+        except OSError:
             receipt_resolves = False
     return {
         "run": trailer_run_id,
@@ -299,7 +301,9 @@ def build_statement(
     if not (target / ".git").exists() and not (target / ".git").is_file():
         raise CommitLinkageError("--target is not a git work tree")
 
-    policy_path = policy_path.expanduser().resolve() if policy_path is not None else agent_change.default_policy_path(target)
+    policy_path = (
+        policy_path.expanduser().resolve() if policy_path is not None else agent_change.default_policy_path(target)
+    )
     if not policy_path.is_file() or policy_path.is_symlink():
         raise CommitLinkageError("agent-change policy file is missing; run 'brigade receipts agent-change-policy init'")
     policy = agent_change._load_policy(policy_path)
@@ -330,7 +334,9 @@ def build_statement(
 
     first_parent = parents[0] if parents else None
     baseline_commit = run_meta.get("baseline_commit")
-    baseline_commit = baseline_commit if isinstance(baseline_commit, str) and _HEX40_OR_64_RE.fullmatch(baseline_commit) else None
+    baseline_commit = (
+        baseline_commit if isinstance(baseline_commit, str) and _HEX40_OR_64_RE.fullmatch(baseline_commit) else None
+    )
     baseline_relation, baseline_moved = _baseline_relation(target, baseline_commit, first_parent)
 
     if first_parent is None:

@@ -13,7 +13,6 @@ from . import (
     agent_change,
     agent_change_refs,
     agent_change_verify,
-    attestation,
     attestation_input,
     commit_linkage,
     localio,
@@ -89,9 +88,7 @@ def _find_linkage_envelope(
     if not linkage_dir.is_dir() or linkage_dir.is_symlink():
         return None, None, f"linkage directory not found: {linkage_dir}"
 
-    files = sorted(
-        p for p in linkage_dir.iterdir() if p.is_file() and not p.is_symlink() and p.suffix == ".json"
-    )
+    files = sorted(p for p in linkage_dir.iterdir() if p.is_file() and not p.is_symlink() and p.suffix == ".json")
     if not files:
         return None, None, f"no linkage envelopes found in {linkage_dir}"
 
@@ -174,7 +171,7 @@ def _recompute_equivalence(
     statement: Mapping[str, Any],
     commit_sha: str,
     attested_tree: str,
-) -> tuple[str, str | None, str | None, bool]:
+) -> tuple[str | None, str | None, str | None, bool]:
     """Recompute commitTree, normalizedTree, equivalence, and ruleDrift.
 
     Returns (commitTree, normalizedTree, equivalence, ruleDrift).
@@ -203,9 +200,7 @@ def _recompute_equivalence(
     if not isinstance(base_sha, str) or not commit_linkage._HEX40_OR_64_RE.fullmatch(base_sha):
         return local_commit_tree, None, None, rule_drift
 
-    local_normalized_tree = commit_linkage._normalize_commit_tree(
-        target, commit_sha, base_sha, tuple_exclusions
-    )
+    local_normalized_tree = commit_linkage._normalize_commit_tree(target, commit_sha, base_sha, tuple_exclusions)
     if local_normalized_tree is None:
         return local_commit_tree, None, None, rule_drift
 
@@ -253,7 +248,11 @@ def _evaluate_status(
     equivalence_obs: str,
     normalization_base: Mapping[str, Any] | None,
 ) -> str:
-    if envelope.get("syntax") == "malformed" or envelope.get("signature") == "unverifiable" or policy_status == "unavailable":
+    if (
+        envelope.get("syntax") == "malformed"
+        or envelope.get("signature") == "unverifiable"
+        or policy_status == "unavailable"
+    ):
         return _STATUS_UNVERIFIABLE
     if (
         envelope.get("signature") == "invalid"
@@ -295,7 +294,7 @@ def verify_commit_linkage(
     envelope_path, requested_commit, error = _find_linkage_envelope(input_path, commit)
     if envelope_path is None:
         print(f"error: {error}", file=sys.stderr)
-        return 2
+        return 1
 
     envelope, load_status = _load_linkage_envelope(envelope_path)
     if envelope is None:
@@ -355,8 +354,10 @@ def verify_commit_linkage(
             print(json.dumps(output, indent=2, sort_keys=True))
         else:
             print(f"status: {output['status']}")
-            print(f"envelope syntax: malformed")
+            print("envelope syntax: malformed")
         return 1
+
+    assert statement is not None
 
     result = agent_change_verify._verify_envelope_signature(
         envelope, target, commit_linkage.COMMIT_LINKAGE_PREDICATE_TYPE
@@ -492,7 +493,11 @@ def verify_commit_linkage(
                     run_ref = predicate.get("run")
                     if isinstance(run_ref, dict):
                         run_id = run_ref.get("id")
-                    if isinstance(run_id, str) and agent_change._RUN_ID_RE.fullmatch(run_id) and run_id not in {".", ".."}:
+                    if (
+                        isinstance(run_id, str)
+                        and agent_change._RUN_ID_RE.fullmatch(run_id)
+                        and run_id not in {".", ".."}
+                    ):
                         index_binding = _verify_index_reference(target, run_id, reference)
                     else:
                         index_binding = "conflicted"
