@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from brigade import cli, control_crosswalk
+from brigade import cli, control_crosswalk, localio
 from brigade.control_crosswalk import (
     EVIDENCE_CONTROLS_SCHEMA,
     HEADER_NOTICE,
@@ -208,6 +208,56 @@ def test_ec11_parses_multiline_index_jsonl(tmp_path):
     ]
     assert ec11_rows
     assert all(m["state"] == "evidenced_passed" for m in ec11_rows), [m["state"] for m in ec11_rows]
+
+
+def test_ec12_evidence_package_manifest_untested_passed_failed(tmp_path):
+    target = tmp_path / "ws"
+    target.mkdir()
+
+    evaluated = control_crosswalk.evaluate_controls(target)
+    ec12_rows = [
+        m for m in evaluated["mappings"] if m["claim_id"] == "EC-12" and m["relationship"] != "no-relationship"
+    ]
+    assert ec12_rows
+    assert all(m["state"] == "untested" for m in ec12_rows), [m["state"] for m in ec12_rows]
+
+    pkg_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    pkg_dir.mkdir(parents=True)
+    entries = [
+        {
+            "path": "receipt.json",
+            "sha256": "a" * 64,
+            "bytes": 2,
+            "media_type": "application/json",
+            "kind": "receipt",
+        }
+    ]
+    entries.sort(key=lambda e: e["path"])
+    manifest = {
+        "schema": "brigade.evidence_package.v1",
+        "schema_version": 1,
+        "created_at": "2026-09-06T00:00:00Z",
+        "source": {"verify_run_id": "run-1", "receipt_sha256": "b" * 64},
+        "entries": entries,
+        "entries_sha256": localio.canonical_json_digest(entries),
+        "limitations": [],
+    }
+    (pkg_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+    evaluated = control_crosswalk.evaluate_controls(target)
+    ec12_rows = [
+        m for m in evaluated["mappings"] if m["claim_id"] == "EC-12" and m["relationship"] != "no-relationship"
+    ]
+    assert all(m["state"] == "evidenced_passed" for m in ec12_rows), [m["state"] for m in ec12_rows]
+
+    manifest["entries_sha256"] = "c" * 64
+    (pkg_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+    evaluated = control_crosswalk.evaluate_controls(target)
+    ec12_rows = [
+        m for m in evaluated["mappings"] if m["claim_id"] == "EC-12" and m["relationship"] != "no-relationship"
+    ]
+    assert all(m["state"] == "evidenced_failed" for m in ec12_rows), [m["state"] for m in ec12_rows]
 
 
 def test_json_output_is_sorted_and_includes_schema(tmp_path, capsys):

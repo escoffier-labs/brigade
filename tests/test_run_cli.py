@@ -1850,7 +1850,7 @@ def test_run_cli_terminalizes_keyboard_interrupt_during_worktree_creation(tmp_pa
     repo = _git_repo_with_roster(tmp_path)
     output_dir = repo / ".brigade" / "runs" / "worktree-entry"
     checkout = tmp_path / "checkout"
-    monkeypatch.setattr(localio, "tree_fingerprint", lambda path: "c" * 40)
+    monkeypatch.setattr(localio, "tree_fingerprint_with_head", lambda path: ("c" * 40, "d" * 40))
 
     monkeypatch.setattr(
         "brigade.cli.run._worktree_checkout_path",
@@ -1885,6 +1885,7 @@ def test_run_cli_terminalizes_keyboard_interrupt_during_worktree_creation(tmp_pa
     assert receipt["status"] == "canceled"
     assert receipt["failure"]["phase"] == "startup"
     assert receipt["tree_fingerprint"] == "c" * 40
+    assert receipt["tree_fingerprint_head"] == "d" * 40
     assert receipt["failure"]["seat"] == "coder"
     assert not (repo / ".brigade" / "run.lock").exists()
 

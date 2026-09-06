@@ -15,7 +15,7 @@ Not mapped in crosswalk version 1.
 | Control | Claim | Relationship | Obligation | Applicability | Rationale | Source |
 |---------|-------|--------------|------------|---------------|-----------|--------|
 | `Art.11` | EC-07 | supports | provider | provider of a high-risk AI system | Technical documentation includes agent, model, and tool inventory. | https://artificialintelligenceact.eu/article/11/ |
-| `Art.11` | EC-12 | no-relationship | provider | provider of a high-risk AI system | Evidence package is not yet implemented; artifact is absent until issue 1407 merges. | https://artificialintelligenceact.eu/article/11/ |
+| `Art.11` | EC-12 | supports | provider | provider of a high-risk AI system | Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; entries_sha256 recomputes. | https://artificialintelligenceact.eu/article/11/ |
 | `Art.12` | EC-01 | supports | provider | provider of a high-risk AI system | Automatic event logging provides traceability of verification executions. | https://artificialintelligenceact.eu/article/12/ |
 | `Art.12` | EC-02 | partially-supports | provider | provider of a high-risk AI system | Signed verification results support log integrity for high-risk systems. | https://artificialintelligenceact.eu/article/12/ |
 | `Art.12` | EC-03 | partially-supports | provider | provider of a high-risk AI system | External verification supports log integrity for high-risk systems. | https://artificialintelligenceact.eu/article/12/ |
@@ -38,7 +38,7 @@ Not mapped in crosswalk version 1.
 | `A.8.15` | EC-06 | supports | service-organisation | any | Logging of lifecycle events. | https://www.iso.org/standard/27001 |
 | `A.8.15` | EC-10 | supports | service-organisation | any | Log content protection for outcome records. | https://www.iso.org/standard/27001 |
 | `A.8.15` | EC-11 | supports | service-organisation | any | Log retention and protection through archive index. | https://www.iso.org/standard/27001 |
-| `A.8.15` | EC-12 | no-relationship | service-organisation | any | Evidence package is not yet implemented; artifact is absent until issue 1407 merges. | https://www.iso.org/standard/27001 |
+| `A.8.15` | EC-12 | supports | service-organisation | any | Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; entries_sha256 recomputes. | https://www.iso.org/standard/27001 |
 | `A.8.32` | EC-01 | supports | service-organisation | any | Changes are tested and verified before implementation. | https://www.iso.org/standard/27001 |
 | `A.8.32` | EC-04 | supports | service-organisation | any | Changes are authorized before implementation. | https://www.iso.org/standard/27001 |
 | `A.8.32` | EC-05 | supports | service-organisation | any | Changes are approved by authorized personnel. | https://www.iso.org/standard/27001 |
@@ -51,7 +51,7 @@ Not mapped in crosswalk version 1.
 | `7.5` | EC-02 | partially-supports | provider | any | Signed Test Result attestation supports integrity of documented verification information. | https://www.iso.org/standard/42001 |
 | `7.5` | EC-03 | partially-supports | provider | any | Cosign bundle supports external verification of documented information. | https://www.iso.org/standard/42001 |
 | `7.5` | EC-08 | supports | deployer | any | Commit trailers link documented information to code changes. | https://www.iso.org/standard/42001 |
-| `7.5` | EC-12 | no-relationship | provider | any | Evidence package is not yet implemented; artifact is absent until issue 1407 merges. | https://www.iso.org/standard/42001 |
+| `7.5` | EC-12 | supports | provider | any | Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; entries_sha256 recomputes. | https://www.iso.org/standard/42001 |
 | `9.1` | EC-10 | supports | deployer | any | Monitoring and measurement evidence in outcome ledger. | https://www.iso.org/standard/42001 |
 | `A.3.2` | EC-05 | supports | deployer | any | Segregation of duties for human approval of AI changes. | https://www.iso.org/standard/42001 |
 | `A.4.2` | EC-07 | supports | deployer | any | Inventory of resources including agents, models, and tools. | https://www.iso.org/standard/42001 |
@@ -75,7 +75,7 @@ Not mapped in crosswalk version 1.
 | `GOVERN-5.1` | EC-07 | supports | deployer | any | Inventory AI systems and supply chain. | https://www.nist.gov/itl/ai-risk-management-framework |
 | `GOVERN-5.2` | EC-02 | supports | provider | any | Signed verification results manage supply-chain risks. | https://www.nist.gov/itl/ai-risk-management-framework |
 | `GOVERN-5.2` | EC-03 | supports | provider | any | Cross-organizational verification through Sigstore bundle. | https://www.nist.gov/itl/ai-risk-management-framework |
-| `GOVERN-5.2` | EC-12 | no-relationship | provider | any | Evidence package is not yet implemented; artifact is absent until issue 1407 merges. | https://www.nist.gov/itl/ai-risk-management-framework |
+| `GOVERN-5.2` | EC-12 | supports | provider | any | Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; entries_sha256 recomputes. | https://www.nist.gov/itl/ai-risk-management-framework |
 | `MANAGE-2.4` | EC-08 | supports | deployer | any | Track changes and communicate risks through commit linkage. | https://www.nist.gov/itl/ai-risk-management-framework |
 | `MANAGE-2.4` | EC-11 | supports | deployer | any | Change management and record retention through archive index. | https://www.nist.gov/itl/ai-risk-management-framework |
 | `MAP-2.3` | EC-09 | supports | deployer | any | Categorize risks and impacts including data leakage. | https://www.nist.gov/itl/ai-risk-management-framework |
@@ -92,7 +92,7 @@ Not mapped in crosswalk version 1.
 | `PS.2` | EC-02 | supports | supplier | any | Release integrity is supported by signed verification attestations. | https://csrc.nist.gov/projects/ssdf |
 | `PS.2` | EC-03 | supports | supplier | any | Release integrity is verifiable by external parties using cosign. | https://csrc.nist.gov/projects/ssdf |
 | `PS.2` | EC-08 | supports | supplier | any | Release integrity through commit linkage. | https://csrc.nist.gov/projects/ssdf |
-| `PS.2` | EC-12 | no-relationship | supplier | any | Evidence package is not yet implemented; artifact is absent until issue 1407 merges. | https://csrc.nist.gov/projects/ssdf |
+| `PS.2` | EC-12 | supports | supplier | any | Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; entries_sha256 recomputes. | https://csrc.nist.gov/projects/ssdf |
 | `PS.3` | EC-07 | supports | supplier | any | Archive and protect each software release to support inventory. | https://csrc.nist.gov/projects/ssdf |
 | `PW.7` | EC-05 | supports | supplier | any | Review and approval of code changes. | https://csrc.nist.gov/projects/ssdf |
 | `PW.8` | EC-01 | supports | supplier | any | Verify the software and confirm it behaves as intended with captured results. | https://csrc.nist.gov/projects/ssdf |
@@ -114,7 +114,7 @@ Not mapped in crosswalk version 1.
 | `CM-3` | EC-03 | supports | service-organisation | any | Change control evidence is externally verifiable. | https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads |
 | `CM-3` | EC-05 | supports | service-organisation | any | Change approval with segregation of duties. | https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads |
 | `CM-3` | EC-08 | supports | service-organisation | any | Change control records linked to commits. | https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads |
-| `CM-3` | EC-12 | no-relationship | service-organisation | any | Evidence package is not yet implemented; artifact is absent until issue 1407 merges. | https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads |
+| `CM-3` | EC-12 | supports | service-organisation | any | Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; entries_sha256 recomputes. | https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads |
 | `CM-8` | EC-07 | supports | service-organisation | any | Information system component inventory. | https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads |
 
 ## OWASP Top 10 for Agentic Applications (`owasp-agentic-2026`)
@@ -128,7 +128,7 @@ Not mapped in crosswalk version 1.
 | `ASI04` | EC-03 | supports | deployer | any | Supply chain verification through cosign bundle. | https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/ |
 | `ASI04` | EC-07 | supports | deployer | any | Agentic supply chain inventory. | https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/ |
 | `ASI04` | EC-08 | supports | deployer | any | Supply chain traceability through commit trailers. | https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/ |
-| `ASI04` | EC-12 | no-relationship | deployer | any | Evidence package is not yet implemented; artifact is absent until issue 1407 merges. | https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/ |
+| `ASI04` | EC-12 | supports | deployer | any | Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; entries_sha256 recomputes. | https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/ |
 | `ASI05` | EC-01 | partially-supports | deployer | any | A passing test suite is not detection of unexpected execution. | https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/ |
 | `ASI05` | EC-06 | partially-supports | deployer | any | Lifecycle logs provide observability but do not directly detect unexpected code execution. | https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/ |
 | `ASI05` | EC-10 | partially-supports | deployer | any | Outcome records provide observability but do not directly detect unexpected code execution. | https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/ |
@@ -144,7 +144,7 @@ Not mapped in crosswalk version 1.
 | `CC7.2` | EC-06 | supports | service-organisation | any | System activity logging for monitoring. | https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022 |
 | `CC7.2` | EC-09 | supports | service-organisation | any | Monitoring for sensitive data handling. | https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022 |
 | `CC7.2` | EC-11 | supports | service-organisation | any | Log retention for monitoring through archive index. | https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022 |
-| `CC7.2` | EC-12 | no-relationship | service-organisation | any | Evidence package is not yet implemented; artifact is absent until issue 1407 merges. | https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022 |
+| `CC7.2` | EC-12 | partially-supports | service-organisation | any | Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; not operational monitoring. | https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022 |
 | `CC8.1` | EC-01 | supports | service-organisation | any | Changes are authorized, tested, and implemented with captured exit status. | https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022 |
 | `CC8.1` | EC-04 | supports | service-organisation | any | Logical access controls for change requesters. | https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022 |
 | `CC8.1` | EC-05 | supports | service-organisation | any | Segregation of duties for approval. | https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022 |

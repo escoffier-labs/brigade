@@ -22,6 +22,7 @@ from . import (
     attestation_input,
     causal_receipt,
     cosign_attestation,
+    evidence_package,
     localio,
     receipts_trailer,
     run_journal,
@@ -51,7 +52,7 @@ _STATE_RULES: dict[str, str] = {
     "EC-09": "guard-audit-allow",
     "EC-10": "outcome-record-exists",
     "EC-11": "verify-archive-index-exists",
-    "EC-12": "artifact-absent-until-merged",
+    "EC-12": "evidence-package-manifest",
 }
 
 
@@ -359,10 +360,35 @@ def _evaluate_verify_archive_index_exists(target: Path, run_id: str | None) -> s
     return "untested"
 
 
-def _evaluate_artifact_absent_until_merged(target: Path, run_id: str | None) -> str:
-    """EC-12 state: the evidence package artifact is not yet implemented."""
-    del target, run_id
-    return "untested"
+def _evaluate_evidence_package_manifest(target: Path, run_id: str | None) -> str:
+    """EC-12 state: at least one evidence package manifest parses and recomputes.
+
+    Manifests are searched under ``<target>/.brigade/evidence-packages/``, which
+    is the conventional local staging location for exported evidence packages.
+    """
+    del run_id  # whole-workspace artifact
+    root = target / ".brigade" / "evidence-packages"
+    if not root.is_dir():
+        return "untested"
+    any_manifest = False
+    for path in root.rglob("manifest.json"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        any_manifest = True
+        manifest = _read_json_object(path)
+        if not isinstance(manifest, dict):
+            continue
+        if manifest.get("schema") != evidence_package.SCHEMA:
+            continue
+        entries = manifest.get("entries")
+        if not isinstance(entries, list):
+            continue
+        stored = manifest.get("entries_sha256")
+        if not isinstance(stored, str):
+            continue
+        if localio.canonical_json_digest(entries) == stored:
+            return "evidenced_passed"
+    return "evidenced_failed" if any_manifest else "untested"
 
 
 _EVALUATORS: dict[str, Any] = {
@@ -377,7 +403,7 @@ _EVALUATORS: dict[str, Any] = {
     "guard-audit-allow": _evaluate_guard_audit_allow,
     "outcome-record-exists": _evaluate_outcome_record_exists,
     "verify-archive-index-exists": _evaluate_verify_archive_index_exists,
-    "artifact-absent-until-merged": _evaluate_artifact_absent_until_merged,
+    "evidence-package-manifest": _evaluate_evidence_package_manifest,
 }
 
 

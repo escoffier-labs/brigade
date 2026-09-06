@@ -35,9 +35,11 @@ def _final_tree_base(base: Mapping[str, Any]) -> dict[str, Any]:
     cwd = result.get("cwd")
     if not isinstance(cwd, Path):
         return result
-    tree_fingerprint = localio.tree_fingerprint(cwd)
+    tree_fingerprint, tree_fingerprint_head = localio.tree_fingerprint_with_head(cwd)
     if tree_fingerprint is not None:
         result["tree_fingerprint"] = tree_fingerprint
+    if tree_fingerprint_head is not None:
+        result["tree_fingerprint_head"] = tree_fingerprint_head
     return result
 
 

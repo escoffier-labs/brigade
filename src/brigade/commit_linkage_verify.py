@@ -224,17 +224,15 @@ def _verify_baseline_relation(
     baseline = predicate.get("baseline")
     if not isinstance(baseline, dict):
         return "unavailable"
-    baseline_commit = baseline.get("gitCommit")
     stated_relation = baseline.get("baselineRelation")
-    if not isinstance(baseline_commit, str) or not isinstance(stated_relation, str):
+    if not isinstance(stated_relation, str):
         return "unavailable"
+    baseline_commit = baseline.get("gitCommit")
     parents = commit_linkage._commit_parents(target, commit_sha, shallow)
     if parents is None:
         return "unavailable"
     first_parent = parents[0] if parents else None
     relation, _moved = commit_linkage._baseline_relation(target, baseline_commit, first_parent, shallow)
-    if relation is None:
-        return "unavailable"
     if relation == stated_relation:
         return "confirmed"
     return "contradicted"
@@ -249,6 +247,7 @@ def _evaluate_status(
     equivalence_obs: str,
     normalization_base: Mapping[str, Any] | None,
     local_baseline_commit: str | None,
+    local_tree_fingerprint_head: str | None,
     recomputed_first_parent: str | None,
     rule_drift: bool,
     commit_available: str,
@@ -284,15 +283,26 @@ def _evaluate_status(
     if equivalence == "exact":
         return _STATUS_LINKED_EXACT
     if equivalence == "normalized":
-        # LINKED-NORMALIZED is granted only when the normalization base is the
-        # run baseline, matches the local run.json baseline, matches the actual
-        # first parent, and the rule has not drifted.
+        # LINKED-NORMALIZED is granted when the normalization base is provable.
+        # The run-baseline source proves it by matching the local run.json
+        # baseline and the actual first parent. The receipt-head source proves it
+        # by matching the fingerprint-time HEAD recorded in run.json, without
+        # requiring the first parent to be that HEAD. Either way the rule must not
+        # have drifted.
         if (
             isinstance(normalization_base, dict)
-            and normalization_base.get("source") == "run-baseline"
             and not rule_drift
-            and normalization_base.get("gitCommit") == local_baseline_commit
-            and normalization_base.get("gitCommit") == recomputed_first_parent
+            and (
+                (
+                    normalization_base.get("source") == "run-baseline"
+                    and normalization_base.get("gitCommit") == local_baseline_commit
+                    and normalization_base.get("gitCommit") == recomputed_first_parent
+                )
+                or (
+                    normalization_base.get("source") == "receipt-head"
+                    and normalization_base.get("gitCommit") == local_tree_fingerprint_head
+                )
+            )
         ):
             return _STATUS_LINKED_NORMALIZED
         return _STATUS_NOT_EQUIVALENT
@@ -542,6 +552,7 @@ def verify_commit_linkage(
         local_shallow = True
 
     local_baseline_commit = None
+    local_tree_fingerprint_head = None
     recomputed_first_parent = None
     if commit_available != "missing" and commit_sha is not None and isinstance(statement, dict):
         parents = commit_linkage._commit_parents(target, commit_sha, local_shallow)
@@ -559,6 +570,9 @@ def verify_commit_linkage(
                         local_baseline = run_meta.get("baseline_commit")
                         if isinstance(local_baseline, str) and commit_linkage._HEX40_OR_64_RE.fullmatch(local_baseline):
                             local_baseline_commit = local_baseline
+                        local_head = run_meta.get("tree_fingerprint_head")
+                        if isinstance(local_head, str) and commit_linkage._HEX40_OR_64_RE.fullmatch(local_head):
+                            local_tree_fingerprint_head = local_head
                     except agent_change.AgentChangeError:
                         pass
 
@@ -577,6 +591,7 @@ def verify_commit_linkage(
         equivalence_obs,
         normalization_base,
         local_baseline_commit,
+        local_tree_fingerprint_head,
         recomputed_first_parent,
         rule_drift,
         commit_available,

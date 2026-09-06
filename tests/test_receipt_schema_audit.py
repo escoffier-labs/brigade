@@ -125,6 +125,26 @@ def test_run_receipt_emits_schema_version_and_sorted_keys(tmp_path):
     assert key_order == sorted(key_order)
 
 
+def test_run_receipt_carries_tree_fingerprint_head_when_provided(tmp_path):
+    tree = "a" * 40
+    head = "b" * 40
+    payload = aboyeur._run_payload(
+        task="audit",
+        cwd=tmp_path,
+        lock_workspace=tmp_path,
+        roster=_minimal_roster(),
+        dry_run=True,
+        read_only=True,
+        status="started",
+        started_at=aboyeur.datetime.now(aboyeur.timezone.utc),
+        include_git=False,
+        tree_fingerprint=tree,
+        tree_fingerprint_head=head,
+    )
+    assert payload["tree_fingerprint"] == tree
+    assert payload["tree_fingerprint_head"] == head
+
+
 def test_run_receipt_legacy_without_schema_version_still_loads(tmp_path):
     run_dir = tmp_path / ".brigade" / "runs" / "legacy-run"
     run_dir.mkdir(parents=True)
@@ -321,11 +341,30 @@ def test_verify_receipt_emits_null_identity_tuple_outside_git(tmp_path, capsys, 
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["baseline_commit"] is None
     assert receipt["tree_fingerprint"] is None
+    assert receipt["tree_fingerprint_head"] is None
     assert receipt["changes_patch_sha256"] is None
     stored = json.loads((Path(receipt["path"]) / "receipt.json").read_text())
     assert stored["baseline_commit"] is None
     assert stored["tree_fingerprint"] is None
+    assert stored["tree_fingerprint_head"] is None
     assert stored["changes_patch_sha256"] is None
+
+
+def test_verify_receipt_emits_tree_fingerprint_head_inside_git(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
+    _init_git_repo(tmp_path)
+    rc = verify_mod.verify_run(
+        target=tmp_path,
+        commands=[f"{sys.executable} -c \"print('ok')\""],
+        reuse=False,
+        json_output=True,
+    )
+    assert rc == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert isinstance(receipt["tree_fingerprint_head"], str)
+    assert receipt["tree_fingerprint_head"] == receipt["baseline_commit"]
+    stored = json.loads((Path(receipt["path"]) / "receipt.json").read_text())
+    assert stored["tree_fingerprint_head"] == receipt["tree_fingerprint_head"]
 
 
 def test_write_reused_receipt_omits_reused_from_without_source_run_id(tmp_path):
@@ -339,6 +378,7 @@ def test_write_reused_receipt_omits_reused_from_without_source_run_id(tmp_path):
     assert "reused_from" not in receipt
     assert receipt["baseline_commit"] is None
     assert receipt["tree_fingerprint"] is None
+    assert receipt["tree_fingerprint_head"] is None
     assert receipt["changes_patch_sha256"] is None
 
 

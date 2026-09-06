@@ -400,7 +400,7 @@ def test_run_detach_startup_escape_kills_child_group_before_terminal_receipt(
 
 def test_run_detach_terminalizes_startup_timeout_and_kills_child(tmp_path, monkeypatch):
     _write_roster(tmp_path)
-    monkeypatch.setattr(aboyeur.localio, "tree_fingerprint", lambda path: "c" * 40)
+    monkeypatch.setattr(aboyeur.localio, "tree_fingerprint_with_head", lambda path: ("c" * 40, "d" * 40))
 
     class FakeProcess:
         pid = 4321
