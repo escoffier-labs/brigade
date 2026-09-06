@@ -209,6 +209,19 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_models_set.add_argument("--notes", default=None, help="Optional operator note (stored as safe policy metadata).")
     p_models_set.add_argument("--reasoning", default=None, help="Exact reasoning value for the seat.")
     p_models_set.add_argument("--brigade-cli", default=None, dest="brigade_cli", help="Exact Brigade CLI binding.")
+    launch_model = p_models_set.add_mutually_exclusive_group()
+    launch_model.add_argument(
+        "--brigade-model",
+        default=None,
+        dest="brigade_model",
+        help="Exact native model id the Brigade adapter launches (e.g. opencode/muse-spark-1.3-contributor-free).",
+    )
+    launch_model.add_argument(
+        "--clear-brigade-model",
+        action="store_true",
+        dest="clear_brigade_model",
+        help="Drop the native launch binding so the canonical model is launched.",
+    )
     p_models_set.add_argument(
         "--t3-instance-id", default=None, dest="t3_instance_id", help="Exact T3 instance binding."
     )
@@ -1416,7 +1429,8 @@ def _dispatch_models_list(args: argparse.Namespace) -> int:
             continue
         if selected_seat is not None and seat_name != selected_seat:
             continue
-        binding = fleet_model_admission._binding_for(consumer, seat)
+        launch_groups = fleet_model_roster.consumer_launch_groups(roster, consumer, seat_name)
+        binding = fleet_model_admission._binding_for(consumer, seat, launch_groups=launch_groups)
         binding_value = binding.get("instance_id") if isinstance(binding, dict) else None
         filtered.append(
             {
@@ -1477,6 +1491,10 @@ def _dispatch_models_set(args: argparse.Namespace) -> int:
             kwargs["reasoning"] = args.reasoning
         if args.brigade_cli is not None:
             kwargs["brigade_cli"] = args.brigade_cli
+        if args.clear_brigade_model:
+            kwargs["brigade_model"] = ""
+        elif args.brigade_model is not None:
+            kwargs["brigade_model"] = args.brigade_model
         if args.t3_instance_id is not None:
             kwargs["t3_instance_id"] = args.t3_instance_id
         if args.t3_service_tier is not None:
@@ -1489,10 +1507,14 @@ def _dispatch_models_set(args: argparse.Namespace) -> int:
     if args.json:
         print(_json.dumps(policy, indent=2, sort_keys=True))
         return 0
-    print(
+    line = (
         f"model policy {policy.get('provider')}/{policy.get('model')} ({policy.get('seat')}): "
         f"{'enabled' if policy.get('enabled') else 'disabled'}"
     )
+    launch = policy.get("brigade_model")
+    if isinstance(launch, str) and launch:
+        line += f"; brigade launch model {launch}"
+    print(line)
     return 0
 
 

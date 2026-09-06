@@ -363,22 +363,30 @@ def parse_fleet_policy_authority(raw: Any) -> tuple[dict[str, Any] | None, str |
     return {"active": raw["active"], "version": version, "digest": digest}, None
 
 
-def binding_launch_models(seat: Mapping[str, Any]) -> tuple[str, ...]:
+def binding_launch_models(
+    seat: Mapping[str, Any],
+    *,
+    launch_groups: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
     """Canonical seat.model plus trusted native/brigade launch-model leaves."""
     models: list[str] = []
     canonical = seat.get("model")
     if isinstance(canonical, str) and canonical:
         models.append(canonical)
-    bindings = seat.get("bindings") if isinstance(seat.get("bindings"), Mapping) else {}
-    if not isinstance(bindings, Mapping):
-        return tuple(models)
-    for group in ("brigade", "native"):
-        body = bindings.get(group)
-        if not isinstance(body, Mapping):
-            continue
-        launch = body.get("model")
-        if isinstance(launch, str) and launch and launch not in models:
-            models.append(launch)
+    sources: list[Mapping[str, Any]] = []
+    bindings = seat.get("bindings")
+    if isinstance(bindings, Mapping):
+        sources.append(bindings)
+    if isinstance(launch_groups, Mapping):
+        sources.append(launch_groups)
+    for source in sources:
+        for group in ("brigade", "native"):
+            body = source.get(group)
+            if not isinstance(body, Mapping):
+                continue
+            launch = body.get("model")
+            if isinstance(launch, str) and launch and launch not in models:
+                models.append(launch)
     return tuple(models)
 
 
@@ -392,3 +400,33 @@ def brigade_launch_model(seat: Mapping[str, Any]) -> str | None:
         return None
     model = brigade.get("model")
     return model if isinstance(model, str) and model else None
+
+
+def consumer_launch_groups(roster: Mapping[str, Any], consumer: str, seat: str) -> Mapping[str, Any] | None:
+    """One seat's signed ``consumer_launch_bindings`` groups, or None when unprojected."""
+    launch_map = roster.get("consumer_launch_bindings")
+    if not isinstance(launch_map, Mapping):
+        return None
+    consumer_map = launch_map.get(consumer)
+    if not isinstance(consumer_map, Mapping):
+        return None
+    groups = consumer_map.get(seat)
+    return groups if isinstance(groups, Mapping) else None
+
+
+def effective_brigade_launch_model(
+    seat: Mapping[str, Any],
+    *,
+    launch_groups: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Reviewed native launch id for brigade-run: consumer projection first, then the seat row.
+
+    The value is always an explicit binding leaf. Nothing here derives a native
+    id from the canonical slug by delimiter or alias rewriting.
+    """
+    if isinstance(launch_groups, Mapping):
+        brigade = compact_launch_groups(launch_groups).get("brigade") or {}
+        projected = brigade.get("model")
+        if isinstance(projected, str) and projected:
+            return projected
+    return brigade_launch_model(seat)

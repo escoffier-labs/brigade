@@ -125,7 +125,13 @@ def _local_cli_matches_hub_binding(aboyeur: Any, agent: Agent, binding: Mapping[
     return aboyeur.agents.command_for(local) == instance_id
 
 
-def _set_remediation_detail(row: Mapping[str, Any], revision: object, *, fallback_seat: str | None = None) -> str:
+def _set_remediation_detail(
+    row: Mapping[str, Any],
+    revision: object,
+    *,
+    fallback_seat: str | None = None,
+    brigade_model: str | None = None,
+) -> str:
     """Return a remediation block for a versioned roster seat row."""
     provider = row.get("provider")
     model = row.get("model")
@@ -142,6 +148,7 @@ def _set_remediation_detail(row: Mapping[str, Any], revision: object, *, fallbac
         t3_instance_id=fleet_model_admission._t3_instance_id_from_row(row),
         t3_service_tier=fleet_model_admission._t3_service_tier_from_row(row),
         revision=revision,
+        brigade_model=brigade_model,
     )
 
 
@@ -433,14 +440,17 @@ def _resolve_versioned(
             policy_provider = row.get("provider")
             policy_model = row.get("model")
             policy_reasoning = row.get("reasoning")
-            launch_model = fleet_model_roster.brigade_launch_model(row) or policy_model
+            launch_groups = fleet_model_roster.consumer_launch_groups(raw_snapshot, "brigade-run", seat)
+            launch_model = (
+                fleet_model_roster.effective_brigade_launch_model(row, launch_groups=launch_groups) or policy_model
+            )
             decision["policy_provider"] = policy_provider
             decision["policy_model"] = policy_model
             decision["launch_model"] = launch_model
             decision["policy_enabled"] = row.get("enabled") is True
-            binding = fleet_model_admission._binding_for("brigade-run", row)
+            binding = fleet_model_admission._binding_for("brigade-run", row, launch_groups=launch_groups)
             policy_floor = None
-            for identity in fleet_model_roster.binding_launch_models(row):
+            for identity in fleet_model_roster.binding_launch_models(row, launch_groups=launch_groups):
                 policy_floor = fleet_model_roster.retired_reason(
                     str(policy_provider or ""), identity, retired_rows or None
                 )
@@ -456,7 +466,9 @@ def _resolve_versioned(
             elif cleaned_override is not None and seat == worker and cleaned_override not in allowed_models:
                 outcome = "mismatch"
                 detail = f"--model {cleaned_override!r} does not match Hub model {policy_model!r}"
-                detail += _set_remediation_detail(row, revision, fallback_seat=seat)
+                # Re-running `set` with the canonical slug would only re-pin the
+                # slug the adapter already rejects. Name the native binding fix.
+                detail += _set_remediation_detail(row, revision, fallback_seat=seat, brigade_model=cleaned_override)
             elif not isinstance(policy_reasoning, str) or not policy_reasoning:
                 outcome = "binding-missing"
                 detail = "registry entry is missing exact reasoning"

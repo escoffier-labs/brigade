@@ -329,6 +329,7 @@ CREATE TABLE IF NOT EXISTS model_policy (
     enabled INTEGER NOT NULL,
     limit_count INTEGER,
     brigade_cli TEXT NOT NULL DEFAULT '',
+    brigade_model TEXT NOT NULL DEFAULT '',
     t3_instance_id TEXT NOT NULL DEFAULT '',
     t3_service_tier TEXT NOT NULL DEFAULT '',
     notes TEXT,

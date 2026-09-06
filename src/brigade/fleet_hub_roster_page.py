@@ -48,6 +48,7 @@ class SeatRow:
     limit: int | None
     enabled: bool
     brigade_cli: str
+    brigade_model: str
     t3_instance_id: str
     t3_service_tier: str
     notes: str | None
@@ -132,7 +133,7 @@ def load_view(
     seats: list[SeatRow] = []
     for row in conn.execute(
         "SELECT seat, provider, model, reasoning, enabled, limit_count, brigade_cli, t3_instance_id, "
-        "t3_service_tier, notes FROM model_policy ORDER BY seat"
+        "t3_service_tier, notes, brigade_model FROM model_policy ORDER BY seat"
     ).fetchall():
         seats.append(
             SeatRow(
@@ -143,6 +144,7 @@ def load_view(
                 limit=None if row[5] is None else int(row[5]),
                 enabled=bool(row[4]),
                 brigade_cli=str(row[6] or ""),
+                brigade_model=str(row[10] or ""),
                 t3_instance_id=str(row[7] or ""),
                 t3_service_tier=str(row[8] or ""),
                 notes=row[9],
@@ -668,6 +670,7 @@ def apply(
                     "enabled": target[row.seat],
                     "limit": row.limit,
                     "brigade_cli": row.brigade_cli,
+                    "brigade_model": row.brigade_model,
                     "t3_instance_id": row.t3_instance_id,
                     "t3_service_tier": row.t3_service_tier,
                     "notes": row.notes,

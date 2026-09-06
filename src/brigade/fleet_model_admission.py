@@ -751,25 +751,20 @@ def _resolve_from_roster(
             },
         )
     match = next((item for item in seats if isinstance(item, dict) and item.get("seat") == seat_name), None)
+    groups = fleet_model_roster.consumer_launch_groups(roster, consumer, str(seat_name))
     if match is None:
         reason = "seat-missing"
     elif not match.get("enabled"):
         reason = "seat-disabled"
     elif any(
         fleet_model_roster.retired_reason(str(match.get("provider") or ""), identity, retired_rows)
-        for identity in fleet_model_roster.binding_launch_models(match)
+        for identity in fleet_model_roster.binding_launch_models(match, launch_groups=groups)
     ):
         reason = "retired-model"
     elif not isinstance(match.get("reasoning"), str) or not str(match.get("reasoning") or "").strip():
         reason = "binding-missing"
     else:
-        launch_map = roster.get("consumer_launch_bindings")
-        groups = None
-        if isinstance(launch_map, Mapping):
-            consumer_map = launch_map.get(consumer)
-            if isinstance(consumer_map, Mapping):
-                groups = consumer_map.get(seat_name)
-        binding = _binding_for(consumer, match, launch_groups=groups if isinstance(groups, Mapping) else None)
+        binding = _binding_for(consumer, match, launch_groups=groups)
         if binding is None:
             reason = "binding-missing"
         else:
@@ -1681,6 +1676,7 @@ def _set_command_remediation(
     t3_service_tier: str | None,
     revision: object,
     consumer: str = "brigade-run",
+    brigade_model: str | None = None,
 ) -> str:
     """Human-readable 'brigade fleet models set' command for a seat row."""
     rev = revision if isinstance(revision, int) else "N"
@@ -1701,6 +1697,8 @@ def _set_command_remediation(
             cmd_parts.append(f"--brigade-cli {cli}")
         else:
             cmd_parts.append("--brigade-cli CLI")
+        if isinstance(brigade_model, str) and brigade_model:
+            cmd_parts.append(f"--brigade-model {brigade_model}")
     cmd_parts.append(f"--expect-revision {rev}")
     return f"bind it with: {' '.join(cmd_parts)}\nsee current rows: brigade fleet models list --seat {seat}"
 
