@@ -1240,6 +1240,21 @@ def run_agent(
             failure_kind=failure_kind,
         )
 
+    from . import fleet_session_bootstrap
+
+    try:
+        prompt = fleet_session_bootstrap.ensure_prompt(prompt, cli_ref=cli_ref, model=model, cwd=cwd)
+    except fleet_session_bootstrap.PreflightDenial as exc:
+        return AgentResult(
+            text="",
+            ok=False,
+            detail=exc.message[:200],
+            failure_phase="preflight",
+            failure_kind=exc.code,
+            requested_model=model,
+            reasoning=reasoning,
+        )
+
     if resume_session_id is not None and (cli_ref != "grok" or not (read_only or sandbox == "read-only")):
         return AgentResult(
             text="",
@@ -1411,23 +1426,31 @@ def run_agent(
         argv.extend(["--json-schema", _GROK_RESULT_SCHEMA])
     assert executable.path is not None
     argv = [executable.path, *(command[1:] if command is not None else ()), *argv[1:]]
-    if cli_ref == "codex":
-        result = proc.run(
-            argv,
-            timeout=timeout,
-            cwd=cwd,
-            env=child_env,
-            stdin=prompt.encode(),
-            process_registry=process_registry,
-        )
-    else:
-        result = proc.run(
-            argv,
-            timeout=timeout,
-            cwd=cwd,
-            env=child_env,
-            process_registry=process_registry,
-        )
+    session_ctx = fleet_session_bootstrap.current_context()
+    try:
+        if cli_ref == "codex":
+            result = proc.run(
+                argv,
+                timeout=timeout,
+                cwd=cwd,
+                env=child_env,
+                stdin=prompt.encode(),
+                process_registry=process_registry,
+            )
+        else:
+            result = proc.run(
+                argv,
+                timeout=timeout,
+                cwd=cwd,
+                env=child_env,
+                process_registry=process_registry,
+            )
+    except OSError as exc:
+        if session_ctx is not None:
+            fleet_session_bootstrap.mark_failed(session_ctx, str(exc))
+        raise
+    if session_ctx is not None:
+        fleet_session_bootstrap.mark_started(session_ctx)
 
     def scrub_detail(detail: str) -> str:
         return _scrub_env_override_values(detail, resolved_overrides, resolved_secret_targets)

@@ -365,6 +365,17 @@ def _resolve_versioned(
         "decisions": [],
         "admissions": [],
     }
+    authority, authority_error = fleet_model_roster.parse_fleet_policy_authority(raw_snapshot.get("fleet_policy"))
+    if authority_error is not None:
+        receipt["state"] = "denied"
+        receipt["authoritative"] = False
+        return aboyeur.FleetModelPolicyResolution(
+            roster=effective,
+            receipt=receipt,
+            error="fleet model policy authority metadata is malformed; refusing new dispatch",
+        )
+    if authority is not None:
+        receipt["fleet_policy"] = authority
     if model_override is not None:
         receipt["model_override"] = model_override.strip()
         receipt["model_override_seat"] = worker
@@ -422,22 +433,27 @@ def _resolve_versioned(
             policy_provider = row.get("provider")
             policy_model = row.get("model")
             policy_reasoning = row.get("reasoning")
+            launch_model = fleet_model_roster.brigade_launch_model(row) or policy_model
             decision["policy_provider"] = policy_provider
             decision["policy_model"] = policy_model
+            decision["launch_model"] = launch_model
             decision["policy_enabled"] = row.get("enabled") is True
             binding = fleet_model_admission._binding_for("brigade-run", row)
-            policy_floor = fleet_model_roster.retired_reason(
-                str(policy_provider or ""),
-                str(policy_model or ""),
-                retired_rows or None,
-            )
+            policy_floor = None
+            for identity in fleet_model_roster.binding_launch_models(row):
+                policy_floor = fleet_model_roster.retired_reason(
+                    str(policy_provider or ""), identity, retired_rows or None
+                )
+                if policy_floor is not None:
+                    break
+            allowed_models = {item for item in (policy_model, launch_model) if isinstance(item, str) and item}
             if policy_floor is not None:
                 outcome = "retired"
                 detail = policy_floor
             elif not isinstance(policy_provider, str) or not isinstance(policy_model, str):
                 outcome = "mismatch"
                 detail = "registry entry is missing exact provider/model"
-            elif cleaned_override is not None and seat == worker and cleaned_override != policy_model:
+            elif cleaned_override is not None and seat == worker and cleaned_override not in allowed_models:
                 outcome = "mismatch"
                 detail = f"--model {cleaned_override!r} does not match Hub model {policy_model!r}"
                 detail += _set_remediation_detail(row, revision, fallback_seat=seat)
@@ -479,7 +495,7 @@ def _resolve_versioned(
                     kept_agents[seat] = replace(
                         agent,
                         cli=resolved_cli,
-                        model=policy_model,
+                        model=launch_model if isinstance(launch_model, str) else policy_model,
                         reasoning=effective_reasoning,
                         command=None,
                         env=agent.env if keep_env else None,

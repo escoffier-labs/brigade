@@ -343,6 +343,10 @@ class WorkerResult:
     output_truncated: bool = False
     output_bytes: int = 0
     output_cap_bytes: int = 0
+    # Fleet routing / delegated-execution disposition when policy selected
+    # another machine. ``None`` for ordinary local work. Carries the target
+    # provenance and pending-handoff facts; never implies a local edit.
+    remote: dict[str, Any] | None = None
 
 
 def _is_output_limit_failure(result: agents.AgentResult | WorkerResult) -> bool:
@@ -384,6 +388,48 @@ class AppserverRunner(Protocol):
         registry: run_control.LiveTurnRegistry | None,
         on_event: Any = None,
     ) -> agents.AgentResult: ...
+
+
+class RemoteTransport(Protocol):
+    """Resolve one seat's fleet route and, when remote, execute it there.
+
+    Returns ``None`` when the routing authority selected this machine, which
+    leaves the local lease and provider path untouched. A returned dispatch is
+    terminal for this attempt: the local branch must not run afterwards.
+    """
+
+    def __call__(self, seat: str, task: str, prompt: str) -> Any: ...
+
+
+def _remote_agent_result(dispatch: Any) -> agents.AgentResult:
+    """Map a fleet remote dispatch onto the transport's own result type.
+
+    A blocked route is a routing rejection, never a quiet local fallback. A
+    terminal delegated success carries the target's text with source
+    provenance; the pending-handoff disposition rides on ``WorkerResult.remote``
+    so an empty local diff is never read as locally implemented.
+    """
+    resolution = dispatch.resolution
+    outcome = dispatch.outcome
+    if outcome is None:
+        return agents.AgentResult(
+            text="",
+            ok=False,
+            detail=f"fleet routing refused seat {resolution.seat!r}: {resolution.reason}",
+            failure_phase="routing",
+            failure_kind=resolution.reason,
+            transport="t3-fleet",
+        )
+    return agents.AgentResult(
+        text=outcome.text,
+        ok=outcome.ok,
+        detail=outcome.detail,
+        failure_phase=outcome.failure_phase,
+        failure_kind=outcome.failure_kind,
+        transport="t3-fleet",
+        request_id=outcome.request_id,
+        status=outcome.state,
+    )
 
 
 class EventWriter(Protocol):
@@ -475,6 +521,7 @@ def dispatch(
     run_id: str | None = None,
     output_dir: Path | None = None,
     model_lease: Callable[[Agent], Any] | None = None,
+    remote_transport: RemoteTransport | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
 
@@ -492,6 +539,13 @@ def dispatch(
     ``quarantine_state`` / ``reprobe_seat`` implement the #474 same-seat-once
     retry bound: persist the failed attempt, re-probe, then allow at most one
     same-seat retry before quarantining the seat for the rest of the run.
+
+    ``remote_transport`` resolves the central fleet route for a seat *before*
+    the ``model_lease`` context is entered. When policy selected another
+    machine the work is delegated there and no local lease or provider call is
+    made; when it selected this machine, or when no transport is wired, the
+    existing local path runs unchanged. It is only ever wired into this worker
+    dispatch, never into the orchestrator's own attempt.
     """
 
     process_registry = process_registry or proc.ProcessRegistry()
@@ -621,6 +675,10 @@ def dispatch(
         started = time.monotonic()
         effective_read_only = read_only if sandbox_read_only is None else sandbox_read_only
         approval_correlation_marker = secrets.token_urlsafe(32)
+        # Set by the most recent invoke() and read by the finish() that maps it,
+        # so a delegated attempt's routing/handoff facts reach its own receipt
+        # and a following local attempt does not inherit them.
+        remote_disposition: list[dict[str, Any] | None] = [None]
 
         def _invoke_external(
             selected_agent: Agent,
@@ -642,6 +700,25 @@ def dispatch(
                 )
                 else None
             )
+            from . import fleet_session_bootstrap
+
+            try:
+                selected_prompt = fleet_session_bootstrap.ensure_prompt(
+                    selected_prompt,
+                    cli_ref=cli_ref,
+                    model=selected_agent.model,
+                    cwd=cwd,
+                )
+            except fleet_session_bootstrap.PreflightDenial as exc:
+                return agents.AgentResult(
+                    text="",
+                    ok=False,
+                    detail=exc.message[:200],
+                    failure_phase="preflight",
+                    failure_kind=exc.code,
+                    requested_model=selected_agent.model,
+                    reasoning=selected_agent.reasoning,
+                )
             if selected_agent.transport == "acpx":
                 from . import acpx_adapter
 
@@ -873,9 +950,22 @@ def dispatch(
             )
             if blocked is not None:
                 return blocked
+            remote_disposition[0] = None
             attempt = on_dispatch_requested(selected_agent) if on_dispatch_requested is not None else None
             try:
-                if model_lease is None:
+                # The fleet route is resolved before the model lease is entered.
+                # A remote or blocked route returns from here, so the source
+                # never leases a seat or calls a provider for work that another
+                # machine owns, and never silently falls back to origin.
+                dispatched = (
+                    remote_transport(selected_agent.name, assignment.task, selected_prompt)
+                    if remote_transport is not None
+                    else None
+                )
+                if dispatched is not None:
+                    remote_disposition[0] = dispatched.receipt()
+                    result = _remote_agent_result(dispatched)
+                elif model_lease is None:
                     result = _invoke_external(selected_agent, selected_prompt, resume_session_id=resume_session_id)
                 else:
                     with model_lease(selected_agent) as lease_error:
@@ -975,6 +1065,7 @@ def dispatch(
                 output_truncated=over_cap,
                 output_bytes=result.output_bytes,
                 output_cap_bytes=result.output_cap_bytes,
+                remote=remote_disposition[0],
             )
 
         initial_started = _attempt_timestamp()

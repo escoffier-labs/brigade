@@ -28,7 +28,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 12 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 33 command path(s)
+- `brigade fleet`: 54 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade governance`: 1 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -197,15 +197,36 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet flush`
 - `brigade fleet grokbot enroll-actor`
 - `brigade fleet models admit`
+- `brigade fleet models bindings`
 - `brigade fleet models default set`
 - `brigade fleet models doctor`
 - `brigade fleet models list`
+- `brigade fleet models plan`
 - `brigade fleet models reconcile`
 - `brigade fleet models retire`
 - `brigade fleet models set`
 - `brigade fleet nodes add`
 - `brigade fleet nodes list`
 - `brigade fleet nodes revoke`
+- `brigade fleet policy delegation create`
+- `brigade fleet policy delegation show`
+- `brigade fleet policy history`
+- `brigade fleet policy inventory ingest`
+- `brigade fleet policy inventory probe`
+- `brigade fleet policy inventory status`
+- `brigade fleet policy observe`
+- `brigade fleet policy preview`
+- `brigade fleet policy quota ingest`
+- `brigade fleet policy reservation release`
+- `brigade fleet policy reservation renew`
+- `brigade fleet policy resolve`
+- `brigade fleet policy rollback`
+- `brigade fleet policy route`
+- `brigade fleet policy save`
+- `brigade fleet policy session acknowledge`
+- `brigade fleet policy session prepare`
+- `brigade fleet policy show`
+- `brigade fleet policy status`
 - `brigade fleet preference get`
 - `brigade fleet preference pull`
 - `brigade fleet preference set`

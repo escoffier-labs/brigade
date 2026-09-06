@@ -14,14 +14,20 @@ from datetime import datetime, timezone
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import parse_qs, urlencode
 
 from . import fleet_command_deck, fleet_dashboard, fleet_hub_grokbot, fleet_hub_sessions, worklore_http
 from . import fleet_hub as _hub
 from . import fleet_hub_model_roster
+from . import fleet_hub_policy_api
 from . import fleet_hub_roster_page
+from . import fleet_hub_routing
 from . import fleet_hub_status
+from . import fleet_model_inventory
+from . import fleet_policy_page
+from . import fleet_repo_policy_page
 from .fleet_hub import (
     DASHBOARD_COOKIE,
     DASHBOARD_COOKIE_MAX_AGE,
@@ -135,6 +141,19 @@ def lookup_node_token(*args: Any, **kwargs: Any) -> Any:
     return _hub.lookup_node_token(*args, **kwargs)
 
 
+def control_plane_from_hub(conn: Any) -> Any:
+    """Adapt the live routing snapshot for the Deck.
+
+    Missing or unreadable projection stays unknown. This helper does not
+    recompute routing or quota precedence.
+    """
+    try:
+        raw = fleet_hub_routing.control_plane_status(conn)
+    except (FleetHubError, sqlite3.Error, KeyError, ValueError, TypeError):
+        return None
+    return fleet_command_deck.control_plane_from_snapshot(raw)
+
+
 def make_handler(
     token: str,
     db_path: Path,
@@ -142,6 +161,7 @@ def make_handler(
     allow_admin_writes: bool = False,
     deck_config: fleet_command_deck.DeckConfig | None = None,
     trust_tailscale_identity: bool = False,
+    policy_inventory: Callable[[], fleet_policy_page.Inventory] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Request handler bound to the admin ``token`` and the hub database.
 
@@ -154,6 +174,10 @@ def make_handler(
     Tailscale-User-Login header added by a Tailscale Serve reverse proxy. It
     must only be used when the hub is bound to a loopback interface and the
     proxy strips spoofed headers; the identity value is never logged or rendered.
+    ``policy_inventory`` supplies an injected provider snapshot for fixtures.
+    When it is unset the policy page loads the persisted SQL inventory store
+    (or reports ``unavailable`` when that store is empty). The page never
+    probes a provider per render.
     """
     frozen_deck = deck_config if deck_config is not None else fleet_command_deck.DeckConfig()
 
@@ -471,11 +495,8 @@ def make_handler(
             ``_serve_dashboard``; non-token query parameters are ignored,
             never reflected. Renders from the startup-frozen deck config."""
             plain = "text/plain; charset=utf-8"
-            if path in ("/", "/deck"):
-                render = fleet_command_deck.render_deck
-            elif path == "/deck/repos":
-                render = fleet_command_deck.render_repos
-            else:
+            repos_page = path == "/deck/repos"
+            if path not in ("/", "/deck") and not repos_page:
                 self._send_html(404, "Not found.\n", content_type=plain)
                 return
             params = parse_qs(query, keep_blank_values=False)
@@ -505,6 +526,7 @@ def make_handler(
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
             try:
+                control_plane = None
                 now = datetime.now(timezone.utc)
                 live_runs = fleet_command_deck.fetch_live_runs(
                     conn, now=now, stale_after_seconds=frozen_deck.stale_after_seconds
@@ -539,6 +561,30 @@ def make_handler(
                 last_heard = fleet_command_deck.fetch_last_heard(conn, station_ids)
                 observers = fleet_command_deck.fetch_observers(conn, frozenset(station_ids))
                 interactive_sessions = fleet_command_deck.fetch_interactive_sessions(conn, now=now)
+                # The repos page joins the policy authority to the coordination
+                # rows. It is read on the same connection, and a failure to read
+                # it is reported as unknown rather than dropping the page.
+                policy_view: Any = None
+                policy_error = ""
+                if repos_page:
+                    identities = sorted(
+                        {
+                            str(session.get("repo_identity") or "")
+                            for session in interactive_sessions
+                            if session.get("repo_identity")
+                        }
+                        | {run.repo_identity for run in live_runs if run.repo_identity}
+                    )
+                    try:
+                        policy_view = fleet_policy_page.load_view(
+                            conn,
+                            inventory=policy_inventory() if policy_inventory is not None else None,
+                            activation=fleet_policy_page.probe_activation(conn),
+                            known_repositories=identities,
+                        )
+                    except (FleetHubError, sqlite3.Error, KeyError, ValueError) as exc:
+                        policy_error = f"the policy authority could not be read ({type(exc).__name__})"
+                control_plane = control_plane_from_hub(conn)
             except sqlite3.Error as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
@@ -556,9 +602,20 @@ def make_handler(
                 now=now,
                 cloud_workers=cloud_workers,
                 interactive_sessions=interactive_sessions,
+                control_plane=control_plane,
             )
             nonce = secrets.token_urlsafe(16)
-            page = render(view, nonce=nonce, now=now)
+            if repos_page:
+                page = fleet_repo_policy_page.render(
+                    view,
+                    rows=fleet_repo_policy_page.build_rows(view, policy_view, unavailable_reason=policy_error),
+                    policy_available=policy_view is not None,
+                    unavailable_reason=policy_error,
+                    nonce=nonce,
+                    now=now,
+                )
+            else:
+                page = fleet_command_deck.render_deck(view, nonce=nonce, now=now)
             self._send_html(200, page, nonce=nonce)
 
         def _roster_auth(self) -> tuple[bool, bool]:
@@ -585,7 +642,9 @@ def make_handler(
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
             try:
-                view = fleet_hub_roster_page.load_view(conn, frozen_deck)
+                view = fleet_hub_roster_page.load_view(
+                    conn, frozen_deck, activation=fleet_policy_page.probe_activation(conn)
+                )
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
@@ -602,6 +661,7 @@ def make_handler(
                 banner=banner,
                 error=error,
                 submission=submission,
+                policy_csrf=fleet_policy_page.csrf_value(token),
             )
             self._send_html(status, page, nonce=nonce)
 
@@ -634,6 +694,197 @@ def make_handler(
             saved = params.get("saved", [""])[0]
             saved_revision = int(saved) if saved.isdigit() and len(saved) <= 12 else None
             self._render_roster(status=200, editable=editable, saved_revision=saved_revision)
+
+        # --- policy page (UI lane; the JSON /policy API above is untouched) ---
+
+        def _render_policy(
+            self,
+            *,
+            status: int,
+            editable: bool,
+            banner: str | None = None,
+            saved_revision: str = "",
+            error: str | None = None,
+            plan: Any = None,
+            draft: Any = None,
+            review: str | None = None,
+        ) -> None:
+            plain = "text/plain; charset=utf-8"
+            try:
+                conn = open_db(Path(db_path))
+            except (FleetHubError, sqlite3.Error) as exc:
+                self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
+                return
+            try:
+                fleet_model_inventory.ensure_schema(conn)
+                view = fleet_policy_page.load_view(
+                    conn,
+                    inventory=policy_inventory() if policy_inventory is not None else None,
+                    activation=fleet_policy_page.probe_activation(conn),
+                )
+            except (FleetHubError, sqlite3.Error) as exc:
+                self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
+                return
+            finally:
+                conn.close()
+            if saved_revision:
+                # Composed here rather than at the redirect: what a save did to
+                # runtime depends on the activation state, which is only known
+                # once the view is loaded.
+                banner = f"saved as revision {saved_revision}. {fleet_policy_page.application_note(view.activation)}"
+            nonce = secrets.token_urlsafe(16)
+            page = fleet_policy_page.render(
+                view,
+                nonce=nonce,
+                now=datetime.now(timezone.utc),
+                csrf=fleet_policy_page.csrf_value(token),
+                editable=editable,
+                banner=banner,
+                error=error,
+                plan=plan,
+                draft=draft,
+                review=review,
+            )
+            self._send_html(status, page, nonce=nonce)
+
+        def _serve_policy_page(self, query: str) -> None:
+            plain = "text/plain; charset=utf-8"
+            params = parse_qs(query, keep_blank_values=False)
+            presented = params.pop("token", [""])[0]
+            if presented:
+                if not hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8")):
+                    self._send_html(401, "Unauthorized.\n", content_type=plain)
+                    return
+                cookie = (
+                    f"{DASHBOARD_COOKIE}={dashboard_cookie_value(token)}; Path=/; HttpOnly; "
+                    f"SameSite=Strict; Max-Age={DASHBOARD_COOKIE_MAX_AGE}"
+                )
+                self._send_html(
+                    303, "", content_type=plain, extra_headers={"Location": "/deck/policy", "Set-Cookie": cookie}
+                )
+                return
+            authorized, editable = self._roster_auth()
+            if not authorized:
+                self._send_html(
+                    401,
+                    "Unauthorized: send the fleet bearer token, or open this page once with "
+                    "?token=<fleet token> to set the dashboard cookie derived from the admin token "
+                    "that reads the dashboards and edits the policy page (rotating the hub token revokes it).\n",
+                    content_type=plain,
+                )
+                return
+            saved = params.get("saved", [""])[0]
+            saved_revision = saved if saved.isdigit() and len(saved) <= 12 else ""
+            self._render_policy(status=200, editable=editable, saved_revision=saved_revision)
+
+        def _post_policy_page(self) -> None:
+            """Same admin-only, same-origin, CSRF-checked path as the roster form."""
+            plain = "text/plain; charset=utf-8"
+            body = self._read_form_body(fleet_policy_page.MAX_FORM_BYTES, fleet_policy_page.FORM_CONTENT_TYPE)
+            if body is None:
+                return
+            try:
+                submission = fleet_policy_page.parse_form(body)
+            except fleet_policy_page.FormError as exc:
+                self._send_html(400, f"{exc}\n", content_type=plain)
+                return
+            expected = fleet_policy_page.csrf_value(token)
+            if not hmac.compare_digest(submission.csrf.encode("utf-8"), expected.encode("utf-8")):
+                self._send_html(403, "form token mismatch: reload the page\n", content_type=plain)
+                return
+            try:
+                conn = open_db(Path(db_path))
+            except (FleetHubError, sqlite3.Error) as exc:
+                self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
+                return
+            try:
+                fleet_model_inventory.ensure_schema(conn)
+                result = fleet_policy_page.apply(
+                    conn,
+                    submission,
+                    actor=fleet_policy_page.UPDATED_BY,
+                    inventory=(
+                        policy_inventory()
+                        if policy_inventory is not None
+                        else fleet_policy_page.load_server_inventory(conn)
+                    ),
+                    activation=fleet_policy_page.probe_activation(conn),
+                    review_key=fleet_policy_page.review_secret(token),
+                )
+            except (FleetHubError, sqlite3.Error) as exc:
+                self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
+                return
+            finally:
+                conn.close()
+            if result.status == "saved":
+                self._send_html(
+                    303, "", content_type=plain, extra_headers={"Location": f"/deck/policy?saved={result.revision}"}
+                )
+                return
+            status = {"previewed": 200, "conflict": 409}.get(result.status, 422)
+            self._render_policy(
+                status=status,
+                editable=True,
+                banner=result.message if result.status == "previewed" else None,
+                error=None if result.status == "previewed" else result.message,
+                plan=result.plan,
+                draft=submission,
+                review=result.review,
+            )
+
+        def _read_form_body(self, max_bytes: int, content_type_expected: str) -> bytes | None:
+            """Shared form gate: media type, length, admin identity, same origin."""
+            plain = "text/plain; charset=utf-8"
+            content_type = self.headers.get("Content-Type", "").partition(";")[0].strip().lower()
+            if content_type != content_type_expected:
+                self._send_html(415, "Unsupported Media Type: send a form body.\n", content_type=plain)
+                return None
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._send_html(400, "bad Content-Length\n", content_type=plain)
+                return None
+            if length <= 0:
+                self._send_html(400, "missing body\n", content_type=plain)
+                return None
+            if length > max_bytes:
+                self._send_html(413, "form body too large\n", content_type=plain)
+                return None
+            presented = self._bearer()
+            if presented is not None:
+                try:
+                    conn = open_db(Path(db_path))
+                except (FleetHubError, sqlite3.Error) as exc:
+                    self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
+                    return None
+                try:
+                    if self._authorized():
+                        is_admin = True
+                    else:
+                        node_id, _revoked = lookup_node_token(conn, presented)
+                        is_admin = False
+                        if node_id is None:
+                            self._send_html(401, "Unauthorized.\n", content_type=plain)
+                            return None
+                finally:
+                    conn.close()
+                if not is_admin:
+                    self._send_html(403, "the admin token is required to edit fleet policy\n", content_type=plain)
+                    return None
+            elif self._cookie_authorized():
+                pass
+            elif self._tailscale_identity_authorized():
+                self._send_html(403, "read-only: enroll with the fleet token to edit\n", content_type=plain)
+                return None
+            else:
+                self._send_html(401, "Unauthorized.\n", content_type=plain)
+                return None
+            if not self._same_origin():
+                self._send_html(403, "cross-origin form post refused\n", content_type=plain)
+                return None
+            return self.rfile.read(length)
+
+        # --- end policy page lane ---
 
         def _same_origin(self) -> bool:
             site = self.headers.get("Sec-Fetch-Site")
@@ -713,7 +964,9 @@ def make_handler(
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
             try:
-                result = fleet_hub_roster_page.apply(conn, frozen_deck, submission)
+                result = fleet_hub_roster_page.apply(
+                    conn, frozen_deck, submission, activation=fleet_policy_page.probe_activation(conn)
+                )
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
@@ -740,15 +993,32 @@ def make_handler(
             if path == "/deck/roster":
                 self._serve_roster(query)
                 return
+            if path == "/deck/policy":
+                self._serve_policy_page(query)
+                return
             if path == "/" or path in ("/deck", "/deck/repos") or path.startswith("/deck/"):
                 self._serve_deck(path, query)
                 return
             if path.startswith(_DASHBOARD_PREFIX):
                 self._serve_dashboard(path, query)
                 return
-            if path in ("/status", "/claims", "/nodes", "/cloud", "/models", "/preference", "/sessions"):
+            if path in (
+                "/status",
+                "/claims",
+                "/nodes",
+                "/cloud",
+                "/models",
+                "/preference",
+                "/sessions",
+                "/policy",
+                "/policy/status",
+                "/policy/inventory",
+            ):
                 if self._bearer() is None:
-                    self._send_json(401, {"error": "unauthorized"})
+                    if path in {"/policy", "/policy/status", "/policy/inventory"}:
+                        self._send_json(401, {"error": {"code": "auth-failed", "message": "unauthorized"}})
+                    else:
+                        self._send_json(401, {"error": "unauthorized"})
                     return
                 include_all = parse_qs(query).get("all", [""])[0].lower() in ("1", "true", "yes")
                 try:
@@ -789,6 +1059,26 @@ def make_handler(
                         payload = {"preference": {key: value for key, value in pref.items() if value is not None}}
                     elif path == "/sessions":
                         payload = {"sessions": list_sessions(conn, include_all=include_all)}
+                    elif path == "/policy/status":
+                        payload = fleet_hub_policy_api.read_status(conn)
+                    elif path == "/policy/inventory":
+                        fleet_model_inventory.ensure_schema(conn)
+                        payload = fleet_hub_policy_api.read_inventory(conn)
+                    elif path == "/policy":
+                        params = parse_qs(query)
+                        history = params.get("history", [""])[0].lower() in ("1", "true", "yes")
+                        limit_raw = params.get("limit", ["50"])[0]
+                        try:
+                            limit = int(limit_raw)
+                        except ValueError:
+                            self._send_json(
+                                400,
+                                fleet_hub_policy_api.FleetPolicyApiError(
+                                    "invalid-request", "limit must be an integer"
+                                ).payload(),
+                            )
+                            return
+                        payload = fleet_hub_policy_api.read_policy(conn, history=history, limit=limit)
                     else:
                         payload = {"claims": list_claims(conn, include_all=include_all)}
                 except sqlite3.Error as exc:
@@ -869,14 +1159,20 @@ def make_handler(
             if path == "/deck/roster":
                 self._post_roster()
                 return
+            if path == "/deck/policy":
+                self._post_policy_page()
+                return
             if path.startswith("/work/"):
                 self._handle_worklore()
                 return
-            if path not in ("/events", "/claims", "/nodes", "/cloud", "/models", "/grokbot", "/sessions"):
+            if path not in ("/events", "/claims", "/nodes", "/cloud", "/models", "/grokbot", "/sessions", "/policy"):
                 self._send_json(404, {"error": "not found"})
                 return
             if self._bearer() is None:
-                self._send_json(401, {"error": "unauthorized"})
+                if path == "/policy":
+                    self._send_json(401, {"error": {"code": "auth-failed", "message": "unauthorized"}})
+                else:
+                    self._send_json(401, {"error": "unauthorized"})
                 return
             # The database is opened before the body is read: a node token
             # is resolved against it, and an unauthenticated peer must not
@@ -898,6 +1194,9 @@ def make_handler(
                     if not is_admin:
                         self._send_json(403, {"error": "the admin token is required to manage nodes"})
                         return
+                elif path == "/policy" and is_admin and not allow_admin_writes:
+                    # Document writes stay admin. Resolve/prepare/ack need a node token.
+                    pass
                 elif path in ("/events", "/claims", "/sessions") and is_admin and not allow_admin_writes:
                     self._send_json(
                         403,
@@ -946,6 +1245,40 @@ def make_handler(
                     status, body_payload = handle_cloud(conn, parsed, caller_node=caller_node, config=frozen_deck)
                 elif path == "/models":
                     status, body_payload = handle_model_policy(conn, parsed, caller_node=caller_node)
+                elif path == "/policy":
+                    if not isinstance(parsed, dict):
+                        self._send_json(
+                            400, {"error": {"code": "invalid-request", "message": "body is not valid JSON"}}
+                        )
+                        return
+                    action = parsed.get("action")
+                    if action in fleet_hub_policy_api.ADMIN_ACTIONS and not is_admin:
+                        self._send_json(
+                            403,
+                            {
+                                "error": {
+                                    "code": "auth-failed",
+                                    "message": "the admin token is required for policy document writes",
+                                }
+                            },
+                        )
+                        return
+                    if action in fleet_hub_policy_api.NODE_ACTIONS and is_admin and not allow_admin_writes:
+                        self._send_json(
+                            403,
+                            {
+                                "error": {
+                                    "code": "auth-failed",
+                                    "message": "the admin token may not resolve or prepare policy: enroll this node with "
+                                    "'brigade fleet nodes add' and configure its node token, or start the hub with "
+                                    "--allow-admin-writes",
+                                }
+                            },
+                        )
+                        return
+                    status, body_payload = fleet_hub_policy_api.handle_policy(
+                        conn, parsed, caller_node=caller_node, is_admin=is_admin
+                    )
                 elif path == "/grokbot":
                     if (
                         is_admin
@@ -967,6 +1300,9 @@ def make_handler(
                     status, body_payload = handle_grokbot(conn, parsed, caller_node=caller_node, config=frozen_deck)
                 else:
                     status, body_payload = handle_node_request(conn, parsed)
+            except fleet_hub_policy_api.FleetPolicyApiError as exc:
+                self._send_json(exc.status, exc.payload())
+                return
             except FleetHubForbidden as exc:
                 self._send_json(403, {"error": str(exc)})
                 return

@@ -10,7 +10,10 @@ import threading
 from contextlib import contextmanager
 from urllib.parse import urlencode
 
-from brigade import fleet_hub, fleet_hub_roster_page
+from datetime import datetime, timezone
+
+from brigade import fleet_command_deck, fleet_hub, fleet_hub_preference, fleet_hub_roster_page
+from brigade import fleet_hub_policy, fleet_policy, fleet_policy_page
 
 TOKEN = "test-admin-token-roster"  # content-guard: allow api-key-assignment
 NODE_A = "11111111-1111-4111-8111-111111111111"
@@ -205,7 +208,9 @@ def test_roster_page_requires_auth_and_renders_every_block(tmp_path):
         assert headers["cache-control"] == "no-store"
         assert 'http-equiv="refresh"' not in page
         assert "Roster" in page and 'href="/deck/roster"' in page
-        for heading in ("Roles", "Seats", "Cloud lanes", "Consumer defaults", "Retired families"):
+        # "Consumer defaults" was renamed: the control is the omitted-seat
+        # admission fallback, not a default model or a second roster.
+        for heading in ("Roles", "Seats", "Cloud lanes", "Admission fallback seat (legacy)", "Retired families"):
             assert heading in page
         assert 'name="role.security"' in page and 'name="role.scout"' in page
         assert 'name="seat.agy_flash" value="1" checked' in page
@@ -419,3 +424,312 @@ def test_roster_post_stale_cloud_lane_writes_nothing(tmp_path):
         _status, _headers, cloud = _request(hub, "GET", "/cloud", headers=_bearer())
         jules = next(row for row in json.loads(cloud)["policy"]["providers"] if row["provider"] == "jules")
         assert jules["enabled"] is True and jules.get("reason") is None
+
+
+# --- honest labelling and policy-authority compatibility ----------------------
+
+
+def _view(db, *, activation=None):
+    conn = fleet_hub.open_db(db)
+    try:
+        return fleet_hub_roster_page.load_view(conn, fleet_command_deck.DeckConfig(), activation=activation)
+    finally:
+        conn.close()
+
+
+def _page(db, *, activation=None, editable=True, policy_csrf="policy-csrf"):
+    view = _view(db, activation=activation)
+    return fleet_hub_roster_page.render(
+        view,
+        nonce="nonce",
+        now=datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc),
+        csrf="csrf",
+        editable=editable,
+        policy_csrf=policy_csrf,
+    )
+
+
+POLICY_DOCUMENT = {
+    "schema": fleet_policy.POLICY_SCHEMA,
+    "defaults": {"roles": {"impl": "seat-alpha", "review": "seat-beta"}},
+    "seats": {
+        "seat-alpha": {"provider": "provider-a", "model": "model-a-1"},
+        "seat-beta": {"provider": "provider-b", "model": "model-b-1"},
+    },
+    "consumers": {"brigade-run": {"reload": "refreshable"}, "t3-fleet": {"reload": "restart-required"}},
+}
+
+
+def _seed_policy(db) -> int:
+    conn = fleet_hub.open_db(db)
+    try:
+        saved = fleet_hub_policy.save_policy(
+            conn,
+            POLICY_DOCUMENT,
+            expected_version=fleet_hub_policy.current_policy(conn)["revision"],
+            actor="operator",
+            reason="roster page test seed",
+        )
+        return int(saved["revision"])
+    finally:
+        conn.close()
+
+
+def _form_fields(page: str, marker: str) -> dict:
+    """Every input/select value of the form containing ``marker``."""
+    form = next(part for part in page.split("<form ")[1:] if marker in part).split("</form>", 1)[0]
+    fields = dict(re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)">', form))
+    for name, body in re.findall(r'<select name="([^"]+)"[^>]*>(.*?)</select>', form, re.S):
+        selected = re.search(r'<option value="([^"]*)" selected', body)
+        fields[name] = selected.group(1) if selected else ""
+    return fields
+
+
+def test_admission_fallback_section_explains_what_it_actually_does(tmp_path):
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        page = _page(db)
+        assert "Admission fallback seat (legacy)" in page
+        assert "Consumer defaults" not in page
+        assert "without naming a seat" in page
+        assert "not a model" in page
+        assert "default-missing" in page
+        assert "admission_default" in page
+        assert 'href="/deck/policy"' in page
+
+
+def test_roles_keep_their_keys_and_gain_labels(tmp_path):
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        page = _page(db)
+        for role in fleet_hub_roster_page.ROLES:
+            assert f'name="role.{role}"' in page
+            assert f"({role})" in page
+        assert "Worker (impl)" in page
+        assert "Orchestrator (chef)" in page
+
+
+def test_staged_policy_is_labelled_and_legacy_writes_still_work(tmp_path):
+    staged = fleet_policy_page.Activation("staged", "not activated", "legacy-writable", "test")
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        page = _page(db, activation=staged)
+        assert "staged policy" in page
+        assert "still write the legacy run preference" in page
+        assert "disabled" not in page.split('name="role.impl"')[1].split("</select>")[0]
+
+
+def test_active_authority_keeps_the_dropdowns_usable_on_the_policy_document(tmp_path):
+    """Active authority moves where a dropdown writes, not whether it is usable.
+
+    Replaces the earlier read-only expectation: the approved requirement is
+    that the existing dropdown UX keeps working and routes through the
+    authoritative preview, so the assertions below pin the canonical form
+    action, the canonical field names, and preview-only controls.
+    """
+    active = fleet_policy_page.Activation("active", "activated", "authority-owned", "test")
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        revision = _seed_policy(db)
+        page = _page(db, activation=active)
+        assert "staged policy" not in page
+        assert "owned by the fleet policy document" in page
+        assert 'href="/deck/policy"' in page
+
+        roles = _form_fields(page, 'name="field.role_impl"')
+        assert roles["scope"] == "defaults"
+        assert roles["expected_version"] == str(revision)
+        assert roles["csrf"] == "policy-csrf"
+        assert roles["field.role_impl"] == "seat-alpha"
+        assert "disabled" not in page.split('name="field.role_impl"')[1].split("</select>")[0]
+
+        admission = _form_fields(page, f'name="field.role_{fleet_policy_page.ADMISSION_ROLE}"')
+        assert admission["scope"] == "consumer"
+        assert admission["target"] == "brigade-run"
+        assert f"field.role_{fleet_policy_page.ADMISSION_ROLE}" in admission
+
+        # Preview only: the confirm-save step belongs to the policy page.
+        assert page.count('action="/deck/policy" class="roster-form"') == 3
+        assert 'value="preview"' in page
+        assert 'name="action" value="save"' not in page
+        # Seat toggles still belong to the legacy roster form.
+        assert 'action="/deck/roster"' in page
+
+
+def test_active_authority_dropdown_edits_reach_the_policy_preview_and_save(tmp_path):
+    active = fleet_policy_page.Activation("active", "activated", "authority-owned", "test")
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        revision = _seed_policy(db)
+        cookie = _login_cookie(hub)
+        page = _page(db, activation=active, policy_csrf=fleet_policy_page.csrf_value(TOKEN))
+        fields = _form_fields(page, 'name="field.role_impl"')
+        fields["field.role_impl"] = "seat-beta"
+        fields["action"] = "preview"
+
+        status, _headers, previewed = _request(
+            hub,
+            "POST",
+            "/deck/policy",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Sec-Fetch-Site": "same-origin",
+                "Cookie": cookie,
+            },
+            body=urlencode(fields).encode(),
+        )
+        assert status == 200
+        assert "defaults.roles.impl" in previewed
+        assert "Confirm save" in previewed
+        conn = fleet_hub.open_db(db)
+        try:
+            assert fleet_hub_policy.current_policy(conn)["revision"] == revision
+        finally:
+            conn.close()
+
+        confirm = next(part for part in previewed.split("<form ")[1:] if "confirm-save" in part).split("</form>")[0]
+        status, headers, _text = _request(
+            hub,
+            "POST",
+            "/deck/policy",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Sec-Fetch-Site": "same-origin",
+                "Cookie": cookie,
+            },
+            body=urlencode(dict(re.findall(r'name="([^"]+)" value="([^"]*)">', confirm))).encode(),
+        )
+        assert status == 303
+        assert headers["location"] == f"/deck/policy?saved={revision + 1}"
+        conn = fleet_hub.open_db(db)
+        try:
+            current = fleet_hub_policy.current_policy(conn)
+            assert current["document"]["defaults"]["roles"]["impl"] == "seat-beta"
+        finally:
+            conn.close()
+
+
+def test_active_authority_leaves_the_legacy_roster_post_refused(tmp_path):
+    """The dropdowns moving to policy must not re-open the legacy write path."""
+    active = fleet_policy_page.Activation("active", "activated", "authority-owned", "test")
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        cookie = _login_cookie(hub)
+        fields = _current_form(hub, cookie)
+        fields["role.impl"] = "agy_flash"
+        submission = fleet_hub_roster_page.parse_form(urlencode(fields).encode())
+        conn = fleet_hub.open_db(db)
+        try:
+            result = fleet_hub_roster_page.apply(conn, fleet_command_deck.DeckConfig(), submission, activation=active)
+        finally:
+            conn.close()
+        assert result.status == "invalid"
+        assert "policy page" in result.message
+        conn = fleet_hub.open_db(db)
+        try:
+            assert fleet_hub_preference.get_run_preference(conn)["impl"] == "coder"
+        finally:
+            conn.close()
+
+
+def test_active_authority_refuses_a_legacy_role_write(tmp_path):
+    active = fleet_policy_page.Activation("active", "activated", "authority-owned", "test")
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        cookie = _login_cookie(hub)
+        fields = _current_form(hub, cookie)
+        fields["role.impl"] = "agy_flash"
+        submission = fleet_hub_roster_page.parse_form(urlencode(fields).encode())
+        conn = fleet_hub.open_db(db)
+        try:
+            result = fleet_hub_roster_page.apply(conn, fleet_command_deck.DeckConfig(), submission, activation=active)
+        finally:
+            conn.close()
+        assert result.status == "invalid"
+        assert "policy page" in result.message
+        conn = fleet_hub.open_db(db)
+        try:
+            assert fleet_hub_preference.get_run_preference(conn)["impl"] == "coder"
+        finally:
+            conn.close()
+
+
+def test_authority_refusal_is_scoped_to_roles_and_the_admission_fallback(tmp_path):
+    """The page-level refusal covers what this form writes to run preference.
+
+    Whether a seat toggle survives activation is the migration module's call
+    (``refuse_legacy_write``), not this page's; the page must not invent a
+    second, looser answer for the fields it does own.
+    """
+    active = fleet_policy_page.Activation("active", "activated", "authority-owned", "test")
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        cookie = _login_cookie(hub)
+        fields = _current_form(hub, cookie)
+        unchanged = fleet_hub_roster_page.parse_form(urlencode(fields).encode())
+        changed_role = fleet_hub_roster_page.parse_form(urlencode({**fields, "role.impl": "agy_flash"}).encode())
+        changed_default = fleet_hub_roster_page.parse_form(
+            urlencode({**fields, "default.brigade-run": "agy_flash"}).encode()
+        )
+        view = _view(db, activation=active)
+        assert fleet_hub_roster_page._authority_refusal(view, unchanged) is None
+        assert "policy page" in fleet_hub_roster_page._authority_refusal(view, changed_role)
+        assert "admission_default" in fleet_hub_roster_page._authority_refusal(view, changed_default)
+
+
+def test_roster_apply_without_activation_keeps_legacy_behaviour(tmp_path):
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        cookie = _login_cookie(hub)
+        fields = _current_form(hub, cookie)
+        fields["role.impl"] = "agy_flash"
+        submission = fleet_hub_roster_page.parse_form(urlencode(fields).encode())
+        conn = fleet_hub.open_db(db)
+        try:
+            result = fleet_hub_roster_page.apply(conn, fleet_command_deck.DeckConfig(), submission)
+        finally:
+            conn.close()
+        assert result.status == "saved", result.message
+        conn = fleet_hub.open_db(db)
+        try:
+            assert fleet_hub_preference.get_run_preference(conn)["impl"] == "agy_flash"
+        finally:
+            conn.close()
+
+
+def test_the_saved_banner_states_what_the_save_did_to_runtime(tmp_path):
+    """The redirect target says a revision landed; the banner says what that means."""
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        revision = _seed_policy(db)
+        cookie = _login_cookie(hub)
+        status, _headers, page = _request(hub, "GET", f"/deck/policy?saved={revision}", headers={"Cookie": cookie})
+        assert status == 200
+        assert f"saved as revision {revision}" in page
+        # The migration reports a fresh hub as not activated, so the banner
+        # must say the revision is staged rather than imply it took effect.
+        assert "The policy authority is not activated" in page
+        assert "does not change runtime routing" in page
+        assert "reloaded" not in page
+
+
+def test_the_roster_page_renders_no_em_dash(tmp_path):
+    active = fleet_policy_page.Activation("active", "activated", "authority-owned", "test")
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        _seed_policy(db)
+        page = _page(db, activation=active, policy_csrf=fleet_policy_page.csrf_value(TOKEN))
+        assert "&mdash;" not in page
+        assert "—" not in page
+
+
+def test_a_read_only_identity_gets_no_policy_write_control(tmp_path):
+    active = fleet_policy_page.Activation("active", "activated", "authority-owned", "test")
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        _seed_policy(db)
+        page = _page(db, activation=active, editable=False, policy_csrf=fleet_policy_page.csrf_value(TOKEN))
+        assert "read-only" in page
+        # The authoritative dropdowns are an editor affordance, so a read-only
+        # identity is not offered a preview it cannot submit.
+        assert 'action="/deck/policy"' not in page

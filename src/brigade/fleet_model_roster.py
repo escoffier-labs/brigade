@@ -11,10 +11,13 @@ from typing import Any, Iterable, Mapping
 ROSTER_SCHEMA = "brigade.fleet_model_roster.v1"
 ADMISSION_SCHEMA = "brigade.model_admission.v1"
 ADMISSION_REQUEST_SCHEMA = "brigade.model_admission_request.v1"
+PLAN_SCHEMA = "brigade.fleet_model_plan.v1"
 MAC_PREFIX = b"brigade.fleet-model-roster.lkg.v1\0"
 MAC_ALGORITHM = "hmac-sha256-node-bearer-v1"
 LKG_TTL_SECONDS = 900
+PLAN_MAX_TTL_SECONDS = 900
 CLOCK_SKEW_SECONDS = 60
+SHA256_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 FAMILY_SEPARATORS = ("-", "/", ":")
 PROVIDER_SEPARATORS = ("/", ":")
 PERMANENT_REASON = "permanently-retired"
@@ -29,6 +32,8 @@ DIGEST_KEYS = (
     "seats",
     "consumer_defaults",
     "retired_models",
+    "fleet_policy",
+    "consumer_launch_bindings",
 )
 CACHE_ENVELOPE_KEYS = (
     "schema",
@@ -42,8 +47,21 @@ CACHE_ENVELOPE_KEYS = (
     "consumer_defaults",
     "retired_models",
 )
+OPTIONAL_CACHE_ENVELOPE_KEYS = ("fleet_policy", "consumer_launch_bindings")
 CONSUMERS = frozenset({"brigade-run", "t3-fleet"})
-ADMISSION_PHASES = frozenset({"controller", "target", "brigade-run"})
+BINDINGS_SCHEMA = "brigade.fleet_model_bindings.v1"
+LAUNCH_BINDING_GROUPS: dict[str, frozenset[str]] = {
+    "brigade": frozenset({"cli", "model"}),
+    "t3_fleet": frozenset({"instance_id", "service_tier"}),
+    "native": frozenset({"instance_id", "model"}),
+}
+MAX_LAUNCH_BINDING_PAIRS = 256
+MAX_LAUNCH_BINDING_BYTES = 65536
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+LAUNCH_IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,255}$")
+LAUNCH_TEXT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+ADMISSION_PHASES = frozenset({"controller", "target", "brigade-run", "launch"})
+PROOF_PHASES = frozenset({"target", "launch"})
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SEAT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
 PROVIDER_ALIASES = {
@@ -62,7 +80,11 @@ def digest_body(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def cache_envelope(payload: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: payload[key] for key in CACHE_ENVELOPE_KEYS if key in payload}
+    body = {key: payload[key] for key in CACHE_ENVELOPE_KEYS if key in payload}
+    for key in OPTIONAL_CACHE_ENVELOPE_KEYS:
+        if key in payload:
+            body[key] = payload[key]
+    return body
 
 
 def roster_digest(payload: Mapping[str, Any]) -> str:
@@ -158,7 +180,13 @@ def validate_roster_rows(payload: Mapping[str, Any]) -> str | None:
         if not isinstance(bindings, dict) or set(bindings) != {"brigade", "t3_fleet"}:
             return "malformed-roster"
         brigade = bindings.get("brigade")
-        if not isinstance(brigade, dict) or set(brigade) != {"cli"} or not isinstance(brigade.get("cli"), str):
+        if not isinstance(brigade, dict) or not isinstance(brigade.get("cli"), str):
+            return "malformed-roster"
+        brigade_keys = set(brigade)
+        if brigade_keys == {"cli", "model"}:
+            if not isinstance(brigade.get("model"), str) or not brigade["model"]:
+                return "malformed-roster"
+        elif brigade_keys != {"cli"}:
             return "malformed-roster"
         t3_fleet = bindings.get("t3_fleet")
         if not isinstance(t3_fleet, dict) or set(t3_fleet) != {"instance_id", "service_tier"}:
@@ -185,4 +213,182 @@ def validate_roster_rows(payload: Mapping[str, Any]) -> str | None:
             return "malformed-roster"
         if "permanent" in row and type(row["permanent"]) is not bool:
             return "malformed-roster"
+    if "fleet_policy" in payload:
+        _, error = parse_fleet_policy_authority(payload.get("fleet_policy"))
+        if error is not None:
+            return "malformed-roster"
+    if "consumer_launch_bindings" in payload:
+        error = validate_consumer_launch_bindings(payload.get("consumer_launch_bindings"))
+        if error is not None:
+            return "malformed-roster"
     return None
+
+
+def _launch_leaf(value: Any, *, identity: bool) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or _CONTROL_RE.search(value):
+        raise ValueError("malformed-leaf")
+    pattern = LAUNCH_IDENTITY_PATTERN if identity else LAUNCH_TEXT_PATTERN
+    if pattern.fullmatch(value) is None:
+        raise ValueError("malformed-leaf")
+    return value
+
+
+def empty_launch_groups() -> dict[str, dict[str, Any]]:
+    return {name: {} for name in LAUNCH_BINDING_GROUPS}
+
+
+def compact_launch_groups(groups: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Keep allowed optional keys with configured values. Empty groups stay present."""
+    compacted = empty_launch_groups()
+    if not isinstance(groups, Mapping):
+        return compacted
+    for group, allowed in LAUNCH_BINDING_GROUPS.items():
+        body = groups.get(group)
+        if not isinstance(body, Mapping):
+            continue
+        for key in sorted(allowed):
+            value = body.get(key)
+            if isinstance(value, str) and value:
+                compacted[group][key] = value
+    return compacted
+
+
+def validate_consumer_launch_bindings(raw: Any) -> str | None:
+    """Reject unsigned or malformed consumer launch-binding projections."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        return "malformed-roster"
+    if len(raw) > MAX_LAUNCH_BINDING_PAIRS:
+        return "malformed-roster"
+    pairs = 0
+    for consumer, seats in raw.items():
+        if not isinstance(consumer, str) or consumer not in CONSUMERS or _CONTROL_RE.search(consumer):
+            return "malformed-roster"
+        if not isinstance(seats, dict):
+            return "malformed-roster"
+        if len(seats) > MAX_LAUNCH_BINDING_PAIRS:
+            return "malformed-roster"
+        for seat, groups in seats.items():
+            if not isinstance(seat, str) or SEAT_NAME_PATTERN.fullmatch(seat) is None or _CONTROL_RE.search(seat):
+                return "malformed-roster"
+            if not isinstance(groups, dict):
+                return "malformed-roster"
+            if set(groups) - set(LAUNCH_BINDING_GROUPS):
+                return "malformed-roster"
+            pairs += 1
+            if pairs > MAX_LAUNCH_BINDING_PAIRS:
+                return "malformed-roster"
+            for group, allowed in LAUNCH_BINDING_GROUPS.items():
+                body = groups.get(group, {})
+                if body is None:
+                    body = {}
+                if not isinstance(body, dict):
+                    return "malformed-roster"
+                if set(body) - allowed:
+                    return "malformed-roster"
+                for key, value in body.items():
+                    identity = key in {"model", "instance_id"}
+                    try:
+                        parsed = _launch_leaf(value, identity=identity)
+                    except ValueError:
+                        return "malformed-roster"
+                    if key in body and value is not None and parsed is None and value != "":
+                        return "malformed-roster"
+    rendered = canonical_json(raw)
+    if len(rendered.encode("ascii")) > MAX_LAUNCH_BINDING_BYTES:
+        return "malformed-roster"
+    return None
+
+
+def adapter_plan_binding(
+    consumer: str,
+    groups: Mapping[str, Any] | None,
+    *,
+    canonical_model: str | None = None,
+    adapter: str | None = None,
+) -> dict[str, Any] | None:
+    """Exact consumer launch mapping for plan.binding. Canonical model stays separate."""
+    if canonical_model is not None and (not isinstance(canonical_model, str) or not canonical_model):
+        return None
+    compacted = compact_launch_groups(groups)
+    if adapter is None and consumer not in ("brigade-run", "t3-fleet"):
+        return None
+    selected = adapter or ("t3-fleet" if consumer == "t3-fleet" else "brigade-run")
+    if selected == "t3-fleet":
+        native = compacted.get("native") or {}
+        t3_fleet = compacted.get("t3_fleet") or {}
+        instance_id = native.get("instance_id") or t3_fleet.get("instance_id")
+        if not isinstance(instance_id, str) or not instance_id:
+            return None
+        payload: dict[str, Any] = {
+            "instance_id": instance_id,
+            "service_tier": t3_fleet.get("service_tier") or None,
+        }
+        native_model = native.get("model")
+        if isinstance(native_model, str) and native_model:
+            payload["model"] = native_model
+        return payload
+    brigade = compacted.get("brigade") or {}
+    instance_id = brigade.get("cli")
+    if not isinstance(instance_id, str) or not instance_id:
+        return None
+    payload = {"instance_id": instance_id, "service_tier": None}
+    launch_model = brigade.get("model")
+    if isinstance(launch_model, str) and launch_model:
+        payload["model"] = launch_model
+    return payload
+
+
+def parse_fleet_policy_authority(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """Parse signed ``fleet_policy`` authority metadata.
+
+    Missing metadata is ``(None, None)`` and means a legacy unactivated
+    snapshot. Malformed metadata is an error, never unenrolled.
+    """
+    if raw is None:
+        return None, None
+    if not isinstance(raw, dict) or set(raw) != {"active", "version", "digest"}:
+        return None, "malformed-authority"
+    if type(raw.get("active")) is not bool:
+        return None, "malformed-authority"
+    version = raw.get("version")
+    if type(version) is not int or version <= 0:
+        return None, "malformed-authority"
+    digest = raw.get("digest")
+    if not isinstance(digest, str) or SHA256_DIGEST_PATTERN.fullmatch(digest) is None:
+        return None, "malformed-authority"
+    return {"active": raw["active"], "version": version, "digest": digest}, None
+
+
+def binding_launch_models(seat: Mapping[str, Any]) -> tuple[str, ...]:
+    """Canonical seat.model plus trusted native/brigade launch-model leaves."""
+    models: list[str] = []
+    canonical = seat.get("model")
+    if isinstance(canonical, str) and canonical:
+        models.append(canonical)
+    bindings = seat.get("bindings") if isinstance(seat.get("bindings"), Mapping) else {}
+    if not isinstance(bindings, Mapping):
+        return tuple(models)
+    for group in ("brigade", "native"):
+        body = bindings.get(group)
+        if not isinstance(body, Mapping):
+            continue
+        launch = body.get("model")
+        if isinstance(launch, str) and launch and launch not in models:
+            models.append(launch)
+    return tuple(models)
+
+
+def brigade_launch_model(seat: Mapping[str, Any]) -> str | None:
+    """Exact brigade-run launch model when ``bindings.brigade.model`` is set."""
+    bindings = seat.get("bindings")
+    if not isinstance(bindings, Mapping):
+        return None
+    brigade = bindings.get("brigade")
+    if not isinstance(brigade, Mapping):
+        return None
+    model = brigade.get("model")
+    return model if isinstance(model, str) and model else None
