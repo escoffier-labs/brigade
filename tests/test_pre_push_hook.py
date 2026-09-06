@@ -90,6 +90,7 @@ def _git_env(repo: Path) -> dict:
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@example.com",
         "HOME": str(repo),
+        "USERPROFILE": str(repo),
         "XDG_CONFIG_HOME": str(repo / ".config"),
         # The embedded CLI starts a detached update refresh unless it is opted
         # out. It inherits this test's temporary HOME, so letting it run can

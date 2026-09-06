@@ -4,6 +4,7 @@ from pathlib import Path
 
 from brigade import cli, localio, receipt_signing, runbook_cmd, work_cmd
 from tests.support import PRIVATE_FILE_MODE, assert_private_mode
+from tests._home import set_home
 
 
 def _write_key(path: Path, value: str) -> None:
@@ -40,7 +41,7 @@ def test_receipts_keygen_writes_private_key_and_refuses_without_force(tmp_path, 
 def test_work_verify_receipt_without_key_keeps_unsigned_digest_shape(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("BRIGADE_RECEIPT_SIGNING_KEY_FILE", str(tmp_path / "missing-key"))
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
 
     assert (
         work_cmd.verify_run(target=tmp_path, commands=[f"{sys.executable} -c \"print('ok')\""], json_output=True) == 0
@@ -55,7 +56,7 @@ def test_work_verify_receipt_signs_receipt_sha256_when_key_exists(tmp_path, caps
     key_path = tmp_path / ".brigade" / "receipt-signing-key"
     _write_key(key_path, "01" * 32)
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
 
     assert (
         work_cmd.verify_run(target=tmp_path, commands=[f"{sys.executable} -c \"print('ok')\""], json_output=True) == 0

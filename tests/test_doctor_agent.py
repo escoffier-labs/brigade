@@ -12,6 +12,7 @@ from brigade import doctor_agent
 from brigade import outcome_cmd
 from brigade.install import install_selection
 from brigade.selection import Selection
+from tests._home import set_home
 
 
 def _expected_init_command(target: Path, *, selection: Selection | None = None) -> str:
@@ -124,7 +125,7 @@ def test_doctor_agent_dormant_loop_clears_after_verify(tmp_path: Path, capsys):
 def test_doctor_agent_silences_absent_harness_checks(tmp_path: Path, capsys, monkeypatch):
     target = _wire(tmp_path, harnesses=["claude", "openclaw"])
     # Ensure OpenClaw host artifacts are absent inside the temp HOME.
-    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    set_home(monkeypatch, str(tmp_path / "empty-home"))
     (tmp_path / "empty-home").mkdir()
     capsys.readouterr()
 
@@ -174,7 +175,7 @@ def test_doctor_agent_suppressed_harness_warn_json_summary(tmp_path: Path, capsy
         ),
     ]
     monkeypatch.setattr(doctor_mod, "_gather_checks", lambda _ctx: checks)
-    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    set_home(monkeypatch, str(tmp_path / "empty-home"))
     (tmp_path / "empty-home").mkdir()
     capsys.readouterr()
 
@@ -186,7 +187,7 @@ def test_doctor_agent_suppressed_harness_warn_json_summary(tmp_path: Path, capsy
 
 
 def test_doctor_agent_bootstrap_missing_init_command_uses_selection(tmp_path: Path, capsys, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    set_home(monkeypatch, str(tmp_path / "empty-home"))
     (tmp_path / "empty-home").mkdir()
     target = _wire(tmp_path, harnesses=["claude"])
     selection = Selection(
@@ -287,7 +288,7 @@ def test_doctor_agent_extract_commands_and_harness_detection(tmp_path: Path, mon
     (target / ".claude").mkdir()
     assert doctor_agent.harness_artifacts_present(target, "claude")
     # OpenClaw detection reads host config under HOME, not the target tree.
-    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    set_home(monkeypatch, str(tmp_path / "empty-home"))
     (tmp_path / "empty-home").mkdir()
     assert not doctor_agent.harness_artifacts_present(target, "openclaw")
     assert doctor_agent.extract_commands("run `brigade security init --target .` now") == [

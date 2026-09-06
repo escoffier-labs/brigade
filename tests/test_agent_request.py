@@ -12,6 +12,7 @@ import pytest
 
 from brigade import aboyeur, agent_request, attestation, run_events, run_journal, runguard
 from brigade.roster import Agent, Roster
+from tests._home import set_home
 
 
 if not shutil.which("ssh-keygen"):
@@ -186,7 +187,7 @@ def test_safe_key_path_rejects_symlink_after_tilde_expansion(tmp_path: Path, mon
     private_key = home / "private-key"
     private_key.write_text("private")
     (home / "linked-key").symlink_to(private_key)
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
 
     with pytest.raises(agent_request.AgentRequestError, match="regular private key"):
         agent_request._safe_key_path(Path("~/linked-key"))

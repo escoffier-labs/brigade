@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._home import set_home
 from tests.support import PRIVATE_DIRECTORY_MODE
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -105,7 +106,7 @@ def _isolate_user_brigade_dir(tmp_path_factory, monkeypatch):
     home = tmp_path_factory.mktemp("operator_home")
     user_dir = home / ".brigade"
     user_dir.mkdir(mode=PRIVATE_DIRECTORY_MODE)
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
     monkeypatch.setenv("BRIGADE_USER_DIR", str(user_dir))
     monkeypatch.setenv("BRIGADE_HOME", str(user_dir))
 

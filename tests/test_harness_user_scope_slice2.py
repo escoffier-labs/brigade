@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from brigade import harness_profiles, mcp_cmd, skills_cmd
+from tests._home import set_home
 
 # Per-harness native user surfaces (relative to the temporary home).
 SURFACES = {
@@ -62,7 +63,7 @@ def _use_home(monkeypatch, tmp_path: Path) -> Path:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     # Harness CLI calls must not spawn the detached update-notify cache writer.
     monkeypatch.setenv("BRIGADE_NO_UPDATE_CHECK", "1")
     return home

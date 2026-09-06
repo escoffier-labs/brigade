@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from brigade import fleet_client, fleet_hub
+from tests._home import set_home
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
@@ -1365,7 +1366,7 @@ def test_session_routes_auth_and_node_identity(hub_server):
 def test_session_admin_writes_include_local_node_id(monkeypatch, session_snapshot, tmp_path):
     home = tmp_path / "operator"
     _plant_home_identity(home, NODE_A)
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setenv("BRIGADE_HOME", str(home / ".brigade"))
     calls = _record_hub_calls(monkeypatch, node_token=None, admin_token=ADMIN_TOKEN)
     assert fleet_client.upsert_session(session_snapshot) is True

@@ -7,13 +7,14 @@ from pathlib import Path
 
 from brigade import __version__ as BRIGADE_VERSION
 from brigade import cli, harness_profile_cmd, harness_profiles
+from tests._home import set_home
 
 
 def _use_home(monkeypatch, tmp_path: Path) -> Path:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     return home
 
 

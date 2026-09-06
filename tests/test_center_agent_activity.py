@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from brigade import center_cmd, grokbot_jobs
 from brigade.center_cmd import agent_activity as activity_records
 from brigade.center_cmd.dashboard.views import agent_activity
+from tests._home import set_home
 
 
 def _write_json(path, payload):
@@ -67,7 +68,7 @@ def test_center_activity_observes_codex_and_cursor_session_files_without_transcr
     cursor.mkdir(parents=True)
     (codex / "rollout-safe-session.jsonl").write_text('{"type":"response_item","payload":{"text":"private prompt"}}\n')
     (cursor / "session-one.jsonl").write_text('{"role":"user","message":"private transcript"}\n')
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
 
     assert center_cmd.activity(target=tmp_path, json_output=True) == 0
@@ -101,7 +102,7 @@ def test_center_activity_projects_grokbot_queue_without_private_instructions(tmp
         now=now,
     )["job_id"]
     home = tmp_path / "empty-home"
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
 
     records = activity_records.collect(tmp_path, now=now)
@@ -161,7 +162,7 @@ def test_center_activity_marks_merged_grokbot_draft_pr_succeeded(tmp_path, monke
         },
     )
     home = tmp_path / "empty-home"
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
 
     records = activity_records.collect(tmp_path, now=now + timedelta(hours=30))
@@ -342,7 +343,7 @@ def test_codex_session_extracts_task_label_from_cwd_folder(tmp_path, capsys, mon
         )
         + "\n"
     )
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     _write_json(
         tmp_path / ".brigade" / "center" / "agent-activity-sources.json",
@@ -375,7 +376,7 @@ def test_codex_session_falls_back_to_first_user_prompt_when_cwd_is_generic(tmp_p
         )
         + "\n"
     )
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
 
     records = activity_records.collect(tmp_path)
@@ -403,7 +404,7 @@ def test_external_sources_redact_journal_text_and_missing_local_sources_are_stal
         tmp_path / ".brigade" / "center" / "agent-activity-sources.json",
         {"sources": [{"provider": "t3", "host": "fleet-east", "journal": "fleet/t3.jsonl"}]},
     )
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
 
     assert center_cmd.activity(target=tmp_path, json_output=True) == 0
@@ -586,7 +587,7 @@ def test_zombie_running_run_without_lock_renders_stale_last_seen(tmp_path, monke
     now = datetime.now(timezone.utc)
     home = tmp_path / "empty-home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     started = now - timedelta(hours=45)
     run = tmp_path / ".brigade" / "runs" / "zombie-run"
@@ -619,7 +620,7 @@ def test_blocked_45h_run_is_older_history_not_live(tmp_path, monkeypatch):
     now = datetime.now(timezone.utc)
     home = tmp_path / "empty-home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     started = now - timedelta(hours=45)
     run = tmp_path / ".brigade" / "runs" / "blocked-old"
@@ -691,7 +692,7 @@ def test_live_lock_keeps_recent_running_run(tmp_path, monkeypatch):
     now = datetime.now(timezone.utc)
     home = tmp_path / "empty-home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setattr("brigade.runguard.run_lock_state", lambda workspace, run_dir: "live")
     started = now - timedelta(minutes=4)
@@ -716,7 +717,7 @@ def test_heartbeat_over_two_hours_is_stale_even_with_live_lock(tmp_path, monkeyp
     now = datetime.now(timezone.utc)
     home = tmp_path / "empty-home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setattr("brigade.runguard.run_lock_state", lambda workspace, run_dir: "live")
     started = now - timedelta(hours=3)

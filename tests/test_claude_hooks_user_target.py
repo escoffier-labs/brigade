@@ -14,6 +14,7 @@ from brigade.claude_hooks.package import PACKAGE_REF, is_managed_handler, manage
 from brigade.claude_hooks import runtime
 from brigade.install import install_selection
 from brigade.selection import Selection
+from tests._home import set_home
 
 
 def _wired_claude(tmp_path: Path) -> Path:
@@ -325,7 +326,7 @@ def test_project_install_refuses_home_directory(tmp_path: Path, monkeypatch, cap
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home.resolve()))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
 
     assert hooks_install(target=home, scope="project") == 2
     assert "user settings" in capsys.readouterr().err
@@ -343,7 +344,7 @@ def test_user_scope_pin_writes_target_into_script(tmp_path: Path, monkeypatch):
     claude = home / ".claude-config"
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
     workspace = _wired_claude(tmp_path)
 
@@ -362,7 +363,7 @@ def test_user_scope_refuses_home_pin(tmp_path: Path, monkeypatch, capsys):
     claude = home / ".claude-config"
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home.resolve()))
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
 
     assert hooks_install(target=home, scope="user") == 2
@@ -389,7 +390,7 @@ def test_status_flags_scope_widened_when_project_settings_are_user_settings(tmp_
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home.resolve()))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     settings = home / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True)
     settings.write_text("{}\n")
