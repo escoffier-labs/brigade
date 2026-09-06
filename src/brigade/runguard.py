@@ -439,9 +439,11 @@ def _recover_run_artifact(owner: dict[str, object] | None, *, persist_recovery_p
     if stamped.get("dry_run") is not True:
         workspace = resolve_run_lock_workspace(stamped, run_json.parent)
         if workspace is not None:
-            tree_fingerprint = localio.tree_fingerprint(workspace)
+            tree_fingerprint, tree_fingerprint_head = localio.tree_fingerprint_with_head(workspace)
             if tree_fingerprint is not None:
                 stamped["tree_fingerprint"] = tree_fingerprint
+            if tree_fingerprint_head is not None:
+                stamped["tree_fingerprint_head"] = tree_fingerprint_head
     try:
         localio.write_json(run_json, stamped)
     except OSError:

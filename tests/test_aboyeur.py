@@ -2827,7 +2827,7 @@ def test_run_stage_two_interruption_records_current_stage_seat(monkeypatch, tmp_
 
 def test_run_terminalizes_keyboard_interrupt_during_planning_without_cli(monkeypatch, tmp_path):
     output_dir = tmp_path / "run"
-    monkeypatch.setattr(aboyeur.localio, "tree_fingerprint", lambda path: "d" * 40)
+    monkeypatch.setattr(aboyeur.localio, "tree_fingerprint_with_head", lambda path: ("d" * 40, "e" * 40))
 
     def interrupted_plan(*args, **kwargs):  # noqa: ARG001
         raise KeyboardInterrupt
@@ -2854,6 +2854,7 @@ def test_run_terminalizes_keyboard_interrupt_during_planning_without_cli(monkeyp
         "seat": "chef",
     }
     assert run_meta["tree_fingerprint"] == "d" * 40
+    assert run_meta["tree_fingerprint_head"] == "e" * 40
 
 
 def test_run_terminalizes_unexpected_synthesis_error_without_cli(monkeypatch, tmp_path):
@@ -4629,7 +4630,7 @@ def test_handoff_failure_preserves_final_artifacts(monkeypatch, tmp_path, capsys
 )
 def test_handoff_escape_terminalizes_nonterminal_receipt(monkeypatch, tmp_path, exception, status, kind, detail):
     calls = []
-    monkeypatch.setattr(aboyeur.localio, "tree_fingerprint", lambda path: "e" * 40)
+    monkeypatch.setattr(aboyeur.localio, "tree_fingerprint_with_head", lambda path: ("e" * 40, "f" * 40))
 
     def fake_run_agent(cli_ref, prompt, **kwargs):
         calls.append(cli_ref)
@@ -4672,6 +4673,7 @@ def test_handoff_escape_terminalizes_nonterminal_receipt(monkeypatch, tmp_path, 
         "seat": "chef",
     }
     assert run_meta["tree_fingerprint"] == "e" * 40
+    assert run_meta["tree_fingerprint_head"] == "f" * 40
 
 
 def test_handoff_sigterm_terminalizes_nonterminal_receipt(tmp_path):
