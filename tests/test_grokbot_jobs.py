@@ -1602,7 +1602,9 @@ def test_hub_complete_report_rejects_non_report_kind_without_writing(
     spec = grokbot_jobs._validate_spec({**_spec(), "artifact": {"kind": artifact_kind}})
     job_id = "grokbot-" + hashlib.sha256(f"hub-report-{artifact_kind}".encode()).hexdigest()[:24]
     artifact_path = tmp_path / ".brigade" / "cloud" / "grokbot" / "artifacts" / f"{job_id}.md"
-    grokbot_jobs._store_task_snapshot(tmp_path, job_id, spec, grokbot_jobs._idempotency_key_hash(f"hub-{artifact_kind}"))
+    grokbot_jobs._store_task_snapshot(
+        tmp_path, job_id, spec, grokbot_jobs._idempotency_key_hash(f"hub-{artifact_kind}")
+    )
     monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
     running = _hub_running_job(job_id, role="implementation-worker", artifact_kind=artifact_kind)
     hub_complete_calls: list[str] = []
