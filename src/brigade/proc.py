@@ -139,6 +139,23 @@ def _signal_process_group(process: subprocess.Popen[bytes], sig: int) -> None:
         pass
 
 
+def process_group_id(pid: int) -> int | None:
+    """Return the process group id for ``pid``, or None where unavailable.
+
+    Windows has no ``os.getpgid``. Returns None there (and when the pid has
+    already been reaped) so callers fall back to the Windows job-object or
+    taskkill termination path in this module instead of raising
+    ``AttributeError``.
+    """
+    getpgid = getattr(os, "getpgid", None)
+    if getpgid is None:
+        return None
+    try:
+        return int(getpgid(pid))
+    except OSError:
+        return None
+
+
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_OBJECT_EXTENDED_LIMIT_CLASS = 9
 _WINDOWS_CREATE_SUSPENDED = 0x00000004

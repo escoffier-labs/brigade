@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import toml_compat as tomllib
+from . import dirfd as dirfd_mod
 from .card_identity import mint_card_id, valid_card_id
 from .guard import redact_text
 from .localio import utc_now_iso_z, write_text_atomic
@@ -1091,11 +1092,11 @@ def _containment_primitives_available() -> bool:
 
 
 def _directory_flags() -> int:
-    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    return dirfd_mod.directory_flags()
 
 
 def _file_flags(mode: int) -> int:
-    return mode | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    return mode | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 
 
 def _path_has_projection_folder(relative: str) -> bool:
@@ -1246,7 +1247,7 @@ def _reject_existing_note(inbox_fd: int, filename: str) -> None:
     try:
         existing = os.open(
             filename,
-            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
             dir_fd=inbox_fd,
         )
     except FileNotFoundError:

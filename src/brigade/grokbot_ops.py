@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import grokbot_jobs, grokbot_mcp
+from . import dirfd as dirfd_mod
 
 
 CONFIG_SCHEMA = "brigade.grokbot-config/1"
@@ -416,8 +417,8 @@ def _open_parent_nofollow(path: Path, *, create: bool) -> int:
     parent = path.parent.absolute()
     if os.name != "posix" or not getattr(os, "O_NOFOLLOW", 0):
         return _open_windows_parent_nofollow(parent, create=create)
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    root_flags = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    flags = dirfd_mod.directory_flags()
+    root_flags = dirfd_mod.root_directory_flags()
     descriptor = os.open(parent.anchor, root_flags)
     try:
         for component in parent.parts[1:]:
@@ -471,7 +472,7 @@ def _read_regular_text(path: Path) -> str:
         if os.name == "posix":
             descriptor = os.open(
                 path.name,
-                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
                 dir_fd=parent,
             )
         else:
@@ -498,7 +499,7 @@ def _write_text_nofollow_atomic(
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
         if os.name == "posix":
-            descriptor = os.open(temporary, flags | os.O_NOFOLLOW, mode, dir_fd=parent)
+            descriptor = os.open(temporary, flags | getattr(os, "O_NOFOLLOW", 0), mode, dir_fd=parent)
         else:
             from .work_cmd import nt_dirfd
 

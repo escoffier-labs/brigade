@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Literal, Mapping
 
+from brigade import dirfd as dirfd_mod
 from brigade import localio
 
 SCHEMA_VERSION = 1
@@ -483,7 +484,7 @@ def _parent_containment_available() -> bool:
 
 
 def _directory_flags() -> int:
-    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    return dirfd_mod.directory_flags()
 
 
 def _dir_identity(fd: int) -> tuple[int, int]:
@@ -530,7 +531,7 @@ def _walk_existing_parent(destination: Path) -> _HeldParent:
     if not parts:
         raise PlanError("unsafe destination path")
     flags = _directory_flags()
-    fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+    fd = os.open(parts[0], dirfd_mod.directory_flags(nofollow=False))
     remaining: list[str] = []
     missing = False
     try:
@@ -619,7 +620,7 @@ def _materialize_held_parent(spec: MutationSpec, held: _HeldParent | None) -> tu
 
 def _publish_bytes_via_parent(parent_fd: int, name: str, data: bytes) -> None:
     temporary_name = f".{name}.{uuid.uuid4().hex}.tmp"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     descriptor = os.open(temporary_name, flags, 0o600, dir_fd=parent_fd)
     try:
         with os.fdopen(descriptor, "wb") as handle:
@@ -644,7 +645,9 @@ def _unlink_via_parent(parent_fd: int, name: str) -> None:
 
 
 def _chmod_via_parent(parent_fd: int, name: str, mode: int) -> None:
-    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd)
+    descriptor = os.open(
+        name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd
+    )
     try:
         os.fchmod(descriptor, mode)
     finally:

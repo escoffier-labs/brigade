@@ -20,6 +20,7 @@ from typing import Any, Iterator
 from .grokbot_job_clock import format_timestamp as _format_timestamp
 from .grokbot_job_clock import parse_timestamp as _parse_timestamp
 from .grokbot_job_clock import timestamp as _timestamp
+from . import dirfd as dirfd_mod
 from .grokbot_job_validation import (
     JOB_ID_RE,
     LOWER_HEX_64_RE as LOWER_HEX_64_RE,
@@ -854,7 +855,10 @@ def _storage_paths_readonly(target: Path) -> Iterator[_Storage]:
 
 
 def _directory_flags() -> int:
-    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        return dirfd_mod.directory_flags()
+    except OSError as exc:
+        raise GrokbotJobError("unsafe-storage") from exc
 
 
 def _open_directory_path(path: Path) -> int:
@@ -1023,7 +1027,7 @@ def _write_bytes_file(directory: _Directory, name: str, data: bytes) -> None:
     try:
         descriptor = os.open(
             temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
             FILE_MODE,
             dir_fd=directory.descriptor,
         )
@@ -1101,7 +1105,7 @@ def _read_json_file(directory: _Directory, name: str, *, missing_ok: bool = Fals
     descriptor: int | None = None
     try:
         descriptor = os.open(
-            name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=directory.descriptor
+            name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=directory.descriptor
         )
     except FileNotFoundError:
         if missing_ok:
@@ -1159,7 +1163,7 @@ def _read_bytes_file(directory: _Directory, name: str, *, maximum: int, missing_
     descriptor: int | None = None
     try:
         descriptor = os.open(
-            name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=directory.descriptor
+            name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=directory.descriptor
         )
     except FileNotFoundError:
         raise GrokbotJobError(missing_reason) from None

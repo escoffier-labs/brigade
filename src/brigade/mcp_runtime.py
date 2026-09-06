@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from . import localio
+from . import proc as proc_mod
 from .mcp_adapters import CanonicalServer
 from .tools_cmd import HIGH_RISK_COMMAND_PATTERNS
 
@@ -528,6 +529,14 @@ def _kill_process_group(proc: subprocess.Popen[str], *, pgid: int | None = None)
             os.killpg(pgid, signal.SIGKILL)
         except (OSError, ProcessLookupError):
             pass
+    elif os.name == "nt":
+        # No process groups on Windows: use the shared job-object/taskkill
+        # termination path in proc.py instead of killing only the direct child.
+        try:
+            proc_mod.terminate_process_tree(proc)  # type: ignore[arg-type]
+            return
+        except OSError:
+            pass
     if proc.poll() is None:
         try:
             proc.kill()
@@ -594,7 +603,7 @@ def _probe_stdio(server: CanonicalServer, *, config_current: bool, timeout: floa
     assert proc.stdout is not None
     assert proc.stderr is not None
     try:
-        pgid = os.getpgid(proc.pid)
+        pgid = proc_mod.process_group_id(proc.pid)
     except OSError:
         pgid = None
     stdout_reader = _BoundedStreamReader(proc.stdout, limit=MAX_STREAM_BYTES)
