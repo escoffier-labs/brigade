@@ -251,20 +251,34 @@ def _evaluate_status(
     local_baseline_commit: str | None,
     recomputed_first_parent: str | None,
     rule_drift: bool,
+    commit_available: str,
 ) -> str:
-    # Signature or trust failures are INVALID before any availability evaluation.
-    if envelope.get("signature") == "invalid" or envelope.get("trust") != "trusted":
+    # Malformed envelopes and unverifiable signatures are environmental/parse
+    # failures, not evidence of tampering.
+    if envelope.get("syntax") == "malformed" or envelope.get("signature") == "unverifiable":
+        return _STATUS_UNVERIFIABLE
+    # Positive evidence of tampering or an untrusted key.
+    if envelope.get("signature") == "invalid" or envelope.get("trust") == "untrusted":
         return _STATUS_INVALID
-    if (
-        envelope.get("syntax") == "malformed"
-        or envelope.get("signature") == "unverifiable"
-        or policy_status == "unavailable"
-    ):
+    # Missing allowed_signers or an unavailable ssh-keygen is an environmental
+    # trust gap, not a statement verdict.
+    if envelope.get("trust") == "unknown":
+        return _STATUS_UNVERIFIABLE
+    # Binding availability is environmental; a conflict is evidence of tampering
+    # or a different run.
+    if run_binding == "unavailable":
+        return _STATUS_UNVERIFIABLE
+    if run_binding == "conflicted":
+        return _STATUS_INVALID
+    # Policy availability is environmental; a mismatch or foreign project is a
+    # statement verdict.
+    if policy_status == "unavailable":
         return _STATUS_UNVERIFIABLE
     if policy_status == "mismatch" or project_status == "mismatch":
         return _STATUS_INVALID
-    if run_binding != "bound":
-        return _STATUS_INVALID
+    # A missing commit object cannot be compared, regardless of the envelope.
+    if commit_available == "missing":
+        return _STATUS_UNVERIFIABLE
     if equivalence is None or equivalence_obs in {"contradicted", "unavailable"}:
         return _STATUS_NOT_EQUIVALENT
     if equivalence == "exact":
@@ -529,7 +543,7 @@ def verify_commit_linkage(
 
     local_baseline_commit = None
     recomputed_first_parent = None
-    if commit_sha is not None and isinstance(statement, dict):
+    if commit_available != "missing" and commit_sha is not None and isinstance(statement, dict):
         parents = commit_linkage._commit_parents(target, commit_sha, local_shallow)
         if parents is not None:
             recomputed_first_parent = parents[0] if parents else None
@@ -549,7 +563,7 @@ def verify_commit_linkage(
                         pass
 
     baseline_relation = "unavailable"
-    if commit_sha is not None and isinstance(statement, dict):
+    if commit_available != "missing" and commit_sha is not None and isinstance(statement, dict):
         baseline_relation = _verify_baseline_relation(target, statement, commit_sha, local_shallow)
 
     normalization_base = _extract_predicate_field(statement, "comparison", "normalizationBase")
@@ -565,6 +579,7 @@ def verify_commit_linkage(
         local_baseline_commit,
         recomputed_first_parent,
         rule_drift,
+        commit_available,
     )
     if object_format_status == "mismatch":
         status = _STATUS_INVALID

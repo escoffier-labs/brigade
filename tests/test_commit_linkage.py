@@ -678,6 +678,7 @@ def test_deleted_commit_object_reports_commit_available_missing(tmp_path: Path) 
     verify_rc, output = _verify_json(ws, run_dir / "linkage" / f"{sha}.json")
     assert verify_rc == 1
     assert output["commitAvailable"] == "missing"
+    assert output["status"] == "UNVERIFIABLE"
 
 
 def test_foreign_exclusion_list_reports_rule_drift(tmp_path: Path) -> None:
@@ -1087,3 +1088,72 @@ def test_object_format_mismatch_reports_invalid(tmp_path: Path) -> None:
     assert verify_rc == 1
     assert output["objectFormat"] == "mismatch"
     assert output["status"] == "INVALID"
+
+
+def test_trust_unknown_reports_unverifiable(tmp_path: Path) -> None:
+    ws, run_dir, key_path = _workspace(tmp_path)
+    sha = _git_commit(ws, "same tree", allow_empty=True)
+    rc, envelope = _export(ws, "run-001", sha, key_path)
+    assert rc == 0
+
+    # Remove the allowed_signers file so the signature is valid but trust is unknown.
+    allowed_signers = ws / ".brigade" / "attestation" / "allowed_signers"
+    assert allowed_signers.is_file()
+    allowed_signers.unlink()
+
+    verify_rc, output = _verify_json(ws, run_dir / "linkage" / f"{sha}.json")
+    assert verify_rc == 1
+    assert output["envelope"]["trust"] == "unknown"
+    assert output["status"] == "UNVERIFIABLE"
+
+
+def test_tampered_payload_reports_invalid(tmp_path: Path) -> None:
+    ws, run_dir, key_path = _workspace(tmp_path)
+    sha = _git_commit(ws, "same tree", allow_empty=True)
+    rc, envelope = _export(ws, "run-001", sha, key_path)
+    assert rc == 0
+
+    statement = _decode_statement(envelope)
+    statement["predicate"]["attestedTree"]["gitTree"] = "0" * 40
+    payload_bytes = json.dumps(statement, indent=2, sort_keys=True).encode("utf-8")
+    envelope["payload"] = base64.b64encode(payload_bytes).decode("utf-8")
+    # Do not re-sign: the signature becomes invalid.
+    tampered_path = run_dir / "linkage" / "tampered-payload.json"
+    tampered_path.write_text(
+        json.dumps(envelope, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    verify_rc, output = _verify_json(ws, tampered_path)
+    assert verify_rc == 1
+    assert output["envelope"]["signature"] == "invalid"
+    assert output["status"] == "INVALID"
+
+
+def test_export_tree_sha_refused(tmp_path: Path) -> None:
+    ws, _run_dir, key_path = _workspace(tmp_path)
+    tree_sha = subprocess.run(
+        ["git", "-C", str(ws), "rev-parse", "HEAD^{tree}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    import sys as _sys
+    import io
+
+    old_stderr = _sys.stderr
+    _sys.stderr = buffer = io.StringIO()
+    try:
+        rc = commit_linkage.export_commit_linkage(ws, "run-001", tree_sha, key=key_path)
+    finally:
+        _sys.stderr = old_stderr
+    stderr = buffer.getvalue()
+    assert rc == 2
+    assert "commit not found or not a commit object" in stderr
+
+
+def test_non_shallow_rev_list_failure_refuses(tmp_path: Path) -> None:
+    ws, _run_dir, _key_path = _workspace(tmp_path)
+    with pytest.raises(commit_linkage.CommitLinkageError, match="could not resolve commit parents"):
+        commit_linkage._commit_parents(ws, "0" * 40, False)

@@ -125,18 +125,28 @@ def _commit_tree(target: Path, sha: str) -> str | None:
 
 
 def _commit_parents(target: Path, sha: str, shallow: bool) -> list[str] | None:
-    """Return ordered parent commit hashes, or None on failure/boundary.
+    """Return ordered parent commit hashes, or None only at a shallow boundary.
 
     In a shallow repository, a commit whose parents are cut off by the
     shallow boundary is reported as ``None`` (unknown) rather than guessed.
+    Any other failure in a non-shallow repository is refused so it is never
+    mistaken for a shallow boundary.
     """
     result = _git(target, "rev-list", "--parents", "-1", sha)
+    if result is None or result.returncode != 0:
+        if shallow:
+            return None
+        raise CommitLinkageError("could not resolve commit parents")
     lines = _git_stdout_lines(result)
     if not lines:
-        return None
+        if shallow:
+            return None
+        raise CommitLinkageError("could not resolve commit parents")
     parts = lines[0].split()
-    if len(parts) < 1:
-        return None
+    if not parts:
+        if shallow:
+            return None
+        raise CommitLinkageError("could not resolve commit parents")
     parents = parts[1:]
     if shallow and not parents:
         return None
@@ -352,6 +362,10 @@ def build_statement(
     shallow = _git_is_shallow(target)
     if shallow is None:
         shallow = True
+
+    commit_object = _git(target, "cat-file", "-e", "--", f"{commit_sha}^{{commit}}")
+    if commit_object is None or commit_object.returncode != 0:
+        raise CommitLinkageError("commit not found or not a commit object")
 
     commit_tree = _commit_tree(target, commit_sha)
     if commit_tree is None:
