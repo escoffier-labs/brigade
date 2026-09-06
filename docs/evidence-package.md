@@ -63,7 +63,8 @@ brigade receipts verify-package <dir> [--json]
 Reads `manifest.json` and reports the integrity of every manifest entry. The
 command exits `0` only when every entry is `present`, no extra regular files
 exist, the manifest `entries_sha256` re-computes to `match`, and the receipt
-digest re-derives from `receipt.json` to `match`.
+digest re-derives from `receipt.json` to `match`. `manifest.json` must be a
+regular file; a symlink is refused.
 
 Default output prints one fixed-word state per file, the manifest-entries state,
 and the receipt-digest state:
@@ -132,7 +133,7 @@ from the run directory. It uses schema `brigade.evidence_package.v1` and
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `path` | string | Filename only; no separators or `..` |
+| `path` | string | Filename only; no separators, `..`, `.`, or `manifest.json` |
 | `sha256` | string | SHA-256 of the file bytes |
 | `bytes` | integer | File size in bytes |
 | `media_type` | string | Best-effort media type |

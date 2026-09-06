@@ -129,16 +129,19 @@ def export_package(
     entries: list[dict[str, Any]] = []
     copied: list[tuple[str, bytes]] = []
 
-    for filename, kind, media_type in PACKAGE_FILES:
-        src = selected.directory / filename
-        if not src.is_file():
-            if kind == "receipt":
-                print(f"error: required receipt file missing: {src}", file=sys.stderr)
-                return 1
-            continue
-        data = _read_source_file(src)
-        entries.append(_entry_manifest(filename, data, kind, media_type))
-        copied.append((filename, data))
+    try:
+        for filename, kind, media_type in PACKAGE_FILES:
+            src = selected.directory / filename
+            if not src.exists():
+                if kind == "receipt":
+                    raise EvidencePackageError(f"required receipt file missing: {filename}")
+                continue
+            data = _read_source_file(src)
+            entries.append(_entry_manifest(filename, data, kind, media_type))
+            copied.append((filename, data))
+    except EvidencePackageError as exc:
+        print(f"error: cannot export evidence package: {exc}", file=sys.stderr)
+        return 1
 
     entries.sort(key=lambda item: item["path"])
     entries_sha256 = localio.canonical_json_digest(entries)
@@ -181,7 +184,7 @@ def export_package(
         if out_path.exists():
             if not force:
                 print(
-                    f"error: evidence package output already exists: {out_path} (use --force to replace)",
+                    f"error: evidence package output already exists: {out_str} (use --force to replace)",
                     file=sys.stderr,
                 )
                 shutil.rmtree(staging, ignore_errors=True)
@@ -230,7 +233,7 @@ def export_package(
 def _is_safe_entry_path(path: str) -> bool:
     if not path:
         return False
-    if path == "..":
+    if path in {"..", ".", "manifest.json"}:
         return False
     if "/" in path or os.sep in path:
         return False
@@ -251,8 +254,15 @@ def verify_package(
         return 1
 
     manifest_path = directory / "manifest.json"
+    if manifest_path.is_symlink():
+        print("error: manifest.json is a symlink", file=sys.stderr)
+        return 1
+
     try:
-        manifest = attestation_input.read_json_object(manifest_path, max_bytes=attestation_input.MAX_JSON_BYTES)
+        manifest_bytes = attestation_input.read_bounded_file(manifest_path, max_bytes=attestation_input.MAX_JSON_BYTES)
+        manifest_value = attestation_input.strict_json_loads(manifest_bytes, max_bytes=attestation_input.MAX_JSON_BYTES)
+        if not isinstance(manifest_value, dict):
+            raise attestation_input.AttestationInputError("JSON document must contain an object")
     except attestation_input.AttestationInputError as exc:
         print(f"error: cannot read manifest: {exc}", file=sys.stderr)
         return 1
@@ -260,7 +270,7 @@ def verify_package(
         print(f"error: cannot read manifest: {exc}", file=sys.stderr)
         return 1
 
-    manifest_bytes = manifest_path.read_bytes()
+    manifest = manifest_value
     manifest_sha256 = _sha256_bytes(manifest_bytes)
 
     entries = manifest.get("entries")
