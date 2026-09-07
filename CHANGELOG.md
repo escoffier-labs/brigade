@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Cosign signer profile now exports agent-change and commit-linkage statements as Sigstore bundles for external verification. (#1404)
 - Fleet status and Command Deck report policy authority as staged before migration activation and active afterward, without activating the migration. (#1460)
 - `brigade memory care closeout --dry-run` previews queued candidates grouped by issue kind without writing a closeout. (#1466)
+- Grok Bot rejects `report_text` for draft-PR and branch completions with `report-not-allowed`, leaving the job running and writing no report snapshot. (#1472)
 
 ### Changed
 - Private Grok Bot manifests, ledgers, action stores, and runtime configuration reads now fail closed on Windows with `secure-owner-read-unavailable` until owner-SID/DACL enforcement is implemented. (#1523)
