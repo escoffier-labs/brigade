@@ -291,12 +291,18 @@ def test_memory_care_status_explains_freshness_metadata(tmp_path, monkeypatch, c
     assert "freshness_dates: present=3 missing=1 expired=1" in out
     assert "evidence_metadata: present=3 missing=1" in out
     assert "confidence_metadata: high=3, low=1" in out
+    assert "autofix_plan: planned=2 blocked=2 would_write=false" in out
+    assert "autofix_plan_block_reasons: requires-current-evidence-review=1, requires-operator-freshness-date=1" in out
 
     assert memory_cmd.status(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["metadata"]["freshness_dates"]["missing"] == 1
     assert payload["autofix_plan"]["plan_count"] == 2
     assert payload["autofix_plan"]["blocked_count"] == 2
+    assert payload["autofix_plan"]["block_reasons"] == [
+        {"reason": "requires-current-evidence-review", "count": 1},
+        {"reason": "requires-operator-freshness-date", "count": 1},
+    ]
 
     assert memory_cmd.import_issues(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -388,16 +394,28 @@ def test_memory_care_plan_fixes_reports_blockers_and_writes_nothing(tmp_path, mo
 
     assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
     capsys.readouterr()
+    queue = json.loads((tmp_path / ".brigade" / "memory-care" / "decay" / "refresh-queue.json").read_text())
+    queued = {card["issue_type"]: card for card in queue["cards"]}
+    assert queued["missing-freshness"]["safe_autofix_plan"]["blocked"] is False
+    assert queued["missing-freshness"]["safe_autofix_plan"]["blockers"] == []
+    assert queued["missing-reviewed"]["safe_autofix_plan"]["blocked"] is True
     assert memory_cmd.plan_fixes(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["would_write"] is False
     assert payload["plan_count"] == 2
-    assert payload["blocked_count"] == 2
+    assert payload["blocked_count"] == 1
+    assert payload["blocked_count"] < payload["plan_count"]
+    assert payload["block_reasons"] == [{"reason": "requires-current-evidence-review", "count": 1}]
+    assert payload["suggested_next_command"] == "brigade memory care backfill"
     by_type = {item["issue_type"]: item for item in payload["items"]}
     assert by_type["missing-reviewed"]["candidate_fields"] == {"last_reviewed": "2026-05-28"}
     assert by_type["missing-reviewed"]["blockers"] == ["requires-current-evidence-review"]
-    assert by_type["missing-freshness"]["candidate_fields"] == {"fresh_until": "<operator-selected-date>"}
-    assert by_type["missing-freshness"]["blockers"] == ["requires-operator-freshness-date"]
+    assert by_type["missing-reviewed"]["status"] == "blocked"
+    assert by_type["missing-freshness"]["candidate_fields"] == {"fresh_until": "2026-07-30"}
+    assert by_type["missing-freshness"]["blockers"] == []
+    assert by_type["missing-freshness"]["status"] == "planned"
+    assert by_type["missing-freshness"]["derivation"] == "last_reviewed+stale_after_days"
+    assert by_type["missing-freshness"]["suggested_next_command"] == "brigade memory care backfill"
     assert reviewed_missing.read_text() == before_reviewed
     assert freshness_missing.read_text() == before_freshness
 
@@ -405,7 +423,14 @@ def test_memory_care_plan_fixes_reports_blockers_and_writes_nothing(tmp_path, mo
     out = capsys.readouterr().out
     assert "memory care fix plan:" in out
     assert "would_write: false" in out
-    assert "blocked: 2" in out
+    assert "blocked: 1" in out
+    assert "block_reasons: requires-current-evidence-review=1" in out
+    assert "freshness-missing.md missing-freshness planned" in out
+
+    assert memory_cmd.status(target=tmp_path) == 0
+    status_out = capsys.readouterr().out
+    assert "autofix_plan: planned=2 blocked=1 would_write=false" in status_out
+    assert "autofix_plan_block_reasons: requires-current-evidence-review=1" in status_out
 
 
 def test_memory_care_imports_autofix_plan_and_brief_visibility(tmp_path, monkeypatch, capsys):
