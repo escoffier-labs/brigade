@@ -7,9 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- Fleet claims test `test_release_with_renew_in_flight_never_resurrects` parks the in-flight renew on an explicit gate and times out only the heartbeat join, instead of shrinking `CLAIM_TIMEOUT_SECONDS` (which also bounded exit `release_claim` and left the row on a busy CI shard). (#1488)
-
 ### Changed
 - `brigade center serve` views render in the Command Deck theme through the shared `ui_theme` shell: dark tokens, the Deck masthead and nav, and no light-mode colors. Status chip colors are unchanged. (#1495)
 - The fleet boards at `/view/machines` and `/view/repos` render in the Command Deck theme through a shared `ui_theme` module, and Deck forms gain a spacing scale (16px panels, 36px controls, 8px helper-text gap, 40px buttons). Routes are unchanged. (#1495)
