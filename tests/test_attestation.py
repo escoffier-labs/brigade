@@ -194,9 +194,7 @@ def test_ad_hoc_command_name_drops_env_vars_and_paths(tmp_path: Path) -> None:
         run_root.mkdir()
         receipt = _sample_receipt(run_root)
         receipt["commands"][0]["check_id"] = None
-        receipt["commands"][0]["command"] = (
-            f"SECRET={secret_value} {planted_path}/bin/pytest -q {planted_path}/tests"
-        )
+        receipt["commands"][0]["command"] = f"SECRET={secret_value} {planted_path}/bin/pytest -q {planted_path}/tests"
         receipt["commands"][0]["argv"] = None
         _restamp_receipt(receipt)
 
