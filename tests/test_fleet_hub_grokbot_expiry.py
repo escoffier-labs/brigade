@@ -345,8 +345,31 @@ def test_fail_after_the_execution_deadline_answers_job_expired(conn):
     assert payload == {"failed": False, "error": "job-expired"}
 
 
+def _legacy_enqueue_digest(body: dict[str, object], *, node_id: str, queue_id: str, owner: str) -> str:
+    """Pre-#1409 digest of the same enqueue request the hub would validate."""
+    raw = dict(body)
+    raw.setdefault("action", "enqueue")
+    request = fleet_hub_grokbot._validate_request(raw)
+    request["node_id"] = node_id
+    request["queue_id"] = queue_id
+    request["queue_owner_node_id"] = owner
+    return fleet_hub_grokbot._legacy_enqueue_request_digest(request)
+
+
 def _drift_enqueue_digest(conn: sqlite3.Connection, job_id: str = JOB_ID) -> None:
-    """Simulate an additive request field so the stored enqueue digest no longer matches."""
+    """Simulate the pre-#1409 digest that omitted ``queue_ttl_seconds``."""
+    digest = _legacy_enqueue_digest(
+        _enqueue_body(job_id), node_id=FEED_NODE, queue_id=QUEUE_ID, owner=FEED_NODE
+    )
+    conn.execute(
+        "UPDATE grokbot_operations SET request_digest=? WHERE job_id=? AND action='enqueue'",
+        (digest, job_id),
+    )
+    conn.commit()
+
+
+def _drift_enqueue_digest_unrelated(conn: sqlite3.Connection, job_id: str = JOB_ID) -> None:
+    """Simulate payload drift other than the additive ``queue_ttl_seconds`` field."""
     conn.execute(
         "UPDATE grokbot_operations SET request_digest=? WHERE job_id=? AND action='enqueue'",
         ("0" * 64, job_id),
@@ -439,3 +462,41 @@ def test_enqueue_digest_drift_on_a_queued_job_stays_operation_mismatch(conn):
     assert status == 409
     assert payload == {"enqueued": False, "error": "operation-mismatch"}
     assert _state(conn) == "queued"
+
+
+def test_terminal_enqueue_recovery_rejects_non_ttl_digest_drift(conn):
+    _enqueue(conn)
+    _complete(conn)
+    _drift_enqueue_digest_unrelated(conn)
+
+    status, payload = fleet_hub_grokbot.handle_grokbot(conn, _enqueue_body(), caller_node=FEED_NODE)
+
+    assert status == 409
+    assert payload == {"enqueued": False, "error": "operation-mismatch"}
+    assert _state(conn) == "completed"
+
+
+def test_terminal_enqueue_recovery_rejects_reused_operation_id_from_different_actor(conn):
+    other_feed = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    status, payload = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        {
+            "action": "enroll-actor",
+            "enroll_node_id": other_feed,
+            "queue_owner_node_id": FEED_NODE,
+            "queue_id": QUEUE_ID,
+            "actor_kind": "feed",
+            "enabled": True,
+        },
+        caller_node=None,
+    )
+    assert status == 200, payload
+    _enqueue(conn)
+    _complete(conn)
+    _drift_enqueue_digest(conn)
+
+    status, payload = fleet_hub_grokbot.handle_grokbot(conn, _enqueue_body(), caller_node=other_feed)
+
+    assert status == 409
+    assert payload == {"enqueued": False, "error": "operation-mismatch"}
+    assert _state(conn) == "completed"

@@ -557,6 +557,11 @@ def _terminal_enqueue_replay(
     ``queue_ttl_seconds`` after #1409) change the stored enqueue digest and
     would otherwise 409 ``operation-mismatch`` before ``_enqueue`` can see the
     existing row. Queued and failed rows keep the mismatch refusal.
+
+    Recovery binds to the recorded enqueue operation: the action must be
+    ``enqueue``, the actor must be this node (NULL is pre-column), and the
+    stored digest may differ from the request only by ``queue_ttl_seconds``.
+    A different actor or any other payload drift keeps the 409.
     """
     existing = conn.execute(
         f"SELECT {_JOB_COLUMNS} FROM grokbot_jobs WHERE idempotency_key_hash = ?",
@@ -571,7 +576,29 @@ def _terminal_enqueue_replay(
         return None
     if job["task_digest"] != request["task_digest"] or job["job_id"] != request["job_id"]:
         return None
-    return {"enqueued": True, "idempotent": True, "job": _job_payload(job)}
+    recorded = conn.execute(
+        "SELECT action, request_digest, actor_node_id FROM grokbot_operations "
+        "WHERE job_id=? AND operation_id=?",
+        (request["job_id"], request["operation_id"]),
+    ).fetchone()
+    if recorded is None or recorded[0] != "enqueue":
+        return None
+    if recorded[2] not in (None, request["node_id"]):
+        return None
+    stored = recorded[1]
+    if not isinstance(stored, str):
+        return None
+    if hmac.compare_digest(stored, _request_digest(request)):
+        return {"enqueued": True, "idempotent": True, "job": _job_payload(job)}
+    if hmac.compare_digest(stored, _legacy_enqueue_request_digest(request)):
+        return {"enqueued": True, "idempotent": True, "job": _job_payload(job)}
+    return None
+
+
+def _legacy_enqueue_request_digest(request: dict[str, Any]) -> str:
+    """Pre-#1409 enqueue digest: same canonicalization without ``queue_ttl_seconds``."""
+    stripped = {key: value for key, value in request.items() if key != "queue_ttl_seconds"}
+    return _request_digest(stripped)
 
 
 def _enqueue(conn: sqlite3.Connection, request: dict[str, Any], policy: dict[str, Any]) -> tuple[int, dict[str, Any]]:

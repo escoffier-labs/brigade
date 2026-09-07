@@ -1389,9 +1389,41 @@ def _bind_hub_enqueue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _drift_hub_enqueue_digest(connection, job_id: str) -> None:
+    """Rewrite the stored enqueue digest to the pre-#1409 form (no queue TTL)."""
+    job = connection.execute(
+        "SELECT role, repository, label, task_digest, idempotency_key_hash, "
+        "timeout_seconds, queue_ttl_seconds, artifact_kind, private_snapshot_id "
+        "FROM grokbot_jobs WHERE job_id=?",
+        (job_id,),
+    ).fetchone()
+    assert job is not None
+    operation = connection.execute(
+        "SELECT operation_id FROM grokbot_operations WHERE job_id=? AND action='enqueue'",
+        (job_id,),
+    ).fetchone()
+    assert operation is not None
+    request = fleet_hub_grokbot._validate_request(
+        {
+            "action": "enqueue",
+            "job_id": job_id,
+            "role": job[0],
+            "repository": job[1],
+            "label": job[2],
+            "task_digest": job[3],
+            "idempotency_key_hash": job[4],
+            "timeout_seconds": job[5],
+            "queue_ttl_seconds": job[6],
+            "artifact_kind": job[7],
+            "private_snapshot_id": job[8],
+            "operation_id": operation[0],
+        }
+    )
+    request["node_id"] = FEED_NODE
+    request["queue_id"] = HUB_QUEUE_ID
+    request["queue_owner_node_id"] = FEED_NODE
     connection.execute(
         "UPDATE grokbot_operations SET request_digest=? WHERE job_id=? AND action='enqueue'",
-        ("0" * 64, job_id),
+        (fleet_hub_grokbot._legacy_enqueue_request_digest(request), job_id),
     )
     connection.commit()
 

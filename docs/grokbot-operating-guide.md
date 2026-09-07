@@ -685,6 +685,16 @@ is the deliverable. A run without a handle is a failed run.
 
 ## Troubleshooting
 
+**Terminal `feed --apply` replay and `operation-mismatch`.** Completing,
+expiring, or canceling a hub job does not consume its idempotency key, so a
+later apply of the same manifest can skip that row as `idempotent: true`.
+The hub recovers that replay only when the recorded operation is `enqueue`,
+the recorded `actor_node_id` is this feed node (or NULL on pre-column rows),
+and the stored request digest matches the request or differs from it only by
+the additive `queue_ttl_seconds` field from #1409. A different actor, a
+non-enqueue operation id, or any other payload drift stays `operation-mismatch`
+(#1446).
+
 **`scout-feed --apply` fails with an opaque queue error.** Under hub authority,
 `brigade run cloud grokbot scout-feed --apply` reads the existing scout jobs
 through the hub `list` action before it enqueues, so a credential refusal on
