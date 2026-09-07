@@ -1252,8 +1252,9 @@ def control_plane_from_snapshot(raw: Mapping[str, object] | None) -> ControlPlan
     quota = tuple(_cp_records(raw, "quota"))
     authority_raw = raw.get("authority")
     authority = AuthorityState()
-    authority_present = isinstance(authority_raw, Mapping)
-    if authority_present:
+    authority_present = False
+    if isinstance(authority_raw, Mapping):
+        authority_present = True
         authority = AuthorityState(
             active=_cp_text(authority_raw.get("active")),
             status=_cp_text(authority_raw.get("status")),
