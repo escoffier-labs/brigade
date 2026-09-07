@@ -142,7 +142,7 @@ def _guard_agent_cli_spawns(monkeypatch, request):
 
     real_popen = subprocess.Popen
 
-    def guarded_popen(argv, *args, **kwargs):
+    def _check(argv):
         candidate = argv[0] if isinstance(argv, (list, tuple)) and argv else None
         if isinstance(candidate, bytes):
             try:
@@ -159,9 +159,16 @@ def _guard_agent_cli_spawns(monkeypatch, request):
                 raise AssertionError(
                     f"test tried to launch agent CLI {name!r}; stub the call or mark with @pytest.mark.allow_agent_cli"
                 )
-        return real_popen(argv, *args, **kwargs)
+        return None
 
-    monkeypatch.setattr(subprocess, "Popen", guarded_popen)
+    class GuardedPopen(real_popen):  # type: ignore[misc,valid-type]
+        """Subclass so Popen[bytes] subscripts and isinstance checks keep working."""
+
+        def __init__(self, argv, *args, **kwargs):
+            _check(argv)
+            super().__init__(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", GuardedPopen)
 
 
 @pytest.fixture(autouse=True)
