@@ -59,8 +59,8 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade roadmap` (extras): 4 command path(s)
 - `brigade roster`: 4 command path(s)
 - `brigade route`: 1 command path(s)
-- `brigade run`: 46 command path(s)
-- `brigade run-cloud` (deprecated; use `brigade run cloud`): 44 command path(s)
+- `brigade run`: 47 command path(s)
+- `brigade run-cloud` (deprecated; use `brigade run cloud`): 45 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
 - `brigade runs`: 20 command path(s)
 - `brigade scrub`: 1 command path(s)
@@ -535,6 +535,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade run`
 - `brigade run approve`
 - `brigade run cloud adopt`
+- `brigade run cloud approve`
 - `brigade run cloud canary`
 - `brigade run cloud compact`
 - `brigade run cloud doctor`
@@ -579,6 +580,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade run cloud sweep`
 - `brigade run cloud sync`
 - `brigade run-cloud adopt` (deprecated; use `brigade run cloud adopt`)
+- `brigade run-cloud approve` (deprecated; use `brigade run cloud approve`)
 - `brigade run-cloud canary` (deprecated; use `brigade run cloud canary`)
 - `brigade run-cloud compact` (deprecated; use `brigade run cloud compact`)
 - `brigade run-cloud doctor` (deprecated; use `brigade run cloud doctor`)

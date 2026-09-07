@@ -251,7 +251,7 @@ class TestInventory:
             ]
         )
         activities = jules_cloud.list_activities("sess-1", _FAKE_KEY, opener=opener.open, max_pages=1, max_items=10)
-        assert activities == [{"id": "act-1", "create_time": "2026-08-12T20:00:00Z"}]
+        assert activities == [{"id": "act-1", "create_time": "2026-08-12T20:00:00Z", "kind": "agentMessaged"}]
         assert "PRIVATE" not in json.dumps(activities)
         # Collection reads always carry the bounded pageSize query.
         url = opener.calls[0].full_url
@@ -284,8 +284,37 @@ class TestInventory:
             "update_time": "2026-08-12T21:00:00Z",
             "url": "https://jules.google.com/task/sess-1",
             "pull_request_url": "https://github.com/owner/repo/pull/7",
+            "has_outputs": True,
         }
         assert opener.calls[0].full_url.endswith("/sessions/sess-1")
+
+    def test_sanitize_activity_keeps_plan_generated_kind_without_payload(self):
+        activity = jules_cloud.sanitize_activity(
+            {
+                "id": "act-plan",
+                "createTime": "2026-09-02T20:00:00Z",
+                "planGenerated": {"title": "PRIVATE-PLAN", "body": "PRIVATE"},
+            }
+        )
+        assert activity == {
+            "id": "act-plan",
+            "create_time": "2026-09-02T20:00:00Z",
+            "kind": "planGenerated",
+        }
+        assert "PRIVATE" not in json.dumps(activity)
+
+    def test_sanitize_session_without_outputs_reports_has_outputs_false(self):
+        session = jules_cloud.sanitize_session(
+            {
+                "id": "sess-plan",
+                "state": "COMPLETED",
+                "url": "https://jules.google.com/session/sess-plan",
+                "outputs": [],
+            }
+        )
+        assert session is not None
+        assert session["has_outputs"] is False
+        assert session["url"] == "https://jules.google.com/session/sess-plan"
 
     def test_get_session_drops_unvalidated_urls_and_timestamps(self):
         opener = FakeOpener(
@@ -889,6 +918,20 @@ class TestLaunchGate:
         body = json.loads(opener.posts[0].data)
         assert body.get("prompt") == "hi"
         assert body.get("requirePlanApproval") is True
+        assert "automationMode" not in body
+
+    def test_no_plan_approval_forwards_require_plan_approval_false(self, monkeypatch):
+        opener = _launch_opener(_json_response({"id": "sess-skip", "state": "QUEUED"}))
+        _grant_hub(monkeypatch)
+        jules_cloud.launch_agent(
+            _FAKE_KEY,
+            repo="owner/repo",
+            prompt="hi",
+            require_plan_approval=False,
+            opener=opener.open,
+        )
+        body = json.loads(opener.posts[0].data)
+        assert body.get("requirePlanApproval") is False
         assert "automationMode" not in body
 
     def test_explicit_opt_in_enables_auto_create_pr(self, monkeypatch):
