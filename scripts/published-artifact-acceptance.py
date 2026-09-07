@@ -28,6 +28,9 @@ GITHUB_API_HOST = "api.github.com"
 PYPI_PROJECT_URL = "https://pypi.org/pypi/brigade-cli/json"
 PYPI_AVAILABILITY_TIMEOUT_SECONDS = 6 * 60
 PYPI_POLL_INTERVAL_SECONDS = 5
+PIPX_INSTALL_TIMEOUT_SECONDS = 6 * 60
+PIPX_INSTALL_POLL_INTERVAL_SECONDS = 10
+VERIFY_RECEIPT_KIND = "brigade_work_verify_receipt"
 USER_AGENT = "brigade-published-artifact-acceptance/1.0"
 GITHUB_RELEASE_TAG_MAX_ATTEMPTS = 6
 GITHUB_RELEASE_TAG_INITIAL_BACKOFF_SECONDS = 2.0
@@ -339,16 +342,205 @@ def run_checked(
     runner: Runner = subprocess.run,
     env: Mapping[str, str] | None = None,
     input_text: str | None = None,
+    cwd: str | Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [str(value) for value in argv]
     try:
-        completed = runner(command, text=True, input=input_text, capture_output=True, env=env, check=False)
+        completed = runner(
+            command,
+            text=True,
+            input=input_text,
+            capture_output=True,
+            env=env,
+            check=False,
+            cwd=None if cwd is None else str(cwd),
+        )
     except OSError as exc:
         raise AcceptanceError(f"could not run {' '.join(command)}: {exc}") from exc
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "no command output").strip()
         raise AcceptanceError(f"{' '.join(command)} failed with exit {completed.returncode}: {detail}")
     return completed
+
+
+def _is_transient_pipx_install_error(detail: str) -> bool:
+    lowered = detail.lower()
+    return any(
+        token in lowered
+        for token in (
+            "no matching distribution found",
+            "could not find a version that satisfies",
+            "404 client error",
+            "not found for the requested version",
+        )
+    )
+
+
+def install_brigade_cli(
+    version: str,
+    *,
+    runner: Runner = subprocess.run,
+    env: Mapping[str, str] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    timeout_seconds: float = PIPX_INSTALL_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = PIPX_INSTALL_POLL_INTERVAL_SECONDS,
+) -> None:
+    """Install an exact wheel, retrying while the simple index lags the JSON API."""
+    deadline = monotonic() + timeout_seconds
+    detail = "pipx install has not succeeded"
+    argv = [sys.executable, "-m", "pipx", "install", f"brigade-cli=={version}"]
+    while True:
+        try:
+            run_checked(argv, runner=runner, env=env)
+            return
+        except AcceptanceError as exc:
+            detail = str(exc)
+            if not _is_transient_pipx_install_error(detail):
+                raise
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise AcceptanceError(
+                f"pipx install of brigade-cli=={version} was not available within {timeout_seconds:g} seconds: {detail}"
+            )
+        sleep(min(poll_interval_seconds, remaining))
+
+
+def imported_item_ids_from_sql(payload: Any) -> list[str]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
+        raise AcceptanceError("miseledger sql did not return a rows list")
+    ids: list[str] = []
+    for row in payload["rows"]:
+        if not isinstance(row, dict):
+            raise AcceptanceError("miseledger sql row was not an object")
+        item_id = row.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            raise AcceptanceError("miseledger sql row is missing an item id")
+        ids.append(item_id)
+    return ids
+
+
+def assert_search_hits_imported_receipts(search_payload: Any, imported_item_ids: Sequence[str]) -> None:
+    """Require search to return imported archive ids. Snippet text is not a signal.
+
+    Since 0.27.0, evidence search hides snippets until trust review, so a freshly
+    imported receipt prints ``<id> [<kind>]`` with an empty snippet.
+    """
+    if not imported_item_ids:
+        raise AcceptanceError("miseledger import produced no item ids")
+    if not isinstance(search_payload, dict) or not isinstance(search_payload.get("results"), list):
+        raise AcceptanceError("miseledger search --json did not return a results list")
+    results = search_payload["results"]
+    if not results:
+        raise AcceptanceError("miseledger search returned no results")
+    search_ids: list[str] = []
+    for result in results:
+        if not isinstance(result, dict):
+            raise AcceptanceError("miseledger search result was not an object")
+        item_id = result.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            raise AcceptanceError("miseledger search result is missing an item id")
+        search_ids.append(item_id)
+    imported = set(imported_item_ids)
+    if not imported.intersection(search_ids):
+        raise AcceptanceError(f"miseledger search ids {search_ids} did not match imported receipts {sorted(imported)}")
+
+
+def smoke_import_and_search(
+    managed_brigade: Path,
+    miseledger: Path,
+    work_root: Path,
+    *,
+    runner: Runner = subprocess.run,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    """Export a verify receipt, import it, and search by id rather than snippet."""
+    marker = f"brigadeunixacceptance{os.urandom(4).hex()}"
+    work_repo = work_root / "repo"
+    work_repo.mkdir(parents=True)
+    run_checked(["git", "init", "-q", "-b", "main", str(work_repo)], runner=runner, env=env)
+    verify_name = f"verify_{marker}.py"
+    (work_repo / verify_name).write_text('print("ok")\n', encoding="utf-8")
+    run_checked(
+        [managed_brigade, "init", "--target", str(work_repo), "--depth", "repo", "--harnesses", "codex"],
+        runner=runner,
+        env=env,
+    )
+    run_checked(
+        [
+            managed_brigade,
+            "work",
+            "verify",
+            "run",
+            "--target",
+            str(work_repo),
+            "--command",
+            f"python {verify_name}",
+            "--capture",
+            "brigade-work",
+        ],
+        runner=runner,
+        env=env,
+    )
+    export_path = work_root / "receipts.jsonl"
+    run_checked(
+        [
+            managed_brigade,
+            "receipts",
+            "export",
+            "miseledger",
+            "--target",
+            str(work_repo),
+            "--out",
+            str(export_path),
+            "--new-only",
+        ],
+        runner=runner,
+        env=env,
+    )
+    if not export_path.is_file():
+        raise AcceptanceError(f"export file missing: {export_path}")
+    import_output = run_checked(
+        [miseledger, "import", "adapter", str(export_path), "--source", "brigade", "--json"],
+        runner=runner,
+        env=env,
+    )
+    try:
+        import_payload = json.loads(import_output.stdout)
+    except json.JSONDecodeError as exc:
+        raise AcceptanceError("miseledger import returned malformed JSON") from exc
+    inserted = import_payload.get("inserted_items") if isinstance(import_payload, dict) else None
+    already_known = import_payload.get("already_known") if isinstance(import_payload, dict) else None
+    inserted_count = int(inserted) if isinstance(inserted, int) else 0
+    already_count = 1 if already_known else 0
+    if (inserted_count + already_count) < 1:
+        raise AcceptanceError(
+            f"miseledger import did not ingest receipts: inserted_items={inserted} already_known={already_known}"
+        )
+    sql_output = run_checked(
+        [
+            miseledger,
+            "sql",
+            f"select id from items where kind = '{VERIFY_RECEIPT_KIND}'",
+            "--json",
+        ],
+        runner=runner,
+        env=env,
+    )
+    try:
+        imported_ids = imported_item_ids_from_sql(json.loads(sql_output.stdout))
+    except json.JSONDecodeError as exc:
+        raise AcceptanceError("miseledger sql returned malformed JSON") from exc
+    search_output = run_checked(
+        [miseledger, "search", marker, "--json", "--limit", "3"],
+        runner=runner,
+        env=env,
+    )
+    try:
+        search_payload = json.loads(search_output.stdout)
+    except json.JSONDecodeError as exc:
+        raise AcceptanceError("miseledger search returned malformed JSON") from exc
+    assert_search_hits_imported_receipts(search_payload, imported_ids)
 
 
 def validate_component_report(report: Any, managed_bin: Path) -> dict[str, Path]:
@@ -558,7 +750,7 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_dar
         try:
             run_checked([sys.executable, "-m", "pip", "install", "--upgrade", "pip", "pipx"], runner=runner, env=env)
             wait_for_pypi_version(version)
-            run_checked([sys.executable, "-m", "pipx", "install", f"brigade-cli=={version}"], runner=runner, env=env)
+            install_brigade_cli(version, runner=runner, env=env)
             if not managed_brigade.is_file():
                 raise AcceptanceError(f"pipx did not install brigade at {managed_brigade}")
 
@@ -585,6 +777,13 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_dar
             verify_managed_component_digests(release["manifest"], managed_paths, host_platform_key())
             assert_go_unavailable(env=env)
             smoke_managed_components(managed_paths, version=version, runner=runner, env=env)
+            smoke_import_and_search(
+                managed_brigade,
+                managed_paths["miseledger"],
+                root / "import-search",
+                runner=runner,
+                env=env,
+            )
             if rosetta_darwin_amd64:
                 smoke_rosetta_darwin_amd64(release["native_paths"], runner=runner, version=version)
         finally:

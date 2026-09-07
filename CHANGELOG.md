@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Post-publish and Windows native acceptance now assert MiseLedger search by imported item id, not snippet text hidden by 0.27.0 trust gating. Unix published-artifact acceptance runs the same import-and-search contract, retries pipx while the simple index lags the JSON API, and source-mode Windows CI pins engine binaries built from the same commit. (#1492)
+
 ### Changed
 - `brigade center serve` views render in the Command Deck theme through the shared `ui_theme` shell: dark tokens, the Deck masthead and nav, and no light-mode colors. Status chip colors are unchanged. (#1495)
 - The fleet boards at `/view/machines` and `/view/repos` render in the Command Deck theme through a shared `ui_theme` module, and Deck forms gain a spacing scale (16px panels, 36px controls, 8px helper-text gap, 40px buttons). Routes are unchanged. (#1495)
