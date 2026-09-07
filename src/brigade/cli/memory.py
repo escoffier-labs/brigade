@@ -69,13 +69,21 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_memory_care_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
     p_memory_care_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_memory_care_closeout = memory_care_sub.add_parser("closeout", help="Write local memory-care closeout metadata.")
+    p_memory_care_closeout = memory_care_sub.add_parser(
+        "closeout",
+        help="Write local memory-care closeout metadata, or preview with --dry-run.",
+    )
     p_memory_care_closeout.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
     )
     p_memory_care_closeout.add_argument("--reason", default=None, help="Review reason.")
     p_memory_care_closeout.add_argument(
         "--defer", action="store_true", help="Mark current queue deferred instead of reviewed."
+    )
+    p_memory_care_closeout.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the queue that would be marked reviewed or deferred, grouped by issue kind, without writing.",
     )
     p_memory_care_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_memory_topology = memory_sub.add_parser(
@@ -430,6 +438,7 @@ def dispatch(args) -> int:
                 target=args.target,
                 reason=args.reason,
                 defer=args.defer,
+                dry_run=args.dry_run,
                 json_output=args.json,
             )
         args._brigade_parser.error(f"unknown memory care command: {args.memory_care_command}")

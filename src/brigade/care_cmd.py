@@ -140,7 +140,8 @@ MEMORY_CLOSEOUT_RUNBOOK_NAME = "memory-closeout.json"
 MEMORY_CLOSEOUT_RUNBOOK_PAYLOAD: dict[str, Any] = {
     "id": "memory-closeout",
     "description": (
-        "Daily memory-care closeout. Run from the repo or workspace root: "
+        "Daily memory-care closeout. Policy: review (not --defer). Preview: "
+        "`brigade memory care closeout --dry-run --json --target .`. Run from root: "
         "brigade runbook run --approved .brigade/memory-care/runbooks/memory-closeout.json"
     ),
     "allowed_commands": ["brigade"],

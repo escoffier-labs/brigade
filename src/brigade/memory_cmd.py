@@ -1712,96 +1712,17 @@ def _closeout_quiet_set(closeout: dict[str, Any] | None) -> tuple[set[str], str 
     return set(), None
 
 
-def closeout(*, target: Path, reason: str | None = None, defer: bool = False, json_output: bool = False) -> int:
-    target = target.expanduser().resolve()
-    if not target.is_dir():
-        print(f"error: --target is not a directory: {target}", file=sys.stderr)
-        return 2
-    try:
-        config = _config_or_default(target)
-        queue_path = _queue_path(target, config)
-        queue = _load_json_file(queue_path)
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
-        print(f"error: cannot read memory-care queue: {exc}", file=sys.stderr)
-        return 2
-    if not isinstance(queue, dict):
-        message = f"error: memory-care queue is missing or not a JSON object at {queue_path}; closeout refused"
-        if json_output:
-            print(json.dumps({"status": "blocked", "error": message, "candidate_count": 0}, indent=2, sort_keys=True))
-        else:
-            print(message, file=sys.stderr)
-        return 1
-    validation_errors = _validate_queue(queue, path=queue_path)
-    if validation_errors:
-        summary = "; ".join(validation_errors[:5])
-        message = f"error: memory-care queue failed validation; closeout refused. {summary}"
-        cards_value = queue.get("cards")
-        candidate_count = len(cards_value) if isinstance(cards_value, list) else 0
-        if json_output:
-            print(
-                json.dumps(
-                    {"status": "blocked", "error": message, "candidate_count": candidate_count},
-                    indent=2,
-                    sort_keys=True,
-                )
-            )
-        else:
-            print(message, file=sys.stderr)
-        return 1
-    cards_value = queue.get("cards")
-    cards = cards_value if isinstance(cards_value, list) else []
-    reason_text = (reason or "").strip()
-    if defer and not reason_text:
-        message = "error: deferred memory-care closeout requires a nonblank --reason"
-        if json_output:
-            print(
-                json.dumps(
-                    {"status": "blocked", "error": message, "candidate_count": len(cards)}, indent=2, sort_keys=True
-                )
-            )
-        else:
-            print(message, file=sys.stderr)
-        return 1
-    if not defer and cards:
-        message = (
-            f"error: memory-care refresh queue has {len(cards)} unresolved candidate(s); "
-            "closeout cannot mark them reviewed. Use --defer with a nonblank --reason to "
-            "defer explicitly, or resolve the queue first."
-        )
-        if json_output:
-            print(
-                json.dumps(
-                    {"status": "blocked", "error": message, "candidate_count": len(cards)},
-                    indent=2,
-                    sort_keys=True,
-                )
-            )
-        else:
-            print(message, file=sys.stderr)
-        return 1
-    fingerprints = [
-        str(card.get("source_fingerprint"))
-        for card in cards
-        if isinstance(card, dict) and isinstance(card.get("source_fingerprint"), str)
-    ]
-    closeout_id = f"{_utc_iso().replace(':', '').replace('+', 'Z')}-memory-care-closeout"
-    payload = {
-        "closeout_id": closeout_id,
-        "created_at": _utc_iso(),
-        "status": "deferred" if defer else "reviewed",
-        "reason": reason_text,
-        "candidate_count": len(cards),
-        "source_fingerprints": fingerprints,
-        "safe_summary": f"{len(cards)} memory-care candidate(s) {'deferred' if defer else 'reviewed'}",
-    }
-    work_cmd._write_json(_closeouts_root(target) / closeout_id / "closeout.json", payload)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"memory_care_closeout: {closeout_id}")
-    print(f"status: {payload['status']}")
-    print(f"candidates: {payload['candidate_count']}")
-    return 0
+def closeout(
+    *,
+    target: Path,
+    reason: str | None = None,
+    defer: bool = False,
+    dry_run: bool = False,
+    json_output: bool = False,
+) -> int:
+    from .memory_care_closeout import closeout as _closeout
+
+    return _closeout(target=target, reason=reason, defer=defer, dry_run=dry_run, json_output=json_output)
 
 
 # --- memory search (deterministic keyword search over cards) ---
