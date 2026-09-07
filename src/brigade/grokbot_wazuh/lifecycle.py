@@ -57,10 +57,39 @@ def normalize_absolute_path(path_value: str) -> str:
     return trimmed if trimmed else "/"
 
 
+def _is_windows_drive_rooted(value: str) -> bool:
+    if os.name != "nt":
+        return False
+    return len(value) >= 3 and value[0].isascii() and value[0].isalpha() and value[1] == ":" and value[2] in {"\\", "/"}
+
+
+def _reject_windows_network_or_device_root(path_text: str) -> None:
+    if path_text.replace("\\", "/").startswith("//"):
+        _environment_invalid()
+    if path_text.startswith("/"):
+        return
+    if _is_windows_drive_rooted(path_text):
+        return
+    if Path(path_text).is_absolute():
+        drive = Path(path_text).drive
+        if len(drive) == 2 and drive[0].isascii() and drive[0].isalpha() and drive[1] == ":":
+            return
+    _environment_invalid()
+
+
 def validate_absolute_reference(path_text: object) -> str:
     if not isinstance(path_text, str) or not path_text or "\0" in path_text:
         _environment_invalid()
-    if not path_text.startswith("/") or any(part in {".", ".."} for part in path_text.split("/")):
+    _reject_windows_network_or_device_root(path_text)
+    candidate = Path(path_text)
+    if not candidate.is_absolute() and not _is_windows_drive_rooted(path_text):
+        if not path_text.startswith("/"):
+            _environment_invalid()
+    if any(part in {".", ".."} for part in candidate.parts):
+        _environment_invalid()
+    if any(segment in {".", ".."} for segment in path_text.replace("\\", "/").split("/")):
+        _environment_invalid()
+    if any(seg and (seg.endswith(".") or seg.endswith(" ")) for seg in path_text.replace("\\", "/").split("/")):
         _environment_invalid()
     return normalize_absolute_path(path_text)
 
@@ -80,7 +109,17 @@ def validate_disjoint_state_paths(
     values = list(paths.values())
     for left_index, left in enumerate(values):
         for right in values[left_index + 1 :]:
-            if left == right or left.startswith(f"{right}/") or right.startswith(f"{left}/"):
+            if os.name == "nt":
+                left_flat = os.path.normcase(left).replace("\\", "/")
+                right_flat = os.path.normcase(right).replace("\\", "/")
+            else:
+                left_flat = left
+                right_flat = right
+            if (
+                left_flat == right_flat
+                or left_flat.startswith(right_flat if right_flat.endswith("/") else f"{right_flat}/")
+                or right_flat.startswith(left_flat if left_flat.endswith("/") else f"{left_flat}/")
+            ):
                 _environment_invalid()
     return paths
 
@@ -133,7 +172,7 @@ def validate_state_directory(path_text: str, *, must_exist: bool) -> str:
             _environment_invalid()
         return normalized
     info = _lstat_nofollow(normalized, directory=True)
-    if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+    if not stat.S_ISDIR(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700):
         _environment_invalid()
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         _environment_invalid()

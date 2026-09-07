@@ -27,6 +27,7 @@ ERROR_MESSAGES = {
     "denied": "Obsidian request was denied",
     "not_found": "Obsidian resource was not found",
     "unavailable": "Obsidian observation is unavailable",
+    "secure-owner-write-unavailable": "Obsidian observation is unavailable",
     "timeout": "Obsidian observation timed out",
     "protocol_error": "Obsidian observation failed",
     "conflict": "Obsidian request conflicted",

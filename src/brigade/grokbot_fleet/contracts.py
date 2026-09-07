@@ -54,6 +54,7 @@ ERROR_MESSAGES = {
     "denied": "Fleet request was denied",
     "not_found": "Fleet resource was not found",
     "unavailable": "Fleet observation is unavailable",
+    "secure-owner-write-unavailable": "Fleet observation is unavailable",
     "timeout": "Fleet observation timed out",
     "protocol_error": "Fleet observation failed",
 }

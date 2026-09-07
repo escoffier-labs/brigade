@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import os
 import threading
@@ -9,6 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any, Callable
 
 import pytest
 
@@ -73,6 +75,49 @@ def _job_files(target: Path) -> list[Path]:
     if not jobs.exists():
         return []
     return sorted(jobs.glob("grokbot-*.json"))
+
+
+def _assert_read_gate_precedes_io(
+    monkeypatch: pytest.MonkeyPatch, module: Any, available_name: str, operation: Callable[[], object]
+) -> None:
+    """Assert the Windows simulation cannot reach any common read primitive."""
+
+    def unexpected_io(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("filesystem I/O reached after secure-owner read gate")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(module, available_name, False)
+        for name in ("listdir", "stat", "fstat", "scandir"):
+            patched.setattr(module.os, name, unexpected_io)
+        patched.setattr(Path, "is_dir", unexpected_io)
+        patched.setattr(Path, "open", unexpected_io)
+        patched.setattr(Path, "lstat", unexpected_io)
+        patched.setattr(builtins, "open", unexpected_io)
+        with pytest.raises(module.FeedError if module is grokbot_feed else module.ScoutFeedError) as caught:
+            operation()
+    assert caught.value.reason == "secure-owner-read-unavailable"
+
+
+def test_windows_private_feed_reads_fail_closed_before_io(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    path = tmp_path / "private.json"
+    _assert_read_gate_precedes_io(
+        monkeypatch, grokbot_feed, "SECURE_OWNER_READ_AVAILABLE", lambda: grokbot_feed._read_manifest_snapshot(path)
+    )
+    _assert_read_gate_precedes_io(
+        monkeypatch, grokbot_feed, "SECURE_OWNER_READ_AVAILABLE", lambda: grokbot_feed._load_wake_config(tmp_path)
+    )
+    _assert_read_gate_precedes_io(
+        monkeypatch, grokbot_feed, "SECURE_OWNER_READ_AVAILABLE", lambda: grokbot_feed._read_wake_sender_key(path)
+    )
+
+
+def test_windows_private_scout_policy_read_fails_closed_before_io(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    _assert_read_gate_precedes_io(
+        monkeypatch,
+        grokbot_scout_feed,
+        "SECURE_OWNER_READ_AVAILABLE",
+        lambda: grokbot_scout_feed._read_policy_snapshot(tmp_path / "policy.json"),
+    )
 
 
 def test_preflight_accepts_a_valid_manifest_without_writing_queue_state(tmp_path: Path):
@@ -165,6 +210,7 @@ def test_preflight_rejects_malformed_manifests_without_writing_queue_state(
     assert not _queue_root(tmp_path).exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission bits")
 def test_preflight_rejects_group_writable_manifest_without_writing(tmp_path: Path):
     manifest = _write_manifest(
         tmp_path / "feed.json",
@@ -179,6 +225,7 @@ def test_preflight_rejects_group_writable_manifest_without_writing(tmp_path: Pat
     assert not _queue_root(tmp_path).exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission bits")
 def test_preflight_rejects_world_writable_manifest_without_writing(tmp_path: Path):
     manifest = _write_manifest(
         tmp_path / "feed.json",
@@ -746,6 +793,29 @@ def _assert_wake_secret_absent(*payloads: object, secrets: tuple[str, ...] = (SE
             assert secret not in text
         assert "X-Automation-Key" not in text
         assert "Authorization" not in text
+
+
+def test_append_wake_status_fails_closed_without_nofollow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Hosts without O_NOFOLLOW (Windows) must not gain a followed wake log write."""
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    grokbot_feed._append_wake_status(tmp_path, 200)
+    assert not grokbot_feed.wake_notify_log_path(tmp_path).exists()
+
+
+def test_append_wake_status_appends_and_refuses_symlink(tmp_path: Path):
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        pytest.skip("requires O_NOFOLLOW")
+    grokbot_feed._append_wake_status(tmp_path, 200)
+    log = grokbot_feed.wake_notify_log_path(tmp_path)
+    assert log.is_file() and not log.is_symlink()
+    assert json.loads(log.read_text(encoding="utf-8").strip()) == {"status": 200}
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("", encoding="utf-8")
+    log.unlink()
+    log.symlink_to(outside)
+    grokbot_feed._append_wake_status(tmp_path, 500)
+    assert outside.read_text(encoding="utf-8") == ""
 
 
 def _wake_job(*, role: str, label: str = "Wake job") -> dict[str, str]:

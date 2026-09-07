@@ -28,6 +28,14 @@ from .contracts import (
 
 STATE_SCHEMA = "brigade.grokbot.wazuh-state.v1"
 STATE_KEYS = frozenset({"alerts", "proposals", "schema", "suppressions"})
+SECURE_OWNER_WRITE_AVAILABLE = os.name == "posix"
+
+
+def _require_secure_owner_write() -> None:
+    if not SECURE_OWNER_WRITE_AVAILABLE:
+        raise WazuhError("secure-owner-write-unavailable")
+
+
 MAX_ALERTS = 2_048
 MAX_SUPPRESSIONS = 256
 MAX_PROPOSALS = 64
@@ -68,9 +76,9 @@ def _require_secure_owner_read() -> None:
 def _assert_secure_stat(info: os.stat_result, *, directory: bool) -> None:
     _require_secure_owner_read()
     if directory:
-        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+        if not stat.S_ISDIR(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700):
             _invalid()
-    elif not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+    elif not stat.S_ISREG(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600):
         _invalid()
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         _invalid()
@@ -93,7 +101,7 @@ def read_secure_text(path: Path | str, *, expected_mode: int = 0o600) -> str:
 
             descriptor = nt_dirfd.open_file(parent, target.name, os.O_RDONLY)
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != expected_mode:
+        if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != expected_mode):
             _invalid()
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             _invalid()
@@ -345,6 +353,7 @@ class WazuhStore:
 
     def _ensure_state_dir(self) -> None:
         _require_secure_owner_read()
+        _require_secure_owner_write()
         parent = -1
         try:
             parent = grokbot_ops._open_parent_nofollow(self._path, create=True)
@@ -391,6 +400,7 @@ class WazuhStore:
         }
 
     def _persist(self, state: Mapping[str, Any]) -> None:
+        _require_secure_owner_write()
         if len(state["alerts"]) > MAX_ALERTS or len(state["suppressions"]) > MAX_SUPPRESSIONS:
             _unavailable()
         if len(state["proposals"]) > MAX_PROPOSALS:

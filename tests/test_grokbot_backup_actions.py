@@ -29,6 +29,14 @@ from tests.test_grokbot_backup_runtime import _runtime
 NOW = datetime(2026, 8, 28, tzinfo=timezone.utc)
 
 
+def test_windows_action_read_fails_closed_before_io(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(actions_mod, "SECURE_OWNER_READ_AVAILABLE", False)
+    with pytest.raises(BackupError) as caught:
+        actions_mod._read_json_file(tmp_path / "action.json")
+    assert caught.value.code == "unavailable"
+    assert str(caught.value) == "secure-owner-read-unavailable"
+
+
 def _dirs(tmp_path: Path) -> tuple[BackupLedger, BackupActionStore, dict[str, datetime]]:
     ledger_dir = tmp_path / "ledger"
     actions = tmp_path / "actions"
