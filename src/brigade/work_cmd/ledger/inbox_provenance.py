@@ -132,6 +132,33 @@ def _validate_import_inbox_name_matches_descriptor(parent: int, name: str, descr
         raise OSError("import inbox name no longer matches its held descriptor")
 
 
+def _check_import_inbox_name_matches_stat(parent: int, name: str, expected: os.stat_result) -> None:
+    """Ensure a directory entry names the object captured in ``expected``.
+
+    Identity-compare variant of
+    :func:`_validate_import_inbox_name_matches_descriptor` for the publish
+    path, where the temporary descriptor must be closed before ``replace``
+    (the NT rename via ``FileRenameInformation`` returns
+    STATUS_ACCESS_DENIED while a handle is open) so the live descriptor
+    cannot be retained across the rename.
+    """
+    named = authority_store._dirfd_stat(parent, name)
+    if (
+        not stat.S_ISREG(named.st_mode)
+        or named.st_nlink != 1
+        or (named.st_dev, named.st_ino, named.st_mode, named.st_nlink)
+        != (expected.st_dev, expected.st_ino, expected.st_mode, expected.st_nlink)
+    ):
+        raise OSError("import inbox name no longer matches its published descriptor")
+
+
+def _close_import_inbox_descriptor(value: int) -> int:
+    """Close an inbox file descriptor, returning the closed sentinel."""
+    if value != -1:
+        os.close(value)
+    return -1
+
+
 def _write_import_inbox_bytes_at(
     parent: int,
     name: str,
@@ -179,10 +206,19 @@ def _write_import_inbox_bytes_at(
             handle.flush()
             os.fsync(handle.fileno())
         _validate_import_inbox_descriptor(descriptor)
+        os.fsync(descriptor)
+        expected = os.fstat(descriptor)
+        # The NT rename fails while any handle on the source or destination
+        # is open: close both descriptors before replacing, keeping the POSIX
+        # ordering (fsync before close, replace, fsync parent).
+        descriptor = _close_import_inbox_descriptor(descriptor)
+        existing = _close_import_inbox_descriptor(existing)
         authority_store._dirfd_replace(parent, temporary_name, name)
-        _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
+        _check_import_inbox_name_matches_stat(parent, name, expected)
         authority_store._dirfd_fsync(parent)
     except BaseException:
+        existing = _close_import_inbox_descriptor(existing)
+        descriptor = _close_import_inbox_descriptor(descriptor)
         try:
             authority_store._dirfd_unlink(parent, temporary_name)
         except FileNotFoundError:
@@ -274,9 +310,15 @@ def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: 
                 os.fsync(handle.fileno())
             _validate_import_inbox_descriptor(descriptor)
             _validate_import_inbox_name_matches_descriptor(parent, temporary_name, descriptor)
+            os.fsync(descriptor)
+            expected = os.fstat(descriptor)
+            # The NT rename fails while a handle on the source is open: close
+            # the temporary descriptor before replacing, keeping the POSIX
+            # ordering (fsync before close, replace, fsync parent).
+            descriptor = _close_import_inbox_descriptor(descriptor)
             authority_store._dirfd_replace(parent, temporary_name, name)
             temporary_name = ""
-            _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
+            _check_import_inbox_name_matches_stat(parent, name, expected)
             authority_store._dirfd_fsync(parent)
             return
         except OSError:

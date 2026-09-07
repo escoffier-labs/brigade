@@ -509,17 +509,21 @@ def _bounded_status_call(
     timeout = timeout_seconds or _status_section_timeout_seconds()
     start = time.monotonic()
     use_alarm = threading.current_thread() is threading.main_thread() and hasattr(signal, "SIGALRM")
+    if not use_alarm:
+        # Platforms without SIGALRM (notably Windows) bound the call with a
+        # worker thread so a slow section still reports warn instead of
+        # stalling the whole status run.
+        return _thread_bounded_status_call(label, func, fallback, timeout=timeout, start=start)
     previous_handler = None
     previous_timer = None
-    if use_alarm:
-        previous_handler = signal.getsignal(signal.SIGALRM)
-        previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
 
-        def _raise_timeout(_signum, _frame):
-            raise _DailyStatusSectionTimeout(label)
+    def _raise_timeout(_signum, _frame):
+        raise _DailyStatusSectionTimeout(label)
 
-        signal.signal(signal.SIGALRM, _raise_timeout)
-        signal.setitimer(signal.ITIMER_REAL, timeout)
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout)
     try:
         result = func()
         elapsed = int((time.monotonic() - start) * 1000)
@@ -533,9 +537,41 @@ def _bounded_status_call(
             label, "warn", _safe_text(Path("."), f"{type(exc).__name__}: {exc}"), elapsed
         )
     finally:
-        if use_alarm:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            if previous_handler is not None:
-                signal.signal(signal.SIGALRM, previous_handler)
-            if previous_timer is not None and previous_timer[0] > 0:
-                signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        if previous_handler is not None:
+            signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer is not None and previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+
+
+def _thread_bounded_status_call(
+    label: str, func, fallback: Any, *, timeout: int, start: float
+) -> tuple[Any, dict[str, Any]]:
+    """Run ``func`` in a worker thread and bound it with ``join(timeout)``."""
+    outcomes: list[Any] = []
+    errors: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            outcomes.append(func())
+        except BaseException as exc:  # noqa: BLE001 - re-reported below with its type name
+            errors.append(exc)
+
+    worker = threading.Thread(target=_run, name=f"brigade-daily-status-{label}", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        elapsed = int((time.monotonic() - start) * 1000)
+        return fallback, _status_section_check(label, "warn", f"timed out after {timeout}s", elapsed)
+    if errors:
+        exc = errors[0]
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise exc
+        elapsed = int((time.monotonic() - start) * 1000)
+        if isinstance(exc, _DailyStatusSectionTimeout):
+            return fallback, _status_section_check(label, "warn", f"timed out after {timeout}s", elapsed)
+        return fallback, _status_section_check(
+            label, "warn", _safe_text(Path("."), f"{type(exc).__name__}: {exc}"), elapsed
+        )
+    elapsed = int((time.monotonic() - start) * 1000)
+    return outcomes[0], _status_section_check(label, "ok", "completed", elapsed)

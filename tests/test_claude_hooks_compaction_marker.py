@@ -26,7 +26,14 @@ def _wired_claude(tmp_path: Path) -> Path:
 def _cache_env(tmp_path: Path) -> dict[str, str]:
     cache = tmp_path / "xdg-cache"
     cache.mkdir(parents=True, exist_ok=True)
-    return {"XDG_CACHE_HOME": str(cache), "HOME": str(tmp_path / "home"), "USERPROFILE": str(tmp_path / "home")}
+    localappdata = tmp_path / "localappdata"
+    localappdata.mkdir(parents=True, exist_ok=True)
+    return {
+        "XDG_CACHE_HOME": str(cache),
+        "HOME": str(tmp_path / "home"),
+        "USERPROFILE": str(tmp_path / "home"),
+        "LOCALAPPDATA": str(localappdata),
+    }
 
 
 def _payload(target: Path, event: str, *, session_id: str = "session-1", **extra):
@@ -256,3 +263,14 @@ def test_two_prompt_events_do_not_double_inject(tmp_path: Path, marker_env: dict
     assert compaction_marker.CLAIM_KEY not in cleaned
     compaction_marker.complete_claim_path(claim_path)
     assert runtime.handle_payload("UserPromptSubmit", payload) is None
+
+
+def test_cache_env_includes_windows_localappdata(tmp_path: Path):
+    """component_paths.cache_root resolves on Windows only with LOCALAPPDATA set."""
+    from brigade import component_paths
+
+    env = _cache_env(tmp_path)
+    assert Path(env["LOCALAPPDATA"]).is_dir()
+    with pytest.raises(ValueError, match="LOCALAPPDATA"):
+        component_paths.cache_root(env={"XDG_CACHE_HOME": env["XDG_CACHE_HOME"]}, system="windows")
+    assert component_paths.cache_root(env=env, system="windows")

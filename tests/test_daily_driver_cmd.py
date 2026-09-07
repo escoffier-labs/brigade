@@ -1718,3 +1718,35 @@ def test_daily_hardening_repo_fleet_daily_use_findings(tmp_path, monkeypatch, ca
     }
     assert {146, 151} <= fleet_phases
     assert audit["implemented_phase_count"] == 50
+
+
+def test_bounded_status_call_binds_slow_section_without_sigalrm(monkeypatch):
+    """Without SIGALRM (Windows) a slow section must still report warn via a worker thread."""
+    import signal as signal_module
+
+    from brigade.daily_cmd import config as daily_config
+
+    monkeypatch.delattr(signal_module, "SIGALRM", raising=False)
+
+    def slow():
+        time.sleep(30)
+        return "slow-result"
+
+    result, check = daily_config._bounded_status_call("slow-section", slow, fallback="fallback", timeout_seconds=1)
+    assert result == "fallback"
+    assert check["status"] == "warn"
+    assert "timed out after 1s" in check["detail"]
+
+    result, check = daily_config._bounded_status_call(
+        "fast-section", lambda: "ok-result", fallback="fallback", timeout_seconds=5
+    )
+    assert result == "ok-result"
+    assert check["status"] == "ok"
+
+    def boom():
+        raise RuntimeError("section exploded")
+
+    result, check = daily_config._bounded_status_call("bad-section", boom, fallback="fallback", timeout_seconds=5)
+    assert result == "fallback"
+    assert check["status"] == "warn"
+    assert "RuntimeError" in check["detail"]
