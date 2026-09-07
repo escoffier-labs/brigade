@@ -1712,7 +1712,73 @@ def _closeout_quiet_set(closeout: dict[str, Any] | None) -> tuple[set[str], str 
     return set(), None
 
 
-def closeout(*, target: Path, reason: str | None = None, defer: bool = False, json_output: bool = False) -> int:
+def _closeout_block_message(*, defer: bool, reason_text: str, cards: list[Any]) -> str | None:
+    if defer and not reason_text:
+        return "error: deferred memory-care closeout requires a nonblank --reason"
+    if not defer and cards:
+        return (
+            f"error: memory-care refresh queue has {len(cards)} unresolved candidate(s); "
+            "closeout cannot mark them reviewed. Use --defer with a nonblank --reason to "
+            "defer explicitly, or resolve the queue first."
+        )
+    return None
+
+
+def _closeout_issue_groups(cards: list[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        kind = str(card.get("issue_type") or "unknown")
+        counts[kind] = counts.get(kind, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _closeout_preview_candidates(cards: list[Any]) -> list[dict[str, Any]]:
+    preview: list[dict[str, Any]] = []
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        preview.append(
+            {
+                "card_id": card.get("card_id"),
+                "file": card.get("file"),
+                "issue_type": card.get("issue_type"),
+                "safe_summary": card.get("safe_summary"),
+                "source_fingerprint": card.get("source_fingerprint"),
+            }
+        )
+    preview.sort(key=lambda item: (str(item.get("issue_type") or ""), str(item.get("file") or "")))
+    return preview
+
+
+def _print_closeout_dry_run(payload: dict[str, Any]) -> None:
+    print("memory_care_closeout: dry-run")
+    print(f"intended_status: {payload['intended_status']}")
+    print(f"would_write: {str(payload['would_write']).lower()}")
+    print(f"would_block: {str(payload['would_block']).lower()}")
+    print(f"candidates: {payload['candidate_count']}")
+    if payload.get("block_reason"):
+        print(f"block_reason: {payload['block_reason']}")
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for card in payload.get("candidates") or []:
+        kind = str(card.get("issue_type") or "unknown")
+        grouped.setdefault(kind, []).append(card)
+    for kind in sorted(grouped):
+        items = grouped[kind]
+        print(f"{kind}: {len(items)}")
+        for card in items:
+            print(f"  {card.get('file') or '-'} {card.get('card_id') or '-'}")
+
+
+def closeout(
+    *,
+    target: Path,
+    reason: str | None = None,
+    defer: bool = False,
+    dry_run: bool = False,
+    json_output: bool = False,
+) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
@@ -1751,33 +1817,36 @@ def closeout(*, target: Path, reason: str | None = None, defer: bool = False, js
     cards_value = queue.get("cards")
     cards = cards_value if isinstance(cards_value, list) else []
     reason_text = (reason or "").strip()
-    if defer and not reason_text:
-        message = "error: deferred memory-care closeout requires a nonblank --reason"
+    block_message = _closeout_block_message(defer=defer, reason_text=reason_text, cards=cards)
+    if dry_run:
+        preview = {
+            "status": "dry-run",
+            "dry_run": True,
+            "would_write": False,
+            "intended_status": "deferred" if defer else "reviewed",
+            "would_block": block_message is not None,
+            "block_reason": block_message,
+            "reason": reason_text,
+            "candidate_count": len(cards),
+            "by_issue_type": _closeout_issue_groups(cards),
+            "candidates": _closeout_preview_candidates(cards),
+        }
         if json_output:
-            print(
-                json.dumps(
-                    {"status": "blocked", "error": message, "candidate_count": len(cards)}, indent=2, sort_keys=True
-                )
-            )
+            print(json.dumps(preview, indent=2, sort_keys=True))
         else:
-            print(message, file=sys.stderr)
-        return 1
-    if not defer and cards:
-        message = (
-            f"error: memory-care refresh queue has {len(cards)} unresolved candidate(s); "
-            "closeout cannot mark them reviewed. Use --defer with a nonblank --reason to "
-            "defer explicitly, or resolve the queue first."
-        )
+            _print_closeout_dry_run(preview)
+        return 0
+    if block_message:
         if json_output:
             print(
                 json.dumps(
-                    {"status": "blocked", "error": message, "candidate_count": len(cards)},
+                    {"status": "blocked", "error": block_message, "candidate_count": len(cards)},
                     indent=2,
                     sort_keys=True,
                 )
             )
         else:
-            print(message, file=sys.stderr)
+            print(block_message, file=sys.stderr)
         return 1
     fingerprints = [
         str(card.get("source_fingerprint"))

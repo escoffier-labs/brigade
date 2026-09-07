@@ -1382,6 +1382,103 @@ def test_memory_care_closeout_refuses_missing_or_invalid_queue(tmp_path, capsys)
     assert not (tmp_path / ".brigade" / "memory-care" / "closeouts").exists()
 
 
+def test_memory_care_closeout_dry_run_previews_queue_by_issue_kind_without_writes(tmp_path, capsys):
+    cards = [
+        _valid_memory_care_card(
+            card_id="card-stale-b",
+            file="memory/cards/stale-b.md",
+            issue_type="stale",
+            source_fingerprint="memory-fp-stale-b",
+        ),
+        _valid_memory_care_card(
+            card_id="card-expired",
+            file="memory/cards/expired.md",
+            issue_type="expired",
+            source_fingerprint="memory-fp-expired",
+        ),
+        _valid_memory_care_card(
+            card_id="card-stale-a",
+            file="memory/cards/stale-a.md",
+            issue_type="stale",
+            source_fingerprint="memory-fp-stale-a",
+        ),
+    ]
+    _write_memory_care_queue(tmp_path, {"version": 1, "cards": cards})
+    before = _snapshot_tree(tmp_path)
+
+    assert memory_cmd.closeout(target=tmp_path, dry_run=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "dry-run"
+    assert payload["dry_run"] is True
+    assert payload["would_write"] is False
+    assert payload["intended_status"] == "reviewed"
+    assert payload["would_block"] is True
+    assert payload["candidate_count"] == 3
+    assert payload["by_issue_type"] == {"expired": 1, "stale": 2}
+    assert [item["issue_type"] for item in payload["candidates"]] == ["expired", "stale", "stale"]
+    assert [item["file"] for item in payload["candidates"]] == [
+        "memory/cards/expired.md",
+        "memory/cards/stale-a.md",
+        "memory/cards/stale-b.md",
+    ]
+    assert _snapshot_tree(tmp_path) == before
+    assert list((tmp_path / ".brigade" / "memory-care").rglob("closeout.json")) == []
+
+    assert (
+        memory_cmd.closeout(
+            target=tmp_path,
+            defer=True,
+            reason="hub backlog preview",
+            dry_run=True,
+            json_output=False,
+        )
+        == 0
+    )
+    human = capsys.readouterr()
+    assert "memory_care_closeout: dry-run" in human.out
+    assert "intended_status: deferred" in human.out
+    assert "would_write: false" in human.out
+    assert "would_block: false" in human.out
+    assert "stale: 2" in human.out
+    assert "expired: 1" in human.out
+    assert "memory/cards/stale-a.md card-stale-a" in human.out
+    assert not human.err
+    assert _snapshot_tree(tmp_path) == before
+
+    assert (
+        cli.main(
+            [
+                "memory",
+                "care",
+                "closeout",
+                "--target",
+                str(tmp_path),
+                "--dry-run",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    cli_payload = json.loads(capsys.readouterr().out)
+    assert cli_payload["status"] == "dry-run"
+    assert cli_payload["by_issue_type"] == {"expired": 1, "stale": 2}
+    assert _snapshot_tree(tmp_path) == before
+
+    # Writes still refuse a nonempty review closeout after a dry-run.
+    assert memory_cmd.closeout(target=tmp_path, json_output=True) == 1
+    blocked = json.loads(capsys.readouterr().out)
+    assert blocked["status"] == "blocked"
+    assert _snapshot_tree(tmp_path) == before
+
+
+def test_memory_care_closeout_dry_run_still_refuses_invalid_queue(tmp_path, capsys):
+    _write_memory_care_queue(tmp_path, {"version": 1, "cards": [_valid_memory_care_card(safe_summary="   ")]})
+    before = _snapshot_tree(tmp_path)
+    assert memory_cmd.closeout(target=tmp_path, dry_run=True, json_output=True) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "blocked"
+    assert _snapshot_tree(tmp_path) == before
+
+
 def test_memory_care_health_ignores_malformed_closeout_receipts(tmp_path):
     _write_memory_care_queue(tmp_path, {"version": 1, "cards": [_valid_memory_care_card()]})
 
