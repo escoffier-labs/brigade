@@ -10,7 +10,7 @@ import re
 import shutil
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +62,19 @@ CHECKS = (
 )
 CONFIDENCE_RANK = {"unknown": 0, "low": 1, "medium": 2, "high": 3}
 PLANABLE_METADATA_FIXES = {"missing-reviewed", "missing-freshness"}
+FRESHNESS_DERIVATION = "last_reviewed+stale_after_days"
+
+
+def _metadata_plan_blockers(issue_type: str, *, reviewed: date | None) -> list[str]:
+    if issue_type == "missing-reviewed":
+        return ["requires-current-evidence-review"]
+    if issue_type == "missing-freshness":
+        return [] if reviewed is not None else ["requires-operator-freshness-date"]
+    return ["issue-type-not-supported-for-metadata-plan"]
+
+
+def _derived_fresh_until(reviewed: date, stale_after_days: int) -> str:
+    return (reviewed + timedelta(days=stale_after_days)).isoformat()
 
 
 @dataclass(frozen=True)
@@ -519,6 +532,7 @@ def _issue(
     summary: str,
     evidence: list[str],
     action: str,
+    reviewed: date | None = None,
 ) -> dict[str, Any]:
     fingerprint = _stable_hash(
         {
@@ -577,16 +591,13 @@ def _issue(
         "source_item_key": f"memory-care:{card_id}:{issue_type}",
     }
     if issue_type in PLANABLE_METADATA_FIXES:
+        blockers = _metadata_plan_blockers(issue_type, reviewed=reviewed)
         record["safe_autofix_plan"] = {
             "mode": "metadata-only",
             "safe_to_apply_automatically": False,
             "would_write": False,
-            "blocked": True,
-            "blockers": (
-                ["requires-current-evidence-review"]
-                if issue_type == "missing-reviewed"
-                else ["requires-operator-freshness-date"]
-            ),
+            "blocked": bool(blockers),
+            "blockers": blockers,
             "candidate_fields": (["last_reviewed"] if issue_type == "missing-reviewed" else ["fresh_until"]),
         }
     return record
@@ -675,6 +686,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
                     summary=f"{rel} has no freshness date metadata.",
                     evidence=["fresh_until missing"],
                     action="Add a freshness date or document why the card should not expire.",
+                    reviewed=reviewed,
                 )
             )
         if "expired" in enabled and expiry is not None and (expiry - today).days <= config.expiry_warning_days:
@@ -949,22 +961,45 @@ def _archive_candidates_from_scan(scan_payload: dict[str, Any] | None, config: M
     }
 
 
-def _autofix_plan_item(issue: dict[str, Any], *, target: Path, scan_date: str) -> dict[str, Any]:
+def _autofix_block_reason_counts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for item in items:
+        blockers = item.get("blockers")
+        if not isinstance(blockers, list):
+            continue
+        for blocker in blockers:
+            if isinstance(blocker, str) and blocker:
+                counts[blocker] = counts.get(blocker, 0) + 1
+    return [
+        {"reason": reason, "count": counts[reason]}
+        for reason in sorted(counts, key=lambda name: (-counts[name], name))
+    ]
+
+
+def _format_block_reasons(reasons: object) -> str:
+    if not isinstance(reasons, list) or not reasons:
+        return "none"
+    parts: list[str] = []
+    for item in reasons:
+        if not isinstance(item, dict):
+            continue
+        reason = item.get("reason")
+        count = item.get("count")
+        if isinstance(reason, str) and reason and isinstance(count, int):
+            parts.append(f"{reason}={count}")
+    return ", ".join(parts) if parts else "none"
+
+
+def _autofix_plan_item(
+    issue: dict[str, Any], *, target: Path, scan_date: str, config: MemoryCareConfig
+) -> dict[str, Any]:
     card_file = str(issue.get("file") or issue.get("card_file") or "")
     issue_type = str(issue.get("issue_type") or "")
     source_fingerprint = str(issue.get("source_fingerprint") or "")
     path = target / card_file if card_file else target
     blockers: list[str] = []
     candidate_fields: dict[str, str] = {}
-    safe_to_apply = False
-    if issue_type == "missing-reviewed":
-        candidate_fields["last_reviewed"] = scan_date
-        blockers.append("requires-current-evidence-review")
-    elif issue_type == "missing-freshness":
-        candidate_fields["fresh_until"] = "<operator-selected-date>"
-        blockers.append("requires-operator-freshness-date")
-    else:
-        blockers.append("issue-type-not-supported-for-metadata-plan")
+    reviewed: date | None = None
     if not card_file:
         blockers.append("missing-card-path")
     elif not path.is_file():
@@ -975,10 +1010,21 @@ def _autofix_plan_item(issue: dict[str, Any], *, target: Path, scan_date: str) -
         except OSError:
             blockers.append("card-file-unreadable")
         else:
-            _meta, has_frontmatter = _parse_frontmatter(text)
+            meta, has_frontmatter = _parse_frontmatter(text)
             if not has_frontmatter:
                 blockers.append("card-frontmatter-missing")
-    return {
+            else:
+                reviewed = _parse_date(_frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at"))
+    if issue_type == "missing-reviewed":
+        candidate_fields["last_reviewed"] = scan_date
+    elif issue_type == "missing-freshness":
+        if reviewed is not None:
+            candidate_fields["fresh_until"] = _derived_fresh_until(reviewed, config.stale_after_days)
+        else:
+            candidate_fields["fresh_until"] = "<operator-selected-date>"
+    blockers.extend(_metadata_plan_blockers(issue_type, reviewed=reviewed))
+    unblocked = not blockers
+    item = {
         "id": f"memory-care-fix-{source_fingerprint or _stable_hash({'file': card_file, 'issue_type': issue_type})}",
         "card_file": card_file,
         "card_id": issue.get("card_id"),
@@ -987,11 +1033,16 @@ def _autofix_plan_item(issue: dict[str, Any], *, target: Path, scan_date: str) -
         "safe_summary": issue.get("safe_summary") or issue.get("summary") or "",
         "candidate_fields": candidate_fields,
         "status": "blocked" if blockers else "planned",
-        "safe_to_apply_automatically": safe_to_apply,
+        "safe_to_apply_automatically": False,
         "would_write": False,
         "blockers": blockers,
-        "suggested_next_command": "brigade memory care import-issues",
+        "suggested_next_command": (
+            "brigade memory care backfill" if unblocked else "brigade memory care import-issues"
+        ),
     }
+    if issue_type == "missing-freshness" and reviewed is not None:
+        item["derivation"] = FRESHNESS_DERIVATION
+    return item
 
 
 def _autofix_plan_payload(
@@ -1008,11 +1059,18 @@ def _autofix_plan_payload(
     issues_value = scan_payload.get("issues") if isinstance(scan_payload, dict) else None
     issues = issues_value if isinstance(issues_value, list) else []
     items = [
-        _autofix_plan_item(issue, target=target, scan_date=scan_date)
+        _autofix_plan_item(issue, target=target, scan_date=scan_date, config=config)
         for issue in issues
         if isinstance(issue, dict) and str(issue.get("issue_type") or "") in PLANABLE_METADATA_FIXES
     ]
     blocked = [item for item in items if item.get("blockers")]
+    unblocked = [item for item in items if not item.get("blockers")]
+    if unblocked:
+        next_command = "brigade memory care backfill"
+    elif items:
+        next_command = "brigade memory care import-issues"
+    else:
+        next_command = "brigade memory care scan"
     return {
         "target": str(target),
         "scan_path": str(_scan_path(target, config)),
@@ -1022,8 +1080,9 @@ def _autofix_plan_payload(
         "would_write": False,
         "plan_count": len(items),
         "blocked_count": len(blocked),
+        "block_reasons": _autofix_block_reason_counts(items),
         "items": items,
-        "suggested_next_command": "brigade memory care import-issues" if items else "brigade memory care scan",
+        "suggested_next_command": next_command,
     }
 
 
@@ -1080,6 +1139,7 @@ def plan_fixes(*, target: Path, json_output: bool = False) -> int:
     print("would_write: false")
     print(f"planned: {payload['plan_count']}")
     print(f"blocked: {payload['blocked_count']}")
+    print(f"block_reasons: {_format_block_reasons(payload.get('block_reasons'))}")
     for item in payload["items"]:
         blockers = ",".join(item.get("blockers", [])) or "none"
         print(f"- {item['card_file']} {item['issue_type']} {item['status']} blockers={blockers}")
@@ -1265,6 +1325,7 @@ def health(target: Path) -> dict[str, Any]:
         "autofix_plan": {
             "plan_count": autofix_plan.get("plan_count", 0),
             "blocked_count": autofix_plan.get("blocked_count", 0),
+            "block_reasons": autofix_plan.get("block_reasons") or [],
             "top_item": autofix_items[0] if autofix_items else None,
             "suggested_next_command": "brigade memory care plan-fixes" if autofix_plan.get("plan_count") else None,
             "would_write": False,
@@ -1324,6 +1385,7 @@ def status(*, target: Path, json_output: bool = False) -> int:
         print(
             f"autofix_plan: planned={autofix_plan.get('plan_count')} blocked={autofix_plan.get('blocked_count')} would_write=false"
         )
+        print(f"autofix_plan_block_reasons: {_format_block_reasons(autofix_plan.get('block_reasons'))}")
         if autofix_plan.get("suggested_next_command"):
             print(f"autofix_plan_command: {autofix_plan.get('suggested_next_command')}")
     top = payload.get("top_issue") if isinstance(payload.get("top_issue"), dict) else None
