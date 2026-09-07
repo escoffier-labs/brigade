@@ -2672,7 +2672,9 @@ def _publish_scanner_config(target: Path, data: bytes, *, force: bool) -> None:
         descriptor = ledger_mod._dirfd_open_file(
             parent,
             temporary_name,
-            dirfd_mod.file_flags(_INBOX_TEMP_MODE),
+            # _dirfd_open_file is descriptor-relative on both platforms; Windows gets
+            # its no-follow guarantee from the NT handle, so the POSIX bit stays optional.
+            _INBOX_TEMP_MODE | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
             0o600,
         )
         with os.fdopen(os.dup(descriptor), "wb") as handle:
