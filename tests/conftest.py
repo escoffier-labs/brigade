@@ -50,6 +50,7 @@ def _seat_health_probe_reports_healthy(monkeypatch, request):
         "test_seat_health_policy",
         "test_aboyeur_seat_health_probe",
         "test_aboyeur_orchestrator_health_routing",
+        "test_roster_doctor",
     }:
         return
 

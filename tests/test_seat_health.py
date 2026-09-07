@@ -277,7 +277,18 @@ def test_model_smoke_runs_only_in_a_temporary_git_repository(monkeypatch):
         "resolve_agent_executable",
         lambda cli: proc.ExecutableIdentity(cli, None, "fixture", True, "fixture"),
     )
-    monkeypatch.setattr(seat_health.proc, "run", lambda *args, **kwargs: proc.Result(0, "1.2.3", ""))
+    real_run = proc.run
+
+    def fake_run(*args, **kwargs):
+        # The executable-version lookup stays faked, but the temporary git
+        # repo setup runs for real (through the bounded proc runner) so the
+        # smoke workspace is a genuine .git worktree.
+        argv = list(args[0]) if args else list(kwargs.get("args", ()))
+        if argv[:2] == ["git", "init"]:
+            return real_run(argv, timeout=10.0)
+        return proc.Result(0, "1.2.3", "")
+
+    monkeypatch.setattr(seat_health.proc, "run", fake_run)
 
     def smoke(agent, roster_value, workspace, timeout):
         seen.append(workspace)

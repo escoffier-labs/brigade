@@ -1,4 +1,5 @@
-import subprocess
+import os
+import stat
 
 from brigade import agents, model_inventory
 
@@ -157,12 +158,15 @@ def test_cursor_inventory_uses_command_prefix(monkeypatch):
 def test_cursor_inventory_uses_regular_file_capture(monkeypatch):
     listing = _cursor_listing("composer-2.5", "kimi-k2.7-code", "glm-5.2-high")
 
-    def fake_run(argv, **kwargs):
-        assert kwargs["stdout"] is not subprocess.PIPE
-        kwargs["stdout"].write(listing.encode())
-        return subprocess.CompletedProcess(argv, 0, stderr=b"")
+    def fake_run_to_file(argv, stdout_file, **kwargs):
+        assert argv == ["cursor-agent", "models"]
+        # The probe must capture through a regular file, never a pipe: piped
+        # cursor-agent output truncates at 8 KiB.
+        assert stat.S_ISREG(os.fstat(stdout_file.fileno()).st_mode)
+        stdout_file.write(listing.encode())
+        return agents.proc.Result(0, "", "")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(model_inventory.proc, "run_to_file", fake_run_to_file)
 
     result = model_inventory._run_cursor_inventory()
 
@@ -174,13 +178,13 @@ def test_cursor_inventory_is_stable_across_repeated_probes(monkeypatch):
     calls = []
     listing = _cursor_listing("composer-2.5", "kimi-k2.7-code", "glm-5.2-high")
 
-    def fake_run(argv, **kwargs):
+    def fake_run_to_file(argv, stdout_file, **kwargs):
         calls.append(argv)
-        assert kwargs["stdout"] is not subprocess.PIPE
-        kwargs["stdout"].write(listing.encode())
-        return subprocess.CompletedProcess(argv, 0, stderr=b"")
+        assert stat.S_ISREG(os.fstat(stdout_file.fileno()).st_mode)
+        stdout_file.write(listing.encode())
+        return agents.proc.Result(0, "", "")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(model_inventory.proc, "run_to_file", fake_run_to_file)
 
     for requested in ("kimi-k2.7-code", "glm-5.2-high"):
         for _ in range(3):
