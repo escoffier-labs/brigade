@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - The Cosign signer profile now exports agent-change and commit-linkage statements as Sigstore bundles for external verification. (#1404)
+- Fleet status and Command Deck report policy authority as staged before migration activation and active afterward, without activating the migration. (#1460)
 
 ### Changed
 
