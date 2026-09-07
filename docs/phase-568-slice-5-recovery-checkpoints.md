@@ -459,3 +459,11 @@ staleness under version 2.
   the checkpoint covers their bytes and the projector still derives the last mapped status.
 - Checkpointing `runguard._recover_run_artifact` repair writes (they are the recovery plane, not live transitions).
 - Any new top-level harness, depth, or include manifest.
+
+## Addendum: oversize degrade (#1506)
+
+`publish_checkpoint_file` still refuses a raw body above `MAX_CHECKPOINT_BYTES`.
+`write_checkpoint` now degrades that one case instead of aborting the live
+write: the published body keeps status, durable request flags, and the tree
+fingerprint, records `truncated` plus the oversized asset-path list, and drops
+bulky fields. Authority recovery strips those two keys before projection.
