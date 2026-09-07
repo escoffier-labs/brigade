@@ -41,7 +41,6 @@ BIND_DRIFT_CHECK = "bind-drift"
 INGRESS_PORT_MISMATCH_CHECK = "ingress-port-mismatch"
 ALLOWED_HOST_MISSING_CHECK = "allowed-host-missing"
 NO_PUBLIC_ROUTE_CHECK = "no-public-route"
-NO_PUBLIC_ROUTE_DETAIL = "pack answers only on its local bind"
 REACHABILITY_NO_PUBLIC_ROUTE = "no-public-route"
 REACHABILITY_HOST_LOCAL = "host-local"
 REACHABILITY_PUBLIC = "public"
@@ -1256,7 +1255,6 @@ def _no_public_route_checks(target: Path, pack: Mapping[str, Any]) -> list[dict[
         {
             "check": NO_PUBLIC_ROUTE_CHECK,
             "status": "manual",
-            "detail": NO_PUBLIC_ROUTE_DETAIL,
         }
     ]
 

@@ -913,7 +913,7 @@ def test_cerebro_doctor_canary_and_unit_hide_paths(tmp_path: Path, monkeypatch):
     assert SECRET not in unit
     assert str(executable) not in unit
     assert any(check["check"] == "no-public-route" and check["status"] == "manual" for check in checks)
-    assert all(set(check) == {"check", "status"} for check in checks if check["check"] != "no-public-route")
+    assert all(set(check) == {"check", "status"} for check in checks)
     assert canary["ok"] is False
     assert "--pack" in unit
     assert "cerebro-memory" in unit
@@ -1694,7 +1694,6 @@ def test_pack_doctor_reports_manual_no_public_route_for_connector(tmp_path: Path
     assert {
         "check": "no-public-route",
         "status": "manual",
-        "detail": "pack answers only on its local bind",
     } in checks
     assert all(check["status"] != "fail" or check["check"] != "no-public-route" for check in checks)
     assert SECRET not in rendered
