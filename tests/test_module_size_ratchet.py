@@ -19,7 +19,7 @@ LEGACY_OVERSIZED: dict[str, int] = {
     "src/brigade/run_redaction.py": 2802,
     "src/brigade/harness_profile_cmd.py": 2570,
     "src/brigade/work_cmd/verification.py": 2380,
-    "src/brigade/memory_cmd.py": 2189,
+    "src/brigade/memory_cmd.py": 2093,
     "src/brigade/care_cmd.py": 2084,
     "src/brigade/receipts_cmd.py": 2055,
 }
