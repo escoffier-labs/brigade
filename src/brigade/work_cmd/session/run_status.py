@@ -16,6 +16,7 @@ from ... import dogfood_cmd, localio
 from ...install import apply_gitignore
 from .. import constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
 from .. import scanners as scanners_mod, reviews as reviews_mod, edges as edges_mod
+from ..scanner_platform import ScannerDescriptorOperationsUnavailable
 
 from .briefing import (
     _doctor_ignore_level,
@@ -126,6 +127,8 @@ def bootstrap(
     try:
         scanners_mod._bind_released_unbound_scanner_runs_root(effective_target)
         _print_bootstrap_line(constants.OK, "scanner_runs_root", "ready")
+    except ScannerDescriptorOperationsUnavailable as exc:
+        _print_bootstrap_line(constants.WARN, "scanner_runs_root", exc)
     except OSError as exc:
         failures += 1
         _print_bootstrap_line(constants.FAIL, "scanner_runs_root", exc)

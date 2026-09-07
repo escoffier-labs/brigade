@@ -880,6 +880,26 @@ def test_operator_init_dry_run_does_not_write(tmp_path, capsys):
     assert not (tmp_path / ".brigade" / "daily.toml").exists()
 
 
+def test_operator_init_skips_windows_scanner_bootstrap_and_continues(tmp_path, monkeypatch, capsys):
+    from brigade.work_cmd import scanner_platform
+
+    monkeypatch.setattr(scanner_platform, "_platform_name", "nt")
+
+    assert operator_cmd.init(target=tmp_path, json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    scanner_step = next(row for row in payload["results"] if row["id"] == "work-scanners")
+    assert scanner_step == {
+        "id": "work-scanners",
+        "path": str(tmp_path / ".brigade" / "scanners.toml"),
+        "status": "skipped",
+        "reason": scanner_platform.SCANNER_DESCRIPTOR_OPERATIONS_UNAVAILABLE,
+    }
+    assert (tmp_path / ".brigade" / "daily.toml").is_file()
+    assert (tmp_path / ".brigade" / "reviews.toml").is_file()
+    assert not (tmp_path / ".brigade" / "scanners.toml").exists()
+
+
 def test_operator_init_dry_run_previews_existing_handoff_source_merge(tmp_path, capsys):
     path = tmp_path / ".brigade" / "handoff-sources.json"
     path.parent.mkdir()
