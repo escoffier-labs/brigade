@@ -239,3 +239,68 @@ def test_resolve_executable_keeps_linux_behavior_unchanged(monkeypatch):
     assert identity.path == "/usr/bin/codex"
     assert identity.kind == "native"
     assert identity.runnable is True
+
+
+def test_resolve_executable_accepts_native_windows_claude_exe(monkeypatch):
+    """Real fleet shape: `claude` resolves to a native .exe outside npm."""
+    resolved = r"C:\Program Files\claude\claude.exe"
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(proc, "which", _fake_windows_which({"claude": resolved}))
+
+    identity = proc.resolve_executable("claude")
+
+    assert identity.path == resolved
+    assert identity.kind == "exe"
+    assert identity.runnable is True
+    assert "supported Windows exe" in identity.detail
+    assert resolved not in identity.detail
+
+
+def test_resolve_executable_accepts_npm_node_wrapper_codex_exe(monkeypatch):
+    """Real fleet shape: `codex` resolves to a node-hosted .exe under npm."""
+    resolved = r"C:\Users\fleet\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.exe"
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(proc, "which", _fake_windows_which({"codex": resolved}))
+
+    identity = proc.resolve_executable("codex")
+
+    assert identity.path == resolved
+    assert identity.kind == "exe"
+    assert identity.runnable is True
+    assert "supported Windows exe" in identity.detail
+    assert resolved not in identity.detail
+
+
+def test_resolve_executable_ps1_shim_needs_per_seat_command_override(monkeypatch):
+    """Real fleet shape: `cursor-agent` resolves to a .ps1 shim.
+
+    The bare seat CLI stays non-runnable, but a per-seat command override
+    (node.exe plus the seat entrypoint, see #1115) resolves to a runnable
+    exe so dispatch can proceed.
+    """
+    shim = r"C:\Users\fleet\AppData\Roaming\npm\cursor-agent.ps1"
+    node = r"C:\Cursor\versions\current\node.exe"
+    entrypoint = r"C:\Cursor\versions\current\index.js"
+
+    def _which(command: str, path: str | None = None) -> str | None:
+        if command == "cursor-agent":
+            return shim
+        if command == node:
+            return node
+        return None
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(proc, "which", _which)
+
+    shim_identity = agents.resolve_agent_executable("cursor")
+
+    assert shim_identity.path == shim
+    assert shim_identity.kind == "unsupported.ps1"
+    assert shim_identity.runnable is False
+    assert "PowerShell script" in shim_identity.detail
+
+    override_identity = agents.resolve_agent_executable("cursor", command=(node, entrypoint))
+
+    assert override_identity.path == node
+    assert override_identity.kind == "exe"
+    assert override_identity.runnable is True
