@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import work_cmd
+from brigade import dirfd, work_cmd
 from brigade.security_cmd import AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY
 from brigade.work_cmd import inbox_lock, ledger
 from brigade.work_cmd.ledger import descriptor_anchors
@@ -37,7 +37,7 @@ def _bind_workspace(tmp_path: Path) -> dict[str, int]:
     _enable_external_key_isolation(tmp_path)
     (tmp_path / ".brigade").mkdir(exist_ok=True)
     workspace = ledger._workspace_directory_identity(tmp_path)
-    root = os.open(tmp_path / ".brigade", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    root = dirfd.open_directory_nofollow(tmp_path / ".brigade")
     try:
         ledger._record_external_directory_authority(tmp_path, (".brigade",), root, workspace=workspace)
     finally:
@@ -73,7 +73,7 @@ def test_record_verifier_owned_file_holds_inbox_writer_lock(tmp_path: Path, monk
 
     monkeypatch.setattr(ledger, "_write_external_directory_authority", wrapped)
     data = receipt.read_bytes()
-    descriptor = os.open(receipt, os.O_RDONLY | os.O_NOFOLLOW)
+    descriptor = dirfd.open_file_nofollow(receipt, os.O_RDONLY)
     try:
         ledger._record_verifier_owned_file(
             tmp_path,
@@ -116,7 +116,7 @@ def test_record_verifier_owned_file_concurrent_updates_do_not_lose_writes(tmp_pa
 
     def record(components: tuple[str, ...], receipt: Path) -> None:
         data = receipt.read_bytes()
-        descriptor = os.open(receipt, os.O_RDONLY | os.O_NOFOLLOW)
+        descriptor = dirfd.open_file_nofollow(receipt, os.O_RDONLY)
         try:
             ledger._record_verifier_owned_file(tmp_path, components=components, descriptor=descriptor, data=data)
         except BaseException as exc:
@@ -158,7 +158,7 @@ def test_record_verifier_owned_file_refuses_replaced_writer_lock(tmp_path: Path,
     monkeypatch.setattr(inbox_lock, "verify_inbox_writer_lock", boom)
     monkeypatch.setattr(ledger, "_write_external_directory_authority", wrapped)
     data = receipt.read_bytes()
-    descriptor = os.open(receipt, os.O_RDONLY | os.O_NOFOLLOW)
+    descriptor = dirfd.open_file_nofollow(receipt, os.O_RDONLY)
     try:
         with pytest.raises(OSError, match="replaced while held"):
             ledger._record_verifier_owned_file(
@@ -240,7 +240,7 @@ def test_open_verifier_owned_directory_parent_close_handoff_is_interrupt_safe(tm
         real_close(fd)
         if recycled or fd != opened.get("imports"):
             return
-        dummy = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+        dummy = dirfd.open_directory_nofollow(tmp_path)
         recycled.append(dummy)
         raise RuntimeError("interrupt after parent close")
 

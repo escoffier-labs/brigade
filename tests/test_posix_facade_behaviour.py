@@ -17,20 +17,24 @@ from brigade import grokbot_reconcile
 from brigade import proc
 from brigade.grokbot_job_validation import GrokbotJobError
 from brigade.grokbot_reconcile import ReconcileError
+from tests._posix import requires_dirfd, requires_process_groups
 
 
+@requires_dirfd
 def test_directory_flags_match_legacy_expression() -> None:
     """The facade refactor must not change the POSIX flag computation."""
     expected = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     assert dirfd.directory_flags() == expected
 
 
+@requires_dirfd
 def test_directory_flags_nofollow_false_matches_legacy_expression() -> None:
     """Root-anchor opens skip O_NOFOLLOW exactly like the old inline code."""
     expected = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
     assert dirfd.directory_flags(nofollow=False) == expected
 
 
+@requires_dirfd
 def test_file_flags_match_legacy_expression() -> None:
     """The new file facade pins the old ``mode | O_NOFOLLOW | O_CLOEXEC`` shape."""
     mode = os.O_RDONLY
@@ -92,6 +96,7 @@ def test_grokbot_reconcile_directory_flags_maps_to_typed_error(
         grokbot_reconcile._directory_flags()
 
 
+@requires_process_groups
 def test_process_group_id_matches_getpgid_on_posix() -> None:
     """The proc facade returns the real pgid where getpgid exists."""
     assert proc.process_group_id(os.getpid()) == os.getpgid(os.getpid())

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from brigade import localio, run_dirfd, run_journal
+from tests._posix import requires_dirfd
 
 
 def test_read_json_dict_invalid_utf8_returns_none(tmp_path: Path):
@@ -72,9 +73,7 @@ def test_write_text_atomic_fsyncs_parent_after_replace(tmp_path: Path, monkeypat
     assert any(kind == "fsync" and is_directory for kind, is_directory in calls[replace_index + 1 :])
 
 
-@pytest.mark.skipif(
-    os.name != "posix" or not hasattr(os, "O_NOFOLLOW"), reason="O_NOFOLLOW is a POSIX symlink hardening flag"
-)
+@requires_dirfd
 def test_write_text_atomic_opens_parent_without_following_symlinks(tmp_path: Path, monkeypatch):
     path = tmp_path / "receipt.txt"
     real_open = localio.os.open

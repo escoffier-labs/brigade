@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import authority_broker, authority_key, authority_marker, cli, scanner_isolation
+from brigade import authority_broker, authority_key, authority_marker, cli, dirfd, scanner_isolation
 from brigade.security_cmd import AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY
 from brigade.work_cmd import constants, helpers, ledger
 
@@ -54,7 +54,7 @@ def _bind_workspace(tmp_path: Path, *, external_key: bool = True) -> dict[str, i
         _enable_external_key_isolation(tmp_path)
     (tmp_path / ".brigade").mkdir(exist_ok=True)
     workspace = ledger._workspace_directory_identity(tmp_path)
-    root = os.open(tmp_path / ".brigade", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    root = dirfd.open_directory_nofollow(tmp_path / ".brigade")
     try:
         ledger._record_external_directory_authority(tmp_path, (".brigade",), root, workspace=workspace)
     finally:
@@ -93,7 +93,7 @@ def _write_g5_receipt(tmp_path: Path, item: dict) -> Path:
     os.close(descriptor)
     path = helpers._scanner_runs_root(tmp_path) / "chosen-run" / "receipt.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    parent = dirfd.open_directory_nofollow(path.parent)
     try:
         ledger._record_verifier_owned_directory(
             tmp_path,
@@ -104,7 +104,7 @@ def _write_g5_receipt(tmp_path: Path, item: dict) -> Path:
         os.close(parent)
     path.write_text(json.dumps(receipt), encoding="utf-8")
     data = path.read_bytes()
-    handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    handle = dirfd.open_file_nofollow(path, os.O_RDONLY)
     try:
         ledger._record_verifier_owned_file(
             tmp_path,

@@ -13,6 +13,7 @@ import pytest
 from brigade import aboyeur
 from brigade import agents
 from brigade import cli
+from brigade import dirfd
 from brigade import dogfood_cmd
 from brigade import localio
 from brigade import repos_cmd
@@ -2973,7 +2974,7 @@ conflict_window = "02:00-02:10"
     os.close(runs_authority)
     run_dir = tmp_path / ".brigade" / "scanners" / "runs" / "no-import-run"
     run_dir.mkdir(parents=True)
-    descriptor = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = dirfd.open_directory_nofollow(run_dir)
     try:
         work_cmd.ledger._record_verifier_owned_directory(
             tmp_path,
@@ -2998,7 +2999,7 @@ conflict_window = "02:00-02:10"
     )
     receipt_path = run_dir / "receipt.json"
     receipt_data = receipt_path.read_bytes()
-    receipt_fd = os.open(receipt_path, os.O_RDONLY | os.O_NOFOLLOW)
+    receipt_fd = dirfd.open_file_nofollow(receipt_path, os.O_RDONLY)
     try:
         work_cmd.ledger._record_verifier_owned_file(
             tmp_path,
