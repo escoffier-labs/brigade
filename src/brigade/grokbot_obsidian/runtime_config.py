@@ -59,6 +59,8 @@ def _is_windows_drive_rooted(value: str) -> bool:
 def is_absolute_safe_path(value: str) -> bool:
     if "\0" in value or has_explicit_dot_segment(value):
         return False
+    if any(seg and (seg.endswith(".") or seg.endswith(" ")) for seg in value.replace("\\", "/").split("/")):
+        return False
     if value.replace("\\", "/").startswith("//"):
         return False
     if value.startswith("/"):
@@ -91,7 +93,9 @@ def paths_overlap(left: str, right: str) -> bool:
         normalized_right = normalize_absolute_path(right)
     if normalized_left == normalized_right:
         return True
-    return normalized_left.startswith(f"{normalized_right}/") or normalized_right.startswith(f"{normalized_left}/")
+    right_prefix = normalized_right if normalized_right.endswith("/") else f"{normalized_right}/"
+    left_prefix = normalized_left if normalized_left.endswith("/") else f"{normalized_left}/"
+    return normalized_left.startswith(right_prefix) or normalized_right.startswith(left_prefix)
 
 
 def assert_disjoint_paths(paths: list[str]) -> None:

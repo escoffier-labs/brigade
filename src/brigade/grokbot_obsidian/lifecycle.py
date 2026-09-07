@@ -127,6 +127,8 @@ def validate_absolute_reference(path_text: object) -> str:
         _environment_invalid()
     if any(segment in {".", ".."} for segment in path_text.replace("\\", "/").split("/")):
         _environment_invalid()
+    if any(seg and (seg.endswith(".") or seg.endswith(" ")) for seg in path_text.replace("\\", "/").split("/")):
+        _environment_invalid()
     return normalize_absolute_path(path_text)
 
 

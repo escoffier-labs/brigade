@@ -114,6 +114,27 @@ def test_disjoint_paths_are_case_insensitive_on_windows(monkeypatch):
         )
 
 
+def test_disjoint_paths_handle_root_operand_and_reject_trailing_alias(monkeypatch):
+    import ntpath
+
+    from brigade.grokbot_wazuh.lifecycle import validate_absolute_reference as validate_ref
+
+    with pytest.raises(WazuhError):
+        validate_disjoint_state_paths("/", "/var/x", "/var/y", "/var/z")
+    with pytest.raises(WazuhError):
+        validate_disjoint_state_paths("/var/x", "/", "/var/y", "/var/z")
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(os.path, "normcase", ntpath.normcase)
+    with pytest.raises(WazuhError):
+        validate_disjoint_state_paths("C:\\", r"C:\brigade\state.json", r"C:\b", r"C:\c")
+    with pytest.raises(WazuhError):
+        validate_disjoint_state_paths(r"C:\brigade\state.json", "C:\\", r"C:\b", r"C:\c")
+    for rejected in ("/var/lib/state.", "/var/lib/state ", r"C:\state.", r"C:\state "):
+        with pytest.raises(WazuhError):
+            validate_ref(rejected)
+    assert isinstance(validate_ref("/var/lib/my.dir/state"), str)
+
+
 def test_absolute_reference_rejects_non_ascii_drive_letter():
     from brigade.grokbot_wazuh.lifecycle import validate_absolute_reference as validate_ref
 

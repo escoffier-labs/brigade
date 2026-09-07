@@ -168,6 +168,31 @@ def test_paths_overlap_is_case_insensitive_on_windows(monkeypatch):
     assert runtime_mod.paths_overlap(r"c:\brigade", r"C:\Brigade\State") is True
 
 
+def test_paths_overlap_handles_root_operand_and_rejects_trailing_alias(monkeypatch):
+    import ntpath
+
+    from brigade.grokbot_obsidian import runtime_config as runtime_mod
+    from brigade.grokbot_obsidian.lifecycle import validate_absolute_reference as validate_ref
+    from brigade.grokbot_obsidian.runtime_config import is_absolute_safe_path, required_absolute_path
+
+    assert runtime_mod.paths_overlap("/", "/var/x") is True
+    assert runtime_mod.paths_overlap("/var/x", "/") is True
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(os.path, "normcase", ntpath.normcase)
+    assert runtime_mod.paths_overlap("C:\\", r"C:\foo") is True
+    assert runtime_mod.paths_overlap(r"C:\foo", "C:\\") is True
+    assert runtime_mod.paths_overlap(r"C:\a", r"C:\a\b") is True
+    for rejected in ("/var/lib/state.", "/var/lib/state ", r"C:\state.", r"C:\state "):
+        with pytest.raises(ObsidianError):
+            validate_ref(rejected)
+        with pytest.raises(ObsidianError):
+            required_absolute_path(rejected)
+        assert is_absolute_safe_path(rejected) is False
+    assert isinstance(validate_ref("/var/lib/my.dir/state"), str)
+    assert isinstance(required_absolute_path("/var/lib/my.dir/state"), str)
+    assert is_absolute_safe_path("/var/lib/my.dir/state") is True
+
+
 def test_disjoint_paths_reject_backslash_nested_drive_paths():
     with pytest.raises(ObsidianError):
         validate_disjoint_state_paths(

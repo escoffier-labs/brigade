@@ -89,6 +89,8 @@ def validate_absolute_reference(path_text: object) -> str:
         _environment_invalid()
     if any(segment in {".", ".."} for segment in path_text.replace("\\", "/").split("/")):
         _environment_invalid()
+    if any(seg and (seg.endswith(".") or seg.endswith(" ")) for seg in path_text.replace("\\", "/").split("/")):
+        _environment_invalid()
     return normalize_absolute_path(path_text)
 
 
@@ -115,8 +117,8 @@ def validate_disjoint_state_paths(
                 right_flat = right
             if (
                 left_flat == right_flat
-                or left_flat.startswith(f"{right_flat}/")
-                or right_flat.startswith(f"{left_flat}/")
+                or left_flat.startswith(right_flat if right_flat.endswith("/") else f"{right_flat}/")
+                or right_flat.startswith(left_flat if left_flat.endswith("/") else f"{left_flat}/")
             ):
                 _environment_invalid()
     return paths
