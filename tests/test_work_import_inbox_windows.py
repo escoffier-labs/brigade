@@ -73,6 +73,7 @@ def test_nt_dirfd_directory_access_is_traversal_without_delete() -> None:
     """Intermediate/parent directory opens must not request DELETE (Win11 ACCESS_DENIED)."""
     traverse = nt_dirfd._DIRECTORY_TRAVERSE_ACCESS
     modify = nt_dirfd._DIRECTORY_MODIFY_ACCESS
+    mkdir = nt_dirfd._DIRECTORY_MKDIR_ACCESS
     assert traverse & nt_dirfd._FILE_LIST_DIRECTORY
     assert traverse & nt_dirfd._FILE_TRAVERSE
     assert traverse & nt_dirfd._SYNCHRONIZE
@@ -81,6 +82,10 @@ def test_nt_dirfd_directory_access_is_traversal_without_delete() -> None:
     assert modify & nt_dirfd._FILE_ADD_FILE
     assert modify & nt_dirfd._FILE_ADD_SUBDIRECTORY
     assert modify & nt_dirfd._FILE_DELETE_CHILD
+    assert mkdir == traverse | nt_dirfd._FILE_ADD_SUBDIRECTORY
+    assert not (mkdir & nt_dirfd._FILE_ADD_FILE)
+    assert not (mkdir & nt_dirfd._FILE_DELETE_CHILD)
+    assert not (mkdir & nt_dirfd._DELETE)
     assert nt_dirfd._directory_access(writable=False) == traverse
     assert nt_dirfd._directory_access(writable=True) == modify
     assert nt_dirfd._SHARE_ALL == (nt_dirfd._FILE_SHARE_READ | nt_dirfd._FILE_SHARE_WRITE | nt_dirfd._FILE_SHARE_DELETE)
@@ -88,6 +93,42 @@ def test_nt_dirfd_directory_access_is_traversal_without_delete() -> None:
     assert nt_dirfd._FILE_WRITE_ACCESS & nt_dirfd._FILE_WRITE_DATA
     assert nt_dirfd._FILE_READ_ACCESS & nt_dirfd._FILE_READ_DATA
     assert not hasattr(nt_dirfd, "_GENERIC_WRITE")
+
+
+def test_nt_dirfd_reopen_directory_writable_requests_mkdir_only_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mkdir-only reopen must not over-request FILE_ADD_FILE or FILE_DELETE_CHILD."""
+    from types import SimpleNamespace
+
+    captured: dict[str, object] = {}
+
+    def fake_nt_create(handle_ref: object, access: int, *args: object) -> int:
+        captured["access"] = access
+        handle_ref._obj.value = 123  # type: ignore[union-attr]
+        return 0
+
+    def fake_get_info(handle: object, info_ref: object) -> bool:
+        info_ref._obj.dwFileAttributes = nt_dirfd._FILE_ATTRIBUTE_DIRECTORY  # type: ignore[union-attr]
+        return True
+
+    api = SimpleNamespace(
+        OBJECT_ATTRIBUTES=nt_dirfd._OBJECT_ATTRIBUTES,
+        IO_STATUS_BLOCK=nt_dirfd._IO_STATUS_BLOCK,
+        NtCreateFile=fake_nt_create,
+        GetFileInformationByHandle=fake_get_info,
+        CloseHandle=lambda handle: True,
+        BY_HANDLE_FILE_INFORMATION=nt_dirfd._BY_HANDLE_FILE_INFORMATION,
+    )
+    monkeypatch.setattr(nt_dirfd, "_require_api", lambda: api)
+    monkeypatch.setattr(nt_dirfd, "_handle_from_fd", lambda _fd: 99)
+    monkeypatch.setattr(nt_dirfd, "_handle_to_fd", lambda _api, _handle, _flags: 7)
+
+    assert nt_dirfd.reopen_directory_writable(3) == 7
+    assert captured["access"] == nt_dirfd._DIRECTORY_MKDIR_ACCESS
+    assert captured["access"] & nt_dirfd._FILE_ADD_SUBDIRECTORY
+    assert not (captured["access"] & nt_dirfd._FILE_ADD_FILE)
+    assert not (captured["access"] & nt_dirfd._FILE_DELETE_CHILD)
 
 
 def test_nt_dirfd_access_denied_names_the_component() -> None:

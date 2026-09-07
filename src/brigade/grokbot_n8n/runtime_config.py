@@ -16,6 +16,7 @@ RUNTIME_KEYS = frozenset({"version", "base_url", "api_key_file"})
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 MAX_RUNTIME_BYTES = 16_384
 MAX_API_KEY_BYTES = 1_024
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
 
 
 def _runtime_error() -> NoReturn:
@@ -26,8 +27,16 @@ def _environment_error() -> NoReturn:
     raise N8nError("invalid_request", "n8n environment is invalid")
 
 
+def _require_secure_owner_read() -> None:
+    """Fail closed until Windows owner-SID/DACL checks are available."""
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise N8nError("unavailable", "secure-owner-read-unavailable")
+
+
 def _has_explicit_dot_segment(value: str) -> bool:
-    return any(segment in {".", ".."} for segment in value.split("/"))
+    if any(part in {".", ".."} for part in Path(value).parts):
+        return True
+    return any(segment in {".", ".."} for segment in value.replace("\\", "/").split("/"))
 
 
 def normalize_absolute_path(path_value: str) -> str:
@@ -35,20 +44,53 @@ def normalize_absolute_path(path_value: str) -> str:
     return trimmed if trimmed else "/"
 
 
-def required_absolute_path(value: object) -> str:
-    if not isinstance(value, str) or not value.startswith("/") or "\0" in value:
+def _is_windows_drive_rooted(value: str) -> bool:
+    if os.name != "nt":
+        return False
+    return len(value) >= 3 and value[0].isascii() and value[0].isalpha() and value[1] == ":" and value[2] in {"\\", "/"}
+
+
+def _reject_windows_network_or_device_root(value: str) -> None:
+    if value.replace("\\", "/").startswith("//"):
         _environment_error()
+    if value.startswith("/"):
+        return
+    if _is_windows_drive_rooted(value):
+        return
+    if Path(value).is_absolute():
+        drive = Path(value).drive
+        if len(drive) == 2 and drive[0].isascii() and drive[0].isalpha() and drive[1] == ":":
+            return
+    _environment_error()
+
+
+def required_absolute_path(value: object) -> str:
+    if not isinstance(value, str) or "\0" in value:
+        _environment_error()
+    assert isinstance(value, str)
+    _reject_windows_network_or_device_root(value)
+    if not Path(value).is_absolute() and not _is_windows_drive_rooted(value):
+        if not value.startswith("/"):
+            _environment_error()
     if _has_explicit_dot_segment(value):
+        _environment_error()
+    if any(seg and (seg.endswith(".") or seg.endswith(" ")) for seg in value.replace("\\", "/").split("/")):
         _environment_error()
     return normalize_absolute_path(value)
 
 
 def paths_overlap(left: str, right: str) -> bool:
-    normalized_left = normalize_absolute_path(left)
-    normalized_right = normalize_absolute_path(right)
+    if os.name == "nt":
+        normalized_left = os.path.normcase(normalize_absolute_path(left)).replace("\\", "/")
+        normalized_right = os.path.normcase(normalize_absolute_path(right)).replace("\\", "/")
+    else:
+        normalized_left = normalize_absolute_path(left)
+        normalized_right = normalize_absolute_path(right)
     if normalized_left == normalized_right:
         return True
-    return normalized_left.startswith(f"{normalized_right}/") or normalized_right.startswith(f"{normalized_left}/")
+    right_prefix = normalized_right if normalized_right.endswith("/") else f"{normalized_right}/"
+    left_prefix = normalized_left if normalized_left.endswith("/") else f"{normalized_left}/"
+    return normalized_left.startswith(right_prefix) or normalized_right.startswith(left_prefix)
 
 
 def assert_disjoint_paths(paths: list[str]) -> None:
@@ -104,7 +146,7 @@ def validate_base_url(value: object) -> str:
 
 
 def _assert_secure_stat(info: os.stat_result) -> None:
-    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+    if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600):
         _environment_error()
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         _environment_error()
@@ -117,6 +159,7 @@ def _file_identity(info: os.stat_result) -> tuple[int, int]:
 def _open_secure_file(path_text: str) -> tuple[int, os.stat_result]:
     from .. import grokbot_ops
 
+    _require_secure_owner_read()
     _require_posix_permissions()
     normalized = required_absolute_path(path_text)
     path = Path(normalized)

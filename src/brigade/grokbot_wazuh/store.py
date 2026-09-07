@@ -28,6 +28,14 @@ from .contracts import (
 
 STATE_SCHEMA = "brigade.grokbot.wazuh-state.v1"
 STATE_KEYS = frozenset({"alerts", "proposals", "schema", "suppressions"})
+SECURE_OWNER_WRITE_AVAILABLE = os.name == "posix"
+
+
+def _require_secure_owner_write() -> None:
+    if not SECURE_OWNER_WRITE_AVAILABLE:
+        raise WazuhError("secure-owner-write-unavailable")
+
+
 MAX_ALERTS = 2_048
 MAX_SUPPRESSIONS = 256
 MAX_PROPOSALS = 64
@@ -48,6 +56,7 @@ PUBLIC_ALERT_KEYS = frozenset(
     }
 )
 _SEMANTIC_KEYS = ("revision", "severity", "title", "body", "source_digest", "content_digest")
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
 
 
 def _unavailable() -> None:
@@ -58,11 +67,18 @@ def _invalid() -> None:
     raise WazuhError("protocol_error", ERROR_MESSAGES["protocol_error"])
 
 
+def _require_secure_owner_read() -> None:
+    """Fail closed until Windows owner-SID/DACL checks are available."""
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise WazuhError("unavailable", "secure-owner-read-unavailable")
+
+
 def _assert_secure_stat(info: os.stat_result, *, directory: bool) -> None:
+    _require_secure_owner_read()
     if directory:
-        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+        if not stat.S_ISDIR(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700):
             _invalid()
-    elif not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+    elif not stat.S_ISREG(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600):
         _invalid()
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         _invalid()
@@ -70,6 +86,7 @@ def _assert_secure_stat(info: os.stat_result, *, directory: bool) -> None:
 
 def read_secure_text(path: Path | str, *, expected_mode: int = 0o600) -> str:
     """Read one current-UID-owned regular file through a no-follow descriptor."""
+    _require_secure_owner_read()
     target = Path(path)
     parent = -1
     descriptor = -1
@@ -79,11 +96,12 @@ def read_secure_text(path: Path | str, *, expected_mode: int = 0o600) -> str:
         if os.name == "posix":
             descriptor = os.open(target.name, flags, dir_fd=parent)
         else:
+            # Dormant until owner-SID/DACL enforcement can lift the read guard.
             from ..work_cmd import nt_dirfd
 
             descriptor = nt_dirfd.open_file(parent, target.name, os.O_RDONLY)
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != expected_mode:
+        if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != expected_mode):
             _invalid()
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             _invalid()
@@ -334,6 +352,8 @@ class WazuhStore:
         }
 
     def _ensure_state_dir(self) -> None:
+        _require_secure_owner_read()
+        _require_secure_owner_write()
         parent = -1
         try:
             parent = grokbot_ops._open_parent_nofollow(self._path, create=True)
@@ -356,6 +376,7 @@ class WazuhStore:
         return {"schema": STATE_SCHEMA, "alerts": {}, "suppressions": {}, "proposals": {}}
 
     def _load(self) -> dict[str, Any]:
+        _require_secure_owner_read()
         try:
             payload = json.loads(read_secure_text(self._path))
         except FileNotFoundError:
@@ -379,6 +400,7 @@ class WazuhStore:
         }
 
     def _persist(self, state: Mapping[str, Any]) -> None:
+        _require_secure_owner_write()
         if len(state["alerts"]) > MAX_ALERTS or len(state["suppressions"]) > MAX_SUPPRESSIONS:
             _unavailable()
         if len(state["proposals"]) > MAX_PROPOSALS:

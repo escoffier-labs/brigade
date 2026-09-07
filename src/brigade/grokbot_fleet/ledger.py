@@ -10,11 +10,21 @@ from pathlib import Path
 from typing import Any, Mapping, NoReturn, Sequence
 
 from .contracts import FleetError, TIERS, is_offset_datetime, omit_undefined, parse_identifier
+from brigade import dirfd as dirfd_mod
 
 LEDGER_VERSION = 1
 MAX_HOST_OBSERVATIONS = 512
 MAX_SERVICE_OBSERVATIONS = 512
 MAX_FINDINGS = 128
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
+# Windows interim limitation: owner-SID/DACL enforcement does not exist yet,
+# so private reads fail closed before any filesystem access.
+SECURE_OWNER_WRITE_AVAILABLE = os.name == "posix"
+
+
+def _require_secure_owner_write() -> None:
+    if not SECURE_OWNER_WRITE_AVAILABLE:
+        raise FleetError("secure-owner-write-unavailable")
 
 
 def _ledger_invalid() -> NoReturn:
@@ -23,6 +33,15 @@ def _ledger_invalid() -> NoReturn:
 
 def _ledger_write_failed() -> NoReturn:
     raise FleetError("unavailable", "Fleet ledger write failed")
+
+
+def _require_secure_owner_read() -> None:
+    """Fail closed on Windows before any filesystem access.
+
+    Owner-SID/DACL enforcement does not exist yet; POSIX behavior unchanged.
+    """
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise FleetError("unavailable", "secure-owner-read-unavailable")
 
 
 def _write_all(handle: int, data: bytes) -> None:
@@ -404,6 +423,8 @@ class FleetLedger:
             self._persist(document)
 
     def _ensure_state_dir(self) -> None:
+        _require_secure_owner_read()
+        _require_secure_owner_write()
         directory = self._path.parent
         try:
             info = directory.lstat()
@@ -416,17 +437,18 @@ class FleetLedger:
             info = directory.lstat()
         except OSError:
             _ledger_invalid()
-        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+        if not stat.S_ISDIR(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700):
             _ledger_invalid()
 
     def _load_document(self) -> dict[str, Any]:
+        _require_secure_owner_read()
         try:
             info = self._path.lstat()
         except FileNotFoundError:
             return {"version": LEDGER_VERSION, "hosts": {}, "services": {}, "findings": []}
         except OSError:
             _ledger_invalid()
-        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+        if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600):
             _ledger_invalid()
         try:
             raw = self._path.read_text(encoding="utf-8")
@@ -436,11 +458,13 @@ class FleetLedger:
         return _validated_document(parsed)
 
     def _persist(self, document: dict[str, Any]) -> None:
+        _require_secure_owner_write()
         self._ensure_state_dir()
         handle = None
         try:
-            handle = os.open(self._temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-            os.fchmod(handle, 0o600)
+            handle = os.open(self._temp, dirfd_mod.file_flags(os.O_WRONLY | os.O_CREAT | os.O_TRUNC), 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(handle, 0o600)
             _write_all(handle, json.dumps(document).encode("utf-8"))
             os.fsync(handle)
             os.close(handle)
