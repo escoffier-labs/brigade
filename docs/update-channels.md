@@ -93,8 +93,8 @@ When that header exactly matches the Brigade CLI format, the Worker records a
 daily version observation: ISO week and UTC day, version, first and last UTC
 timestamps, request count, and an `internal` classification for configured
 operator egress. It derives the source value from a salted SHA-256 hash of the
-connecting address and ISO week, so the hash changes weekly and reports cannot
-join it across weeks.
+connecting address and ISO week. The hash changes weekly, and reports do not
+join sources across weeks.
 
 Analytics does not store raw IP addresses or a persistent installation ID. It
 also does not store hostnames, usernames, repository or project names, command
