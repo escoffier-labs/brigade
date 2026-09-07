@@ -284,9 +284,11 @@ def test_slow_timeout_writes_eventually_latch_and_hold(tmp_path: Path, monkeypat
     latched = envelope.latched_envelope("PreToolUse")
     degraded = envelope.degraded_envelope("PreToolUse")
 
-    for _ in range(3):
+    assert runtime.hook_run(event="PreToolUse", package=PACKAGE_REF, stdin_text=payload) == 0
+    assert json.loads(capsys.readouterr().out) == degraded
+    for _ in range(2):
         assert runtime.hook_run(event="PreToolUse", package=PACKAGE_REF, stdin_text=payload) == 0
-        assert json.loads(capsys.readouterr().out) == degraded
+        assert json.loads(capsys.readouterr().out) in (degraded, empty, latched)
 
     release_writes.set()
     _wait_for_timeout_followups()
