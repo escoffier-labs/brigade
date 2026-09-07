@@ -18,6 +18,10 @@ from brigade.selection import Selection
 from tests._home import set_home
 
 
+def _normalized_path_text(value: str) -> str:
+    return value.replace("\\", "/")
+
+
 def test_doctor_passes_against_workspace_profile(tmp_target: Path, capsys):
     install_selection(
         tmp_target,
@@ -814,7 +818,7 @@ def test_doctor_fails_when_memory_card_exceeds_budget(tmp_target: Path, capsys):
     assert rc == 1
     assert "memory-card: budget" in out
     assert "over hard limit" in out
-    assert "memory/cards/oversized.md" in out
+    assert "memory/cards/oversized.md" in _normalized_path_text(out)
 
 
 def test_doctor_memory_card_budget_honors_config(tmp_path: Path):
@@ -836,7 +840,7 @@ def test_doctor_memory_card_budget_honors_config(tmp_path: Path):
     assert budget, "expected a memory-card: budget result"
     status, _, detail = budget[0]
     assert status == doctor_mod.FAIL
-    assert "memory/cards/big-active.md" in detail
+    assert "memory/cards/big-active.md" in _normalized_path_text(detail)
     assert "big-archived.md" not in detail  # excluded path not counted
 
 
@@ -852,7 +856,7 @@ def test_doctor_warns_when_memory_card_is_empty(tmp_target: Path, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "memory-card: empty" in out
-    assert "memory/cards/empty.md" in out
+    assert "memory/cards/empty.md" in _normalized_path_text(out)
 
 
 def test_doctor_openclaw_reports_cron_memory_jobs(tmp_target: Path, monkeypatch, capsys):
@@ -968,7 +972,7 @@ def test_doctor_checks_codex_inbox_when_selected(tmp_target: Path, capsys):
     assert "adapter: handoff: codex inbox" in inbox_checks
     codex_inbox = inbox_checks["adapter: handoff: codex inbox"]
     assert codex_inbox["status"] == doctor_mod.OK
-    assert ".codex/memory-handoffs" in codex_inbox["detail"]
+    assert ".codex/memory-handoffs" in _normalized_path_text(codex_inbox["detail"])
 
 
 def test_doctor_reports_default_wired_skills_for_selected_harnesses(tmp_target: Path, capsys):
@@ -989,7 +993,7 @@ def test_doctor_reports_default_wired_skills_for_selected_harnesses(tmp_target: 
     assert checks["adapter: skills: claude default wired"]["status"] == "OK"
     assert "brigade-work" in checks["adapter: skills: claude default wired"]["detail"]
     assert checks["adapter: skills: codex default wired"]["status"] == "OK"
-    assert ".codex/skills" in checks["adapter: skills: codex default wired"]["detail"]
+    assert ".codex/skills" in _normalized_path_text(checks["adapter: skills: codex default wired"]["detail"])
 
 
 def test_doctor_warns_when_default_wired_skill_is_missing(tmp_target: Path, capsys):
@@ -1012,8 +1016,12 @@ def test_doctor_warns_when_default_wired_skill_is_missing(tmp_target: Path, caps
     assert skill_check["status"] == "WARN"
     assert "harness=codex" in skill_check["detail"]
     assert "skill=ultra-work-scout" in skill_check["detail"]
-    assert ".codex/skills/ultra-work-scout/SKILL.md" in skill_check["detail"]
-    assert f"brigade skills install ultra-work-scout --workspace {tmp_target} --target codex" in skill_check["detail"]
+    detail = _normalized_path_text(skill_check["detail"])
+    assert ".codex/skills/ultra-work-scout/SKILL.md" in detail
+    assert (
+        _normalized_path_text(f"brigade skills install ultra-work-scout --workspace {tmp_target} --target codex")
+        in detail
+    )
     assert "brigade-work" not in skill_check["detail"]
 
 
@@ -1292,7 +1300,7 @@ conflict_window = "02:55-03:15"
     status, name, detail = collisions[0]
     assert status == doctor_mod.WARN
     assert name == "memory-care: producer collision"
-    assert "memory/cards/decay" in detail
+    assert "memory/cards/decay" in _normalized_path_text(detail)
     assert "brigade memory-care" in detail
     assert "legacy Card Decay Scanner (Daily)" in detail
 
@@ -1386,7 +1394,7 @@ def test_doctor_warns_when_custom_memory_care_output_collides(tmp_target: Path, 
 
     assert len(collisions) == 1
     _, _, detail = collisions[0]
-    assert "memory/cards/decay" in detail
+    assert "memory/cards/decay" in _normalized_path_text(detail)
     assert "brigade memory-care" in detail
     assert "legacy Card Decay Scanner (Daily)" in detail
 
@@ -1424,7 +1432,7 @@ conflict_window = "02:55-03:15"
     assert len(collisions) == 1
 
     detail = collisions[0][2]
-    assert "memory/cards/decay" in detail
+    assert "memory/cards/decay" in _normalized_path_text(detail)
     assert FAKE_CRON_COMMAND not in detail
     assert "SECRET-TOKEN" not in detail
     assert str(tmp_target) not in detail

@@ -46,6 +46,31 @@ def test_dirty_paths_rejects_non_git_directory(tmp_path):
         runguard.dirty_paths(tmp_path)
 
 
+def test_pytest_git_ceiling_keeps_temp_lock_local(tmp_path, tmp_path_factory, monkeypatch):
+    """An uninitialized test workspace cannot inherit the enclosing checkout."""
+    pytest_base_temp = tmp_path_factory.getbasetemp().resolve()
+    existing = os.environ["GIT_CEILING_DIRECTORIES"]
+    enclosing = tmp_path / "enclosing"
+    enclosing.mkdir()
+    _git(enclosing, "init")
+    base_temp = enclosing / "pytest-base"
+    base_temp.mkdir()
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", f"{existing}{os.pathsep}{base_temp}")
+    ceilings = os.environ["GIT_CEILING_DIRECTORIES"].split(os.pathsep)
+    assert str(pytest_base_temp) in ceilings
+    assert str(base_temp) in ceilings
+
+    workspace = base_temp / "workspace"
+    workspace.mkdir()
+
+    assert runguard.lock_path(workspace) == workspace / ".brigade" / "run.lock"
+
+    child_repo = workspace / "child-repo"
+    child_repo.mkdir()
+    _git(child_repo, "init")
+    assert runguard.lock_path(child_repo) == child_repo / ".brigade" / "run.lock"
+
+
 def test_require_clean_worktree_allows_clean_repo(tmp_path):
     repo = _repo(tmp_path)
 
