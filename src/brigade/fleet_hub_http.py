@@ -18,6 +18,7 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import parse_qs, urlencode
 
+from . import fleet_claim_display
 from . import fleet_command_deck, fleet_dashboard, fleet_hub_grokbot, fleet_hub_sessions, worklore_http
 from . import fleet_hub as _hub
 from . import fleet_hub_model_roster
@@ -449,7 +450,7 @@ def make_handler(
                     history_window_seconds=frozen_deck.stale_history_after_seconds,
                     stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
                 )
-                claims = list_claims(conn)
+                claims = fleet_claim_display.list_display_claims(conn, include_all=include_all)
                 started_at = run_started_at(
                     conn,
                     [
@@ -1080,7 +1081,7 @@ def make_handler(
                             return
                         payload = fleet_hub_policy_api.read_policy(conn, history=history, limit=limit)
                     else:
-                        payload = {"claims": list_claims(conn, include_all=include_all)}
+                        payload = {"claims": fleet_claim_display.list_display_claims(conn, include_all=include_all)}
                 except sqlite3.Error as exc:
                     self._send_json(500, {"error": f"hub database error: {exc}"})
                     return
