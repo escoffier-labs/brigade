@@ -310,6 +310,9 @@ def _run_brief(tmp_path, cache_home: Path, monkeypatch, capsys) -> str:
     """
     from datetime import datetime, timezone
 
+    # The suite pins BRIGADE_NO_UPDATE_CHECK (#1475); this helper is the notice path.
+    monkeypatch.delenv("BRIGADE_NO_UPDATE_CHECK", raising=False)
+
     from brigade import dogfood_cmd, work_cmd
 
     from tests.work_cmd_test_helpers import _init_git_repo

@@ -165,6 +165,8 @@ def test_status_json_update_none_without_cache(tmp_target, tmp_path_factory, mon
 
 
 def test_status_json_update_present_when_newer(tmp_target, tmp_path_factory, monkeypatch, capsys):
+    # The suite pins BRIGADE_NO_UPDATE_CHECK (#1475); this test is the notice path.
+    monkeypatch.delenv("BRIGADE_NO_UPDATE_CHECK", raising=False)
     cache_home = tmp_path_factory.mktemp("update_cache_newer")
     _write_update_cache(cache_home, checked_at=100.0, latest="99.0.0")
     payload = json.loads(_run_status(tmp_target, cache_home, monkeypatch, capsys, json_output=True))
@@ -189,6 +191,8 @@ def test_status_prints_no_update_line_without_update(tmp_target, tmp_path_factor
 
 
 def test_status_prints_update_line_when_newer(tmp_target, tmp_path_factory, monkeypatch, capsys):
+    # The suite pins BRIGADE_NO_UPDATE_CHECK (#1475); this test is the notice path.
+    monkeypatch.delenv("BRIGADE_NO_UPDATE_CHECK", raising=False)
     cache_home = tmp_path_factory.mktemp("update_cache_newer_text")
     _write_update_cache(cache_home, checked_at=100.0, latest="99.0.0")
     lines = _run_status(tmp_target, cache_home, monkeypatch, capsys).splitlines()

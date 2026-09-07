@@ -16,6 +16,10 @@ from brigade import (
     proc,
 )
 
+# This module drives the real codex_cloud.list_tasks through its own fake proc.run,
+# so it opts out of the suite-wide inventory stub (#1475).
+pytestmark = pytest.mark.real_codex_cloud
+
 
 def test_codex_cloud_ref_is_known_and_maps_to_codex():
     assert agents.is_known("codex-cloud:env-123")
