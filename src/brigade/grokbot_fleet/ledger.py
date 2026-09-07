@@ -10,11 +10,18 @@ from pathlib import Path
 from typing import Any, Mapping, NoReturn, Sequence
 
 from .contracts import FleetError, TIERS, is_offset_datetime, omit_undefined, parse_identifier
+from brigade import dirfd as dirfd_mod
 
 LEDGER_VERSION = 1
 MAX_HOST_OBSERVATIONS = 512
 MAX_SERVICE_OBSERVATIONS = 512
 MAX_FINDINGS = 128
+SECURE_OWNER_WRITE_AVAILABLE = os.name == "posix"
+
+
+def _require_secure_owner_write() -> None:
+    if not SECURE_OWNER_WRITE_AVAILABLE:
+        raise FleetError("secure-owner-write-unavailable")
 
 
 def _ledger_invalid() -> NoReturn:
@@ -404,6 +411,7 @@ class FleetLedger:
             self._persist(document)
 
     def _ensure_state_dir(self) -> None:
+        _require_secure_owner_write()
         directory = self._path.parent
         try:
             info = directory.lstat()
@@ -436,10 +444,11 @@ class FleetLedger:
         return _validated_document(parsed)
 
     def _persist(self, document: dict[str, Any]) -> None:
+        _require_secure_owner_write()
         self._ensure_state_dir()
         handle = None
         try:
-            handle = os.open(self._temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            handle = os.open(self._temp, dirfd_mod.file_flags(os.O_WRONLY | os.O_CREAT | os.O_TRUNC), 0o600)
             if hasattr(os, "fchmod"):
                 os.fchmod(handle, 0o600)
             _write_all(handle, json.dumps(document).encode("utf-8"))

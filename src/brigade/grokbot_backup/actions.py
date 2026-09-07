@@ -21,6 +21,7 @@ from .contracts import (
     parse_identifier,
 )
 from .exec import EXEC_DEFAULT_OUTPUT_BYTES, BackupProcessLimiter, ExecRequest, Runner, create_process_limiter, run_exec
+from brigade import dirfd as dirfd_mod
 from .ledger import backup_finding_revision
 from .normalize import sanitize_backup_detail
 
@@ -67,6 +68,14 @@ def _action_state_invalid() -> NoReturn:
 
 def _environment_invalid() -> NoReturn:
     raise BackupError("invalid_request", "Backup environment is invalid")
+
+
+SECURE_OWNER_WRITE_AVAILABLE = os.name == "posix"
+
+
+def _require_secure_owner_write() -> None:
+    if not SECURE_OWNER_WRITE_AVAILABLE:
+        raise BackupError("secure-owner-write-unavailable")
 
 
 def _write_all(handle: int, data: bytes) -> None:
@@ -270,6 +279,7 @@ def _assert_safe_directory(path: Path) -> None:
 
 
 def _ensure_writable_directory(path: Path) -> None:
+    _require_secure_owner_write()
     try:
         info = path.lstat()
     except FileNotFoundError:
@@ -309,9 +319,10 @@ def _read_json_file(path: Path) -> object:
 
 
 def _write_exclusive_json(path: Path, record: Mapping[str, Any]) -> None:
+    _require_secure_owner_write()
     handle = None
     try:
-        handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        handle = os.open(path, dirfd_mod.file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL), 0o600)
         if hasattr(os, "fchmod"):
             os.fchmod(handle, 0o600)
         _write_all(handle, json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"))
@@ -335,10 +346,11 @@ def _write_exclusive_json(path: Path, record: Mapping[str, Any]) -> None:
 
 
 def _write_atomic_json(path: Path, record: Mapping[str, Any]) -> None:
+    _require_secure_owner_write()
     temp = Path(f"{path}.tmp")
     handle = None
     try:
-        handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        handle = os.open(temp, dirfd_mod.file_flags(os.O_WRONLY | os.O_CREAT | os.O_TRUNC), 0o600)
         if hasattr(os, "fchmod"):
             os.fchmod(handle, 0o600)
         _write_all(handle, json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"))

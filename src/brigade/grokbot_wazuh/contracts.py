@@ -27,6 +27,7 @@ ERROR_MESSAGES = {
     "denied": "Wazuh request was denied",
     "not_found": "Wazuh resource was not found",
     "unavailable": "Wazuh observation is unavailable",
+    "secure-owner-write-unavailable": "Wazuh observation is unavailable",
     "timeout": "Wazuh observation timed out",
     "protocol_error": "Wazuh observation failed",
 }

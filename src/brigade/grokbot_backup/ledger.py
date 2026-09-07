@@ -21,10 +21,17 @@ from .contracts import (
     omit_undefined,
     parse_identifier,
 )
+from brigade import dirfd as dirfd_mod
 
 LEDGER_VERSION = 1
 MAX_RECORDS = 2_048
 MAX_TEXT_BYTES = 4_096
+SECURE_OWNER_WRITE_AVAILABLE = os.name == "posix"
+
+
+def _require_secure_owner_write() -> None:
+    if not SECURE_OWNER_WRITE_AVAILABLE:
+        raise BackupError("secure-owner-write-unavailable")
 
 
 def _ledger_invalid() -> NoReturn:
@@ -460,6 +467,7 @@ class BackupLedger:
         return None
 
     def _ensure_state_dir(self) -> None:
+        _require_secure_owner_write()
         directory = self._path.parent
         try:
             info = directory.lstat()
@@ -523,13 +531,14 @@ class BackupLedger:
         return records
 
     def _persist(self, records: list[dict[str, Any]]) -> None:
+        _require_secure_owner_write()
         retained = records if len(records) <= MAX_RECORDS else records[-MAX_RECORDS:]
         self._ensure_state_dir()
         body = "" if not retained else "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in retained)
         temp = Path(f"{self._path}.tmp.{os.getpid()}.{threading.get_ident()}")
         handle = None
         try:
-            handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            handle = os.open(temp, dirfd_mod.file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL), 0o600)
             if hasattr(os, "fchmod"):
                 os.fchmod(handle, 0o600)
             _write_all(handle, body.encode("utf-8"))

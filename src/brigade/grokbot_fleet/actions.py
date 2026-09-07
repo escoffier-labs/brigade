@@ -123,6 +123,14 @@ class FleetActionStoreError(FleetError):
         super().__init__("denied", "Fleet request was denied")
 
 
+SECURE_OWNER_WRITE_AVAILABLE = os.name == "posix"
+
+
+def _require_secure_owner_write() -> None:
+    if not SECURE_OWNER_WRITE_AVAILABLE:
+        raise FleetError("secure-owner-write-unavailable")
+
+
 def _action_state_invalid() -> NoReturn:
     raise FleetError("protocol_error", "Fleet action state is invalid")
 
@@ -411,6 +419,7 @@ def _parse_receipt(raw: object) -> dict[str, Any]:
 
 
 def _assert_owner_dir(path: Path, *, create: bool) -> None:
+    _require_secure_owner_write()
     try:
         info = path.lstat()
     except FileNotFoundError:
@@ -439,6 +448,7 @@ def _assert_owner_dir(path: Path, *, create: bool) -> None:
 
 
 def _assert_owner_file(info: os.stat_result) -> None:
+    _require_secure_owner_write()
     if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600):
         _action_state_invalid()
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
@@ -462,6 +472,7 @@ def _unlink_quiet(path: Path) -> None:
 
 
 def _write_exclusive_json(path: Path, record: Mapping[str, Any]) -> None:
+    _require_secure_owner_write()
     handle = None
     created = False
     try:
@@ -537,6 +548,7 @@ def _read_safe_json(path: Path) -> Any:
 
 
 def _fsync_directory(path: Path) -> None:
+    _require_secure_owner_write()
     handle = None
     try:
         handle = os.open(path, dirfd_mod.directory_flags())
