@@ -23,6 +23,7 @@ COMMAND_FINGERPRINT = __import__("re").compile(r"^sha256:[0-9a-f]{64}$")
 MAX_CA_BYTES = 16_384
 MAX_RECEIPT_BYTES = 8_192
 MAX_RUNTIME_JSON_BYTES = 262_144
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
 ADAPTER_ENVIRONMENT_KEYS = (
     "PATH",
     "HOME",
@@ -42,6 +43,12 @@ def _environment_error() -> NoReturn:
 
 def _runtime_error() -> NoReturn:
     raise ObsidianError("invalid_request", "Obsidian runtime configuration is invalid")
+
+
+def _require_secure_owner_read() -> None:
+    """Fail closed until Windows owner-SID/DACL checks are available."""
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise ObsidianError("unavailable", "secure-owner-read-unavailable")
 
 
 def has_explicit_dot_segment(value: str) -> bool:
@@ -148,6 +155,7 @@ def _assert_secure_runtime_stat(info: os.stat_result) -> None:
 
 def _read_secure_runtime_bytes(path_text: str, *, max_bytes: int) -> bytes:
     """Read a current-UID-owned mode-0600 file through one no-follow descriptor."""
+    _require_secure_owner_read()
     normalized = required_absolute_path(path_text)
     path = Path(normalized)
     try:
@@ -167,6 +175,7 @@ def _read_secure_runtime_bytes(path_text: str, *, max_bytes: int) -> bytes:
         if os.name == "posix":
             descriptor = os.open(path.name, flags, dir_fd=parent)
         else:
+            # Dormant until owner-SID/DACL enforcement can lift the read guard.
             from ..work_cmd import nt_dirfd
 
             descriptor = nt_dirfd.open_file(parent, path.name, os.O_RDONLY)

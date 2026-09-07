@@ -48,6 +48,7 @@ PUBLIC_ALERT_KEYS = frozenset(
     }
 )
 _SEMANTIC_KEYS = ("revision", "severity", "title", "body", "source_digest", "content_digest")
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
 
 
 def _unavailable() -> None:
@@ -58,7 +59,14 @@ def _invalid() -> None:
     raise WazuhError("protocol_error", ERROR_MESSAGES["protocol_error"])
 
 
+def _require_secure_owner_read() -> None:
+    """Fail closed until Windows owner-SID/DACL checks are available."""
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise WazuhError("unavailable", "secure-owner-read-unavailable")
+
+
 def _assert_secure_stat(info: os.stat_result, *, directory: bool) -> None:
+    _require_secure_owner_read()
     if directory:
         if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
             _invalid()
@@ -70,6 +78,7 @@ def _assert_secure_stat(info: os.stat_result, *, directory: bool) -> None:
 
 def read_secure_text(path: Path | str, *, expected_mode: int = 0o600) -> str:
     """Read one current-UID-owned regular file through a no-follow descriptor."""
+    _require_secure_owner_read()
     target = Path(path)
     parent = -1
     descriptor = -1
@@ -79,6 +88,7 @@ def read_secure_text(path: Path | str, *, expected_mode: int = 0o600) -> str:
         if os.name == "posix":
             descriptor = os.open(target.name, flags, dir_fd=parent)
         else:
+            # Dormant until owner-SID/DACL enforcement can lift the read guard.
             from ..work_cmd import nt_dirfd
 
             descriptor = nt_dirfd.open_file(parent, target.name, os.O_RDONLY)
@@ -334,6 +344,7 @@ class WazuhStore:
         }
 
     def _ensure_state_dir(self) -> None:
+        _require_secure_owner_read()
         parent = -1
         try:
             parent = grokbot_ops._open_parent_nofollow(self._path, create=True)
@@ -356,6 +367,7 @@ class WazuhStore:
         return {"schema": STATE_SCHEMA, "alerts": {}, "suppressions": {}, "proposals": {}}
 
     def _load(self) -> dict[str, Any]:
+        _require_secure_owner_read()
         try:
             payload = json.loads(read_secure_text(self._path))
         except FileNotFoundError:

@@ -34,6 +34,9 @@ HEX64 = __import__("re").compile(r"^[0-9a-f]{64}$")
 RECEIPT_FORBIDDEN = ("stdout", "stderr", "api_key", "nonce", "upstream", "authorization")
 ACTION_STATE_SUBDIRS = ("proposals", "consumed", "receipts")
 CURRENT_REVISION = object()
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
+# Windows interim limitation: owner-SID/DACL enforcement does not exist yet,
+# so private reads fail closed before any filesystem access.
 RECEIPT_KINDS = frozenset({"proposal", "approval", "rejection", "execution", "verification"})
 RECEIPT_OUTCOMES = frozenset(
     {
@@ -63,6 +66,15 @@ def _state_invalid() -> NoReturn:
 
 def _environment_invalid() -> NoReturn:
     raise ObsidianError("invalid_request", ERROR_MESSAGES["invalid_request"])
+
+
+def _require_secure_owner_read() -> None:
+    """Fail closed on Windows before any filesystem access.
+
+    Owner-SID/DACL enforcement does not exist yet; POSIX behavior unchanged.
+    """
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise ObsidianError("unavailable", "secure-owner-read-unavailable")
 
 
 def _parse_iso(value: str) -> datetime:
@@ -375,6 +387,7 @@ def parse_receipt_record(raw: object, expected_receipt_id: str | None = None) ->
 
 
 def _ensure_directory(path: Path) -> None:
+    _require_secure_owner_read()
     if path.exists() or path.is_symlink():
         if grokbot_ops._path_is_symlink(path) or path.is_symlink() or not path.is_dir():
             _state_invalid()
@@ -407,6 +420,7 @@ def _write_exclusive_json(directory: Path, name: str, record: Mapping[str, Any])
 
 
 def _read_json(directory: Path, name: str) -> object:
+    _require_secure_owner_read()
     path = directory / name
     if grokbot_ops._path_is_symlink(path) or path.is_symlink():
         _state_invalid()
@@ -425,6 +439,7 @@ def _read_json(directory: Path, name: str) -> object:
 
 
 def _hex_json_files(directory: Path) -> list[str]:
+    _require_secure_owner_read()
     names = []
     try:
         for entry in os.listdir(directory):

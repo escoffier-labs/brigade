@@ -42,6 +42,7 @@ ADAPTER_ENVIRONMENT_KEYS = (
     "DBUS_SESSION_BUS_ADDRESS",
 )
 FIXED_ARG_RE = __import__("re").compile(r"^(?:--)?[A-Za-z0-9][A-Za-z0-9._:-]*$")
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
 
 
 def _runtime_config_error() -> NoReturn:
@@ -50,6 +51,12 @@ def _runtime_config_error() -> NoReturn:
 
 def _environment_error() -> NoReturn:
     raise BackupError("invalid_request", "Backup environment is invalid")
+
+
+def _require_secure_owner_read() -> None:
+    """Fail closed until Windows owner-SID/DACL checks are available."""
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise BackupError("unavailable", "secure-owner-read-unavailable")
 
 
 def _not_found() -> NoReturn:
@@ -103,6 +110,7 @@ def _assert_secure_runtime_stat(info: os.stat_result) -> None:
 
 def read_secure_runtime_text(path_text: str) -> str:
     """Read a current-UID-owned mode-0600 runtime file through one no-follow descriptor."""
+    _require_secure_owner_read()
     from .. import grokbot_ops
 
     normalized = _required_absolute_path(path_text)
@@ -124,6 +132,7 @@ def read_secure_runtime_text(path_text: str) -> str:
         if os.name == "posix":
             descriptor = os.open(path.name, flags, dir_fd=parent)
         else:
+            # Dormant until owner-SID/DACL enforcement can lift the read guard.
             from ..work_cmd import nt_dirfd
 
             descriptor = nt_dirfd.open_file(parent, path.name, os.O_RDONLY)

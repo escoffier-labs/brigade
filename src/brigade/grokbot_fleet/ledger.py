@@ -15,6 +15,9 @@ LEDGER_VERSION = 1
 MAX_HOST_OBSERVATIONS = 512
 MAX_SERVICE_OBSERVATIONS = 512
 MAX_FINDINGS = 128
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
+# Windows interim limitation: owner-SID/DACL enforcement does not exist yet,
+# so private reads fail closed before any filesystem access.
 
 
 def _ledger_invalid() -> NoReturn:
@@ -23,6 +26,15 @@ def _ledger_invalid() -> NoReturn:
 
 def _ledger_write_failed() -> NoReturn:
     raise FleetError("unavailable", "Fleet ledger write failed")
+
+
+def _require_secure_owner_read() -> None:
+    """Fail closed on Windows before any filesystem access.
+
+    Owner-SID/DACL enforcement does not exist yet; POSIX behavior unchanged.
+    """
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise FleetError("unavailable", "secure-owner-read-unavailable")
 
 
 def _write_all(handle: int, data: bytes) -> None:
@@ -404,6 +416,7 @@ class FleetLedger:
             self._persist(document)
 
     def _ensure_state_dir(self) -> None:
+        _require_secure_owner_read()
         directory = self._path.parent
         try:
             info = directory.lstat()
@@ -420,6 +433,7 @@ class FleetLedger:
             _ledger_invalid()
 
     def _load_document(self) -> dict[str, Any]:
+        _require_secure_owner_read()
         try:
             info = self._path.lstat()
         except FileNotFoundError:

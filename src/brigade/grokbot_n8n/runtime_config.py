@@ -16,6 +16,7 @@ RUNTIME_KEYS = frozenset({"version", "base_url", "api_key_file"})
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 MAX_RUNTIME_BYTES = 16_384
 MAX_API_KEY_BYTES = 1_024
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
 
 
 def _runtime_error() -> NoReturn:
@@ -24,6 +25,12 @@ def _runtime_error() -> NoReturn:
 
 def _environment_error() -> NoReturn:
     raise N8nError("invalid_request", "n8n environment is invalid")
+
+
+def _require_secure_owner_read() -> None:
+    """Fail closed until Windows owner-SID/DACL checks are available."""
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise N8nError("unavailable", "secure-owner-read-unavailable")
 
 
 def _has_explicit_dot_segment(value: str) -> bool:
@@ -117,6 +124,7 @@ def _file_identity(info: os.stat_result) -> tuple[int, int]:
 def _open_secure_file(path_text: str) -> tuple[int, os.stat_result]:
     from .. import grokbot_ops
 
+    _require_secure_owner_read()
     _require_posix_permissions()
     normalized = required_absolute_path(path_text)
     path = Path(normalized)

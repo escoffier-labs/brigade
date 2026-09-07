@@ -25,6 +25,9 @@ from .contracts import (
 LEDGER_VERSION = 1
 MAX_RECORDS = 2_048
 MAX_TEXT_BYTES = 4_096
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
+# Windows interim limitation: owner-SID/DACL enforcement does not exist yet,
+# so private reads fail closed before any filesystem access.
 
 
 def _ledger_invalid() -> NoReturn:
@@ -33,6 +36,15 @@ def _ledger_invalid() -> NoReturn:
 
 def _ledger_write_failed() -> NoReturn:
     raise BackupError("unavailable", "Backup ledger write failed")
+
+
+def _require_secure_owner_read() -> None:
+    """Fail closed on Windows before any filesystem access.
+
+    Owner-SID/DACL enforcement does not exist yet; POSIX behavior unchanged.
+    """
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise BackupError("unavailable", "secure-owner-read-unavailable")
 
 
 def _write_all(handle: int, data: bytes) -> None:
@@ -460,6 +472,7 @@ class BackupLedger:
         return None
 
     def _ensure_state_dir(self) -> None:
+        _require_secure_owner_read()
         directory = self._path.parent
         try:
             info = directory.lstat()
@@ -476,6 +489,7 @@ class BackupLedger:
             _ledger_invalid()
 
     def _load_records(self) -> list[dict[str, Any]]:
+        _require_secure_owner_read()
         try:
             info = self._path.lstat()
         except FileNotFoundError:
