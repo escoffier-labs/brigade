@@ -253,6 +253,14 @@ class PolicyStamp:
 
 
 @dataclass(frozen=True)
+class AuthorityState:
+    """Fleet-policy-migration activation as reported by the routing snapshot."""
+
+    active: str = UNKNOWN
+    status: str = UNKNOWN
+
+
+@dataclass(frozen=True)
 class MachineState:
     """One machine's observed capacity. Every field defaults to ``unknown``."""
 
@@ -360,6 +368,10 @@ class ControlPlane:
     # unknown, never that the raw observations can stand in for it.
     quota_effective: tuple[QuotaEffective, ...] = ()
     quota_effective_present: bool = False
+    # Optional. Absent means the Deck has not been given an authority stamp,
+    # never that the migration is inactive.
+    authority: AuthorityState = field(default_factory=AuthorityState)
+    authority_present: bool = False
 
 
 @dataclass(frozen=True)
@@ -1238,6 +1250,15 @@ def control_plane_from_snapshot(raw: Mapping[str, object] | None) -> ControlPlan
 
     sessions = tuple(_cp_records(raw, "sessions"))
     quota = tuple(_cp_records(raw, "quota"))
+    authority_raw = raw.get("authority")
+    authority = AuthorityState()
+    authority_present = False
+    if isinstance(authority_raw, Mapping):
+        authority_present = True
+        authority = AuthorityState(
+            active=_cp_text(authority_raw.get("active")),
+            status=_cp_text(authority_raw.get("status")),
+        )
     return ControlPlane(
         policy=policy,
         sessions=sessions,
@@ -1249,6 +1270,8 @@ def control_plane_from_snapshot(raw: Mapping[str, object] | None) -> ControlPlan
         present=frozenset(present),
         quota_effective=_quota_effective(raw),
         quota_effective_present=raw.get("quota_effective") is not None,
+        authority=authority,
+        authority_present=authority_present,
     )
 
 
@@ -1346,6 +1369,13 @@ def render_control_plane(control_plane: ControlPlane | None) -> str:
             "unknown. That is not the same as nothing being wrong.</p></section>"
         )
     policy = control_plane.policy
+    if control_plane.authority_present:
+        authority_label = control_plane.authority.status
+        if authority_label == UNKNOWN:
+            authority_label = control_plane.authority.active
+        authority_html = f"authority {_esc(authority_label)} &middot; "
+    else:
+        authority_html = "authority unknown &middot; "
     machine_rows = "".join(
         f"<tr><td>{_esc(machine.id)}</td><td>{_esc(machine.os)}</td><td>{_esc(machine.state)}</td>"
         f"<td>{_esc(machine.load)}/{_esc(machine.capacity)}</td><td>{_esc(machine.active_claims)}</td>"
@@ -1416,7 +1446,7 @@ def render_control_plane(control_plane: ControlPlane | None) -> str:
     )
     return (
         '<section class="panel" aria-labelledby="control-plane"><header><h2 id="control-plane">Control plane</h2>'
-        f'<p class="panel-count">policy {_esc(policy.version)} &middot; {_esc(policy.digest)} &middot; '
+        f'<p class="panel-count">{authority_html}policy {_esc(policy.version)} &middot; {_esc(policy.digest)} &middot; '
         f"updated {_esc(policy.updated_at)}</p></header>{gap_html}"
         f"<h3>Machines</h3>{machines_html}"
         f"<h3>Effective capacity</h3>{effective_html}"

@@ -1807,20 +1807,22 @@ def _queue_projection(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
-def control_plane_status(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Authenticated GET /policy/status projection."""
+def _authority_projection(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Read-only fleet-policy-migration activation state. Never writes or activates."""
     from . import fleet_policy_migration
 
+    activated = fleet_policy_migration.is_activated(conn) or bool(
+        fleet_policy_migration.migration_status(conn).get("activated")
+    )
+    return {"active": activated, "status": "active" if activated else "staged"}
+
+
+def control_plane_status(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Authenticated GET /policy/status projection."""
     snap = snapshot(conn)
-    migration = fleet_policy_migration.migration_status(conn)
-    activated = bool(migration.get("activated"))
-    staged = bool((migration.get("schema") or {}).get("present"))
     return {
         "schema": CONTROL_PLANE_SCHEMA,
-        "authority": {
-            "active": activated,
-            "status": "active" if activated else ("staged" if staged else "inactive"),
-        },
+        "authority": _authority_projection(conn),
         "policy": snap["policy"],
         "sessions": snap["sessions"],
         "machines": snap["machines"],
