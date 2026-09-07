@@ -358,9 +358,7 @@ def _legacy_enqueue_digest(body: dict[str, object], *, node_id: str, queue_id: s
 
 def _drift_enqueue_digest(conn: sqlite3.Connection, job_id: str = JOB_ID) -> None:
     """Simulate the pre-#1409 digest that omitted ``queue_ttl_seconds``."""
-    digest = _legacy_enqueue_digest(
-        _enqueue_body(job_id), node_id=FEED_NODE, queue_id=QUEUE_ID, owner=FEED_NODE
-    )
+    digest = _legacy_enqueue_digest(_enqueue_body(job_id), node_id=FEED_NODE, queue_id=QUEUE_ID, owner=FEED_NODE)
     conn.execute(
         "UPDATE grokbot_operations SET request_digest=? WHERE job_id=? AND action='enqueue'",
         (digest, job_id),

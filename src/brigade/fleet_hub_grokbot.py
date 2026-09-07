@@ -577,8 +577,7 @@ def _terminal_enqueue_replay(
     if job["task_digest"] != request["task_digest"] or job["job_id"] != request["job_id"]:
         return None
     recorded = conn.execute(
-        "SELECT action, request_digest, actor_node_id FROM grokbot_operations "
-        "WHERE job_id=? AND operation_id=?",
+        "SELECT action, request_digest, actor_node_id FROM grokbot_operations WHERE job_id=? AND operation_id=?",
         (request["job_id"], request["operation_id"]),
     ).fetchone()
     if recorded is None or recorded[0] != "enqueue":
