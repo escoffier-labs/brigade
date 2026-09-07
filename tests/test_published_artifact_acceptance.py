@@ -830,3 +830,155 @@ def test_run_acceptance_proves_go_unavailable_immediately_before_setup_and_smoke
         'run_checked(\n                [managed_brigade, "setup", "--offline", "--manifest", str(manifest_path)],'
         in run_acceptance_body
     )
+    assert "smoke_import_and_search(" in run_acceptance_body
+    assert "install_brigade_cli(" in run_acceptance_body
+
+
+def test_search_hits_imported_receipts_accepts_empty_snippet(acceptance_module):
+    """0.27.0 hides snippets until trust review; id match is the contract (#1492)."""
+    payload = {
+        "query": "brigadeunixacceptanceabcdef12",
+        "results": [
+            {
+                "id": "73a4dea0caf74b08af5e0f59",
+                "source_kind": "brigade",
+                "kind": "brigade_work_verify_receipt",
+                "snippet": "",
+            }
+        ],
+    }
+
+    acceptance_module.assert_search_hits_imported_receipts(payload, ["73a4dea0caf74b08af5e0f59", "aa"])
+
+
+def test_search_hits_imported_receipts_rejects_snippet_only_or_id_mismatch(acceptance_module):
+    payload = {
+        "query": "brigadeunixacceptanceabcdef12",
+        "results": [
+            {
+                "id": "not-imported",
+                "source_kind": "brigade",
+                "kind": "brigade_work_verify_receipt",
+                "snippet": "brigadeunixacceptanceabcdef12 verify script",
+            }
+        ],
+    }
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="did not match imported"):
+        acceptance_module.assert_search_hits_imported_receipts(payload, ["73a4dea0caf74b08af5e0f59"])
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="no results"):
+        acceptance_module.assert_search_hits_imported_receipts({"query": "x", "results": []}, ["abc"])
+
+
+def test_imported_item_ids_from_sql_rows(acceptance_module):
+    ids = acceptance_module.imported_item_ids_from_sql(
+        {"rows": [{"id": "73a4dea0caf74b08af5e0f59"}, {"id": "deadbeefcafebabe"}]}
+    )
+    assert ids == ["73a4dea0caf74b08af5e0f59", "deadbeefcafebabe"]
+
+
+def test_install_brigade_cli_retries_when_simple_index_lags(acceptance_module):
+    clock = [0.0]
+    sleeps = []
+    attempts = []
+
+    def runner(argv, **kwargs):
+        attempts.append(argv)
+        if len(attempts) < 3:
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                "",
+                "ERROR: No matching distribution found for brigade-cli==1.2.3",
+            )
+        return subprocess.CompletedProcess(argv, 0, "installed", "")
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    acceptance_module.install_brigade_cli(
+        "1.2.3",
+        runner=runner,
+        env={},
+        sleep=sleep,
+        monotonic=lambda: clock[0],
+        timeout_seconds=30,
+        poll_interval_seconds=5,
+    )
+
+    assert len(attempts) == 3
+    assert sleeps == [5, 5]
+
+
+def test_install_brigade_cli_does_not_retry_permanent_failure(acceptance_module):
+    def runner(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "permission denied")
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="permission denied"):
+        acceptance_module.install_brigade_cli(
+            "1.2.3",
+            runner=runner,
+            env={},
+            sleep=lambda _: pytest.fail("permanent pipx errors should not sleep"),
+            monotonic=lambda: 0.0,
+            timeout_seconds=30,
+            poll_interval_seconds=5,
+        )
+
+
+def test_smoke_import_and_search_uses_json_search_and_imported_ids(acceptance_module, tmp_path):
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        name = Path(argv[0]).name if argv else ""
+        if name == "brigade" and "export" in argv:
+            out = Path(argv[argv.index("--out") + 1])
+            out.write_text("{}\n", encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "ok", "")
+        if name == "miseledger" and "import" in argv:
+            return subprocess.CompletedProcess(argv, 0, '{"inserted_items": 1, "already_known": false}', "")
+        if name == "miseledger" and "sql" in argv:
+            return subprocess.CompletedProcess(argv, 0, '{"rows": [{"id": "73a4dea0caf74b08af5e0f59"}]}', "")
+        if name == "miseledger" and "search" in argv:
+            assert "--json" in argv
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    {
+                        "query": "marker",
+                        "results": [
+                            {
+                                "id": "73a4dea0caf74b08af5e0f59",
+                                "source_kind": "brigade",
+                                "kind": "brigade_work_verify_receipt",
+                                "snippet": "",
+                            }
+                        ],
+                    }
+                ),
+                "",
+            )
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    brigade = tmp_path / "brigade"
+    brigade.write_text("#!/bin/sh\nexit 0\n")
+    brigade.chmod(0o755)
+    miseledger = tmp_path / "miseledger"
+    miseledger.write_text("#!/bin/sh\nexit 0\n")
+    miseledger.chmod(0o755)
+
+    acceptance_module.smoke_import_and_search(
+        brigade,
+        miseledger,
+        tmp_path / "work",
+        runner=runner,
+        env={"HOME": str(tmp_path / "profile")},
+    )
+
+    search = next(argv for argv in calls if Path(argv[0]).name == "miseledger" and "search" in argv)
+    assert "--json" in search
+    assert any("sql" in argv for argv in calls)
