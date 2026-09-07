@@ -352,7 +352,13 @@ class GrokbotAdapter:
         except AdapterError as exc:
             journal_tool_call(name, arguments, "refused", exc.reason)
             raise AdapterError(exc.reason) from None
-        except (grokbot_jobs.GrokbotJobError, ValueError, OSError):
+        except grokbot_jobs.GrokbotJobError as exc:
+            if exc.reason == "report-not-allowed":
+                journal_tool_call(name, arguments, "refused", exc.reason)
+                raise AdapterError(exc.reason) from None
+            journal_tool_call(name, arguments, "refused", None)
+            raise AdapterError() from None
+        except (ValueError, OSError):
             journal_tool_call(name, arguments, "refused", None)
             raise AdapterError() from None
         journal_tool_call(name, arguments, "ok", None)

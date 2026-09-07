@@ -612,6 +612,7 @@ def complete_report(
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
         _require_live_lease_or_expire(storage, record, bot_id, lease_id, now, instant)
+        _require_report_artifact_kind(record["spec"])
         _require_report_job(record)
         validated = _validated_completion(record, artifact)
         if hashlib.sha256(report_bytes).hexdigest() != validated["sha256"]:
@@ -1425,6 +1426,31 @@ def _require_report_job(record: dict[str, Any]) -> None:
         raise GrokbotJobError("invalid-artifact")
 
 
+def _job_artifact_kind(spec: dict[str, Any], job: dict[str, Any] | None = None) -> object:
+    artifact = spec.get("artifact")
+    if isinstance(artifact, dict) and artifact.get("kind") is not None:
+        return artifact.get("kind")
+    if job is None:
+        return None
+    nested = job.get("artifact")
+    if isinstance(nested, dict) and nested.get("kind") is not None:
+        return nested.get("kind")
+    return job.get("artifact_kind")
+
+
+def _require_report_artifact_kind(spec: dict[str, Any], job: dict[str, Any] | None = None) -> None:
+    if _job_artifact_kind(spec, job) != "report":
+        raise GrokbotJobError("report-not-allowed")
+
+
+def _require_hub_report_job(snapshot: dict[str, Any], job_id: str) -> None:
+    kind = _job_artifact_kind(snapshot)
+    if kind is None:
+        kind = _job_artifact_kind({}, _hub_job(job_id))
+    if kind != "report":
+        raise GrokbotJobError("report-not-allowed")
+
+
 def _validated_completion(record: dict[str, Any], artifact: object) -> dict[str, Any]:
     if record["state"] != "running":
         raise GrokbotJobError("invalid-transition")
@@ -1751,6 +1777,7 @@ def _complete_report_via_hub(
     target: Path, job_id: str, bot_id: str, lease_id: str, artifact: dict[str, Any], report_bytes: bytes
 ) -> dict[str, Any]:
     snapshot = _load_task_snapshot(target, job_id)
+    _require_hub_report_job(snapshot, job_id)
     validated = _validate_completion_artifact(artifact, snapshot)
     if hashlib.sha256(report_bytes).hexdigest() != validated["sha256"]:
         raise GrokbotJobError("digest-mismatch")
