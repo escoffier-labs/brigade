@@ -63,6 +63,7 @@ Thumbs.db
 !/scripts/measure_work_store.py
 !/scripts/verify-fast
 !/scripts/ci_pytest_shard.py
+!/scripts/windows_pytest.py
 !/scripts/verify_lock.py
 !/scripts/check_size_ratchet_baseline.py
 !/scripts/benchmark_issue266_work_status_memory.py

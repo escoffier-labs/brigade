@@ -317,6 +317,32 @@ def test_ci_workflow_cancels_superseded_runs_for_the_same_pr_or_ref():
     assert "cancel-in-progress: true" in header
 
 
+def test_ci_workflow_runs_per_file_windows_pytest_and_uploads_results():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    section = _workflow_job_section(text, "windows-pytest")
+
+    assert "if: github.event_name == 'pull_request'" in section
+    assert "continue-on-error: true" in section
+    assert "runs-on: windows-latest" in section
+    assert "timeout-minutes: 60" in section
+    assert "shell: cmd" in section
+    assert "persist-credentials: false" in section
+    assert "git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}" in section
+    assert 'python -m pip install -e ".[dev]"' in section
+    assert "|| exit /b 1" in section
+    assert (
+        'python scripts/windows_pytest.py --record "%RUNNER_TEMP%\\windows-pytest-results\\summary.json" '
+        "--job-timeout 3300 --base-ref ${{ github.event.pull_request.base.sha }}"
+    ) in section
+    assert "--serial" not in section
+    artifact = _workflow_step_section(text, "windows-pytest", "Upload per-file pytest results")
+    assert "if: ${{ always() }}" in artifact
+    assert "uses: actions/upload-artifact@v7" in artifact
+    assert "path: ${{ runner.temp }}/windows-pytest-results" in artifact
+    assert "if-no-files-found: warn" in artifact
+    assert "powershell" not in section
+
+
 def test_ci_workflow_runs_four_shards_on_every_supported_python():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     shards = _workflow_job_section(text, "test-shards")
