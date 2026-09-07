@@ -11,6 +11,10 @@ from typing import Any
 from .. import center_cmd, doctor as core_doctor, handoff_cmd, security_cmd, skills_cmd, tools_cmd
 from ..install import install_selection
 from ..selection import KNOWN_HARNESSES, WRITER_INBOXES, Selection, resolve_owner
+from ..work_cmd.scanner_platform import (
+    SCANNER_DESCRIPTOR_OPERATIONS_UNAVAILABLE,
+    ScannerDescriptorOperationsUnavailable,
+)
 from .guide import _steps, _validate_profile, plan_payload
 from .health import doctor as operator_doctor, verify_harness
 
@@ -59,8 +63,21 @@ def init(
         if step["id"] == "handoff-sources":
             kwargs["json_output"] = True
         output = StringIO()
-        with redirect_stdout(output):
-            rc = step["command"](**kwargs)
+        try:
+            with redirect_stdout(output):
+                rc = step["command"](**kwargs)
+        except ScannerDescriptorOperationsUnavailable:
+            if step["id"] != "work-scanners":
+                raise
+            results.append(
+                {
+                    "id": step["id"],
+                    "path": str(path),
+                    "status": "skipped",
+                    "reason": SCANNER_DESCRIPTOR_OPERATIONS_UNAVAILABLE,
+                }
+            )
+            continue
         output_text = output.getvalue().strip()
         result = {
             "id": step["id"],

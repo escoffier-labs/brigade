@@ -1214,6 +1214,37 @@ def test_work_bootstrap_prepares_daily_loop(tmp_path, monkeypatch, capsys):
     assert "timeout_seconds = 44" in config
 
 
+def test_work_bootstrap_warns_when_windows_scanner_operations_are_unsupported(tmp_path, monkeypatch, capsys):
+    from brigade.work_cmd import scanner_platform
+
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(scanner_platform, "_platform_name", "nt")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+
+    assert work_cmd.bootstrap(target=tmp_path) == 0
+
+    out = capsys.readouterr().out
+    assert f"[warn] scanner_runs_root: {scanner_platform.SCANNER_DESCRIPTOR_OPERATIONS_UNAVAILABLE}" in out
+    assert "[ok] ready: daily work loop is usable" in out
+    assert not (tmp_path / ".brigade" / "scanners" / "runs").exists()
+
+
+def test_work_bootstrap_fails_for_unexpected_scanner_runs_root_error(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd.scanners,
+        "_bind_released_unbound_scanner_runs_root",
+        lambda target: (_ for _ in ()).throw(OSError("unsafe scanner state")),
+    )
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+
+    assert work_cmd.bootstrap(target=tmp_path) == 1
+
+    out = capsys.readouterr().out
+    assert "[fail] scanner_runs_root: unsafe scanner state" in out
+    assert "[fail] ready: 1 blocker" in out
+
+
 def test_work_bootstrap_preserves_existing_config_without_force(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(

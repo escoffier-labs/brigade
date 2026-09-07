@@ -27,6 +27,12 @@ from .inbox_lock import inbox_writer_lock as _scanner_inbox_writer_lock
 from .inbox_lock import scanner_inbox_run_lock as _scanner_inbox_run_lock
 from .inbox_lock import verify_inbox_lock as _verify_scanner_inbox_run_lock
 from .inbox_lock import verify_inbox_writer_lock as _verify_scanner_inbox_writer_lock
+from .scanner_platform import (
+    require_scanner_descriptor_operations as _require_scanner_descriptor_operations,
+    scanner_inbox_has_single_link as _scanner_inbox_has_single_link,
+    scanner_inbox_open_primitives_available as _scanner_inbox_open_primitives_available,
+    scanner_import_read_primitives_available as _scanner_import_read_primitives_available,
+)
 
 # Historical name kept for the writer-exclusion surface's existing callers/tests.
 _scanner_inbox_lock_path = inbox_lock.inbox_lock_path
@@ -311,12 +317,11 @@ def _bind_released_unbound_scanner_runs_root(target: Path) -> str:
     is foreign-owned, world-writable, or reached through a symlink fails
     closed. This is not the #1036 legacy adoption fallback.
 
-    Descriptor-relative walks use the ledger dirfd abstraction so Windows
-    binds through ``nt_dirfd`` the same way import-inbox does. When no
-    platform dirfd exists and the tree is absent, return ``missing`` so
-    first-create paths such as ``operator quickstart`` can proceed. An
-    existing unbound tree is never adopted without a descriptor walk.
+    Descriptor-relative scanner operations are unavailable on Windows. When
+    no platform dirfd exists and the tree is absent, return ``missing`` so
+    first-create paths such as ``operator quickstart`` can proceed.
     """
+    _require_scanner_descriptor_operations()
     if _scanner_runs_directory_is_bound(target):
         return "bound"
     if not ledger_mod._dirfd_available():
@@ -369,6 +374,7 @@ def _open_scanner_runs_directory(target: Path, *, create: bool) -> int:
     Create binds only a verifier-owned, uncompromised released root so a
     pre-0.27 workspace can keep sweeping.
     """
+    _require_scanner_descriptor_operations()
     if create:
         _bind_released_unbound_scanner_runs_root(target)
     return ledger_mod._open_verifier_owned_directory(
@@ -1036,29 +1042,10 @@ def _scanner_inbox_identity(metadata: os.stat_result) -> tuple[int, int] | None:
     return device, inode
 
 
-def _scanner_inbox_has_single_link(metadata: os.stat_result) -> bool:
-    """Return whether metadata proves the inbox has exactly one directory entry."""
-    try:
-        link_count = metadata.st_nlink
-    except AttributeError:
-        return False
-    return type(link_count) is int and link_count == 1
-
-
-def _scanner_inbox_open_primitives_available() -> bool:
-    """Return whether this platform can keep every inbox path component no-follow."""
-    return (
-        os.name == "posix"
-        and bool(getattr(os, "O_NOFOLLOW", 0))
-        and bool(getattr(os, "O_DIRECTORY", 0))
-        and os.open in os.supports_dir_fd
-        and os.mkdir in os.supports_dir_fd
-    )
-
-
 def _open_scanner_inbox_parent(target: Path, *, create: bool) -> tuple[int, str, tuple[tuple[int, int], ...]]:
     """Open the inbox parent by descriptors, rejecting every symlinked component."""
     if not _scanner_inbox_open_primitives_available():
+        _require_scanner_descriptor_operations()
         raise OSError("descriptor-relative scanner inbox operations are unavailable")
     target_root = target.expanduser().resolve()
     inbox_path = helpers._imports_path(target_root)
@@ -1260,6 +1247,7 @@ def _remove_scanner_inbox_at(parent: int, name: str) -> None:
 
 def _write_scanner_inbox_bytes(target: Path, data: bytes) -> None:
     """Atomically publish complete inbox bytes through a held no-follow parent."""
+    _require_scanner_descriptor_operations()
     with _scanner_inbox_run_lock(target), _scanner_inbox_writer_lock(target):
         _write_scanner_inbox_bytes_locked(target, data)
 
@@ -1441,6 +1429,7 @@ def _bounded_jsonl_rows(raw: bytes) -> list[bytes]:
 
 def _append_scanner_inbox_bytes(target: Path, data: bytes) -> None:
     """Append scanner records by atomically publishing complete inbox bytes."""
+    _require_scanner_descriptor_operations()
     with _scanner_inbox_run_lock(target), _scanner_inbox_writer_lock(target):
         existing = _scanner_inbox_bytes(target)
         separator = b"\n" if existing and not existing.endswith((b"\n", b"\r")) else b""
@@ -1449,6 +1438,7 @@ def _append_scanner_inbox_bytes(target: Path, data: bytes) -> None:
 
 def _restore_scanner_inbox_bytes(target: Path, data: bytes, exists: bool) -> None:
     """Restore the scanner inbox transaction to its exact pre-publication state."""
+    _require_scanner_descriptor_operations()
     if exists:
         _write_scanner_inbox_bytes(target, data)
         return
@@ -1496,6 +1486,7 @@ def _restore_scanner_inbox_snapshot_direct(
     missing and rollback refuses any inbox whose inode no longer matches the
     snapshotted one.
     """
+    _require_scanner_descriptor_operations()
     with _scanner_inbox_run_lock(target), _scanner_inbox_writer_lock(target):
         _verify_scanner_inbox_run_lock(target)
         _verify_scanner_inbox_writer_lock(target)
@@ -1888,18 +1879,6 @@ def _scanner_validate_import_output(
     return import_path, records, [f"{scanner.get('id')}: {error}" for error in errors]
 
 
-def _scanner_import_read_primitives_available() -> bool:
-    """Return whether scanner imports can be opened without pathname races."""
-    return (
-        os.name == "posix"
-        and bool(getattr(os, "O_NOFOLLOW", 0))
-        and bool(getattr(os, "O_DIRECTORY", 0))
-        and bool(getattr(os, "O_NONBLOCK", 0))
-        and os.open in os.supports_dir_fd
-        and os.stat in os.supports_dir_fd
-    )
-
-
 def _scanner_import_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
     return metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink
 
@@ -1963,6 +1942,7 @@ def _open_scanner_import_directory(parent: int, name: str, flags: int) -> int:
 
 def _scanner_read_import_jsonl(target: Path, scanner: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
     """Read scanner JSONL through descriptors rooted at the exact workspace target."""
+    _require_scanner_descriptor_operations()
     if not _scanner_import_read_primitives_available():
         raise OSError("descriptor-relative scanner import operations are unavailable")
     relative = _scanner_import_relative_path(scanner)
@@ -2413,28 +2393,37 @@ def _scanner_health(target: Path) -> dict[str, Any]:
         checks.append({"status": constants.OK, "name": "scanner_schedule", "detail": "no scanner schedule conflicts"})
 
     try:
-        runs_root_state = _bind_released_unbound_scanner_runs_root(target)
+        _require_scanner_descriptor_operations()
     except OSError as exc:
-        checks.append({"status": constants.FAIL, "name": "scanner_runs_root", "detail": str(exc)})
+        checks.append({"status": constants.WARN, "name": "scanner_descriptor_operations", "detail": str(exc)})
+        descriptor_operations_available = False
     else:
-        if runs_root_state == "repaired":
-            checks.append(
-                {
-                    "status": constants.OK,
-                    "name": "scanner_runs_root",
-                    "detail": "bound released pre-authority runs root",
-                }
-            )
-        elif runs_root_state == "bound":
-            checks.append(
-                {
-                    "status": constants.OK,
-                    "name": "scanner_runs_root",
-                    "detail": "bound to this workspace",
-                }
-            )
+        descriptor_operations_available = True
 
-    receipts, malformed_receipts = _scanner_receipt_collection(target)
+    if descriptor_operations_available:
+        try:
+            runs_root_state = _bind_released_unbound_scanner_runs_root(target)
+        except OSError as exc:
+            checks.append({"status": constants.FAIL, "name": "scanner_runs_root", "detail": str(exc)})
+        else:
+            if runs_root_state == "repaired":
+                checks.append(
+                    {
+                        "status": constants.OK,
+                        "name": "scanner_runs_root",
+                        "detail": "bound released pre-authority runs root",
+                    }
+                )
+            elif runs_root_state == "bound":
+                checks.append(
+                    {
+                        "status": constants.OK,
+                        "name": "scanner_runs_root",
+                        "detail": "bound to this workspace",
+                    }
+                )
+
+    receipts, malformed_receipts = _scanner_receipt_collection(target) if descriptor_operations_available else ([], [])
     receipts.sort(key=lambda item: str(item.get("started_at") or item.get("run_id") or ""), reverse=True)
     if malformed_receipts:
         checks.append(
@@ -2472,7 +2461,7 @@ def _scanner_health(target: Path) -> dict[str, Any]:
         checks.append({"status": constants.OK, "name": "scanner_run_logs", "detail": "receipt logs exist"})
 
     stale_successes: list[str] = []
-    if scanners:
+    if descriptor_operations_available and scanners:
         now = helpers._now()
         for scanner in scanners:
             if not scanner.get("enabled", True):
@@ -2496,17 +2485,18 @@ def _scanner_health(target: Path) -> dict[str, Any]:
     elif receipts and plan.get("valid"):
         checks.append({"status": constants.OK, "name": "scanner_runs_stale", "detail": "none"})
 
-    due = _scanner_due_items(target, scanners)
-    if due:
-        checks.append(
-            {
-                "status": constants.WARN,
-                "name": "scanner_runs_due",
-                "detail": ", ".join(str(item.get("id")) for item in due[:5]),
-            }
-        )
-    elif plan.get("valid"):
-        checks.append({"status": constants.OK, "name": "scanner_runs_due", "detail": "none"})
+    due = _scanner_due_items(target, scanners) if descriptor_operations_available else []
+    if descriptor_operations_available:
+        if due:
+            checks.append(
+                {
+                    "status": constants.WARN,
+                    "name": "scanner_runs_due",
+                    "detail": ", ".join(str(item.get("id")) for item in due[:5]),
+                }
+            )
+        elif plan.get("valid"):
+            checks.append({"status": constants.OK, "name": "scanner_runs_due", "detail": "none"})
 
     from .. import scanner_isolation
 
@@ -2713,6 +2703,7 @@ def scanners_init(*, target: Path, force: bool = False, update_gitignore: bool =
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
+    _require_scanner_descriptor_operations()
     path = helpers._scanner_config_path(target)
     try:
         _publish_scanner_config(target, config_mod._format_scanner_toml().encode("utf-8"), force=force)
@@ -2862,6 +2853,7 @@ def scanners_doctor(*, target: Path, json_output: bool = False, import_issues: b
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
+    _require_scanner_descriptor_operations()
     health = _scanner_health(target)
     imported: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -2946,6 +2938,7 @@ def _scanners_run_payload(
             "runs": [],
             "skipped": [],
         }, 2
+    _require_scanner_descriptor_operations()
     selector_count = sum(1 for item in (scanner_id, all_matching, due) if bool(item))
     if require_selector and selector_count != 1:
         error = "pass exactly one of scanner id, --all, or --due"
@@ -3277,6 +3270,7 @@ def scanners_runs(*, target: Path, json_output: bool = False, limit: int = 20) -
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
+    _require_scanner_descriptor_operations()
     receipts = _scanner_receipts(target)[:limit]
     payload = {"target": str(target), "runs_root": str(helpers._scanner_runs_root(target)), "runs": receipts}
     if json_output:
@@ -3300,6 +3294,7 @@ def scanners_run_show(*, target: Path, run_id: str, json_output: bool = False) -
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
+    _require_scanner_descriptor_operations()
     matches = [receipt for receipt in _scanner_receipts(target) if str(receipt.get("run_id") or "").startswith(run_id)]
     if not matches:
         print(f"error: scanner run not found: {run_id}", file=sys.stderr)
