@@ -807,13 +807,9 @@ def project_budget_state(
                 ):
                     used[dimension] = max(used.get(dimension, 0), int(payload["used"]))
             terminal_policy = "budget_exhausted"
-        elif event_type == EVENT_CANCEL_REQUESTED:
-            reason = payload.get("reason_class")
-            if reason == "operator_cancel":
-                terminal_policy = "operator_cancelled"
-            elif reason == "budget_cancel" and terminal_policy is None:
-                terminal_policy = "budget_exhausted"
         elif event_type == EVENT_CANCELLED:
+            # ``run_budget.cancel_requested`` is intent only. Terminal policy
+            # and cancel receipts require this matching receipt fact.
             raw_outcomes = payload.get("outcomes")
             outcomes: tuple[CancelOutcome, ...] = ()
             if isinstance(raw_outcomes, list):
@@ -1397,10 +1393,11 @@ class BudgetCoordinator:
         return replace(self._projection, used=used)
 
     def _commit(self, event_specs: Sequence[Mapping[str, Any]]) -> None:
+        recorded: list[dict[str, Any]] = []
         for spec in event_specs:
             self.append_event(str(spec["event_type"]), dict(spec["payload"]), str(spec["idempotency_key"]))
-            synthetic = {"event_type": spec["event_type"], "payload": dict(spec["payload"])}
-            self._events_cache.append(synthetic)
+            recorded.append({"event_type": spec["event_type"], "payload": dict(spec["payload"])})
+        self._events_cache.extend(recorded)
         self._projection = project_budget_state(self.declaration, self._events_cache)
 
     def _reserve_unlocked(self, *, request_id: str, units: int = 1) -> ReservationDecision:
@@ -1766,10 +1763,13 @@ class BudgetCoordinator:
         dimension: str,
         cancel_fn: Callable[[], CancellationReport | tuple[str, int]] | None = None,
     ) -> CancelReceipt:
-        """Best-effort cancel of active work with durable cancel receipts.
+        """Cancel active work only after both cancel lifecycle facts are durable.
 
         ``cancel_fn`` returns observations. The legacy tuple form remains
         readable for callers that only have an aggregate transport result.
+        The request and receipt are committed together so a failed
+        ``run_budget.cancelled`` write leaves the in-memory projection
+        non-terminal with no cancel receipt.
         """
         with self._lock:
             for receipt in reversed(self._projection.cancel_receipts):
@@ -1781,7 +1781,6 @@ class BudgetCoordinator:
                 transport_capability=transport_capability,
                 dimension=dimension,
             )
-            self._commit([requested])
             transport_result = "unsupported"
             active_remaining = 0
             outcomes: tuple[CancelOutcome, ...] = ()
@@ -1805,7 +1804,7 @@ class BudgetCoordinator:
                 outcomes=outcomes,
                 active_seats=active_seats,
             )
-            self._commit([cancelled])
+            self._commit([requested, cancelled])
             return CancelReceipt(
                 request_id=request_id,
                 reason_class=reason_class,
