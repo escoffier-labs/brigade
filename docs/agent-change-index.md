@@ -107,6 +107,7 @@ Index envelope:
   untrusted key is still reported as `valid` because the signature verified
   cryptographically over the PAE bytes; the `trust` axis reports `untrusted`
   and the overall status is `INVALID`.
+
 - `trust`: `trusted`, `untrusted`, or `unknown` (when `allowed_signers` is
   absent or unreadable).
 - `freshness`: `revocation-checked` or `revocation-absent`, plus
@@ -116,6 +117,28 @@ Index envelope:
 - `policy`: `match`, `mismatch`, or `unavailable`. Compares the policy digest
   recorded in the statement with the digest of the policy the verifier is
   evaluating.
+
+### Approval policy observations
+
+`POLICY-FAIL` records a clean, authenticated approval-policy refusal. It is an
+audit observation under the evaluator's external policy, not approval or
+release authority. An emitted `complete: true` index and a successful export
+are advisory evidence only, and do not authorize approval or release.
+
+The verifier validates every referenced approval against its exact signed
+envelope and journal event in one observation batch. Only the current latest
+journal-associated approval is evaluated as policy. Earlier artifacts are
+`approval_state: historical`: authenticated artifact/event associations with
+policy unevaluated, never current validity and never required-set evidence.
+`approval_state: unavailable` means that association could not be established.
+
+Missing requester evidence leaves an otherwise valid allow unevaluated and a
+required approval incomplete; clean signed `deny` and `hold` remain
+`POLICY-FAIL`. Integrity failures, including malformed subjects, bad
+signatures, failed receipt rederivation, stale bindings, broken journal
+associations, and an observed journal or envelope mutation, take precedence and
+return `INVALID`. Consumers must treat every unknown future overall status as
+non-success; only `COMPLETE-OK` is success.
 
 Each reference:
 

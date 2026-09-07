@@ -745,144 +745,22 @@ def _verify_v2_approval(
     context: ApprovalVerificationContext,
     now: datetime | None,
 ) -> ApprovalVerification:
-    """Verify human-approval/v2 without passing its evidence through v1 readers."""
-    run_id = run_dir.name
-    try:
-        predicate = statement.get("predicate")
-        if not isinstance(predicate, Mapping):
-            raise approval_v2.ApprovalV2Error("approval v2 predicate is invalid")
-        approver = predicate.get("approver")
-        run_ref = predicate.get("run")
-        policy = predicate.get("policy")
-        if not isinstance(approver, Mapping) or not isinstance(run_ref, Mapping) or not isinstance(policy, Mapping):
-            raise approval_v2.ApprovalV2Error("approval v2 references are invalid")
-        signed = approval_v2.parse_signed_bindings(statement)
-        principal = approver.get("principal")
-        signature = attestation.verify_attestation(
-            envelope,
-            allowed_signers_path=attestation.default_allowed_signers_path(target),
-            target=target,
-            principal=principal if isinstance(principal, str) else None,
-            expected_predicate_type=HUMAN_APPROVAL_V2_PREDICATE_TYPE,
-        )
-        policy_digest = policy.get("digest")
-        chain_head = run_ref.get("journalChainHead")
-        valid = all(
-            (
-                signature.status == attestation.STATUS_SIGNED_OK,
-                signature.principal == principal,
-                signature.keyid == approver.get("keyid"),
-                statement.get("_type") == attestation.IN_TOTO_STATEMENT_TYPE,
-                statement.get("predicateType") == HUMAN_APPROVAL_V2_PREDICATE_TYPE,
-                run_ref.get("id") == run_id,
-                isinstance(chain_head, Mapping) and chain_head.get("sha256") == event.previous_digest,
-                predicate.get("schemaVersion") == 2,
-                predicate.get("decision") == decision_value,
-                predicate.get("scope") == event.payload.get("scope"),
-                principal == event.payload.get("approver_principal"),
-                approver.get("keyid") == event.payload.get("approver_keyid"),
-                predicate.get("nonce") == event.payload.get("nonce"),
-                predicate.get("decidedAt") == event.payload.get("decided_at") == event.recorded_at,
-                predicate.get("expiresAt") == event.payload.get("expires_at"),
-                event.payload.get("producer_keyids") == sorted(signed.evidence.producer_keyids),
-                event.payload.get("subject_tree") == signed.tree_fingerprint,
-                hashlib.sha256(statement_bytes).hexdigest() == event.payload.get("statement_sha256"),
-                policy.get("name") == approval_v2.SOD_POLICY_NAME,
-                isinstance(policy_digest, Mapping) and policy_digest.get("sha256") == approval_v2.SOD_POLICY_SHA256,
-                predicate.get("reasonCode") in REASON_CODES,
-                isinstance(predicate.get("reasonSha256"), str) and bool(_HEX64_RE.fullmatch(predicate["reasonSha256"])),
-                _parse_timestamp(predicate.get("decidedAt")) is not None,
-                _parse_timestamp(predicate.get("expiresAt")) is not None,
-            )
-        )
-        if not valid:
-            raise approval_v2.ApprovalV2Error("approval v2 signature or bindings are invalid")
-        current_requester = approval_v2.verify_recorded_request(target, run_dir, report.events)
-    except (approval_v2.ApprovalV2Error, OSError):
-        return ApprovalVerification(
-            run_id,
-            "APPROVAL-INVALID",
-            decision_value,
-            None,
-            prior_approvals=prior_approvals,
-            binding="test-result",
-        )
+    """Compatibility wrapper for the shared v2 approval verifier."""
+    from .approval_verification import verify_v2_approval
 
-    evidence_stale = False
-    if signed.evidence.test_results:
-        try:
-            current_evidence = approval_v2.collect_test_result_evidence(target, run_id, signed.tree_fingerprint)
-        except (approval_v2.ApprovalV2Error, OSError):
-            evidence_stale = True
-            current_evidence = None
-        if current_evidence != signed.evidence:
-            evidence_stale = True
-    elif decision_value == "allow":
-        return ApprovalVerification(
-            run_id,
-            "APPROVAL-INVALID",
-            decision_value,
-            None,
-            prior_approvals=prior_approvals,
-            binding="test-result",
-        )
-    requester_stale = current_requester != signed.requester
-    local_approval = run_meta.get("approval")
-    local_reason = local_approval.get("reason") if isinstance(local_approval, Mapping) else None
-    reason_stale = not isinstance(local_reason, str) or approval_v2.reason_sha256(
-        predicate["nonce"], local_reason
-    ) != predicate.get("reasonSha256")
-    live_tree = context.live_tree
-    comparison_tree = live_tree if live_tree is not None else run_meta.get("tree_fingerprint")
-    if not isinstance(comparison_tree, str) or not comparison_tree:
-        return ApprovalVerification(
-            run_id,
-            "APPROVAL-INVALID",
-            decision_value,
-            None,
-            live_tree=live_tree,
-            prior_approvals=prior_approvals,
-            binding="test-result",
-        )
-
-    instant = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    sod = approval_v2.evaluate_sod(
-        statement=statement,
-        evidence=signed.evidence,
-        requester=signed.requester,
-        events=report.events,
-        approval_sequence=event.sequence,
-        workspace_keyid=context.workspace_keyid,
-        now=instant,
-    )
-    expires_at = _parse_timestamp(predicate.get("expiresAt"))
-    stale = comparison_tree != signed.tree_fingerprint or evidence_stale or requester_stale or reason_stale
-    detail = "APPROVAL-STALE" if stale else None
-    if any(check["status"] == "failed" and check["id"] != "approval-not-expired" for check in sod["checks"]):
-        status = "SOD-VIOLATION"
-    elif decision_value == "allow" and expires_at is not None and expires_at <= instant:
-        status = "APPROVAL-EXPIRED"
-    elif reason_stale or (decision_value == "allow" and stale):
-        status = "APPROVAL-STALE"
-    elif sod["result"] == "INDETERMINATE":
-        status = "SOD-INDETERMINATE"
-    elif decision_value == "allow":
-        status = "APPROVED"
-    elif decision_value == "deny":
-        status = "DENIED"
-    elif decision_value == "hold":
-        status = "HELD"
-    else:
-        status = "APPROVAL-INVALID"
-    return ApprovalVerification(
-        run_id,
-        status,
-        decision_value,
-        sod,
-        live_tree=live_tree,
+    return verify_v2_approval(
+        target=target,
+        run_dir=run_dir,
+        report=report,
+        event=event,
+        decision_value=decision_value,
         prior_approvals=prior_approvals,
-        detail=detail,
-        binding="test-result",
+        envelope=envelope,
+        statement=statement,
+        statement_bytes=statement_bytes,
+        run_meta=run_meta,
+        context=context,
+        now=now,
     )
 
 
@@ -936,114 +814,24 @@ def verify_run_approval(
                 context=context,
                 now=now,
             )
-        predicate = statement.get("predicate")
-        if not isinstance(predicate, Mapping):
-            raise ApprovalError("approval predicate is invalid")
-        approver = predicate.get("approver")
-        run_ref = predicate.get("run")
-        policy = predicate.get("policy")
-        if not isinstance(approver, Mapping) or not isinstance(run_ref, Mapping) or not isinstance(policy, Mapping):
-            raise ApprovalError("approval predicate references are invalid")
-        recorded_producer_keyids = _recorded_producer_keyids(predicate)
-        if recorded_producer_keyids is None:
-            raise ApprovalError("approval producer identities are invalid")
-        signed = _signed_subjects(statement)
-        if signed is None:
-            raise ApprovalError("approval subjects are invalid")
-        approved_tree, signed_receipt_subjects = signed
-        live_tree = context.live_tree
-        comparison_tree = live_tree if live_tree is not None else run_meta.get("tree_fingerprint")
-        if not isinstance(comparison_tree, str) or not comparison_tree:
-            raise ApprovalError("run.json has no final tree_fingerprint")
-        principal = approver.get("principal")
-        signature = attestation.verify_attestation(
-            envelope,
-            allowed_signers_path=attestation.default_allowed_signers_path(target),
+        from .approval_verification import verify_v1_approval
+
+        return verify_v1_approval(
             target=target,
-            principal=principal if isinstance(principal, str) else None,
-            expected_predicate_type=HUMAN_APPROVAL_PREDICATE_TYPE,
+            run_dir=run_dir,
+            report=report,
+            event=event,
+            decision_value=decision_value,
+            prior_approvals=prior_approvals,
+            envelope=envelope,
+            statement=statement,
+            statement_bytes=statement_bytes,
+            run_meta=run_meta,
+            context=context,
+            now=now,
         )
-        receipts = collect_verify_receipts(target, run_id, tree_fingerprint=approved_tree, context=context)
-        current_receipt_subjects = {(f"verify:{receipt.run_id}", receipt.receipt_sha256) for receipt in receipts}
-        missing_subjects = signed_receipt_subjects - current_receipt_subjects
-        signed_receipts = [
-            receipt
-            for receipt in receipts
-            if (f"verify:{receipt.run_id}", receipt.receipt_sha256) in signed_receipt_subjects
-        ]
-        policy_digest = policy.get("digest")
-        chain_head = run_ref.get("journalChainHead")
-        valid = all(
-            (
-                signature.status == attestation.STATUS_SIGNED_OK,
-                signature.principal == principal,
-                signature.keyid == approver.get("keyid"),
-                statement.get("_type") == attestation.IN_TOTO_STATEMENT_TYPE,
-                statement.get("predicateType") == HUMAN_APPROVAL_PREDICATE_TYPE,
-                run_ref.get("id") == run_id,
-                isinstance(chain_head, Mapping) and chain_head.get("sha256") == event.previous_digest,
-                predicate.get("schemaVersion") == 1,
-                predicate.get("decision") == decision,
-                predicate.get("scope") == event.payload.get("scope"),
-                principal == event.payload.get("approver_principal"),
-                approver.get("keyid") == event.payload.get("approver_keyid"),
-                predicate.get("nonce") == nonce,
-                predicate.get("expiresAt") == event.payload.get("expires_at"),
-                event.payload.get("producer_keyids") == sorted(recorded_producer_keyids),
-                event.payload.get("subject_tree") == approved_tree,
-                hashlib.sha256(statement_bytes).hexdigest() == event.payload.get("statement_sha256"),
-                policy.get("name") == SOD_POLICY_NAME,
-                isinstance(policy_digest, Mapping) and policy_digest.get("sha256") == SOD_POLICY_SHA256,
-                predicate.get("reasonCode") in REASON_CODES,
-                isinstance(predicate.get("reason"), str) and len(predicate["reason"]) <= 500,
-                _parse_timestamp(predicate.get("decidedAt")) is not None,
-                _parse_timestamp(predicate.get("expiresAt")) is not None,
-            )
-        )
-        if not valid:
-            raise ApprovalError("approval signature or subjects do not match current evidence")
     except (ApprovalError, OSError):
         return ApprovalVerification(run_id, "APPROVAL-INVALID", decision_value, None, prior_approvals=prior_approvals)
-
-    instant = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    sod = evaluate_sod(
-        target=target,
-        statement=statement,
-        run_meta=run_meta,
-        receipts=signed_receipts,
-        events=report.events,
-        approval_sequence=event.sequence,
-        now=instant,
-        recorded_producer_keyids=recorded_producer_keyids,
-        context=context,
-    )
-    expires_at = _parse_timestamp(predicate.get("expiresAt"))
-    stale = comparison_tree != approved_tree or bool(missing_subjects)
-    detail = "APPROVAL-STALE" if stale else None
-    if any(check["status"] == "failed" and check["id"] != "approval-not-expired" for check in sod["checks"]):
-        status = "SOD-VIOLATION"
-    elif decision == "allow" and expires_at is not None and expires_at <= instant:
-        status = "APPROVAL-EXPIRED"
-    elif decision == "allow" and stale:
-        status = "APPROVAL-STALE"
-    elif decision == "allow":
-        status = "APPROVED"
-    elif decision == "deny":
-        status = "DENIED"
-    elif decision == "hold":
-        status = "HELD"
-    else:
-        status = "APPROVAL-INVALID"
-    return ApprovalVerification(
-        run_id,
-        status,
-        decision_value,
-        sod,
-        live_tree=live_tree,
-        prior_approvals=prior_approvals,
-        detail=detail,
-        binding="receipt",
-    )
 
 
 def verify_approvals(target: Path) -> dict[str, Any]:

@@ -1520,7 +1520,7 @@ Machine-readable audit observations produced by the agent-change verifier.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `schema` | string | Always `brigade.agent_change_verification.v1` |
-| `status` | string | `COMPLETE-OK`, `INCOMPLETE`, `INVALID`, or `UNVERIFIABLE` |
+| `status` | string | `COMPLETE-OK`, `POLICY-FAIL`, `INCOMPLETE`, `INVALID`, or `UNVERIFIABLE` |
 | `evaluatedAt` | string (ISO-8601) | UTC Z timestamp |
 | `policy` | object | `{"path", "status", "digest"}` where `status` is `match`, `mismatch`, or `unavailable` |
 | `project` | object | `{"scope", "status"}` where `status` is `match` or `mismatch` |
@@ -1554,7 +1554,15 @@ Per-reference observations:
 | `binding` | string | `bound` or `conflicted` |
 | `rederivation` | string | `reproduced`, `failed`, or `not-applicable` |
 | `policy_outcome` | string | `pass`, `fail`, `unevaluated`, or `not-applicable` |
+| `approval_state` | string | Approval references only: `current`, `historical`, or `unavailable`. `historical` means an authenticated artifact/event association with policy unevaluated, not current validity. Only `current` can satisfy a required approval. |
 | `reason` | string \| null | Refusal reason when `availability` is `partial` or `syntax` is `malformed` |
+
+`POLICY-FAIL` is a clean policy refusal after integrity checks, not approval or
+release authority. Emitted `complete` and export success are advisory only.
+Missing requester evidence leaves allow unevaluated, while clean signed deny or
+hold remains `POLICY-FAIL`. Observed journal or envelope mutation and every
+integrity failure take precedence over policy failures; unknown future statuses
+are non-success for consumers.
 
 ---
 
