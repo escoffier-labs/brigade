@@ -446,6 +446,7 @@ def _write_roster(tmp_target, body: str) -> None:
     path.write_text(body)
 
 
+@pytest.mark.allow_agent_cli  # stubs proc.which, so doctor probes the real grok binary
 def test_roster_doctor_ok_for_supported_model_pin(monkeypatch, tmp_target, capsys):
     _write_roster(
         tmp_target,
