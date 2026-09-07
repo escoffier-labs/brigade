@@ -971,8 +971,7 @@ def _autofix_block_reason_counts(items: list[dict[str, Any]]) -> list[dict[str, 
             if isinstance(blocker, str) and blocker:
                 counts[blocker] = counts.get(blocker, 0) + 1
     return [
-        {"reason": reason, "count": counts[reason]}
-        for reason in sorted(counts, key=lambda name: (-counts[name], name))
+        {"reason": reason, "count": counts[reason]} for reason in sorted(counts, key=lambda name: (-counts[name], name))
     ]
 
 
