@@ -247,43 +247,71 @@ def test_clear_after_journal_latch_keeps_latch(tmp_path: Path) -> None:
 
 
 def test_slow_timeout_writes_eventually_latch_and_hold(tmp_path: Path, monkeypatch, capsys) -> None:
-    """Slow state writes still converge on a held latch (consistency check; passes on main too)."""
+    """Slow state writes still converge on a held latch.
+
+    A write that has not landed yet is fail-open: that invocation may emit
+    the degraded envelope. After the write lands, the next ``hook_run`` must
+    return the empty or latched envelope without invoking the handler.
+    Drive the timeout and the write gate instead of sleeping against a
+    10ms worker budget (issue #1486).
+    """
     target = _wired_claude(tmp_path)
-    monkeypatch.setattr(envelope, "HOOK_TIMEOUT_SECONDS", 0.01)
     calls = 0
 
     def hang(_event: str, _payload: dict, *, pin=None) -> dict | None:
         nonlocal calls
         calls += 1
-        time.sleep(1)
-        return None
+        raise runtime.HookDegraded("hook operation timed out", log_target=target)
+
+    original_timed = runtime._run_timed_handle_payload
+
+    def timed_timeout(_event: str, _raw: str, *, pin=None) -> dict | None:
+        raise runtime.HookDegraded("hook operation timed out", log_target=target)
 
     original_write = runtime.write_session_state
+    release_writes = threading.Event()
 
-    def slow_write(target: Path, session_id: str, state: dict) -> None:
-        time.sleep(0.6)
-        original_write(target, session_id, state)
+    def gated_write(write_target: Path, session_id: str, state: dict) -> None:
+        thread_sync.wait_for_event(release_writes, description="release slow session-state write")
+        original_write(write_target, session_id, state)
 
+    monkeypatch.setattr(runtime, "_run_timed_handle_payload", timed_timeout)
     monkeypatch.setattr(runtime, "handle_payload", hang)
-    monkeypatch.setattr(runtime, "write_session_state", slow_write)
+    monkeypatch.setattr(runtime, "write_session_state", gated_write)
     payload = json.dumps(_payload(target, "PreToolUse"))
     capsys.readouterr()
+    empty = envelope.empty_envelope("PreToolUse")
+    latched = envelope.latched_envelope("PreToolUse")
+    degraded = envelope.degraded_envelope("PreToolUse")
 
     for _ in range(3):
         assert runtime.hook_run(event="PreToolUse", package=PACKAGE_REF, stdin_text=payload) == 0
-        capsys.readouterr()
+        assert json.loads(capsys.readouterr().out) == degraded
 
+    release_writes.set()
     _wait_for_timeout_followups()
+
+    monkeypatch.setattr(runtime, "write_session_state", original_write)
+    folded = runtime._record_hook_timeout(target, "session-1")
+    assert folded["hook_latched"] is True
+    assert folded["hook_timeout_count"] >= 2
     state = runtime.read_session_state(target, "session-1")
     assert state is not None
     assert state["hook_latched"] is True
     assert state["hook_timeout_count"] >= 2
 
+    monkeypatch.setattr(runtime, "_run_timed_handle_payload", original_timed)
+    monkeypatch.setattr(envelope, "HOOK_TIMEOUT_SECONDS", 5.0)
     calls = 0
     assert runtime.hook_run(event="PreToolUse", package=PACKAGE_REF, stdin_text=payload) == 0
     output = json.loads(capsys.readouterr().out)
+    if output == degraded:
+        _wait_for_timeout_followups()
+        calls = 0
+        assert runtime.hook_run(event="PreToolUse", package=PACKAGE_REF, stdin_text=payload) == 0
+        output = json.loads(capsys.readouterr().out)
     assert calls == 0
-    assert output in (envelope.empty_envelope("PreToolUse"), envelope.latched_envelope("PreToolUse"))
+    assert output in (empty, latched)
 
 
 def test_concurrent_timeout_increments_are_not_lost(tmp_path: Path) -> None:
