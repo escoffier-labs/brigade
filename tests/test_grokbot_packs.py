@@ -912,12 +912,8 @@ def test_cerebro_doctor_canary_and_unit_hide_paths(tmp_path: Path, monkeypatch):
     assert str(workdir) not in sanitized
     assert SECRET not in unit
     assert str(executable) not in unit
-    assert any(
-        check["check"] == "no-public-route" and check["status"] == "manual" for check in checks
-    )
-    assert all(
-        set(check) == {"check", "status"} for check in checks if check["check"] != "no-public-route"
-    )
+    assert any(check["check"] == "no-public-route" and check["status"] == "manual" for check in checks)
+    assert all(set(check) == {"check", "status"} for check in checks if check["check"] != "no-public-route")
     assert canary["ok"] is False
     assert "--pack" in unit
     assert "cerebro-memory" in unit
