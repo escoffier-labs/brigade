@@ -2161,6 +2161,29 @@ def test_run_agent_malformed_env_file_ref_never_reads_parent_environment(monkeyp
     assert calls == []
 
 
+def test_parse_env_file_reference_accepts_posix_and_windows_absolute_paths():
+    assert agents._parse_env_file_reference("env-file:/abs/path/file.env#MY_VAR") == (
+        "/abs/path/file.env",
+        "MY_VAR",
+    )
+    assert agents._parse_env_file_reference(r"env-file:C:\path\file.env#MY_VAR") == (
+        r"C:\path\file.env",
+        "MY_VAR",
+    )
+    assert agents._parse_env_file_reference("env-file:C:/path/file.env#MY_VAR") == (
+        "C:/path/file.env",
+        "MY_VAR",
+    )
+
+
+def test_parse_env_file_reference_rejects_relative_bare_drive_unc_and_hash():
+    assert agents._parse_env_file_reference("env-file:relative/path#MY_VAR") is None
+    assert agents._parse_env_file_reference("env-file:C:#MY_VAR") is None
+    assert agents._parse_env_file_reference(r"env-file:\\server\share\file.env#MY_VAR") is None
+    assert agents._parse_env_file_reference("env-file://server/share/file.env#MY_VAR") is None
+    assert agents._parse_env_file_reference("env-file:/a#b#MY_VAR") is None
+
+
 def test_run_agent_env_file_prefixed_parent_variable_still_resolves(monkeypatch):
     # Only the exact "env-file:" syntax is an env-file reference; a parent
     # variable that merely starts with "env-file" resolves from the
