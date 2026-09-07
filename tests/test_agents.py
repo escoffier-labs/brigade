@@ -7,6 +7,35 @@ import pytest
 from brigade import agents
 
 
+def _stub_agent_executable(monkeypatch, *, path_for=None):
+    """Stub the executable-resolution seam so dispatch tests exercise dispatch.
+
+    Replaces the POSIX-only ``proc.which`` fixtures (``"/x/" + command``) that
+    the Windows shim guard classifies as ``unsupported-command-shim`` before
+    dispatch runs. ``path_for`` optionally pins the resolved path (or maps a
+    command name to a path when callable); the default mirrors the old
+    ``/x/<command>`` layout so launched-argv assertions keep working.
+    """
+
+    def _resolve(cli_ref, path=None, command=None):
+        cmd = agents.command_for(cli_ref, command)
+        if callable(path_for):
+            resolved = path_for(cmd)
+        elif path_for is not None:
+            resolved = path_for
+        else:
+            resolved = f"/x/{cmd}"
+        return agents.proc.ExecutableIdentity(
+            command=cmd,
+            path=resolved,
+            kind="native",
+            runnable=True,
+            detail="test executable",
+        )
+
+    monkeypatch.setattr(agents, "resolve_agent_executable", _resolve)
+
+
 def test_build_argv_for_known_clis():
     # A claude write run with no explicit sandbox must fail safely rather than
     # silently grant full access (or stall on a permission prompt).
@@ -260,7 +289,7 @@ def test_run_agent_claude_workspace_write_fails_without_spawn(monkeypatch):
         spawned.append(argv)
         return agents.proc.Result(0, "answer", "")
 
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", fake_run)
 
     res = agents.run_agent("claude", "implement it", sandbox="workspace-write")
@@ -284,7 +313,7 @@ def test_run_agent_claude_write_without_sandbox_fails_safely(monkeypatch):
         spawned.append(argv)
         return agents.proc.Result(0, "answer", "")
 
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", fake_run)
 
     res = agents.run_agent("claude", "implement it")  # sandbox=None
@@ -315,7 +344,7 @@ def test_run_agent_non_sandbox_value_error_is_not_unsupported_sandbox(monkeypatc
     # UnsupportedSandboxError maps to unsupported-sandbox; other ValueErrors map
     # to invalid-dispatch-args.
     spawned = []
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: spawned.append(argv))
 
     result = agents.run_agent("goose", "hi", model="anything")
@@ -330,7 +359,7 @@ def test_run_agent_non_sandbox_value_error_is_not_unsupported_sandbox(monkeypatc
 def test_run_agent_unknown_cli_value_error_is_not_unsupported_sandbox(monkeypatch):
     # A second non-sandbox ValueError class: an unknown cli must be
     # invalid-dispatch-args, not unsupported-sandbox.
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(0, "answer", ""))
 
     result = agents.run_agent("nope", "hi")
@@ -759,7 +788,7 @@ def _fake_ollama_env(monkeypatch, list_result, run_result=None):
             return list_result
         return run_result if run_result is not None else agents.proc.Result(0, "answer", "")
 
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", fake_run)
     return calls
 
@@ -803,7 +832,7 @@ def test_run_agent_ollama_fails_seat_when_list_fails(monkeypatch):
 
 
 def test_run_agent_captures_output(monkeypatch):
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(0, "  answer  ", ""))
     res = agents.run_agent("codex", "do it")
     assert res.ok is True
@@ -815,7 +844,7 @@ def test_run_agent_captures_output(monkeypatch):
 
 
 def test_run_agent_maps_output_limit_overflow_to_harness_failure(monkeypatch):
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -839,7 +868,7 @@ def test_run_agent_maps_output_limit_overflow_to_harness_failure(monkeypatch):
 
 
 def test_run_agent_keeps_successful_truncated_exec_output(monkeypatch):
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -868,7 +897,7 @@ def test_truncated_exec_output_still_runs_final_output_validation(monkeypatch):
     progress-only or tool-only output was reported ok purely because the child
     happened to overflow the cap.
     """
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -889,7 +918,7 @@ def test_truncated_exec_output_still_runs_final_output_validation(monkeypatch):
 
 
 def test_run_agent_maps_incomplete_process_group_to_harness_failure(monkeypatch):
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -912,7 +941,7 @@ def test_run_agent_maps_incomplete_process_group_to_harness_failure(monkeypatch)
 
 def test_run_agent_rejects_decode_failure_even_when_exit_zero(monkeypatch):
     decode_error = "child stderr is not valid UTF-8 (utf-8): 'utf-8' codec can't decode byte 0x9d in position 0"
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -937,7 +966,7 @@ def test_run_agent_rejects_decode_failure_even_when_exit_zero(monkeypatch):
 def test_run_agent_rejects_structured_grok_decode_failure_before_parsing(monkeypatch):
     decode_error = "child stdout is not valid UTF-8 (utf-8): 'utf-8' codec can't decode byte 0x9d in position 7"
     partial_stdout = "prefix\n\ufffd"
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -973,7 +1002,7 @@ def test_run_agent_rejects_intent_only_antigravity_output(monkeypatch):
             "I will inspect the matching source files next.",
         ]
     )
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
 
     result = agents.run_agent("antigravity", "trace it", model="Gemini 3.5 Flash (High)")
@@ -997,7 +1026,7 @@ def test_run_agent_rejects_intent_only_antigravity_output(monkeypatch):
     ],
 )
 def test_run_agent_rejects_bare_progress_only_output(monkeypatch, output):
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -1011,7 +1040,7 @@ def test_run_agent_rejects_bare_progress_only_output(monkeypatch, output):
 
 
 def test_run_agent_rejects_progress_over_changed_files(monkeypatch):
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -1040,7 +1069,7 @@ def test_run_agent_rejects_progress_over_changed_files(monkeypatch):
 )
 def test_run_agent_rejects_tool_call_only_output(monkeypatch, payload):
     output = json.dumps(payload)
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
 
     result = agents.run_agent("antigravity", "inspect it")
@@ -1060,7 +1089,7 @@ def test_run_agent_rejects_tool_call_only_output(monkeypatch, payload):
     ],
 )
 def test_run_agent_rejects_tool_use_markup_without_final_text(monkeypatch, output):
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
 
     result = agents.run_agent("antigravity", "inspect it")
@@ -1082,7 +1111,7 @@ def test_run_agent_rejects_tool_call_and_tool_result_transcript(monkeypatch):
             ]
         }
     )
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
 
     result = agents.run_agent("antigravity", "inspect it")
@@ -1101,7 +1130,7 @@ def test_run_agent_rejects_call_output_without_final_text(monkeypatch, result_ty
             ]
         }
     )
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
 
     result = agents.run_agent("antigravity", "inspect it")
@@ -1120,7 +1149,7 @@ def test_run_agent_rejects_call_output_without_final_text(monkeypatch, result_ty
     ],
 )
 def test_run_agent_rejects_in_band_operational_diagnostics(monkeypatch, output, failure_kind):
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
 
     result = agents.run_agent("antigravity", "answer directly")
@@ -1143,7 +1172,7 @@ def test_run_agent_rejects_in_band_operational_diagnostics(monkeypatch, output, 
     ],
 )
 def test_run_agent_accepts_short_or_quoted_substantive_output(monkeypatch, output):
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
 
     result = agents.run_agent("antigravity", "answer directly")
@@ -1159,7 +1188,7 @@ def test_run_agent_forwards_model_to_argv(monkeypatch):
         captured["argv"] = argv
         return agents.proc.Result(0, "answer", "")
 
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", fake_run)
     res = agents.run_agent("claude", "hi", sandbox="danger-full-access", model="claude-fable-5")
     assert res.ok is True
@@ -1190,7 +1219,7 @@ def test_run_agent_codex_feeds_prompt_on_stdin(monkeypatch):
         captured["stdin"] = kw.get("stdin")
         return agents.proc.Result(0, "answer", "")
 
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", fake_run)
     res = agents.run_agent("codex", "plan this task", model="gpt-5.5", read_only=True)
     assert res.ok is True
@@ -1214,7 +1243,7 @@ def test_run_agent_maps_codex_stdin_hang_banner(monkeypatch):
             "Reading additional input from stdin...\nOpenAI Codex v0.144.5\n--------\n",
         )
 
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", fake_run)
     res = agents.run_agent("codex", "hi")
     assert res.ok is False
@@ -1252,7 +1281,7 @@ def test_run_agent_threads_cwd_into_argv_builder(monkeypatch, tmp_path):
         captured["cwd"] = kw["cwd"]
         return agents.proc.Result(0, "answer", "")
 
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", fake_run)
     res = agents.run_agent("antigravity", "hi", cwd=tmp_path)
     assert res.ok is True
@@ -1277,7 +1306,7 @@ def test_run_agent_antigravity_forwards_timeout_and_probes_resolved_seat(monkeyp
             return agents.proc.Result(0, "--print-timeout <duration>", "")
         return agents.proc.Result(0, "answer", "")
 
-    monkeypatch.setattr(agents.proc, "which", lambda command, path=None: "/seat/bin/agy")
+    _stub_agent_executable(monkeypatch, path_for="/seat/bin/agy")
     monkeypatch.setattr(agents.proc, "run", fake_run)
 
     result = agents.run_agent(
@@ -1349,7 +1378,7 @@ def test_run_agent_threads_process_registry_to_ollama_preflight(monkeypatch):
         seen["process_registry"] = process_registry
         return False, "stop before dispatch"
 
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents, "ollama_model_present", fake_present)
 
     result = agents.run_agent("ollama:llama3.3", "fix it", process_registry=registry)
@@ -1362,7 +1391,7 @@ def test_run_agent_preserves_legacy_ollama_preflight_call_shape(monkeypatch):
     def fake_present(model, executable=None):
         return False, "stop before dispatch"
 
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents, "ollama_model_present", fake_present)
 
     assert not agents.run_agent("ollama:llama3.3", "fix it").ok
@@ -1377,7 +1406,7 @@ def test_run_agent_antigravity_with_no_cwd_allows_current_cwd(monkeypatch, tmp_p
         return agents.proc.Result(0, "answer", "")
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", fake_run)
     res = agents.run_agent("antigravity", "hi", timeout=None)
 
@@ -1394,7 +1423,7 @@ def test_run_agent_antigravity_with_no_cwd_allows_current_cwd(monkeypatch, tmp_p
 
 
 def test_run_agent_nonzero_is_not_ok(monkeypatch):
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(1, "", "boom"))
     res = agents.run_agent("claude", "x", sandbox="danger-full-access")
     assert res.ok is False
@@ -1414,7 +1443,7 @@ _CODEX_UNSUPPORTED_MODEL_400 = (
 def test_run_agent_classifies_nonzero_unsupported_model_without_leaking_provider_400(monkeypatch, stream, diagnostic):
     stdout = diagnostic if stream == "stdout" else ""
     stderr = diagnostic if stream == "stderr" else ""
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(1, stdout, stderr))
 
     result = agents.run_agent("codex", "scan the tree", model="gpt-daybreak-blue-latest")
@@ -1440,7 +1469,7 @@ def test_run_agent_classifies_nonzero_unsupported_model_without_leaking_provider
     ],
 )
 def test_run_agent_classifies_nonzero_operational_diagnostics(monkeypatch, diagnostic, failure_kind):
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(1, "", diagnostic))
 
     result = agents.run_agent("codex", "scan the tree")
@@ -1452,7 +1481,7 @@ def test_run_agent_classifies_nonzero_operational_diagnostics(monkeypatch, diagn
 
 @pytest.mark.parametrize("cli_ref", ["cursor", "grok"])
 def test_run_agent_classifies_silent_adapter_exit(monkeypatch, cli_ref):
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(0, "", ""))
 
     result = agents.run_agent(cli_ref, "do it")
@@ -1501,7 +1530,7 @@ def _grok_write_envelope(
 
 def test_run_agent_accepts_grok_snake_case_end_turn_stop_reason(monkeypatch):
     stdout = _grok_json_output("PONG", stop_reason="end_turn")
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
 
     result = agents.run_agent("grok", "reply with PONG", read_only=True, model="grok-4.5")
@@ -1514,7 +1543,7 @@ def test_run_agent_accepts_grok_snake_case_end_turn_stop_reason(monkeypatch):
 @pytest.mark.parametrize("stop_reason", ["Cancelled", "endturn", "END_TURN", "end turn"])
 def test_run_agent_still_rejects_unknown_grok_stop_reasons(monkeypatch, stop_reason):
     stdout = _grok_json_output("No actionable findings.", stop_reason=stop_reason)
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
 
     result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
@@ -1528,7 +1557,7 @@ def test_run_agent_still_rejects_unknown_grok_stop_reasons(monkeypatch, stop_rea
 def test_run_agent_accepts_grok_write_mode_envelope_text(monkeypatch):
     answer = "Implemented the requested change."
     stdout = _grok_write_envelope(answer)
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
 
     result = agents.run_agent("grok", "implement it", read_only=False, model="grok-4.5")
@@ -1543,7 +1572,7 @@ def test_run_agent_accepts_grok_write_mode_envelope_text(monkeypatch):
 def test_run_agent_write_mode_does_not_request_a_json_schema(monkeypatch):
     stdout = _grok_write_envelope("Implemented the requested change.")
     seen = {}
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
 
     def fake_run(argv, **kwargs):
         seen["argv"] = argv
@@ -1562,7 +1591,7 @@ def test_run_agent_write_mode_does_not_request_a_json_schema(monkeypatch):
 
 def test_run_agent_rejects_grok_write_mode_progress_without_end_turn(monkeypatch):
     stdout = _grok_write_envelope("Gathering the diffs first.", stop_reason="max_turns")
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
 
     result = agents.run_agent("grok", "implement it", read_only=False, model="grok-4.5")
@@ -1580,7 +1609,7 @@ def test_run_agent_rejects_grok_progress_without_structured_final_output(monkeyp
         "Reviewing the README.md and tools/brigade.md diffs against Brigade 0.22.0. "
         "Gathering the git diffs and current file content first."
     )
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
 
     result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
@@ -1597,7 +1626,7 @@ def test_run_agent_rejects_grok_progress_without_structured_final_output(monkeyp
 def test_run_agent_rejects_grok_json_without_structured_final_output(monkeypatch):
     output = "Reviewing the diff and gathering the relevant files first."
     stdout = _grok_json_output(output, structured=False, stop_reason="Cancelled")
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
 
     result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
@@ -1624,7 +1653,7 @@ def test_run_agent_rejects_invalid_grok_structured_final_output(monkeypatch, cas
     else:
         payload["structuredOutputError"] = "model reported an invalid structured result"
     stdout = json.dumps(payload)
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
 
     result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
@@ -1640,7 +1669,7 @@ def test_run_agent_rejects_falsey_present_grok_structured_error(monkeypatch, err
     payload = json.loads(_grok_json_output("No actionable findings."))
     payload["structuredOutputError"] = error_value
     stdout = json.dumps(payload)
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
 
     result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
@@ -1655,7 +1684,7 @@ def test_run_agent_rejects_falsey_present_grok_structured_error(monkeypatch, err
 def test_run_agent_accepts_structured_grok_finding_with_progress_opening(monkeypatch):
     output = "Reviewing the diff: missing bounds check in foo."
     stdout = _grok_json_output(output)
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
 
     result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
@@ -1668,7 +1697,7 @@ def test_run_agent_accepts_structured_grok_finding_with_progress_opening(monkeyp
 def test_run_agent_accepts_concise_grok_no_findings(monkeypatch):
     output = _grok_json_output("No actionable findings.")
     seen = {}
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
 
     def fake_run(argv, **kwargs):
         seen["argv"] = argv
@@ -1706,7 +1735,7 @@ def test_run_agent_resumes_exact_grok_session_with_original_settings(monkeypatch
     output = _grok_json_output("Recovered final answer.")
     seen = {}
     session_id = "019f0000-0000-7000-8000-000000000001"
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
 
     def fake_run(argv, **kwargs):
         seen["argv"] = argv
@@ -1742,7 +1771,7 @@ def test_run_agent_resumes_exact_grok_session_with_original_settings(monkeypatch
 def test_run_agent_binds_initial_grok_session_to_launcher_id(monkeypatch):
     session_id = "A"
     seen = {}
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
 
     def fake_run(argv, **kwargs):
         seen["argv"] = argv
@@ -1766,7 +1795,7 @@ def test_run_agent_binds_initial_grok_session_to_launcher_id(monkeypatch):
 
 @pytest.mark.parametrize("returned_session_id", ["FOREIGN", None])
 def test_run_agent_rejects_unbound_grok_result_session(monkeypatch, returned_session_id):
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -1794,7 +1823,7 @@ def test_run_agent_rejects_unbound_grok_result_session(monkeypatch, returned_ses
 
 @pytest.mark.parametrize("token", ["--resume", "--resume=A", "--session-id", "--session-id=A", "--"])
 def test_run_agent_rejects_reserved_custom_grok_session_argument_before_launch(monkeypatch, token):
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda *args, **kwargs: pytest.fail("process must not launch"))
 
     result = agents.run_agent(
@@ -1814,7 +1843,7 @@ def test_run_agent_rejects_reserved_custom_grok_session_argument_before_launch(m
 def test_run_agent_keeps_permission_mode_prompt_separate_from_grok_flags(monkeypatch):
     output = _grok_json_output("No actionable findings.")
     seen = {}
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
 
     def fake_run(argv, **kwargs):
         seen["argv"] = argv
@@ -1840,7 +1869,7 @@ def test_run_agent_rejects_writable_grok_plain_output(monkeypatch):
     # Surface that as a diagnosable failure naming the envelope, not a silent
     # pass and not the generic "no structured final response" detail.
     output = "Implemented the requested change."
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
 
     result = agents.run_agent("grok", "implement it", read_only=False, model="grok-4.5")
@@ -1860,7 +1889,7 @@ def test_run_agent_read_only_plain_output_keeps_generic_final_detail(monkeypatch
     # Read-only dispatch pins --json-schema, so bare text there is a missing
     # structured final, not CLI version skew. Keep the original detail.
     output = "Implemented the requested change."
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
 
     result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
@@ -1878,7 +1907,7 @@ def test_run_agent_grok_write_mode_uses_one_final_answer_rule(monkeypatch, stop_
     # envelope's "text", never a re-parse of a JSON-looking payload inside it.
     nested = json.dumps({"kind": "answer", "answer": "unwrapped"})
     stdout = _grok_write_envelope(nested, stop_reason=stop_reason)
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
 
     result = agents.run_agent("grok", "implement it", read_only=False, model="grok-4.5")
@@ -1889,7 +1918,7 @@ def test_run_agent_grok_write_mode_uses_one_final_answer_rule(monkeypatch, stop_
 
 def test_run_agent_reports_invalid_internal_grok_read_only_argv(monkeypatch):
     calls = []
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents, "build_argv", lambda *args, **kwargs: ["grok", "-p", "review it"])
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: calls.append(argv))
 
@@ -1903,7 +1932,7 @@ def test_run_agent_reports_invalid_internal_grok_read_only_argv(monkeypatch):
 
 def test_run_agent_rejects_direct_read_only_cursor_composer_before_spawn(monkeypatch):
     calls = []
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: calls.append(argv))
 
     result = agents.run_agent("cursor", "inspect", read_only=True, model="composer-2.5-fast")
@@ -1917,7 +1946,7 @@ def test_run_agent_rejects_direct_read_only_cursor_composer_before_spawn(monkeyp
 
 
 def test_run_agent_classifies_grok_cursor_empty_output_with_process_evidence(monkeypatch):
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(0, "\n", "provider note"))
 
     result = agents.run_agent("cursor", "inspect", read_only=True, model="grok-4.5-xhigh")
@@ -2032,7 +2061,7 @@ def test_run_agent_env_overrides_child_environment(monkeypatch):
         captured["env"] = kw.get("env")
         return agents.proc.Result(0, "answer", "")
 
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", fake_run)
     monkeypatch.setenv("PRE_EXISTING", "kept")
 
@@ -2055,7 +2084,7 @@ def test_run_agent_env_ref_resolves_from_parent(monkeypatch):
         captured["env"] = kw.get("env")
         return agents.proc.Result(0, "answer", "")
 
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", fake_run)
     monkeypatch.setenv("KIMI_API_KEY", "sk-resolved-value")
 
@@ -2077,7 +2106,7 @@ def test_run_agent_env_file_ref_uses_runtime_environment_file(tmp_path, monkeypa
         captured["env"] = kw.get("env")
         return agents.proc.Result(0, f"answer used {token}\n", "")
 
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", fake_run)
     monkeypatch.setenv("CLIPROXY_API_KEY", "stale-parent-token")
 
@@ -2097,7 +2126,7 @@ def test_run_agent_env_file_ref_uses_runtime_environment_file(tmp_path, monkeypa
 def test_run_agent_env_file_ref_unavailable_fails_before_spawn(tmp_path, monkeypatch):
     calls = []
     environment_file = tmp_path / "missing.env"
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: calls.append(argv))
 
     result = agents.run_agent(
@@ -2116,7 +2145,7 @@ def test_run_agent_malformed_env_file_ref_never_reads_parent_environment(monkeyp
     # A malformed env-file reference must fail dispatch, not fall through to a
     # parent-environment lookup under the malformed string's name.
     calls = []
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: calls.append(argv))
     monkeypatch.setenv("env-file:relative/path#CLIPROXY_API_KEY", "leaked-parent-value")
 
@@ -2143,7 +2172,7 @@ def test_run_agent_env_file_prefixed_parent_variable_still_resolves(monkeypatch)
         captured["env"] = kw.get("env")
         return agents.proc.Result(0, "ok\n", "")
 
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", fake_run)
     monkeypatch.setenv("env-filed", token)
 
@@ -2169,7 +2198,7 @@ def test_run_agent_scrubs_resolved_env_values_from_success_output(monkeypatch):
             f"debug auth={token}\n",
         )
 
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", fake_run)
     monkeypatch.setenv("LANE_KEY", token)
 
@@ -2192,7 +2221,7 @@ def test_run_agent_scrubs_resolved_env_values_from_success_output(monkeypatch):
 
 def test_run_agent_scrubs_resolved_env_value_from_failure_detail(monkeypatch):
     token = "lane-token-value-for-test"
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2215,7 +2244,7 @@ def test_run_agent_scrubs_resolved_env_value_from_failure_detail(monkeypatch):
 def test_run_agent_scrubs_longer_overlapping_env_value_first(monkeypatch):
     secret = "https://token.example.test/v1-secret"
     fragment = "token.example.test/v1"
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2237,7 +2266,7 @@ def test_run_agent_scrubs_longer_overlapping_env_value_first(monkeypatch):
 
 def test_run_agent_scrubs_equal_env_values_with_stable_target(monkeypatch):
     shared = "shared-override-value"
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2256,7 +2285,7 @@ def test_run_agent_scrubs_equal_env_values_with_stable_target(monkeypatch):
 def test_run_agent_never_scrubs_short_plain_flag_values(monkeypatch):
     """Regression for #323: a proxy seat with a '1'-valued flag corrupted plan JSON."""
     plan = '{"assignments":[{"stage":1,"worker":"coder"},{"stage":2,"worker":"reviewer"}]}'
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2280,7 +2309,7 @@ def test_run_agent_never_scrubs_short_plain_flag_values(monkeypatch):
 
 
 def test_run_agent_skips_short_secret_values(monkeypatch):
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2296,7 +2325,7 @@ def test_run_agent_skips_short_secret_values(monkeypatch):
 
 def test_run_agent_scrubs_alnum_secret_only_on_word_boundaries(monkeypatch):
     secret = "abcd1234efgh"
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2313,7 +2342,7 @@ def test_run_agent_scrubs_alnum_secret_only_on_word_boundaries(monkeypatch):
 def test_run_agent_skips_alnum_secret_embedded_in_unicode_identifier(monkeypatch):
     secret = "abcd1234efgh"
     embedded = f"é{secret}終"
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2366,7 +2395,7 @@ def test_scrub_secret_boundary_treats_right_combining_mark_as_identifier_continu
 def test_run_agent_skips_alnum_secret_embedded_with_decomposed_left_combining_mark(monkeypatch):
     secret = "abcd1234efgh"
     embedded = f"e\u0301{secret}"
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2383,7 +2412,7 @@ def test_run_agent_skips_alnum_secret_embedded_with_decomposed_left_combining_ma
 def test_run_agent_skips_alnum_secret_embedded_with_decomposed_right_combining_mark(monkeypatch):
     secret = "abcd1234efgh"
     embedded = f"{secret}\u0301x"
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2400,7 +2429,7 @@ def test_run_agent_skips_alnum_secret_embedded_with_decomposed_right_combining_m
 def test_run_agent_scrubs_alnum_secret_delimited_by_unicode_punctuation(monkeypatch):
     secret = "abcd1234efgh"
     delimited = f"《{secret}》"
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2424,7 +2453,7 @@ def test_run_agent_scrubs_alnum_secret_delimited_by_unicode_punctuation(monkeypa
     ],
 )
 def test_run_agent_scrubs_secret_only_on_identifier_edges(monkeypatch, secret, embedded, standalone):
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2440,7 +2469,7 @@ def test_run_agent_scrubs_secret_only_on_identifier_edges(monkeypatch, secret, e
 
 def test_run_agent_scrubs_structured_grok_after_parsing(monkeypatch):
     token = "lane-token-value-for-test"
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2462,7 +2491,7 @@ def test_run_agent_scrubs_structured_grok_after_parsing(monkeypatch):
 
 def test_run_agent_classifies_output_before_scrubbing_env_values(monkeypatch):
     diagnostic = "rate limit exceeded"
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2484,7 +2513,7 @@ def test_run_agent_classifies_output_before_scrubbing_env_values(monkeypatch):
 def test_run_agent_classifies_invalid_grok_before_scrubbing_env_values(monkeypatch):
     diagnostic = "rate limit exceeded"
     stdout = _grok_json_output(f"Error: {diagnostic} for this provider.", structured=False)
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2510,7 +2539,7 @@ def test_run_agent_classifies_invalid_grok_before_scrubbing_env_values(monkeypat
 
 def test_run_agent_scrubs_long_env_value_before_detail_truncation(monkeypatch):
     token = "secret-boundary-" + "x" * 240
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2536,7 +2565,7 @@ def test_run_agent_scrubs_long_grok_error_before_detail_truncation(monkeypatch):
     payload = json.loads(_grok_json_output("No findings."))
     payload["structuredOutputError"] = f"schema rejected token {token}"
     stdout = json.dumps(payload)
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2560,7 +2589,7 @@ def test_run_agent_scrubs_long_grok_error_before_detail_truncation(monkeypatch):
 
 def test_run_agent_does_not_scrub_unrelated_parent_environment(monkeypatch):
     unrelated = "parent-value-not-overridden"
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(
         agents.proc,
         "run",
@@ -2576,7 +2605,7 @@ def test_run_agent_does_not_scrub_unrelated_parent_environment(monkeypatch):
 
 def test_run_agent_env_ref_missing_fails_before_spawn(monkeypatch):
     calls = []
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: calls.append(argv))
     monkeypatch.delenv("MISSING_LANE_KEY", raising=False)
 
@@ -2596,7 +2625,7 @@ def test_run_agent_env_default_leaves_child_environment_alone(monkeypatch):
         captured["env"] = kw.get("env")
         return agents.proc.Result(0, "answer", "")
 
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", fake_run)
 
     assert agents.run_agent("claude", "hi", sandbox="danger-full-access").ok
@@ -2604,7 +2633,7 @@ def test_run_agent_env_default_leaves_child_environment_alone(monkeypatch):
 
 
 def test_run_agent_env_ref_missing_is_typed_failure(monkeypatch):
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.delenv("MISSING_LANE_KEY", raising=False)
     result = agents.run_agent(
         "claude", "hi", sandbox="danger-full-access", env={"ANTHROPIC_AUTH_TOKEN_REF": "MISSING_LANE_KEY"}
@@ -2614,7 +2643,7 @@ def test_run_agent_env_ref_missing_is_typed_failure(monkeypatch):
 
 
 def test_run_agent_env_rejects_bare_ref_suffix(monkeypatch):
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setenv("HOME_VAR", "value")
     result = agents.run_agent("claude", "hi", sandbox="danger-full-access", env={"_REF": "HOME_VAR"})
     assert not result.ok
@@ -2622,7 +2651,7 @@ def test_run_agent_env_rejects_bare_ref_suffix(monkeypatch):
 
 
 def test_run_agent_env_ref_empty_value_is_typed_failure(monkeypatch):
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    _stub_agent_executable(monkeypatch)
     monkeypatch.setenv("EMPTY_LANE_KEY", "")
     result = agents.run_agent(
         "claude", "hi", sandbox="danger-full-access", env={"ANTHROPIC_AUTH_TOKEN_REF": "EMPTY_LANE_KEY"}
