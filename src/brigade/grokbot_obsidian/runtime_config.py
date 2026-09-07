@@ -59,13 +59,16 @@ def _is_windows_drive_rooted(value: str) -> bool:
 def is_absolute_safe_path(value: str) -> bool:
     if "\0" in value or has_explicit_dot_segment(value):
         return False
-    if value.startswith("\\\\") or value.startswith("//"):
+    if value.replace("\\", "/").startswith("//"):
         return False
     if value.startswith("/"):
         return True
     if _is_windows_drive_rooted(value):
         return True
-    return Path(value).is_absolute()
+    if Path(value).is_absolute():
+        drive = Path(value).drive
+        return len(drive) == 2 and drive[0].isascii() and drive[0].isalpha() and drive[1] == ":"
+    return False
 
 
 def normalize_absolute_path(path_value: str) -> str:
@@ -80,8 +83,12 @@ def required_absolute_path(value: object) -> str:
 
 
 def paths_overlap(left: str, right: str) -> bool:
-    normalized_left = normalize_absolute_path(left).replace("\\", "/")
-    normalized_right = normalize_absolute_path(right).replace("\\", "/")
+    if os.name == "nt":
+        normalized_left = os.path.normcase(normalize_absolute_path(left)).replace("\\", "/")
+        normalized_right = os.path.normcase(normalize_absolute_path(right)).replace("\\", "/")
+    else:
+        normalized_left = normalize_absolute_path(left)
+        normalized_right = normalize_absolute_path(right)
     if normalized_left == normalized_right:
         return True
     return normalized_left.startswith(f"{normalized_right}/") or normalized_right.startswith(f"{normalized_left}/")

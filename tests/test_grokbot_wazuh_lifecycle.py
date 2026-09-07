@@ -66,6 +66,9 @@ def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
         r"\\server\share\path",
         r"\\.\pipe\x",
         r"\\?\C:\path",
+        "//server/share",
+        r"/\server/share",
+        r"\/server/share",
         "relative/path",
         "/var/lib/../escape",
         r"C:\state\..\escape",
@@ -83,6 +86,31 @@ def test_disjoint_paths_reject_backslash_nested_drive_paths():
             r"C:\b\other\ledger.json",
             r"C:\b\state",
             r"C:\b\approvals",
+        )
+
+
+def test_disjoint_paths_treat_backslash_name_as_disjoint_on_posix():
+    if os.name != "posix":
+        pytest.skip("backslash is a literal filename character only on POSIX")
+    assert validate_disjoint_state_paths("/a/b\\c", "/a/b", "/a/c", "/a/d") == {
+        "runtime_path": "/a/b\\c",
+        "ledger_path": "/a/b",
+        "action_state_path": "/a/c",
+        "approval_dir": "/a/d",
+    }
+
+
+def test_disjoint_paths_are_case_insensitive_on_windows(monkeypatch):
+    import ntpath
+
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(os.path, "normcase", ntpath.normcase)
+    with pytest.raises(WazuhError):
+        validate_disjoint_state_paths(
+            r"C:\Brigade\State",
+            r"C:\Brigade\Other",
+            r"c:\brigade",
+            r"C:\Brigade\Approvals",
         )
 
 

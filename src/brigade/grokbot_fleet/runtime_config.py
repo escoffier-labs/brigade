@@ -213,14 +213,16 @@ def _is_windows_drive_rooted(value: str) -> bool:
 
 
 def _reject_windows_network_or_device_root(value: str) -> None:
-    if value.startswith("\\\\") or value.startswith("//"):
+    if value.replace("\\", "/").startswith("//"):
         _environment_error()
     if value.startswith("/"):
         return
     if _is_windows_drive_rooted(value):
         return
     if Path(value).is_absolute():
-        return
+        drive = Path(value).drive
+        if len(drive) == 2 and drive[0].isascii() and drive[0].isalpha() and drive[1] == ":":
+            return
     _environment_error()
 
 
@@ -238,8 +240,12 @@ def _required_absolute_path(value: object) -> str:
 
 
 def paths_overlap(left: str, right: str) -> bool:
-    normalized_left = normalize_absolute_path(left).replace("\\", "/")
-    normalized_right = normalize_absolute_path(right).replace("\\", "/")
+    if os.name == "nt":
+        normalized_left = os.path.normcase(normalize_absolute_path(left)).replace("\\", "/")
+        normalized_right = os.path.normcase(normalize_absolute_path(right)).replace("\\", "/")
+    else:
+        normalized_left = normalize_absolute_path(left)
+        normalized_right = normalize_absolute_path(right)
     if normalized_left == normalized_right:
         return True
     return normalized_left.startswith(f"{normalized_right}/") or normalized_right.startswith(f"{normalized_left}/")

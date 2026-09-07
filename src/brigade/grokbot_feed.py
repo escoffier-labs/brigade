@@ -620,15 +620,23 @@ def _post_wake(url: str, key: str, body: dict[str, str]) -> int:
 
 
 def _append_wake_status(target: Path, status: int) -> None:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        return
     path = wake_notify_log_path(target)
     line = (json.dumps({"status": status}, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0)
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    if nofollow:
-        flags |= nofollow
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0) | nofollow
     descriptor: int | None = None
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            prior = path.lstat()
+        except FileNotFoundError:
+            prior = None
+        except OSError:
+            return
+        if prior is not None and (stat.S_ISLNK(prior.st_mode) or not stat.S_ISREG(prior.st_mode)):
+            return
         descriptor = os.open(os.fspath(path), flags, grokbot_jobs.FILE_MODE)
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):

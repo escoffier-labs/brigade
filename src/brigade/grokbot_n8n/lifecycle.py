@@ -66,14 +66,16 @@ def _is_windows_drive_rooted(value: str) -> bool:
 
 
 def _reject_windows_network_or_device_root(path_text: str) -> None:
-    if path_text.startswith("\\\\") or path_text.startswith("//"):
+    if path_text.replace("\\", "/").startswith("//"):
         _environment_invalid()
     if path_text.startswith("/"):
         return
     if _is_windows_drive_rooted(path_text):
         return
     if Path(path_text).is_absolute():
-        return
+        drive = Path(path_text).drive
+        if len(drive) == 2 and drive[0].isascii() and drive[0].isalpha() and drive[1] == ":":
+            return
     _environment_invalid()
 
 

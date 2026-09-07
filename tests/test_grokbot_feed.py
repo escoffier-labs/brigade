@@ -750,6 +750,29 @@ def _assert_wake_secret_absent(*payloads: object, secrets: tuple[str, ...] = (SE
         assert "Authorization" not in text
 
 
+def test_append_wake_status_fails_closed_without_nofollow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Hosts without O_NOFOLLOW (Windows) must not gain a followed wake log write."""
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    grokbot_feed._append_wake_status(tmp_path, 200)
+    assert not grokbot_feed.wake_notify_log_path(tmp_path).exists()
+
+
+def test_append_wake_status_appends_and_refuses_symlink(tmp_path: Path):
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        pytest.skip("requires O_NOFOLLOW")
+    grokbot_feed._append_wake_status(tmp_path, 200)
+    log = grokbot_feed.wake_notify_log_path(tmp_path)
+    assert log.is_file() and not log.is_symlink()
+    assert json.loads(log.read_text(encoding="utf-8").strip()) == {"status": 200}
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("", encoding="utf-8")
+    log.unlink()
+    log.symlink_to(outside)
+    grokbot_feed._append_wake_status(tmp_path, 500)
+    assert outside.read_text(encoding="utf-8") == ""
+
+
 def _wake_job(*, role: str, label: str = "Wake job") -> dict[str, str]:
     return {
         "job_id": "grokbot-" + "a" * 24,

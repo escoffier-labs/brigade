@@ -124,6 +124,9 @@ def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
         r"\\server\share\path",
         r"\\.\pipe\x",
         r"\\?\C:\path",
+        "//server/share",
+        r"/\server/share",
+        r"\/server/share",
         "relative/path",
         "/var/lib/../escape",
         r"C:\state\..\escape",
@@ -135,11 +138,34 @@ def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
         assert is_absolute_safe_path(rejected) is False
 
 
-def test_paths_overlap_detects_backslash_nesting():
+def test_paths_overlap_detects_backslash_nesting(monkeypatch):
+    import ntpath
+
+    from brigade.grokbot_obsidian import runtime_config as runtime_mod
+
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(os.path, "normcase", ntpath.normcase)
+    assert runtime_mod.paths_overlap(r"C:\a", r"C:\a\b") is True
+    assert runtime_mod.paths_overlap(r"C:\a\b", r"C:\a") is True
+
+
+def test_paths_overlap_treats_backslash_as_literal_on_posix():
     from brigade.grokbot_obsidian.runtime_config import paths_overlap
 
-    assert paths_overlap(r"C:\a", r"C:\a\b") is True
-    assert paths_overlap(r"C:\a\b", r"C:\a") is True
+    if os.name != "posix":
+        pytest.skip("backslash is a literal filename character only on POSIX")
+    assert paths_overlap("/a/b\\c", "/a/b") is False
+
+
+def test_paths_overlap_is_case_insensitive_on_windows(monkeypatch):
+    import ntpath
+
+    from brigade.grokbot_obsidian import runtime_config as runtime_mod
+
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(os.path, "normcase", ntpath.normcase)
+    assert runtime_mod.paths_overlap(r"C:\Brigade\State", r"c:\brigade") is True
+    assert runtime_mod.paths_overlap(r"c:\brigade", r"C:\Brigade\State") is True
 
 
 def test_disjoint_paths_reject_backslash_nested_drive_paths():

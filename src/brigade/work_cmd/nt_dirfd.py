@@ -75,6 +75,9 @@ _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 # parent that will mkdir/create/rename children also needs ADD_*|DELETE_CHILD.
 _DIRECTORY_TRAVERSE_ACCESS = _FILE_LIST_DIRECTORY | _FILE_TRAVERSE | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
 _DIRECTORY_MODIFY_ACCESS = _DIRECTORY_TRAVERSE_ACCESS | _FILE_ADD_FILE | _FILE_ADD_SUBDIRECTORY | _FILE_DELETE_CHILD
+# Narrowest mask for the mkdir-only reopen: traverse plus create-subdirectory,
+# without FILE_ADD_FILE or FILE_DELETE_CHILD.
+_DIRECTORY_MKDIR_ACCESS = _DIRECTORY_TRAVERSE_ACCESS | _FILE_ADD_SUBDIRECTORY
 _SHARE_ALL = _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
 _FILE_READ_ACCESS = _FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
 _FILE_WRITE_ACCESS = _FILE_READ_ATTRIBUTES | _FILE_WRITE_DATA | _FILE_APPEND_DATA | _DELETE | _SYNCHRONIZE
@@ -252,7 +255,7 @@ def reopen_directory_writable(parent: int) -> int:
     iosb = api.IO_STATUS_BLOCK()
     status = api.NtCreateFile(
         ctypes.byref(handle),
-        _DIRECTORY_MODIFY_ACCESS,
+        _DIRECTORY_MKDIR_ACCESS,
         ctypes.byref(obj),
         ctypes.byref(iosb),
         None,
