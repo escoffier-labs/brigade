@@ -37,6 +37,29 @@ def test_windows_action_read_fails_closed_before_io(tmp_path: Path, monkeypatch:
     assert str(caught.value) == "secure-owner-read-unavailable"
 
 
+@pytest.mark.parametrize("existing_directory", (False, True), ids=("missing", "empty"))
+def test_windows_action_list_reads_fail_closed_before_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing_directory: bool
+):
+    root = tmp_path / "actions"
+    if existing_directory:
+        (root / "operations").mkdir(parents=True)
+        (root / "consumed").mkdir()
+    store = BackupActionStore(action_state_path=str(root), approval_dir=str(tmp_path / "approvals"))
+
+    def unexpected_io(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("filesystem I/O reached after secure-owner read gate")
+
+    monkeypatch.setattr(actions_mod, "SECURE_OWNER_READ_AVAILABLE", False)
+    with monkeypatch.context() as patched:
+        patched.setattr(actions_mod.os, "listdir", unexpected_io)
+        for operation in (store.active_operations, store._list_consumed):
+            with pytest.raises(BackupError) as caught:
+                operation()
+            assert caught.value.code == "unavailable"
+            assert str(caught.value) == "secure-owner-read-unavailable"
+
+
 def _dirs(tmp_path: Path) -> tuple[BackupLedger, BackupActionStore, dict[str, datetime]]:
     ledger_dir = tmp_path / "ledger"
     actions = tmp_path / "actions"

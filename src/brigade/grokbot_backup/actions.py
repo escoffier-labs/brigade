@@ -542,6 +542,7 @@ class BackupActionStore:
     def _list_json_records(
         self, directory: Path, loader: Callable[[str], dict[str, Any] | None]
     ) -> list[dict[str, Any]]:
+        _require_secure_owner_read()
         try:
             names = os.listdir(directory)
         except FileNotFoundError:
@@ -564,6 +565,7 @@ class BackupActionStore:
         return self._list_json_records(self._root / "operations", self._load_operation)
 
     def _list_consumed(self) -> list[Path]:
+        _require_secure_owner_read()
         directory = self._root / "consumed"
         try:
             return [directory / name for name in os.listdir(directory) if name.endswith(".json")]

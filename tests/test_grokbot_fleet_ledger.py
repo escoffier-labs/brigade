@@ -33,7 +33,8 @@ def test_ledger_creates_owner_only_dir_and_file(tmp_path: Path):
     if os.name != "posix":
         with pytest.raises(FleetError) as caught:
             ledger.ready()
-        assert caught.value.code == "secure-owner-write-unavailable"
+        assert caught.value.code == "unavailable"
+        assert str(caught.value) == "secure-owner-read-unavailable"
         return
     ledger.ready()
     ledger.record_observation(HOST, "receipt-1")

@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from brigade import grokbot_findings
+from brigade import grokbot_feed, grokbot_findings, grokbot_scout_feed
+from brigade.grokbot_backup import actions as backup_actions
 from brigade.grokbot_backup import ledger as backup_ledger
 from brigade.grokbot_backup import runtime_config as backup_runtime_config
 from brigade.grokbot_backup.contracts import BackupError
@@ -45,6 +46,20 @@ def _read_cases(path_text: str):
             grokbot_findings.FindingsError,
             None,
         ),
+        (
+            lambda: backup_actions.BackupActionStore(
+                action_state_path=path_text, approval_dir=path_text
+            ).active_operations(),
+            BackupError,
+            "unavailable",
+        ),
+        (
+            lambda: backup_actions.BackupActionStore(
+                action_state_path=path_text, approval_dir=path_text
+            )._list_consumed(),
+            BackupError,
+            "unavailable",
+        ),
         (lambda: backup_ledger.BackupLedger(path_text)._ensure_state_dir(), BackupError, "unavailable"),
         (lambda: backup_ledger.BackupLedger(path_text)._load_records(), BackupError, "unavailable"),
         (lambda: fleet_ledger.FleetLedger(path_text)._ensure_state_dir(), FleetError, "unavailable"),
@@ -59,6 +74,8 @@ def _read_cases(path_text: str):
         (lambda: n8n_runtime_config.read_secure_runtime_text(path_text), N8nError, "unavailable"),
         (lambda: n8n_runtime_config.read_secure_api_key(path_text), N8nError, "unavailable"),
         (lambda: obsidian_runtime_config.read_secure_runtime_text(path_text), ObsidianError, "unavailable"),
+        (lambda: grokbot_feed._read_manifest_snapshot(Path(path_text)), grokbot_feed.FeedError, None),
+        (lambda: grokbot_scout_feed._read_policy_snapshot(Path(path_text)), grokbot_scout_feed.ScoutFeedError, None),
     )
 
 
@@ -91,6 +108,7 @@ def test_private_readers_fail_closed_before_filesystem_access(monkeypatch: pytes
     """Linux simulates the unavailable Windows ownership capability per module."""
     modules = (
         grokbot_findings,
+        backup_actions,
         backup_ledger,
         fleet_ledger,
         obsidian_store,
@@ -99,6 +117,8 @@ def test_private_readers_fail_closed_before_filesystem_access(monkeypatch: pytes
         fleet_runtime_config,
         n8n_runtime_config,
         obsidian_runtime_config,
+        grokbot_feed,
+        grokbot_scout_feed,
     )
     for module in modules:
         monkeypatch.setattr(module, "SECURE_OWNER_READ_AVAILABLE", False)
@@ -119,6 +139,7 @@ def test_native_windows_capabilities_are_disabled(monkeypatch: pytest.MonkeyPatc
         pytest.skip("native Windows assertion")
     for module in (
         grokbot_findings,
+        backup_actions,
         backup_ledger,
         fleet_ledger,
         obsidian_store,
@@ -127,6 +148,8 @@ def test_native_windows_capabilities_are_disabled(monkeypatch: pytest.MonkeyPatc
         fleet_runtime_config,
         n8n_runtime_config,
         obsidian_runtime_config,
+        grokbot_feed,
+        grokbot_scout_feed,
     ):
         assert module.SECURE_OWNER_READ_AVAILABLE is False
     _assert_no_filesystem_access(monkeypatch, UNSAFE_PATHS[0])

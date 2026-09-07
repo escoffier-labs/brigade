@@ -87,7 +87,7 @@ def _assert_read_gate_precedes_io(
 
     with monkeypatch.context() as patched:
         patched.setattr(module, available_name, False)
-        for name in ("listdir", "stat", "fstat", "scandir"):
+        for name in ("listdir", "open", "read", "stat", "fstat", "scandir"):
             patched.setattr(module.os, name, unexpected_io)
         patched.setattr(Path, "is_dir", unexpected_io)
         patched.setattr(Path, "open", unexpected_io)
