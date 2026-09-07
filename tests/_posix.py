@@ -21,10 +21,16 @@ import os
 import pytest
 
 from brigade import dirfd
+from brigade.work_cmd.scanner_platform import SCANNER_DESCRIPTOR_OPERATIONS_UNAVAILABLE
 
 requires_dirfd = pytest.mark.skipif(
     not dirfd.posix_available(),
     reason="descriptor-relative primitives (O_DIRECTORY/O_NOFOLLOW/dir_fd) are POSIX-only",
+)
+
+requires_scanner_descriptors = pytest.mark.skipif(
+    not dirfd.posix_available(),
+    reason=SCANNER_DESCRIPTOR_OPERATIONS_UNAVAILABLE,
 )
 
 requires_process_groups = pytest.mark.skipif(

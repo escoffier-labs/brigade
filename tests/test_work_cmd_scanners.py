@@ -16,8 +16,7 @@ from brigade import handoff_cmd
 from brigade import localio
 from brigade import work_cmd
 from brigade.work_cmd import helpers
-
-from tests._posix import requires_dirfd
+from tests._posix import requires_scanner_descriptors
 from tests.work_cmd_test_helpers import (
     _write_json,
     _init_git_repo,
@@ -72,6 +71,94 @@ def _bind_planted_scanner_receipt(tmp_path: Path, run_id: str) -> None:
         os.close(descriptor)
 
 
+def test_windows_scanner_operations_raise_before_init_mutates(tmp_path, monkeypatch) -> None:
+    from brigade.work_cmd import scanner_platform, scanners as scanners_mod
+
+    monkeypatch.setattr(scanner_platform, "_platform_name", "nt")
+
+    with pytest.raises(scanner_platform.ScannerDescriptorOperationsUnavailable, match="Windows"):
+        scanners_mod.scanners_init(target=tmp_path)
+
+    with pytest.raises(scanner_platform.ScannerDescriptorOperationsUnavailable, match="Windows"):
+        scanners_mod._bind_released_unbound_scanner_runs_root(tmp_path)
+
+    assert not (tmp_path / ".brigade").exists()
+
+
+def test_windows_scanner_inbox_write_raises_before_mutating(tmp_path, monkeypatch) -> None:
+    from brigade.work_cmd import scanner_platform, scanners as scanners_mod
+
+    monkeypatch.setattr(scanner_platform, "_platform_name", "nt")
+
+    with pytest.raises(scanner_platform.ScannerDescriptorOperationsUnavailable, match="Windows"):
+        scanners_mod._write_scanner_inbox_bytes(tmp_path, b'{"text":"blocked"}\n')
+
+    assert not (tmp_path / ".brigade").exists()
+
+
+def test_windows_scanner_rollback_raises_before_creating_locks(tmp_path, monkeypatch) -> None:
+    from brigade.work_cmd import scanner_platform, scanners as scanners_mod
+
+    monkeypatch.setattr(scanner_platform, "_platform_name", "nt")
+
+    with pytest.raises(scanner_platform.ScannerDescriptorOperationsUnavailable, match="Windows"):
+        scanners_mod._restore_scanner_inbox_snapshot_direct(tmp_path, b'{"text":"blocked"}\n')
+
+    assert not (tmp_path / ".brigade").exists()
+
+
+@pytest.mark.parametrize("command", ("init", "doctor"))
+def test_windows_scanner_cli_prints_descriptor_unavailable_reason(tmp_path, monkeypatch, capsys, command) -> None:
+    from brigade.work_cmd import scanner_platform
+
+    monkeypatch.setattr(scanner_platform, "_platform_name", "nt")
+
+    assert cli.main(["work", "scanners", command, "--target", str(tmp_path)]) == 2
+
+    assert capsys.readouterr().err == f"error: {scanner_platform.SCANNER_DESCRIPTOR_OPERATIONS_UNAVAILABLE}\n"
+
+
+def test_windows_scanner_health_does_not_measure_due_when_descriptors_are_unsupported(tmp_path, monkeypatch) -> None:
+    from brigade.work_cmd import scanner_platform, scanners as scanners_mod
+
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    (tmp_path / ".brigade" / "scanners.toml").write_text(
+        """
+[[scanner]]
+id = "windows-health"
+source = "windows-health"
+command = "brigade work brief"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/windows-health.json"
+conflict_window = "02:00-02:10"
+"""
+    )
+    monkeypatch.setattr(scanner_platform, "_platform_name", "nt")
+    monkeypatch.setattr(
+        scanners_mod,
+        "_bind_released_unbound_scanner_runs_root",
+        lambda _target: pytest.fail("scanner health must not bind runs on Windows"),
+    )
+    monkeypatch.setattr(
+        scanners_mod,
+        "_scanner_receipt_collection",
+        lambda _target: pytest.fail("scanner health must not read receipts on Windows"),
+    )
+
+    health = scanners_mod._scanner_health(tmp_path)
+
+    assert health["due"] == []
+    assert {
+        "status": "warn",
+        "name": "scanner_descriptor_operations",
+        "detail": scanner_platform.SCANNER_DESCRIPTOR_OPERATIONS_UNAVAILABLE,
+    } in health["checks"]
+
+
+@requires_scanner_descriptors
 def test_scanner_receipt_producer_rejects_run_directory_swap(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -186,14 +273,14 @@ def test_replaced_individual_scanner_run_cannot_manufacture_receipt_authority(tm
     assert not ledger._has_locally_stamped_import_proof(item, target=tmp_path)
 
 
-@requires_dirfd
+@requires_scanner_descriptors
 def test_scanner_receipt_collection_rejects_replaced_bound_run_directory(tmp_path: Path) -> None:
     from brigade.work_cmd import helpers, ledger, scanners as scanners_mod
 
     root = scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
     run_id = "bound-run"
     os.mkdir(run_id, dir_fd=root)
-    run = os.open(run_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+    run = os.open(run_id, dirfd.directory_flags(), dir_fd=root)
     try:
         ledger._record_verifier_owned_directory(
             tmp_path,
@@ -214,14 +301,14 @@ def test_scanner_receipt_collection_rejects_replaced_bound_run_directory(tmp_pat
     assert scanners_mod._scanner_receipts(tmp_path) == []
 
 
-@requires_dirfd
+@requires_scanner_descriptors
 def test_scanner_receipt_collection_rejects_renamed_receipt(tmp_path: Path) -> None:
     from brigade.work_cmd import helpers, ledger, scanners as scanners_mod
 
     root = scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
     run_id = "bound-run"
     os.mkdir(run_id, dir_fd=root)
-    run = os.open(run_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+    run = os.open(run_id, dirfd.directory_flags(), dir_fd=root)
     try:
         ledger._record_verifier_owned_directory(
             tmp_path,
@@ -238,6 +325,7 @@ def test_scanner_receipt_collection_rejects_renamed_receipt(tmp_path: Path) -> N
     assert scanners_mod._scanner_receipts(tmp_path) == []
 
 
+@requires_scanner_descriptors
 def test_pre_created_unbound_scanner_runs_directory_is_not_adopted(tmp_path: Path) -> None:
     """#1036: create=True binds a clean released root but does not adopt children."""
     from brigade.work_cmd import helpers, ledger, scanners as scanners_mod
@@ -301,6 +389,7 @@ def test_plaintext_runs_anchor_does_not_let_replacement_directory_forge_receipt(
     assert not ledger._has_locally_stamped_import_proof(item, target=tmp_path)
 
 
+@requires_scanner_descriptors
 def test_scanner_receipt_temp_substitution_does_not_publish_attacker_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -367,7 +456,8 @@ def test_work_doctor_warns_for_scanner_queue_health(tmp_path, monkeypatch, capsy
     assert "[warn] scanner_import_noise: dismissed import threshold 5: noisy-scan=5" in out
 
 
-def test_work_scanners_init_list_show_plan_and_json(tmp_path, monkeypatch, capsys):
+@requires_scanner_descriptors
+def test_work_scanners_init_writes_scanner_config(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
 
@@ -379,6 +469,14 @@ def test_work_scanners_init_list_show_plan_and_json(tmp_path, monkeypatch, capsy
     assert f"scanner_config: {config}" in out
     assert "scanners: 9" in out
     assert ".brigade/scanners.toml" in (tmp_path / ".gitignore").read_text()
+
+
+def test_work_scanners_list_show_plan_and_json(tmp_path, capsys):
+    from brigade.work_cmd import config as config_mod
+
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir()
+    config.write_text(config_mod._format_scanner_toml())
 
     assert work_cmd.scanners_list(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -411,6 +509,7 @@ def test_work_scanners_init_list_show_plan_and_json(tmp_path, monkeypatch, capsy
     assert payload["suggestions"]
 
 
+@requires_scanner_descriptors
 def test_scanners_init_refuses_dangling_and_force_symlink_scanners_toml(tmp_path, capsys):
     """#1042: init/--force must not follow a planted scanners.toml symlink."""
     outside = tmp_path / "outside" / "planted.toml"
@@ -489,6 +588,7 @@ conflict_window = "02:10-02:40"
     assert payload["suggestions"][1]["suggested_cadence"] == "daily@02:15"
 
 
+@requires_scanner_descriptors
 def test_work_scanners_run_writes_receipt_and_reports_import_counts(tmp_path, capsys):
     _init_git_repo(tmp_path)
     script = tmp_path / "scanner.py"
@@ -617,6 +717,7 @@ def test_scanner_import_output_rejects_hard_linked_leaf(tmp_path):
     assert errors
 
 
+@requires_scanner_descriptors
 def test_scanner_import_output_rejects_parent_swapped_while_opening(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -652,6 +753,7 @@ def test_scanner_import_output_rejects_parent_swapped_while_opening(tmp_path, mo
     assert errors
 
 
+@requires_scanner_descriptors
 def test_scanner_import_output_rejects_target_root_swapped_while_opening(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -687,6 +789,7 @@ def test_scanner_import_output_rejects_target_root_swapped_while_opening(tmp_pat
     assert errors
 
 
+@requires_scanner_descriptors
 def test_scanner_import_output_loads_ordinary_nested_relative_jsonl(tmp_path):
     imports = tmp_path / "imports" / "nested"
     imports.mkdir(parents=True)
@@ -716,6 +819,7 @@ def test_scanner_import_output_rejects_absolute_path_when_config_is_bypassed(tmp
     assert errors
 
 
+@requires_scanner_descriptors
 def test_work_scanners_run_ingest_output_adds_provenance_only_with_flag(tmp_path, capsys):
     _init_git_repo(tmp_path)
     script = tmp_path / "scanner.py"
@@ -782,6 +886,7 @@ conflict_window = "02:00-02:10"
     assert metadata["scanner_output_path_snapshot"]["exists"] is True
 
 
+@requires_scanner_descriptors
 def test_import_path_ingest_rolls_back_when_final_receipt_publication_fails(tmp_path, monkeypatch):
     """#1040: explicit import_path commit + proofs roll back if the final receipt fails."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -839,6 +944,7 @@ conflict_window = "02:00-02:10"
         assert list(proofs.glob("*.json")) == []
 
 
+@requires_scanner_descriptors
 def test_scanners_run_releases_directory_authority_when_import_publication_raises(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -968,6 +1074,7 @@ def _assert_scanner_run_authorities_released(
         assert raised.value.errno == errno.EBADF
 
 
+@requires_scanner_descriptors
 def test_scanners_run_releases_directory_authority_when_stamp_raises(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -992,6 +1099,7 @@ def test_scanners_run_releases_directory_authority_when_stamp_raises(tmp_path, m
     _assert_scanner_run_authorities_released(prior_keys, captured_keys, captured_fds)
 
 
+@requires_scanner_descriptors
 def test_scanners_run_releases_directory_authority_when_receipt_rewrite_raises(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -1019,6 +1127,7 @@ def test_scanners_run_releases_directory_authority_when_receipt_rewrite_raises(t
     _assert_scanner_run_authorities_released(prior_keys, captured_keys, captured_fds)
 
 
+@requires_scanner_descriptors
 def test_work_scanners_ingest_output_sanitizes_hostile_records_and_owns_identity(tmp_path, capsys):
     _init_git_repo(tmp_path)
     script = tmp_path / "scanner.py"
@@ -1150,6 +1259,7 @@ conflict_window = "02:00-02:10"
     assert changed["runs"][0]["ingest_output"]["created"] == 1
 
 
+@requires_scanner_descriptors
 def test_scanners_run_rebuilds_idless_self_import_with_local_provenance(tmp_path, capsys):
     _init_git_repo(tmp_path)
     script = tmp_path / "self_import.py"
@@ -1212,6 +1322,7 @@ conflict_window = "02:00-02:10"
         assert marker not in serialized
 
 
+@requires_scanner_descriptors
 def test_work_scanners_ingest_output_contains_provenance_stamp_failures_without_leaking_details(
     tmp_path, monkeypatch, capsys
 ):
@@ -1261,6 +1372,7 @@ conflict_window = "02:00-02:10"
     assert "Hostile scanner record" not in rendered
 
 
+@requires_scanner_descriptors
 def test_work_scanners_run_ingest_output_rejects_malformed_without_partial_write(tmp_path, capsys):
     _init_git_repo(tmp_path)
     script = tmp_path / "scanner.py"
@@ -1299,6 +1411,7 @@ conflict_window = "02:00-02:10"
     assert not (tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").exists()
 
 
+@requires_scanner_descriptors
 def test_work_scanners_due_all_disabled_and_receipt_review(tmp_path, capsys):
     _init_git_repo(tmp_path)
     script = tmp_path / "scanner.py"
@@ -1358,6 +1471,7 @@ conflict_window = "03:00-03:10"
     assert "status: completed" in out
 
 
+@requires_scanner_descriptors
 def test_work_scanners_run_show_escapes_terminal_controls_but_json_preserves_them(tmp_path, capsys):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -1396,6 +1510,7 @@ def test_work_scanners_run_show_escapes_terminal_controls_but_json_preserves_the
     assert (run_path / "receipt.json").read_bytes() == receipt_before
 
 
+@requires_scanner_descriptors
 def test_work_scanners_run_refuses_risky_running_timeout_and_failure(tmp_path, capsys):
     _init_git_repo(tmp_path)
     script = tmp_path / "scanner.py"
@@ -1487,6 +1602,7 @@ conflict_window = "04:00-04:10"
     assert fail_payload["runs"][0]["stderr_summary"] == "bad error"
 
 
+@requires_scanner_descriptors
 def test_work_scanners_execution_health_surfaces_and_imports_issues(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
@@ -1585,6 +1701,7 @@ conflict_window = "02:00-02:10"
     assert "[warn] scanner_runs_failed:" in out
 
 
+@requires_scanner_descriptors
 def test_work_scanners_doctor_warns_for_missing_stale_bad_and_imports_issues(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
@@ -1628,6 +1745,7 @@ conflict_window = "02:00-02:30"
     assert payload["import_issues"] if "import_issues" in payload else True
 
 
+@requires_scanner_descriptors
 def test_work_brief_and_doctor_include_scanner_health(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
@@ -1796,23 +1914,24 @@ conflict_window = "00:10-00:25"
     )
 
 
-def _scanner_required_check(tmp_path: Path, capsys) -> dict:
-    assert work_cmd.scanners_doctor(target=tmp_path, json_output=True) in (0, 1)
-    payload = json.loads(capsys.readouterr().out)
-    return next(check for check in payload["checks"] if check["name"] == "scanner_required")
+def _scanner_required_check(tmp_path: Path) -> dict:
+    from brigade.work_cmd import scanners as scanners_mod
+
+    health = scanners_mod._scanner_health(tmp_path)
+    return next(check for check in health["checks"] if check["name"] == "scanner_required")
 
 
-def test_scanner_required_ignores_chat_sweep_without_enabled_surface(tmp_path, capsys):
+def test_scanner_required_ignores_chat_sweep_without_enabled_surface(tmp_path):
     _init_git_repo(tmp_path)
     _required_scanner_config(tmp_path, chat_enabled=False)
 
     # No chat-surfaces.toml at all: chat-memory-sweep has nothing to sweep, so a
     # disabled chat-memory-sweep must not raise scanner_required.
-    check = _scanner_required_check(tmp_path, capsys)
+    check = _scanner_required_check(tmp_path)
     assert check["status"] == "ok"
 
 
-def test_scanner_required_flags_chat_sweep_when_surface_enabled(tmp_path, capsys):
+def test_scanner_required_flags_chat_sweep_when_surface_enabled(tmp_path):
     _init_git_repo(tmp_path)
     _required_scanner_config(tmp_path, chat_enabled=False)
     surfaces = tmp_path / ".brigade" / "chat-surfaces.toml"
@@ -1826,11 +1945,12 @@ enabled = true
     )
 
     # With a live chat surface, a disabled chat-memory-sweep is a real gap.
-    check = _scanner_required_check(tmp_path, capsys)
+    check = _scanner_required_check(tmp_path)
     assert check["status"] == "warn"
     assert "disabled=chat-memory-sweep" in check["detail"]
 
 
+@requires_scanner_descriptors
 def test_scanners_run_sanitizes_malicious_self_importing_scanner(tmp_path, capsys, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2038,6 +2158,7 @@ def test_scanner_weekly_stale_threshold_is_longer_than_daily():
     assert constants.SCANNER_WEEKLY_STALE_HOURS > 7 * 24
 
 
+@requires_scanner_descriptors
 def test_scanners_run_restores_same_id_rows_and_discards_malformed_self_imports(tmp_path, capsys):
     _init_git_repo(tmp_path)
     trusted = work_cmd.ledger._make_import(
@@ -2125,6 +2246,7 @@ conflict_window = "02:00-02:10"
     assert task["metadata"]["safe_evidence"] == "trusted-local-record"
 
 
+@requires_scanner_descriptors
 def test_scanners_run_persists_complete_pre_run_rows_after_empty_inbox(tmp_path, capsys):
     _init_git_repo(tmp_path)
     trusted = work_cmd.ledger._make_import(
@@ -2168,6 +2290,7 @@ conflict_window = "02:00-02:10"
     assert work_cmd.ledger._read_imports(tmp_path) == before
 
 
+@requires_scanner_descriptors
 def test_scanners_run_preserves_raw_pre_run_rows_and_rejects_each_new_invalid_raw_row(tmp_path, capsys):
     _init_git_repo(tmp_path)
     inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
@@ -2198,6 +2321,7 @@ inbox.write_bytes(b'new invalid\\n[1, 2]\\n')
     }
 
 
+@requires_scanner_descriptors
 def test_scanner_reconciliation_keeps_builtin_lifecycle_mutation_and_strips_untrusted_row_authority(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2254,6 +2378,7 @@ def test_scanner_reconciliation_keeps_builtin_lifecycle_mutation_and_strips_untr
     assert "handoff_target_document" not in metadata
 
 
+@requires_scanner_descriptors
 def test_scanner_lifecycle_rewrite_requires_ownership_run_proof_and_legal_transition(tmp_path):
     """#1039: a lifecycle rewrite needs source ownership, run proof, and a legal transition."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -2326,6 +2451,7 @@ def test_locally_stamped_import_authority_cannot_be_forged_from_row_fields():
     assert not work_cmd.ledger._has_locally_stamped_import_proof(forged)
 
 
+@requires_scanner_descriptors
 def test_scanner_reconciliation_replaces_only_matching_duplicate_id_raw_row(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2356,6 +2482,7 @@ def test_scanner_reconciliation_replaces_only_matching_duplicate_id_raw_row(tmp_
     assert inbox.read_bytes() == first_raw + mutated_second_raw
 
 
+@requires_scanner_descriptors
 def test_scanner_reconciliation_preserves_noop_final_row_without_newline(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2377,6 +2504,7 @@ def test_scanner_reconciliation_preserves_noop_final_row_without_newline(tmp_pat
     assert inbox.read_bytes() == before_raw
 
 
+@requires_scanner_descriptors
 def test_scanner_reconciliation_separates_appended_row_after_final_row_without_newline(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2403,6 +2531,7 @@ def test_scanner_reconciliation_separates_appended_row_after_final_row_without_n
     assert json.loads(rows[1])["text"] == "Accepted append"
 
 
+@requires_scanner_descriptors
 def test_scanner_reconciliation_accepts_changed_revision_with_same_source_key(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2465,6 +2594,7 @@ def test_trusted_builtin_scanner_requires_complete_normalized_configuration():
         assert scanners_mod._trusted_builtin_scanner(changed) is False
 
 
+@requires_scanner_descriptors
 def test_scanner_reconciliation_does_not_dedupe_against_unproven_pre_run_row(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2499,6 +2629,7 @@ def test_scanner_reconciliation_does_not_dedupe_against_unproven_pre_run_row(tmp
     assert imports[1]["metadata"]["declared_source"] == "declared-source"
 
 
+@requires_scanner_descriptors
 def test_scanner_reconciliation_requires_matching_immutable_content_for_local_dedupe(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2534,6 +2665,7 @@ def test_scanner_reconciliation_requires_matching_immutable_content_for_local_de
     assert [item["text"] for item in imports] == [prior["text"], candidate["text"]]
 
 
+@requires_scanner_descriptors
 def test_scanners_run_ingest_output_preserves_all_raw_pre_run_rows(tmp_path, capsys):
     _init_git_repo(tmp_path)
     inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
@@ -2589,6 +2721,7 @@ import_format = "jsonl"
         ("append", b'{"text":"appended"}\n'),
     ],
 )
+@requires_scanner_descriptors
 def test_scanner_inbox_helpers_reject_symlink_without_no_follow(tmp_path, monkeypatch, no_follow, helper, data):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2621,6 +2754,7 @@ def test_scanner_inbox_helpers_reject_symlink_without_no_follow(tmp_path, monkey
         ("append", b'{"text":"appended"}\n'),
     ],
 )
+@requires_scanner_descriptors
 def test_scanner_inbox_helpers_reject_hard_linked_outside_file_without_accessing_it(tmp_path, helper, data):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2651,6 +2785,7 @@ def test_scanner_inbox_helpers_reject_hard_linked_outside_file_without_accessing
         ("append", b'{"text":"appended"}\n'),
     ],
 )
+@requires_scanner_descriptors
 def test_scanner_inbox_helpers_reject_path_swap_without_no_follow(
     tmp_path, monkeypatch, no_follow, identity, helper, data
 ):
@@ -2703,6 +2838,7 @@ def test_scanner_inbox_helpers_reject_path_swap_without_no_follow(
         ("append", b'{"text":"appended"}\n'),
     ],
 )
+@requires_scanner_descriptors
 def test_scanner_inbox_helpers_reject_parent_swap_without_touching_outside(tmp_path, monkeypatch, helper, data):
     """A parent symlink introduced after validation cannot redirect an inbox operation."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -2743,6 +2879,7 @@ def test_scanner_inbox_helpers_reject_parent_swap_without_touching_outside(tmp_p
     assert outside.read_bytes() == b'{"text":"outside"}\n'
 
 
+@requires_scanner_descriptors
 def test_scanner_inbox_rewrite_failure_preserves_original_bytes(tmp_path, monkeypatch):
     """A write failure before publication leaves the prior inbox intact."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -2780,6 +2917,7 @@ def test_scanner_inbox_rewrite_failure_preserves_original_bytes(tmp_path, monkey
     assert inbox.read_bytes() == before
 
 
+@requires_scanner_descriptors
 def test_scanner_inbox_rewrite_rejects_post_write_temp_substitution(tmp_path, monkeypatch):
     """A substituted temp name cannot replace the existing inbox."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -2812,6 +2950,7 @@ def test_scanner_inbox_rewrite_rejects_post_write_temp_substitution(tmp_path, mo
     assert outside.read_bytes() == outside_bytes
 
 
+@requires_scanner_descriptors
 def test_scanner_inbox_rewrite_rolls_back_replace_boundary_temp_substitution(tmp_path, monkeypatch):
     """A temp alias substituted inside replace cannot displace the prior inbox."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -2844,6 +2983,7 @@ def test_scanner_inbox_rewrite_rolls_back_replace_boundary_temp_substitution(tmp
     assert outside.read_bytes() == outside_bytes
 
 
+@requires_scanner_descriptors
 def test_scanner_inbox_rewrite_preserves_original_when_replace_raises_before_mutation(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2869,6 +3009,7 @@ def test_scanner_inbox_rewrite_preserves_original_when_replace_raises_before_mut
     assert inbox.read_bytes() == before
 
 
+@requires_scanner_descriptors
 def test_scanner_inbox_rewrite_restores_existing_inbox_when_replace_then_raises(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2895,6 +3036,7 @@ def test_scanner_inbox_rewrite_restores_existing_inbox_when_replace_then_raises(
     assert inbox.read_bytes() == before
 
 
+@requires_scanner_descriptors
 def test_scanner_inbox_rewrite_restores_missing_inbox_when_replace_then_raises(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2919,6 +3061,7 @@ def test_scanner_inbox_rewrite_restores_missing_inbox_when_replace_then_raises(t
     assert not inbox.exists()
 
 
+@requires_scanner_descriptors
 def test_scanner_inbox_rewrite_restores_original_after_rollback_temp_substitution(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2957,6 +3100,7 @@ def test_scanner_inbox_rewrite_restores_original_after_rollback_temp_substitutio
     assert inbox.read_bytes() == before
 
 
+@requires_scanner_descriptors
 def test_scanner_inbox_rewrite_restores_original_after_repeated_rollback_substitution(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2995,6 +3139,7 @@ def test_scanner_inbox_rewrite_restores_original_after_repeated_rollback_substit
     assert not inbox.exists() or inbox.read_bytes() == before
 
 
+@requires_scanner_descriptors
 def test_scanner_inbox_append_restores_original_after_partial_write(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -3056,6 +3201,7 @@ def test_scanner_inbox_path_uses_validated_resolved_parent(tmp_path):
         ("append", b'{"text":"appended"}\n'),
     ],
 )
+@requires_scanner_descriptors
 def test_scanner_inbox_helpers_reject_fifo_without_blocking(tmp_path, helper, data):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -3074,6 +3220,7 @@ def test_scanner_inbox_helpers_reject_fifo_without_blocking(tmp_path, helper, da
     assert stat.S_ISFIFO(inbox.stat().st_mode)
 
 
+@requires_scanner_descriptors
 def test_scanner_reconciliation_rejects_symlinked_inbox_without_mutating_target(tmp_path, capsys):
     _init_git_repo(tmp_path)
     inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
@@ -3113,6 +3260,7 @@ conflict_window = "02:00-02:10"
     assert outside.read_text() == '{"text":"outside","kind":"task","source":"attacker"}\n'
 
 
+@requires_scanner_descriptors
 def test_scanners_run_ingest_output_rejects_symlinked_inbox_without_mutating_target(tmp_path, capsys):
     _init_git_repo(tmp_path)
     inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
@@ -3160,6 +3308,7 @@ import_format = "jsonl"
     assert payload["runs"][0]["ingest_output"]["rejected"] == 1
 
 
+@requires_scanner_descriptors
 def test_scanner_self_import_preserves_trusted_source_scoped_metadata(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -3207,6 +3356,7 @@ def test_scanner_self_import_preserves_trusted_source_scoped_metadata(tmp_path):
     assert item["metadata"]["source_fingerprint"] == "a3c4779d5f0e9d79c434ebe449bc5a3f9d0ebfe1f156e44d3b608c9cfb61a112"
 
 
+@requires_scanner_descriptors
 def test_scanner_self_import_strips_privileged_metadata_without_producer_proof(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -3238,6 +3388,7 @@ def test_scanner_self_import_strips_privileged_metadata_without_producer_proof(t
     assert "handoff_target_document" not in stored["metadata"]
 
 
+@requires_scanner_descriptors
 def test_scanner_stamp_discards_staged_receipt_proof_when_inbox_rewrite_fails(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -3283,7 +3434,9 @@ def test_scanner_child_environment_omits_home_and_xdg_data_home() -> None:
         assert "LOCALAPPDATA" not in env
         if "PATH" in os.environ:
             assert env.get("PATH") == os.environ["PATH"]
-        assert component_paths.data_root(env=env) != real_root
+        assert component_paths.data_root(env=env, system="linux") != real_root
+        with pytest.raises(ValueError, match="windows component data root requires LOCALAPPDATA"):
+            component_paths.data_root(env=env, system="windows")
 
 
 def test_scanner_child_environment_sandbox_is_removed_after_use() -> None:
@@ -3353,6 +3506,7 @@ def test_scanner_child_environment_points_gh_at_the_operator_config_dir(tmp_path
         assert env["XDG_DATA_HOME"] != os.environ.get("XDG_DATA_HOME")
 
 
+@requires_scanner_descriptors
 def test_scanner_child_sandbox_seeds_the_parent_directory_bindings(tmp_path) -> None:
     """A Brigade child under the sandbox validates directories the parent created and bound."""
     from brigade.work_cmd import ledger as ledger_mod
@@ -3399,6 +3553,7 @@ def _stub_gh_bin(directory: Path) -> Path:
     return script
 
 
+@requires_scanner_descriptors
 def test_shipped_scanner_child_can_authenticate_gh_under_the_scrubbed_env(tmp_path, monkeypatch) -> None:
     """The env scrub must not break a scanner that shells out to `gh`."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -3422,6 +3577,7 @@ def test_shipped_scanner_child_can_authenticate_gh_under_the_scrubbed_env(tmp_pa
     assert "authenticated" in receipt["stdout_summary"]
 
 
+@requires_scanner_descriptors
 def test_shipped_scanner_child_gh_fails_without_credentials(tmp_path, monkeypatch) -> None:
     """Control: the same probe fails when no credential reaches the child."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -3446,6 +3602,7 @@ def test_shipped_scanner_child_gh_fails_without_credentials(tmp_path, monkeypatc
     assert "gh auth login" in receipt["stderr_summary"]
 
 
+@requires_scanner_descriptors
 def test_shipped_handoff_ingest_scanner_completes_under_the_scrubbed_env(tmp_path, monkeypatch) -> None:
     """Run the shipped, enabled-by-default scanner end to end with the scrubbed child env."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -3465,6 +3622,7 @@ def test_shipped_handoff_ingest_scanner_completes_under_the_scrubbed_env(tmp_pat
     assert receipt["status"] == "completed"
 
 
+@requires_scanner_descriptors
 def test_scanner_stamp_inbox_probe_treats_not_a_directory_as_missing(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -3497,6 +3655,7 @@ def test_scanner_stamp_inbox_probe_treats_not_a_directory_as_missing(tmp_path, m
     assert stamped
 
 
+@requires_scanner_descriptors
 def test_scanner_stamp_binding_restore_failure_fails_closed(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -3530,6 +3689,7 @@ def test_scanner_stamp_binding_restore_failure_fails_closed(tmp_path, monkeypatc
     assert inbox.read_bytes() == raw
 
 
+@requires_scanner_descriptors
 def test_scanner_stamp_surfaces_failed_proof_rollback_and_restores_inbox(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -3570,6 +3730,7 @@ def test_scanner_stamp_surfaces_failed_proof_rollback_and_restores_inbox(tmp_pat
     assert inbox.read_bytes() == raw
 
 
+@requires_scanner_descriptors
 def test_scanner_self_import_preserves_trusted_memory_refresh_identity(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -3611,6 +3772,7 @@ def test_scanner_self_import_preserves_trusted_memory_refresh_identity(tmp_path)
     assert metadata["source_fingerprint"] == "53ff90f17a2d879497cec5c037ff74f2cf1a8fdc8482b66f395b729c32d06f05"
 
 
+@requires_scanner_descriptors
 def test_scanner_self_import_partial_memory_refresh_config_drops_privileged_metadata(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -3644,6 +3806,7 @@ def test_scanner_self_import_partial_memory_refresh_config_drops_privileged_meta
     assert metadata["source_fingerprint"] != "0123456789abcdef"
 
 
+@requires_scanner_descriptors
 def test_scanner_self_import_drops_wrong_source_operational_metadata(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -3700,7 +3863,7 @@ def test_scanner_self_import_drops_wrong_source_operational_metadata(tmp_path):
         assert metadata["source_fingerprint"] == work_cmd.ledger._untrusted_import_canonical_hash(item)
 
 
-@requires_dirfd
+@requires_scanner_descriptors
 def test_scanner_read_receipt_derives_target_from_correct_parent(tmp_path: Path) -> None:
     """_scanner_read_receipt must use parents[3] (the workspace root) not parents[2]."""
     from brigade.work_cmd import ledger, scanners as scanners_mod
@@ -3708,7 +3871,7 @@ def test_scanner_read_receipt_derives_target_from_correct_parent(tmp_path: Path)
     run_id = "compat-run"
     root = scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
     os.mkdir(run_id, dir_fd=root)
-    run = os.open(run_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+    run = os.open(run_id, dirfd.directory_flags(), dir_fd=root)
     try:
         ledger._record_verifier_owned_directory(
             tmp_path,
@@ -3727,7 +3890,7 @@ def test_scanner_read_receipt_derives_target_from_correct_parent(tmp_path: Path)
     assert receipt["run_id"] == run_id
 
 
-@requires_dirfd
+@requires_scanner_descriptors
 def test_scanner_read_receipt_accepts_run_directory_path(tmp_path: Path) -> None:
     """_scanner_read_receipt should also accept a run directory (not just receipt.json)."""
     from brigade.work_cmd import ledger, scanners as scanners_mod
@@ -3735,7 +3898,7 @@ def test_scanner_read_receipt_accepts_run_directory_path(tmp_path: Path) -> None
     run_id = "compat-run-dir"
     root = scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
     os.mkdir(run_id, dir_fd=root)
-    run = os.open(run_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+    run = os.open(run_id, dirfd.directory_flags(), dir_fd=root)
     try:
         ledger._record_verifier_owned_directory(
             tmp_path,
@@ -3772,6 +3935,7 @@ conflict_window = "02:00-02:10"
     )
 
 
+@requires_scanner_descriptors
 def test_scanner_run_bounded_output_reaps_child_and_records_typed_failure(tmp_path):
     """#1197: unbounded scanner output must trip a typed failure, not exhaust memory."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -3789,6 +3953,7 @@ def test_scanner_run_bounded_output_reaps_child_and_records_typed_failure(tmp_pa
     assert receipt["exit_code"] != 0
 
 
+@requires_scanner_descriptors
 def test_scanner_run_does_not_wait_for_descendant_holding_pipes(tmp_path):
     """#1197: a grandchild holding the pipes is reaped promptly AND fails the run.
 
@@ -3817,6 +3982,7 @@ def test_scanner_run_does_not_wait_for_descendant_holding_pipes(tmp_path):
     assert float(receipt["duration_seconds"]) < 15
 
 
+@requires_scanner_descriptors
 def test_scanner_cutoff_appended_rows_get_no_proof_and_are_rolled_back(tmp_path):
     """#1197: rows appended before the group cutoff must not become eligible work."""
     from brigade.work_cmd import config as config_mod
@@ -3853,6 +4019,7 @@ def test_scanner_cutoff_appended_rows_get_no_proof_and_are_rolled_back(tmp_path)
     assert scanners_mod._scanner_import_counts(tmp_path)["total"] == 0
 
 
+@requires_scanner_descriptors
 def test_scanner_inbox_read_enforces_total_byte_limit(tmp_path, monkeypatch):
     """#1198: inbox reads must reject oversized files with a typed failure."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -3866,6 +4033,7 @@ def test_scanner_inbox_read_enforces_total_byte_limit(tmp_path, monkeypatch):
         scanners_mod._scanner_inbox_bytes(tmp_path)
 
 
+@requires_scanner_descriptors
 def test_scanner_stamp_rejects_oversized_inbox_with_typed_failure(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -3890,6 +4058,7 @@ def test_scanner_stamp_rejects_oversized_inbox_with_typed_failure(tmp_path, monk
     assert run["self_import"]["rejection_reasons"] == {"provenance_stamp_failed": 1}
 
 
+@requires_scanner_descriptors
 def test_scanner_inbox_imports_enforce_per_record_byte_limit(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -3902,6 +4071,7 @@ def test_scanner_inbox_imports_enforce_per_record_byte_limit(tmp_path, monkeypat
         scanners_mod._scanner_inbox_imports(tmp_path)
 
 
+@requires_scanner_descriptors
 def test_scanner_jsonl_ingestion_enforces_total_and_per_record_limits(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -3926,6 +4096,7 @@ def test_scanner_jsonl_ingestion_enforces_total_and_per_record_limits(tmp_path, 
         )
 
 
+@requires_scanner_descriptors
 def test_scanner_rollback_snapshot_is_bounded(tmp_path, monkeypatch):
     """#1198: rollback snapshots of run artifacts must be bounded."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -3942,6 +4113,7 @@ def test_scanner_rollback_snapshot_is_bounded(tmp_path, monkeypatch):
         os.close(authority.root)
 
 
+@requires_scanner_descriptors
 def test_failed_scanner_run_restores_pre_run_inbox_and_rejects_new_rows(tmp_path):
     """#1199: a failed run must not leave eligible rows behind in the inbox."""
     from brigade.work_cmd import ledger, scanners as scanners_mod
@@ -3971,6 +4143,7 @@ def test_failed_scanner_run_restores_pre_run_inbox_and_rejects_new_rows(tmp_path
     assert run["self_import"]["rejection_reasons"] == {"run_not_completed": 1}
 
 
+@requires_scanner_descriptors
 def test_failed_scanner_run_leaves_no_eligible_work_end_to_end(tmp_path):
     """#1199 end to end: scanner appends a pending row then exits nonzero."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -4007,6 +4180,7 @@ def test_failed_scanner_run_leaves_no_eligible_work_end_to_end(tmp_path):
     assert receipt["self_import"]["rejection_reasons"] == {"run_not_completed": 1}
 
 
+@requires_scanner_descriptors
 def test_scanner_run_aborts_before_launch_when_pre_run_snapshot_unavailable(tmp_path, monkeypatch):
     """#1207: an un-snapshotable inbox must abort the run before the scanner launches."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -4035,6 +4209,7 @@ def test_scanner_run_aborts_before_launch_when_pre_run_snapshot_unavailable(tmp_
     assert any("snapshot" in str(error).lower() for error in payload["errors"])
 
 
+@requires_scanner_descriptors
 def test_oversized_pre_run_inbox_aborts_run_and_preserves_exact_bytes(tmp_path, monkeypatch):
     """#1207: a swallowed snapshot OSError used to let a failed scanner destroy the inbox."""
     from brigade.work_cmd import ledger, scanners as scanners_mod
@@ -4070,6 +4245,7 @@ def test_oversized_pre_run_inbox_aborts_run_and_preserves_exact_bytes(tmp_path, 
     assert inbox.read_bytes() == original
 
 
+@requires_scanner_descriptors
 def test_failed_run_after_truncation_restores_exact_original_bytes(tmp_path):
     """#1207: under-cap snapshot + mid-run truncation still restores the original bytes."""
     from brigade.work_cmd import ledger, scanners as scanners_mod
@@ -4102,6 +4278,7 @@ def test_failed_run_after_truncation_restores_exact_original_bytes(tmp_path):
     assert inbox.read_bytes() == original
 
 
+@requires_scanner_descriptors
 def test_missing_pre_run_inbox_stays_missing_after_failed_run(tmp_path):
     """#1207: restoring a previously missing inbox must not create an empty file."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -4129,6 +4306,7 @@ def test_missing_pre_run_inbox_stays_missing_after_failed_run(tmp_path):
     assert not helpers._imports_path(tmp_path).exists()
 
 
+@requires_scanner_descriptors
 def test_pre_run_snapshot_detects_torn_same_uid_write(tmp_path, monkeypatch):
     """#1207: a same-UID writer mutating the inode mid-read must be detected."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -4163,6 +4341,7 @@ def test_pre_run_snapshot_detects_torn_same_uid_write(tmp_path, monkeypatch):
         scanners_mod._snapshot_scanner_inbox(tmp_path)
 
 
+@requires_scanner_descriptors
 def test_rollback_refuses_inbox_swapped_since_snapshot(tmp_path):
     """#1207: rollback must refuse when the live inbox no longer matches its snapshot."""
     from brigade.work_cmd import ledger, scanners as scanners_mod
@@ -4179,6 +4358,7 @@ def test_rollback_refuses_inbox_swapped_since_snapshot(tmp_path):
         scanners_mod._restore_scanner_inbox_snapshot_direct(tmp_path, snapshot)
 
 
+@requires_scanner_descriptors
 def test_scanner_inbox_descriptor_bytes_enforces_byte_cap(tmp_path, monkeypatch):
     """#1207: rollback descriptor reads enforce the cap while reading, not up front."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -4234,6 +4414,7 @@ def test_ledger_import_inbox_snapshot_detects_mid_read_append(tmp_path, monkeypa
         ledger._snapshot_import_inbox(tmp_path)
 
 
+@requires_scanner_descriptors
 def test_inbox_replacement_between_snapshot_and_launch_aborts_run(tmp_path, monkeypatch):
     """#1207 round 2: an inbox swapped after its snapshot aborts before the scanner launches."""
     from brigade.work_cmd import ledger, scanners as scanners_mod
@@ -4269,6 +4450,7 @@ def test_inbox_replacement_between_snapshot_and_launch_aborts_run(tmp_path, monk
     assert any("changed" in str(error).lower() for error in payload["errors"])
 
 
+@requires_scanner_descriptors
 def test_same_inode_write_between_snapshot_and_launch_aborts_run(tmp_path, monkeypatch):
     """#1207 round 2: a same-inode in-place rewrite after snapshot aborts before launch."""
     from brigade.work_cmd import ledger, scanners as scanners_mod
@@ -4304,6 +4486,7 @@ def test_same_inode_write_between_snapshot_and_launch_aborts_run(tmp_path, monke
     assert any("changed" in str(error).lower() for error in payload["errors"])
 
 
+@requires_scanner_descriptors
 def test_scanner_inbox_run_lock_is_reentrant_per_process(tmp_path):
     """#1207 round 2: nested writer paths inside one run must not self-deadlock."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -4314,6 +4497,7 @@ def test_scanner_inbox_run_lock_is_reentrant_per_process(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix" or not hasattr(sys, "executable"), reason="requires POSIX flock")
+@requires_scanner_descriptors
 def test_scanner_inbox_run_lock_blocks_other_process_writers(tmp_path):
     """#1207 round 2: the run-wide inbox lock excludes honest writers in other processes."""
     import subprocess
@@ -4342,6 +4526,7 @@ def test_scanner_inbox_run_lock_blocks_other_process_writers(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX symlinks")
+@requires_scanner_descriptors
 def test_scanner_inbox_run_lock_refuses_planted_symlink_lock_file(tmp_path):
     """#1207 round 3: a symlink planted at the lock path must be refused."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -4360,6 +4545,7 @@ def test_scanner_inbox_run_lock_refuses_planted_symlink_lock_file(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX fifos")
+@requires_scanner_descriptors
 def test_scanner_inbox_run_lock_refuses_planted_fifo_lock_file(tmp_path):
     """#1207 round 3: a FIFO planted at the lock path must be refused."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -4376,6 +4562,7 @@ def test_scanner_inbox_run_lock_refuses_planted_fifo_lock_file(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX hard links")
+@requires_scanner_descriptors
 def test_scanner_inbox_run_lock_refuses_multi_linked_lock_file(tmp_path):
     """#1207 round 3: a multi-linked lock file must be refused."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -4393,6 +4580,7 @@ def test_scanner_inbox_run_lock_refuses_multi_linked_lock_file(tmp_path):
     assert twin.read_bytes() == b""
 
 
+@requires_scanner_descriptors
 def test_scanner_inbox_run_lock_detects_replaced_lock_file_during_run(tmp_path):
     """#1207 round 3: replacing the locked inode mid-run refuses protected writes."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -4411,6 +4599,7 @@ def test_scanner_inbox_run_lock_detects_replaced_lock_file_during_run(tmp_path):
             scanners_mod._write_scanner_inbox_bytes(tmp_path, b'{"text":"swap"}\n')
 
 
+@requires_scanner_descriptors
 def test_scanner_inbox_run_lock_verify_requires_held_lock(tmp_path):
     """#1207 round 3: protected-write revalidation fails closed without the lock."""
     from brigade.work_cmd import inbox_lock as inbox_lock_mod
@@ -4423,6 +4612,7 @@ def test_scanner_inbox_run_lock_verify_requires_held_lock(tmp_path):
         inbox_lock_mod.verify_inbox_lock(tmp_path)
 
 
+@requires_scanner_descriptors
 def test_cleanup_failure_still_yields_failed_scanner_run_and_unblocks_reruns(tmp_path, monkeypatch):
     """#1207 round 2: a cleanup exception must not bypass the Result or strand a running receipt."""
     from brigade import proc as proc_mod
@@ -4451,6 +4641,7 @@ def test_cleanup_failure_still_yields_failed_scanner_run_and_unblocks_reruns(tmp
     assert payload2["runs"][0]["status"] == "failed"
 
 
+@requires_scanner_descriptors
 def test_run_one_exception_finalizes_scanner_receipt_as_failed(tmp_path, monkeypatch):
     """#1207 round 2: an exception after the running receipt persists must finalize it failed."""
     from brigade.work_cmd import scanners as scanners_mod
@@ -4477,6 +4668,7 @@ def test_run_one_exception_finalizes_scanner_receipt_as_failed(tmp_path, monkeyp
 # --- #1207 round 4: two-lock design (no inherited descriptors) -------------
 
 
+@requires_scanner_descriptors
 def test_run_and_writer_lock_files_are_distinct_adjacent_files(tmp_path):
     """Round 4: the run window and each canonical write use separate lock files."""
     from brigade.work_cmd import inbox_lock as inbox_lock_mod
@@ -4495,6 +4687,7 @@ def test_run_and_writer_lock_files_are_distinct_adjacent_files(tmp_path):
             assert metadata.st_nlink == 1
 
 
+@requires_scanner_descriptors
 def test_writer_lock_is_reentrant_per_process_and_refuses_replacement(tmp_path):
     """Round 4: nested writer sections do not self-deadlock; swaps fail closed."""
     from brigade.work_cmd import inbox_lock as inbox_lock_mod
@@ -4512,6 +4705,7 @@ def test_writer_lock_is_reentrant_per_process_and_refuses_replacement(tmp_path):
             inbox_lock_mod.verify_inbox_writer_lock(tmp_path)
 
 
+@requires_scanner_descriptors
 def test_released_inbox_lock_registry_entry_is_removed_and_writers_refuse(tmp_path, monkeypatch):
     """Round 5 (F1): a released lock leaves no registry entry behind."""
     from brigade.work_cmd import inbox_lock as inbox_lock_mod
@@ -4571,6 +4765,7 @@ def test_verify_inbox_lock_fstats_live_descriptor_and_refuses_closed_fd(tmp_path
     assert str(inbox_lock_mod.inbox_writer_lock_path(tmp_path)) not in inbox_lock_mod._ACTIVE_LOCKS
 
 
+@requires_scanner_descriptors
 def test_busy_writer_lock_deadline_bounds_launcher_stamping_and_releases_run_lock(tmp_path, monkeypatch):
     """Round 5 (F3): an escaped holder gets a typed failure, never an endless hang."""
     import subprocess
@@ -4631,6 +4826,7 @@ def test_busy_writer_lock_deadline_bounds_launcher_stamping_and_releases_run_loc
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+@requires_scanner_descriptors
 def test_scanner_run_reaps_silent_descendant_holding_writer_lock(tmp_path):
     """Round 6 (H1): a descendant that closed the capture pipes and holds the
     writer lock must not outlive a scanner run whose direct child exited 0."""
@@ -4716,6 +4912,7 @@ def test_scanner_run_reaps_silent_descendant_holding_writer_lock(tmp_path):
     assert time_mod.monotonic() - started < 15, "outside writer could not acquire the writer lock promptly"
 
 
+@requires_scanner_descriptors
 def test_ingestion_lock_timeout_marks_run_failed_and_returns_nonzero(tmp_path, monkeypatch):
     """Round 6 (M1): a writer-lock timeout during ingestion must fail the run
     and the command's exit code, not report rc 0 with every import rejected."""
@@ -4840,6 +5037,7 @@ def _writer_lock_probe_script(tmp_path, lock_path):
     return probe
 
 
+@requires_scanner_descriptors
 def test_overlapping_thread_acquisitions_are_thread_owned_and_close_once(tmp_path, monkeypatch):
     """Finding 2: reentrancy is owned by one thread; others wait for full release."""
     import subprocess
@@ -5012,6 +5210,7 @@ def test_outside_canonical_writer_gets_typed_failure_when_writer_lock_busy(tmp_p
             child.wait(timeout=15)
 
 
+@requires_scanner_descriptors
 def test_stamping_takes_writer_lock_before_reading_and_keeps_child_rows(tmp_path, monkeypatch):
     """Round 5 (F2): stamping snapshots under the writer lock; late child rows survive."""
     import subprocess
@@ -5153,6 +5352,7 @@ def test_stamping_takes_writer_lock_before_reading_and_keeps_child_rows(tmp_path
     assert outcome["stamped"], "stamping produced no rows"
 
 
+@requires_scanner_descriptors
 def test_ingestion_pre_reads_under_writer_lock_and_concurrent_commit_survives_rollback(tmp_path, monkeypatch):
     """Round 6 (M3): the writer lock spans snapshot through receipt rollback.
 
@@ -5326,6 +5526,7 @@ import_format = "jsonl"
             peer.wait(timeout=15)
 
 
+@requires_scanner_descriptors
 def test_scanner_children_receive_capability_free_marker_and_no_descriptors(tmp_path, monkeypatch):
     """Round 4 (F1/F2): children get a marker env var, never a lock descriptor."""
     import inspect
@@ -5364,6 +5565,7 @@ def test_scanner_children_receive_capability_free_marker_and_no_descriptors(tmp_
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX flock and fd passing")
+@requires_scanner_descriptors
 def test_unlocking_any_inherited_descriptor_cannot_release_launcher_run_lock(tmp_path):
     """Round 4 (F1): LOCK_UN on an inherited fd must never drop the run window.
 
@@ -5414,6 +5616,7 @@ def test_unlocking_any_inherited_descriptor_cannot_release_launcher_run_lock(tmp
 
 
 @pytest.mark.skipif(os.name != "posix", reason="uses POSIX flock probes for timing")
+@requires_scanner_descriptors
 def test_launcher_stamping_waits_for_child_writer_lock(tmp_path):
     """Round 4 (F2): launcher writes serialize behind a self-importing child.
 
@@ -5463,6 +5666,7 @@ def test_launcher_stamping_waits_for_child_writer_lock(tmp_path):
             child.wait(timeout=15)
 
 
+@requires_scanner_descriptors
 def test_every_canonical_writer_follows_task_then_run_then_writer_order(tmp_path, monkeypatch):
     """Round 4 (F3): every caller takes task-ledger -> run -> writer, in order."""
     import contextlib
