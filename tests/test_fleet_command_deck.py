@@ -14,8 +14,10 @@ import pytest
 from brigade import fleet_command_deck as deck
 from brigade import fleet_repo_policy_page as repos_page
 from brigade import fleet_hub
+from brigade import fleet_hub_policy
 from brigade import fleet_hub_status
 from brigade import fleet_hub_sessions
+from brigade import fleet_policy_migration
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
@@ -1415,6 +1417,23 @@ def test_blocked_queue_reasons_are_attention_not_zero():
     assert "no eligible machine" in html
 
 
+def test_control_plane_adapter_reads_authority():
+    missing = deck.control_plane_from_snapshot(_control_plane_snapshot())
+    assert missing.authority_present is False
+    assert missing.authority.status == deck.UNKNOWN
+    html_missing = deck.render_deck(_empty_view(missing), nonce="nonce", now=NOW)
+    assert "authority unknown" in html_missing
+
+    plane = deck.control_plane_from_snapshot(_control_plane_snapshot(authority={"active": True, "status": "active"}))
+    assert plane.authority_present is True
+    assert plane.authority.active == "yes"
+    assert plane.authority.status == "active"
+    html = deck.render_deck(_empty_view(plane), nonce="nonce", now=NOW)
+    assert "authority active" in html
+    assert "authority unknown" not in html
+    assert "authority inactive" not in html
+
+
 def test_control_plane_values_are_escaped():
     snapshot = _control_plane_snapshot()
     snapshot["machines"][0]["unused_reason"] = "<script>alert(1)</script>"
@@ -1521,3 +1540,39 @@ def test_deck_http_renders_fresh_stale_queued_idle_and_unknown_slots(tmp_path):
         assert "worker-unknown" in page
         assert "unknown-telemetry" in page
         assert "ALL CLEAR" not in page or "unknown" in page.lower()
+
+
+def _fake_activated_marker(db) -> int:
+    """Stamp the activation marker without running ``activate_migration``."""
+    conn = fleet_hub.open_db(db)
+    try:
+        fleet_policy_migration.ensure_schema(conn)
+        conn.execute(
+            "INSERT INTO fleet_policy_migration (singleton, activated, activated_at, activated_by, reason, "
+            "preview_digest, policy_revision, roster_revision, preference_digest, candidate_digest) "
+            "VALUES (1, 1, '2026-09-07T00:00:00+00:00', 'fixture-operator', 'fake-activated-db', "
+            "'sha256:preview', 1, 1, 'sha256:pref', 'sha256:candidate')"
+        )
+        conn.commit()
+        return int(fleet_hub_policy.current_policy(conn)["revision"])
+    finally:
+        conn.close()
+
+
+def test_deck_http_projects_fake_activated_authority(tmp_path):
+    with _start_hub(tmp_path, CONFIG) as (hub, db):
+        status, _headers, staged = _request(hub, "GET", "/deck", headers=_bearer())
+        assert status == 200, staged
+        assert "authority staged" in staged
+        assert "authority active" not in staged
+        revision = _fake_activated_marker(db)
+        status, _headers, page = _request(hub, "GET", "/deck", headers=_bearer())
+        assert status == 200, page
+        assert "authority active" in page
+        assert "authority staged" not in page
+        conn = fleet_hub.open_db(db)
+        try:
+            assert fleet_policy_migration.is_activated(conn) is True
+            assert int(fleet_hub_policy.current_policy(conn)["revision"]) == revision
+        finally:
+            conn.close()

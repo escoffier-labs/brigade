@@ -1019,14 +1019,31 @@ def test_preference_meta_follows_policy_revision_after_activation(conn):
     assert later["updated_at"] != meta["updated_at"]
 
 
-def test_control_plane_status_projects_real_activation_state(conn):
+def _fake_activated_marker(conn: sqlite3.Connection) -> None:
+    """Stamp the activation marker without running ``activate_migration``."""
+    fleet_policy_migration.ensure_schema(conn)
+    conn.execute(
+        "INSERT INTO fleet_policy_migration (singleton, activated, activated_at, activated_by, reason, "
+        "preview_digest, policy_revision, roster_revision, preference_digest, candidate_digest) "
+        "VALUES (1, 1, '2026-09-07T00:00:00+00:00', 'fixture-operator', 'fake-activated-db', "
+        "'sha256:preview', 1, 1, 'sha256:pref', 'sha256:candidate')"
+    )
+    conn.commit()
+
+
+def test_control_plane_status_projects_staged_then_fake_activated_state(conn):
     from brigade import fleet_hub_routing
 
     _seed_legacy(conn)
+    dump_before = _dump(conn)
     before = fleet_hub_routing.control_plane_status(conn)["authority"]
-    assert before == {"active": False, "status": "inactive"}
-    preview = _preview(conn, annotations=_annotate(SEAT_ALPHA, SEAT_BETA))
-    _activate(conn, preview)
-    assert fleet_policy_migration.is_activated(conn) is True
+    assert before == {"active": False, "status": "staged"}
+    assert fleet_policy_migration.is_activated(conn) is False
+    assert _dump(conn) == dump_before
+
+    _fake_activated_marker(conn)
+    dump_marked = _dump(conn)
     after = fleet_hub_routing.control_plane_status(conn)["authority"]
     assert after == {"active": True, "status": "active"}
+    assert fleet_policy_migration.is_activated(conn) is True
+    assert _dump(conn) == dump_marked
