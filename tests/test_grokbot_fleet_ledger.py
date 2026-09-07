@@ -26,10 +26,14 @@ HOST = {
 }
 
 
-@pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission bits")
 def test_ledger_creates_owner_only_dir_and_file(tmp_path: Path):
     path = tmp_path / "state" / "ledger.json"
     ledger = FleetLedger(str(path))
+    if os.name != "posix":
+        with pytest.raises(FleetError) as caught:
+            ledger.ready()
+        assert caught.value.code == "secure-owner-write-unavailable"
+        return
     ledger.ready()
     ledger.record_observation(HOST, "receipt-1")
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700

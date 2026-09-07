@@ -462,7 +462,7 @@ def _open_windows_parent_nofollow(parent: Path, *, create: bool) -> int:
             except FileNotFoundError:
                 if not create:
                     raise
-                nt_dirfd.mkdir_child(descriptor, component)
+                _mkdir_windows_child(anchor, relative_parts[:index], component)
                 child = nt_dirfd.open_child_directory(descriptor, component, writable=want_writable)
             os.close(descriptor)
             descriptor = child
@@ -470,6 +470,29 @@ def _open_windows_parent_nofollow(parent: Path, *, create: bool) -> int:
     except BaseException:
         os.close(descriptor)
         raise
+
+
+def _mkdir_windows_child(anchor: Path, prefix: tuple[str, ...], component: str) -> None:
+    """Create one Windows child through a writable reopen of its parent only."""
+    from .work_cmd import nt_dirfd
+
+    if not prefix:
+        mkdir_parent = nt_dirfd.open_root_directory(anchor, writable=True)
+    else:
+        mkdir_parent = nt_dirfd.open_root_directory(anchor, writable=False)
+        try:
+            for depth, name in enumerate(prefix):
+                last = depth == len(prefix) - 1
+                child = nt_dirfd.open_child_directory(mkdir_parent, name, writable=last)
+                os.close(mkdir_parent)
+                mkdir_parent = child
+        except BaseException:
+            os.close(mkdir_parent)
+            raise
+    try:
+        nt_dirfd.mkdir_child(mkdir_parent, component)
+    finally:
+        os.close(mkdir_parent)
 
 
 def _read_regular_text(path: Path) -> str:

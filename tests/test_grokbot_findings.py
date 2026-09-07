@@ -254,7 +254,6 @@ def test_preview_rejects_malformed_manifests_without_writing(tmp_path: Path, pay
     assert not (_queue_root(queue) / "findings").exists()
 
 
-@pytest.mark.skipif(not grokbot_findings.SECURE_OWNER_WRITE_AVAILABLE, reason="secure-owner-write-unavailable")
 def test_preview_rejects_group_readable_manifest_without_writing(tmp_path: Path):
     queue = tmp_path / "queue"
     owner = tmp_path / "owner"
@@ -262,10 +261,19 @@ def test_preview_rejects_group_readable_manifest_without_writing(tmp_path: Path)
     owner.mkdir()
     manifest = _write_manifest(tmp_path / "findings.json", _manifest(_entry()), mode=0o640)
 
-    with pytest.raises(grokbot_findings.FindingsError) as exc:
-        grokbot_findings.preview(queue, owner, manifest)
+    if os.name == "posix":
+        with pytest.raises(grokbot_findings.FindingsError) as exc:
+            grokbot_findings.preview(queue, owner, manifest)
 
-    assert exc.value.reason == "unsafe-manifest"
+        assert exc.value.reason == "unsafe-manifest"
+        assert not _review_inbox(owner).exists()
+        return
+    # Windows has no owner gate on this read path, so a group-readable
+    # manifest may be accepted. Only the no-write invariant is asserted here.
+    try:
+        grokbot_findings.preview(queue, owner, manifest)
+    except grokbot_findings.FindingsError:
+        pass
     assert not _review_inbox(owner).exists()
 
 

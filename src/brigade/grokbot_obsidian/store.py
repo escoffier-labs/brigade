@@ -57,6 +57,14 @@ class ObsidianActionStoreError(ObsidianError):
         super().__init__("denied", ERROR_MESSAGES["denied"])
 
 
+SECURE_OWNER_WRITE_AVAILABLE = os.name == "posix"
+
+
+def _require_secure_owner_write() -> None:
+    if not SECURE_OWNER_WRITE_AVAILABLE:
+        raise ObsidianError("secure-owner-write-unavailable")
+
+
 def _state_invalid() -> NoReturn:
     raise ObsidianError("protocol_error", ERROR_MESSAGES["protocol_error"])
 
@@ -375,6 +383,7 @@ def parse_receipt_record(raw: object, expected_receipt_id: str | None = None) ->
 
 
 def _ensure_directory(path: Path) -> None:
+    _require_secure_owner_write()
     if path.exists() or path.is_symlink():
         if grokbot_ops._path_is_symlink(path) or path.is_symlink() or not path.is_dir():
             _state_invalid()
@@ -392,6 +401,7 @@ def _ensure_directory(path: Path) -> None:
 
 
 def _write_exclusive_json(directory: Path, name: str, record: Mapping[str, Any]) -> None:
+    _require_secure_owner_write()
     payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
     if len(payload.encode("utf-8")) > MAX_RECORD_BYTES:
         _state_invalid()

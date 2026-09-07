@@ -28,6 +28,14 @@ from .contracts import (
 
 STATE_SCHEMA = "brigade.grokbot.wazuh-state.v1"
 STATE_KEYS = frozenset({"alerts", "proposals", "schema", "suppressions"})
+SECURE_OWNER_WRITE_AVAILABLE = os.name == "posix"
+
+
+def _require_secure_owner_write() -> None:
+    if not SECURE_OWNER_WRITE_AVAILABLE:
+        raise WazuhError("secure-owner-write-unavailable")
+
+
 MAX_ALERTS = 2_048
 MAX_SUPPRESSIONS = 256
 MAX_PROPOSALS = 64
@@ -334,6 +342,7 @@ class WazuhStore:
         }
 
     def _ensure_state_dir(self) -> None:
+        _require_secure_owner_write()
         parent = -1
         try:
             parent = grokbot_ops._open_parent_nofollow(self._path, create=True)
@@ -379,6 +388,7 @@ class WazuhStore:
         }
 
     def _persist(self, state: Mapping[str, Any]) -> None:
+        _require_secure_owner_write()
         if len(state["alerts"]) > MAX_ALERTS or len(state["suppressions"]) > MAX_SUPPRESSIONS:
             _unavailable()
         if len(state["proposals"]) > MAX_PROPOSALS:
