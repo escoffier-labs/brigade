@@ -141,7 +141,7 @@ Packaged bind values are defaults only. They do not collide: operator `127.0.0.1
 
 ## Report snapshots
 
-`grokbot_queue_complete` accepts an optional `report_text` string. Send it only for a Repository Scout job whose expected artifact kind is `report`. The text must be non-empty UTF-8 and at most 12,000 bytes. The completion `artifact` remains `{"kind": "report", "path": "<repo-relative path>", "sha256": "<hex>"}`, and `sha256` must be the SHA-256 of those exact UTF-8 bytes. Draft-PR and branch completions reject `report_text`.
+`grokbot_queue_complete` accepts an optional `report_text` string. Send it only for a Repository Scout job whose expected artifact kind is `report`. The text must be non-empty UTF-8 and at most 12,000 bytes. The completion `artifact` remains `{"kind": "report", "path": "<repo-relative path>", "sha256": "<hex>"}`, and `sha256` must be the SHA-256 of those exact UTF-8 bytes. Draft-PR and branch completions reject `report_text` with the bounded reason `report-not-allowed`. The job stays running, no snapshot is written, and the Bot can retry without `report_text`.
 
 Omitting `report_text` keeps the existing metadata-only completion. The job can still reach `completed`. No snapshot is stored, so later operator retrieval fails with the same public validation error as any other rejected tool input.
 
