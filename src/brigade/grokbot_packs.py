@@ -36,10 +36,15 @@ PACK_SCHEMA = "brigade.grokbot.connector-pack.v1"
 INSTANCE_SCHEMA = "brigade.grokbot.connector-instance.v1"
 INSTANCE_DIR = Path(".brigade") / "grokbot" / "packs"
 PACK_KEYS = frozenset({"schema", "id", "version", "kind", "instance", "default_bind", "public_route", "tools"})
-LIST_PACK_KEYS = PACK_KEYS | {"installed_bind"}
+LIST_PACK_KEYS = PACK_KEYS | {"installed_bind", "reachability"}
 BIND_DRIFT_CHECK = "bind-drift"
 INGRESS_PORT_MISMATCH_CHECK = "ingress-port-mismatch"
 ALLOWED_HOST_MISSING_CHECK = "allowed-host-missing"
+NO_PUBLIC_ROUTE_CHECK = "no-public-route"
+NO_PUBLIC_ROUTE_DETAIL = "pack answers only on its local bind"
+REACHABILITY_NO_PUBLIC_ROUTE = "no-public-route"
+REACHABILITY_HOST_LOCAL = "host-local"
+REACHABILITY_PUBLIC = "public"
 _MAX_CLOUDFLARED_PROCS = 16
 _MAX_METRICS_ENDPOINTS = 8
 _MAX_PUBLIC_HOSTS = 8
@@ -57,6 +62,7 @@ INSTANCE_KEYS = frozenset(
         "bearer",
     }
 )
+INSTANCE_OPTIONAL_KEYS = frozenset({"host_local"})
 DEFAULT_BINDS = {
     "implementation-worker": "127.0.0.1:8768",
     "operator": "127.0.0.1:8766",
@@ -181,16 +187,18 @@ def _packaged_packs() -> list[dict[str, Any]]:
 
 
 def list_packs(target: Path | None = None) -> list[dict[str, Any]]:
-    """Return packaged manifests plus the installed bind when one exists.
+    """Return packaged manifests plus installed bind and reachability.
 
-    ``installed_bind`` is read from ``.brigade/grokbot/packs/<id>.json``. The
-    pack CLI dispatcher does not pass ``--target`` into this function, so a
-    missing target uses that command's target when present, else ``.``.
+    ``installed_bind`` and ``reachability`` are read from
+    ``.brigade/grokbot/packs/<id>.json``. The pack CLI dispatcher does not pass
+    ``--target`` into this function, so a missing target uses that command's
+    target when present, else ``.``.
     """
     resolved = target if target is not None else _cli_pack_target()
     packs = _packaged_packs()
     for pack in packs:
         pack["installed_bind"] = _peek_installed_bind(resolved, pack["id"])
+        pack["reachability"] = _pack_reachability(resolved, pack)
     return packs
 
 
@@ -345,6 +353,7 @@ def doctor(target: Path, pack_id: str, *, service_result: bool = False) -> list[
     else:
         checks = grokbot_cerebro.doctor(target)
     checks.extend(_installed_bind_checks(target, pack))
+    checks.extend(_no_public_route_checks(target, pack))
     if service_result:
         checks.append(grokbot_ops.inspect_service_result(pack["instance"]))
     return checks
@@ -929,7 +938,12 @@ def _validate_pack(raw: Mapping[str, Any]) -> dict[str, Any]:
 def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[str, Any]:
     pack = show_pack(pack_id)
     expected_keys = _instance_keys(pack)
-    if set(payload) != expected_keys or payload.get("schema") != INSTANCE_SCHEMA:
+    present = set(payload)
+    optional = present & INSTANCE_OPTIONAL_KEYS
+    if present - optional != expected_keys or payload.get("schema") != INSTANCE_SCHEMA:
+        raise PackError("unexpected-key")
+    host_local = payload.get("host_local")
+    if host_local is not None and host_local is not True and host_local is not False:
         raise PackError("unexpected-key")
     if payload.get("pack_id") != pack_id:
         raise PackError("unexpected-key")
@@ -1200,6 +1214,51 @@ def _peek_allowed_hosts(target: Path, pack_id: str) -> list[str]:
     if not isinstance(hosts, list):
         return []
     return [host for host in hosts if isinstance(host, str)]
+
+
+def _peek_public_route(target: Path, pack_id: str) -> str:
+    payload = _peek_instance_payload(target, pack_id)
+    if payload is None:
+        return ""
+    route = payload.get("public_route")
+    return route if isinstance(route, str) else ""
+
+
+def _peek_host_local(target: Path, pack_id: str) -> bool:
+    payload = _peek_instance_payload(target, pack_id)
+    return payload is not None and payload.get("host_local") is True
+
+
+def _pack_reachability(target: Path, pack: Mapping[str, Any]) -> str | None:
+    if pack["kind"] != "connector":
+        return None
+    pack_id = str(pack["id"])
+    if _peek_installed_bind(target, pack_id) is None:
+        return None
+    if _peek_host_local(target, pack_id):
+        return REACHABILITY_HOST_LOCAL
+    if _peek_allowed_hosts(target, pack_id) or _peek_public_route(target, pack_id):
+        return REACHABILITY_PUBLIC
+    return REACHABILITY_NO_PUBLIC_ROUTE
+
+
+def _no_public_route_checks(target: Path, pack: Mapping[str, Any]) -> list[dict[str, str]]:
+    if pack["kind"] != "connector":
+        return []
+    pack_id = str(pack["id"])
+    if _peek_installed_bind(target, pack_id) is None:
+        return []
+    if _peek_host_local(target, pack_id):
+        return []
+    if _peek_allowed_hosts(target, pack_id) or _peek_public_route(target, pack_id):
+        return []
+    return [
+        {
+            "check": NO_PUBLIC_ROUTE_CHECK,
+            "status": "manual",
+            "detail": NO_PUBLIC_ROUTE_DETAIL,
+        }
+    ]
 
 
 def _public_allowed_hosts(hosts: Iterable[str]) -> tuple[str, ...]:

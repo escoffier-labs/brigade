@@ -124,6 +124,7 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
         assert set(pack) == grokbot_packs.LIST_PACK_KEYS
         assert pack["schema"] == grokbot_packs.PACK_SCHEMA
         assert pack["installed_bind"] is None
+        assert pack["reachability"] is None
         shown = grokbot_packs.show_pack(pack["id"])
         assert shown == pack
         assert grokbot_packs.PACK_KEYS <= set(shown)
@@ -911,7 +912,12 @@ def test_cerebro_doctor_canary_and_unit_hide_paths(tmp_path: Path, monkeypatch):
     assert str(workdir) not in sanitized
     assert SECRET not in unit
     assert str(executable) not in unit
-    assert all(set(check) == {"check", "status"} for check in checks)
+    assert any(
+        check["check"] == "no-public-route" and check["status"] == "manual" for check in checks
+    )
+    assert all(
+        set(check) == {"check", "status"} for check in checks if check["check"] != "no-public-route"
+    )
     assert canary["ok"] is False
     assert "--pack" in unit
     assert "cerebro-memory" in unit
@@ -1542,7 +1548,9 @@ def test_pack_list_reports_installed_bind_alongside_packaged_default(tmp_path: P
     listed = {pack["id"]: pack for pack in grokbot_packs.list_packs(tmp_path)}
     assert listed["operator"]["default_bind"] == "127.0.0.1:8766"
     assert listed["operator"]["installed_bind"] == CUSTOM_BIND
+    assert listed["operator"]["reachability"] is None
     assert listed["repository-scout"]["installed_bind"] is None
+    assert listed["repository-scout"]["reachability"] is None
 
     assert cli.main(_pack_argv(tmp_path, "list", "--json")) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1664,3 +1672,115 @@ def test_pack_doctor_fails_allowed_host_missing_on_running_listener(tmp_path: Pa
     assert str(tmp_path) not in rendered
     assert missing_bind not in rendered
     assert allowed_bind not in rendered
+
+
+def _mark_host_local(target: Path, pack_id: str) -> None:
+    path = grokbot_packs.instance_config_path(target, pack_id)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["host_local"] = True
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def test_pack_doctor_reports_manual_no_public_route_for_connector(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    monkeypatch.setattr(grokbot_packs, "_cloudflared_metrics_binds", lambda: ())
+    executable, workdir = _cerebro_paths(tmp_path)
+    grokbot_packs.apply_setup(
+        tmp_path,
+        "cerebro-memory",
+        bearer_env="TEST_GROKBOT_BEARER",
+        cli_executable=executable,
+        workdir=workdir,
+    )
+    checks = grokbot_packs.doctor(tmp_path, "cerebro-memory")
+    rendered = json.dumps(checks)
+    assert {
+        "check": "no-public-route",
+        "status": "manual",
+        "detail": "pack answers only on its local bind",
+    } in checks
+    assert all(check["status"] != "fail" or check["check"] != "no-public-route" for check in checks)
+    assert SECRET not in rendered
+    assert str(tmp_path) not in rendered
+    assert str(executable) not in rendered
+    assert str(workdir) not in rendered
+
+
+def test_pack_doctor_stays_quiet_when_connector_has_public_host(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    monkeypatch.setattr(grokbot_packs, "_cloudflared_metrics_binds", lambda: ())
+    executable, workdir = _cerebro_paths(tmp_path)
+    grokbot_packs.apply_setup(
+        tmp_path,
+        "cerebro-memory",
+        allowed_hosts=[PUBLIC_HOST],
+        bearer_env="TEST_GROKBOT_BEARER",
+        cli_executable=executable,
+        workdir=workdir,
+    )
+    checks = grokbot_packs.doctor(tmp_path, "cerebro-memory")
+    rendered = json.dumps(checks)
+    assert all(check["check"] != "no-public-route" for check in checks)
+    assert SECRET not in rendered
+    assert PUBLIC_HOST not in rendered
+    assert str(tmp_path) not in rendered
+
+
+def test_pack_doctor_stays_quiet_when_connector_is_host_local(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    monkeypatch.setattr(grokbot_packs, "_cloudflared_metrics_binds", lambda: ())
+    executable, workdir = _cerebro_paths(tmp_path)
+    grokbot_packs.apply_setup(
+        tmp_path,
+        "cerebro-memory",
+        bearer_env="TEST_GROKBOT_BEARER",
+        cli_executable=executable,
+        workdir=workdir,
+    )
+    _mark_host_local(tmp_path, "cerebro-memory")
+    checks = grokbot_packs.doctor(tmp_path, "cerebro-memory")
+    rendered = json.dumps(checks)
+    assert all(check["check"] != "no-public-route" for check in checks)
+    assert SECRET not in rendered
+    assert str(tmp_path) not in rendered
+
+
+def test_pack_list_json_exposes_reachability(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    executable, workdir = _cerebro_paths(tmp_path)
+    grokbot_packs.apply_setup(
+        tmp_path,
+        "cerebro-memory",
+        bearer_env="TEST_GROKBOT_BEARER",
+        cli_executable=executable,
+        workdir=workdir,
+    )
+    listed = {pack["id"]: pack for pack in grokbot_packs.list_packs(tmp_path)}
+    assert listed["cerebro-memory"]["reachability"] == "no-public-route"
+    assert listed["operator"]["reachability"] is None
+
+    grokbot_packs.apply_setup(
+        tmp_path,
+        "cerebro-memory",
+        allowed_hosts=[PUBLIC_HOST],
+        bearer_env="TEST_GROKBOT_BEARER",
+        cli_executable=executable,
+        workdir=workdir,
+    )
+    listed = {pack["id"]: pack for pack in grokbot_packs.list_packs(tmp_path)}
+    assert listed["cerebro-memory"]["reachability"] == "public"
+
+    _mark_host_local(tmp_path, "cerebro-memory")
+    listed = {pack["id"]: pack for pack in grokbot_packs.list_packs(tmp_path)}
+    assert listed["cerebro-memory"]["reachability"] == "host-local"
+
+    assert cli.main(_pack_argv(tmp_path, "list", "--json")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    cli_listed = {pack["id"]: pack for pack in payload["packs"]}
+    assert cli_listed["cerebro-memory"]["reachability"] == "host-local"
+    assert "reachability" in cli_listed["operator"]
+    dumped = json.dumps(payload)
+    assert SECRET not in dumped
+    assert PUBLIC_HOST not in dumped
+    assert str(tmp_path) not in dumped
