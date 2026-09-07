@@ -339,3 +339,90 @@ def test_scanner_run_marker_is_capability_free_and_writer_lock_is_adjacent(tmp_p
     assert inbox_lock.inbox_lock_path(tmp_path).name == "inbox.jsonl.lock"
     assert writer_path.name == "inbox.jsonl.writer.lock"
     assert writer_path.parent == inbox_lock.inbox_lock_path(tmp_path).parent
+
+
+def _track_replace_openness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[list[int]], list[tuple[str, str]]]:
+    """Record descriptors still open at each import-inbox replace call."""
+    from brigade.work_cmd.ledger import authority_store
+
+    real_open = authority_store._dirfd_open_file
+    real_replace = authority_store._dirfd_replace
+    opened: list[int] = []
+    still_open: list[list[int]] = []
+    calls: list[tuple[str, str]] = []
+
+    def _is_closed(descriptor: int) -> bool:
+        try:
+            os.fstat(descriptor)
+        except OSError:
+            return True
+        return False
+
+    def tracking_open(parent_fd: int, entry: str, flags: int, mode: int = 0o600) -> int:
+        descriptor = real_open(parent_fd, entry, flags, mode)
+        opened.append(descriptor)
+        return descriptor
+
+    def checked_replace(parent_fd: int, source: str, destination: str) -> None:
+        still_open.append([descriptor for descriptor in opened if not _is_closed(descriptor)])
+        calls.append((source, destination))
+        real_replace(parent_fd, source, destination)
+
+    monkeypatch.setattr(authority_store, "_dirfd_open_file", tracking_open)
+    monkeypatch.setattr(authority_store, "_dirfd_replace", checked_replace)
+    return still_open, calls
+
+
+def test_write_import_inbox_bytes_at_closes_fds_before_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The NT rename fails while a handle is open; fds must close before replace."""
+    from brigade.work_cmd.ledger import inbox_provenance
+
+    parent, name, _previous_raw, _previous_exists = inbox_provenance._snapshot_import_inbox(tmp_path)
+    try:
+        still_open, calls = _track_replace_openness(monkeypatch)
+        data = b'{"text": "windows rename"}\n'
+        inbox_provenance._write_import_inbox_bytes_at(parent, name, data)
+        assert len(calls) == 1
+        assert calls[0][1] == name
+        assert still_open == [[]]
+        assert (tmp_path / ".brigade" / "work" / "imports" / name).read_bytes() == data
+    finally:
+        os.close(parent)
+
+
+def test_restore_import_inbox_snapshot_closes_temp_before_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The snapshot rollback path must also close its temp handle before replace."""
+    from brigade.work_cmd.ledger import inbox_provenance
+
+    parent, name, _previous_raw, _previous_exists = inbox_provenance._snapshot_import_inbox(tmp_path)
+    try:
+        inbox_provenance._write_import_inbox_bytes_at(parent, name, b"v1\n")
+        still_open, calls = _track_replace_openness(monkeypatch)
+        inbox_provenance._restore_import_inbox_snapshot(parent, name, b"v2\n", True)
+        assert len(calls) == 1
+        assert calls[0][1] == name
+        assert still_open == [[]]
+        assert (tmp_path / ".brigade" / "work" / "imports" / name).read_bytes() == b"v2\n"
+    finally:
+        os.close(parent)
+
+
+def test_nt_set_info_access_denied_names_the_component() -> None:
+    """A failed NT rename/unlink must name the component like _raise_ntstatus does."""
+    from types import SimpleNamespace
+
+    def access_denied(_handle: object, _iosb: object, _info: object, _length: int, _klass: int) -> int:
+        return nt_dirfd._STATUS_ACCESS_DENIED
+
+    api = SimpleNamespace(
+        IO_STATUS_BLOCK=nt_dirfd._IO_STATUS_BLOCK,
+        NtSetInformationFile=access_denied,
+    )
+    with pytest.raises(PermissionError, match="path component access denied: inbox.jsonl"):
+        nt_dirfd._nt_set_info(api, 0, None, 0, nt_dirfd._FileRenameInformation, name="inbox.jsonl")
+    with pytest.raises(PermissionError, match="path component access denied$"):
+        nt_dirfd._nt_set_info(api, 0, None, 0, nt_dirfd._FileRenameInformation)

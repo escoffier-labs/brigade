@@ -314,7 +314,7 @@ def replace_children(parent: int, source: str, destination: str, *, replace: boo
     try:
         _reject_reparse(api, handle, expected_directory=False)
         info, length = _rename_information(api, parent, destination, replace=replace)
-        _nt_set_info(api, handle, info, length, _FileRenameInformation)
+        _nt_set_info(api, handle, info, length, _FileRenameInformation, name=destination)
     finally:
         api.CloseHandle(handle)
 
@@ -335,7 +335,7 @@ def unlink_child(parent: int, name: str) -> None:
         _reject_reparse(api, handle, expected_directory=False)
         info = api.FILE_DISPOSITION_INFORMATION()
         info.DeleteFile = True
-        _nt_set_info(api, handle, ctypes.byref(info), ctypes.sizeof(info), _FileDispositionInformation)
+        _nt_set_info(api, handle, ctypes.byref(info), ctypes.sizeof(info), _FileDispositionInformation, name=name)
     finally:
         api.CloseHandle(handle)
 
@@ -465,10 +465,10 @@ def _nt_create(
     return handle.value
 
 
-def _nt_set_info(api: Any, handle: Any, info: Any, length: int, klass: int) -> None:
+def _nt_set_info(api: Any, handle: Any, info: Any, length: int, klass: int, *, name: str | None = None) -> None:
     iosb = api.IO_STATUS_BLOCK()
     status = api.NtSetInformationFile(handle, ctypes.byref(iosb), info, length, klass)
-    _raise_ntstatus(status)
+    _raise_ntstatus(status, name=name)
 
 
 def _rename_information(api: Any, parent: int, destination: str, *, replace: bool) -> tuple[Any, int]:
@@ -502,7 +502,7 @@ def _raise_ntstatus(status: int, *, name: str | None = None) -> None:
         raise IsADirectoryError("path component is a directory")
     if code in {_STATUS_STOPPED_ON_SYMLINK, _STATUS_IO_REPARSE_TAG_NOT_HANDLED, _STATUS_REPARSE_POINT_NOT_RESOLVED}:
         raise OSError("path component is a reparse point")
-    raise OSError(f"Windows no-follow directory operation failed: NTSTATUS=0x{code:08X}")
+    raise OSError(f"Windows no-follow directory operation failed{suffix}: NTSTATUS=0x{code:08X}")
 
 
 def _bind_api_namespace(*, kernel32: Any = None, ntdll: Any = None) -> SimpleNamespace:

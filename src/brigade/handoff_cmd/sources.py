@@ -205,6 +205,11 @@ def _parse_ingestor_log_receipt(target: Path, config: SourceConfig, log_path: Pa
     return _drafts_mod._normalize_ingest_receipt(target, receipt)
 
 
+def _is_windows_drive_colon(value: str, index: int) -> bool:
+    """Return whether the colon at ``index`` is a Windows drive prefix (``C:\\``)."""
+    return index == 1 and len(value) > 2 and value[0].isalpha() and value[2] in ("/", "\\")
+
+
 def _split_outcome_line(value: str) -> tuple[str | None, str | None]:
     value = value.strip()
     if not value:
@@ -212,8 +217,14 @@ def _split_outcome_line(value: str) -> tuple[str | None, str | None]:
     target_value = None
     if " -> " in value:
         value, target_value = value.split(" -> ", 1)
-    if ":" in value:
-        value = value.split(":", 1)[0]
+    if ": " in value:
+        # A drive-letter prefix (``C:\\...``) never contains ``": "``, so
+        # this only strips a real detail suffix (``path: detail``).
+        value = value.split(": ", 1)[0]
+    elif ":" in value:
+        index = value.find(":")
+        if not _is_windows_drive_colon(value, index):
+            value = value.split(":", 1)[0]
     value = value.strip().strip("`")
     if value.startswith("[") and "]" in value:
         value = value.split("]", 1)[1].strip()

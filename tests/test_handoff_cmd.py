@@ -374,7 +374,7 @@ def test_handoff_draft_writes_linted_no_card_style(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     path = tmp_path / payload["path"]
     assert path.is_file()
-    assert ".codex/memory-handoffs" in payload["path"]
+    assert str(Path(".codex") / "memory-handoffs") in payload["path"]
     assert payload["action"] == "no-card"
     assert payload["target_document"] == ".learnings/LEARNINGS.md"
     assert payload["valid"] is True
@@ -419,7 +419,7 @@ Drafts can create cards.
 
     payload = json.loads(capsys.readouterr().out)
     path = tmp_path / payload["path"]
-    assert ".antigravity/memory-handoffs" in payload["path"]
+    assert str(Path(".antigravity") / "memory-handoffs") in payload["path"]
     assert payload["action"] == "create-card"
     assert payload["target_card"] == "handoff-draft.md"
     assert payload["target_document"] is None
@@ -450,7 +450,7 @@ def test_handoff_draft_supports_hermes_writer_inbox(tmp_path, capsys):
 
     payload = json.loads(capsys.readouterr().out)
     path = tmp_path / payload["path"]
-    assert ".hermes/memory-handoffs" in payload["path"]
+    assert str(Path(".hermes") / "memory-handoffs") in payload["path"]
     assert payload["inbox"] == ".hermes/memory-handoffs"
     assert payload["valid"] is True
     assert path.is_file()
@@ -515,7 +515,7 @@ def test_hermes_handoff_smoke_receipt_show_and_archive(tmp_path, capsys):
     archive_payload = json.loads(capsys.readouterr().out)
     assert archive_payload["archived"] == 1
     record = archive_payload["records"][0]
-    assert ".hermes/memory-handoffs" in record["path"]
+    assert str(Path(".hermes") / "memory-handoffs") in record["path"]
     assert record["ingestion_status"] == "ingested"
     assert record["ingest_run_id"] == "hermes-smoke-run"
     assert not draft_path.exists()
@@ -871,7 +871,7 @@ def test_handoff_list_discovers_claude_codex_and_configured_inboxes(tmp_path, ca
 
     assert handoff_cmd.list_drafts(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert {draft["path"].rsplit("/", 1)[-1] for draft in payload["drafts"]} == {"claude.md", "codex.md", "custom.md"}
+    assert {Path(draft["path"]).name for draft in payload["drafts"]} == {"claude.md", "codex.md", "custom.md"}
     assert all(draft["watched"] is True for draft in payload["drafts"])
 
 
@@ -2451,3 +2451,17 @@ Body
     )
     assert draft.action == "create-card"
     assert draft.target_card == "synonym-draft.md"
+
+
+def test_split_outcome_line_keeps_windows_drive_paths():
+    from brigade.handoff_cmd import sources as handoff_sources
+
+    assert handoff_sources._split_outcome_line(r"C:\Users\x\handoff.md") == (r"C:\Users\x\handoff.md", None)
+    assert handoff_sources._split_outcome_line("C:/x/y") == ("C:/x/y", None)
+    assert handoff_sources._split_outcome_line("path:detail") == ("path", None)
+    assert handoff_sources._split_outcome_line("path: detail") == ("path", None)
+    assert handoff_sources._split_outcome_line(r"C:\Users\x\handoff.md: broken") == (
+        r"C:\Users\x\handoff.md",
+        None,
+    )
+    assert handoff_sources._split_outcome_line(r"C:\a.md -> outbox") == (r"C:\a.md", "outbox")
