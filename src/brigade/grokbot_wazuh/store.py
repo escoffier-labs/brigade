@@ -60,9 +60,9 @@ def _invalid() -> None:
 
 def _assert_secure_stat(info: os.stat_result, *, directory: bool) -> None:
     if directory:
-        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+        if not stat.S_ISDIR(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700):
             _invalid()
-    elif not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+    elif not stat.S_ISREG(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600):
         _invalid()
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         _invalid()
@@ -83,7 +83,7 @@ def read_secure_text(path: Path | str, *, expected_mode: int = 0o600) -> str:
 
             descriptor = nt_dirfd.open_file(parent, target.name, os.O_RDONLY)
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != expected_mode:
+        if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != expected_mode):
             _invalid()
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             _invalid()

@@ -563,7 +563,7 @@ def _read_manifest_snapshot(path: Path) -> bytes:
         owner_uid = getattr(os, "getuid", None)
         if owner_uid is not None and info.st_uid != owner_uid():
             raise FindingsError("unsafe-manifest")
-        if (info.st_mode & 0o777) != 0o600:
+        if os.name == "posix" and (info.st_mode & 0o777) != 0o600:
             raise FindingsError("unsafe-manifest")
         return grokbot_jobs._read_bounded_bytes(descriptor, MAX_MANIFEST_BYTES)
     except grokbot_jobs.GrokbotJobError as exc:

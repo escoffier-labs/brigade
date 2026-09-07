@@ -165,6 +165,7 @@ def test_preflight_rejects_malformed_manifests_without_writing_queue_state(
     assert not _queue_root(tmp_path).exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission bits")
 def test_preflight_rejects_group_writable_manifest_without_writing(tmp_path: Path):
     manifest = _write_manifest(
         tmp_path / "feed.json",
@@ -179,6 +180,7 @@ def test_preflight_rejects_group_writable_manifest_without_writing(tmp_path: Pat
     assert not _queue_root(tmp_path).exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission bits")
 def test_preflight_rejects_world_writable_manifest_without_writing(tmp_path: Path):
     manifest = _write_manifest(
         tmp_path / "feed.json",

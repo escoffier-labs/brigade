@@ -261,7 +261,11 @@ def _assert_safe_directory(path: Path) -> None:
         info = path.lstat()
     except OSError:
         _environment_invalid()
-    if path.is_symlink() or not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(info.st_mode)
+        or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700)
+    ):
         _environment_invalid()
 
 
@@ -277,7 +281,11 @@ def _ensure_writable_directory(path: Path) -> None:
         info = path.lstat()
     except OSError:
         _action_state_invalid()
-    if path.is_symlink() or not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(info.st_mode)
+        or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700)
+    ):
         _action_state_invalid()
 
 
@@ -288,7 +296,11 @@ def _read_json_file(path: Path) -> object:
         raise
     except OSError:
         _action_state_invalid()
-    if path.is_symlink() or not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(info.st_mode)
+        or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600)
+    ):
         _action_state_invalid()
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -300,7 +312,8 @@ def _write_exclusive_json(path: Path, record: Mapping[str, Any]) -> None:
     handle = None
     try:
         handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        os.fchmod(handle, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(handle, 0o600)
         _write_all(handle, json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"))
         os.fsync(handle)
         os.close(handle)
@@ -326,7 +339,8 @@ def _write_atomic_json(path: Path, record: Mapping[str, Any]) -> None:
     handle = None
     try:
         handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        os.fchmod(handle, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(handle, 0o600)
         _write_all(handle, json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"))
         os.fsync(handle)
         os.close(handle)

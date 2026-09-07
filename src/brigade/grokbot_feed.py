@@ -308,7 +308,7 @@ def _read_manifest_snapshot(path: Path) -> bytes:
         owner_uid = getattr(os, "getuid", None)
         if owner_uid is not None and info.st_uid != owner_uid():
             raise FeedError("unsafe-manifest")
-        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        if os.name == "posix" and info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             raise FeedError("unsafe-manifest")
         chunks: list[bytes] = []
         while True:
@@ -497,7 +497,7 @@ def _load_wake_config(target: Path) -> dict[str, Any] | None:
         return None
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         return None
-    if stat.S_IMODE(info.st_mode) != 0o600:
+    if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600:
         return None
     owner_uid = getattr(os, "getuid", None)
     if owner_uid is not None and info.st_uid != owner_uid():
@@ -565,7 +565,7 @@ def _read_owner_regular_file(path: Path, *, maximum: int, require_mode: int | No
         owner_uid = getattr(os, "getuid", None)
         if owner_uid is not None and info.st_uid != owner_uid():
             raise FeedError("unsafe-wake-config")
-        if require_mode is not None and stat.S_IMODE(info.st_mode) != require_mode:
+        if require_mode is not None and os.name == "posix" and stat.S_IMODE(info.st_mode) != require_mode:
             raise FeedError("unsafe-wake-config")
         if info.st_size > maximum:
             raise FeedError("unsafe-wake-config")

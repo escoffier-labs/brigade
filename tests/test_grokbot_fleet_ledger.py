@@ -26,6 +26,7 @@ HOST = {
 }
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission bits")
 def test_ledger_creates_owner_only_dir_and_file(tmp_path: Path):
     path = tmp_path / "state" / "ledger.json"
     ledger = FleetLedger(str(path))
@@ -96,6 +97,7 @@ def test_findings_returns_sorted_detached_copies(tmp_path: Path):
     assert ledger.findings()[0] is not snapshot[0]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission bits")
 def test_ledger_fails_closed_on_unsafe_permissions(tmp_path: Path):
     path = tmp_path / "state" / "ledger.json"
     path.parent.mkdir(parents=True)

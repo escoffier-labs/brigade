@@ -452,7 +452,7 @@ def _read_policy_snapshot(path: Path) -> bytes:
         owner_uid = getattr(os, "getuid", None)
         if owner_uid is not None and info.st_uid != owner_uid():
             raise grokbot_feed.FeedError("unsafe-manifest")
-        if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        if os.name == "posix" and info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
             raise grokbot_feed.FeedError("unsafe-manifest")
         chunks: list[bytes] = []
         while chunk := os.read(descriptor, 65536):

@@ -76,7 +76,7 @@ def _parse_service_mapping(raw: object) -> MappingProxyType:
 
 
 def _assert_secure_runtime_stat(info: os.stat_result) -> None:
-    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+    if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600):
         _environment_error()
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         _environment_error()
@@ -196,7 +196,9 @@ def project_fleet_public_registry(runtime: Mapping[str, Any]):
 
 
 def _has_explicit_dot_segment(value: str) -> bool:
-    return any(segment in {".", ".."} for segment in value.split("/"))
+    if any(part in {".", ".."} for part in Path(value).parts):
+        return True
+    return any(segment in {".", ".."} for segment in value.replace("\\", "/").split("/"))
 
 
 def normalize_absolute_path(path_value: str) -> str:
@@ -205,7 +207,7 @@ def normalize_absolute_path(path_value: str) -> str:
 
 
 def _required_absolute_path(value: object) -> str:
-    if not isinstance(value, str) or not value.startswith("/") or "\0" in value:
+    if not isinstance(value, str) or "\0" in value or not Path(value).is_absolute():
         _environment_error()
     if _has_explicit_dot_segment(value):
         _environment_error()

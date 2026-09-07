@@ -424,7 +424,11 @@ def _assert_owner_dir(path: Path, *, create: bool) -> None:
         info = path.lstat()
     except OSError:
         _environment_invalid()
-    if path.is_symlink() or not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(info.st_mode)
+        or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700)
+    ):
         if create:
             _action_state_invalid()
         _environment_invalid()
@@ -435,7 +439,7 @@ def _assert_owner_dir(path: Path, *, create: bool) -> None:
 
 
 def _assert_owner_file(info: os.stat_result) -> None:
-    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+    if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600):
         _action_state_invalid()
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         _action_state_invalid()
@@ -463,7 +467,8 @@ def _write_exclusive_json(path: Path, record: Mapping[str, Any]) -> None:
     try:
         handle = os.open(path, dirfd_mod.file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL), 0o600)
         created = True
-        os.fchmod(handle, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(handle, 0o600)
         _write_all(handle, json.dumps(record).encode("utf-8"))
         os.fsync(handle)
         os.close(handle)
@@ -536,7 +541,7 @@ def _fsync_directory(path: Path) -> None:
     try:
         handle = os.open(path, dirfd_mod.directory_flags())
         info = os.fstat(handle)
-        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+        if not stat.S_ISDIR(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700):
             _action_state_invalid()
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             _action_state_invalid()

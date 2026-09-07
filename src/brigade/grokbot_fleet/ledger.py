@@ -416,7 +416,7 @@ class FleetLedger:
             info = directory.lstat()
         except OSError:
             _ledger_invalid()
-        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+        if not stat.S_ISDIR(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700):
             _ledger_invalid()
 
     def _load_document(self) -> dict[str, Any]:
@@ -426,7 +426,7 @@ class FleetLedger:
             return {"version": LEDGER_VERSION, "hosts": {}, "services": {}, "findings": []}
         except OSError:
             _ledger_invalid()
-        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+        if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600):
             _ledger_invalid()
         try:
             raw = self._path.read_text(encoding="utf-8")
@@ -440,7 +440,8 @@ class FleetLedger:
         handle = None
         try:
             handle = os.open(self._temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-            os.fchmod(handle, 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(handle, 0o600)
             _write_all(handle, json.dumps(document).encode("utf-8"))
             os.fsync(handle)
             os.close(handle)

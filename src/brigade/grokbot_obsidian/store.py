@@ -379,7 +379,7 @@ def _ensure_directory(path: Path) -> None:
         if grokbot_ops._path_is_symlink(path) or path.is_symlink() or not path.is_dir():
             _state_invalid()
         info = path.lstat()
-        if stat.S_IMODE(info.st_mode) != 0o700:
+        if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700:
             _state_invalid()
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             _state_invalid()
@@ -387,7 +387,7 @@ def _ensure_directory(path: Path) -> None:
     path.mkdir(mode=0o700, parents=True)
     os.chmod(path, 0o700)
     info = path.lstat()
-    if path.is_symlink() or not path.is_dir() or stat.S_IMODE(info.st_mode) != 0o700:
+    if path.is_symlink() or not path.is_dir() or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700):
         _state_invalid()
 
 
@@ -515,7 +515,7 @@ class ObsidianActionStore:
         if not self.approval_dir.is_dir() or self.approval_dir.is_symlink():
             _environment_invalid()
         info = self.approval_dir.lstat()
-        if stat.S_IMODE(info.st_mode) != 0o700:
+        if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700:
             _environment_invalid()
 
     def _retain(self) -> None:

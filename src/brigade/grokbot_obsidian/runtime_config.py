@@ -45,11 +45,13 @@ def _runtime_error() -> NoReturn:
 
 
 def has_explicit_dot_segment(value: str) -> bool:
-    return any(segment in {".", ".."} for segment in value.split("/"))
+    if any(part in {".", ".."} for part in Path(value).parts):
+        return True
+    return any(segment in {".", ".."} for segment in value.replace("\\", "/").split("/"))
 
 
 def is_absolute_safe_path(value: str) -> bool:
-    return value.startswith("/") and "\0" not in value and not has_explicit_dot_segment(value)
+    return Path(value).is_absolute() and "\0" not in value and not has_explicit_dot_segment(value)
 
 
 def normalize_absolute_path(path_value: str) -> str:
@@ -140,7 +142,7 @@ def open_validated_executable_fd(path_text: str) -> int:
 
 
 def _assert_secure_runtime_stat(info: os.stat_result) -> None:
-    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+    if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600):
         _runtime_error()
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         _runtime_error()

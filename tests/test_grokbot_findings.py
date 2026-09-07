@@ -254,6 +254,7 @@ def test_preview_rejects_malformed_manifests_without_writing(tmp_path: Path, pay
     assert not (_queue_root(queue) / "findings").exists()
 
 
+@pytest.mark.skipif(not grokbot_findings.SECURE_OWNER_WRITE_AVAILABLE, reason="secure-owner-write-unavailable")
 def test_preview_rejects_group_readable_manifest_without_writing(tmp_path: Path):
     queue = tmp_path / "queue"
     owner = tmp_path / "owner"
@@ -315,6 +316,7 @@ def test_preview_rejects_invalid_limits_without_writing(tmp_path: Path, limit: o
     assert not _review_inbox(owner).exists()
 
 
+@pytest.mark.skipif(not grokbot_findings.SECURE_OWNER_WRITE_AVAILABLE, reason="secure-owner-write-unavailable")
 def test_apply_writes_one_quoted_handoff_and_a_private_marker(tmp_path: Path):
     queue = tmp_path / "queue"
     owner = tmp_path / "owner"

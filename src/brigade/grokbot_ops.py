@@ -446,16 +446,24 @@ def _open_windows_parent_nofollow(parent: Path, *, create: bool) -> int:
     from .work_cmd import nt_dirfd
 
     anchor = Path(parent.anchor)
-    descriptor = nt_dirfd.open_root_directory(anchor, writable=create)
     try:
-        for component in parent.relative_to(anchor).parts:
+        relative_parts = parent.relative_to(anchor).parts
+    except ValueError:
+        raise OSError("unsafe output directory") from None
+    if not relative_parts:
+        descriptor = nt_dirfd.open_root_directory(anchor, writable=create)
+        return descriptor
+    descriptor = nt_dirfd.open_root_directory(anchor, writable=False)
+    try:
+        for index, component in enumerate(relative_parts):
+            want_writable = bool(create and index == len(relative_parts) - 1)
             try:
-                child = nt_dirfd.open_child_directory(descriptor, component, writable=create)
+                child = nt_dirfd.open_child_directory(descriptor, component, writable=want_writable)
             except FileNotFoundError:
                 if not create:
                     raise
                 nt_dirfd.mkdir_child(descriptor, component)
-                child = nt_dirfd.open_child_directory(descriptor, component, writable=create)
+                child = nt_dirfd.open_child_directory(descriptor, component, writable=want_writable)
             os.close(descriptor)
             descriptor = child
         return descriptor

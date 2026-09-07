@@ -65,7 +65,10 @@ def _environment_invalid() -> NoReturn:
 def validate_absolute_reference(path_text: object) -> str:
     if not isinstance(path_text, str) or not path_text or "\0" in path_text:
         _environment_invalid()
-    if not path_text.startswith("/") or any(part in {".", ".."} for part in path_text.split("/")):
+    candidate = Path(path_text)
+    if not candidate.is_absolute() or any(part in {".", ".."} for part in candidate.parts):
+        _environment_invalid()
+    if any(segment in {".", ".."} for segment in path_text.replace("\\", "/").split("/")):
         _environment_invalid()
     return normalize_absolute_path(path_text)
 
@@ -118,7 +121,7 @@ def validate_state_directory(path_text: str, *, must_exist: bool) -> str:
             _environment_invalid()
         return normalized
     info = _lstat_nofollow(normalized)
-    if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+    if not stat.S_ISDIR(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700):
         _environment_invalid()
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         _environment_invalid()
