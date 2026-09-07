@@ -16,7 +16,7 @@ import unicodedata
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, List
 
 from . import proc
@@ -27,7 +27,13 @@ _CODEX_CLOUD_PREFIX = "codex-cloud:"
 _CLOUDFLARE_AI_GATEWAY_PREFIX = "cloudflare-ai-gateway/"
 _CLOUDFLARE_AI_GATEWAY_REQUIRED_ENV = ("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID")
 ENV_FILE_REF_PREFIX = "env-file:"
-ENV_FILE_REF_RE = re.compile(r"^env-file:(/[^#]+)#([A-Z][A-Z0-9_]*)$")
+# Accept a POSIX absolute path ("/...") or a Windows drive-absolute path in
+# either separator form ("C:\..." or "C:/..."). UNC paths ("\\server\share" and
+# "//server/share") are deliberately rejected: nothing needs them and they
+# would widen the trust boundary. The pattern is only a first filter;
+# _parse_env_file_reference re-enforces absoluteness with PurePath checks.
+ENV_FILE_REF_RE = re.compile(r"^env-file:((?:/(?!/)[^#]+)|(?:[A-Za-z]:[/\\][^#]+))#([A-Z][A-Z0-9_]*)$")
+_ENV_FILE_DRIVE_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:[/\\]")
 
 
 def is_env_file_reference(value: str) -> bool:
@@ -997,14 +1003,46 @@ def ollama_model_present(
     )
 
 
-def _read_env_file_reference(reference: str) -> str | None:
-    """Read one systemd-style KEY=VALUE entry without evaluating the file."""
+def _parse_env_file_reference(reference: str) -> tuple[str, str] | None:
+    """Split an env-file reference into (path, variable) when strictly valid.
 
+    The validator gates reading a secret file, so it stays strict: no
+    globbing, no environment expansion, no relative segments, and only
+    absolute paths. UNC paths are deliberately rejected since nothing needs
+    them. Returns None for anything malformed.
+    """
     match = ENV_FILE_REF_RE.match(reference)
     if match is None:
         return None
-    path = Path(match.group(1))
+    raw_path = match.group(1)
     variable = match.group(2)
+    # UNC paths are deliberately rejected: nothing needs them and they widen
+    # the trust boundary.
+    if raw_path.startswith("\\\\") or raw_path.startswith("//"):
+        return None
+    if any(char in raw_path for char in "*?[]{}"):
+        return None
+    if "$" in raw_path or "%" in raw_path:
+        return None
+    if any(segment in (".", "..") for segment in re.split(r"[\\/]", raw_path)):
+        return None
+    posix_absolute = PurePosixPath(raw_path).is_absolute() and raw_path.startswith("/")
+    windows_absolute = (
+        PureWindowsPath(raw_path).is_absolute() and _ENV_FILE_DRIVE_ABSOLUTE_RE.match(raw_path) is not None
+    )
+    if not (posix_absolute or windows_absolute):
+        return None
+    return (raw_path, variable)
+
+
+def _read_env_file_reference(reference: str) -> str | None:
+    """Read one systemd-style KEY=VALUE entry without evaluating the file."""
+
+    match = _parse_env_file_reference(reference)
+    if match is None:
+        return None
+    path = Path(match[0])
+    variable = match[1]
     try:
         contents = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
