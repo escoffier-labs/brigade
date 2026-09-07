@@ -365,6 +365,14 @@ original file is missing, corrupt, or not an object.
 | `approval` | object | no | Latest signed human decision: `{decision, scope, approver_principal, decided_at, expires_at, reason, nonce, statement_sha256, sod}`. The reason preimage is local-only |
 | `run_budget` | object | no | Optional projected `brigade.run_budget.v1` summary when a coordinator wrote one (#593). Journal events remain authoritative. |
 
+A recovery-checkpoint body that would exceed `MAX_CHECKPOINT_BYTES` (16 MiB)
+degrades instead of failing the live write (#1506). The published checkpoint
+keeps `status`, durable request flags, and `tree_fingerprint`, records
+`truncated: true` plus `oversized_paths` (`{path, byte_size?}` for
+`docs/assets/**` and common binary suffixes), and drops bulky fields such as
+`task` and `pre_run_snapshot`. The live `run.json` still receives the full
+receipt. Authority recovery strips the two truncation keys before projection.
+
 ### Signed human approval (`brigade.run_event.v1` event type)
 
 An `approval` event records a separately signed human decision without changing

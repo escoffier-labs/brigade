@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `brigade run` no longer dies with `CheckpointError: checkpoint bytes exceed MAX_CHECKPOINT_BYTES` after a finished worker writes screenshots or other assets. An oversize recovery checkpoint now degrades: it keeps the tree fingerprint and names the oversized asset paths, marks the body `truncated`, and lets the live `run.json` write finish with the real status. `publish_checkpoint_file` still refuses a raw oversize body. (#1506)
+
 ### Changed
 - `brigade center serve` views render in the Command Deck theme through the shared `ui_theme` shell: dark tokens, the Deck masthead and nav, and no light-mode colors. Status chip colors are unchanged. (#1495)
 - The fleet boards at `/view/machines` and `/view/repos` render in the Command Deck theme through a shared `ui_theme` module, and Deck forms gain a spacing scale (16px panels, 36px controls, 8px helper-text gap, 40px buttons). Routes are unchanged. (#1495)
