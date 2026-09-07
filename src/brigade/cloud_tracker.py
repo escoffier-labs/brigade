@@ -40,6 +40,7 @@ TERMINAL_STATES = FINISHED_STATES | FAILED_STATES | frozenset({"interrupted", "t
 
 CLASSIFICATIONS = (
     "pending",
+    "needs-plan-approval",
     "ready-to-land",
     "landed",
     "stale",
@@ -322,6 +323,41 @@ def _prs_for_branch(github: dict[str, Any], branch: str | None) -> list[dict[str
     return matched
 
 
+def _jules_session_url(provider_info: dict[str, Any] | None) -> str | None:
+    """Return a sanitized Jules session URL, or None."""
+    if not isinstance(provider_info, dict):
+        return None
+    from . import jules_cloud
+
+    return jules_cloud._validated_session_url(provider_info.get("url"))
+
+
+def _jules_plan_only(
+    provider_info: dict[str, Any] | None,
+    *,
+    branch_exists: bool,
+    open_pr: bool,
+) -> bool:
+    """True when a Jules session stopped at a plan with nothing landable."""
+    if not isinstance(provider_info, dict):
+        return False
+    if branch_exists or open_pr:
+        return False
+    if provider_info.get("has_outputs") is True:
+        return False
+    if isinstance(provider_info.get("pull_request_url"), str) and provider_info.get("pull_request_url"):
+        return False
+    kinds = provider_info.get("activity_kinds")
+    if isinstance(kinds, list):
+        named = [kind for kind in kinds if isinstance(kind, str) and kind]
+        if named == ["planGenerated"]:
+            return True
+        if named:
+            return False
+    state = _normalize_provider_state(provider_info.get("state"))
+    return state in READY_STATES or state == "finished"
+
+
 def _classify_entry(
     entry: dict[str, Any],
     *,
@@ -392,6 +428,12 @@ def _classify_entry(
         # Ready / finished without a merge: landable, stale, or needs investigation.
         if expects_branch and not branch_exists and not open_pr:
             classification = "needs-investigation"
+        elif provider == "jules" and _jules_plan_only(
+            provider_info if isinstance(provider_info, dict) else None,
+            branch_exists=branch_exists,
+            open_pr=open_pr,
+        ):
+            classification = "needs-plan-approval"
         else:
             ready_mark = ready_at or _parse_time(entry.get("dispatched_at"))
             age_hours = _hours_since(ready_mark, now)
@@ -406,7 +448,7 @@ def _classify_entry(
     else:
         classification = "pending"
 
-    return {
+    row = {
         "id": entry.get("id"),
         "provider": provider,
         "task_id": task_id,
@@ -421,6 +463,10 @@ def _classify_entry(
         "evidence": evidence,
         "pr": prs[0] if prs else None,
     }
+    session_url = _jules_session_url(provider_info if isinstance(provider_info, dict) else None)
+    if session_url:
+        row["url"] = session_url
+    return row
 
 
 def _orphan_branch_rows(
@@ -868,7 +914,13 @@ def sweep(target: Path, *, now: datetime | None = None, status: dict[str, Any] |
             "classification": classification,
             "evidence": row.get("evidence"),
         }
-        if classification in {"ready-to-land", "stale", "needs-investigation", "pending"}:
+        if classification in {
+            "ready-to-land",
+            "stale",
+            "needs-investigation",
+            "pending",
+            "needs-plan-approval",
+        }:
             recoverable.append(item)
         elif classification == "orphaned":
             deletable.append(item)
@@ -909,7 +961,14 @@ def _row_is_preserved(row: dict[str, Any]) -> bool:
     """Keep active, ambiguous, orphaned, needs-investigation, and current work."""
     classification = row.get("classification")
     state = row.get("provider_state")
-    if classification in {"orphaned", "needs-investigation", "pending", "ready-to-land", "stale"}:
+    if classification in {
+        "orphaned",
+        "needs-investigation",
+        "pending",
+        "ready-to-land",
+        "stale",
+        "needs-plan-approval",
+    }:
         return True
     if is_active_state(state):
         return True
@@ -1304,7 +1363,21 @@ def _jules_cloud_observation(target: Path) -> ProviderObservation:
         session_id = session.get("id")
         if not isinstance(session_id, str):
             continue
-        tasks[session_id] = {"state": normalize_provider_state(session.get("state"))}
+        info: dict[str, Any] = {"state": normalize_provider_state(session.get("state"))}
+        url = session.get("url")
+        if isinstance(url, str):
+            info["url"] = url
+        if session.get("has_outputs") is True:
+            info["has_outputs"] = True
+        pull_request_url = session.get("pull_request_url")
+        if isinstance(pull_request_url, str):
+            info["pull_request_url"] = pull_request_url
+        kinds = session.get("activity_kinds")
+        if isinstance(kinds, list):
+            named = [kind for kind in kinds[:20] if isinstance(kind, str) and kind]
+            if named:
+                info["activity_kinds"] = named
+        tasks[session_id] = info
     return ProviderObservation(True, True, None, tasks)
 
 
@@ -1396,6 +1469,7 @@ def center_activity_records(
     )
     state_map = {
         "pending": "running",
+        "needs-plan-approval": "running",
         "ready-to-land": "ready",
         "stale": "stale",
         "landed": "succeeded",
