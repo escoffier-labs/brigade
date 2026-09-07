@@ -62,11 +62,31 @@ def _environment_invalid() -> NoReturn:
     raise FleetError("invalid_request", "Fleet environment is invalid")
 
 
+def _is_windows_drive_rooted(value: str) -> bool:
+    return len(value) >= 3 and value[0].isalpha() and value[1] == ":" and value[2] in {"\\", "/"}
+
+
+def _reject_windows_network_or_device_root(path_text: str) -> None:
+    if path_text.startswith("\\\\") or path_text.startswith("//"):
+        _environment_invalid()
+    if path_text.startswith("/"):
+        return
+    if _is_windows_drive_rooted(path_text):
+        return
+    if Path(path_text).is_absolute():
+        return
+    _environment_invalid()
+
+
 def validate_absolute_reference(path_text: object) -> str:
     if not isinstance(path_text, str) or not path_text or "\0" in path_text:
         _environment_invalid()
+    _reject_windows_network_or_device_root(path_text)
     candidate = Path(path_text)
-    if not candidate.is_absolute() or any(part in {".", ".."} for part in candidate.parts):
+    if not candidate.is_absolute() and not _is_windows_drive_rooted(path_text):
+        if not path_text.startswith("/"):
+            _environment_invalid()
+    if any(part in {".", ".."} for part in candidate.parts):
         _environment_invalid()
     if any(segment in {".", ".."} for segment in path_text.replace("\\", "/").split("/")):
         _environment_invalid()

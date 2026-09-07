@@ -59,6 +59,27 @@ def test_disjoint_paths_reject_overlap_dots_and_relative():
         validate_disjoint_state_paths("var/lib/a", "/var/lib/b", "/var/lib/c", "/var/lib/d")
 
 
+def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
+    from brigade.grokbot_backup.lifecycle import validate_absolute_reference as validate_ref
+    from brigade.grokbot_backup.runtime_config import _required_absolute_path
+
+    for accepted in ("/var/lib/state", r"C:\state\dir", "C:/state/dir"):
+        assert isinstance(validate_ref(accepted), str)
+        assert isinstance(_required_absolute_path(accepted), str)
+    for rejected in (
+        r"\\server\share\path",
+        r"\\.\pipe\x",
+        r"\\?\C:\path",
+        "relative/path",
+        "/var/lib/../escape",
+        r"C:\state\..\escape",
+    ):
+        with pytest.raises(BackupError):
+            validate_ref(rejected)
+        with pytest.raises(BackupError):
+            _required_absolute_path(rejected)
+
+
 def test_pack_setup_doctor_canary_and_unit_hide_secrets(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
     paths = _backup_paths(tmp_path)

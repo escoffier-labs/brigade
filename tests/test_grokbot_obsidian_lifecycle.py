@@ -101,6 +101,29 @@ def test_disjoint_paths_reject_overlap_and_relative():
         validate_disjoint_state_paths("var/lib/a", "/var/lib/b", "/var/lib/c", "/var/lib/d", "/usr/bin/true")
 
 
+def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
+    from brigade.grokbot_obsidian.lifecycle import validate_absolute_reference as validate_ref
+    from brigade.grokbot_obsidian.runtime_config import is_absolute_safe_path, required_absolute_path
+
+    for accepted in ("/var/lib/state", r"C:\state\dir", "C:/state/dir"):
+        assert isinstance(validate_ref(accepted), str)
+        assert isinstance(required_absolute_path(accepted), str)
+        assert is_absolute_safe_path(accepted) is True
+    for rejected in (
+        r"\\server\share\path",
+        r"\\.\pipe\x",
+        r"\\?\C:\path",
+        "relative/path",
+        "/var/lib/../escape",
+        r"C:\state\..\escape",
+    ):
+        with pytest.raises(ObsidianError):
+            validate_ref(rejected)
+        with pytest.raises(ObsidianError):
+            required_absolute_path(rejected)
+        assert is_absolute_safe_path(rejected) is False
+
+
 def test_pack_setup_doctor_canary_and_unit_hide_secrets(tmp_path: Path, monkeypatch):
     kwargs = _obsidian_setup_kwargs(tmp_path, monkeypatch)
     preview = grokbot_packs.preview_setup(

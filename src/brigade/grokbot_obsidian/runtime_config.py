@@ -50,8 +50,20 @@ def has_explicit_dot_segment(value: str) -> bool:
     return any(segment in {".", ".."} for segment in value.replace("\\", "/").split("/"))
 
 
+def _is_windows_drive_rooted(value: str) -> bool:
+    return len(value) >= 3 and value[0].isalpha() and value[1] == ":" and value[2] in {"\\", "/"}
+
+
 def is_absolute_safe_path(value: str) -> bool:
-    return Path(value).is_absolute() and "\0" not in value and not has_explicit_dot_segment(value)
+    if "\0" in value or has_explicit_dot_segment(value):
+        return False
+    if value.startswith("\\\\") or value.startswith("//"):
+        return False
+    if value.startswith("/"):
+        return True
+    if _is_windows_drive_rooted(value):
+        return True
+    return Path(value).is_absolute()
 
 
 def normalize_absolute_path(path_value: str) -> str:

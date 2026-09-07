@@ -37,9 +37,30 @@ def normalize_absolute_path(path_value: str) -> str:
     return trimmed if trimmed else "/"
 
 
-def required_absolute_path(value: object) -> str:
-    if not isinstance(value, str) or "\0" in value or not Path(value).is_absolute():
+def _is_windows_drive_rooted(value: str) -> bool:
+    return len(value) >= 3 and value[0].isalpha() and value[1] == ":" and value[2] in {"\\", "/"}
+
+
+def _reject_windows_network_or_device_root(value: str) -> None:
+    if value.startswith("\\\\") or value.startswith("//"):
         _environment_error()
+    if value.startswith("/"):
+        return
+    if _is_windows_drive_rooted(value):
+        return
+    if Path(value).is_absolute():
+        return
+    _environment_error()
+
+
+def required_absolute_path(value: object) -> str:
+    if not isinstance(value, str) or "\0" in value:
+        _environment_error()
+    assert isinstance(value, str)
+    _reject_windows_network_or_device_root(value)
+    if not Path(value).is_absolute() and not _is_windows_drive_rooted(value):
+        if not value.startswith("/"):
+            _environment_error()
     if _has_explicit_dot_segment(value):
         _environment_error()
     return normalize_absolute_path(value)
