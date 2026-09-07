@@ -246,6 +246,52 @@ A 60-minute drain remains useful as a safety net: if a POST failed, the
 routine can still list the queue and claim anything that was missed. Do not
 rely on a short poll as the primary wake.
 
+### Several Builder bots
+
+One Grok Bot runs one routine at a time. Throughput therefore scales with
+how many bots share the queue, not with how often a single bot's poll or
+wake cadence fires.
+
+Every Builder bot claims from the same `implementation-worker` queue. The
+hub lease is the only mutual-exclusion guard: `claim` moves a job from
+`queued` to `claimed` under one lease, and a second claim on that job is
+refused. Two bots never work the same job.
+
+The wake config already accepts a list of targets per role, so one
+`--apply` enqueue can POST the same bounded body to several bots. The
+first free bot that claims wins. Each target gets its own bounded POST,
+its own eight-second single try, and its own status line in
+`wake-notify.jsonl`.
+
+```json
+{
+  "schema": "brigade.grokbot.wake.v1",
+  "webhook_url": "https://example.invalid/webhook/REPLACE",
+  "sender_key_file": "/etc/brigade/grokbot-wake-a.key",
+  "webhooks": {
+    "implementation-worker": [
+      {
+        "webhook_url": "https://example.invalid/webhook/REPLACE",
+        "sender_key_file": "/etc/brigade/grokbot-wake-a.key"
+      },
+      {
+        "webhook_url": "https://example.invalid/webhook/REPLACE",
+        "sender_key_file": "/etc/brigade/grokbot-wake-b.key"
+      }
+    ]
+  }
+}
+```
+
+A per-bot poll routine remains the drain when that bot is idle. A wake
+that arrives while the bot is already on a job is not a second claim; the
+next poll still lists the queue and takes anything still `queued`.
+
+To add another bot: create it, give it the same coordinator routine text,
+confirm it lists the queue through the `implementation-worker` connector,
+then append its webhook target to the `implementation-worker` list in
+`.brigade/cloud/grokbot/wake.json`.
+
 ### Measuring the queue
 
 Hillclimb uses two per-job latencies for `implementation-worker` work, read
