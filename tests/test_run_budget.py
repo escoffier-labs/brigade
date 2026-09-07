@@ -310,6 +310,49 @@ def test_threshold_denial_exhaustion_cancel_reconcile_idempotent_under_recovery(
     assert cancel_again["idempotency_key"] == "run_budget.cancelled:cancel-1"
 
 
+def test_cancelled_event_with_seat_outcomes_canonicalizes():
+    created = _build_event(1, "run.created", {"status": "started"}, "create-1", RECORDED_AT, None)
+    cancelled = _build_event(
+        2,
+        "run_budget.cancelled",
+        {
+            "request_id": "opcancel:live-ctrl-c",
+            "reason_class": "operator_cancel",
+            "transport_capability": "mixed",
+            "transport_result": "partial",
+            "active_remaining": 1,
+            "active_seats": ["reviewer"],
+            "outcomes": [
+                {
+                    "seat": "coder",
+                    "transport_capability": "interrupt",
+                    "transport_result": "interrupted",
+                },
+                {
+                    "seat": "reviewer",
+                    "transport_capability": "none",
+                    "transport_result": "unsupported",
+                },
+            ],
+            "dimension": "wall_clock_seconds",
+        },
+        "run_budget.cancelled:opcancel:live-ctrl-c",
+        "2026-08-10T21:00:01.000000Z",
+        created["event_digest"],
+    )
+    projection = run_budget.project_budget_state(
+        run_budget.RunBudgetDeclaration(),
+        [created, cancelled],
+    )
+    assert projection.terminal_policy == "operator_cancelled"
+    assert len(projection.cancel_receipts) == 1
+    assert projection.cancel_receipts[0].active_seats == ("reviewer",)
+    assert [(item.seat, item.transport_result) for item in projection.cancel_receipts[0].outcomes] == [
+        ("coder", "interrupted"),
+        ("reviewer", "unsupported"),
+    ]
+
+
 def test_failed_cancelled_event_leaves_projection_non_terminal_without_receipt():
     recorded: list[str] = []
 
