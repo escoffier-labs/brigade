@@ -988,7 +988,12 @@ def _redacted_endpoint(value: str | None) -> str | None:
 
 def _temporary_git_repo() -> Path:
     root = Path(tempfile.mkdtemp(prefix="brigade-seat-health-"))
-    subprocess.run(["git", "init", "--quiet", str(root)], check=True, capture_output=True, text=True)
+    argv = ["git", "init", "--quiet", str(root)]
+    # Every probe subprocess runs through proc.run under an explicit timeout so
+    # a hung child surfaces as a failed check instead of stalling roster doctor.
+    result = proc.run(argv, timeout=10.0)
+    if result.code != 0:
+        raise subprocess.CalledProcessError(result.code, argv, result.stdout, result.stderr)
     return root
 
 

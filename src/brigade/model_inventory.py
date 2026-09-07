@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import re
-import subprocess
 import tempfile
 from dataclasses import dataclass
 from typing import Literal
 
 from . import proc
 
-InventoryState = Literal["exact", "fuzzy-resolved", "missing", "unavailable"]
+InventoryState = Literal["exact", "fuzzy-resolved", "missing", "unavailable", "timeout"]
 
 _LIST_COMMANDS = {
     "cursor": ["cursor-agent", "models"],
@@ -47,6 +46,7 @@ class ModelInventoryResult:
 class _HarnessInventory:
     models: tuple[str, ...] = ()
     error: str = ""
+    timed_out: bool = False
 
 
 class ModelInventoryInspector:
@@ -74,6 +74,14 @@ class ModelInventoryInspector:
     def _inspect_listed(self, cli_ref: str, requested: str, command: tuple[str, ...] | None) -> ModelInventoryResult:
         inventory = self._inventory(cli_ref, command)
         harness = "Cursor" if cli_ref == "cursor" else "Grok"
+        if inventory.timed_out:
+            return ModelInventoryResult(
+                "timeout",
+                requested,
+                (),
+                f"live {harness} inventory timed out after {_INVENTORY_TIMEOUT_SECONDS:g}s; "
+                "the hung probe process tree was terminated",
+            )
         if inventory.error:
             return ModelInventoryResult(
                 "unavailable",
@@ -118,7 +126,11 @@ class ModelInventoryInspector:
             result = _run_cursor_inventory([*command, "models"]) if command is not None else _run_cursor_inventory()
         else:
             result = proc.run(_LIST_COMMANDS[cli_ref], timeout=_INVENTORY_TIMEOUT_SECONDS)
-        if result.code != 0:
+        if _is_probe_timeout(result):
+            inventory = _HarnessInventory(
+                timed_out=True, error=f"live inventory timed out after {_INVENTORY_TIMEOUT_SECONDS:g}s"
+            )
+        elif result.code != 0:
             diagnostic = result.stderr.strip() or result.stdout.strip() or f"exit {result.code}"
             inventory = _HarnessInventory(error=diagnostic[:160])
         else:
@@ -135,6 +147,14 @@ class ModelInventoryInspector:
 
     def _inspect_ollama(self, requested: str) -> ModelInventoryResult:
         inventory = self._inventory("ollama")
+        if inventory.timed_out:
+            return ModelInventoryResult(
+                "timeout",
+                requested,
+                (),
+                f"live Ollama inventory timed out after {_INVENTORY_TIMEOUT_SECONDS:g}s; "
+                "the hung probe process tree was terminated",
+            )
         if inventory.error:
             return ModelInventoryResult(
                 "unavailable",
@@ -160,6 +180,13 @@ class ModelInventoryInspector:
             )
 
         result = proc.run(["ollama", "show", requested], timeout=15.0)
+        if _is_probe_timeout(result):
+            return ModelInventoryResult(
+                "timeout",
+                requested,
+                (),
+                "live Ollama inventory timed out after 15s; the hung probe process tree was terminated",
+            )
         if result.code == 0:
             return ModelInventoryResult(
                 "exact",
@@ -172,42 +199,31 @@ class ModelInventoryInspector:
         return ModelInventoryResult(state, requested, (), diagnostic[:200])
 
 
+def _is_probe_timeout(result: proc.Result) -> bool:
+    """True when a bounded probe runner killed a hung child (exit 124)."""
+    return result.code == 124 and "timeout after" in result.stderr
+
+
 def _run_cursor_inventory(command: list[str] | None = None) -> proc.Result:
-    """Capture Cursor inventory through a file because its pipe output truncates at 8 KiB."""
+    """Capture Cursor inventory through a file because its pipe output truncates at 8 KiB.
+
+    The probe runs through :func:`brigade.proc.run_to_file` under an explicit
+    timeout, so a hung agent CLI surfaces as exit 124 instead of blocking
+    roster doctor, and the whole probe process tree is terminated (owned job
+    object on Windows, process group on POSIX) instead of orphaned.
+    """
     with tempfile.TemporaryFile() as stdout:
         try:
-            completed = subprocess.run(
+            completed = proc.run_to_file(
                 command or _LIST_COMMANDS["cursor"],
-                stdout=stdout,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.DEVNULL,
+                stdout,
                 timeout=_INVENTORY_TIMEOUT_SECONDS,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout.seek(0)
-            output = stdout.read().decode("utf-8", errors="replace")
-            diagnostic = _decode_subprocess_output(exc.stderr)
-            if diagnostic and not diagnostic.endswith("\n"):
-                diagnostic += "\n"
-            return proc.Result(
-                124,
-                output,
-                f"{diagnostic}timeout after {_INVENTORY_TIMEOUT_SECONDS}s",
             )
         except OSError as exc:
             return proc.Result(127 if isinstance(exc, FileNotFoundError) else 126, "", str(exc))
         stdout.seek(0)
         output = stdout.read().decode("utf-8", errors="replace")
-    return proc.Result(completed.returncode, output, _decode_subprocess_output(completed.stderr))
-
-
-def _decode_subprocess_output(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    return value.decode("utf-8", errors="replace")
+    return proc.Result(completed.code, output, completed.stderr)
 
 
 def _parse_model_list(cli_ref: str, output: str) -> tuple[bool, tuple[str, ...]]:

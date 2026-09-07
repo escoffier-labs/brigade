@@ -1270,6 +1270,60 @@ def run(
     process_registry: ProcessRegistry | None = None,
     supervise_group: bool = False,
 ) -> Result:
+    return _launch_and_collect(
+        args,
+        subprocess.PIPE,
+        timeout=timeout,
+        env=env,
+        cwd=cwd,
+        stdin=stdin,
+        process_registry=process_registry,
+        supervise_group=supervise_group,
+    )
+
+
+def run_to_file(
+    args: List[str],
+    stdout_file: Any,
+    *,
+    timeout: float = 30.0,
+    env: Optional[dict] = None,
+    cwd: Optional[Path] = None,
+    process_registry: ProcessRegistry | None = None,
+) -> Result:
+    """Run ``args`` with stdout redirected to an already-open binary file.
+
+    Some agent CLIs truncate piped stdout (``cursor-agent models`` stops at
+    8 KiB on a pipe), so their probes need a regular file. Timeout and tree
+    termination match :func:`run`: the call returns exit 124 with ``timeout
+    after Ns`` in stderr, and the whole process tree is reaped through the
+    owned job object on Windows or the process group on POSIX. The caller owns
+    ``stdout_file`` and reads the captured bytes back after the call; the
+    returned :class:`Result` carries an empty stdout with the captured stderr.
+    """
+    return _launch_and_collect(
+        args,
+        stdout_file,
+        timeout=timeout,
+        env=env,
+        cwd=cwd,
+        stdin=None,
+        process_registry=process_registry,
+        supervise_group=False,
+    )
+
+
+def _launch_and_collect(
+    args: List[str],
+    stdout_target: Any,
+    *,
+    timeout: float = 30.0,
+    env: Optional[dict] = None,
+    cwd: Optional[Path] = None,
+    stdin: bytes | None = None,
+    process_registry: ProcessRegistry | None = None,
+    supervise_group: bool = False,
+) -> Result:
     windows_launch = os.name == "nt"
     child_job: _WindowsChildJob | None = None
     if windows_launch:
@@ -1286,7 +1340,7 @@ def run(
         popen_kwargs: dict[str, Any] = dict(_process_group_kwargs(suspend=windows_launch))
         process = subprocess.Popen(
             args,
-            stdout=subprocess.PIPE,
+            stdout=stdout_target,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
             env=env,
