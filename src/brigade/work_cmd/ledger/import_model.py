@@ -134,6 +134,9 @@ def _read_import_inbox_raw(target: Path) -> tuple[bytes, tuple[int, int, int, in
         raw = b"".join(chunks)
         if len(raw) != before.st_size:
             raise OSError("import inbox changed while snapshotting")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        if os.read(descriptor, len(raw) + 1) != raw:
+            raise OSError("import inbox changed while snapshotting")
         return raw, identity, True
     finally:
         if descriptor != -1:
