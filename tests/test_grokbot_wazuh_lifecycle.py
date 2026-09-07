@@ -77,16 +77,32 @@ def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
             validate_ref(rejected)
 
 
-def test_disjoint_paths_reject_backslash_nested_drive_paths():
-    if os.name != "nt":
-        pytest.skip("drive-rooted paths are rejected on POSIX before overlap checks")
-    with pytest.raises(WazuhError):
-        validate_disjoint_state_paths(
-            r"C:\b\state\runtime.json",
-            r"C:\b\other\ledger.json",
-            r"C:\b\state",
+def test_disjoint_paths_reject_backslash_nested_drive_paths(monkeypatch):
+    import ntpath
+    from types import SimpleNamespace
+
+    from brigade.grokbot_wazuh import lifecycle as lifecycle_mod
+
+    with monkeypatch.context() as patched:
+        patched.setattr(lifecycle_mod, "os", SimpleNamespace(name="nt", path=ntpath))
+        assert validate_disjoint_state_paths(
+            r"C:\b\runtime.json",
+            r"C:\b\ledger.json",
+            r"C:\b\actions",
             r"C:\b\approvals",
-        )
+        ) == {
+            "runtime_path": r"C:\b\runtime.json",
+            "ledger_path": r"C:\b\ledger.json",
+            "action_state_path": r"C:\b\actions",
+            "approval_dir": r"C:\b\approvals",
+        }
+        with pytest.raises(WazuhError):
+            validate_disjoint_state_paths(
+                r"C:\b\state\runtime.json",
+                r"C:\b\other\ledger.json",
+                r"C:\b\state",
+                r"C:\b\approvals",
+            )
 
 
 def test_disjoint_paths_treat_backslash_name_as_disjoint_on_posix():
@@ -102,34 +118,43 @@ def test_disjoint_paths_treat_backslash_name_as_disjoint_on_posix():
 
 def test_disjoint_paths_are_case_insensitive_on_windows(monkeypatch):
     import ntpath
+    from types import SimpleNamespace
 
-    monkeypatch.setattr(os, "name", "nt")
-    monkeypatch.setattr(os.path, "normcase", ntpath.normcase)
-    with pytest.raises(WazuhError):
-        validate_disjoint_state_paths(
-            r"C:\Brigade\State",
-            r"C:\Brigade\Other",
-            r"c:\brigade",
-            r"C:\Brigade\Approvals",
-        )
+    from brigade.grokbot_wazuh import lifecycle as lifecycle_mod
+
+    with monkeypatch.context() as patched:
+        patched.setattr(lifecycle_mod, "os", SimpleNamespace(name="nt", path=ntpath))
+        with pytest.raises(WazuhError):
+            validate_disjoint_state_paths(
+                r"C:\Brigade\State",
+                r"C:\Brigade\Other",
+                r"c:\brigade",
+                r"C:\Brigade\Approvals",
+            )
 
 
 def test_disjoint_paths_handle_root_operand_and_reject_trailing_alias(monkeypatch):
     import ntpath
+    from types import SimpleNamespace
 
+    from brigade.grokbot_wazuh import lifecycle as lifecycle_mod
     from brigade.grokbot_wazuh.lifecycle import validate_absolute_reference as validate_ref
 
     with pytest.raises(WazuhError):
         validate_disjoint_state_paths("/", "/var/x", "/var/y", "/var/z")
     with pytest.raises(WazuhError):
         validate_disjoint_state_paths("/var/x", "/", "/var/y", "/var/z")
-    monkeypatch.setattr(os, "name", "nt")
-    monkeypatch.setattr(os.path, "normcase", ntpath.normcase)
-    with pytest.raises(WazuhError):
-        validate_disjoint_state_paths("C:\\", r"C:\brigade\state.json", r"C:\b", r"C:\c")
-    with pytest.raises(WazuhError):
-        validate_disjoint_state_paths(r"C:\brigade\state.json", "C:\\", r"C:\b", r"C:\c")
-    for rejected in ("/var/lib/state.", "/var/lib/state ", r"C:\state.", r"C:\state "):
+    with monkeypatch.context() as patched:
+        patched.setattr(lifecycle_mod, "os", SimpleNamespace(name="nt", path=ntpath))
+        with pytest.raises(WazuhError):
+            validate_disjoint_state_paths("C:\\", r"C:\brigade\state.json", r"C:\b", r"C:\c")
+        with pytest.raises(WazuhError):
+            validate_disjoint_state_paths(r"C:\brigade\state.json", "C:\\", r"C:\b", r"C:\c")
+        assert isinstance(validate_ref(r"C:\state"), str)
+        for rejected in (r"C:\state.", r"C:\state "):
+            with pytest.raises(WazuhError):
+                validate_ref(rejected)
+    for rejected in ("/var/lib/state.", "/var/lib/state "):
         with pytest.raises(WazuhError):
             validate_ref(rejected)
     assert isinstance(validate_ref("/var/lib/my.dir/state"), str)
