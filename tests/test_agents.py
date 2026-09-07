@@ -7,6 +7,30 @@ import pytest
 from brigade import agents
 
 
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "env-file:/runtime.env#CLIPROXY_API_KEY",
+        r"env-file:C:\runtime.env#CLIPROXY_API_KEY",
+        "env-file:C:/runtime.env#CLIPROXY_API_KEY",
+    ),
+)
+def test_env_file_reference_accepts_absolute_paths(reference):
+    assert agents.is_valid_env_file_reference(reference)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "env-file:relative.env#CLIPROXY_API_KEY",
+        "env-file:C:runtime.env#CLIPROXY_API_KEY",
+        r"env-file:\\server\share\runtime.env#CLIPROXY_API_KEY",
+    ),
+)
+def test_env_file_reference_rejects_non_local_absolute_paths(reference):
+    assert not agents.is_valid_env_file_reference(reference)
+
+
 def test_build_argv_for_known_clis():
     # A claude write run with no explicit sandbox must fail safely rather than
     # silently grant full access (or stall on a permission prompt).

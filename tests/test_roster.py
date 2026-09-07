@@ -640,7 +640,7 @@ def test_env_ref_accepts_absolute_environment_file_reference(tmp_path):
     environment_file = tmp_path / "runtime.env"
     roster = ENV_SEAT.replace(
         'ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY"',
-        f'ANTHROPIC_AUTH_TOKEN_REF = "env-file:{environment_file}#CLIPROXY_API_KEY"',
+        f'ANTHROPIC_AUTH_TOKEN_REF = "env-file:{environment_file.as_posix()}#CLIPROXY_API_KEY"',
     )
     assert roster_mod.load_roster(_write(tmp_path, roster)).agents["k3"].env is not None
 
@@ -651,6 +651,8 @@ def test_env_ref_accepts_absolute_environment_file_reference(tmp_path):
         "env-file:relative.env#CLIPROXY_API_KEY",
         "env-file:/runtime.env#",
         "env-file:/runtime.env#not_a_variable",
+        "env-file:C:runtime.env#CLIPROXY_API_KEY",
+        "env-file://server/share/runtime.env#CLIPROXY_API_KEY",
     ),
 )
 def test_env_ref_rejects_malformed_environment_file_reference(tmp_path, reference):

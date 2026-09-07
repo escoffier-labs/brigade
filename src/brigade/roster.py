@@ -281,7 +281,7 @@ def _as_env(value: object, agent_name: str) -> dict[str, str] | None:
         if key.endswith("_REF"):
             target = key[: -len("_REF")]
             if agent_adapters.is_env_file_reference(raw):
-                if not agent_adapters.ENV_FILE_REF_RE.match(raw):
+                if not agent_adapters.is_valid_env_file_reference(raw):
                     raise ValueError(f"agents.{agent_name}.env.{key} must use env-file:/absolute/path#VARIABLE")
             elif not _ENV_NAME_RE.match(raw):
                 raise ValueError(

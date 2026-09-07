@@ -16,7 +16,7 @@ import unicodedata
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, List
 
 from . import proc
@@ -27,7 +27,7 @@ _CODEX_CLOUD_PREFIX = "codex-cloud:"
 _CLOUDFLARE_AI_GATEWAY_PREFIX = "cloudflare-ai-gateway/"
 _CLOUDFLARE_AI_GATEWAY_REQUIRED_ENV = ("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID")
 ENV_FILE_REF_PREFIX = "env-file:"
-ENV_FILE_REF_RE = re.compile(r"^env-file:(/[^#]+)#([A-Z][A-Z0-9_]*)$")
+ENV_FILE_REF_RE = re.compile(r"^env-file:(?P<path>[^#]+)#(?P<variable>[A-Z][A-Z0-9_]*)$")
 
 
 def is_env_file_reference(value: str) -> bool:
@@ -39,6 +39,23 @@ def is_env_file_reference(value: str) -> bool:
     variable that merely starts with ``env-file`` (no colon) stays an
     ordinary environment reference."""
     return value.startswith(ENV_FILE_REF_PREFIX)
+
+
+def is_valid_env_file_reference(value: str) -> bool:
+    """Return whether an env-file reference has an absolute local path.
+
+    POSIX paths and Windows drive-absolute paths are accepted regardless of
+    the host platform. UNC paths are intentionally rejected because their
+    access semantics are not portable across Brigade's local runtimes.
+    """
+
+    match = ENV_FILE_REF_RE.match(value)
+    if match is None:
+        return False
+    path = match.group("path")
+    if path.startswith(("\\\\", "//")):
+        return False
+    return PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute()
 
 
 _NONRECOVERABLE_GROK_OUTPUT_FAILURES = frozenset(
@@ -1001,10 +1018,10 @@ def _read_env_file_reference(reference: str) -> str | None:
     """Read one systemd-style KEY=VALUE entry without evaluating the file."""
 
     match = ENV_FILE_REF_RE.match(reference)
-    if match is None:
+    if match is None or not is_valid_env_file_reference(reference):
         return None
-    path = Path(match.group(1))
-    variable = match.group(2)
+    path = Path(match.group("path"))
+    variable = match.group("variable")
     try:
         contents = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
