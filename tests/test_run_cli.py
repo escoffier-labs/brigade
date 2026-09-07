@@ -22,6 +22,7 @@ from brigade import run_journal
 from brigade import runguard
 from brigade import runs_cmd
 from tests import thread_sync
+from tests._posix import requires_process_groups
 from tests.run_test_helpers import HEALTHY_SEAT_HEALTH_CHILD_SETUP
 
 
@@ -2099,6 +2100,7 @@ def test_app_server_and_control_start_after_dispatching_is_recorded(tmp_path, mo
     assert seen == {"app_server": "dispatching", "control_server": "dispatching"}
 
 
+@requires_process_groups
 def test_sigterm_during_control_setup_closes_appserver_child_before_lock_release(tmp_path):
     repo = _git_repo_with_roster(tmp_path)
     output_dir = tmp_path / "run-artifacts"
@@ -2242,6 +2244,7 @@ def test_run_cli_terminalizes_keyboard_interrupt_during_dispatch(tmp_path, monke
         (signal.SIGTERM, 128 + signal.SIGTERM, "signal"),
     ],
 )
+@requires_process_groups
 def test_run_cli_cancels_blocked_worker_process_before_releasing_lock(tmp_path, sig, expected_code, failure_kind):
     repo = _git_repo_with_roster(tmp_path)
     output_dir = tmp_path / "run-artifacts"
@@ -2328,6 +2331,7 @@ raise SystemExit(cli.main([
     assert run_meta["failure"]["seat"] == "coder"
 
 
+@requires_process_groups
 def test_run_cli_terminalizes_sigint_during_graphtrail_baseline_capture(tmp_path, capsys):
     repo = _git_repo_with_roster(tmp_path)
     output_dir = repo / ".brigade" / "runs" / "blocked-graphtrail-baseline"
@@ -2393,6 +2397,7 @@ raise SystemExit(cli.main([
         ("codex-cloud-submit", signal.SIGTERM, 128 + signal.SIGTERM, "dispatching", "coder"),
     ],
 )
+@requires_process_groups
 def test_run_cli_cancels_blocked_phase_process_before_releasing_lock(
     tmp_path, phase, sig, expected_code, expected_status, expected_seat
 ):

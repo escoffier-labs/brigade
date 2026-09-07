@@ -8,7 +8,6 @@ defined in ``.brigade/mcp.json``.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 from . import mcp_cmd
+from . import proc as proc_mod
 from .mcp_adapters import CanonicalServer
 from .mcp_runtime import (
     MCP_PROTOCOL_VERSION,
@@ -241,7 +241,7 @@ def _exchange_stdio(
     assert proc.stdout is not None
     assert proc.stderr is not None
     try:
-        pgid = os.getpgid(proc.pid)
+        pgid = proc_mod.process_group_id(proc.pid)
     except OSError:
         pgid = None
     reader = _BoundedStreamReader(proc.stdout, limit=MAX_STREAM_BYTES)

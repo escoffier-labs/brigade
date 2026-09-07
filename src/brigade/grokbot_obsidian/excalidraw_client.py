@@ -13,6 +13,7 @@ from typing import Any, Mapping, NoReturn
 
 from .adapters import allowlisted_excalidraw_env
 from .contracts import ERROR_MESSAGES, ObsidianError
+from .. import proc as proc_mod
 from .runtime_config import (
     descriptor_execution_available,
     open_validated_executable_fd,
@@ -96,7 +97,7 @@ class StdioExcalidrawMcpClient:
                 except OSError:
                     pass
         try:
-            self._pgid = os.getpgid(self._proc.pid)
+            self._pgid = proc_mod.process_group_id(self._proc.pid)
         except OSError:
             self._pgid = None
 
@@ -115,6 +116,14 @@ class StdioExcalidrawMcpClient:
             try:
                 os.killpg(self._pgid, signal.SIGKILL)
             except (OSError, ProcessLookupError):
+                pass
+        elif os.name == "nt":
+            # No process groups on Windows: use the shared job-object/taskkill
+            # termination path in proc.py, then fall through to the shared
+            # poll/wait tail below so the handle is reaped and _proc cleared.
+            try:
+                proc_mod.terminate_process_tree(proc)  # type: ignore[arg-type]
+            except OSError:
                 pass
         if proc.poll() is None:
             try:

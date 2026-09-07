@@ -16,6 +16,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from brigade import cli, grokbot_jobs, grokbot_mcp, grokbot_ops
+from tests._posix import requires_opath
 
 LISTENER_RECOVERY_UNIT_LINES = ("StartLimitIntervalSec=15min", "StartLimitBurst=3")
 LISTENER_RECOVERY_SERVICE_LINES = (
@@ -972,9 +973,7 @@ def test_config_operations_refuse_symlinked_config_file_and_directory(tmp_path: 
     assert config["instance"] == "operator"
 
 
-@pytest.mark.skipif(
-    os.name != "posix" or not getattr(os, "O_PATH", 0), reason="requires POSIX O_PATH directory descriptors"
-)
+@requires_opath
 def test_posix_path_walker_uses_opath_root_and_keeps_read_write_nofollow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

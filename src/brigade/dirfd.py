@@ -49,6 +49,52 @@ def unavailable(kind: str) -> OSError:
     return OSError(f"descriptor-relative {kind} are unavailable")
 
 
+def directory_flags(*, nofollow: bool = True) -> int:
+    """Return ``O_RDONLY|O_DIRECTORY`` plus ``O_NOFOLLOW``/``O_CLOEXEC``.
+
+    Fail-closed on platforms without ``O_DIRECTORY`` (Windows has neither
+    ``O_DIRECTORY`` nor ``O_NOFOLLOW``): raises the module's typed
+    :func:`unavailable` ``OSError`` instead of ``AttributeError`` so callers
+    can map it to their own error type. POSIX behaviour is unchanged.
+    """
+    o_directory = getattr(os, "O_DIRECTORY", 0)
+    o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not o_directory or (nofollow and not o_nofollow):
+        raise unavailable("directory operations")
+    flags = os.O_RDONLY | o_directory | getattr(os, "O_CLOEXEC", 0)
+    if nofollow:
+        flags |= o_nofollow
+    return flags
+
+
+def file_flags(mode: int) -> int:
+    """Return ``mode`` plus ``O_NOFOLLOW``/``O_CLOEXEC``.
+
+    Fail-closed on platforms without ``O_NOFOLLOW`` (Windows has none):
+    raises the module's typed :func:`unavailable` ``OSError`` instead of
+    opening without the symlink guard, so non-``dir_fd`` callers that
+    would otherwise degrade via ``getattr(os, "O_NOFOLLOW", 0)`` stay
+    fail-closed too.
+    """
+    o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not o_nofollow:
+        raise unavailable("file operations")
+    return mode | o_nofollow | getattr(os, "O_CLOEXEC", 0)
+
+
+def root_directory_flags() -> int:
+    """Return anchor flags (``O_PATH`` when present) plus directory guards.
+
+    Fail-closed with :func:`unavailable` ``OSError`` on platforms without
+    ``O_DIRECTORY``/``O_NOFOLLOW`` instead of ``AttributeError``.
+    """
+    o_directory = getattr(os, "O_DIRECTORY", 0)
+    o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not o_directory or not o_nofollow:
+        raise unavailable("directory operations")
+    return getattr(os, "O_PATH", os.O_RDONLY) | o_directory | o_nofollow | getattr(os, "O_CLOEXEC", 0)
+
+
 def validate_component(name: str) -> str:
     """Reject empty, dotted, separator-bearing, or NUL names so walks stay contained."""
     if not isinstance(name, str) or not name:

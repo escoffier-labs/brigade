@@ -11,9 +11,10 @@ from typing import Any
 
 import pytest
 
-from brigade import provenance
+from brigade import dirfd, provenance
 from brigade.security_cmd import AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY
 from brigade.work_cmd import constants, helpers, ledger
+from tests._posix import requires_dirfd
 from tests.support import PRIVATE_FILE_MODE
 
 
@@ -64,7 +65,7 @@ def _rewrite_authority_anchor(anchor: Path, directory: Path) -> None:
 
 def _bind_receipt_file(tmp_path: Path, receipt_path: Path, *, run_id: str) -> None:
     data = receipt_path.read_bytes()
-    descriptor = os.open(receipt_path, os.O_RDONLY | os.O_NOFOLLOW)
+    descriptor = dirfd.open_file_nofollow(receipt_path, os.O_RDONLY)
     try:
         ledger._record_verifier_owned_file(
             tmp_path,
@@ -104,7 +105,7 @@ def _write_external_import_proof(tmp_path: Path, item: dict[str, Any], *, source
     _establish_scanner_runs_authority(tmp_path)
     receipt_path = helpers._scanner_runs_root(tmp_path) / run_id / "receipt.json"
     receipt_path.parent.mkdir(parents=True)
-    descriptor = os.open(receipt_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = dirfd.open_directory_nofollow(receipt_path.parent)
     try:
         ledger._record_verifier_owned_directory(
             tmp_path,
@@ -142,7 +143,7 @@ def _write_builtin_scanner_receipt(
     _establish_scanner_runs_authority(tmp_path)
     path = helpers._scanner_runs_root(tmp_path) / "chosen-run" / "receipt.json"
     path.parent.mkdir(parents=True)
-    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = dirfd.open_directory_nofollow(path.parent)
     try:
         ledger._record_verifier_owned_directory(
             tmp_path,
@@ -338,8 +339,8 @@ def test_receipt_binding_write_failure_restores_receipt_proof_inbox_and_bindings
         "command": scanner["command"],
     }
     authority = scanners_mod._ScannerRunDirectoryAuthority(
-        root=os.open(helpers._scanner_runs_root(tmp_path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW),
-        directory=os.open(receipt_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW),
+        root=dirfd.open_directory_nofollow(helpers._scanner_runs_root(tmp_path)),
+        directory=dirfd.open_directory_nofollow(receipt_path.parent),
         run_id="chosen-run",
     )
     scanners_mod._SCANNER_RUN_DIRECTORY_AUTHORITIES[id(run)] = authority
@@ -1819,6 +1820,7 @@ def test_import_proof_directory_relocation_rejects_record_without_workspace_bind
         ledger._open_import_proof_directory(relocated, create=True)
 
 
+@requires_dirfd
 def test_import_inbox_rollback_short_write_restores_all_prior_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1851,6 +1853,7 @@ def test_import_inbox_rollback_short_write_restores_all_prior_bytes(
         os.close(parent)
 
 
+@requires_dirfd
 def test_import_inbox_rollback_zero_write_fails_without_reporting_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2673,7 +2676,7 @@ def test_canonical_dedupe_after_rename_without_preopening_authority(tmp_path: Pa
     original.mkdir()
     _enable_external_key_isolation(original)
     (original / ".brigade").mkdir(exist_ok=True)
-    descriptor = os.open(original / ".brigade", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = dirfd.open_directory_nofollow(original / ".brigade")
     try:
         ledger._record_external_directory_authority(
             original,

@@ -10,6 +10,7 @@ import os
 import pytest
 
 from brigade import cli
+from brigade import dirfd
 from brigade import doctor as doctor_mod
 from brigade.install import install_selection
 from brigade.memory_cmd import MemoryCareConfig
@@ -548,7 +549,7 @@ def test_doctor_warns_when_sticky_marker_exists_and_isolation_is_off(tmp_target:
     )
     (tmp_target / ".brigade").mkdir(exist_ok=True)
     workspace = ledger._workspace_directory_identity(tmp_target)
-    root = os.open(tmp_target / ".brigade", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    root = dirfd.open_directory_nofollow(tmp_target / ".brigade")
     try:
         ledger._record_external_directory_authority(tmp_target, (".brigade",), root, workspace=workspace)
     finally:

@@ -13,6 +13,7 @@ from brigade import aboyeur, cli, proc, run_checkpoint, run_journal
 from brigade import roster as roster_mod
 from brigade import runguard
 from brigade.cli import run as run_cli
+from tests._posix import requires_process_groups
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -325,6 +326,7 @@ def test_run_detach_parent_stops_terminalizing_receipt_at_child_takeover(tmp_pat
         ("error", 2, "failed", "unexpected-error"),
     ],
 )
+@requires_process_groups
 def test_run_detach_startup_escape_kills_child_group_before_terminal_receipt(
     tmp_path, monkeypatch, escape, expected_code, expected_status, expected_kind
 ):
@@ -804,6 +806,7 @@ time.sleep(300)
 """
 
 
+@requires_process_groups
 @pytest.mark.skipif(os.name != "posix", reason="POSIX session teardown semantics")
 def test_spawn_detached_child_survives_parent_session_exit(tmp_path):
     """The detached child must reach a terminal receipt after its parent's session dies.

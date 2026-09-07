@@ -24,6 +24,7 @@ from .contracts import (
     parse_wazuh_finding_id,
 )
 from .exec import EXEC_DEFAULT_OUTPUT_BYTES, ExecRequest, Runner, run_exec
+from brigade import dirfd as dirfd_mod
 from .probes import PROBE_WORKING_DIRECTORY, _health_class, verify_catalogued_service
 from .runtime_config import FLEET_SAFE_SERVICE_UNIT_PATTERN
 
@@ -460,7 +461,7 @@ def _write_exclusive_json(path: Path, record: Mapping[str, Any]) -> None:
     handle = None
     created = False
     try:
-        handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        handle = os.open(path, dirfd_mod.file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL), 0o600)
         created = True
         os.fchmod(handle, 0o600)
         _write_all(handle, json.dumps(record).encode("utf-8"))
@@ -510,7 +511,7 @@ def _replace_json(path: Path, record: Mapping[str, Any]) -> None:
 def _read_safe_json(path: Path) -> Any:
     handle = None
     try:
-        handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        handle = os.open(path, dirfd_mod.file_flags(os.O_RDONLY))
         info = os.fstat(handle)
         _assert_owner_file(info)
         raw = os.read(handle, 1_048_576)
@@ -533,7 +534,7 @@ def _read_safe_json(path: Path) -> Any:
 def _fsync_directory(path: Path) -> None:
     handle = None
     try:
-        handle = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        handle = os.open(path, dirfd_mod.directory_flags())
         info = os.fstat(handle)
         if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
             _action_state_invalid()

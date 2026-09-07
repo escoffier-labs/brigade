@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from brigade import codex_appserver, proc
+from tests._posix import requires_process_groups
 
 FAKE = [sys.executable, str(Path(__file__).parent / "fake_appserver.py")]
 
@@ -162,7 +163,7 @@ def test_start_closes_spawned_process_when_initialize_fails(monkeypatch):
     ]
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group regression")
+@requires_process_groups
 def test_close_terminates_appserver_descendant_process_group(tmp_path):
     child_pid_path = tmp_path / "child.pid"
     server_script = tmp_path / "server_with_child.py"

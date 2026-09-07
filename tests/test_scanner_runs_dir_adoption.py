@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from brigade.work_cmd import helpers, ledger, scanners as scanners_mod
+from tests._posix import requires_dirfd
 from tests.support import PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE
 
 
@@ -263,6 +264,7 @@ def test_doctor_and_init_repair_released_unbound_runs_root(tmp_path: Path) -> No
     assert _runs_root_is_bound(other)
 
 
+@requires_dirfd
 def test_forged_receipt_in_verifier_created_run_dir_is_rejected(tmp_path: Path) -> None:
     root = scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
     run_id = "verifier-run"

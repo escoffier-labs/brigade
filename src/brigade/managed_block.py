@@ -42,6 +42,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
+from . import dirfd as dirfd_mod
+
 MarkerStyle = Literal["html", "hash"]
 MARKER_STYLE_HTML: MarkerStyle = "html"
 MARKER_STYLE_HASH: MarkerStyle = "hash"
@@ -885,10 +887,7 @@ def _managed_parent_containment_available() -> bool:
 
 
 def _managed_directory_flags(*, follow_descriptor: bool = False) -> int:
-    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
-    if not follow_descriptor:
-        flags |= os.O_NOFOLLOW
-    return flags
+    return dirfd_mod.directory_flags(nofollow=not follow_descriptor)
 
 
 def _is_held_descriptor_dir(path: Path) -> bool:
@@ -907,7 +906,7 @@ def _create_managed_parent(parent: Path) -> int:
     if not parts:
         raise OSError("unsafe managed-block parent")
     flags = _managed_directory_flags()
-    descriptor = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+    descriptor = os.open(parts[0], dirfd_mod.directory_flags(nofollow=False))
     try:
         for component in parts[1:]:
             if component in {"", ".", ".."}:
@@ -1021,7 +1020,7 @@ def write_text_nofollow_atomic(
     temporary_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
     descriptor = -1
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         descriptor = os.open(temporary_name, flags, 0o600, dir_fd=parent_fd)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             descriptor = -1

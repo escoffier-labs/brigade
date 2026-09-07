@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from .. import dogfood_cmd
 from .. import proc as proc_mod
+from .. import dirfd as dirfd_mod
 from ..install import apply_gitignore
 from . import constants, helpers, inbox_lock, ledger as ledger_mod, config as config_mod
 from . import sweeps as sweeps_mod
@@ -443,6 +444,10 @@ def _list_scanner_run_ids(root: int, target: Path) -> list[str]:
     else:
         names = [entry.name for entry in helpers._scanner_runs_root(target).iterdir()]
     return [name for name in names if isinstance(name, str)]
+
+
+_INBOX_READ_MODE = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+_INBOX_TEMP_MODE = os.O_WRONLY | os.O_CREAT | os.O_EXCL
 
 
 def _scanner_run_file_open_flags(*, write: bool) -> int:
@@ -1063,7 +1068,7 @@ def _open_scanner_inbox_parent(target: Path, *, create: bool) -> tuple[int, str,
         raise OSError("scanner inbox escapes target") from exc
     if len(relative.parts) < 2:
         raise OSError("scanner inbox path is incomplete")
-    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    directory_flags = dirfd_mod.directory_flags()
     descriptor = os.open(target_root, directory_flags)
     identities: list[tuple[int, int]] = []
     try:
@@ -1118,7 +1123,7 @@ def _validate_scanner_inbox_descriptor(descriptor: int) -> None:
 def _open_scanner_inbox(target: Path, flags: int, *, create: bool = False) -> int:
     """Open the inbox through held parent descriptors with no-follow authority."""
     parent, name, identities = _open_scanner_inbox_parent(target, create=create)
-    safe_flags = flags | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+    safe_flags = dirfd_mod.file_flags(flags | getattr(os, "O_NONBLOCK", 0))
     try:
         try:
             descriptor = os.open(name, safe_flags, dir_fd=parent)
@@ -1140,7 +1145,7 @@ def _open_scanner_inbox(target: Path, flags: int, *, create: bool = False) -> in
 
 def _validate_scanner_inbox_at(parent: int, name: str, *, missing_ok: bool) -> None:
     try:
-        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent)
+        descriptor = os.open(name, dirfd_mod.file_flags(_INBOX_READ_MODE), dir_fd=parent)
     except FileNotFoundError:
         if missing_ok:
             return
@@ -1156,7 +1161,7 @@ def _validate_scanner_inbox_name_matches_descriptor(parent: int, name: str, desc
     _validate_scanner_inbox_descriptor(descriptor)
     expected_identity = _scanner_inbox_identity(os.fstat(descriptor))
     assert expected_identity is not None
-    candidate = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent)
+    candidate = os.open(name, dirfd_mod.file_flags(_INBOX_READ_MODE), dir_fd=parent)
     try:
         try:
             _validate_scanner_inbox_descriptor(candidate)
@@ -1189,12 +1194,7 @@ def _scanner_inbox_temp_name() -> str:
 def _write_scanner_inbox_temp(parent: int, data: bytes) -> tuple[str, int]:
     """Write and retain one validated temporary inbox object."""
     name = _scanner_inbox_temp_name()
-    descriptor = os.open(
-        name,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-        0o600,
-        dir_fd=parent,
-    )
+    descriptor = os.open(name, dirfd_mod.file_flags(_INBOX_TEMP_MODE), 0o600, dir_fd=parent)
     try:
         with os.fdopen(os.dup(descriptor), "wb") as handle:
             handle.write(data)
@@ -1276,11 +1276,7 @@ def _write_scanner_inbox_bytes_locked(target: Path, data: bytes) -> None:
     rollback_required = False
     try:
         try:
-            previous = os.open(
-                name,
-                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
-                dir_fd=parent,
-            )
+            previous = os.open(name, dirfd_mod.file_flags(_INBOX_READ_MODE), dir_fd=parent)
         except FileNotFoundError:
             pass
         else:
@@ -1478,7 +1474,7 @@ def _require_scanner_inbox_identity(parent: int, name: str, identity: tuple[int,
     ``_scanner_inbox_run_lock`` from snapshot through rollback.
     """
     try:
-        current = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent)
+        current = os.open(name, dirfd_mod.file_flags(_INBOX_READ_MODE), dir_fd=parent)
     except FileNotFoundError as exc:
         raise OSError("scanner inbox vanished since its pre-run snapshot") from exc
     try:
@@ -1970,8 +1966,8 @@ def _scanner_read_import_jsonl(target: Path, scanner: dict[str, Any]) -> tuple[l
     if not _scanner_import_read_primitives_available():
         raise OSError("descriptor-relative scanner import operations are unavailable")
     relative = _scanner_import_relative_path(scanner)
-    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    directory_flags = dirfd_mod.directory_flags()
+    file_flags = dirfd_mod.file_flags(_INBOX_READ_MODE)
     absolute_target = Path(os.path.abspath(target.expanduser()))
     target_components = absolute_target.parts[1:]
     if not target_components:
@@ -2676,7 +2672,9 @@ def _publish_scanner_config(target: Path, data: bytes, *, force: bool) -> None:
         descriptor = ledger_mod._dirfd_open_file(
             parent,
             temporary_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            # _dirfd_open_file is descriptor-relative on both platforms; Windows gets
+            # its no-follow guarantee from the NT handle, so the POSIX bit stays optional.
+            _INBOX_TEMP_MODE | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
             0o600,
         )
         with os.fdopen(os.dup(descriptor), "wb") as handle:

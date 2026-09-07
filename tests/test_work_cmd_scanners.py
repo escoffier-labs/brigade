@@ -10,12 +10,14 @@ from types import SimpleNamespace
 import pytest
 
 from brigade import cli
+from brigade import dirfd
 from brigade import dogfood_cmd
 from brigade import handoff_cmd
 from brigade import localio
 from brigade import work_cmd
 from brigade.work_cmd import helpers
 
+from tests._posix import requires_dirfd
 from tests.work_cmd_test_helpers import (
     _write_json,
     _init_git_repo,
@@ -44,7 +46,7 @@ def _verified_builtin_scanner_run(scanner: dict[str, object]) -> dict[str, objec
 
 def _record_scanner_run_authority(tmp_path: Path, run_id: str) -> None:
     directory = helpers._scanner_runs_root(tmp_path) / run_id
-    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = dirfd.open_directory_nofollow(directory)
     try:
         work_cmd.ledger._record_verifier_owned_directory(
             tmp_path,
@@ -58,7 +60,7 @@ def _record_scanner_run_authority(tmp_path: Path, run_id: str) -> None:
 def _bind_planted_scanner_receipt(tmp_path: Path, run_id: str) -> None:
     path = helpers._scanner_runs_root(tmp_path) / run_id / "receipt.json"
     data = path.read_bytes()
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    descriptor = dirfd.open_file_nofollow(path, os.O_RDONLY)
     try:
         work_cmd.ledger._record_verifier_owned_file(
             tmp_path,
@@ -166,7 +168,7 @@ def test_replaced_individual_scanner_run_cannot_manufacture_receipt_authority(tm
     os.close(root)
     run = helpers._scanner_runs_root(tmp_path) / "chosen-run"
     run.mkdir()
-    descriptor = os.open(run, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = dirfd.open_directory_nofollow(run)
     try:
         ledger._record_verifier_owned_directory(
             tmp_path,
@@ -184,6 +186,7 @@ def test_replaced_individual_scanner_run_cannot_manufacture_receipt_authority(tm
     assert not ledger._has_locally_stamped_import_proof(item, target=tmp_path)
 
 
+@requires_dirfd
 def test_scanner_receipt_collection_rejects_replaced_bound_run_directory(tmp_path: Path) -> None:
     from brigade.work_cmd import helpers, ledger, scanners as scanners_mod
 
@@ -211,6 +214,7 @@ def test_scanner_receipt_collection_rejects_replaced_bound_run_directory(tmp_pat
     assert scanners_mod._scanner_receipts(tmp_path) == []
 
 
+@requires_dirfd
 def test_scanner_receipt_collection_rejects_renamed_receipt(tmp_path: Path) -> None:
     from brigade.work_cmd import helpers, ledger, scanners as scanners_mod
 
@@ -3696,6 +3700,7 @@ def test_scanner_self_import_drops_wrong_source_operational_metadata(tmp_path):
         assert metadata["source_fingerprint"] == work_cmd.ledger._untrusted_import_canonical_hash(item)
 
 
+@requires_dirfd
 def test_scanner_read_receipt_derives_target_from_correct_parent(tmp_path: Path) -> None:
     """_scanner_read_receipt must use parents[3] (the workspace root) not parents[2]."""
     from brigade.work_cmd import ledger, scanners as scanners_mod
@@ -3722,6 +3727,7 @@ def test_scanner_read_receipt_derives_target_from_correct_parent(tmp_path: Path)
     assert receipt["run_id"] == run_id
 
 
+@requires_dirfd
 def test_scanner_read_receipt_accepts_run_directory_path(tmp_path: Path) -> None:
     """_scanner_read_receipt should also accept a run directory (not just receipt.json)."""
     from brigade.work_cmd import ledger, scanners as scanners_mod

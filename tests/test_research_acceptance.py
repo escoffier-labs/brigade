@@ -194,8 +194,12 @@ def start_brigade(workspace: Path, *args: str) -> subprocess.Popen[str]:
 def _terminate_tree(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
+    killpg = getattr(os, "killpg", None)
     try:
-        os.killpg(process.pid, signal.SIGKILL)
+        if killpg is not None:
+            killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
     except ProcessLookupError:
         process.kill()
     try:

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from . import grokbot_jobs, handoff_cmd
+from . import dirfd as dirfd_mod
 from .handoff_cmd.models import DEFAULT_DRAFT_DOCUMENT, NO_CARD_ACTION
 from .selection import WRITER_INBOXES
 
@@ -451,7 +452,7 @@ def _write_handoff_posix(owner: Path, inbox_rel: Path, name: str, text: str) -> 
             return "recovered"
 
         temporary = f".{name}.tmp"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         descriptor: int | None = None
         temporary_created = False
         try:
@@ -501,7 +502,10 @@ def _write_handoff_posix(owner: Path, inbox_rel: Path, name: str, text: str) -> 
 
 
 def _directory_flags() -> int:
-    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        return dirfd_mod.directory_flags()
+    except OSError as exc:
+        raise ReconcileError("unsafe-storage") from exc
 
 
 def _remove_stale_handoff_temp(directory: int, name: str) -> None:
@@ -510,7 +514,7 @@ def _remove_stale_handoff_temp(directory: int, name: str) -> None:
     try:
         descriptor = os.open(
             temporary,
-            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
             dir_fd=directory,
         )
     except FileNotFoundError:
@@ -535,7 +539,7 @@ def _read_existing_handoff_at(directory: int, name: str) -> str | None:
     try:
         descriptor = os.open(
             name,
-            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
             dir_fd=directory,
         )
     except FileNotFoundError:

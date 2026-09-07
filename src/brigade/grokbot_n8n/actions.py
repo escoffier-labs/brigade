@@ -24,6 +24,7 @@ from .contracts import (
     target_type_for_action,
 )
 from . import runtime_config
+from brigade import dirfd as dirfd_mod
 
 APPROVAL_KEYS = frozenset(
     {
@@ -103,7 +104,10 @@ def _require_posix_permissions() -> None:
 
 
 def _directory_flags() -> int:
-    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        return dirfd_mod.directory_flags()
+    except OSError:
+        _environment_invalid()
 
 
 def _open_child(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
@@ -176,7 +180,10 @@ def _walk_directory(path: Path, *, create: bool, private: bool, on_error: Callab
     absolute = Path(os.path.abspath(path))
     if not str(absolute).startswith("/") or "\0" in str(absolute):
         on_error()
-    root_flags = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        root_flags = dirfd_mod.root_directory_flags()
+    except OSError:
+        on_error()
     try:
         descriptor = os.open(absolute.anchor, root_flags)
     except OSError:
