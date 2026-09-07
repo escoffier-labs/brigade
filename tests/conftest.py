@@ -93,6 +93,78 @@ def _no_live_fleet_hub(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_update_check_for_suite(monkeypatch):
+    """Disable the update-check service for the whole suite (#1475).
+
+    ``update_notify.maybe_notify`` runs after every CLI call and spawns a
+    detached ``brigade update --notify-refresh`` unless BRIGADE_NO_UPDATE_CHECK
+    or CI is set. Pin the opt-out so no test reaches the live check endpoint.
+    Tests that exercise the notify path opt back in by deleting the variable.
+    """
+    monkeypatch.setenv("BRIGADE_NO_UPDATE_CHECK", "1")
+
+
+@pytest.fixture(autouse=True)
+def _stub_codex_cloud_inventory(monkeypatch, request):
+    """Keep the suite off the host's live Codex Cloud inventory (#1475).
+
+    ``brigade work brief`` observes providers through
+    ``codex_cloud.list_tasks`` (``codex cloud list --json``). The stub returns
+    an empty successful inventory. Tests that exercise the real function with
+    their own fake ``proc.run`` opt out with ``@pytest.mark.real_codex_cloud``.
+    """
+    if request.node.get_closest_marker("real_codex_cloud"):
+        return
+    from brigade import codex_cloud
+
+    monkeypatch.setattr(
+        codex_cloud,
+        "list_tasks",
+        lambda **kwargs: codex_cloud.ListTasksResult(tasks=[], ok=True),
+    )
+
+
+_AGENT_CLI_BINARIES = frozenset({"codex", "claude", "cursor-agent", "opencode", "gemini", "agy", "grok"})
+
+
+@pytest.fixture(autouse=True)
+def _guard_agent_cli_spawns(monkeypatch, request):
+    """Fail a test that launches a real agent CLI binary (#1475).
+
+    Wraps ``subprocess.Popen`` and inspects ``argv[0]``'s basename. Tests that
+    legitimately launch those binaries through fakes on PATH opt in with
+    ``@pytest.mark.allow_agent_cli``.
+    """
+    if request.node.get_closest_marker("allow_agent_cli"):
+        return
+    import os
+    import subprocess
+
+    real_popen = subprocess.Popen
+
+    def guarded_popen(argv, *args, **kwargs):
+        candidate = argv[0] if isinstance(argv, (list, tuple)) and argv else None
+        if isinstance(candidate, bytes):
+            try:
+                candidate = candidate.decode()
+            except (UnicodeDecodeError, ValueError):
+                candidate = None
+        if isinstance(candidate, os.PathLike):
+            candidate = os.fspath(candidate)
+        if isinstance(candidate, str) and candidate:
+            name = os.path.basename(candidate)
+            if name.lower().endswith(".exe"):
+                name = name[:-4]
+            if name in _AGENT_CLI_BINARIES:
+                raise AssertionError(
+                    f"test tried to launch agent CLI {name!r}; stub the call or mark with @pytest.mark.allow_agent_cli"
+                )
+        return real_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", guarded_popen)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_user_brigade_dir(tmp_path_factory, monkeypatch):
     """Redirect user-level ``~/.brigade`` sticky state away from the real home.
 

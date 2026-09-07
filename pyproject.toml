@@ -62,6 +62,8 @@ testpaths = ["tests"]
 addopts = "-ra"
 markers = [
     "care_host_integration: host-dependent memory-care scheduler integration tests",
+    "allow_agent_cli: test legitimately launches an agent CLI binary (codex, claude, cursor-agent, opencode, gemini, agy, grok) through a fake on PATH",
+    "real_codex_cloud: test exercises the real codex_cloud.list_tasks with its own fake proc.run",
 ]
 
 [tool.ruff]
