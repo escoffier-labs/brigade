@@ -105,10 +105,21 @@ def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
     from brigade.grokbot_obsidian.lifecycle import validate_absolute_reference as validate_ref
     from brigade.grokbot_obsidian.runtime_config import is_absolute_safe_path, required_absolute_path
 
-    for accepted in ("/var/lib/state", r"C:\state\dir", "C:/state/dir"):
-        assert isinstance(validate_ref(accepted), str)
-        assert isinstance(required_absolute_path(accepted), str)
-        assert is_absolute_safe_path(accepted) is True
+    assert isinstance(validate_ref("/var/lib/state"), str)
+    assert isinstance(required_absolute_path("/var/lib/state"), str)
+    assert is_absolute_safe_path("/var/lib/state") is True
+    if os.name == "nt":
+        for accepted in (r"C:\state\dir", "C:/state/dir"):
+            assert isinstance(validate_ref(accepted), str)
+            assert isinstance(required_absolute_path(accepted), str)
+            assert is_absolute_safe_path(accepted) is True
+    else:
+        for drive_path in (r"C:\state\dir", "C:/state/dir"):
+            with pytest.raises(ObsidianError):
+                validate_ref(drive_path)
+            with pytest.raises(ObsidianError):
+                required_absolute_path(drive_path)
+            assert is_absolute_safe_path(drive_path) is False
     for rejected in (
         r"\\server\share\path",
         r"\\.\pipe\x",
@@ -117,6 +128,36 @@ def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
         "/var/lib/../escape",
         r"C:\state\..\escape",
     ):
+        with pytest.raises(ObsidianError):
+            validate_ref(rejected)
+        with pytest.raises(ObsidianError):
+            required_absolute_path(rejected)
+        assert is_absolute_safe_path(rejected) is False
+
+
+def test_paths_overlap_detects_backslash_nesting():
+    from brigade.grokbot_obsidian.runtime_config import paths_overlap
+
+    assert paths_overlap(r"C:\a", r"C:\a\b") is True
+    assert paths_overlap(r"C:\a\b", r"C:\a") is True
+
+
+def test_disjoint_paths_reject_backslash_nested_drive_paths():
+    with pytest.raises(ObsidianError):
+        validate_disjoint_state_paths(
+            r"C:\b\state\runtime.json",
+            r"C:\b\state",
+            r"C:\b\approvals",
+            r"C:\b\staging",
+            r"C:\b\bin\excalidraw",
+        )
+
+
+def test_absolute_reference_rejects_non_ascii_drive_letter():
+    from brigade.grokbot_obsidian.lifecycle import validate_absolute_reference as validate_ref
+    from brigade.grokbot_obsidian.runtime_config import is_absolute_safe_path, required_absolute_path
+
+    for rejected in ("Ｃ:\\state", "µ:/x"):
         with pytest.raises(ObsidianError):
             validate_ref(rejected)
         with pytest.raises(ObsidianError):

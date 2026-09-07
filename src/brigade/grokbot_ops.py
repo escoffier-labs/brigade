@@ -462,7 +462,7 @@ def _open_windows_parent_nofollow(parent: Path, *, create: bool) -> int:
             except FileNotFoundError:
                 if not create:
                     raise
-                _mkdir_windows_child(anchor, relative_parts[:index], component)
+                _mkdir_windows_child(descriptor, component)
                 child = nt_dirfd.open_child_directory(descriptor, component, writable=want_writable)
             os.close(descriptor)
             descriptor = child
@@ -472,23 +472,21 @@ def _open_windows_parent_nofollow(parent: Path, *, create: bool) -> int:
         raise
 
 
-def _mkdir_windows_child(anchor: Path, prefix: tuple[str, ...], component: str) -> None:
-    """Create one Windows child through a writable reopen of its parent only."""
+def _mkdir_windows_child(parent_fd: int, component: str) -> None:
+    """Create one Windows child under the already-held parent descriptor.
+
+    The held handle is reopened with mutation access through
+    ``nt_dirfd.reopen_directory_writable`` (NtCreateFile with RootDirectory set
+    to the held descriptor and an empty ObjectName), so the mkdir parent is the
+    same directory object the caller holds instead of a fresh re-walk of the
+    prefix by name from the anchor. The reopened handle is closed immediately.
+    Reparse rejection still fires on every open, so a remaining failure lands
+    as an error rather than a traversal.
+    """
     from .work_cmd import nt_dirfd
 
-    if not prefix:
-        mkdir_parent = nt_dirfd.open_root_directory(anchor, writable=True)
-    else:
-        mkdir_parent = nt_dirfd.open_root_directory(anchor, writable=False)
-        try:
-            for depth, name in enumerate(prefix):
-                last = depth == len(prefix) - 1
-                child = nt_dirfd.open_child_directory(mkdir_parent, name, writable=last)
-                os.close(mkdir_parent)
-                mkdir_parent = child
-        except BaseException:
-            os.close(mkdir_parent)
-            raise
+    nt_dirfd.validate_component(component)
+    mkdir_parent = nt_dirfd.reopen_directory_writable(parent_fd)
     try:
         nt_dirfd.mkdir_child(mkdir_parent, component)
     finally:

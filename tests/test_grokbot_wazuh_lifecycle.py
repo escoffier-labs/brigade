@@ -54,8 +54,14 @@ def test_disjoint_paths_reject_overlap_dots_and_relative():
 def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
     from brigade.grokbot_wazuh.lifecycle import validate_absolute_reference as validate_ref
 
-    for accepted in ("/var/lib/state", r"C:\state\dir", "C:/state/dir"):
-        assert isinstance(validate_ref(accepted), str)
+    assert isinstance(validate_ref("/var/lib/state"), str)
+    if os.name == "nt":
+        for accepted in (r"C:\state\dir", "C:/state/dir"):
+            assert isinstance(validate_ref(accepted), str)
+    else:
+        for drive_path in (r"C:\state\dir", "C:/state/dir"):
+            with pytest.raises(WazuhError):
+                validate_ref(drive_path)
     for rejected in (
         r"\\server\share\path",
         r"\\.\pipe\x",
@@ -64,6 +70,26 @@ def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
         "/var/lib/../escape",
         r"C:\state\..\escape",
     ):
+        with pytest.raises(WazuhError):
+            validate_ref(rejected)
+
+
+def test_disjoint_paths_reject_backslash_nested_drive_paths():
+    if os.name != "nt":
+        pytest.skip("drive-rooted paths are rejected on POSIX before overlap checks")
+    with pytest.raises(WazuhError):
+        validate_disjoint_state_paths(
+            r"C:\b\state\runtime.json",
+            r"C:\b\other\ledger.json",
+            r"C:\b\state",
+            r"C:\b\approvals",
+        )
+
+
+def test_absolute_reference_rejects_non_ascii_drive_letter():
+    from brigade.grokbot_wazuh.lifecycle import validate_absolute_reference as validate_ref
+
+    for rejected in ("Ｃ:\\state", "µ:/x"):
         with pytest.raises(WazuhError):
             validate_ref(rejected)
 

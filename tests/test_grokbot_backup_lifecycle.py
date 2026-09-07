@@ -63,9 +63,18 @@ def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
     from brigade.grokbot_backup.lifecycle import validate_absolute_reference as validate_ref
     from brigade.grokbot_backup.runtime_config import _required_absolute_path
 
-    for accepted in ("/var/lib/state", r"C:\state\dir", "C:/state/dir"):
-        assert isinstance(validate_ref(accepted), str)
-        assert isinstance(_required_absolute_path(accepted), str)
+    assert isinstance(validate_ref("/var/lib/state"), str)
+    assert isinstance(_required_absolute_path("/var/lib/state"), str)
+    if os.name == "nt":
+        for accepted in (r"C:\state\dir", "C:/state/dir"):
+            assert isinstance(validate_ref(accepted), str)
+            assert isinstance(_required_absolute_path(accepted), str)
+    else:
+        for drive_path in (r"C:\state\dir", "C:/state/dir"):
+            with pytest.raises(BackupError):
+                validate_ref(drive_path)
+            with pytest.raises(BackupError):
+                _required_absolute_path(drive_path)
     for rejected in (
         r"\\server\share\path",
         r"\\.\pipe\x",
@@ -74,6 +83,34 @@ def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
         "/var/lib/../escape",
         r"C:\state\..\escape",
     ):
+        with pytest.raises(BackupError):
+            validate_ref(rejected)
+        with pytest.raises(BackupError):
+            _required_absolute_path(rejected)
+
+
+def test_paths_overlap_detects_backslash_nesting():
+    from brigade.grokbot_backup.runtime_config import paths_overlap
+
+    assert paths_overlap(r"C:\a", r"C:\a\b") is True
+    assert paths_overlap(r"C:\a\b", r"C:\a") is True
+
+
+def test_disjoint_paths_reject_backslash_nested_drive_paths():
+    with pytest.raises(BackupError):
+        validate_disjoint_state_paths(
+            r"C:\b\state\runtime.json",
+            r"C:\b\other\ledger.json",
+            r"C:\b\state",
+            r"C:\b\approvals",
+        )
+
+
+def test_absolute_reference_rejects_non_ascii_drive_letter():
+    from brigade.grokbot_backup.lifecycle import validate_absolute_reference as validate_ref
+    from brigade.grokbot_backup.runtime_config import _required_absolute_path
+
+    for rejected in ("Ｃ:\\state", "µ:/x"):
         with pytest.raises(BackupError):
             validate_ref(rejected)
         with pytest.raises(BackupError):

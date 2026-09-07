@@ -60,7 +60,9 @@ def _environment_invalid() -> NoReturn:
 
 
 def _is_windows_drive_rooted(value: str) -> bool:
-    return len(value) >= 3 and value[0].isalpha() and value[1] == ":" and value[2] in {"\\", "/"}
+    if os.name != "nt":
+        return False
+    return len(value) >= 3 and value[0].isascii() and value[0].isalpha() and value[1] == ":" and value[2] in {"\\", "/"}
 
 
 def _reject_windows_network_or_device_root(path_text: str) -> None:
