@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fleet status and Command Deck report policy authority as staged before migration activation and active afterward, without activating the migration. (#1460)
 - `brigade memory care closeout --dry-run` previews queued candidates grouped by issue kind without writing a closeout. (#1466)
 - Grok Bot rejects `report_text` for draft-PR and branch completions with `report-not-allowed`, leaving the job running and writing no report snapshot. (#1472)
+- `brigade run` no longer dies with `CheckpointError: checkpoint bytes exceed MAX_CHECKPOINT_BYTES` after a finished worker writes screenshots or other assets. An oversize recovery checkpoint now degrades: it keeps the tree fingerprint and names the oversized asset paths, marks the body `truncated`, and lets the live `run.json` write finish with the real status. `publish_checkpoint_file` still refuses a raw oversize body. (#1506)
 
 ### Changed
 - Private Grok Bot manifests, ledgers, action stores, and runtime configuration reads now fail closed on Windows with `secure-owner-read-unavailable` until owner-SID/DACL enforcement is implemented. (#1523)

@@ -3123,6 +3123,108 @@ def test_recover_from_checkpoint_base_stripped_projection_failure_is_bounded(tmp
     assert not (run_dir / "run.json").exists()
 
 
+# -- Issue #1506: oversize recovery checkpoints degrade instead of killing the run --
+
+
+def test_write_checkpoint_oversize_degrades_to_truncated_snapshot(enabled, tmp_path, monkeypatch):
+    """A snapshot above MAX_CHECKPOINT_BYTES must not raise CheckpointError.
+
+    UI slices that add PNG screenshots under docs/assets/ can push the
+    write-ahead run.json snapshot over the cap. The run has already written
+    its receipt and handoff; failing closed here records the run as failed
+    and drops the final report (issue #1506). Degrade: keep the tree
+    fingerprint and name the oversized asset paths, mark truncated, and
+    publish a bounded checkpoint so the live write can finish.
+    """
+    monkeypatch.setattr(run_checkpoint, "MAX_CHECKPOINT_BYTES", 2048)
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    repo = tmp_path / "repo"
+    screenshot = repo / "docs" / "assets" / "deck" / "home.png"
+    screenshot.parent.mkdir(parents=True)
+    screenshot.write_bytes(b"\x89PNG" + b"p" * 120)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    tree_fingerprint = "a" * 40
+    snapshot = {
+        "schema": "brigade.run.v1",
+        "status": "ok",
+        "task": "x" * 4000,
+        "lifecycle_journal_requested": True,
+        "tree_fingerprint": tree_fingerprint,
+        "cwd": str(repo),
+        "pre_run_snapshot": {
+            "untracked_files": ["docs/assets/deck/home.png", "README.md"],
+        },
+    }
+    run_json_bytes = _writer_bytes(snapshot)
+    assert len(run_json_bytes) > run_checkpoint.MAX_CHECKPOINT_BYTES
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        event = run_checkpoint.write_checkpoint(
+            run_dir, run_json_bytes, workspace=workspace, paired_event_type="run.completed"
+        )
+
+    assert event is not None
+    stored = run_checkpoint.validate_checkpoint(run_dir, event)
+    assert len(stored) <= run_checkpoint.MAX_CHECKPOINT_BYTES
+    obj = json.loads(stored.decode("utf-8"))
+    assert obj["truncated"] is True
+    assert obj["status"] == "ok"
+    assert obj["tree_fingerprint"] == tree_fingerprint
+    assert obj["lifecycle_journal_requested"] is True
+    named = {row["path"]: row for row in obj["oversized_paths"]}
+    assert "docs/assets/deck/home.png" in named
+    assert named["docs/assets/deck/home.png"]["byte_size"] == screenshot.stat().st_size
+    assert "README.md" not in named
+    assert "task" not in obj
+
+
+def test_write_checkpoint_oversize_base_stripped_stays_recoverable(enabled, tmp_path, monkeypatch):
+    """An oversize base-stripped write still projects after truncation."""
+    monkeypatch.setattr(run_checkpoint, "MAX_CHECKPOINT_BYTES", 2048)
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    base = _authority_base(
+        workspace,
+        status="ok",
+        task="y" * 4000,
+        tree_fingerprint="b" * 40,
+        pre_run_snapshot={"untracked_files": ["docs/assets/deck/review.png"]},
+    )
+    run_json_bytes = _writer_bytes(base)
+    assert len(run_json_bytes) > run_checkpoint.MAX_CHECKPOINT_BYTES
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        event = run_checkpoint.write_checkpoint(
+            run_dir,
+            run_json_bytes,
+            workspace=workspace,
+            paired_event_type="run.completed",
+            body_kind="base-stripped",
+        )
+    assert event is not None
+    assert event.payload["body_kind"] == "base-stripped"
+    stored = run_checkpoint.validate_checkpoint(run_dir, event)
+    obj = json.loads(stored.decode("utf-8"))
+    assert obj["truncated"] is True
+    assert obj["run_journal_authority_requested"] is True
+    assert obj["lifecycle_journal_requested"] is True
+    assert any(row["path"] == "docs/assets/deck/review.png" for row in obj["oversized_paths"])
+
+    (run_dir / "run.json").unlink()
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert repaired["status"] == "ok"
+    assert repaired["tree_fingerprint"] == "b" * 40
+    assert repaired["journal_present"] is True
+
+
 # -- Issue #568 slice 7 assignment 6: localio.write_text_atomic SIGKILL crash window --
 
 
