@@ -140,11 +140,8 @@ MEMORY_CLOSEOUT_RUNBOOK_NAME = "memory-closeout.json"
 MEMORY_CLOSEOUT_RUNBOOK_PAYLOAD: dict[str, Any] = {
     "id": "memory-closeout",
     "description": (
-        "Daily memory-care closeout. Policy: review (not --defer). Preview first with "
-        "`brigade memory care closeout --dry-run --json --target .`; re-enable the hub "
-        "timer only after that preview is reviewed. The scheduled step stays "
-        "`brigade memory care closeout --target .` and still refuses a nonempty queue. "
-        "Run from the repo or workspace root: "
+        "Daily memory-care closeout. Policy: review (not --defer). Preview: "
+        "`brigade memory care closeout --dry-run --json --target .`. Run from root: "
         "brigade runbook run --approved .brigade/memory-care/runbooks/memory-closeout.json"
     ),
     "allowed_commands": ["brigade"],
