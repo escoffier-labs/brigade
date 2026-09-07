@@ -20,7 +20,7 @@ Security closeouts record reviewed or accepted-risk state for the latest local s
 
 Handoff closeouts record draft id, lint state, ingestion state, target card or document, source import reference, and safe fingerprints under `.brigade/handoffs/closeouts/`.
 
-Memory-care closeouts record refresh queue fingerprints under `.brigade/memory-care/closeouts/`.
+Memory-care closeouts record refresh queue fingerprints under `.brigade/memory-care/closeouts/`. `brigade memory care closeout --dry-run` previews the queue grouped by issue kind and writes nothing.
 
 Release candidate closeouts write `CLOSEOUT.json` inside the candidate bundle and use one of these states:
 
