@@ -395,6 +395,11 @@ what the worker carries on start, renew, complete, fail, and ack-cancel for that
 job. A supplied `lease_id` is echoed back unchanged, and a malformed one is
 still refused before any queue mutation.
 
+Optional `worker_label` on claim is a bounded per-bot name (`builder-2`,
+`[a-z0-9-]{1,32}`). The listener passes it through unchanged. Hub job rows and
+`brigade run cloud grokbot status` echo it next to the claimant so several
+Builder bots that share one connector identity stay distinguishable.
+
 ### Queue tool arguments
 
 `grokbot_queue_list` accepts four optional arguments: `state` (one of the seven

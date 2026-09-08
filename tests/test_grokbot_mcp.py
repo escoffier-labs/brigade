@@ -1836,6 +1836,7 @@ def test_tool_descriptions_state_the_contract_for_the_listener_role(tmp_path: Pa
     claim = descriptions["grokbot_queue_claim"]
     for fragment in (
         "lease_id",
+        "worker_label",
         "grokbot_queue_list",
         "grokbot_queue_start",
         "grokbot_queue_renew",
@@ -1857,10 +1858,11 @@ def test_registered_tool_signatures_advertise_exactly_the_accepted_arguments(tmp
     assert all(parameter.default is None for parameter in listing.parameters.values())
 
     claim = inspect.signature(grokbot_mcp._tool_handler(worker, "grokbot_queue_claim"))
-    assert list(claim.parameters) == ["job_id", "lease_id", "lease_seconds"]
+    assert list(claim.parameters) == ["job_id", "lease_id", "lease_seconds", "worker_label"]
     assert claim.parameters["job_id"].default is inspect.Parameter.empty
     assert claim.parameters["lease_id"].default is None
     assert claim.parameters["lease_seconds"].default is None
+    assert claim.parameters["worker_label"].default is None
 
 
 def test_one_bounded_journal_line_per_tool_call_never_holds_an_argument_value(tmp_path: Path, caplog):
@@ -1954,7 +1956,12 @@ def test_advertised_input_schema_and_served_gate_accept_the_documented_list_filt
     tools = {tool["name"]: tool for tool in listing.json()["result"]["tools"]}
     assert set(tools["grokbot_queue_list"]["inputSchema"]["properties"]) == {"state", "include_all", "limit", "role"}
     assert set(tools["grokbot_queue_claim"]["inputSchema"].get("required", [])) == {"job_id"}
-    assert set(tools["grokbot_queue_claim"]["inputSchema"]["properties"]) == {"job_id", "lease_id", "lease_seconds"}
+    assert set(tools["grokbot_queue_claim"]["inputSchema"]["properties"]) == {
+        "job_id",
+        "lease_id",
+        "lease_seconds",
+        "worker_label",
+    }
 
 
 def _raw_tool_call(name: str, arguments: object) -> bytes:
@@ -2289,3 +2296,84 @@ def test_claim_and_renew_journal_the_lease_deadline(tmp_path: Path, caplog):
     ]
     assert job_id not in "\n".join(lease_lines)
     assert "lease-journal" not in "\n".join(lease_lines)
+
+
+def test_queue_claim_stores_and_echoes_a_bounded_worker_label(tmp_path: Path):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "worker-label-job")["job_id"]
+    worker = _adapter(tmp_path)
+
+    claimed = worker.call_tool(
+        "grokbot_queue_claim",
+        {"job_id": job_id, "lease_id": "lease-label", "worker_label": "builder-2"},
+    )
+
+    assert claimed["worker_label"] == "builder-2"
+    assert worker.call_tool("grokbot_queue_status", {"job_id": job_id})["worker_label"] == "builder-2"
+    asserted = worker.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": "lease-label"})
+    assert asserted["worker_label"] == "builder-2"
+
+
+@pytest.mark.parametrize("label", ["Builder-2", "builder_2", "", "a" * 33, "builder 2"])
+def test_queue_claim_refuses_an_invalid_worker_label_before_mutation(tmp_path: Path, label: str):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "invalid-label-job")["job_id"]
+    worker = _adapter(tmp_path)
+
+    with pytest.raises(grokbot_mcp.AdapterError) as refusal:
+        worker.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-label", "worker_label": label})
+
+    assert refusal.value.reason == "worker_label must match [a-z0-9-]{1,32}"
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "queued"
+
+
+def test_queue_claim_treats_a_null_worker_label_as_omitted(tmp_path: Path):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "null-label-job")["job_id"]
+    worker = _adapter(tmp_path)
+
+    assert grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": job_id, "worker_label": None}) is True
+    claimed = worker.call_tool(
+        "grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-null", "worker_label": None}
+    )
+    assert "worker_label" not in claimed
+
+
+def test_queue_claim_passes_worker_label_to_hub_claim_unchanged(tmp_path: Path, monkeypatch):
+    job_id = "grokbot-" + "c" * 24
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: True)
+    monkeypatch.setattr(grokbot_mcp.GrokbotAdapter, "ensure_hub_actor", lambda self: None)
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "get_job",
+        lambda *_args, **_kwargs: {"job_id": job_id, "role": "implementation-worker"},
+    )
+
+    def fake_claim(*args: object, **kwargs: object) -> dict[str, object]:
+        seen["kwargs"] = kwargs
+        return {
+            "job_id": job_id,
+            "state": "claimed",
+            "role": "implementation-worker",
+            "worker_label": kwargs.get("worker_label"),
+            "lease_expires_at": "2026-09-08T00:00:00Z",
+        }
+
+    monkeypatch.setattr(grokbot_jobs, "claim_execution_context", fake_claim)
+    claimed = _adapter(tmp_path, hub_token="listener-node-token").call_tool(
+        "grokbot_queue_claim",
+        {"job_id": job_id, "lease_id": "lease-hub", "worker_label": "builder-2"},
+    )
+
+    assert seen["kwargs"] == {"worker_label": "builder-2"}
+    assert claimed["worker_label"] == "builder-2"
+
+
+def test_claim_advertises_the_optional_worker_label_argument():
+    required, optional = grokbot_mcp._TOOL_ARGUMENT_TYPES["grokbot_queue_claim"]
+
+    assert "worker_label" not in required
+    assert optional["worker_label"] is str
+    assert grokbot_mcp._valid_tool_arguments(
+        "grokbot_queue_claim", {"job_id": "grokbot-a", "worker_label": "builder-2"}
+    )
+    assert grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": "grokbot-a", "worker_label": None})
+    assert not grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": "grokbot-a", "worker_label": 2})

@@ -11,6 +11,7 @@ REPOSITORY_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,98}$")
 IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 TASK_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+WORKER_LABEL_RE = re.compile(r"^[a-z0-9-]{1,32}$")
 GITHUB_PULL_URL_RE = re.compile(
     r"^https://github\.com/[A-Za-z0-9][A-Za-z0-9_.-]{0,98}/[A-Za-z0-9][A-Za-z0-9_.-]{0,98}/pull/[1-9][0-9]*$"
 )
@@ -110,6 +111,12 @@ def validate_opaque_id(value: object, reason: str) -> str:
 def validate_lease_seconds(value: object) -> int:
     if type(value) is not int or not LEASE_SECONDS_MIN <= value <= LEASE_SECONDS_MAX:
         raise GrokbotJobError("invalid-lease-seconds")
+    return value
+
+
+def validate_worker_label(value: object) -> str:
+    if not isinstance(value, str) or not WORKER_LABEL_RE.fullmatch(value):
+        raise GrokbotJobError("invalid-worker-label")
     return value
 
 
