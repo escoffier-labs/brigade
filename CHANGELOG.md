@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Document the Arch Linux and Omarchy install path using `python-pipx`, including recovery after a system Python minor-version upgrade.
 - Update-channel documentation now describes beta previews and automatic update-check collection and retention.
 - `brigade center serve` views render in the Command Deck theme through the shared `ui_theme` shell: dark tokens, the Deck masthead and nav, and no light-mode colors. Status chip colors are unchanged. (#1495)
 - The fleet boards at `/view/machines` and `/view/repos` render in the Command Deck theme through a shared `ui_theme` module, and Deck forms gain a spacing scale (16px panels, 36px controls, 8px helper-text gap, 40px buttons). Routes are unchanged. (#1495)

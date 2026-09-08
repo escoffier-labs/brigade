@@ -21,6 +21,35 @@ sudo dnf install pipx
 pipx ensurepath
 ```
 
+#### Arch Linux and Omarchy
+
+On Arch Linux, install [the `python-pipx` package](https://archlinux.org/packages/extra/any/python-pipx/):
+
+```bash
+sudo pacman -Syu --needed python-pipx
+pipx ensurepath
+```
+
+This Arch command performs a full system upgrade and installs `pipx`.
+
+On Omarchy, use its [package command](https://omarchy.org/manual/other-packages/):
+
+```bash
+omarchy pkg add python-pipx
+pipx ensurepath
+```
+
+Use `omarchy update` for [Omarchy system updates](https://omarchy.org/manual/updates/) so its snapshots, migrations, and configuration updates run with the package upgrade.
+
+On either distribution, open a new terminal, then follow the Brigade install commands below. Run `pipx` as your regular user. It keeps Brigade isolated from the externally managed system Python.
+
+After an Arch upgrade replaces Python with a new minor version, an existing pipx environment may need rebuilding:
+
+```bash
+pipx reinstall brigade-cli
+brigade --version
+```
+
 On another distribution, use its `pipx` package when available. The [pipx install guide](https://pipx.pypa.io/latest/how-to/install-pipx.html) covers the virtual-environment fallback.
 
 ### macOS
