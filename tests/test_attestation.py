@@ -184,8 +184,7 @@ def test_cli_export_refuses_a_stale_stored_receipt_digest(tmp_path: Path, capsys
 
 def test_ad_hoc_command_name_drops_env_vars_and_paths(tmp_path: Path) -> None:
     # Plant a value that cannot appear in lowercase SHA-256 hex. The previous
-    # SECRET=abc sentinel collided with receipt digests about 1 in a few hundred
-    # runs because pytest tmp_path is hashed into the exported payload.
+    # SECRET=abc sentinel can occur in receipt SHA-256 hex.
     secret_value = "ZzSentinelValue"
     planted_path = "/tmp/x"
     key_path, _signers_path = attestation.keygen(tmp_path, principal="alice-signer")
