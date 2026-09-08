@@ -146,6 +146,390 @@ def test_registered_process_terminates_before_unregister_on_base_exception(monke
     assert events == [("register", 4242), ("terminate", 4242), ("unregister", 4242)]
 
 
+def _real_child_command(ready_path: Path) -> list[str]:
+    code = (
+        "import os,time; from pathlib import Path; "
+        "os.close(0); os.close(1); os.close(2); "
+        f"Path({str(ready_path)!r}).write_text('ready'); "
+        "time.sleep(60)"
+    )
+    return [sys.executable, "-c", code]
+
+
+def _wait_for_child_ready(ready_path: Path) -> None:
+    deadline = time.monotonic() + 1
+    while not ready_path.is_file() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ready_path.read_text() == "ready"
+
+
+def _fallback_reap(process, stop_child, child_job=None) -> None:
+    """Test-only ownership when a wrapper fails before proc.run owns the child."""
+    try:
+        stop_child(process, None, child_job)
+    except BaseException:
+        pass
+    try:
+        if process.poll() is None:
+            process.kill()
+    except BaseException:
+        pass
+    try:
+        process.wait(timeout=proc._TIMED_OUT_DRAIN_SECONDS)
+    except (BaseException, subprocess.TimeoutExpired):
+        pass
+    for stream_name in ("stdout", "stderr", "stdin"):
+        stream = getattr(process, stream_name, None)
+        if stream is not None:
+            try:
+                stream.close()
+            except BaseException:
+                pass
+    if child_job is not None:
+        try:
+            child_job.close()
+        except BaseException:
+            pass
+
+
+def _trace_contains(exc: BaseException, function_name: str) -> bool:
+    traceback = exc.__traceback__
+    while traceback is not None:
+        if traceback.tb_frame.f_code.co_name == function_name:
+            return True
+        traceback = traceback.tb_next
+    return False
+
+
+@pytest.mark.parametrize(
+    ("failure_index", "expected_roles", "interrupt_first_join"),
+    [
+        (1, ["stdout-reader"], False),
+        (2, ["stdout-reader", "stderr-reader"], False),
+        (3, ["stdout-reader", "stderr-reader", "stdin-writer"], False),
+        (4, ["stdout-reader", "stderr-reader", "stdin-writer", "watcher"], True),
+    ],
+)
+def test_collector_start_failure_reaps_real_child_once(
+    monkeypatch, tmp_path, failure_index, expected_roles, interrupt_first_join
+):
+    """Every collector Thread.start failure must reap its already-launched child."""
+    ready_path = tmp_path / "child-ready"
+    command = _real_child_command(ready_path)
+    captured: dict[str, subprocess.Popen[bytes]] = {}
+    real_popen = proc.subprocess.Popen
+    real_start = threading.Thread.start
+    real_join = threading.Thread.join
+    real_stop_child = proc._stop_child
+    sentinel = RuntimeError(f"collector start {failure_index}")
+    roles: list[str] = []
+    collector_threads: list[threading.Thread] = []
+    joined: list[threading.Thread] = []
+    stop_calls: list[object] = []
+
+    def recording_popen(*args, **kwargs):
+        if not args or args[0] != command:
+            return real_popen(*args, **kwargs)
+        child = real_popen(*args, **kwargs)
+        assert "process" not in captured
+        captured["process"] = child
+        if os.name != "nt":
+            _wait_for_child_ready(ready_path)
+        unrelated = threading.Thread(target=lambda: None)
+        unrelated.start()
+        unrelated.join(timeout=proc._TIMED_OUT_DRAIN_SECONDS)
+        return child
+
+    def recording_bind(job, child, args):
+        result = real_bind(job, child, args)
+        if result is None:
+            _wait_for_child_ready(ready_path)
+        return result
+
+    def collector_role(thread: threading.Thread) -> str | None:
+        child = captured.get("process")
+        target = getattr(thread, "_target", None)
+        args = getattr(thread, "_args", ())
+        name = getattr(target, "__qualname__", "")
+        if name.endswith("read_stream"):
+            if args and args[0] is getattr(child, "stdout", None):
+                return "stdout-reader"
+            if args and args[0] is getattr(child, "stderr", None):
+                return "stderr-reader"
+        if target is proc._write_stdin and args and args[0] is child:
+            return "stdin-writer"
+        if name.endswith("watch_process"):
+            return "watcher"
+        return None
+
+    def injected_start(thread, *args, **kwargs):
+        role = collector_role(thread)
+        if role is not None:
+            collector_threads.append(thread)
+            roles.append(role)
+            if len(roles) == failure_index:
+                raise sentinel
+        return real_start(thread, *args, **kwargs)
+
+    def recording_join(thread, *args, **kwargs):
+        if thread in collector_threads:
+            joined.append(thread)
+            if interrupt_first_join and len(joined) == 1:
+                raise KeyboardInterrupt
+        return real_join(thread, *args, **kwargs)
+
+    def recording_stop(child, *args, **kwargs):
+        if child is captured.get("process"):
+            stop_calls.append(child)
+        return real_stop_child(child, *args, **kwargs)
+
+    monkeypatch.setattr(proc.subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(threading.Thread, "start", injected_start)
+    monkeypatch.setattr(threading.Thread, "join", recording_join)
+    monkeypatch.setattr(proc, "_stop_child", recording_stop)
+    if os.name == "nt":
+        real_bind = proc._bind_suspended_windows_child
+        monkeypatch.setattr(proc, "_bind_suspended_windows_child", recording_bind)
+
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            proc.run(command, stdin=b"probe\n", supervise_group=True)
+
+        child = captured["process"]
+        assert raised.value is sentinel
+        assert _trace_contains(sentinel, "injected_start")
+        assert roles == expected_roles
+        assert child.returncode is not None
+        assert len(stop_calls) == 1
+        assert all(not thread.is_alive() for thread in collector_threads[:-1])
+        assert collector_threads[-1] not in joined
+        if interrupt_first_join:
+            assert joined == collector_threads[:-1]
+    finally:
+        monkeypatch.setattr(proc.subprocess, "Popen", real_popen)
+        child = captured.get("process")
+        if child is not None:
+            _fallback_reap(child, real_stop_child)
+
+
+@pytest.mark.parametrize("insert_before_raise", [False, True], ids=("before-insert", "after-insert"))
+def test_registration_failure_reaps_real_child_and_unregisters_attempt(monkeypatch, tmp_path, insert_before_raise):
+    ready_path = tmp_path / "child-ready"
+    command = _real_child_command(ready_path)
+    captured: dict[str, subprocess.Popen[bytes]] = {}
+    real_popen = proc.subprocess.Popen
+    real_stop_child = proc._stop_child
+    sentinel = RuntimeError("registration failed")
+    stop_calls: list[subprocess.Popen[bytes]] = []
+
+    class RaisingRegistry:
+        def __init__(self) -> None:
+            self.processes: set[object] = set()
+            self.events: list[str] = []
+
+        def register(self, child) -> None:
+            self.events.append("register")
+            if insert_before_raise:
+                self.processes.add(child)
+            raise sentinel
+
+        def terminate(self, child) -> None:
+            self.events.append("terminate")
+            proc._terminate_processes((child,), terminate_grace=0.05, kill_grace=0.05)
+
+        def unregister(self, child) -> None:
+            self.events.append("unregister")
+            self.processes.discard(child)
+
+    def recording_popen(*args, **kwargs):
+        if not args or args[0] != command:
+            return real_popen(*args, **kwargs)
+        child = real_popen(*args, **kwargs)
+        assert "process" not in captured
+        captured["process"] = child
+        if os.name != "nt":
+            _wait_for_child_ready(ready_path)
+        return child
+
+    def recording_bind(job, child, args):
+        result = real_bind(job, child, args)
+        if result is None:
+            _wait_for_child_ready(ready_path)
+        return result
+
+    def recording_stop(child, *args, **kwargs):
+        stop_calls.append(child)
+        registry.events.append("stop")
+        return real_stop_child(child, *args, **kwargs)
+
+    registry = RaisingRegistry()
+    monkeypatch.setattr(proc.subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(proc, "_stop_child", recording_stop)
+    if os.name == "nt":
+        real_bind = proc._bind_suspended_windows_child
+        monkeypatch.setattr(proc, "_bind_suspended_windows_child", recording_bind)
+
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            proc.run(command, process_registry=registry)
+
+        child = captured["process"]
+        assert raised.value is sentinel
+        assert child.returncode is not None
+        assert stop_calls == [child]
+        assert registry.events.index("register") < registry.events.index("stop") < registry.events.index("unregister")
+        if os.name != "nt":
+            assert "terminate" in registry.events
+        assert registry.processes == set()
+    finally:
+        monkeypatch.setattr(proc.subprocess, "Popen", real_popen)
+        child = captured.get("process")
+        if child is not None:
+            _fallback_reap(child, real_stop_child)
+
+
+def test_readiness_wrapper_fallback_reaps_child_before_proc_takes_ownership(monkeypatch, tmp_path):
+    ready_path = tmp_path / "child-ready"
+    command = _real_child_command(ready_path)
+    captured: dict[str, subprocess.Popen[bytes]] = {}
+    real_popen = proc.subprocess.Popen
+    real_stop_child = proc._stop_child
+    sentinel = RuntimeError("readiness wrapper failed")
+    child_jobs: list[object] = []
+    closed_job_ids: set[int] = set()
+
+    def recording_job():
+        job = real_create_job()
+        if job is None:
+            return None
+        real_close = job.close
+
+        def tracked_close():
+            if id(job) in closed_job_ids:
+                return
+            closed_job_ids.add(id(job))
+            real_close()
+
+        job.close = tracked_close
+        child_jobs.append(job)
+        return job
+
+    def failing_popen(*args, **kwargs):
+        if not args or args[0] != command:
+            return real_popen(*args, **kwargs)
+        child = real_popen(*args, **kwargs)
+        assert "process" not in captured
+        captured["process"] = child
+        raise sentinel
+
+    monkeypatch.setattr(proc.subprocess, "Popen", failing_popen)
+    if os.name == "nt":
+        real_create_job = proc._create_windows_child_job
+        monkeypatch.setattr(proc, "_create_windows_child_job", recording_job)
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            proc.run(command)
+        assert raised.value is sentinel
+        assert captured["process"].returncode is None
+    finally:
+        monkeypatch.setattr(proc.subprocess, "Popen", real_popen)
+        child = captured.get("process")
+        if child is not None:
+            child_job = child_jobs[0] if child_jobs else None
+            _fallback_reap(child, real_stop_child, child_job)
+            assert child.returncode is not None
+            if child_job is not None:
+                assert closed_job_ids == {id(child_job)}
+
+
+@pytest.mark.parametrize("interruption", ["stop", "unregister", "stdout-close"])
+def test_startup_exception_survives_cleanup_interruptions(monkeypatch, interruption):
+    sentinel = RuntimeError("startup failed")
+    events: list[str] = []
+
+    class RecordingStream(io.BytesIO):
+        def __init__(self, name: str) -> None:
+            super().__init__()
+            self.name = name
+            self.raise_once = True
+
+        def close(self) -> None:
+            if self.closed:
+                return
+            events.append(f"close:{self.name}")
+            if interruption == "stdout-close" and self.name == "stdout" and self.raise_once:
+                self.raise_once = False
+                super().close()
+                raise KeyboardInterrupt
+            super().close()
+
+    class StubRegistry:
+        def register(self, child) -> None:
+            events.append("register")
+
+        def terminate(self, child) -> None:
+            events.append("terminate")
+
+        def unregister(self, child) -> None:
+            events.append("unregister")
+            if interruption == "unregister":
+                raise KeyboardInterrupt
+
+    class StubProcess:
+        pid = 4242
+        returncode = 0
+        _handle = 424242
+
+        def __init__(self) -> None:
+            self.stdout = RecordingStream("stdout")
+            self.stderr = RecordingStream("stderr")
+            self.stdin = RecordingStream("stdin")
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    def failing_start(thread, *args, **kwargs):
+        raise sentinel
+
+    def interrupted_stop(*args, **kwargs):
+        events.append("stop")
+        if interruption == "stop":
+            raise KeyboardInterrupt
+
+    stub = StubProcess()
+    monkeypatch.setattr(proc.subprocess, "Popen", lambda *args, **kwargs: stub)
+    monkeypatch.setattr(threading.Thread, "start", failing_start)
+    monkeypatch.setattr(proc, "_stop_child", interrupted_stop)
+    if os.name == "nt":
+
+        class FakeJob:
+            def assign(self, process_handle):
+                return True
+
+            def resume(self, pid):
+                return True
+
+            def close(self):
+                events.append("job-close")
+
+        monkeypatch.setattr(proc, "_create_windows_child_job", lambda: FakeJob())
+
+    raised: BaseException | None = None
+    try:
+        proc.run(["worker"], process_registry=StubRegistry())
+    except BaseException as exc:
+        raised = exc
+
+    assert raised is sentinel
+    assert _trace_contains(sentinel, "failing_start")
+    assert events.count("stop") == 1
+    assert "unregister" in events
+    assert events[-3:] == ["close:stdout", "close:stderr", "close:stdin"]
+
+
 def test_windows_registry_cancellation_targets_owned_descendant_tree(monkeypatch):
     class StubProcess:
         pid = 4242
