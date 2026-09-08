@@ -26,6 +26,16 @@ class _LoadedApproval:
     envelope_sha256: str
 
 
+@dataclass(frozen=True)
+class _VerifiedReference:
+    nonce: str
+    path: Path
+    locator: str
+    event: run_journal.RunEvent
+    payload_sha256: str
+    envelope_sha256: str
+
+
 def _safe_approval_reference(
     *, target: Path, run_id: str, ref: Mapping[str, Any]
 ) -> tuple[str, Path | None, str | None]:
@@ -93,15 +103,22 @@ def _load_selected_approval(path: Path, nonce: str) -> _LoadedApproval | None:
     )
 
 
-def _event_for_reference(events: Sequence[run_journal.RunEvent], *, nonce: str) -> run_journal.RunEvent | None:
-    matches = [
-        event
-        for event in events
-        if event.event_type == "approval"
-        and event.payload.get("nonce") == nonce
-        and event.payload.get("attestation_path") == f"approvals/{nonce}.json"
-    ]
-    return matches[0] if len(matches) == 1 else None
+def _approval_events_by_nonce(events: Sequence[run_journal.RunEvent]) -> dict[str, run_journal.RunEvent | None]:
+    """Index exact approval events while preserving ambiguous-event refusal."""
+    indexed: dict[str, run_journal.RunEvent | None] = {}
+    for event in events:
+        nonce = event.payload.get("nonce")
+        if (
+            event.event_type != "approval"
+            or not isinstance(nonce, str)
+            or event.payload.get("attestation_path") != f"approvals/{nonce}.json"
+        ):
+            continue
+        if nonce in indexed:
+            indexed[nonce] = None
+        else:
+            indexed[nonce] = event
+    return indexed
 
 
 def _mark_invalid(observation: dict[str, Any]) -> None:
@@ -166,21 +183,43 @@ def verify_approval_references(
             report = run_journal.read_journal_bounded(journal_path)
             if report.partial_tail is not None or report.chain_errors:
                 raise run_journal.RunJournalError("journal is corrupt")
-            loaded: dict[int, tuple[run_journal.RunEvent, _LoadedApproval]] = {}
+            events_by_nonce = _approval_events_by_nonce(report.events)
+            latest = next((event for event in reversed(report.events) if event.event_type == "approval"), None)
+            safe_associations: dict[tuple[str, Path], list[int]] = {}
             for index in approval_indexes:
                 ref, observation = references[index], observations[index]
                 assert isinstance(ref, Mapping)
                 nonce, path, reason = _safe_approval_reference(target=target, run_id=run_id, ref=ref)
-                loaded_artifact = _load_selected_approval(path, nonce) if path is not None else None
-                event = _event_for_reference(report.events, nonce=nonce) if loaded_artifact is not None else None
-                if loaded_artifact is None or event is None or reason is not None:
+                if path is None or reason is not None:
                     _mark_invalid(observation)
                     continue
-                if (
-                    ref.get("payloadSha256") != loaded_artifact.payload_sha256
-                    or ref.get("envelopeSha256") != loaded_artifact.envelope_sha256
-                ):
-                    _mark_invalid(observation)
+                safe_associations.setdefault((nonce, path), []).append(index)
+
+            verified_references: dict[int, _VerifiedReference] = {}
+            selected: (
+                tuple[int, _VerifiedReference, _LoadedApproval, approval_verification.ValidatedApprovalArtifact] | None
+            ) = None
+            for (nonce, path), indexes in safe_associations.items():
+                loaded_artifact = _load_selected_approval(path, nonce)
+                event = events_by_nonce.get(nonce)
+                if loaded_artifact is None or event is None:
+                    for index in indexes:
+                        _mark_invalid(observations[index])
+                    loaded_artifact = None
+                    continue
+                matching_indexes: list[int] = []
+                for index in indexes:
+                    ref = references[index]
+                    assert isinstance(ref, Mapping)
+                    if (
+                        ref.get("payloadSha256") != loaded_artifact.payload_sha256
+                        or ref.get("envelopeSha256") != loaded_artifact.envelope_sha256
+                    ):
+                        _mark_invalid(observations[index])
+                    else:
+                        matching_indexes.append(index)
+                if not matching_indexes:
+                    loaded_artifact = None
                     continue
                 try:
                     validated = approval_verification.validate_approval_artifact(
@@ -197,24 +236,47 @@ def verify_approval_references(
                         strict_v1=True,
                     )
                 except (approval.ApprovalError, approval_v2.ApprovalV2Error, OSError):
-                    _mark_invalid(observation)
+                    for index in matching_indexes:
+                        _mark_invalid(observations[index])
+                    loaded_artifact = None
                     continue
                 if validated.tree_fingerprint != index_tree:
-                    _mark_invalid(observation)
+                    for index in matching_indexes:
+                        _mark_invalid(observations[index])
+                    loaded_artifact = None
+                    del validated
                     continue
-                loaded[index] = (event, loaded_artifact)
+                reference = references[matching_indexes[0]]
+                assert isinstance(reference, Mapping)
+                locator = reference.get("locator")
+                assert isinstance(locator, str)
+                verified_reference = _VerifiedReference(
+                    nonce=nonce,
+                    path=path,
+                    locator=locator,
+                    event=event,
+                    payload_sha256=loaded_artifact.payload_sha256,
+                    envelope_sha256=loaded_artifact.envelope_sha256,
+                )
+                for index in matching_indexes:
+                    verified_references[index] = verified_reference
+                if latest is not None and event.sequence == latest.sequence:
+                    selected = (matching_indexes[0], verified_reference, loaded_artifact, validated)
+                else:
+                    loaded_artifact = None
+                del validated
 
-            duplicate_events = {
-                event.sequence
-                for event, _artifact in loaded.values()
-                if sum(candidate.sequence == event.sequence for candidate, _ in loaded.values()) > 1
-            }
-            for index, (event, _artifact) in tuple(loaded.items()):
-                if event.sequence in duplicate_events:
-                    _mark_invalid(observations[index])
-                    del loaded[index]
+            by_event: dict[int, list[int]] = {}
+            for index, verified_reference in verified_references.items():
+                by_event.setdefault(verified_reference.event.sequence, []).append(index)
+            for indexes in by_event.values():
+                if len(indexes) > 1:
+                    for index in indexes:
+                        _mark_invalid(observations[index])
+                        del verified_references[index]
+                    if selected is not None and selected[0] in indexes:
+                        selected = None
 
-            latest = next((event for event in reversed(report.events) if event.event_type == "approval"), None)
             try:
                 run_meta = attestation_input.read_json_object(run_dir / "run.json")
             except (OSError, attestation_input.AttestationInputError):
@@ -222,28 +284,17 @@ def verify_approval_references(
             context = approval._verification_context(target)
             context.live_tree = index_tree
             context.live_tree_state = "index-pinned"
-            for index, (event, loaded_artifact) in loaded.items():
+            for index, verified_reference in verified_references.items():
                 observation = observations[index]
-                if event is not latest:
+                if selected is None or index != selected[0]:
                     observation["approval_state"] = "historical"
                     _merge_policy(observation, "unevaluated")
                     continue
                 if not isinstance(run_meta, Mapping):
                     _mark_invalid(observation)
                     continue
-                validated_artifact = approval_verification.validate_approval_artifact(
-                    target=target,
-                    run_dir=run_dir,
-                    report=report,
-                    event=event,
-                    decision_value=event.payload.get("decision")
-                    if isinstance(event.payload.get("decision"), str)
-                    else None,
-                    envelope=loaded_artifact.envelope,
-                    statement=loaded_artifact.statement,
-                    statement_bytes=loaded_artifact.statement_bytes,
-                    strict_v1=True,
-                )
+                validated_artifact = selected[3]
+                event = verified_reference.event
                 current_meta, requester = _current_requester_meta(
                     target=target,
                     run_dir=run_dir,
@@ -256,7 +307,7 @@ def verify_approval_references(
                 if current_meta is None:
                     _mark_invalid(observation)
                     continue
-                verified = approval_verification.evaluate_current_approval(
+                policy_result = approval_verification.evaluate_current_approval(
                     target=target,
                     run_dir=run_dir,
                     events=report.events,
@@ -268,31 +319,37 @@ def verify_approval_references(
                     context=context,
                     now=None,
                 )
-                if verified.detail == "APPROVAL-STALE" or verified.status in {"APPROVAL-INVALID", "APPROVAL-STALE"}:
+                if policy_result.detail == "APPROVAL-STALE" or policy_result.status in {
+                    "APPROVAL-INVALID",
+                    "APPROVAL-STALE",
+                }:
                     _mark_invalid(observation)
-                elif verified.status in {"SOD-VIOLATION", "APPROVAL-EXPIRED", "DENIED", "HELD"}:
+                elif policy_result.status in {"SOD-VIOLATION", "APPROVAL-EXPIRED", "DENIED", "HELD"}:
                     _merge_policy(observation, "fail")
                 elif decision in {"deny", "hold"}:
                     _merge_policy(observation, "fail")
                 elif requester is None:
                     _merge_policy(observation, "unevaluated")
-                elif verified.status == "APPROVED":
+                elif policy_result.status == "APPROVED":
                     _merge_policy(observation, "pass")
                 else:
                     _merge_policy(observation, "unevaluated")
 
             reread = run_journal.read_journal_bounded(journal_path)
             changed = reread.partial_tail is not None or reread.chain_errors or reread.events != report.events
-            for index, (_event, artifact) in loaded.items():
-                ref = references[index]
-                assert isinstance(ref, Mapping)
-                nonce, path, reason = _safe_approval_reference(target=target, run_id=run_id, ref=ref)
-                fresh = _load_selected_approval(path, nonce) if path == artifact.path and reason is None else None
+            for verified_reference in verified_references.values():
+                nonce, path, reason = _safe_approval_reference(
+                    target=target, run_id=run_id, ref={"locator": verified_reference.locator}
+                )
+                fresh = (
+                    _load_selected_approval(path, nonce) if path == verified_reference.path and reason is None else None
+                )
                 if fresh is None or (fresh.payload_sha256, fresh.envelope_sha256) != (
-                    artifact.payload_sha256,
-                    artifact.envelope_sha256,
+                    verified_reference.payload_sha256,
+                    verified_reference.envelope_sha256,
                 ):
                     changed = True
+                fresh = None
             if changed:
                 for index in approval_indexes:
                     _mark_invalid(observations[index])

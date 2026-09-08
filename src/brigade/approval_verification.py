@@ -150,6 +150,9 @@ def _validate_v2_artifact(
     )
     policy_digest = policy.get("digest")
     chain_head = run_ref.get("journalChainHead")
+    nonce = predicate.get("nonce")
+    if not isinstance(nonce, str) or not approval_v2._HEX32_RE.fullmatch(nonce):
+        raise approval_v2.ApprovalV2Error("approval v2 nonce is invalid")
     valid = all(
         (
             signature.status == attestation.STATUS_SIGNED_OK,

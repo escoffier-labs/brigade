@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from brigade import agent_change_verify
-from brigade import approval, approval_v2, approval_verification, attestation, run_journal
+from brigade import agent_change_approval_verify, agent_change_verify
+from brigade import approval, approval_v2, approval_verification, attestation, localio, run_journal
 
 from tests import test_approval as approval_fixtures
 
@@ -133,6 +133,88 @@ def test_v2_selected_artifact_validation_does_not_read_current_reason_projection
     )
 
     assert validated.version == 2
+
+
+@pytest.mark.parametrize("nonce", [None, 7, "", "a" * 31, "not-a-nonce", "A" * 32])
+def test_v2_selected_artifact_rejects_invalid_nonce_even_when_the_event_matches(tmp_path: Path, nonce: object) -> None:
+    target, run_dir, report, event, _envelope, statement, _statement_bytes = _artifact_fixture(tmp_path, version=2)
+    altered_statement = copy.deepcopy(statement)
+    predicate = altered_statement["predicate"]
+    assert isinstance(predicate, dict)
+    predicate["nonce"] = nonce
+    altered_bytes = attestation.canonical_statement_bytes(altered_statement)
+    key = tmp_path / "approver" / ".brigade" / "attestation" / "signing-key"
+    altered_envelope = attestation.create_envelope(altered_statement, key)
+    payload = dict(event.payload)
+    payload["nonce"] = nonce
+    payload["statement_sha256"] = hashlib.sha256(altered_bytes).hexdigest()
+    matching_event = replace(event, payload=payload)
+
+    with pytest.raises(approval_v2.ApprovalV2Error, match="nonce"):
+        approval_verification.validate_approval_artifact(
+            target=target,
+            run_dir=run_dir,
+            report=report,
+            event=matching_event,
+            decision_value="allow",
+            envelope=altered_envelope,
+            statement=altered_statement,
+            statement_bytes=altered_bytes,
+        )
+
+    context = approval._verification_context(target)
+    verification = approval_verification.verify_selected_approval(
+        target=target,
+        run_dir=run_dir,
+        report=report,
+        event=matching_event,
+        decision_value="allow",
+        prior_approvals=(),
+        envelope=altered_envelope,
+        statement=altered_statement,
+        statement_bytes=altered_bytes,
+        run_meta=json.loads((run_dir / "run.json").read_text(encoding="utf-8")),
+        context=context,
+        now=None,
+    )
+    assert verification.status == "APPROVAL-INVALID"
+
+
+@pytest.mark.parametrize("nonce", [None, 7, "", "a" * 31, "not-a-nonce", "A" * 32])
+def test_index_approval_nonce_guards_remain_non_crashing_and_invalid(
+    tmp_path: Path, nonce: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target, run_dir, report, event, envelope, statement, statement_bytes = _artifact_fixture(tmp_path, version=2)
+    payload = dict(event.payload)
+    payload["nonce"] = nonce
+    malformed_report = replace(event, payload=payload)
+    report = replace(report, events=(*report.events[:-1], malformed_report))
+    original_read = run_journal.read_journal_bounded
+
+    def read_malformed_event(path: Path) -> run_journal.JournalReport:
+        if path == run_dir / "events" / "lifecycle.jsonl":
+            return report
+        return original_read(path)
+
+    monkeypatch.setattr("brigade.agent_change_approval_verify.run_journal.read_journal_bounded", read_malformed_event)
+    observation = _approval(outcome="pass")
+    reference = {
+        "kind": "human-approval",
+        "locator": f".brigade/runs/{run_dir.name}/approvals/{'02' * 16}.json",
+        "payloadSha256": hashlib.sha256(statement_bytes).hexdigest(),
+        "envelopeSha256": localio.canonical_json_digest(envelope),
+    }
+
+    agent_change_approval_verify.verify_approval_references(
+        target=target,
+        run_id=run_dir.name,
+        index_tree=approval_fixtures.TREE,
+        references=[reference],
+        observations=[observation],
+    )
+
+    assert observation["binding"] == "conflicted"
+    assert observation["approval_state"] == "unavailable"
 
 
 @pytest.mark.parametrize("version", [1, 2])
