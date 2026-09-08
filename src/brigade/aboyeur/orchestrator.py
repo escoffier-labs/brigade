@@ -1426,23 +1426,37 @@ def run(
         if output_dir is not None:
             artifacts.record_dispatch_stage(output_dir, stage=stage, seats=seats)
 
+    def record_budget_cancel(*, request_id: str, reason_class: str, dimension: str) -> None:
+        if budget_coordinator is None:
+            return
+        try:
+            budget_coordinator.request_cancel(
+                request_id=request_id,
+                reason_class=reason_class,
+                transport_capability="mixed",
+                dimension=dimension,
+                cancel_fn=_budget_cancel_fn,
+            )
+        except (
+            run_budget.BudgetError,
+            run_lifecycle.LifecycleJournalError,
+            run_checkpoint.CheckpointError,
+            OSError,
+        ) as exc:
+            raise runguard.RetainRunLockError(f"failed to record budget cancel receipt: {exc}") from exc
+
     def dispatch_interrupted() -> None:
         if output_dir is None:
             return
         active_seat = active_seats[0] if len(active_seats) == 1 else None
         # Live operator cancellation is a policy terminal (#593), not a worker
-        # FailureClass and not infrastructure-neutral under #580.
-        if budget_coordinator is not None:
-            try:
-                budget_coordinator.request_cancel(
-                    request_id="opcancel:live-ctrl-c",
-                    reason_class="operator_cancel",
-                    transport_capability="mixed",
-                    dimension="wall_clock_seconds",
-                    cancel_fn=_budget_cancel_fn,
-                )
-            except (run_budget.BudgetError, run_lifecycle.LifecycleJournalError, OSError) as exc:
-                print(f"warning: budget cancel receipt failed: {exc}", file=sys.stderr)
+        # FailureClass and not infrastructure-neutral under #580. Do not write
+        # the local terminal snapshot unless the cancel lifecycle pair landed.
+        record_budget_cancel(
+            request_id="opcancel:live-ctrl-c",
+            reason_class="operator_cancel",
+            dimension="wall_clock_seconds",
+        )
         artifacts.record_run_termination(
             output_dir,
             status="canceled",
@@ -1485,16 +1499,11 @@ def run(
             )
         except run_budget.BudgetPolicyError as exc:
             if exc.exhausted:
-                try:
-                    budget_coordinator.request_cancel(
-                        request_id=f"budgetcancel:{exc.dimension}",
-                        reason_class="budget_cancel",
-                        transport_capability="mixed",
-                        dimension=exc.dimension,
-                        cancel_fn=_budget_cancel_fn,
-                    )
-                except (run_budget.BudgetError, run_lifecycle.LifecycleJournalError, OSError) as cancel_exc:
-                    print(f"warning: budget cancel receipt failed: {cancel_exc}", file=sys.stderr)
+                record_budget_cancel(
+                    request_id=f"budgetcancel:{exc.dimension}",
+                    reason_class="budget_cancel",
+                    dimension=exc.dimension,
+                )
             raise
         except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
             # Mirror dispatch_fact fail-closed translation so enrollment gaps

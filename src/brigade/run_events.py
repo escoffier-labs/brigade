@@ -71,6 +71,9 @@ ENVELOPE_KEYS = frozenset(
 # private-data exclusions are structural: no key can carry raw prompts, model
 # output, tool arguments, credentials, provider response bodies, or stack
 # traces -- only bounded detail/status/seat-style strings and integer attempts.
+# ``run_budget.cancelled`` is the one structured exception: ``active_seats``
+# is a bounded string list and ``outcomes`` is a closed list of three-string
+# maps, both re-validated by ``run_budget.validate_run_budget_payload``.
 EVENT_TYPES: dict[str, frozenset[str]] = {
     "run.created": frozenset({"status"}),
     "run.planning.started": frozenset({"detail"}),
@@ -454,6 +457,8 @@ def _validate_payload(event_type: str, payload: Any) -> None:
         if key == "producer_keyids" and isinstance(value, list):
             if any(not isinstance(item, str) or not item or len(item) > MAX_PAYLOAD_STR_LEN for item in value):
                 raise CanonicalizationError("approval producer_keyids must be a list of bounded strings")
+            continue
+        if event_type == "run_budget.cancelled" and key in {"active_seats", "outcomes"} and isinstance(value, list):
             continue
         raise CanonicalizationError(_bound(f"payload {key!r} has unsupported type {type(value).__name__}"))
     if event_type == "approval":
