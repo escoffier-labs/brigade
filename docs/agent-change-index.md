@@ -21,7 +21,7 @@ orchestrated agent change in one signed, in-toto Statement. It is produced by
 - `brigade receipts verify-agent-change <envelope-or-run-dir>
   --target <dir> [--policy <file>] [--json]`
   Audit the index. When `<envelope-or-run-dir>` is a directory, the verifier
-  reads `agent-change.json` inside it; when it is a file, it locates the run
+  reads `agent-change.json` inside it. When it is a file, it locates the run
   directory from the statement's run id under `<target>/.brigade/runs/`.
   Exit is `0` only for `COMPLETE-OK`.
 
@@ -78,7 +78,7 @@ Predicate fields:
   as needed.
 - `missing`: list of `{"kind", "reason"}` entries for required references that
   are absent at emit time. Only kinds listed in the policy's `required_references`
-  are included; a policy that does not require `agent-request` will not list it.
+  are included. A policy that does not require `agent-request` will not list it.
 - `otherTreeReceipts`: test-result receipts whose `producer_run_id` matches
   but whose `tree_fingerprint` differs from the final tree.
 - `complete`: boolean. The emitter sets this from the policy, but verifiers
@@ -101,7 +101,7 @@ the agent-change predicate type and the statement's `gitTree` subject claim.
   (`PASSED` or `FAILED`) and `rederived`.
 - `human-approval`: every approval file in `<run-dir>/approvals/<nonce>.json`
   whose name matches `^[0-9a-f]{32}\.json$`. The latest journal-bound approval
-  is marked `journalBound: true`; the others are `journalBound: false`.
+  is marked `journalBound: true`. The others are `journalBound: false`.
 
 ## Verifier axes and statuses
 
@@ -112,7 +112,7 @@ Index envelope:
 - `syntax`: `wellformed` or `malformed`.
 - `signature`: `valid`, `invalid`, or `unverifiable`. A signature from an
   untrusted key is still reported as `valid` because the signature verified
-  cryptographically over the PAE bytes; the `trust` axis reports `untrusted`
+  cryptographically over the PAE bytes. The `trust` axis reports `untrusted`
   and the overall status is `INVALID`.
 - `trust`: `trusted`, `untrusted`, or `unknown` (when `allowed_signers` is
   absent or unreadable).
@@ -137,8 +137,8 @@ Each reference:
 - `rederivation`: `reproduced`, `failed`, or `not-applicable`. Test Results
   only.
 - `policy_outcome`: `pass`, `fail`, `unevaluated`, or `not-applicable`. A
-  `PASSED` Test Result under an allowed profile with a trusted signer passes;
-  anything else is `fail` or `unevaluated`.
+  `PASSED` Test Result under an allowed profile with a trusted signer passes.
+  Anything else is `fail` or `unevaluated`.
 
 Project scope:
 
@@ -155,7 +155,7 @@ Required-set evaluation:
 Overall status:
 
 - `COMPLETE-OK`: every required reference is present, cryptographically valid,
-  trusted, bound, re-derived where applicable, and passes policy; and the index
+  trusted, bound, re-derived where applicable, and passes policy. The index
   envelope is valid, trusted, bound, and policy-matched.
 - `INCOMPLETE`: a required reference is missing or does not satisfy the policy.
 - `INVALID`: signature or policy check failed.
@@ -170,5 +170,5 @@ The index is signed with the same workspace attestation key that signs Test
 Result attestations. `signerIndependence` is therefore
 `"shared-workspace-key"`, meaning the index is a producer self-attestation, not
 an independent assessment. The verifier does not treat shared-key signing as a
-trust defect; it reports `trust: trusted` when the signature verifies against
+trust defect. It reports `trust: trusted` when the signature verifies against
 `allowed_signers` and reports the shared-key limitation in the statement.
