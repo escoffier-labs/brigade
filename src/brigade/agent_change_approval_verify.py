@@ -270,12 +270,14 @@ def verify_approval_references(
                 )
                 if verified.detail == "APPROVAL-STALE" or verified.status in {"APPROVAL-INVALID", "APPROVAL-STALE"}:
                     _mark_invalid(observation)
-                elif requester is None:
-                    _merge_policy(observation, "fail" if decision in {"deny", "hold"} else "unevaluated")
-                elif verified.status == "APPROVED":
-                    _merge_policy(observation, "pass")
                 elif verified.status in {"SOD-VIOLATION", "APPROVAL-EXPIRED", "DENIED", "HELD"}:
                     _merge_policy(observation, "fail")
+                elif decision in {"deny", "hold"}:
+                    _merge_policy(observation, "fail")
+                elif requester is None:
+                    _merge_policy(observation, "unevaluated")
+                elif verified.status == "APPROVED":
+                    _merge_policy(observation, "pass")
                 else:
                     _merge_policy(observation, "unevaluated")
 
