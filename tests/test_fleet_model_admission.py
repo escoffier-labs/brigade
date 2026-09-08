@@ -63,6 +63,10 @@ ADMISSION_PROVENANCE_KEYS = (
     "binding",
     "expires_at",
 )
+REQUIRES_SAFE_CACHE = pytest.mark.skipif(
+    not fleet_model_admission.nofollow_supported(),
+    reason="LKG cache tests require no-follow descriptor support",
+)
 RETIRED_SPELLINGS = (
     ("codex", "gpt-5.4"),
     ("openai", "gpt-5.4"),
@@ -1667,6 +1671,7 @@ def test_model_admission_decision_is_frozen_and_secret_free():
     _secret_free(decision, "Bearer", "/tmp/", "prompt")
 
 
+@REQUIRES_SAFE_CACHE
 def test_valid_node_roster_is_cached_after_mac_and_digest_checks(tmp_path, monkeypatch):
     from brigade import fleet_model_admission
 
@@ -1837,6 +1842,7 @@ def test_windows_without_nofollow_fails_closed(tmp_path, monkeypatch):
         assert offline.reason == "cache-unsafe-platform"
 
 
+@REQUIRES_SAFE_CACHE
 def test_lkg_is_used_only_after_timeout_transport_or_http_5xx(tmp_path, monkeypatch):
     from brigade import fleet_model_admission
 
@@ -1888,6 +1894,7 @@ def test_lkg_is_used_only_after_timeout_transport_or_http_5xx(tmp_path, monkeypa
         ),
     ],
 )
+@REQUIRES_SAFE_CACHE
 def test_authoritative_auth_and_conflict_never_fall_back_to_lkg(tmp_path, monkeypatch, exc, reason, exit_code):
     from brigade import fleet_model_admission
 
@@ -1910,6 +1917,7 @@ def test_authoritative_auth_and_conflict_never_fall_back_to_lkg(tmp_path, monkey
         _secret_free(decision, node_token, ADMIN_TOKEN)
 
 
+@REQUIRES_SAFE_CACHE
 def test_malformed_and_integrity_failures_never_rewrite_lkg(tmp_path, monkeypatch):
     from brigade import fleet_model_admission
 
@@ -2013,6 +2021,7 @@ def test_malformed_and_integrity_failures_never_rewrite_lkg(tmp_path, monkeypatc
         )
 
 
+@REQUIRES_SAFE_CACHE
 def test_admit_hub_success_lkg_success_policy_denial_and_revision_conflict(tmp_path, monkeypatch):
     from brigade import fleet_model_admission
 
@@ -2099,6 +2108,7 @@ def test_admit_hub_success_lkg_success_policy_denial_and_revision_conflict(tmp_p
         _secret_free(conflict, node_token, ADMIN_TOKEN)
 
 
+@REQUIRES_SAFE_CACHE
 def test_fleet_models_cli_admit_doctor_reconcile_retire_and_default(tmp_path, monkeypatch, capsys):
     from brigade import fleet_model_admission
 
@@ -2457,6 +2467,7 @@ def test_validate_envelope_rejects_expires_at_not_after_issued_at(tmp_path, monk
         )
 
 
+@REQUIRES_SAFE_CACHE
 def test_lkg_rejects_cached_at_beyond_allowed_future_skew(tmp_path, monkeypatch):
     from brigade import fleet_model_admission
 
@@ -2498,6 +2509,7 @@ def test_lkg_read_rejects_a_mac_valid_revision_below_high_water(tmp_path, monkey
 
 
 @pytest.mark.parametrize("highest_revision", ["not-an-integer", ["not-an-integer"]])
+@REQUIRES_SAFE_CACHE
 def test_lkg_rejects_malformed_highest_revision_without_raising(tmp_path, monkeypatch, highest_revision):
     from brigade import fleet_model_admission
 
@@ -2524,6 +2536,7 @@ def test_lkg_rejects_malformed_highest_revision_without_raising(tmp_path, monkey
         assert decision.reason == "lkg-unsafe"
 
 
+@REQUIRES_SAFE_CACHE
 def test_cli_t3_fleet_admit_fails_closed_when_audit_spool_read_raises_oserror(tmp_path, monkeypatch, capsys):
     with _hub(tmp_path) as hub:
         node_token = _enroll(hub)
@@ -2563,6 +2576,7 @@ def test_cli_t3_fleet_admit_fails_closed_when_audit_spool_read_raises_oserror(tm
 
 
 @pytest.mark.parametrize("mutation", ["extra-field", "model", "expired"])
+@REQUIRES_SAFE_CACHE
 def test_cli_t3_fleet_replay_rejects_tampered_admission_payload(tmp_path, monkeypatch, capsys, mutation):
     with _hub(tmp_path) as hub:
         node_token = _enroll(hub)
@@ -2616,6 +2630,7 @@ def test_cli_t3_fleet_replay_rejects_tampered_admission_payload(tmp_path, monkey
         assert payload["error"] == "lkg-unsafe"
 
 
+@REQUIRES_SAFE_CACHE
 def test_audit_replay_rejects_created_at_beyond_allowed_future_skew(tmp_path, monkeypatch):
     from brigade import fleet_model_admission
 
@@ -2731,6 +2746,7 @@ def test_map_hub_admission_rejects_non_authoritative_or_extra_fields_and_applies
     }
 
 
+@REQUIRES_SAFE_CACHE
 def test_reconcile_authority_failure_is_nonzero_and_doctor_does_not_write_cache(tmp_path, monkeypatch):
     from brigade import fleet_model_admission
 
@@ -2776,6 +2792,7 @@ def test_reconcile_authority_failure_is_nonzero_and_doctor_does_not_write_cache(
         assert fleet_model_admission.lkg_path().read_bytes() == lkg_before
 
 
+@REQUIRES_SAFE_CACHE
 def test_doctor_cache_valid_revalidates_mac_not_existence(tmp_path, monkeypatch):
     from brigade import fleet_model_admission
 
@@ -2797,6 +2814,7 @@ def test_doctor_cache_valid_revalidates_mac_not_existence(tmp_path, monkeypatch)
         assert doctor.payload["cache_valid"] is False
 
 
+@REQUIRES_SAFE_CACHE
 def test_malformed_signed_rows_are_malformed_roster_without_mutation(tmp_path, monkeypatch):
     from brigade import fleet_model_admission
 
@@ -2821,6 +2839,7 @@ def test_malformed_signed_rows_are_malformed_roster_without_mutation(tmp_path, m
         assert fleet_model_admission.lkg_path().read_bytes() == before
 
 
+@REQUIRES_SAFE_CACHE
 def test_lkg_enforces_independent_ttl_windows(tmp_path, monkeypatch):
     from brigade import fleet_model_admission
 
@@ -2866,6 +2885,7 @@ def _lkg_body(raw: bytes) -> dict:
     return record
 
 
+@REQUIRES_SAFE_CACHE
 def test_admit_malformed_and_client_errors_never_use_lkg(tmp_path, monkeypatch):
     from brigade import fleet_model_admission
 
@@ -2990,6 +3010,7 @@ def test_reconcile_missing_default_and_enabled_seats_are_instance_missing(tmp_pa
         assert "cursor_composer" in seats
 
 
+@REQUIRES_SAFE_CACHE
 def test_lkg_cache_omits_legacy_models_projection(tmp_path, monkeypatch):
     from brigade import fleet_model_admission
 
@@ -3005,6 +3026,7 @@ def test_lkg_cache_omits_legacy_models_projection(tmp_path, monkeypatch):
         ) | {"mac"}
 
 
+@REQUIRES_SAFE_CACHE
 def test_audit_spool_bounds_replay_and_fails_closed_on_corrupt(tmp_path, monkeypatch):
     from brigade import fleet_model_admission
 
@@ -3748,6 +3770,7 @@ def test_admin_token_can_inspect_but_cannot_cache_or_admit(tmp_path, monkeypatch
         assert not fleet_model_admission.high_water_path().exists()
 
 
+@REQUIRES_SAFE_CACHE
 def test_oversized_audit_spool_fails_closed_without_rewrite(tmp_path, monkeypatch):
     from brigade import fleet_model_admission
 
