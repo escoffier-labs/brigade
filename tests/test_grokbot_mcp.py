@@ -2330,7 +2330,9 @@ def test_queue_claim_treats_a_null_worker_label_as_omitted(tmp_path: Path):
     worker = _adapter(tmp_path)
 
     assert grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": job_id, "worker_label": None}) is True
-    claimed = worker.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-null", "worker_label": None})
+    claimed = worker.call_tool(
+        "grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-null", "worker_label": None}
+    )
     assert "worker_label" not in claimed
 
 
@@ -2370,6 +2372,8 @@ def test_claim_advertises_the_optional_worker_label_argument():
 
     assert "worker_label" not in required
     assert optional["worker_label"] is str
-    assert grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": "grokbot-a", "worker_label": "builder-2"})
+    assert grokbot_mcp._valid_tool_arguments(
+        "grokbot_queue_claim", {"job_id": "grokbot-a", "worker_label": "builder-2"}
+    )
     assert grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": "grokbot-a", "worker_label": None})
     assert not grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": "grokbot-a", "worker_label": 2})
