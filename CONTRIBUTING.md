@@ -74,6 +74,19 @@ Keep a command path as a working deprecated alias for at least one stable releas
 
 ## Planning artifacts
 
+Session handoffs, model ratings, proposed operator rosters, raw model responses,
+and announcement drafts stay local. Store new working artifacts under ignored
+`.brigade/` paths. Public documentation should use reviewed prose and examples.
+Screenshots may remain public. Review them for credentials, private prompts,
+and private paths before adding them.
+
+Only `TEMPLATE.md` and `.gitkeep` belong in tracked harness handoff inboxes.
+CI runs `python3 scripts/check_public_files.py` before its content scan and
+rejects tracked files matched by repository `.gitignore` rules, including files
+added with `git add -f`. To stop tracking an exposed file while preserving the
+local copy, use `git rm --cached -- <path>` and add an ignore rule if needed.
+Removing a file from the current tree leaves earlier Git history intact.
+
 Reviewed planning docs are public and tracked: the phase plans (`docs/phase-*.md`), `docs/roadmap-completion-plan.md`, and the superpowers plans and specs under `docs/superpowers/`. They stay in the repo as a record of how the work was sequenced.
 
 `/docs/plans/` and `/docs/specs/` are gitignored on purpose. They are scratch space for in-flight drafts that have not been reviewed for publication. When a plan there is finished and scrubbed, move it to one of the tracked locations above (or delete it).

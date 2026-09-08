@@ -660,7 +660,7 @@ This path requires user-installed `acpx 0.12.0` and `cursor-agent acp`. Read-onl
 ACP model ids follow the ids advertised by `cursor-agent acp`, which can differ from direct Cursor aliases. Authenticated checks with `acpx 0.12.0` passed `composer-2.5` and `grok-4.5`. The direct alias `grok-4.5-xhigh` is rejected by ACP; the ACP server advertises `grok-4.5` with `modelId` `grok-4.5[effort=high,fast=true]`. Acpx has no separate reasoning flag, so Brigade does not translate the direct alias or infer an effort setting. Pin the exact model id for the selected transport.
 Direct Cursor inventory is not applied to ACP seats because the two transports advertise different IDs. ACP version and authentication checks remain separate roster-doctor checks.
 Run `brigade roster doctor` to validate roster syntax and check which CLIs are on `PATH`.
-To decide which model belongs in which seat with receipt-backed evidence instead of reputation, see [model ratings](model-ratings.md).
+Use local verification receipts to compare candidate models for each task. Keep raw ratings and operator roster decisions in ignored local storage.
 When `--roster` is omitted, `brigade run` first reads `--cwd/.brigade/roster.toml`;
 if that file is missing, it falls back to `Path.home()/.brigade/roster.toml`.
 Passing `--roster` keeps using exactly that file.

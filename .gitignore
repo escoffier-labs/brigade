@@ -76,7 +76,20 @@ Thumbs.db
 !/scripts/verify_component_manifest_provenance.py
 !/scripts/verify_env.py
 !/scripts/version_sync.py
+!/scripts/check_public_files.py
 /skills/
+
+# Operator notes and raw review artifacts stay local. Publish reviewed,
+# redacted documentation and synthetic examples instead.
+/benchmarks/model-ratings*/
+/docs/model-ratings*.md
+/docs/announcement-*.md
+/docs/research/evidence/*.md
+
+# Protect handoff inboxes for harnesses beyond this checkout's managed set.
+/.*/memory-handoffs/*
+!/.*/memory-handoffs/TEMPLATE.md
+!/.*/memory-handoffs/.gitkeep
 
 # Local plan/spec scratch dirs only. Reviewed planning artifacts ARE
 # tracked and public: docs/phase-*.md, docs/roadmap-completion-plan.md,

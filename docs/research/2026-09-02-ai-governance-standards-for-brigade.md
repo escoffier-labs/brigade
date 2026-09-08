@@ -1,8 +1,8 @@
 # AI governance, audit, and proof-of-work standards Brigade could evidence
 
-Status: research, 2026-09-02. No code changes. Two Luna (gpt-5.6) survey reports
-are archived beside this file under `evidence/` and were spot-checked by hand
-against primary sources on the same day.
+Status: research, 2026-09-02. No code changes. The supporting survey reports
+were spot-checked by hand against primary sources on the same day. Raw model
+responses are local working artifacts and are excluded from the repository.
 
 ## BLUF
 
@@ -294,6 +294,4 @@ June 2026" (the 2026 edition shipped 9 Dec 2025) and Gemini's SCAI
 - [GitHub: trace any Copilot coding agent commit to its session logs](https://github.blog/changelog/2026-03-20-trace-any-copilot-coding-agent-commit-to-its-session-logs/), [agent audit log events](https://docs.github.com/en/copilot/reference/agentic-audit-log-events)
 - [Anthropic Compliance API](https://claude.com/blog/claude-platform-compliance-api)
 
-Full clause-level surveys with their own source lists:
-`evidence/2026-09-02-ai-governance-luna-survey-1-frameworks.md` and
-`evidence/2026-09-02-ai-governance-luna-survey-2-attestations.md`.
+The source links above remain available for review without the local survey files.

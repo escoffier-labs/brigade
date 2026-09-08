@@ -437,6 +437,11 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # Rejects tracked files that repository .gitignore rules ignore (e.g. a
+      # force-added local handoff). Runs before the content scan because the
+      # scan's tracked scope deliberately skips .claude/ and cannot see them.
+      - name: Tracked files honor .gitignore
+        run: python scripts/check_public_files.py
       # Scans with the guard this repo ships, not a pinned copy of the retired
       # standalone repo. Brigade has no runtime dependencies, so PYTHONPATH is
       # enough and no install step is needed. --baseline accepts the findings
