@@ -1383,7 +1383,7 @@ profile.
 
 **Paths:** Test Result `<run-dir>/attestation.sigstore.json`, agent-change `<run-dir>/agent-change.sigstore.json`, and commit-linkage `<run-dir>/linkage/<commit-sha>.sigstore.json` (exported with `--profile cosign`).
 
-An opt-in signer profile packaging Test Result, agent-change, or commit-linkage in-toto Statements as unwrapped standardized Sigstore bundles returned by `cosign attest-blob`. The file is the unmodified standardized Sigstore bundle output returned by cosign.
+An opt-in signer profile packaging Test Result, agent-change, or commit-linkage in-toto Statements as unwrapped standardized Sigstore bundles returned by `cosign attest-blob`. The file is the unwrapped standardized Sigstore bundle output returned by cosign, with validated Sigstore fields preserved.
 
 ### Bundle Structure
 

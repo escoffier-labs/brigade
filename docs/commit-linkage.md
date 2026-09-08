@@ -31,9 +31,9 @@ separator, and the hex validation of every SHA before use makes this safe.
 
 Predicate type `https://brigade.dev/attestation/commit-linkage/v1`,
 `schemaVersion: 1`. Subject: exactly one entry
-`{"name": "git:commit", "digest": {"gitCommit": <full-sha>}}`. Signed with
-`brigade.sshsig-dsse.v1` using the workspace attestation key, and written to
-`<run-dir>/linkage/<commit-sha>.json`.
+`{"name": "git:commit", "digest": {"gitCommit": <full-sha>}}`. By default,
+the statement is signed with `brigade.sshsig-dsse.v1` using the workspace
+attestation key, and written to `<run-dir>/linkage/<commit-sha>.json`.
 
 ## Cosign profile
 

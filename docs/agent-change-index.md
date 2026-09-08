@@ -14,9 +14,10 @@ orchestrated agent change in one signed, in-toto Statement. It is produced by
 
 - `brigade receipts export agent-change --target <dir> --run-id <run-id>
   [--key <path>] [--profile <sshsig|cosign>] [--policy <file>] [--out <path>] [--force] [--json]`
-  Build and sign the index statement for `<run-id>`. The default output is
-  `<run-dir>/agent-change.json`. Exit is `0` when the index is complete under
-  the policy and nonzero when it is incomplete.
+  Build and sign the index statement for `<run-id>`. The default SSHSIG profile
+  writes `<run-dir>/agent-change.json`. The cosign profile writes
+  `<run-dir>/agent-change.sigstore.json`. Exit is `0` when the index is
+  complete under the policy and nonzero when it is incomplete.
 
 - `brigade receipts verify-agent-change <envelope-or-run-dir>
   --target <dir> [--policy <file>] [--json]`
