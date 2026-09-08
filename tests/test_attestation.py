@@ -183,25 +183,32 @@ def test_cli_export_refuses_a_stale_stored_receipt_digest(tmp_path: Path, capsys
 
 
 def test_ad_hoc_command_name_drops_env_vars_and_paths(tmp_path: Path) -> None:
+    # Plant a value that cannot appear in lowercase SHA-256 hex. The previous
+    # SECRET=abc sentinel can occur in receipt SHA-256 hex.
+    secret_value = "ZzSentinelValue"
+    planted_path = "/tmp/x"
     key_path, _signers_path = attestation.keygen(tmp_path, principal="alice-signer")
-    receipt = _sample_receipt(tmp_path)
-    receipt["commands"][0]["check_id"] = None
-    receipt["commands"][0]["command"] = "SECRET=abc /tmp/x/bin/pytest -q /tmp/x/tests"
-    receipt["commands"][0]["argv"] = None
-    _restamp_receipt(receipt)
+    for index in range(50):
+        run_root = tmp_path / f"run-{index:02d}"
+        run_root.mkdir()
+        receipt = _sample_receipt(run_root)
+        receipt["commands"][0]["check_id"] = None
+        receipt["commands"][0]["command"] = f"SECRET={secret_value} {planted_path}/bin/pytest -q {planted_path}/tests"
+        receipt["commands"][0]["argv"] = None
+        _restamp_receipt(receipt)
 
-    envelope = attestation.export_attestation(receipt, key_path=key_path)
-    payload_bytes = base64.b64decode(envelope["payload"])
-    statement = json.loads(payload_bytes)
-    pred = statement["predicate"]
-    assert pred["passedTests"] == ["pytest -q tests"]
-    assert pred["failedTests"] == []
+        envelope = attestation.export_attestation(receipt, key_path=key_path)
+        payload_bytes = base64.b64decode(envelope["payload"])
+        statement = json.loads(payload_bytes)
+        pred = statement["predicate"]
+        assert pred["passedTests"] == ["pytest -q tests"]
+        assert pred["failedTests"] == []
 
-    envelope_json = json.dumps(envelope)
-    payload_json = payload_bytes.decode("utf-8")
-    for secret in ("SECRET", "abc", "/tmp/x"):
-        assert secret not in envelope_json
-        assert secret not in payload_json
+        envelope_json = json.dumps(envelope)
+        payload_json = payload_bytes.decode("utf-8")
+        for secret in ("SECRET", secret_value, planted_path):
+            assert secret not in envelope_json
+            assert secret not in payload_json
 
 
 def test_ad_hoc_command_name_with_unbalanced_quote_still_exports(tmp_path: Path) -> None:
