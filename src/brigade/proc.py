@@ -956,6 +956,75 @@ def _collection_complete(
     return collector.stream_limit_exceeded or (process.poll() is not None and not _readers_alive(threads))
 
 
+def _join_started_threads_after_exception(threads: list[threading.Thread], timeout: float) -> None:
+    """Attempt every already-started cleanup join under one shared deadline."""
+    deadline = time.monotonic() + max(timeout, 0.0)
+    for thread in threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        try:
+            thread.join(timeout=remaining)
+        except BaseException:
+            pass
+
+
+def _cleanup_launch_exception(
+    process: subprocess.Popen[bytes],
+    process_registry: ProcessRegistry | None,
+    child_job: _WindowsChildJob | None,
+    started_threads: list[threading.Thread],
+) -> None:
+    """Best-effort bounded cleanup while preserving a launch setup exception."""
+    try:
+        _stop_child(process, process_registry, child_job)
+    except BaseException:
+        pass
+    try:
+        process.wait(timeout=_TIMED_OUT_DRAIN_SECONDS)
+    except BaseException:
+        pass
+    _join_started_threads_after_exception(started_threads, _TIMED_OUT_DRAIN_SECONDS)
+
+
+def _release_launch_resources(
+    process: subprocess.Popen[bytes],
+    process_registry: ProcessRegistry | None,
+    child_job: _WindowsChildJob | None,
+    registration_attempted: bool,
+) -> BaseException | None:
+    """Release launcher-owned resources without letting one release skip another."""
+    cleanup_exception: BaseException | None = None
+
+    def record_cleanup_exception(exc: BaseException) -> None:
+        nonlocal cleanup_exception
+        if cleanup_exception is None:
+            cleanup_exception = exc
+
+    if child_job is not None:
+        try:
+            child_job.close()
+        except Exception:
+            pass
+        except BaseException as exc:
+            record_cleanup_exception(exc)
+    if registration_attempted and process_registry is not None:
+        try:
+            process_registry.unregister(process)
+        except BaseException as exc:
+            record_cleanup_exception(exc)
+    for stream_name in ("stdout", "stderr", "stdin"):
+        stream = getattr(process, stream_name, None)
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+            except BaseException as exc:
+                record_cleanup_exception(exc)
+    return cleanup_exception
+
+
 def _collect_process_output(
     process: subprocess.Popen[bytes],
     *,
@@ -964,6 +1033,7 @@ def _collect_process_output(
     process_registry: ProcessRegistry | None,
     child_job: _WindowsChildJob | None = None,
     supervise_group: bool = False,
+    started_threads: list[threading.Thread] | None = None,
 ) -> Result:
     collector = _BoundedCollector()
 
@@ -981,17 +1051,21 @@ def _collect_process_output(
             collector.wake.set()
 
     threads: list[threading.Thread] = []
+    if started_threads is None:
+        started_threads = []
     for stream, name in ((process.stdout, "stdout"), (process.stderr, "stderr")):
         if stream is None:
             continue
         reader = threading.Thread(target=read_stream, args=(stream, name), daemon=True)
         reader.start()
         threads.append(reader)
+        started_threads.append(reader)
 
     stdin_thread: threading.Thread | None = None
     if process.stdin is not None:
         stdin_thread = threading.Thread(target=_write_stdin, args=(process, stdin), daemon=True)
         stdin_thread.start()
+        started_threads.append(stdin_thread)
 
     def watch_process() -> None:
         try:
@@ -1001,6 +1075,7 @@ def _collect_process_output(
 
     process_watcher = threading.Thread(target=watch_process, daemon=True)
     process_watcher.start()
+    started_threads.append(process_watcher)
 
     timed_out = False
     incomplete_group = False
@@ -1019,38 +1094,31 @@ def _collect_process_output(
 
     deadline = time.monotonic() + max(timeout, 0.0)
     exited_at: float | None = None
-    try:
-        while True:
-            if _collection_complete(process, threads, collector):
+    while True:
+        if _collection_complete(process, threads, collector):
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+        wait_for = remaining
+        if process.poll() is not None:
+            if exited_at is None:
+                exited_at = time.monotonic()
+            # The direct child is gone but a descendant still holds an
+            # output pipe open. Drain briefly, then reap the whole group
+            # instead of blocking until the timeout.
+            drain_left = _TIMED_OUT_DRAIN_SECONDS - (time.monotonic() - exited_at)
+            if drain_left <= 0:
+                incomplete_group = True
                 break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                break
-            wait_for = remaining
-            if process.poll() is not None:
-                if exited_at is None:
-                    exited_at = time.monotonic()
-                # The direct child is gone but a descendant still holds an
-                # output pipe open. Drain briefly, then reap the whole group
-                # instead of blocking until the timeout.
-                drain_left = _TIMED_OUT_DRAIN_SECONDS - (time.monotonic() - exited_at)
-                if drain_left <= 0:
-                    incomplete_group = True
-                    break
-                wait_for = min(wait_for, drain_left)
-            # Clear-check-wait: avoid missing a wake that arrives between the
-            # completeness check above and the blocking wait below.
-            collector.wake.clear()
-            if _collection_complete(process, threads, collector):
-                break
-            collector.wake.wait(timeout=wait_for)
-    except BaseException:
-        try:
-            _stop_child(process, process_registry, child_job)
-        except Exception:
-            pass
-        raise
+            wait_for = min(wait_for, drain_left)
+        # Clear-check-wait: avoid missing a wake that arrives between the
+        # completeness check above and the blocking wait below.
+        collector.wake.clear()
+        if _collection_complete(process, threads, collector):
+            break
+        collector.wake.wait(timeout=wait_for)
 
     if supervise_group and not timed_out and not incomplete_group and process.poll() is not None:
         # Supervised runs (scanner launches): once the direct child is gone,
@@ -1326,6 +1394,7 @@ def _launch_and_collect(
 ) -> Result:
     windows_launch = os.name == "nt"
     child_job: _WindowsChildJob | None = None
+    started_threads: list[threading.Thread] = []
     if windows_launch:
         # The job must exist before the child can run a single instruction.
         child_job = _create_windows_child_job()
@@ -1361,9 +1430,12 @@ def _launch_and_collect(
         bind_error = _bind_suspended_windows_child(child_job, process, args)
         if bind_error is not None:
             return Result(code=126, stdout="", stderr=bind_error)
-    if process_registry is not None:
-        process_registry.register(process)
+    registration_attempted = False
+    primary_exception = False
     try:
+        if process_registry is not None:
+            registration_attempted = True
+            process_registry.register(process)
         return _collect_process_output(
             process,
             timeout=timeout,
@@ -1371,22 +1443,21 @@ def _launch_and_collect(
             process_registry=process_registry,
             child_job=child_job,
             supervise_group=supervise_group,
+            started_threads=started_threads,
         )
+    except BaseException:
+        primary_exception = True
+        _cleanup_launch_exception(process, process_registry, child_job, started_threads)
+        raise
     finally:
-        if child_job is not None:
-            try:
-                child_job.close()
-            except Exception:
-                pass
-        if process_registry is not None:
-            process_registry.unregister(process)
-        for stream_name in ("stdout", "stderr", "stdin"):
-            stream = getattr(process, stream_name, None)
-            if stream is not None:
-                try:
-                    stream.close()
-                except OSError:
-                    pass
+        cleanup_exception = _release_launch_resources(
+            process,
+            process_registry,
+            child_job,
+            registration_attempted,
+        )
+        if not primary_exception and cleanup_exception is not None:
+            raise cleanup_exception
 
 
 def run_delimited(
