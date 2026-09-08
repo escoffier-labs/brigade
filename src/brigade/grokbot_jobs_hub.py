@@ -153,6 +153,7 @@ def _hub_projection_job(job: dict[str, Any]) -> dict[str, Any]:
         "artifact_size",
         "claimant_node",
         "claimant_worker",
+        "worker_label",
         "lease_generation",
         "queue_id",
     ):

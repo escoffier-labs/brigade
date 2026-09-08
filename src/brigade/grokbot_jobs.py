@@ -38,6 +38,7 @@ from .grokbot_job_validation import (
     validate_opaque_id as _validate_opaque_id,
     validate_ownership_paths as _validate_ownership_paths,
     validate_repository as _validate_repository,
+    validate_worker_label,
 )
 from .grokbot_jobs_hub import (
     _hub_job,
@@ -464,9 +465,13 @@ def claim(
     lease_id: str,
     lease_seconds: int,
     now: datetime | None = None,
+    *,
+    worker_label: str | None = None,
 ) -> dict[str, Any]:
     """Claim a queued job with one opaque bot lease."""
-    return _claim_job(target, job_id, bot_id, lease_id, lease_seconds, now, include_context=False)
+    return _claim_job(
+        target, job_id, bot_id, lease_id, lease_seconds, now, include_context=False, worker_label=worker_label
+    )
 
 
 def claim_execution_context(
@@ -476,9 +481,13 @@ def claim_execution_context(
     lease_id: str,
     lease_seconds: int,
     now: datetime | None = None,
+    *,
+    worker_label: str | None = None,
 ) -> dict[str, Any]:
     """Claim a queued job and return its validated worker context."""
-    return _claim_job(target, job_id, bot_id, lease_id, lease_seconds, now, include_context=True)
+    return _claim_job(
+        target, job_id, bot_id, lease_id, lease_seconds, now, include_context=True, worker_label=worker_label
+    )
 
 
 def _claim_job(
@@ -490,13 +499,23 @@ def _claim_job(
     now: datetime | None,
     *,
     include_context: bool,
+    worker_label: str | None = None,
 ) -> dict[str, Any]:
     job_id = _validate_job_id(job_id)
     bot_id = _validate_opaque_id(bot_id, "invalid-bot-id")
     lease_id = _validate_opaque_id(lease_id, "invalid-lease-id")
     lease_seconds = _validate_lease_seconds(lease_seconds)
+    worker_label = None if worker_label is None else validate_worker_label(worker_label)
     if hub_authority(target):
-        return _claim_via_hub(target, job_id, bot_id, lease_id, lease_seconds, include_context=include_context)
+        return _claim_via_hub(
+            target,
+            job_id,
+            bot_id,
+            lease_id,
+            lease_seconds,
+            include_context=include_context,
+            worker_label=worker_label,
+        )
     timestamp, instant = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
@@ -522,6 +541,8 @@ def _claim_job(
                 "lease_id": lease_id,
             }
         )
+        if worker_label is not None:
+            record["worker_label"] = worker_label
         _commit_mutation(storage.jobs, record, timestamp)
         return _claim_result(record, include_context=include_context)
 
@@ -1311,6 +1332,7 @@ def _validate_record(record: dict[str, Any]) -> dict[str, Any]:
         "lease_id",
         "cancel_requested_at",
         "result_artifact",
+        "worker_label",
     }
     if set(record) - required - optional or not required <= set(record) or record.get("schema") != JOB_SCHEMA:
         raise GrokbotJobError("corrupt-storage")
@@ -1349,6 +1371,13 @@ def _validate_record(record: dict[str, Any]) -> dict[str, Any]:
             raise GrokbotJobError("corrupt-storage")
         _validate_opaque_id(record["bot_id"], "corrupt-storage")
         _validate_opaque_id(record["lease_id"], "corrupt-storage")
+        if "worker_label" in record:
+            try:
+                validate_worker_label(record["worker_label"])
+            except GrokbotJobError:
+                raise GrokbotJobError("corrupt-storage") from None
+    elif "worker_label" in record:
+        raise GrokbotJobError("corrupt-storage")
     if "cancel_requested_at" in record:
         if (
             not present_live_fields
@@ -1677,7 +1706,14 @@ TERMINAL_STATES = frozenset({"completed", "failed", "expired", "canceled"})
 
 
 def _claim_via_hub(
-    target: Path, job_id: str, bot_id: str, lease_id: str, lease_seconds: int, *, include_context: bool
+    target: Path,
+    job_id: str,
+    bot_id: str,
+    lease_id: str,
+    lease_seconds: int,
+    *,
+    include_context: bool,
+    worker_label: str | None = None,
 ) -> dict[str, Any]:
     current = _hub_job(job_id)
     decision = _require_hub(
@@ -1687,6 +1723,7 @@ def _claim_via_hub(
         lease_seconds=lease_seconds,
         expected_item_revision=current["item_revision"],
         operation_id=f"claim:{job_id}:{current['item_revision']}",
+        worker_label=worker_label,
     )
     result = _hub_projection(decision)
     if include_context:
