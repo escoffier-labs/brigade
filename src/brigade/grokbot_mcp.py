@@ -392,9 +392,12 @@ class GrokbotAdapter:
             job_id = _job_id(arguments)
             return grokbot_jobs.read_report(self.config.target, job_id)
         if name == "grokbot_queue_claim":
-            job = self._eligible_job(arguments, allowed={"job_id"}, optional={"lease_id", "lease_seconds"})
+            job = self._eligible_job(
+                arguments, allowed={"job_id"}, optional={"lease_id", "lease_seconds", "worker_label"}
+            )
             lease_id = _lease_id(arguments, mint=True)
             lease_seconds = self._requested_lease_seconds(arguments)
+            worker_label = _worker_label(arguments)
             if grokbot_jobs.hub_authority(self.config.target):
                 return self._granted_lease(
                     name,
@@ -404,6 +407,7 @@ class GrokbotAdapter:
                         self.config.bot_id,
                         lease_id,
                         lease_seconds,
+                        worker_label=worker_label,
                     ),
                     lease_id,
                     lease_seconds,
@@ -419,7 +423,12 @@ class GrokbotAdapter:
                 raise AdapterError()
             try:
                 result = grokbot_jobs.claim_execution_context(
-                    self.config.target, job["job_id"], self.config.bot_id, lease_id, lease_seconds
+                    self.config.target,
+                    job["job_id"],
+                    self.config.bot_id,
+                    lease_id,
+                    lease_seconds,
+                    worker_label=worker_label,
                 )
             except Exception:
                 self._release_hub_lease(job["job_id"], lease_id, "released")
@@ -889,12 +898,19 @@ def _tool_handler(adapter: GrokbotAdapter, name: str) -> Callable[..., Any]:
         handler: Callable[..., Any] = invoke_list
     elif name == "grokbot_queue_claim":
 
-        def invoke_claim(job_id: str, lease_id: str | None = None, lease_seconds: int | None = None) -> dict[str, Any]:
+        def invoke_claim(
+            job_id: str,
+            lease_id: str | None = None,
+            lease_seconds: int | None = None,
+            worker_label: str | None = None,
+        ) -> dict[str, Any]:
             payload: dict[str, Any] = {"job_id": job_id}
             if lease_id is not None:
                 payload["lease_id"] = lease_id
             if lease_seconds is not None:
                 payload["lease_seconds"] = lease_seconds
+            if worker_label is not None:
+                payload["worker_label"] = worker_label
             return _invoke_adapter(adapter, name, payload)
 
         handler = invoke_claim
@@ -1084,6 +1100,17 @@ def _lease_id(arguments: dict[str, Any], *, mint: bool = False) -> str:
     return lease_id
 
 
+def _worker_label(arguments: Mapping[str, Any]) -> str | None:
+    """Return the caller's optional per-bot label, or None when omitted."""
+    value = arguments.get("worker_label")
+    if value is None:
+        return None
+    try:
+        return grokbot_jobs.validate_worker_label(value)
+    except grokbot_jobs.GrokbotJobError:
+        raise AdapterError("worker_label must match [a-z0-9-]{1,32}") from None
+
+
 @dataclass(frozen=True)
 class ListOptions:
     """The validated, role-pinned projection filters for one list call."""
@@ -1230,7 +1257,7 @@ _TOOL_ARGUMENT_TYPES: dict[str, tuple[dict[str, type[object]], dict[str, type[ob
     "grokbot_queue_cancel": ({"job_id": str}, {}),
     "grokbot_queue_expire": ({"job_id": str}, {}),
     "grokbot_queue_report": ({"job_id": str}, {}),
-    "grokbot_queue_claim": ({"job_id": str}, {"lease_id": str, "lease_seconds": int}),
+    "grokbot_queue_claim": ({"job_id": str}, {"lease_id": str, "lease_seconds": int, "worker_label": str}),
     "grokbot_queue_renew": ({"job_id": str, "lease_id": str}, {}),
     "grokbot_queue_start": ({"job_id": str, "lease_id": str}, {}),
     "grokbot_queue_complete": ({"job_id": str, "lease_id": str, "artifact": dict}, {"report_text": str}),
@@ -1312,11 +1339,13 @@ _LIST_DESCRIPTION = (
 )
 _CLAIM_DESCRIPTION = (
     "Claim one queued job for this listener's fixed worker identity. Arguments: job_id (required), "
-    "lease_id (optional), and lease_seconds (optional, integer {lease_min}..{lease_max}); null means "
-    "omitted for either optional. When lease_id is omitted the listener mints one and returns it as "
-    "lease_id; carry that value on every later call for this job. When lease_seconds is omitted the "
-    "listener grants its configured lease ({lease_default} seconds here). The result carries the "
-    "granted lease_seconds and the lease_expires_at deadline; the job's own deadline can shorten it. "
+    "lease_id (optional), lease_seconds (optional, integer {lease_min}..{lease_max}), and "
+    "worker_label (optional, [a-z0-9-]{{1,32}}); null means omitted for any optional. When lease_id "
+    "is omitted the listener mints one and returns it as lease_id; carry that value on every later "
+    "call for this job. When lease_seconds is omitted the listener grants its configured lease "
+    "({lease_default} seconds here). A supplied worker_label is stored on the hub job row and "
+    "echoed unchanged on claim, status, renew, and complete. The result carries the granted "
+    "lease_seconds and the lease_expires_at deadline; the job's own deadline can shorten it. "
     "The routine sequence is grokbot_queue_list, grokbot_queue_claim, grokbot_queue_start, "
     "grokbot_queue_renew before lease_expires_at, then grokbot_queue_complete or grokbot_queue_fail, "
     "and grokbot_queue_ack_cancel when the operator requests cancellation. A renew or fail sent after "

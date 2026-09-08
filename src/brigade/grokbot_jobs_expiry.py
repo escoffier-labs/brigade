@@ -38,7 +38,7 @@ def _projection(record: dict[str, Any]) -> dict[str, Any]:
         "item_revision": record["item_revision"],
         "artifact": spec["artifact"],
     }
-    for key in ("claimed_at", "lease_expires_at", "cancel_requested_at"):
+    for key in ("claimed_at", "lease_expires_at", "cancel_requested_at", "worker_label"):
         if key in record:
             projection[key] = record[key]
     return projection

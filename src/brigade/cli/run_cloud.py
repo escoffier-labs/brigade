@@ -1688,9 +1688,20 @@ def _print_grokbot_result(result: dict) -> None:
         jobs = result["jobs"]
         print(f"grokbot jobs: {len(jobs)}")
         for job in jobs:
-            print(f"job {job['job_id']} state={job['state']}")
+            print(_format_grokbot_job_line(job))
         return
-    print(f"job {result['job_id']} state={result['state']}")
+    print(_format_grokbot_job_line(result))
+
+
+def _format_grokbot_job_line(job: dict) -> str:
+    line = f"job {job['job_id']} state={job['state']}"
+    claimant = job.get("claimant_worker") or job.get("claimant_node")
+    if claimant:
+        line += f" claimant={claimant}"
+    label = job.get("worker_label")
+    if label:
+        line += f" worker_label={label}"
+    return line
 
 
 if __name__ == "__main__":  # pragma: no cover
