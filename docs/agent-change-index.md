@@ -13,7 +13,7 @@ orchestrated agent change in one signed, in-toto Statement. It is produced by
   unless `--force` is given.
 
 - `brigade receipts export agent-change --target <dir> --run-id <run-id>
-  [--key <path>] [--policy <file>] [--out <path>] [--force] [--json]`
+  [--key <path>] [--profile <sshsig|cosign>] [--policy <file>] [--out <path>] [--force] [--json]`
   Build and sign the index statement for `<run-id>`. The default output is
   `<run-dir>/agent-change.json`. Exit is `0` when the index is complete under
   the policy and nonzero when it is incomplete.
@@ -83,6 +83,13 @@ Predicate fields:
   but whose `tree_fingerprint` differs from the final tree.
 - `complete`: boolean. The emitter sets this from the policy, but verifiers
   recompute it from their own policy and ignore the statement value.
+
+## Cosign profile
+
+`--profile cosign` writes an unwrapped Sigstore bundle to
+`<run-dir>/agent-change.sigstore.json`. `verify-agent-change` accepts SSHSIG
+envelopes only. External consumers use `cosign verify-blob-attestation` with
+the agent-change predicate type and the statement's `gitTree` subject claim.
 
 ## Reference kinds
 

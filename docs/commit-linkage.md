@@ -16,11 +16,12 @@ not who authored them, and not whether any review occurred.
 
 ## Commands
 
-- `brigade receipts export commit-linkage --target <dir> --run-id <run-id> --commit <sha> [--key <path>] [--principal <name>] [--out <path>] [--force] [--json]`
+- `brigade receipts export commit-linkage --target <dir> --run-id <run-id> --commit <sha> [--key <path>] [--profile <sshsig|cosign>] [--principal <name>] [--out <path>] [--force] [--json]`
 - `brigade receipts verify-commit-linkage <envelope-or-run-dir> --target <dir> [--commit <sha>] [--json]`
 
-With a run directory, `--commit` selects among `linkage/*.json`; when exactly
-one linkage envelope exists, `--commit` is optional. `--commit` accepts a full
+With a run directory, `--commit` selects among SSHSIG `linkage/*.json` files
+and ignores sibling `.sigstore.json` bundles; when exactly one SSHSIG envelope
+exists, `--commit` is optional. `--commit` accepts a full
 SHA only (40 or 64 lowercase hex characters matching the repository's object
 format). The internal `git rev-parse` and `git rev-list` calls do not take a
 trailing `--` before the SHA because those commands would treat it as a path
@@ -33,6 +34,14 @@ Predicate type `https://brigade.dev/attestation/commit-linkage/v1`,
 `{"name": "git:commit", "digest": {"gitCommit": <full-sha>}}`. Signed with
 `brigade.sshsig-dsse.v1` using the workspace attestation key, and written to
 `<run-dir>/linkage/<commit-sha>.json`.
+
+## Cosign profile
+
+`--profile cosign` writes an unwrapped Sigstore bundle to
+`<run-dir>/linkage/<commit-sha>.sigstore.json`. `verify-commit-linkage`
+accepts SSHSIG envelopes only. External consumers use
+`cosign verify-blob-attestation` with the commit-linkage predicate type and
+the statement's `gitCommit` subject claim.
 
 ## Predicate fields
 
