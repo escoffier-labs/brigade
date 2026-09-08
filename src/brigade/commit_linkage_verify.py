@@ -88,7 +88,11 @@ def _find_linkage_envelope(
     if not linkage_dir.is_dir() or linkage_dir.is_symlink():
         return None, None, f"linkage directory not found: {linkage_dir}"
 
-    files = sorted(p for p in linkage_dir.iterdir() if p.is_file() and not p.is_symlink() and p.suffix == ".json")
+    files = sorted(
+        p
+        for p in linkage_dir.iterdir()
+        if p.is_file() and not p.is_symlink() and p.suffix == ".json" and not p.name.endswith(".sigstore.json")
+    )
     if not files:
         return None, None, f"no linkage envelopes found in {linkage_dir}"
 

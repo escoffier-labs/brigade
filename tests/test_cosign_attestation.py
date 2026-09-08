@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from brigade import attestation, attestation_cmd, cli, cosign_attestation, localio
+from brigade import agent_change, attestation, attestation_cmd, cli, commit_linkage, cosign_attestation, localio
 
 
 def _sample_statement() -> dict[str, Any]:
@@ -773,6 +773,94 @@ def test_real_cosign_bundle_verifies_with_git_tree_subject(tmp_path: Path, monke
         timeout=30,
     )
     assert res_verify.returncode == 0, f"cosign verify failed: {res_verify.stderr}\nstdout: {res_verify.stdout}"
+
+    agent_change.init_policy(tmp_path)
+    agent_run_dir = tmp_path / ".brigade" / "runs" / run_id
+    agent_run_dir.mkdir(parents=True)
+    (agent_run_dir / "run.json").write_text(
+        json.dumps({"tree_fingerprint": tree_fingerprint, "orchestrator": "chef", "worker": "worker"}),
+        encoding="utf-8",
+    )
+    assert agent_change.export_agent_change(tmp_path, run_id, profile="cosign") == 3
+    agent_bundle = agent_run_dir / "agent-change.sigstore.json"
+    result = subprocess.run(
+        [
+            cosign_bin,
+            "verify-blob-attestation",
+            "--bundle",
+            str(agent_bundle),
+            "--key",
+            str(public_key_path),
+            "--insecure-ignore-tlog=true",
+            f"--type={agent_change.AGENT_CHANGE_PREDICATE_TYPE}",
+            f"--digest={tree_fingerprint}",
+            "--digestAlg=gitTree",
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+    repo = tmp_path / "commit-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "file.txt").write_text("fixture", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "file.txt"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    commit_sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    commit_tree = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    agent_change.init_policy(repo)
+    commit_run_dir = repo / ".brigade" / "runs" / "commit-run"
+    commit_run_dir.mkdir(parents=True)
+    (commit_run_dir / "run.json").write_text(
+        json.dumps({"tree_fingerprint": commit_tree, "baseline_commit": commit_sha}), encoding="utf-8"
+    )
+    assert (
+        commit_linkage.export_commit_linkage(
+            repo, "commit-run", commit_sha, key=key_dir / "cosign.key", profile="cosign"
+        )
+        == 0
+    )
+    linkage_bundle = commit_run_dir / "linkage" / f"{commit_sha}.sigstore.json"
+    result = subprocess.run(
+        [
+            cosign_bin,
+            "verify-blob-attestation",
+            "--bundle",
+            str(linkage_bundle),
+            "--key",
+            str(public_key_path),
+            "--insecure-ignore-tlog=true",
+            f"--type={commit_linkage.COMMIT_LINKAGE_PREDICATE_TYPE}",
+            f"--digest={commit_sha}",
+            "--digestAlg=gitCommit",
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_cosign_key_path_resolution_and_env_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

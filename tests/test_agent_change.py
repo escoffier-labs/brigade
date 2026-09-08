@@ -31,8 +31,8 @@ if not shutil.which("ssh-keygen"):
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-def _keygen(target: Path, principal: str = "test-signer") -> Path:
-    key_path, _ = attestation.keygen(target, principal=principal)
+def _keygen(target: Path, principal: str = "test-signer", *, key_file: Path | None = None) -> Path:
+    key_path, _ = attestation.keygen(target, principal=principal, key_file=key_file)
     return key_path
 
 
@@ -353,52 +353,149 @@ def _build_full_run(
     baseline_commit: str = "2222222222222222222222222222222222222222",
     patch_sha256: str = "3333333333333333333333333333333333333333333333333333333333333333",
     approval_version: int = 2,
+    include_request: bool = True,
+    approval_expires_at: str = "2027-09-06T13:00:00.000000Z",
+    approver_is_requester: bool = False,
+    approver_is_producer: bool = False,
+    producer_is_requester: bool = True,
+    approval_decision: str = "allow",
 ) -> tuple[Path, Path, Path, dict[str, Any]]:
     target = tmp_path / "ws"
     target.mkdir()
     agent_change.init_policy(target)
     key_path = _keygen(target)
+    producer_principal = "test-signer" if producer_is_requester else "test-producer"
+    producer_key_path = (
+        key_path
+        if producer_is_requester
+        else _keygen(
+            target,
+            principal=producer_principal,
+            key_file=target / ".brigade" / "attestation" / "test-producer-key",
+        )
+    )
+    if approver_is_requester:
+        approver_principal, approver_key_path = "test-signer", key_path
+    elif approver_is_producer:
+        approver_principal, approver_key_path = producer_principal, producer_key_path
+    else:
+        approver_principal = "test-approver"
+        approver_key_path = _keygen(
+            target,
+            principal=approver_principal,
+            key_file=target / ".brigade" / "attestation" / "test-approver-key",
+        )
     run_id = "run-001"
     run_dir = _run_dir(target, run_id, tree)
-    request_info = _signed_request(target, run_dir, key_path, baseline_commit)
-    # Update run.json with the request fields without recreating the directory.
-    run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-    run_json["requester_principal"] = request_info["requester_principal"]
-    run_json["requester_keyid"] = request_info["requester_keyid"]
-    run_json["request"] = {
-        "nonce": request_info["nonce"],
-        "attestation_path": request_info["attestation_path"],
-        "task_sha256": request_info["task_sha256"],
-        "statement_sha256": request_info["statement_sha256"],
-        "baseline_commit": request_info["baseline_commit"],
-    }
-    (run_dir / "run.json").write_text(json.dumps(run_json, indent=2, sort_keys=True), encoding="utf-8")
-    _test_result_envelope(target, run_dir, key_path, "verify-001", tree, baseline_commit, patch_sha256)
+    request_info: dict[str, Any] = {}
+    if include_request:
+        request_info = _signed_request(target, run_dir, key_path, baseline_commit)
+        # Update run.json with the request fields without recreating the directory.
+        run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        run_json["requester_principal"] = request_info["requester_principal"]
+        run_json["requester_keyid"] = request_info["requester_keyid"]
+        run_json["request"] = {
+            "nonce": request_info["nonce"],
+            "attestation_path": request_info["attestation_path"],
+            "task_sha256": request_info["task_sha256"],
+            "statement_sha256": request_info["statement_sha256"],
+            "baseline_commit": request_info["baseline_commit"],
+        }
+        (run_dir / "run.json").write_text(json.dumps(run_json, indent=2, sort_keys=True), encoding="utf-8")
+    else:
+        run_journal.append_event(
+            run_dir / "events" / "lifecycle.jsonl",
+            run_id=run_id,
+            event_type="run.created",
+            payload={"status": "created"},
+            idempotency_key="run-started",
+            expected_previous_sequence=0,
+            recorded_at="2026-09-06T00:00:00.000000Z",
+        )
+    patch_bytes = b"patch"
+    _test_result_envelope(
+        target,
+        run_dir,
+        producer_key_path,
+        "verify-001",
+        tree,
+        baseline_commit,
+        hashlib.sha256(patch_bytes).hexdigest(),
+    )
     approval_nonce = "02" * 16
     journal_path = run_dir / "events" / "lifecycle.jsonl"
-    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    report = run_journal.read_journal(journal_path)
+    requester = approval_v2.verify_recorded_request(target, run_dir, report.events)
+    decided_at = "2026-09-06T13:00:00.000000Z"
+    expires_at = approval_expires_at
+    reason = "looks good"
+    approver_keyid = _key_fingerprint(approver_key_path)
+    if approval_version == 2:
+        evidence = approval_v2.collect_test_result_evidence(target, run_id, tree)
+        statement = approval_v2.build_statement(
+            run_id=run_id,
+            journal_chain_head=report.events[-1].event_digest,
+            tree_fingerprint=tree,
+            evidence=evidence,
+            requester=requester,
+            decision=approval_decision,
+            scope="run",
+            principal=approver_principal,
+            keyid=approver_keyid,
+            decided_at=decided_at,
+            expires_at=expires_at,
+            nonce=approval_nonce,
+            reason_code="reviewed-tests",
+            reason=reason,
+        )
+        producer_keyids = sorted(evidence.producer_keyids)
+    else:
+        receipts = approval.collect_verify_receipts(target, run_id, tree_fingerprint=tree)
+        statement = approval.build_statement(
+            run_id=run_id,
+            journal_chain_head=report.events[-1].event_digest,
+            tree_fingerprint=tree,
+            receipts=receipts,
+            decision=approval_decision,
+            scope="run",
+            principal=approver_principal,
+            keyid=approver_keyid,
+            decided_at=decided_at,
+            expires_at=expires_at,
+            nonce=approval_nonce,
+            reason_code="reviewed-tests",
+            reason=reason,
+        )
+        producer_keyids = sorted({keyid for receipt in receipts for keyid in receipt.signing_keyids})
+    envelope = attestation.create_envelope(statement, approver_key_path)
+    approval_path = run_dir / "approvals" / f"{approval_nonce}.json"
+    approval_path.parent.mkdir(parents=True, exist_ok=True)
+    approval_path.write_text(json.dumps(envelope, indent=2, sort_keys=True), encoding="utf-8")
+    statement_sha256 = hashlib.sha256(attestation.canonical_statement_bytes(statement)).hexdigest()
     run_journal.append_event(
         journal_path,
         run_id=run_id,
         event_type="approval",
         payload={
-            "decision": "allow",
+            "decision": approval_decision,
             "scope": "run",
-            "approver_principal": "test-signer",
-            "approver_keyid": _key_fingerprint(key_path),
+            "approver_principal": approver_principal,
+            "approver_keyid": approver_keyid,
             "subject_tree": tree,
             "nonce": approval_nonce,
-            "decided_at": "2026-09-06T13:00:00.000000Z",
-            "expires_at": "2027-09-06T13:00:00.000000Z",
-            "statement_sha256": "a" * 64,
+            "decided_at": decided_at,
+            "expires_at": expires_at,
+            "statement_sha256": statement_sha256,
             "attestation_path": f"approvals/{approval_nonce}.json",
-            "producer_keyids": [],
+            "producer_keyids": producer_keyids,
         },
         idempotency_key=f"approval:{approval_nonce}",
         expected_previous_sequence=1,
-        recorded_at="2026-09-06T13:00:00.000000Z",
+        recorded_at=decided_at,
     )
-    _ = _approval_envelope(run_dir, key_path, tree, approval_nonce, "a" * 64, version=approval_version)
+    run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    run_json["approval"] = {"reason": reason}
+    (run_dir / "run.json").write_text(json.dumps(run_json, indent=2, sort_keys=True), encoding="utf-8")
     return target, run_dir, key_path, request_info
 
 

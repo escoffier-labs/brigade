@@ -58,7 +58,7 @@ use schema version 2. Readers older than version 2 refuse these events with
 | `duration_seconds` | number | no | Wall time |
 | `timeout` | integer | no | Per-command timeout seconds |
 | `path` | string | yes | Run directory path |
-| `producer_run_id` | string | no | Orchestrator run id from `BRIGADE_RUN_ID` when the producer ran under a Brigade run (#499). Omitted when unset; legacy receipts without it remain readable |
+| `producer_run_id` | string | no | Orchestrator run id from `BRIGADE_RUN_ID` when the producer ran under a Brigade run (#499). Omitted when unset. Legacy receipts without it remain readable |
 | `commands` | array of object | yes | See command object below |
 | `planned_commands` | array of string | no | Display argv joined |
 | `evidence` | object | no | Workspace evidence snapshot |
@@ -67,7 +67,7 @@ use schema version 2. Readers older than version 2 refuse these events with
 | `tree_fingerprint_head` | string \| null | yes | Fingerprint-time HEAD commit used to reset excluded evidence paths, or `null` with the unavailable identity tuple |
 | `changes_patch_sha256` | string \| null | yes | SHA-256 of `changes.patch`, or `null` with the unavailable identity tuple |
 | `git` | object | no | `{head, branch, dirty_files}` |
-| `code_graph_delta` | object | no | GraphTrail summary |
+| `code_graph_delta` | object | no | Brigade Code summary |
 | `harness_session` | object | no | `{harness, fingerprint}` |
 | `digests` | object | no | `{algorithm, logs, receipt_sha256, signature?, key_id?}` |
 | `reused_from` | string | no | Prior run id when reused |
@@ -95,7 +95,7 @@ explicit command and use `source: manifest_checks` (the manifest's own checks).
 | `schema_version` | integer | `1` |
 | `verifier` | object | `{source, command?\|argv?\|manifest_id?}` with `source` in `command`, `argv`, `manifest_id`, `manifest_checks` |
 | `rollback` | object | `{policy, command?}` with `policy` in `none`, `manual`, `command`, `git-restore` |
-| `budget` | object | `{latency_seconds, token_budget?, wall_clock_seconds?, worker_dispatch_count?, input_tokens?, output_tokens?}` — #500 declaration; #593 enforces wall-clock and worker-dispatch ceilings before new work starts. Aggregate `token_budget` (receipt `tokens_used`) stays observed and is not reinterpreted as `input_tokens`. Optional `input_tokens` / `output_tokens` declare explicit split observed caps. When `wall_clock_seconds` is unset, `latency_seconds` maps to the wall-clock ceiling. |
+| `budget` | object | `{latency_seconds, token_budget?, wall_clock_seconds?, worker_dispatch_count?, input_tokens?, output_tokens?}`: #500 declaration. #593 enforces wall-clock and worker-dispatch ceilings before new work starts. Aggregate `token_budget` (receipt `tokens_used`) stays observed and is not reinterpreted as `input_tokens`. Optional `input_tokens` / `output_tokens` declare explicit split observed caps. When `wall_clock_seconds` is unset, `latency_seconds` maps to the wall-clock ceiling. |
 
 **`budget_use` object**
 
@@ -107,7 +107,7 @@ explicit command and use `source: manifest_checks` (the manifest's own checks).
 | `tokens_used` | integer \| null | Observed aggregate tokens when an adapter reports them |
 | `input_tokens_budget` | integer | Declared input-token cap when set |
 | `output_tokens_budget` | integer | Declared output-token cap when set |
-| `exhausted` | boolean | Observation only; not an enforcement gate |
+| `exhausted` | boolean | Observation only. Not an enforcement gate |
 
 **`subject_binding` object** (additive, manifest-selected runs)
 
@@ -125,17 +125,17 @@ explicit command and use `source: manifest_checks` (the manifest's own checks).
 | `patch_binding` | object | Patch-backed tuple plus `subject_path` and `subject_hash` |
 | `fixture_binding` | object | `{manifest_id, case_id, check_id}` for fixture evaluation runs |
 
-**`generated_patch_quarantine` object** (additive, `patch_source: generated` only; #507)
+**`generated_patch_quarantine` object** (additive, `patch_source: generated` only. #507)
 
 | Field | Type | Notes |
 | --- | --- | --- |
 | `schema` | string | `brigade.generated_patch_quarantine.v1` |
 | `schema_version` | integer | `1` |
-| `status` | string | Always `quarantined` on the proposal envelope; independent verify + effectiveness checks lift it for scoring |
+| `status` | string | Always `quarantined` on the proposal envelope. Independent verify + effectiveness checks lift it for scoring |
 | `candidate_count` | integer | ≥ 1 sampled candidates from the producing model |
 | `model` | string | Model id that produced the candidates |
 | `model_version` | string | Model version / revision string |
-| `model_confidence`, `lexical_similarity`, `textual_similarity`, `repeated_sampling`, … | number \| integer | Optional audit-only fields. Explicitly non-promoting; ignored for eligibility and `signal_value` |
+| `model_confidence`, `lexical_similarity`, `textual_similarity`, `repeated_sampling`, … | number \| integer | Optional audit-only fields. Explicitly non-promoting. Ignored for eligibility and `signal_value` |
 
 Generated patches fail closed without complete quarantine metadata
 (`generated_patch_quarantine_incomplete`), without an independent verifier
@@ -174,7 +174,7 @@ receipts or routing authority.
 ## `brigade.verify_archive_index.v1`: `schema_version: 1`
 
 **Path:** `<verify-archive-root>/index.jsonl` (one JSON object per line, append-only,
-sorted keys per line). The default archive root is `.brigade/work/verify-archive`;
+sorted keys per line). The default archive root is `.brigade/work/verify-archive`.
 `.brigade/config.json` keys `verify_archive_enabled` and `verify_archive_dir` override it.
 
 Retention prunes the local `.brigade/work/verify-runs/` directory down to the newest
@@ -198,11 +198,11 @@ directory with the same files and file hashes as the source.
 | `source_run_dir` | string | yes | Original run directory path |
 | `archive_run_dir` | string | yes | Archived copy path |
 | `already_archived` | boolean | yes | `true` when an identical archive already existed |
-| `receipt_file_sha256` | string \| null | yes | SHA-256 of the archived `receipt.json` bytes; `null` when the run dir had no receipt |
-| `receipt_schema_version` | integer \| null | yes | The receipt's own `schema_version`; `null` for legacy receipts without one |
-| `receipt_sha256` | string \| null | yes | The receipt's self-declared canonical digest; `null` when absent |
-| `signature` | string \| null | yes | Receipt signature when the run was signed; `null` otherwise |
-| `key_id` | string \| null | yes | Signing key id paired with `signature`; `null` otherwise |
+| `receipt_file_sha256` | string \| null | yes | SHA-256 of the archived `receipt.json` bytes. `null` when the run dir had no receipt |
+| `receipt_schema_version` | integer \| null | yes | The receipt's own `schema_version`. `null` for legacy receipts without one |
+| `receipt_sha256` | string \| null | yes | The receipt's self-declared canonical digest. `null` when absent |
+| `signature` | string \| null | yes | Receipt signature when the run was signed. `null` otherwise |
+| `key_id` | string \| null | yes | Signing key id paired with `signature`. `null` otherwise |
 | `status` | string \| null | yes | Receipt status at archival time |
 | `started_at` | string \| null | yes | Receipt start timestamp |
 | `completed_at` | string \| null | yes | Receipt completion timestamp |
@@ -276,7 +276,7 @@ receipts that omit optional fields.
 | `acceptance` | array of string | yes | |
 | `risks` | array of string | yes | |
 | `steps` | array of string | yes | |
-| `decisions` | array of object | no | Optional decision checkpoints (#496). **Absent or omitted is valid** (legacy). When present must be a list; non-list values and malformed entries fail closed |
+| `decisions` | array of object | no | Optional decision checkpoints (#496). **Absent or omitted is valid** (legacy). When present must be a list. Non-list values and malformed entries fail closed |
 | `next_command` | string | yes | Suggested next safe command |
 | `receipt_paths` | array of string | yes | Related relative paths |
 | `research_runs` | array of object | yes | Quarantined research attachments |
@@ -290,7 +290,7 @@ receipts that omit optional fields.
 | `options` | array of string | yes | Non-empty allowed selections (each entry a non-empty string) |
 | `selected` | string \| null | yes | Chosen option when resolved |
 | `rationale` | string \| null | yes | Why that option |
-| `evidence_ref` | string \| null | yes | Opaque receipt path or external evidence id. Stored as written; **not** validated as a local file path (external/opaque ids are allowed) |
+| `evidence_ref` | string \| null | yes | Opaque receipt path or external evidence id. Stored as written. **Not** validated as a local file path (external/opaque ids are allowed) |
 | `status` | string | yes | `pending` or `resolved` |
 | `created_at` | string | yes | ISO-8601 |
 | `resolved_at` | string \| null | yes | ISO-8601 when resolved |
@@ -298,7 +298,7 @@ receipts that omit optional fields.
 A checkpoint is resolved only when `selected`, `rationale`, and `evidence_ref`
 are all non-empty and `selected` is one of the non-empty `options`. Every
 decision entry must include a present, non-empty `options` array of non-empty
-strings; `options: null`, `options: []`, or missing `options` fail closed.
+strings. `options: null`, `options: []`, or missing `options` fail closed.
 Unresolved checkpoints block plan `--accept`, `work task claim`, `work claim`,
 and `work task done`. Corrupt `decisions` data (non-list, non-object entry,
 invalid/missing id, duplicate id, wrong field types) must fail closed with exit code 2 /
@@ -394,7 +394,7 @@ journal event and signed envelope remain the evidence.
 ### Run budget lifecycle (`brigade.run_event.v1` event types, #593)
 
 Append-only facts under `events/lifecycle.jsonl`. Status-neutral in the run
-projector; the coordinator applies terminal policy via `run.failed` /
+projector. The coordinator applies terminal policy via `run.failed` /
 `run.interrupted` (or receipt termination) using run-owned kinds
 `budget-exhausted` and `operator-cancelled`. These are **not** #576 worker
 `FailureClass` values and are **not** infrastructure-neutral under #580.
@@ -628,7 +628,7 @@ instead of letting the worker improvise tools.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `stage`, `worker`, `task` | — | Assignment identity |
+| `stage`, `worker`, `task` | N/A | Assignment identity |
 | `requirements` | object | Declared `domain` / `capabilities` / `max_risk_class` (omit empty) |
 | `enforcement` | boolean | True when any requirement was declared |
 | `admissible` | array of scored tool | Sorted by score desc, then tool id |
@@ -650,7 +650,7 @@ instead of letting the worker improvise tools.
 additive `skill.json` `obligations` to report missing check / review / handoff
 receipts as advisory findings (`brigade.skill_obligations_audit.v1`). Per-run
 matching requires exact `producer_run_id` equality with the audited
-orchestrator run id; timestamp proximity never satisfies. Legacy receipts
+orchestrator run id. Timestamp proximity never satisfies. Legacy receipts
 without `producer_run_id` are reported as unattributed and cannot satisfy.
 Workers receive the orchestrator id as `BRIGADE_RUN_ID` through the run
 transport env path. See `docs/skill-registry.md`.
@@ -880,10 +880,10 @@ not infer import acceptance from the artifact filename alone.
 | Unknown manifest keys | **Refuse** (closed envelope) |
 | Nested receipt unknown keys | **Ignore** (receipt-family additive evolution) |
 | Symlinks / special files | **Refuse** |
-| Recovery-checkpoint bodies | **Strip** to closed artifact references on export (#636); validate refuses bodies |
-| Raw worker event streams (`events/**/*.jsonl` except authenticated lifecycle) | **Refuse** as portable public support; export replaces with scrubbed sidecars (`events/**/<worker>.scrubbed.json`, `privacy_class=redacted`) or fails closed (#592); nested smuggling paths are rejected |
-| Reserved `events/lifecycle.jsonl` | **Authenticate** as `brigade.run_event.v1` chain (or empty); reject raw JSON-RPC worker envelopes disguised as the journal (#592) |
-| Resume after import | **Not supported** in v1 (`resume_supported: false`); import is inspection/audit oriented |
+| Recovery-checkpoint bodies | **Strip** to closed artifact references on export (#636). Validate refuses bodies |
+| Raw worker event streams (`events/**/*.jsonl` except authenticated lifecycle) | **Refuse** as portable public support. Export replaces with scrubbed sidecars (`events/**/<worker>.scrubbed.json`, `privacy_class=redacted`) or fails closed (#592). Nested smuggling paths are rejected |
+| Reserved `events/lifecycle.jsonl` | **Authenticate** as `brigade.run_event.v1` chain (or empty). Reject raw JSON-RPC worker envelopes disguised as the journal (#592) |
+| Resume after import | **Not supported** in v1 (`resume_supported: false`). Import is inspection/audit oriented |
 | Digest mismatch | **Refuse** |
 
 `compatibility` object fields are closed for v1: reader window pinned to
@@ -929,7 +929,7 @@ path, and it does not contain its own digest.
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `path` | string | yes | Filename only; no separators or `..` |
+| `path` | string | yes | Filename only. No separators or `..` |
 | `sha256` | string | yes | SHA-256 of the file bytes |
 | `bytes` | integer | yes | File size in bytes |
 | `media_type` | string | yes | Best-effort media type |
@@ -949,7 +949,7 @@ references.
 Lineage-only companion for plan, run, verify, outcome, handoff, and synthesis
 artifacts (issue #493). It is not a second provenance, trust, or privacy
 envelope. Artifacts carry the companion under the additive `causal_receipt`
-field; run handoffs also write a sibling `*.causal-receipt.json`. Historical
+field. Run handoffs also write a sibling `*.causal-receipt.json`. Historical
 artifacts without the field remain readable and are not rewritten.
 
 | Field | Type | Required | Notes |
@@ -968,11 +968,11 @@ artifacts without the field remain readable and are not rewritten.
 | `kind` | string | yes | Closed: `plan`, `run`, `worker-result`, `synthesis`, `verify`, `outcome`, `handoff` |
 | `id` | string | yes | Safe identity label. Never an absolute path |
 | `digest` | string | no | Bare lowercase SHA-256 hex of the parent companion record |
-| `link` | string | yes | `recorded` on new writes; `inferred` is reserved for #583 backfill |
+| `link` | string | yes | `recorded` on new writes. `inferred` is reserved for #583 backfill |
 
 Compact JSON is capped at 2048 bytes. Unknown relations, malformed digests,
 broken parents, digest mismatches, and unsupported versions produce bounded
-diagnostics. Companions store references and digests only — never prompts,
+diagnostics. Companions store references and digests only. Never prompts,
 model output, tool arguments, retrieved content, stack traces, credentials,
 or home paths.
 
@@ -980,7 +980,7 @@ Typical recorded chain: plan → run (`planned_from`) → verify (`executed_from
 → outcome (`captured_from`) → handoff (`handed_off_from`). Synthesis may list
 multiple `synthesized_from` worker-result parents. When fan-in exceeds the
 inline bounds, those parents live in `brigade.causal_parent_manifest.v1`
-(`<run-id>-parent-manifest.json`); `walk_ancestors` resolves them through
+(`<run-id>-parent-manifest.json`). `walk_ancestors` resolves them through
 that sibling artifact.
 
 ### `brigade.causal_parent_manifest.v1`: `schema_version: 1`
@@ -1006,7 +1006,7 @@ prompts, transcript bodies, raw stdout/stderr, log paths, or absolute
 workspace paths. Every string that enters a list, detail, or watch JSON
 contract passes through one `_clean_str` chokepoint: the value is bounded,
 then home-directory prefixes are rewritten to `~` as the last transform.
-That rewrite is universal — not limited to `failure.detail` or
+That rewrite is universal. It is not limited to `failure.detail` or
 `commands[].command`. Matched prefixes are POSIX `/home/<user>` and
 `/Users/<user>` (including a doubled slash such as `/home//<user>`, and
 usernames that contain a space or an apostrophe) and Windows
@@ -1017,7 +1017,9 @@ and human CLI output are never modified.
 `GET /api/runs`, `GET /api/runs/<run-id>`, and `GET /api/runs/<run-id>/events`
 (SSE of watch records). It does not add a second artifact reader.
 
-### `brigade.runs-list.v1` — `brigade runs list --json`
+<a id="brigaderuns-listv1--brigade-runs-list---json"></a>
+
+### `brigade.runs-list.v1`: `brigade runs list --json`
 
 ```json
 {"schema": "brigade.runs-list.v1", "runs": [], "skipped_invalid": 0}
@@ -1032,7 +1034,9 @@ Invalid run directories are counted in `skipped_invalid` and skipped.
 That includes a child that is a symlink and a directory whose resolved
 path leaves the runs root, so list JSON cannot enumerate an alternate tree.
 
-### `brigade.run-detail.v1` — `brigade runs show <run> --json`, `brigade runs latest --json`
+<a id="brigaderun-detailv1--brigade-runs-show-run---json-brigade-runs-latest---json"></a>
+
+### `brigade.run-detail.v1`: `brigade runs show <run> --json`, `brigade runs latest --json`
 
 Both commands share one serializer:
 
@@ -1066,7 +1070,9 @@ Both commands share one serializer:
 - `briefs`: attachment markers for the Code Intelligence (`code-graph`),
   drift (`drift-impact`), and Evidence Ledger (`evidence`) briefs.
 
-### `brigade.run-watch.v1` — `brigade runs watch <run> --json`
+<a id="brigaderun-watchv1--brigade-runs-watch-run---json"></a>
+
+### `brigade.run-watch.v1`: `brigade runs watch <run> --json`
 
 Every newline-delimited watch record (`watch`, `run`, `plan`, `event`,
 `workers`, `synthesis`, `final`, `summary`) carries
@@ -1084,9 +1090,11 @@ unknown future record types. `brigade runs events` keeps its own
   prompts, transcript bodies, raw stdout/stderr, log paths, and
   absolute paths in `params` are omitted.
 - `final` text is one-lined and bounded through the same `_clean_str`
-  chokepoint; a value that cannot be rendered safely is omitted.
+  chokepoint. A value that cannot be rendered safely is omitted.
 
-### `brigade.run-diff.v1` — `brigade runs diff <child> [other] --json`
+<a id="brigaderun-diffv1--brigade-runs-diff-child-other---json"></a>
+
+### `brigade.run-diff.v1`: `brigade runs diff <child> [other] --json`
 
 Read-only comparison of a durable child against its recorded parent
 (one-argument form) or two sibling runs that share a parent (explicit
@@ -1110,14 +1118,14 @@ Unknown, corrupt, or parentless run IDs fail closed with no JSON.
 ```
 
 - `relation`: `child-parent` or `siblings`. Left is the child (or first
-  sibling); right is the parent (or second sibling).
+  sibling). Right is the parent (or second sibling).
 - `lifecycle`, `workers`, `verification`, and `outcome` each carry
   `changed`, optional `changes` (`field` / `left` / `right`), and the
   compared left/right views. Compared strings use the same `_clean_str`
   chokepoint as list/show/latest/watch. Verification `changed` is the
   ordered `{status, command, exit_code}` sequence across every receipt
-  and command; `run_id` and the `final.txt` digest are display-only.
-- `graphtrail` compares GraphTrail snapshot attestations only when both
+  and command. `run_id` and the `final.txt` digest are display-only.
+- `graphtrail` compares Brigade Code snapshot attestations only when both
   sides have compatible snapshots (`ok`/`status=ok` plus a before or
   after snapshot sha256). Absent or incompatible snapshots set
   `status: skipped` and a `reason` (`absent snapshots` or
@@ -1257,7 +1265,7 @@ the workspace's default attestation key. The common v1/v2 verifier enforces
 `approval-before-merge-ship` from journal sequence. An approval event must
 precede every merge or ship event even if its signed `decidedAt` was backdated.
 Projector version 7 makes existing `run.json` snapshots stale input for
-`run_shadow`; regenerate the shadow after the projection is refreshed.
+`run_shadow`. Regenerate the shadow after the projection is refreshed.
 
 Approval v1 remains verification-only compatibility. Verification reports
 `binding: receipt` because its subjects contain verify receipt digests. That
@@ -1272,8 +1280,8 @@ New decisions use
 receipt attributed to the run by exact `producer_run_id` and naming the
 approved final Git tree has all of the following:
 
-- complete baseline commit, final Git tree, and `changes.patch` identity;
-- a retained `changes.patch` whose SHA-256 matches the receipt;
+- complete baseline commit, final Git tree, and `changes.patch` identity.
+- a retained `changes.patch` whose SHA-256 matches the receipt.
 - a canonical SSHSIG Test Result envelope at `attestation.json` that verifies
   as `SIGNED-OK`, re-derives exactly from the local receipt, and has predicate
   result `PASSED`.
@@ -1293,7 +1301,7 @@ SHA-256 and then verify run id. The predicate repeats the exact sorted payload
 digest set and records, for every item, its verify run id, canonical envelope
 SHA-256, envelope profile, verified SSHSIG `signerKeyid`, and
 `producerKeyids`. The emitted `producerKeyids` value is the exact singleton
-list containing `signerKeyid`; removable receipt HMAC metadata is not a
+list containing `signerKeyid`. Removable receipt HMAC metadata is not a
 producer identity. Verification compares the signed set to the complete
 current final-tree set, so a missing, changed, or later final-tree receipt
 makes an allow approval stale. The predicate has a closed key set and records
@@ -1333,7 +1341,7 @@ Trust is evaluated offline via standard OpenSSH `allowed_signers` files:
 - Key revocation list (optional): `.brigade/attestation/revoked_keys`.
 - Allowed signers entry format: `<principal> namespaces="brigade-attestation" <key-type> <base64-key>`.
 - Verification executes `ssh-keygen -Y verify -f <allowed_signers> -I <principal> -n brigade-attestation -s <sigfile>` over the recomputed DSSE PAE. Re-derivation of the in-toto Statement from the local verify receipt, and therefore the `SUBJECT-MISMATCH` check, only runs when `--target` is given and the run directory referenced by the receipt exists.
-- `brigade receipts verify-attestation --require-receipt --target <workspace>` requires that local receipt. A missing receipt reports `EVIDENCE-MISSING`; without this opt-in, cross-machine signature-only verification remains valid.
+- `brigade receipts verify-attestation --require-receipt --target <workspace>` requires that local receipt. A missing receipt reports `EVIDENCE-MISSING`. Without this opt-in, cross-machine signature-only verification remains valid.
 
 ### `brigade.attestation_verify_result.v1`
 
@@ -1373,14 +1381,14 @@ profile.
 
 ## `brigade.attestation.cosign-dsse.v1`
 
-**Path:** `<run-dir>/attestation.sigstore.json` (exported via `brigade receipts export attestation --profile cosign`)
+**Paths:** Test Result `<run-dir>/attestation.sigstore.json`, agent-change `<run-dir>/agent-change.sigstore.json`, and commit-linkage `<run-dir>/linkage/<commit-sha>.sigstore.json` (exported with `--profile cosign`).
 
-An opt-in signer profile packaging a verify receipt (`brigade.work_verify_receipt`) as an unwrapped standardized Sigstore bundle returned by `cosign attest-blob`. The file is the unmodified standardized Sigstore bundle output returned by cosign. Its `dsseEnvelope` signs the existing in-toto Test Result Statement without additional wrapper objects or custom fields.
+An opt-in signer profile packaging Test Result, agent-change, or commit-linkage in-toto Statements as unwrapped standardized Sigstore bundles returned by `cosign attest-blob`. The file is the unwrapped standardized Sigstore bundle output returned by cosign, with validated Sigstore fields preserved.
 
 ### Bundle Structure
 
 - Media type: `application/vnd.dev.sigstore.bundle.v0.3+json`
-- Default output file: `<run-dir>/attestation.sigstore.json`, keeping SSHSIG output (`attestation.json`) distinct.
+- Default output files: `<run-dir>/attestation.sigstore.json`, `<run-dir>/agent-change.sigstore.json`, and `<run-dir>/linkage/<commit-sha>.sigstore.json`, each distinct from its SSHSIG envelope.
 - Envelope payload type: `application/vnd.in-toto+json`
 - Scope: local cosign key files only. The default private key path is `.brigade/attestation/cosign.key`, overridable via `BRIGADE_COSIGN_KEY_FILE` or `--key`. When using password-encrypted keys (such as those generated by `cosign generate-key-pair`), supply the password via the `COSIGN_PASSWORD` environment variable. Keyless OIDC, Fulcio, Rekor transparency log upload, KMS, and TSA are excluded.
 - Safe versions: cosign release versions 2.6.5 and newer within major 2 (invoked with `--new-bundle-format=true` and `--tlog-upload=false`) and 3.1.3 and newer within major 3 (invoked with a temporary offline `--signing-config`). Prereleases, distro-suffixed versions, other major versions, and vulnerable ranges from GHSA-fx35-mq7g-6g98 are rejected.
@@ -1389,7 +1397,13 @@ An opt-in signer profile packaging a verify receipt (`brigade.work_verify_receip
 
 Brigade does not provide a cosign verification wrapper command. `brigade receipts verify-attestation` remains the SSHSIG verifier and does not verify Sigstore bundles.
 
-External consumers verify the bundle directly with `cosign verify-blob-attestation`:
+External consumers verify the bundle directly with `cosign verify-blob-attestation`.
+
+| Export | Predicate type | Default file | Subject claim |
+| --- | --- | --- | --- |
+| Test Result | `https://in-toto.io/attestation/test-result/v0.1` | `<run-dir>/attestation.sigstore.json` | `gitTree` |
+| Agent-change | `https://brigade.dev/attestation/agent-change/v1` | `<run-dir>/agent-change.sigstore.json` | `gitTree` |
+| Commit-linkage | `https://brigade.dev/attestation/commit-linkage/v1` | `<run-dir>/linkage/<commit-sha>.sigstore.json` | `gitCommit` |
 
 ```bash
 cosign verify-blob-attestation \
@@ -1401,41 +1415,31 @@ cosign verify-blob-attestation \
   --digestAlg=gitTree
 ```
 
-Because Rekor transparency log upload is excluded from this profile, `--insecure-ignore-tlog=true` is required when verifying. Passing `--type=https://in-toto.io/attestation/test-result/v0.1` matches the in-toto Test Result predicate type, and `--digest=<git-tree>` with `--digestAlg=gitTree` enables claim checking against the in-toto Statement subject.
-
----
-
-## `brigade.attestation.cosign-dsse.v1`
-
-**Path:** `<run-dir>/attestation.sigstore.json` (exported via `brigade receipts export attestation --profile cosign`)
-
-An opt-in signer profile packaging a verify receipt (`brigade.work_verify_receipt`) as an unwrapped standardized Sigstore bundle returned by `cosign attest-blob`. The file is the unmodified standardized Sigstore bundle output returned by cosign. Its `dsseEnvelope` signs the existing in-toto Test Result Statement without additional wrapper objects or custom fields.
-
-### Bundle Structure
-
-- Media type: `application/vnd.dev.sigstore.bundle.v0.3+json`
-- Default output file: `<run-dir>/attestation.sigstore.json`, keeping SSHSIG output (`attestation.json`) distinct.
-- Envelope payload type: `application/vnd.in-toto+json`
-- Scope: local cosign key files only. The default private key path is `.brigade/attestation/cosign.key`, overridable via `BRIGADE_COSIGN_KEY_FILE` or `--key`. When using password-encrypted keys (such as those generated by `cosign generate-key-pair`), supply the password via the `COSIGN_PASSWORD` environment variable. Keyless OIDC, Fulcio, Rekor transparency log upload, KMS, and TSA are excluded.
-- Safe versions: cosign release versions 2.6.5 and newer within major 2 (invoked with `--new-bundle-format=true` and `--tlog-upload=false`) and 3.1.3 and newer within major 3 (invoked with a temporary offline `--signing-config`). Prereleases, distro-suffixed versions, other major versions, and vulnerable ranges from GHSA-fx35-mq7g-6g98 are rejected.
-
-### External Verification
-
-Brigade does not provide a cosign verification wrapper command. `brigade receipts verify-attestation` remains the SSHSIG verifier and does not verify Sigstore bundles.
-
-External consumers verify the bundle directly with `cosign verify-blob-attestation`:
-
 ```bash
 cosign verify-blob-attestation \
-  --bundle <run-dir>/attestation.sigstore.json \
+  --bundle <run-dir>/agent-change.sigstore.json \
   --key .brigade/attestation/cosign.pub \
   --insecure-ignore-tlog=true \
-  --type=https://in-toto.io/attestation/test-result/v0.1 \
+  --type=https://brigade.dev/attestation/agent-change/v1 \
   --digest=<git-tree> \
   --digestAlg=gitTree
 ```
 
-Because Rekor transparency log upload is excluded from this profile, `--insecure-ignore-tlog=true` is required when verifying. Passing `--type=https://in-toto.io/attestation/test-result/v0.1` matches the in-toto Test Result predicate type, and `--digest=<git-tree>` with `--digestAlg=gitTree` enables claim checking against the in-toto Statement subject.
+```bash
+cosign verify-blob-attestation \
+  --bundle <run-dir>/linkage/<commit-sha>.sigstore.json \
+  --key .brigade/attestation/cosign.pub \
+  --insecure-ignore-tlog=true \
+  --type=https://brigade.dev/attestation/commit-linkage/v1 \
+  --digest=<git-commit> \
+  --digestAlg=gitCommit
+```
+
+Because Rekor transparency log upload is excluded from this profile,
+`--insecure-ignore-tlog=true` is required when verifying. External verification
+validates the signature and declared claim only. It does not evaluate Brigade
+policy, reference completeness, or local tree equivalence. Agent requests and
+human approvals remain SSHSIG-only.
 
 ---
 
@@ -1444,14 +1448,14 @@ Because Rekor transparency log upload is excluded from this profile, `--insecure
 **Path:** `<target>/.brigade/attestation/agent-change-policy.json`
 
 External policy that governs what an agent-change index must contain. The index
-cannot define its own acceptance policy; the emitter refuses to run when this
+cannot define its own acceptance policy. The emitter refuses to run when this
 file is missing.
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `schema` | string | yes | Always `brigade.agent_change_policy.v1` |
 | `schema_version` | integer | yes | Always `1` for this contract |
-| `project_scope` | string | yes | Opaque operator-chosen scope; never a URL or path |
+| `project_scope` | string | yes | Opaque operator-chosen scope. Never a URL or path |
 | `required_references` | array of object | yes | Each entry has `kind` and optional `min_count` |
 | `allowed_profiles` | array of string | yes | Signer profiles accepted for references |
 | `policy_version` | integer | yes | Bumped for breaking changes |
@@ -1481,10 +1485,10 @@ Predicate carried by the agent-change evidence index.
 | `policy` | object | yes | `{"name": "brigade.agent_change_policy.v1", "digest": {"sha256": ...}}` |
 | `project` | object | yes | `{"scope": <project_scope>}` |
 | `signerIndependence` | string | yes | Always `"shared-workspace-key"` in this slice |
-| `references` | array of object | yes | Sorted reference entries; see below |
+| `references` | array of object | yes | Sorted reference entries. See below |
 | `missing` | array of object | yes | `{"kind", "reason"}` for absent required references |
 | `otherTreeReceipts` | array of object | yes | `{"verifyRunId", "tree"}` for matching producer runs on other trees |
-| `complete` | boolean | yes | Emitter-computed completeness; verifiers recompute it |
+| `complete` | boolean | yes | Emitter-computed completeness. Verifiers recompute it |
 
 Reference entry:
 
@@ -1520,12 +1524,12 @@ Machine-readable audit observations produced by the agent-change verifier.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `schema` | string | Always `brigade.agent_change_verification.v1` |
-| `status` | string | `COMPLETE-OK`, `INCOMPLETE`, `INVALID`, or `UNVERIFIABLE` |
+| `status` | string | `COMPLETE-OK`, `POLICY-FAIL`, `INCOMPLETE`, `INVALID`, or `UNVERIFIABLE` |
 | `evaluatedAt` | string (ISO-8601) | UTC Z timestamp |
 | `policy` | object | `{"path", "status", "digest"}` where `status` is `match`, `mismatch`, or `unavailable` |
 | `project` | object | `{"scope", "status"}` where `status` is `match` or `mismatch` |
-| `index` | object | Index envelope observations; see below |
-| `references` | array of object | Per-reference observations; see below |
+| `index` | object | Index envelope observations. See below |
+| `references` | array of object | Per-reference observations. See below |
 | `required_set` | array of object | `{"kind", "status", "count"}` for each required reference kind |
 | `disclaimer` | string | States that the result is an audit observation, not an approval or release decision |
 
@@ -1554,7 +1558,15 @@ Per-reference observations:
 | `binding` | string | `bound` or `conflicted` |
 | `rederivation` | string | `reproduced`, `failed`, or `not-applicable` |
 | `policy_outcome` | string | `pass`, `fail`, `unevaluated`, or `not-applicable` |
+| `approval_state` | string | Approval references only: `current`, `historical`, or `unavailable`. `historical` means an authenticated artifact/event association with policy unevaluated, not current validity. Only `current` can satisfy a required approval. |
 | `reason` | string \| null | Refusal reason when `availability` is `partial` or `syntax` is `malformed` |
+
+`POLICY-FAIL` is a clean policy refusal after integrity checks, not approval or
+release authority. Emitted `complete` and export success are advisory only.
+Missing requester evidence leaves allow unevaluated, while clean signed deny or
+hold remains `POLICY-FAIL`. Observed journal or envelope mutation and every
+integrity failure take precedence over policy failures. Unknown future statuses
+are non-success for consumers.
 
 ---
 

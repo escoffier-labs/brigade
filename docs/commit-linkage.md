@@ -16,11 +16,12 @@ not who authored them, and not whether any review occurred.
 
 ## Commands
 
-- `brigade receipts export commit-linkage --target <dir> --run-id <run-id> --commit <sha> [--key <path>] [--principal <name>] [--out <path>] [--force] [--json]`
+- `brigade receipts export commit-linkage --target <dir> --run-id <run-id> --commit <sha> [--key <path>] [--profile <sshsig|cosign>] [--principal <name>] [--out <path>] [--force] [--json]`
 - `brigade receipts verify-commit-linkage <envelope-or-run-dir> --target <dir> [--commit <sha>] [--json]`
 
-With a run directory, `--commit` selects among `linkage/*.json`; when exactly
-one linkage envelope exists, `--commit` is optional. `--commit` accepts a full
+With a run directory, `--commit` selects among SSHSIG `linkage/*.json` files
+and ignores sibling `.sigstore.json` bundles. When exactly one SSHSIG envelope
+exists, `--commit` is optional. `--commit` accepts a full
 SHA only (40 or 64 lowercase hex characters matching the repository's object
 format). The internal `git rev-parse` and `git rev-list` calls do not take a
 trailing `--` before the SHA because those commands would treat it as a path
@@ -30,16 +31,24 @@ separator, and the hex validation of every SHA before use makes this safe.
 
 Predicate type `https://brigade.dev/attestation/commit-linkage/v1`,
 `schemaVersion: 1`. Subject: exactly one entry
-`{"name": "git:commit", "digest": {"gitCommit": <full-sha>}}`. Signed with
-`brigade.sshsig-dsse.v1` using the workspace attestation key, and written to
-`<run-dir>/linkage/<commit-sha>.json`.
+`{"name": "git:commit", "digest": {"gitCommit": <full-sha>}}`. By default,
+the statement is signed with `brigade.sshsig-dsse.v1` using the workspace
+attestation key, and written to `<run-dir>/linkage/<commit-sha>.json`.
+
+## Cosign profile
+
+`--profile cosign` writes an unwrapped Sigstore bundle to
+`<run-dir>/linkage/<commit-sha>.sigstore.json`. `verify-commit-linkage`
+accepts SSHSIG envelopes only. External consumers use
+`cosign verify-blob-attestation` with the commit-linkage predicate type and
+the statement's `gitCommit` subject claim.
 
 ## Predicate fields
 
 - `run`: `{id, journalChainHead}` as in the agent-change index.
-- `attestedTree`: `{gitTree}` — the run's terminal `tree_fingerprint` from
+- `attestedTree`: `{gitTree}`. The run's terminal `tree_fingerprint` is from
   `run.json`.
-- `commitTree`: `{gitTree}` — `git rev-parse <sha>^{tree}`.
+- `commitTree`: `{gitTree}`. `git rev-parse <sha>^{tree}`.
 - `commitParents`: `[{"gitCommit": ...}]` in order, or `{"status": "unknown"}` at a
   shallow-repository boundary where the parents are cut off.
 - `commitKind`: `root`, `linear`, `merge`, or `unknown` when the parents are
@@ -48,7 +57,7 @@ Predicate type `https://brigade.dev/attestation/commit-linkage/v1`,
 - `equivalence`: `exact`, `normalized`, or `none`.
 - `git`: `{objectFormat, shallow}` from the local repository.
 - `baseline`: run baseline commit and its relationship to the commit's first
-  parent. Always present; `baselineRelation` is one of `same-as-parent`,
+  parent. Always present. `baselineRelation` is one of `same-as-parent`,
   `ancestor-of-parent`, `unrelated`, or `unknown` and is never `null`. Any
   missing information (including a root commit, a run with no recorded
   baseline, or a shallow boundary where ancestry cannot be determined) is
@@ -103,7 +112,7 @@ are:
 - `commitTree`: `match`, `mismatch`, or `unavailable`.
 - `normalizedTree`: `match`, `mismatch`, or `unavailable`.
 - `ruleDrift`: `true` when the statement's exclusion list differs from the
-  verifier's; the verifier still evaluates under the statement's list.
+  verifier's. The verifier still evaluates under the statement's list.
 - `equivalence`: `confirmed`, `contradicted`, or `unavailable`.
 - `runBinding`: `bound`, `conflicted`, or `unavailable`.
 - `indexBinding`: `bound`, `conflicted`, or `absent`.
@@ -115,7 +124,7 @@ Overall `status`:
 - `LINKED-NORMALIZED`: the normalized commit tree equals the attested tree, the
   exclusion rule has not drifted, and the normalization base is provable: either
   its source is `run-baseline`, the base commit equals the local `run.json`
-  `baseline_commit`, and the base commit equals the recomputed first parent; or
+  `baseline_commit`, and the base commit equals the recomputed first parent, or
   its source is `receipt-head` and the base commit equals the local `run.json`
   `tree_fingerprint_head`.
 - `NOT-EQUIVALENT`: trees do not match, or normalized equivalence was based on
@@ -140,5 +149,5 @@ and `1` or `2` on errors.
   sign a linkage for any commit that shares the attested tree.
 - No forge chronology, branch protection state, or review evidence is included.
 - The attested tree object may be unreachable and can be pruned by `git gc`.
-  A missing object does not change the digest comparison; it only means the
+  A missing object does not change the digest comparison. It only means the
   object cannot be probed directly.

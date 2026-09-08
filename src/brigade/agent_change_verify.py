@@ -13,6 +13,7 @@ from typing import Any
 
 from . import (
     agent_change as agent_change_mod,
+    agent_change_approval_verify,
     agent_request,
     approval,
     approval_v2,
@@ -357,12 +358,25 @@ def _run_request_nonce(target: Path, run_id: str | None, ref_nonce: str | None) 
 
 
 def _verify_reference(
-    ref: Mapping[str, Any],
+    ref: object,
     target: Path,
     run_id: str | None,
     index_tree: str | None,
     policy: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
+    if not isinstance(ref, Mapping):
+        return {
+            "kind": None,
+            "locator": None,
+            "availability": "partial",
+            "syntax": "malformed",
+            "cryptographic": "unchecked",
+            "trust": "unknown",
+            "freshness": f"{_freshness(target)}, timestamp-absent",
+            "binding": "conflicted",
+            "rederivation": "not-applicable",
+            "policy_outcome": "unevaluated",
+        }
     locator = ref.get("locator")
     kind = ref.get("kind")
     if not isinstance(locator, str):
@@ -515,14 +529,6 @@ def _verify_reference(
     if kind == "test-result":
         rederivation = "reproduced" if result.rederived else "failed"
 
-    if kind == "human-approval" and statement is not None:
-        subjects = statement.get("subject")
-        if isinstance(subjects, list):
-            for subject in subjects:
-                if isinstance(subject, dict) and subject.get("name") not in {"git:tree", "git:baseline"}:
-                    binding = "conflicted"
-                    break
-
     allowed_profiles = set(policy.get("allowed_profiles", [])) if policy is not None else set()
     profile_ok = ref.get("profile") in allowed_profiles
     predicate = statement.get("predicate") if isinstance(statement, dict) else None
@@ -596,6 +602,7 @@ def _evaluate_required_set(
             and vref.get("binding") == "bound"
             and (vref.get("rederivation") in {"reproduced", "not-applicable"})
             and vref.get("policy_outcome") in {"pass", "not-applicable"}
+            and (kind != "human-approval" or vref.get("approval_state") == "current")
         ]
         if len(satisfied) >= min_count:
             observations.append(
@@ -628,16 +635,33 @@ def _overall_status(
         return "UNVERIFIABLE"
     if index.get("signature") == "invalid":
         return "INVALID"
-    # Positive evidence of tampering or a foreign project (untrusted index key,
-    # binding conflict, a reference that failed policy, or a mismatched project
-    # scope) must be reported as INVALID, never as merely INCOMPLETE.
+    # Integrity failures take precedence over a clean policy refusal regardless
+    # of the reference order. A policy outcome is considered only after every
+    # artifact has passed its signature, trust, binding, and rederivation axes.
     if index.get("trust") != "trusted" or index.get("binding") != "bound":
         return "INVALID"
     if project_status == "mismatch":
         return "INVALID"
     for ref in references:
-        if ref.get("policy_outcome") == "fail" or ref.get("binding") == "conflicted":
+        if (
+            ref.get("binding") == "conflicted"
+            or ref.get("syntax") == "malformed"
+            or ref.get("cryptographic") == "invalid"
+            or ref.get("trust") == "untrusted"
+            or ref.get("rederivation") == "failed"
+        ):
             return "INVALID"
+    if any(
+        ref.get("availability") != "present"
+        or ref.get("syntax") != "wellformed"
+        or ref.get("cryptographic") in {"unchecked", "unverifiable"}
+        or ref.get("trust") == "unknown"
+        or ref.get("binding") == "unavailable"
+        for ref in references
+    ):
+        return "INCOMPLETE"
+    if any(ref.get("policy_outcome") == "fail" for ref in references):
+        return "POLICY-FAIL"
     # A stricter verifier policy always mismatches the emitted digest, so completeness
     # must be evaluated before the digest comparison. Missing references therefore
     # surface as INCOMPLETE even when the policy digest would otherwise mismatch.
@@ -735,6 +759,13 @@ def verify_agent_change(
                 references = raw_refs
 
     verified_refs = [_verify_reference(ref, target, run_id, index_tree, policy_obj) for ref in references]
+    agent_change_approval_verify.verify_approval_references(
+        target=target,
+        run_id=run_id,
+        index_tree=index_tree,
+        references=references,
+        observations=verified_refs,
+    )
     required_set = _evaluate_required_set(policy_obj, verified_refs)
     status = _overall_status(index_obs, required_set, verified_refs, policy_status, project_status)
 

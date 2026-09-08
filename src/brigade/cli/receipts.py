@@ -144,8 +144,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_acp_init.add_argument("--force", action="store_true", help="Overwrite an existing policy file.")
     p_acp_init.set_defaults(func=dispatch)
 
+    verifier_help = "Verify an SSHSIG agent-change evidence index envelope."
     p_verify_agent_change = receipts_sub.add_parser(
-        "verify-agent-change", help="Verify an agent-change evidence index envelope."
+        "verify-agent-change", help=verifier_help, description=verifier_help
     )
     p_verify_agent_change.add_argument(
         "envelope_or_run_dir",
@@ -166,7 +167,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_agent_change.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_agent_change.add_argument("--run-id", metavar="<run-id>", required=True, help="Run id to export.")
     p_agent_change.add_argument(
-        "--key", metavar="PATH", type=Path, default=None, help="Path to the attestation signing key."
+        "--key", metavar="PATH", type=Path, default=None, help="Path to the signer profile's private key."
+    )
+    p_agent_change.add_argument(
+        "--profile", choices=("sshsig", "cosign"), default="sshsig", help="Signer profile. Defaults to sshsig."
     )
     p_agent_change.add_argument(
         "--policy", metavar="PATH", type=Path, default=None, help="Path to agent-change policy file."
@@ -183,7 +187,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_commit_linkage.add_argument("--run-id", metavar="<run-id>", required=True, help="Run id to link.")
     p_commit_linkage.add_argument("--commit", metavar="<sha>", required=True, help="Full git commit sha to link.")
     p_commit_linkage.add_argument(
-        "--key", metavar="PATH", type=Path, default=None, help="Path to the attestation signing key."
+        "--key", metavar="PATH", type=Path, default=None, help="Path to the signer profile's private key."
+    )
+    p_commit_linkage.add_argument(
+        "--profile", choices=("sshsig", "cosign"), default="sshsig", help="Signer profile. Defaults to sshsig."
     )
     p_commit_linkage.add_argument(
         "--principal", metavar="NAME", default=None, help="Signer principal name (unused, accepted for compatibility)."
@@ -196,8 +203,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_commit_linkage.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_commit_linkage.set_defaults(func=dispatch)
 
+    linkage_verifier_help = "Verify an SSHSIG post-commit linkage statement envelope."
     p_verify_commit_linkage = receipts_sub.add_parser(
-        "verify-commit-linkage", help="Verify a post-commit linkage statement envelope."
+        "verify-commit-linkage", help=linkage_verifier_help, description=linkage_verifier_help
     )
     p_verify_commit_linkage.add_argument(
         "envelope_or_run_dir",
@@ -322,6 +330,7 @@ def dispatch(args) -> int:
             target=args.target,
             run_id=args.run_id,
             key=args.key,
+            profile=args.profile,
             policy=policy_path,
             out=args.out,
             force=args.force,
@@ -346,6 +355,7 @@ def dispatch(args) -> int:
             run_id=args.run_id,
             commit_sha=args.commit,
             key=args.key,
+            profile=args.profile,
             policy=policy_path,
             out=args.out,
             force=args.force,
