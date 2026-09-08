@@ -18,6 +18,7 @@ from . import (
     approval_v2,
     attestation,
     attestation_input,
+    cosign_attestation,
     localio,
     run_journal,
 )
@@ -35,6 +36,7 @@ from .agent_change_refs import (
 
 AGENT_CHANGE_PREDICATE_TYPE = "https://brigade.dev/attestation/agent-change/v1"
 AGENT_CHANGE_POLICY_SCHEMA = "brigade.agent_change_policy.v1"
+_COSIGN_EXPORT_ERROR = "cosign signer failed; agent-change artifact was not written"
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _APPROVAL_NONCE_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -133,11 +135,30 @@ def init_policy(target: Path, *, force: bool = False) -> Path:
 def _resolve_run_dir(target: Path, run_id: str) -> Path:
     if not _RUN_ID_RE.fullmatch(run_id) or run_id in {".", ".."}:
         raise AgentChangeError("run id must contain only letters, digits, dot, underscore, or hyphen")
-    runs_root = (target / ".brigade" / "runs").resolve()
-    run_dir = (runs_root / run_id).resolve()
-    if run_dir.parent != runs_root or run_dir.name != run_id or not run_dir.is_dir() or run_dir.is_symlink():
+    brigade_dir = target / ".brigade"
+    runs_path = brigade_dir / "runs"
+    run_path = runs_path / run_id
+    try:
+        if brigade_dir.is_symlink() or runs_path.is_symlink() or run_path.is_symlink():
+            raise AgentChangeError(f"run directory not found: {run_id}")
+        runs_root = runs_path.resolve()
+        if not runs_root.is_relative_to(target) or not runs_root.is_dir():
+            raise AgentChangeError(f"run directory not found: {run_id}")
+        run_dir = run_path.resolve()
+    except OSError:
+        raise AgentChangeError(f"run directory not found: {run_id}") from None
+    if run_dir.parent != runs_root or run_dir.name != run_id or not run_dir.is_dir():
         raise AgentChangeError(f"run directory not found: {run_id}")
     return run_dir
+
+
+def _sign_export_statement(statement: Mapping[str, Any], key_path: Path, profile: str) -> dict[str, Any]:
+    if profile == "sshsig":
+        return attestation.create_envelope(statement, key_path)
+    try:
+        return cosign_attestation.export_statement(statement, key_path)
+    except cosign_attestation.CosignAttestationError:
+        raise AgentChangeError(_COSIGN_EXPORT_ERROR) from None
 
 
 def _read_run_json(run_dir: Path) -> dict[str, Any]:
@@ -635,6 +656,7 @@ def export_agent_change(
     run_id: str,
     *,
     key: Path | None = None,
+    profile: str = "sshsig",
     policy: Path | None = None,
     out: str | None = None,
     force: bool = False,
@@ -654,6 +676,9 @@ def export_agent_change(
     if run_id == "latest":
         print("error: 'latest' is not supported for agent-change export", file=sys.stderr)
         return 2
+    if profile not in {"sshsig", "cosign"}:
+        print(f"error: unsupported attestation profile '{profile}'; expected sshsig or cosign", file=sys.stderr)
+        return 1
 
     try:
         run_dir = _resolve_run_dir(target, run_id)
@@ -662,8 +687,15 @@ def export_agent_change(
         return 2
 
     policy_path = policy.expanduser().resolve() if policy is not None else None
-    key_path = attestation.resolve_signing_key_path(target, key_file=key)
+    key_path = (
+        attestation.resolve_signing_key_path(target, key_file=key)
+        if profile == "sshsig"
+        else cosign_attestation.resolve_cosign_key_path(target, key_file=key)
+    )
     if not key_path.is_file():
+        if profile == "cosign":
+            print(f"error: {_COSIGN_EXPORT_ERROR}", file=sys.stderr)
+            return 1
         print(f"error: signing key not found: {key_path}", file=sys.stderr)
         return 1
 
@@ -676,20 +708,36 @@ def export_agent_change(
         print(f"error: {exc} (use --force to overwrite)", file=sys.stderr)
         return 1
 
-    try:
-        envelope = attestation.create_envelope(statement, key_path)
-    except attestation.AttestationError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-
     if out == "-":
+        try:
+            envelope = _sign_export_statement(statement, key_path, profile)
+        except AgentChangeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except attestation.AttestationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         print(json.dumps(envelope, indent=2, sort_keys=True))
         return 0 if statement["predicate"]["complete"] else 3
 
+    out_path: Path | None
     if out is not None:
         out_path = Path(out).expanduser().resolve()
     else:
-        out_path = run_dir / "agent-change.json"
+        out_path = _safe_agent_change_path(run_dir, profile)
+        if out_path is None:
+            print("error: symlinked or out-of-run agent-change path refused", file=sys.stderr)
+            return 2
+
+    assert out_path is not None
+    try:
+        envelope = _sign_export_statement(statement, key_path, profile)
+    except AgentChangeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except attestation.AttestationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     try:
         attestation.write_attestation_file(envelope, out_path, force=force)
@@ -723,3 +771,21 @@ def export_agent_change(
             print("warning: index is incomplete; required references are missing")
 
     return 0 if statement["predicate"]["complete"] else 3
+
+
+def _safe_agent_change_path(run_dir: Path, profile: str) -> Path | None:
+    filename = "agent-change.json" if profile == "sshsig" else "agent-change.sigstore.json"
+    out_path = run_dir / filename
+    try:
+        resolved_run_dir = run_dir.resolve()
+        current = out_path
+        while current != resolved_run_dir:
+            if not current.is_relative_to(resolved_run_dir) or current.is_symlink():
+                return None
+            parent = current.parent
+            if parent == current:
+                return None
+            current = parent
+    except OSError:
+        return None
+    return out_path

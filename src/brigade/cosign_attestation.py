@@ -26,6 +26,41 @@ class CosignAttestationError(attestation.AttestationError):
     pass
 
 
+def _snapshot_statement(statement: Mapping[str, Any]) -> tuple[dict[str, Any], bytes]:
+    """Return a bounded plain-JSON in-toto Statement before invoking cosign."""
+    try:
+        snapshot = attestation_input.validate_json_value(statement)
+    except attestation_input.AttestationInputError:
+        raise CosignAttestationError("invalid cosign statement input") from None
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("_type") != attestation.IN_TOTO_STATEMENT_TYPE
+        or not isinstance(snapshot.get("subject"), list)
+        or not isinstance(snapshot.get("predicateType"), str)
+        or not snapshot["predicateType"]
+        or not isinstance(snapshot.get("predicate"), Mapping)
+    ):
+        raise CosignAttestationError("invalid cosign statement input")
+    for subject in snapshot["subject"]:
+        if not isinstance(subject, Mapping) or not isinstance(subject.get("name"), str) or not subject["name"]:
+            raise CosignAttestationError("invalid cosign statement input")
+        digest = subject.get("digest")
+        if not isinstance(digest, Mapping) or not digest:
+            raise CosignAttestationError("invalid cosign statement input")
+        if any(
+            not isinstance(algorithm, str) or not algorithm or not isinstance(value, str) or not value
+            for algorithm, value in digest.items()
+        ):
+            raise CosignAttestationError("invalid cosign statement input")
+    try:
+        statement_bytes = attestation.canonical_statement_bytes(snapshot)
+    except (TypeError, ValueError, OverflowError):
+        raise CosignAttestationError("invalid cosign statement input") from None
+    if len(statement_bytes) > attestation_input.MAX_PAYLOAD_BYTES:
+        raise CosignAttestationError("cosign statement payload exceeds byte limit")
+    return snapshot, statement_bytes
+
+
 def default_cosign_key_path(target: Path) -> Path:
     return target.expanduser().resolve() / ".brigade" / "attestation" / DEFAULT_COSIGN_KEY_NAME
 
@@ -217,6 +252,7 @@ def validate_bundle(bundle: Mapping[str, Any], statement: Mapping[str, Any]) -> 
 
 
 def create_bundle(statement: Mapping[str, Any], key_path: Path) -> dict[str, Any]:
+    snapshot, statement_bytes = _snapshot_statement(statement)
     binary, version = require_safe_cosign()
 
     with tempfile.TemporaryDirectory() as tmp_dir_str:
@@ -224,7 +260,7 @@ def create_bundle(statement: Mapping[str, Any], key_path: Path) -> dict[str, Any
         statement_path = tmp_dir / "statement.json"
         bundle_path = tmp_dir / "bundle.sigstore.json"
 
-        statement_path.write_bytes(attestation.canonical_statement_bytes(statement))
+        statement_path.write_bytes(statement_bytes)
 
         cmd = [
             binary,
@@ -283,9 +319,15 @@ def create_bundle(statement: Mapping[str, Any], key_path: Path) -> dict[str, Any
         except (OSError, attestation_input.AttestationInputError) as exc:
             raise CosignAttestationError(f"failed to read or parse cosign bundle JSON: {exc}") from exc
 
-        return validate_bundle(bundle_data, statement)
+        return validate_bundle(bundle_data, snapshot)
 
 
 def export_attestation(receipt: Mapping[str, Any], key_path: Path) -> dict[str, Any]:
     statement = attestation.build_statement(receipt)
-    return create_bundle(statement, key_path)
+    return export_statement(statement, key_path)
+
+
+def export_statement(statement: Mapping[str, Any], key_path: Path) -> dict[str, Any]:
+    """Sign and validate an arbitrary in-toto statement as a Sigstore bundle."""
+    snapshot, _statement_bytes = _snapshot_statement(statement)
+    return validate_bundle(create_bundle(snapshot, key_path), snapshot)
