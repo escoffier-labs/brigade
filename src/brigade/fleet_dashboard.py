@@ -563,10 +563,13 @@ def _machine_board(
     for row in rows:
         by_node.setdefault(row.node_id, []).append(row)
     node_ids = set(by_node)
+    claim_nodes = {claim.owner_node for claim in claims if claim.owner_node and not claim.expired}
     if not query.node and not query.attention_only and not query.seat and not query.state and not query.repo:
         node_ids |= {node_id for node_id in info if node_id}
+        node_ids |= claim_nodes
     elif query.node:
         node_ids |= {node_id for node_id in info if node_id and _contains(node_id, query.node)}
+        node_ids |= {node_id for node_id in claim_nodes if _contains(node_id, query.node)}
 
     def card_key(node_id: str) -> tuple[int, str]:
         worst = min((_rank(row) for row in by_node.get(node_id, []) if row.live), default=_IDLE_RANK)
@@ -719,7 +722,11 @@ def render_page(
     all_rows = build_rows(runs, started_at, now=current)
     claim_rows = build_claims(claims, now=current)
     visible = filter_rows(all_rows, query)
-    node_ids = sorted({str(node.get("node_id") or "") for node in nodes} | {row.node_id for row in all_rows})
+    node_ids = sorted(
+        {str(node.get("node_id") or "") for node in nodes}
+        | {row.node_id for row in all_rows}
+        | {claim.owner_node for claim in claim_rows if claim.owner_node and not claim.expired}
+    )
     node_ids = [node_id for node_id in node_ids if node_id]
     if query.view == "repos":
         board = _repo_board(_repo_entries(all_rows, claim_rows, query), query.sort)
