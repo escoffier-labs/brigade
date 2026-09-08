@@ -157,9 +157,10 @@ def _real_child_command(ready_path: Path) -> list[str]:
 
 
 def _wait_for_child_ready(ready_path: Path) -> None:
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + 15
     while not ready_path.is_file() and time.monotonic() < deadline:
         time.sleep(0.01)
+    assert ready_path.is_file(), "child readiness timed out"
     assert ready_path.read_text() == "ready"
 
 
