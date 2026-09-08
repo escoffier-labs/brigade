@@ -17,6 +17,7 @@ import pytest
 
 from brigade import fleet_client, fleet_hub
 from brigade import fleet_hub_sessions as sessions
+from tests import thread_sync
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
@@ -886,27 +887,28 @@ class TestClientClaims:
 
     def test_release_with_renew_in_flight_never_resurrects(self, hub, monkeypatch):
         """A heartbeat renew that lands after release must not re-acquire the
-        row: the released target stays free instead of leaking for a TTL."""
+        row: the released target stays free instead of leaking for a TTL.
+
+        #1488: park the renew on an explicit gate and time out only the
+        heartbeat join. Shrinking ``CLAIM_TIMEOUT_SECONDS`` to bound that
+        join also bounds the exit ``release_claim`` HTTP deadline, so a
+        slow hub on a busy CI shard leaves the row
+        (``assert [claim] == []``).
+        """
         url, token, _db = hub
         self._env(monkeypatch, url, token)
         monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.01)
-        monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 0.2)  # bounds the exit join
         renew_started = threading.Event()
         allow_renew = threading.Event()
-
-        # We can extract the heartbeat thread during the context to wait on it!
-        # wait, we can just intercept the acquire_claim to know if it happened,
-        # but to know it DIDN'T happen, we just wait for the thread to die!
+        heartbeat_thread = None
+        real_thread_start = threading.Thread.start
+        real_join = threading.Thread.join
+        real_post = fleet_client._post_claim_blocking
 
         def stuck_renew(target, **kwargs):
             renew_started.set()
-            allow_renew.wait(5)
+            thread_sync.wait_for_event(allow_renew, description="exit release finished before unparking renew")
             return fleet_client.ClaimDecision(granted=False, reason="missing", holder=kwargs.get("holder"))
-
-        monkeypatch.setattr(fleet_client, "renew_claim", stuck_renew)
-
-        heartbeat_thread = None
-        real_thread_start = threading.Thread.start
 
         def track_thread(self_thread, *args, **kwargs):
             nonlocal heartbeat_thread
@@ -914,19 +916,34 @@ class TestClientClaims:
                 heartbeat_thread = self_thread
             return real_thread_start(self_thread, *args, **kwargs)
 
+        def join_without_waiting_for_parked_renew(self_thread, timeout=None):
+            if self_thread is heartbeat_thread:
+                # Drain immediately so release runs while renew is still
+                # parked. Other joins (claim HTTP workers) keep their deadline.
+                return real_join(self_thread, 0.05)
+            return real_join(self_thread, timeout)
+
+        def delayed_release_post(hub_url, tok, body, *, timeout):
+            # Regression pin for #1488: 0.35s used to exceed the test's 0.2s
+            # CLAIM_TIMEOUT_SECONDS patch and leave the row as hub-unavailable.
+            if body.get("action") == "release":
+                time.sleep(0.35)
+            return real_post(hub_url, tok, body, timeout=timeout)
+
+        monkeypatch.setattr(fleet_client, "renew_claim", stuck_renew)
         monkeypatch.setattr(threading.Thread, "start", track_thread)
+        monkeypatch.setattr(threading.Thread, "join", join_without_waiting_for_parked_renew)
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", delayed_release_post)
 
-        with fleet_client.repo_claim("repo-a", ttl_seconds=60):
-            assert renew_started.wait(5)
+        try:
+            with fleet_client.repo_claim("repo-a", ttl_seconds=60):
+                thread_sync.wait_for_event(renew_started, description="heartbeat renew parked")
+            assert fleet_client.fetch_claims(include_all=True) == []
+        finally:
+            allow_renew.set()
 
-        assert fleet_client.fetch_claims(include_all=True) == []
-
-        # Let the stale renew finish.
-        allow_renew.set()
-
-        # Wait for the thread to definitively end.
         if heartbeat_thread is not None:
-            heartbeat_thread.join(timeout=5)
+            real_join(heartbeat_thread, timeout=thread_sync.DEFAULT_HARD_TIMEOUT)
             assert not heartbeat_thread.is_alive()
 
         assert fleet_client.fetch_claims(include_all=True) == [], "released claim was resurrected"
