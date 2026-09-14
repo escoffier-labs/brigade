@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `grokbot_queue_claim` accepts an optional bounded `worker_label` (`[a-z0-9-]{1,32}`) so several Builder bots sharing one connector identity stay distinguishable on hub job rows, claim/renew/complete results, and `brigade run cloud grokbot status`. (#1501)
 - The Cosign signer profile now exports agent-change and commit-linkage statements as Sigstore bundles for external verification. (#1404)
 
 ### Changed
