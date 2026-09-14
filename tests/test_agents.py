@@ -2184,6 +2184,50 @@ def test_parse_env_file_reference_rejects_relative_bare_drive_unc_and_hash():
     assert agents._parse_env_file_reference("env-file:/a#b#MY_VAR") is None
 
 
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "env-file:/runtime.env#CLIPROXY_API_KEY",
+        r"env-file:C:\runtime.env#CLIPROXY_API_KEY",
+        "env-file:C:/runtime.env#CLIPROXY_API_KEY",
+    ),
+)
+def test_env_file_reference_accepts_absolute_paths(reference):
+    assert agents.is_valid_env_file_reference(reference)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "env-file:relative.env#CLIPROXY_API_KEY",
+        "env-file:C:runtime.env#CLIPROXY_API_KEY",
+        r"env-file:\\server\share\runtime.env#CLIPROXY_API_KEY",
+    ),
+)
+def test_env_file_reference_rejects_non_local_absolute_paths(reference):
+    assert not agents.is_valid_env_file_reference(reference)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "env-file:/a/../b.env#MY_VAR",
+        r"env-file:C:\run\..\b.env#MY_VAR",
+        "env-file:/run/*.env#MY_VAR",
+        "env-file:/run/brigade[0].env#MY_VAR",
+        "env-file:/run/$HOME/runtime.env#MY_VAR",
+        "env-file:C:/run/%APPDATA%/runtime.env#MY_VAR",
+        "env-file:/runtime.env#not_a_variable",
+        "env-file:/runtime.env#",
+    ),
+)
+def test_env_file_reference_validity_tracks_the_runtime_parser(reference):
+    # The shared classifier must not be laxer than the reader it gates: every
+    # reference the runtime parser refuses is invalid at validation time too.
+    assert agents._parse_env_file_reference(reference) is None
+    assert not agents.is_valid_env_file_reference(reference)
+
+
 def test_run_agent_env_file_prefixed_parent_variable_still_resolves(monkeypatch):
     # Only the exact "env-file:" syntax is an env-file reference; a parent
     # variable that merely starts with "env-file" resolves from the
