@@ -1321,6 +1321,14 @@ def coverage_gaps(control_plane: ControlPlane | None) -> tuple[str, ...]:
         gaps.append("queue eligibility")
     if any(item.routine_state == UNKNOWN for item in control_plane.integrations):
         gaps.append("integration readiness")
+    # A legacy or partial snapshot carries no ``authority`` key, and the panel
+    # then prints "authority unknown". Without this the same panel also claims
+    # every section reported, and deck_verdict can answer ALL CLEAR while
+    # control-plane authority is explicitly unknown.
+    if not control_plane.authority_present or (
+        control_plane.authority.active == UNKNOWN and control_plane.authority.status == UNKNOWN
+    ):
+        gaps.append("control-plane authority")
     return tuple(dict.fromkeys(gaps))
 
 

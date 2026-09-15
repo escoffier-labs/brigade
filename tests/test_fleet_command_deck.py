@@ -1224,13 +1224,31 @@ def test_empty_rail_without_telemetry_is_not_all_clear():
 
 
 def test_full_telemetry_with_no_signals_is_all_clear():
-    view = _empty_view(deck.control_plane_from_snapshot(_control_plane_snapshot()))
+    snapshot = _control_plane_snapshot(authority={"active": True, "status": "active"})
+    view = _empty_view(deck.control_plane_from_snapshot(snapshot))
     assert deck.coverage_gaps(view.control_plane) == ()
     assert deck.deck_verdict(view) == "ALL CLEAR"
 
 
+def test_missing_authority_is_a_coverage_gap_not_an_all_clear():
+    """A legacy snapshot without ``authority`` must not read as full coverage.
+
+    The panel prints "authority unknown" for such a snapshot. Without authority
+    in the coverage calculation it simultaneously claimed every section had
+    reported, and deck_verdict answered ALL CLEAR.
+    """
+    for snapshot in (_control_plane_snapshot(), _control_plane_snapshot(authority={})):
+        view = _empty_view(deck.control_plane_from_snapshot(snapshot))
+        assert "control-plane authority" in deck.coverage_gaps(view.control_plane)
+        assert deck.deck_verdict(view) == "COVERAGE UNKNOWN (1)"
+        html = deck.render_deck(view, nonce="nonce", now=NOW)
+        assert "authority unknown" in html
+        assert "all control-plane sections reported" not in html
+        assert "ALL CLEAR" not in html
+
+
 def test_partial_telemetry_names_the_missing_sections():
-    snapshot = _control_plane_snapshot()
+    snapshot = _control_plane_snapshot(authority={"active": True, "status": "active"})
     del snapshot["quota"]
     del snapshot["routes"]
     view = _empty_view(deck.control_plane_from_snapshot(snapshot))
