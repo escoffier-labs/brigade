@@ -1131,6 +1131,11 @@ def test_memory_job_catalog_matches_design_doc():
     assert by_id["evidence-crawl"].requires_existing_runbook is True
     assert by_id["memory-closeout"].schedule == "0 9 * * *"
     assert by_id["memory-closeout"].runbook_rel.endswith("memory-closeout.json")
+    payload = care_cmd.MEMORY_CLOSEOUT_RUNBOOK_PAYLOAD
+    assert payload["steps"] == [{"id": "closeout", "run": "brigade memory care closeout --target ."}]
+    description = str(payload["description"])
+    assert "Policy: review (not --defer)" in description
+    assert "memory care closeout --dry-run" in description
 
 
 def test_care_install_one_entry_does_not_touch_sibling_or_other_target(tmp_path, monkeypatch):

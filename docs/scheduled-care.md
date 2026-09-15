@@ -78,6 +78,16 @@ same selector, and namespaced backends still key registrations by
 `(target identity, job_id)`. Per-job installs support systemd and launchd. The
 crontab examples below remain operator-owned manual recipes.
 
+Re-enable `memory-closeout` only after reviewing a dry-run of the current
+queue. Policy recorded next to the shipped runbook: **review**, not `--defer`.
+Preview with `brigade memory care closeout --dry-run --json --target .`, then
+`brigade care install --target . --entry memory-closeout`. The scheduled step
+stays `brigade memory care closeout --target .` and still refuses a nonempty
+queue. Do not pass `--defer` unless an operator explicitly accepts the backlog
+with a nonblank `--reason`. After the timer fires, `brigade care status`
+should show a completed receipt when the queue is empty (or an explicit defer
+was chosen).
+
 Related docs: [memory care](memory-care.md), [scanner registry](scanner-registry.md), [operator center](operator-center.md), [agents guide](agents-guide.md), [execution model](execution-model.md).
 
 ## Scheduler wiring
