@@ -1271,9 +1271,12 @@ def validate_run_budget_payload(event_type: str, payload: Mapping[str, Any]) -> 
         if active_seats is not None:
             if not isinstance(active_seats, list) or len(active_seats) > 16 or active != len(active_seats):
                 raise run_events.CanonicalizationError("run_budget.cancelled active_seats is invalid")
-            if len(set(active_seats)) != len(active_seats) or any(
-                not isinstance(seat, str) or not seat or len(seat) > 80 for seat in active_seats
-            ):
+            # Element types before the dedupe: set() over an unhashable seat
+            # raises a raw TypeError, which escapes validate_event's
+            # CanonicalizationError handler and breaks journal inspection.
+            if any(not isinstance(seat, str) or not seat or len(seat) > 80 for seat in active_seats):
+                raise run_events.CanonicalizationError("run_budget.cancelled active_seats is invalid")
+            if len(set(active_seats)) != len(active_seats):
                 raise run_events.CanonicalizationError("run_budget.cancelled active_seats is invalid")
         if outcomes is not None:
             if not isinstance(outcomes, list) or len(outcomes) > 16:
@@ -1285,10 +1288,15 @@ def validate_run_budget_payload(event_type: str, payload: Mapping[str, Any]) -> 
                     "transport_result",
                 }:
                     raise run_events.CanonicalizationError("run_budget.cancelled outcome is invalid")
+                # isinstance before membership for the same reason: an
+                # unhashable capability or result would make `in` raise
+                # TypeError instead of a bounded diagnostic.
                 if (
                     not isinstance(outcome["seat"], str)
                     or not outcome["seat"]
                     or len(outcome["seat"]) > 80
+                    or not isinstance(outcome["transport_capability"], str)
+                    or not isinstance(outcome["transport_result"], str)
                     or outcome["transport_capability"] not in TRANSPORT_CAPABILITIES
                     or outcome["transport_result"] not in TRANSPORT_RESULTS
                 ):
