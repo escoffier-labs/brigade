@@ -1,7 +1,7 @@
 # Brigade update channels
 
 `stable` is the immutable release and pinner channel. `beta` is the intentional
-development-machine channel for the `0.27` preview line. `brigade update` is the
+development-machine channel for the next release's preview line. `brigade update` is the
 supported user-global mutation path for a pipx-managed Brigade installation once
 you want channel-managed upgrades. Deliberate initial or manual exact pins such
 as `pipx install brigade-cli==X.Y.Z` are valid and do not require `brigade update`
@@ -79,22 +79,37 @@ When the external development timer is migrated, replace its direct pipx script 
 
 ## Update notifications
 
-After a successful command, brigade may print one stderr line (at most once
-per 24 hours) when a newer release exists:
+After a successful interactive command, brigade may print one stderr line when
+a newer release exists. The normal cache interval is 24 hours, but it is a
+best-effort local schedule, not a guarantee that a request or notice occurs at
+that cadence:
 
     A new brigade release is available: X.Y.Z (installed A.B.C). Run "brigade update".
 
-How it learns about new releases: at most once per 24 hours, a detached
-background process sends one HTTPS GET to
-`https://check.brigade.tools/v1/version`. The request has no query
-parameters, no body, and no install id. The User-Agent carries the brigade
-version and OS name. Raw IPs are never stored server-side (a weekly-salted
-hash backs an aggregate weekly-active count). The stderr notice is skipped
-when stderr is not a TTY, when `CI` is set, or when the command failed. The
-background cache refresh still runs when stderr is piped (agent harnesses) so
-`work brief` can surface available updates; it is skipped when `CI` is set or
-`BRIGADE_NO_UPDATE_CHECK` is set.
+How it learns about new releases: a detached background process may send one
+HTTPS GET to `https://check.brigade.tools/v1/version`. The request has no query
+parameters or body. Its User-Agent carries the Brigade version and OS name.
+When that header exactly matches the Brigade CLI format, the Worker records a
+daily version observation: ISO week and UTC day, version, first and last UTC
+timestamps, request count, and an `internal` classification for configured
+operator egress. It derives the source value from a salted SHA-256 hash of the
+connecting address and ISO week. The hash changes weekly, and reports do not
+join sources across weeks.
 
-Opt out completely (no notice, no network, ever):
+Analytics does not store raw IP addresses or a persistent installation ID. It
+also does not store hostnames, usernames, repository or project names, command
+arguments, or account identifiers. These observations are not a count of
+people or installations. A weekly scheduled purge deletes rows older than 90
+days.
+
+The stderr notice is skipped when stderr is not a TTY, when `CI` is set, or
+when the command failed. The background cache refresh can still run with piped
+stderr so `work brief` can surface available updates. It is skipped when `CI`
+or `BRIGADE_NO_UPDATE_CHECK` is set.
+
+To disable this automatic update check and its cache refresh:
 
     export BRIGADE_NO_UPDATE_CHECK=1
+
+This setting controls the automatic version check only. It does not disable an
+explicit `brigade update` command.

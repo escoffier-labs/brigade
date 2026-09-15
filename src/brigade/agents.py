@@ -47,6 +47,18 @@ def is_env_file_reference(value: str) -> bool:
     return value.startswith(ENV_FILE_REF_PREFIX)
 
 
+def is_valid_env_file_reference(value: str) -> bool:
+    """True when an env-file reference is one the runtime can actually read.
+
+    Roster validation and secret resolution share a single answer here, so a
+    reference the loader accepts is exactly a reference the reader accepts:
+    absolute POSIX or Windows drive paths only, with no UNC path, glob,
+    environment expansion, or relative segment. The rules live in
+    :func:`_parse_env_file_reference`; this is the boolean view of them.
+    """
+    return _parse_env_file_reference(value) is not None
+
+
 _NONRECOVERABLE_GROK_OUTPUT_FAILURES = frozenset(
     {
         "provider-error",

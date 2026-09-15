@@ -13,15 +13,16 @@ orchestrated agent change in one signed, in-toto Statement. It is produced by
   unless `--force` is given.
 
 - `brigade receipts export agent-change --target <dir> --run-id <run-id>
-  [--key <path>] [--policy <file>] [--out <path>] [--force] [--json]`
-  Build and sign the index statement for `<run-id>`. The default output is
-  `<run-dir>/agent-change.json`. Exit is `0` when the index is complete under
-  the policy and nonzero when it is incomplete.
+  [--key <path>] [--profile <sshsig|cosign>] [--policy <file>] [--out <path>] [--force] [--json]`
+  Build and sign the index statement for `<run-id>`. The default SSHSIG profile
+  writes `<run-dir>/agent-change.json`. The cosign profile writes
+  `<run-dir>/agent-change.sigstore.json`. Exit is `0` when the index is
+  complete under the policy and nonzero when it is incomplete.
 
 - `brigade receipts verify-agent-change <envelope-or-run-dir>
   --target <dir> [--policy <file>] [--json]`
   Audit the index. When `<envelope-or-run-dir>` is a directory, the verifier
-  reads `agent-change.json` inside it; when it is a file, it locates the run
+  reads `agent-change.json` inside it. When it is a file, it locates the run
   directory from the statement's run id under `<target>/.brigade/runs/`.
   Exit is `0` only for `COMPLETE-OK`.
 
@@ -78,11 +79,18 @@ Predicate fields:
   as needed.
 - `missing`: list of `{"kind", "reason"}` entries for required references that
   are absent at emit time. Only kinds listed in the policy's `required_references`
-  are included; a policy that does not require `agent-request` will not list it.
+  are included. A policy that does not require `agent-request` will not list it.
 - `otherTreeReceipts`: test-result receipts whose `producer_run_id` matches
   but whose `tree_fingerprint` differs from the final tree.
 - `complete`: boolean. The emitter sets this from the policy, but verifiers
   recompute it from their own policy and ignore the statement value.
+
+## Cosign profile
+
+`--profile cosign` writes an unwrapped Sigstore bundle to
+`<run-dir>/agent-change.sigstore.json`. `verify-agent-change` accepts SSHSIG
+envelopes only. External consumers use `cosign verify-blob-attestation` with
+the agent-change predicate type and the statement's `gitTree` subject claim.
 
 ## Reference kinds
 
@@ -94,7 +102,7 @@ Predicate fields:
   (`PASSED` or `FAILED`) and `rederived`.
 - `human-approval`: every approval file in `<run-dir>/approvals/<nonce>.json`
   whose name matches `^[0-9a-f]{32}\.json$`. The latest journal-bound approval
-  is marked `journalBound: true`; the others are `journalBound: false`.
+  is marked `journalBound: true`. The others are `journalBound: false`.
 
 ## Verifier axes and statuses
 
@@ -105,8 +113,9 @@ Index envelope:
 - `syntax`: `wellformed` or `malformed`.
 - `signature`: `valid`, `invalid`, or `unverifiable`. A signature from an
   untrusted key is still reported as `valid` because the signature verified
-  cryptographically over the PAE bytes; the `trust` axis reports `untrusted`
+  cryptographically over the PAE bytes. The `trust` axis reports `untrusted`
   and the overall status is `INVALID`.
+
 - `trust`: `trusted`, `untrusted`, or `unknown` (when `allowed_signers` is
   absent or unreadable).
 - `freshness`: `revocation-checked` or `revocation-absent`, plus
@@ -116,6 +125,28 @@ Index envelope:
 - `policy`: `match`, `mismatch`, or `unavailable`. Compares the policy digest
   recorded in the statement with the digest of the policy the verifier is
   evaluating.
+
+### Approval policy observations
+
+`POLICY-FAIL` records a clean, authenticated approval-policy refusal. It is an
+audit observation under the evaluator's external policy, not approval or
+release authority. An emitted `complete: true` index and a successful export
+are advisory evidence only, and do not authorize approval or release.
+
+The verifier validates every referenced approval against its exact signed
+envelope and journal event in one observation batch. Only the current latest
+journal-associated approval is evaluated as policy. Earlier artifacts are
+`approval_state: historical`: authenticated artifact/event associations with
+policy unevaluated, never current validity and never required-set evidence.
+`approval_state: unavailable` means that association could not be established.
+
+Missing requester evidence leaves an otherwise valid allow unevaluated and a
+required approval incomplete. Clean signed `deny` and `hold` remain
+`POLICY-FAIL`. Integrity failures, including malformed subjects, bad
+signatures, failed receipt rederivation, stale bindings, broken journal
+associations, and an observed journal or envelope mutation, take precedence and
+return `INVALID`. Consumers must treat every unknown future overall status as
+non-success. Only `COMPLETE-OK` is success.
 
 Each reference:
 
@@ -130,8 +161,8 @@ Each reference:
 - `rederivation`: `reproduced`, `failed`, or `not-applicable`. Test Results
   only.
 - `policy_outcome`: `pass`, `fail`, `unevaluated`, or `not-applicable`. A
-  `PASSED` Test Result under an allowed profile with a trusted signer passes;
-  anything else is `fail` or `unevaluated`.
+  `PASSED` Test Result under an allowed profile with a trusted signer passes.
+  Anything else is `fail` or `unevaluated`.
 
 Project scope:
 
@@ -148,11 +179,16 @@ Required-set evaluation:
 Overall status:
 
 - `COMPLETE-OK`: every required reference is present, cryptographically valid,
-  trusted, bound, re-derived where applicable, and passes policy; and the index
+  trusted, bound, re-derived where applicable, and passes policy. The index
   envelope is valid, trusted, bound, and policy-matched.
-- `INCOMPLETE`: a required reference is missing or does not satisfy the policy.
-- `INVALID`: signature or policy check failed.
-- `UNVERIFIABLE`: the envelope is malformed or the policy is unavailable.
+- `POLICY-FAIL`: after integrity checks, a verified reference has
+  `policy_outcome: fail`.
+- `INCOMPLETE`: evidence is missing, partial, unavailable, unverifiable, or
+  unknown, or required evidence is unsatisfied.
+- `INVALID`: integrity, known trust, binding, rederivation, project-scope, or
+  policy-digest checks fail.
+- `UNVERIFIABLE`: the index is malformed, its signature is unverifiable, or
+  the policy is unavailable.
 
 ## "Not an approval" and shared-key limitations
 
@@ -163,5 +199,5 @@ The index is signed with the same workspace attestation key that signs Test
 Result attestations. `signerIndependence` is therefore
 `"shared-workspace-key"`, meaning the index is a producer self-attestation, not
 an independent assessment. The verifier does not treat shared-key signing as a
-trust defect; it reports `trust: trusted` when the signature verifies against
+trust defect. It reports `trust: trusted` when the signature verifies against
 `allowed_signers` and reports the shared-key limitation in the statement.

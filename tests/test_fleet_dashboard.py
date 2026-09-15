@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from brigade import fleet_dashboard, fleet_hub, fleet_hub_sessions, fleet_hub_status
+from brigade import fleet_client, fleet_dashboard, fleet_hub, fleet_hub_grokbot, fleet_hub_sessions, fleet_hub_status
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
@@ -79,6 +79,33 @@ def _seed(hub) -> None:
     claim = {"action": "acquire", "target": "repo-a", "node_id": NODE_B, "holder": HOLDER_TOKEN, "conductor": "orch"}
     status, _headers, text = _request(hub, "POST", "/claims", headers=_bearer(), body=claim)
     assert status == 200, text
+
+
+def _insert_grokbot_job(conn, *, job_id: str, state: str, lease_expires_at: str) -> None:
+    stamp = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT INTO grokbot_jobs ("
+        "job_id, role, repository, label, task_digest, idempotency_key_hash, state, item_revision, sequence, "
+        "created_at, updated_at, queued_at, timeout_seconds, artifact_kind, owner_node, claimed_at, "
+        "lease_expires_at, claimant_node, claimant_worker"
+        ") VALUES (?, 'implementation-worker', ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, 900, 'draft-pr', "
+        "'fixture-queue-owner', ?, ?, ?, ?)",
+        (
+            job_id,
+            "fixture/http-active",
+            "HTTP active Grok job",
+            f"fixture-private-task-digest-{job_id}",
+            job_id[-24:].ljust(64, "f"),
+            state,
+            stamp,
+            stamp,
+            stamp,
+            stamp,
+            lease_expires_at,
+            NODE_B,
+            "grokbot-worker",
+        ),
+    )
 
 
 def _login_cookie(hub) -> str:
@@ -159,6 +186,79 @@ class TestDashboardAuth:
 
 
 class TestBoards:
+    def test_http_claim_projection_renders_active_grokbot_jobs_without_events(self, hub, monkeypatch):
+        now = datetime.now(timezone.utc)
+        active_job = "grokbot-" + "a" * 24
+        expired_job = "grokbot-" + "b" * 24
+        terminal_job = "grokbot-" + "c" * 24
+        status, _headers, text = _request(
+            hub,
+            "POST",
+            "/claims",
+            headers=_bearer(),
+            body={"action": "acquire", "target": "fixture/ordinary", "node_id": NODE_A, "holder": HOLDER_TOKEN},
+        )
+        assert status == 200, text
+        conn = fleet_hub.init_db(hub[2])
+        try:
+            fleet_hub_grokbot.ensure_schema(conn)
+            _insert_grokbot_job(
+                conn, job_id=active_job, state="claimed", lease_expires_at=(now + timedelta(minutes=5)).isoformat()
+            )
+            _insert_grokbot_job(
+                conn, job_id=expired_job, state="running", lease_expires_at=(now - timedelta(seconds=1)).isoformat()
+            )
+            _insert_grokbot_job(
+                conn, job_id=terminal_job, state="completed", lease_expires_at=(now + timedelta(minutes=5)).isoformat()
+            )
+            conn.commit()
+            assert [claim["target"] for claim in fleet_hub.list_claims(conn)] == ["fixture/ordinary"]
+        finally:
+            conn.close()
+
+        status, _headers, body = _request(hub, "GET", "/claims", headers=_bearer())
+        assert status == 200
+        claims = json.loads(body)["claims"]
+        assert {claim.get("job") for claim in claims if claim.get("harness") == "grokbot"} == {active_job}
+        assert {claim["target"] for claim in claims} == {
+            "fixture/ordinary",
+            f"fixture/http-active · HTTP active Grok job [{active_job}]",
+        }
+        assert TOKEN not in body and HOLDER_TOKEN not in body and "fixture-private-task-digest" not in body
+
+        status, _headers, all_body = _request(hub, "GET", "/claims?all=1", headers=_bearer())
+        assert status == 200
+        assert {claim.get("job") for claim in json.loads(all_body)["claims"] if claim.get("harness") == "grokbot"} == {
+            active_job,
+            expired_job,
+        }
+        assert terminal_job not in all_body
+
+        for view in ("machines", "repos"):
+            status, _headers, page = _request(hub, "GET", f"/view/{view}", headers=_bearer())
+            assert status == 200
+            assert active_job in page
+            assert expired_job not in page and terminal_job not in page
+            assert TOKEN not in page and HOLDER_TOKEN not in page and "fixture-private-task-digest" not in page
+            status, _headers, all_page = _request(hub, "GET", f"/view/{view}?all=1", headers=_bearer())
+            assert status == 200
+            assert active_job in all_page
+            assert expired_job not in all_page and terminal_job not in all_page
+
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", f"http://{hub[0]}:{hub[1]}")
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", TOKEN)
+        assert {claim.get("job") for claim in fleet_client.fetch_claims() if claim.get("harness") == "grokbot"} == {
+            active_job
+        }
+        assert {
+            claim.get("job")
+            for claim in fleet_client.fetch_claims(include_all=True)
+            if claim.get("harness") == "grokbot"
+        } == {
+            active_job,
+            expired_job,
+        }
+
     def test_machine_board_renders_seeded_events_and_claims(self, hub):
         _seed(hub)
         status, _headers, text = _request(hub, "GET", "/view/machines", headers=_bearer())
@@ -266,6 +366,36 @@ class TestBoards:
         assert "No fleet events recorded yet." in text
         _status, _headers, text = _request(hub, "GET", "/view/repos", headers=_bearer())
         assert "No repos match." in text
+
+    def test_claim_only_node_and_claim_text_are_rendered_safely(self):
+        now = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
+        claim = {
+            "target": "example/brigade · <script>alert(1)</script> [grokbot-aaaaaaaaaaaaaaaaaaaaaaaa]",
+            "owner_node": "claim-only-node",
+            "owner_conductor": "<img src=x>",
+            "harness": "grokbot",
+            "role": "implementation-worker",
+            "job": "grokbot-aaaaaaaaaaaaaaaaaaaaaaaa",
+            "acquired_at": now.isoformat(),
+            "expires_at": (now + timedelta(minutes=5)).isoformat(),
+        }
+        for view in ("machines", "repos"):
+            page = fleet_dashboard.render_page(
+                view=view,
+                query_string="",
+                runs=[],
+                claims=[claim],
+                nodes=[],
+                started_at={},
+                nonce="test-nonce",
+                now=now,
+            )
+            assert "<script>alert(1)</script>" not in page
+            assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+            assert "&lt;img src=x&gt;" in page
+            if view == "machines":
+                assert 'data-node="claim-only-node"' in page
+                assert "0 live runs, 1 machine, 0 need attention, 1 claim held." in page
 
 
 class TestSortAndFilter:

@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -9,6 +10,18 @@ from tests.support import PRIVATE_DIRECTORY_MODE
 SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+
+@pytest.fixture(autouse=True)
+def _bound_git_discovery_to_pytest_temp_root(tmp_path_factory, monkeypatch):
+    """Keep Git discovery for test and subprocess work below pytest's temp root."""
+    base_temp = tmp_path_factory.getbasetemp().resolve()
+    existing = os.environ.get("GIT_CEILING_DIRECTORIES")
+    ceiling = str(base_temp)
+    monkeypatch.setenv(
+        "GIT_CEILING_DIRECTORIES",
+        f"{existing}{os.pathsep}{ceiling}" if existing else ceiling,
+    )
 
 
 @pytest.fixture

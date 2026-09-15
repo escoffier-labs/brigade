@@ -636,12 +636,44 @@ def test_env_ref_value_must_be_variable_name(tmp_path):
         roster_mod.load_roster(_write(tmp_path, bad))
 
 
+def _toml_basic_string(value: str) -> str:
+    """Escape a reference for a TOML basic string so backslashes survive.
+
+    Windows references carry literal backslashes; unescaped, TOML reads them
+    as escape sequences and the loader fails on syntax instead of on the
+    reference under test.
+    """
+
+    return value.replace("\\", "\\\\")
+
+
+def _seat_with_env_ref(reference: str) -> str:
+    return ENV_SEAT.replace(
+        'ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY"',
+        f'ANTHROPIC_AUTH_TOKEN_REF = "{_toml_basic_string(reference)}"',
+    )
+
+
 def test_env_ref_accepts_absolute_environment_file_reference(tmp_path):
     environment_file = tmp_path / "runtime.env"
     roster = ENV_SEAT.replace(
         'ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY"',
-        f'ANTHROPIC_AUTH_TOKEN_REF = "env-file:{environment_file}#CLIPROXY_API_KEY"',
+        f'ANTHROPIC_AUTH_TOKEN_REF = "env-file:{environment_file.as_posix()}#CLIPROXY_API_KEY"',
     )
+    assert roster_mod.load_roster(_write(tmp_path, roster)).agents["k3"].env is not None
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "env-file:C:/ProgramData/brigade/runtime.env#CLIPROXY_API_KEY",
+        r"env-file:C:\ProgramData\brigade\runtime.env#CLIPROXY_API_KEY",
+    ),
+)
+def test_env_ref_accepts_windows_absolute_environment_file_reference(tmp_path, reference):
+    # A roster authored on Windows loads anywhere: validation inspects the
+    # reference, it does not resolve it against the running host.
+    roster = _seat_with_env_ref(reference)
     assert roster_mod.load_roster(_write(tmp_path, roster)).agents["k3"].env is not None
 
 
@@ -651,10 +683,33 @@ def test_env_ref_accepts_absolute_environment_file_reference(tmp_path):
         "env-file:relative.env#CLIPROXY_API_KEY",
         "env-file:/runtime.env#",
         "env-file:/runtime.env#not_a_variable",
+        "env-file:C:runtime.env#CLIPROXY_API_KEY",
+        "env-file://server/share/runtime.env#CLIPROXY_API_KEY",
     ),
 )
 def test_env_ref_rejects_malformed_environment_file_reference(tmp_path, reference):
-    bad = ENV_SEAT.replace('ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY"', f'ANTHROPIC_AUTH_TOKEN_REF = "{reference}"')
+    bad = _seat_with_env_ref(reference)
+    with pytest.raises(ValueError, match="env-file:/absolute/path#VARIABLE"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "env-file:/a/../b.env#MY_VAR",
+        r"env-file:C:\run\..\b.env#MY_VAR",
+        "env-file:/run/*.env#MY_VAR",
+        "env-file:/run/brigade[0].env#MY_VAR",
+        "env-file:/run/$HOME/runtime.env#MY_VAR",
+        "env-file:C:/run/%APPDATA%/runtime.env#MY_VAR",
+        r"env-file:\\server\share\runtime.env#MY_VAR",
+    ),
+)
+def test_env_ref_rejects_references_the_runtime_parser_refuses(tmp_path, reference):
+    # Loading must not accept a reference the secret reader will later refuse:
+    # otherwise the seat validates now and dies at dispatch with a missing env.
+    assert agents._parse_env_file_reference(reference) is None
+    bad = _seat_with_env_ref(reference)
     with pytest.raises(ValueError, match="env-file:/absolute/path#VARIABLE"):
         roster_mod.load_roster(_write(tmp_path, bad))
 

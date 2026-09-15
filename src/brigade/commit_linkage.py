@@ -20,12 +20,14 @@ from . import (
     agent_change_refs,
     attestation,
     attestation_input,
+    cosign_attestation,
     causal_receipt,
     localio,
     receipts_trailer,
 )
 
 COMMIT_LINKAGE_PREDICATE_TYPE = "https://brigade.dev/attestation/commit-linkage/v1"
+_COSIGN_EXPORT_ERROR = "cosign signer failed; commit-linkage artifact was not written"
 
 _HEX40_OR_64_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
@@ -52,6 +54,15 @@ _REMOVE_GIT_ENV_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 
 class CommitLinkageError(RuntimeError):
     """Commit-linkage statement construction or export failed."""
+
+
+def _sign_export_statement(statement: Mapping[str, Any], key_path: Path, profile: str) -> dict[str, Any]:
+    if profile == "sshsig":
+        return attestation.create_envelope(statement, key_path)
+    try:
+        return cosign_attestation.export_statement(statement, key_path)
+    except cosign_attestation.CosignAttestationError:
+        raise CommitLinkageError(_COSIGN_EXPORT_ERROR) from None
 
 
 def _git_env(extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -483,14 +494,15 @@ def build_statement(
     }
 
 
-def _safe_linkage_path(run_dir: Path, commit_sha: str) -> Path | None:
+def _safe_linkage_path(run_dir: Path, commit_sha: str, profile: str) -> Path | None:
     """Return the default linkage path only if it stays under the run directory.
 
     Refuses a symlinked run directory, linkage directory, or any intermediate
     component, using a per-component lstat check that does not follow links.
     """
     linkage_dir = run_dir / "linkage"
-    out_path = linkage_dir / f"{commit_sha}.json"
+    suffix = ".json" if profile == "sshsig" else ".sigstore.json"
+    out_path = linkage_dir / f"{commit_sha}{suffix}"
     try:
         resolved_run_dir = run_dir.resolve()
         current = out_path
@@ -514,6 +526,7 @@ def export_commit_linkage(
     commit_sha: str,
     *,
     key: Path | None = None,
+    profile: str = "sshsig",
     policy: Path | None = None,
     out: str | None = None,
     force: bool = False,
@@ -532,8 +545,18 @@ def export_commit_linkage(
         )
         return 2
 
-    key_path = attestation.resolve_signing_key_path(target, key_file=key)
+    if profile not in {"sshsig", "cosign"}:
+        print(f"error: unsupported attestation profile '{profile}'; expected sshsig or cosign", file=sys.stderr)
+        return 1
+    key_path = (
+        attestation.resolve_signing_key_path(target, key_file=key)
+        if profile == "sshsig"
+        else cosign_attestation.resolve_cosign_key_path(target, key_file=key)
+    )
     if not key_path.is_file():
+        if profile == "cosign":
+            print(f"error: {_COSIGN_EXPORT_ERROR}", file=sys.stderr)
+            return 1
         print(f"error: signing key not found: {key_path}", file=sys.stderr)
         return 1
 
@@ -548,13 +571,15 @@ def export_commit_linkage(
         print(f"error: {exc} (use --force to overwrite)", file=sys.stderr)
         return 1
 
-    try:
-        envelope = attestation.create_envelope(statement, key_path)
-    except attestation.AttestationError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-
     if out == "-":
+        try:
+            envelope = _sign_export_statement(statement, key_path, profile)
+        except CommitLinkageError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except attestation.AttestationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         print(json.dumps(envelope, indent=2, sort_keys=True))
         return 0 if statement["predicate"]["equivalence"] in {"exact", "normalized"} else 3
 
@@ -567,12 +592,20 @@ def export_commit_linkage(
         except agent_change.AgentChangeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
-        out_path = _safe_linkage_path(run_dir, commit_sha)
+        out_path = _safe_linkage_path(run_dir, commit_sha, profile)
         if out_path is None:
             print("error: symlinked or out-of-run linkage path refused", file=sys.stderr)
             return 2
 
     assert out_path is not None
+    try:
+        envelope = _sign_export_statement(statement, key_path, profile)
+    except CommitLinkageError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except attestation.AttestationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     try:
         attestation.write_attestation_file(envelope, out_path, force=force)
     except FileExistsError as exc:

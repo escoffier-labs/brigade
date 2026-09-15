@@ -15,6 +15,10 @@ from brigade import context_eval
 from brigade import evidence_brief
 from brigade import proc
 from brigade import provenance
+from brigade import run_budget
+from brigade import run_journal
+from brigade import run_lifecycle
+from brigade import run_projector
 from brigade import run_transport
 from brigade import runguard
 from brigade.roster import Agent, Roster
@@ -2823,6 +2827,61 @@ def test_run_stage_two_interruption_records_current_stage_seat(monkeypatch, tmp_
         "detail": "run canceled by operator",
         "seat": "reviewer",
     }
+
+
+def test_failed_budget_cancellation_event_leaves_run_non_terminal(monkeypatch, tmp_path):
+    """A failed run_budget.cancelled write must not terminalize the local run (#1439)."""
+    calls: list[str] = []
+    original_record = run_lifecycle.record_lifecycle_event
+
+    def fail_cancelled_event(run_dir, **kwargs):
+        if kwargs.get("event_type") == run_budget.EVENT_CANCELLED:
+            raise run_lifecycle.LifecycleJournalError("lifecycle journal canonicalization failure")
+        return original_record(run_dir, **kwargs)
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        calls.append(cli_ref)
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps(
+                    {
+                        "assignments": [
+                            {"stage": 1, "worker": "coder", "task": "implement"},
+                        ]
+                    }
+                ),
+                ok=True,
+            )
+        raise KeyboardInterrupt
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    monkeypatch.setattr(run_lifecycle, "record_lifecycle_event", fail_cancelled_event)
+
+    with pytest.raises(runguard.RetainRunLockError, match="budget cancel receipt"):
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(),
+            cwd=tmp_path,
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "dispatching"
+    assert "finished_at" not in run_meta
+    assert run_meta.get("failure", {}).get("kind") != run_budget.POLICY_KIND_OPERATOR_CANCELLED
+    assert runguard.lock_path(tmp_path).is_dir()
+
+    journal = output_dir / "events" / "lifecycle.jsonl"
+    report = run_journal.read_journal_bounded(journal)
+    assert "run_budget.cancelled" not in {event.event_type for event in report.events}
+    budget = run_budget.project_budget_state(run_budget.RunBudgetDeclaration(), report.events)
+    assert budget.terminal_policy is None
+    assert budget.cancel_receipts == ()
+    projection = run_projector.project_run_snapshot(run_meta, report.events, journal_present=True)
+    assert projection.status == "dispatching"
 
 
 def test_run_terminalizes_keyboard_interrupt_during_planning_without_cli(monkeypatch, tmp_path):

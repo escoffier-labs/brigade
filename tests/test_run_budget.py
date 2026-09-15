@@ -310,6 +310,177 @@ def test_threshold_denial_exhaustion_cancel_reconcile_idempotent_under_recovery(
     assert cancel_again["idempotency_key"] == "run_budget.cancelled:cancel-1"
 
 
+def test_cancelled_event_with_seat_outcomes_canonicalizes():
+    created = _build_event(1, "run.created", {"status": "started"}, "create-1", RECORDED_AT, None)
+    cancelled = _build_event(
+        2,
+        "run_budget.cancelled",
+        {
+            "request_id": "opcancel:live-ctrl-c",
+            "reason_class": "operator_cancel",
+            "transport_capability": "mixed",
+            "transport_result": "partial",
+            "active_remaining": 1,
+            "active_seats": ["reviewer"],
+            "outcomes": [
+                {
+                    "seat": "coder",
+                    "transport_capability": "interrupt",
+                    "transport_result": "interrupted",
+                },
+                {
+                    "seat": "reviewer",
+                    "transport_capability": "none",
+                    "transport_result": "unsupported",
+                },
+            ],
+            "dimension": "wall_clock_seconds",
+        },
+        "run_budget.cancelled:opcancel:live-ctrl-c",
+        "2026-08-10T21:00:01.000000Z",
+        created["event_digest"],
+    )
+    projection = run_budget.project_budget_state(
+        run_budget.RunBudgetDeclaration(),
+        [created, cancelled],
+    )
+    assert projection.terminal_policy == "operator_cancelled"
+    assert len(projection.cancel_receipts) == 1
+    assert projection.cancel_receipts[0].active_seats == ("reviewer",)
+    assert [(item.seat, item.transport_result) for item in projection.cancel_receipts[0].outcomes] == [
+        ("coder", "interrupted"),
+        ("reviewer", "unsupported"),
+    ]
+
+
+def _cancelled_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "request_id": "opcancel:malformed",
+        "reason_class": "operator_cancel",
+        "transport_capability": "interrupt",
+        "transport_result": "interrupted",
+        "active_remaining": 1,
+        "dimension": "wall_clock_seconds",
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"active_seats": [{}]}, id="seat-is-a-dict"),
+        pytest.param({"active_seats": [[]]}, id="seat-is-a-list"),
+        pytest.param(
+            {
+                "active_remaining": 0,
+                "outcomes": [
+                    {"seat": "coder", "transport_capability": ["interrupt"], "transport_result": "interrupted"}
+                ],
+            },
+            id="capability-is-a-list",
+        ),
+        pytest.param(
+            {
+                "active_remaining": 0,
+                "outcomes": [
+                    {"seat": "coder", "transport_capability": "interrupt", "transport_result": ["interrupted"]}
+                ],
+            },
+            id="result-is-a-list",
+        ),
+    ],
+)
+def test_malformed_cancellation_lists_are_bounded_diagnostics_not_typeerror(overrides):
+    """Unhashable nested values must not reach a set or frozenset operation.
+
+    ``_validate_payload`` lets ``active_seats`` and ``outcomes`` through as raw
+    lists, so element types have to be checked before ``set(active_seats)`` or
+    ``capability in TRANSPORT_CAPABILITIES``. ``validate_event`` catches only
+    ``CanonicalizationError``, so a raw ``TypeError`` here escapes as a crash
+    and breaks recovery and inspection of that journal.
+    """
+    payload = _cancelled_payload(**overrides)
+
+    with pytest.raises(run_events.CanonicalizationError):
+        run_budget.validate_run_budget_payload("run_budget.cancelled", payload)
+
+
+def test_malformed_cancellation_journal_event_validates_as_invalid_without_raising():
+    created = _build_event(1, "run.created", {"status": "started"}, "create-1", RECORDED_AT, None)
+    envelope = {
+        "schema": RUN_EVENT_SCHEMA,
+        "schema_version": RUN_EVENT_SCHEMA_VERSION,
+        "run_id": RUN_ID,
+        "sequence": 2,
+        "event_type": "run_budget.cancelled",
+        "recorded_at": "2026-08-10T21:00:01.000000Z",
+        "prev_event_digest": created["event_digest"],
+        "idempotency_key": "run_budget.cancelled:opcancel:malformed",
+        "payload": _cancelled_payload(active_seats=[{}]),
+        "event_id": "not-a-real-id",
+        "event_digest": "0" * 64,
+    }
+
+    # Returns bounded diagnostics rather than raising TypeError out of the
+    # journal reader.
+    errors = run_events.validate_event(envelope)
+    assert errors
+    assert any("active_seats" in error for error in errors)
+
+
+def test_cancelled_event_still_rejects_duplicate_seats():
+    with pytest.raises(run_events.CanonicalizationError):
+        run_budget.validate_run_budget_payload(
+            "run_budget.cancelled",
+            _cancelled_payload(active_remaining=2, active_seats=["reviewer", "reviewer"]),
+        )
+
+
+def test_failed_cancelled_event_leaves_projection_non_terminal_without_receipt():
+    recorded: list[str] = []
+
+    def append_event(event_type: str, payload: dict, idempotency_key: str):
+        if event_type == run_budget.EVENT_CANCELLED:
+            raise run_events.CanonicalizationError("lifecycle journal canonicalization failure")
+        recorded.append(event_type)
+        return {"event_type": event_type, "payload": payload, "idempotency_key": idempotency_key}
+
+    coordinator = run_budget.BudgetCoordinator(
+        declaration=run_budget.RunBudgetDeclaration(worker_dispatch_count=1),
+        append_event=append_event,
+    )
+    with pytest.raises(run_events.CanonicalizationError, match="canonicalization"):
+        coordinator.request_cancel(
+            request_id="cancel-fail",
+            reason_class="operator_cancel",
+            transport_capability="mixed",
+            dimension="wall_clock_seconds",
+            cancel_fn=lambda: ("interrupted", 0),
+        )
+
+    assert recorded == [run_budget.EVENT_CANCEL_REQUESTED]
+    assert coordinator.projection.terminal_policy is None
+    assert coordinator.projection.cancel_receipts == ()
+
+    recovered = run_budget.project_budget_state(
+        coordinator.declaration,
+        [
+            {
+                "event_type": run_budget.EVENT_CANCEL_REQUESTED,
+                "payload": {
+                    "request_id": "cancel-fail",
+                    "reason_class": "operator_cancel",
+                    "transport_capability": "mixed",
+                    "dimension": "wall_clock_seconds",
+                },
+            }
+        ],
+    )
+    assert recovered.terminal_policy is None
+    assert recovered.cancel_receipts == ()
+
+
 def test_observed_dimensions_are_labeled_and_not_hard_gated():
     declaration = run_budget.RunBudgetDeclaration(
         worker_dispatch_count=5,

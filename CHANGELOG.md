@@ -7,8 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A `brigade run` cancellation whose journal append fails no longer drives local state to a terminal result, and a malformed `run_budget.cancelled` list reports a bounded invalid-event diagnostic instead of raising `TypeError` out of journal validation. (#1439)
+- Agent-change verification now separates clean approval-policy refusals as `POLICY-FAIL`, verifies current approval evidence against the signed index tree, and keeps historical approvals from satisfying the required approval. (#1464)
+
+### Added
+
+- The Cosign signer profile now exports agent-change and commit-linkage statements as Sigstore bundles for external verification. (#1404)
+
 ### Changed
 - Private Grok Bot manifests, ledgers, action stores, and runtime configuration reads now fail closed on Windows with `secure-owner-read-unavailable` until owner-SID/DACL enforcement is implemented. (#1523)
+
+- Contributing policy drops the formal `APPROVED` review gate: merge requires green required checks and resolved conversations, and documents that GitHub ignores the `CHANGELOG.md` union merge driver when computing mergeability.
+- Update-channel documentation now describes beta previews and automatic update-check collection and retention.
+- Document the Arch Linux and Omarchy install path using `python-pipx`, including recovery after a system Python minor-version upgrade.
 - `brigade center serve` views render in the Command Deck theme through the shared `ui_theme` shell: dark tokens, the Deck masthead and nav, and no light-mode colors. Status chip colors are unchanged. (#1495)
 - The fleet boards at `/view/machines` and `/view/repos` render in the Command Deck theme through a shared `ui_theme` module, and Deck forms gain a spacing scale (16px panels, 36px controls, 8px helper-text gap, 40px buttons). Routes are unchanged. (#1495)
 - Declared version and beta preview base move to 0.28.0 after the v0.27.0 tag so publish-dev wheels sort above stable. (#1468)

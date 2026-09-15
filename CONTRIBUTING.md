@@ -21,15 +21,17 @@ External contributions are welcome. This section is the short path; [Pull reques
 - All required GitHub Actions checks pass. The checks are pinned to GitHub Actions app id 15368.
 - All review conversations are resolved.
 
-**Maintainer merge policy** (required before merge; not enforced by GitHub branch protection today):
+**Maintainer merge policy** (required before merge):
 
-- A current formal `APPROVED` review exists from a non-author reviewer.
-- The approval was recorded after the last push. New commits dismiss stale approvals.
+- Every required status check passes.
+- No review conversation is left unresolved. Branch protection enforces this.
 - Keep the branch current with `main` before merge when practical (branch protection does not require strict status checks, so GitHub does not block merge solely for being behind `main`).
 
-The pull request author cannot approve their own pull request. `gh pr review --approve` fails with "Can not approve your own pull request" when the author and reviewer share one GitHub identity.
+A formal `APPROVED` review is not required. Branch protection sets zero required approvals, and the maintainer merges on green checks and resolved conversations.
 
-CodeRabbit is the current external review identity. Its green commit status is not the grading artifact because the status can be green while the formal GitHub review is still `CHANGES_REQUESTED`. Under maintainer policy, merge waits on a current formal non-author `APPROVED` review and all required checks passing.
+The pull request author cannot approve their own pull request. `gh pr review --approve` fails with "Can not approve your own pull request" when the author and reviewer share one GitHub identity, so a self-approval gate would be unsatisfiable for single-maintainer work.
+
+CodeRabbit is the current external review identity and runs automatically. Treat its findings as advice: address the ones that hold, resolve the threads either way, and record why a finding was skipped. A stale `CHANGES_REQUESTED` review blocks the merge button even after the finding is fixed; dismiss it with `gh pr review --dismiss` rather than pushing an empty commit to chase a fresh approval.
 
 Inspect the gate before attempting a merge:
 
@@ -40,11 +42,13 @@ gh pr view <number> --json reviewDecision,mergeStateStatus
 
 `reviewDecision` reports `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or `APPROVED`. `mergeStateStatus` reports states such as `CLEAN`, `BLOCKED`, and `BEHIND`. Neither field exposes unresolved review conversations; GitHub still blocks merge when any remain.
 
-Dispatched sessions should open the pull request, run local verification, and push commits. After the final push, comment `@coderabbitai full review`. The `coderabbitai[bot]` identity records the formal GitHub review. Wait for its current `APPROVED` review before merging. A green CodeRabbit commit status alone does not satisfy this gate.
+Dispatched sessions should open the pull request, run local verification, and push commits. Automatic review runs on push; `@coderabbitai full review` requests another pass when a change deserves one. Do not block a merge waiting on a bot review that adds nothing.
 
 ## Changelog
 
 User-visible PRs append a bullet under the root `CHANGELOG.md` `## [Unreleased]` (effects, not commit subjects). `.gitattributes` marks `/CHANGELOG.md merge=union` so sibling PRs that each add their own Unreleased line combine instead of conflicting. Nested `CHANGELOG.md` files are not marked.
+
+The union driver applies to local merges and rebases only. GitHub does not read `.gitattributes` merge drivers when it computes pull-request mergeability, so sibling Unreleased appends still show as `CONFLICTING` on github.com even though they merge clean locally. Rebase the branch on `main` locally, let the union driver combine the bullets, and force-push; the pull request then reports `MERGEABLE`.
 
 Union is safe for that append-only Unreleased list when each entry is its own line. When two branches edit the same line or adjacent lines of an existing bullet, union keeps both versions or interleaves wrapped lines and does not conflict. Treat that clean merge as a rewrite to re-read; a human must reconcile.
 
