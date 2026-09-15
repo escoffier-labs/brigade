@@ -1194,9 +1194,66 @@ def test_jules_cloud_registry_entry_classifies_terminal_via_provider_tasks(tmp_p
     )
     row = next(r for r in payload["entries"] if r["task_id"] == "sess-jules-1")
     assert row["provider_state"] == "completed"
-    # `completed` is a READY state. With no expected artifact to miss and no
-    # staleness yet, a fresh terminal Jules session is landable, not pending.
+    # `completed` is a READY state. With no expected artifact to miss, no
+    # staleness yet, and no observed plan activity, a fresh terminal Jules
+    # session is landable. Plan-only needs positive `planGenerated` evidence
+    # (#1419); state alone must never manufacture `needs-plan-approval`.
     assert row["classification"] == "ready-to-land"
+
+
+def test_jules_plan_only_session_is_not_ready_to_land(tmp_path: Path):
+    cloud_tracker.register(
+        tmp_path,
+        provider="jules",
+        task_id="sess-plan-only",
+        label="jules-1413-verify-timeout",
+        prompt_hash=_prompt_hash("x"),
+        dispatched_at=_iso(NOW),
+    )
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks={
+            "sess-plan-only": {
+                "state": "completed",
+                "url": "https://jules.google.com/session/14361725569735593935",
+                "has_outputs": False,
+                "activity_kinds": ["planGenerated"],
+            }
+        },
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+    )
+    row = next(r for r in payload["entries"] if r["task_id"] == "sess-plan-only")
+    assert row["classification"] == "needs-plan-approval"
+    assert row["url"] == "https://jules.google.com/session/14361725569735593935"
+
+
+def test_jules_completed_session_with_outputs_is_ready_to_land(tmp_path: Path):
+    cloud_tracker.register(
+        tmp_path,
+        provider="jules",
+        task_id="sess-with-output",
+        label="jules:owner/repo@aabbccdd0011",
+        prompt_hash=_prompt_hash("x"),
+        dispatched_at=_iso(NOW),
+    )
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks={
+            "sess-with-output": {
+                "state": "completed",
+                "url": "https://jules.google.com/session/sess-with-output",
+                "has_outputs": True,
+            }
+        },
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+    )
+    row = next(r for r in payload["entries"] if r["task_id"] == "sess-with-output")
+    assert row["classification"] == "ready-to-land"
+    assert row["url"] == "https://jules.google.com/session/sess-with-output"
 
 
 def test_jules_terminal_entry_expecting_a_missing_branch_needs_investigation(tmp_path: Path):
@@ -1254,11 +1311,258 @@ def test_observe_providers_includes_jules_inventory_when_key_present(monkeypatch
             {"id": "sess-jules-4", "state": "COMPLETED"},
         ],
     )
+    activity_calls: list[str] = []
+
+    def _activities(session_id, _api_key, **_kw):
+        activity_calls.append(session_id)
+        return []
+
+    monkeypatch.setattr(jules_cloud, "list_activities", _activities)
     provider_tasks, _github, _cursor_wired = cloud_tracker.observe_providers(tmp_path)
     assert provider_tasks == {
         "sess-jules-3": {"state": "in_progress"},
         "sess-jules-4": {"state": "completed"},
     }
+    # Only the terminal session could have its label turn on plan evidence, so
+    # the in-progress one is never worth a second API call.
+    assert activity_calls == ["sess-jules-4"]
+
+
+def _jules_session_row(session_id: str, **overrides) -> dict:
+    """A row shaped exactly like jules_cloud.sanitize_session output."""
+    row = {
+        "id": session_id,
+        "state": "COMPLETED",
+        "create_time": "2026-09-02T20:00:00Z",
+        "update_time": "2026-09-02T21:00:00Z",
+        "url": f"https://jules.google.com/session/{session_id}",
+        "pull_request_url": None,
+        "has_outputs": False,
+    }
+    row.update(overrides)
+    return row
+
+
+def _wire_jules_observation(monkeypatch, sessions, activities, *, calls=None):
+    """Point the tracker at canned sanitized sessions and activities."""
+    _isolate_hosted_providers(monkeypatch)
+    monkeypatch.setenv("JULES_API_KEY", "fake-jules-key")
+    monkeypatch.setattr(jules_cloud, "list_sessions", lambda *a, **k: list(sessions))
+
+    def _activities(session_id, _api_key, **kwargs):
+        if calls is not None:
+            calls.append((session_id, kwargs))
+        result = activities[session_id]
+        if isinstance(result, Exception):
+            raise result
+        return [{"id": f"act-{i}", "create_time": None, "kind": kind} for i, kind in enumerate(result)]
+
+    monkeypatch.setattr(jules_cloud, "list_activities", _activities)
+
+
+def test_jules_observation_fetches_activity_kinds_for_candidate_sessions(monkeypatch, tmp_path: Path):
+    # sanitize_session never emits activity_kinds, so the tracker must fetch the
+    # bounded activity inventory itself or the evidence is never observable.
+    calls: list[tuple[str, dict]] = []
+    _wire_jules_observation(
+        monkeypatch,
+        [_jules_session_row("sess-plan")],
+        {"sess-plan": ["userMessaged", "planGenerated", "sessionCompleted"]},
+        calls=calls,
+    )
+    observation = cloud_tracker._jules_cloud_observation(tmp_path)
+    assert observation.tasks["sess-plan"]["activity_kinds"] == [
+        "userMessaged",
+        "planGenerated",
+        "sessionCompleted",
+    ]
+    assert [name for name, _kwargs in calls] == ["sess-plan"]
+    # Per-session reads stay bounded: one page, bounded items, short deadline.
+    _name, kwargs = calls[0]
+    assert kwargs["max_pages"] == 1
+    assert kwargs["max_items"] == cloud_tracker.JULES_ACTIVITY_MAX_ITEMS
+    assert kwargs["page_size"] == cloud_tracker.JULES_ACTIVITY_MAX_ITEMS
+    assert kwargs["deadline"] == cloud_tracker.JULES_ACTIVITY_DEADLINE
+
+
+def test_jules_observation_skips_activity_fetch_for_non_candidate_sessions(monkeypatch, tmp_path: Path):
+    # Outputs, a PR url, or a non-terminal state already decide the label, so
+    # those sessions must not cost an extra API call.
+    calls: list[tuple[str, dict]] = []
+    _wire_jules_observation(
+        monkeypatch,
+        [
+            _jules_session_row("sess-outputs", has_outputs=True),
+            _jules_session_row("sess-pr", pull_request_url="https://github.com/owner/repo/pull/7"),
+            _jules_session_row("sess-running", state="IN_PROGRESS"),
+        ],
+        {},
+        calls=calls,
+    )
+    observation = cloud_tracker._jules_cloud_observation(tmp_path)
+    assert calls == []
+    assert all("activity_kinds" not in info for info in observation.tasks.values())
+
+
+def test_jules_observation_caps_the_number_of_activity_fetches(monkeypatch, tmp_path: Path):
+    # A 100-session inventory must not become 100 extra API calls.
+    session_count = cloud_tracker.JULES_ACTIVITY_SESSION_CAP + 7
+    sessions = [
+        _jules_session_row(f"sess-{index:03d}", update_time=f"2026-09-02T21:{index:02d}:00Z")
+        for index in range(session_count)
+    ]
+    calls: list[tuple[str, dict]] = []
+    _wire_jules_observation(
+        monkeypatch,
+        sessions,
+        {session["id"]: ["planGenerated"] for session in sessions},
+        calls=calls,
+    )
+    observation = cloud_tracker._jules_cloud_observation(tmp_path)
+    assert len(calls) == cloud_tracker.JULES_ACTIVITY_SESSION_CAP
+    # Newest-updated candidates win the cap.
+    newest = [session["id"] for session in sessions[-cloud_tracker.JULES_ACTIVITY_SESSION_CAP :]]
+    assert sorted(name for name, _kwargs in calls) == sorted(newest)
+    # Every session still appears in the inventory; only evidence is capped.
+    assert len(observation.tasks) == session_count
+
+
+def test_jules_observation_bounds_retained_activity_kinds(monkeypatch, tmp_path: Path):
+    # Retention stays bounded and drops blanks, as the session path did.
+    kinds = ["planGenerated", "", "planGenerated", "agentMessaged"] + [f"kind-{i}" for i in range(40)]
+    _wire_jules_observation(monkeypatch, [_jules_session_row("sess-many")], {"sess-many": kinds})
+    observation = cloud_tracker._jules_cloud_observation(tmp_path)
+    named = observation.tasks["sess-many"]["activity_kinds"]
+    assert len(named) <= cloud_tracker.JULES_ACTIVITY_KIND_CAP
+    assert all(isinstance(kind, str) and kind for kind in named)
+    assert named[:2] == ["planGenerated", "agentMessaged"]
+
+
+def test_jules_activity_fetch_failure_never_manufactures_plan_approval(monkeypatch, tmp_path: Path):
+    # One failing session must not break the observation, and missing evidence
+    # must not be read as "stopped at a plan".
+    _wire_jules_observation(
+        monkeypatch,
+        [_jules_session_row("sess-broken"), _jules_session_row("sess-plan")],
+        {
+            "sess-broken": jules_cloud.JulesCloudError("Jules Cloud request failed"),
+            "sess-plan": ["userMessaged", "planGenerated"],
+        },
+    )
+    observation = cloud_tracker._jules_cloud_observation(tmp_path)
+    assert observation.reachable is True
+    assert "activity_kinds" not in observation.tasks["sess-broken"]
+    assert observation.tasks["sess-plan"]["activity_kinds"] == ["userMessaged", "planGenerated"]
+
+    for task_id in ("sess-broken", "sess-plan"):
+        cloud_tracker.register(
+            tmp_path,
+            provider="jules",
+            task_id=task_id,
+            label=f"jules:owner/repo@{task_id[-12:]:0>12}",
+            prompt_hash=_prompt_hash(task_id),
+            dispatched_at=_iso(NOW),
+        )
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        github={"branches": [], "prs": []},
+        provider_observations={"jules": observation},
+    )
+    rows = {row["task_id"]: row["classification"] for row in payload["entries"]}
+    assert rows["sess-broken"] == "ready-to-land"
+    assert rows["sess-plan"] == "needs-plan-approval"
+
+
+def test_jules_completed_session_with_work_activity_is_not_plan_approval(monkeypatch, tmp_path: Path):
+    # The headline regression: a completed no-output analysis run whose
+    # activities show real work was labeled needs-plan-approval because the
+    # tracker never fetched activities and fell through to the state-only
+    # path (#1419 review). Driven through the real observation path.
+    _wire_jules_observation(
+        monkeypatch,
+        [_jules_session_row("sess-analysis")],
+        {"sess-analysis": ["userMessaged", "agentMessaged", "artifacts", "sessionCompleted"]},
+    )
+    observation = cloud_tracker._jules_cloud_observation(tmp_path)
+    cloud_tracker.register(
+        tmp_path,
+        provider="jules",
+        task_id="sess-analysis",
+        label="jules:owner/repo@00aabbccddee",
+        prompt_hash=_prompt_hash("analysis"),
+        dispatched_at=_iso(NOW),
+    )
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        github={"branches": [], "prs": []},
+        provider_observations={"jules": observation},
+    )
+    row = next(r for r in payload["entries"] if r["task_id"] == "sess-analysis")
+    assert row["classification"] == "ready-to-land"
+
+
+def test_jules_plan_followed_by_artifacts_is_not_plan_approval(tmp_path: Path):
+    # A plan that was approved and then produced artifacts is not waiting on
+    # anyone, so planGenerated alone must not be enough to claim plan-only.
+    cloud_tracker.register(
+        tmp_path,
+        provider="jules",
+        task_id="sess-plan-then-work",
+        label="jules:owner/repo@00ccddeeff00",
+        prompt_hash=_prompt_hash("approved"),
+        dispatched_at=_iso(NOW),
+    )
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks={
+            "sess-plan-then-work": {
+                "state": "completed",
+                "has_outputs": False,
+                "activity_kinds": ["userMessaged", "planGenerated", "artifacts", "sessionCompleted"],
+            }
+        },
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+    )
+    row = next(r for r in payload["entries"] if r["task_id"] == "sess-plan-then-work")
+    assert row["classification"] == "ready-to-land"
+
+
+def test_jules_plan_session_with_surrounding_activities_still_needs_approval(tmp_path: Path):
+    # A real session records the prompt, agent chatter and completion alongside
+    # the plan, so plan-only cannot require exactly ["planGenerated"].
+    cloud_tracker.register(
+        tmp_path,
+        provider="jules",
+        task_id="sess-real-plan",
+        label="jules:owner/repo@00112233aabb",
+        prompt_hash=_prompt_hash("plan"),
+        dispatched_at=_iso(NOW),
+    )
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks={
+            "sess-real-plan": {
+                "state": "completed",
+                "has_outputs": False,
+                "activity_kinds": [
+                    "userMessaged",
+                    "planGenerated",
+                    "agentMessaged",
+                    "progressUpdated",
+                    "sessionCompleted",
+                ],
+            }
+        },
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+    )
+    row = next(r for r in payload["entries"] if r["task_id"] == "sess-real-plan")
+    assert row["classification"] == "needs-plan-approval"
 
 
 def test_observe_providers_skips_jules_inventory_when_key_absent(monkeypatch, tmp_path: Path):
@@ -2657,3 +2961,279 @@ def test_cli_run_cloud_compact_json_contract(tmp_path: Path, capsys, monkeypatch
     assert ids["orphaned"] in kept_ids
     assert ids["needs"] in kept_ids
     assert ids["landed-old"] not in kept_ids
+
+
+def test_cli_run_cloud_launch_jules_no_plan_approval_forwards_skip(tmp_path: Path, capsys, monkeypatch):
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("jules prompt", encoding="utf-8")
+    prompt_file.chmod(0o600)
+    monkeypatch.setenv("JULES_API_KEY", "jules-api-key-deadbeef")
+    captured: dict[str, Any] = {}
+
+    def fake_launch(api_key: str, **kwargs: Any):
+        captured.update(kwargs)
+        return jules_cloud.LaunchResult(ok=True, session_id="sess-skip", reason="ok")
+
+    monkeypatch.setattr(jules_cloud, "launch_agent", fake_launch)
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "launch",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "jules",
+            "--repo",
+            "owner/repo",
+            "--label",
+            "jules-skip-plan",
+            "--prompt-file",
+            str(prompt_file),
+            "--no-plan-approval",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert captured["require_plan_approval"] is False
+    assert captured["auto_create_pr"] is False
+
+
+def test_cli_run_cloud_launch_jules_keeps_plan_approval_without_flag(tmp_path: Path, capsys, monkeypatch):
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("jules prompt", encoding="utf-8")
+    prompt_file.chmod(0o600)
+    monkeypatch.setenv("JULES_API_KEY", "jules-api-key-deadbeef")
+    captured: dict[str, Any] = {}
+
+    def fake_launch(api_key: str, **kwargs: Any):
+        captured.update(kwargs)
+        return jules_cloud.LaunchResult(ok=True, session_id="sess-default", reason="ok")
+
+    monkeypatch.setattr(jules_cloud, "launch_agent", fake_launch)
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "launch",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "jules",
+            "--repo",
+            "owner/repo",
+            "--label",
+            "jules-default-plan",
+            "--prompt-file",
+            str(prompt_file),
+            "--json",
+        ]
+    )
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert captured["require_plan_approval"] is True
+    assert captured["auto_create_pr"] is False
+
+
+def test_cli_run_cloud_launch_cursor_rejects_no_plan_approval(tmp_path: Path, capsys, monkeypatch):
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("unused prompt", encoding="utf-8")
+    prompt_file.chmod(0o600)
+    monkeypatch.setenv("CURSOR_API_KEY", "cursor-api-key-deadbeef")
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cursor_cloud,
+        "launch_agent",
+        lambda *a, **k: (
+            calls.append({"args": a, "kwargs": k}) or cursor_cloud.LaunchResult(ok=True, agent_id="nope", reason="ok")
+        ),
+    )
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "launch",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "cursor-cloud",
+            "--repo",
+            "owner/repo",
+            "--label",
+            "cursor-flags",
+            "--prompt-file",
+            str(prompt_file),
+            "--no-plan-approval",
+            "--json",
+        ]
+    )
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["reason"] == "unsupported-flag"
+    assert calls == []
+
+
+def test_cli_run_cloud_approve_jules_wraps_approve_plan(tmp_path: Path, capsys, monkeypatch):
+    monkeypatch.setenv("JULES_API_KEY", "jules-api-key-deadbeef")
+    calls: list[dict[str, Any]] = []
+
+    def fake_approve(session_id: str, api_key: str, **kwargs: Any):
+        calls.append({"session_id": session_id, "api_key": api_key, "kwargs": kwargs})
+        return {}
+
+    monkeypatch.setattr(jules_cloud, "approve_plan", fake_approve)
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "approve",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "jules",
+            "--task",
+            "sess-approve-1",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"ok": True, "provider": "jules", "task_id": "sess-approve-1"}
+    assert calls == [{"session_id": "sess-approve-1", "api_key": "jules-api-key-deadbeef", "kwargs": {}}]
+
+
+def test_cli_run_cloud_approve_jules_missing_key_makes_zero_provider_mutation(tmp_path: Path, capsys, monkeypatch):
+    monkeypatch.delenv("JULES_API_KEY", raising=False)
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        jules_cloud,
+        "approve_plan",
+        lambda *a, **k: calls.append({"args": a, "kwargs": k}) or {},
+    )
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "approve",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "jules",
+            "--task",
+            "sess-approve-2",
+            "--json",
+        ]
+    )
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["reason"] == "missing-key"
+    assert calls == []
+
+
+def test_cli_run_cloud_approve_rejects_non_jules_provider(tmp_path: Path, capsys, monkeypatch):
+    monkeypatch.setenv("JULES_API_KEY", "jules-api-key-deadbeef")
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        jules_cloud,
+        "approve_plan",
+        lambda *a, **k: calls.append({"args": a, "kwargs": k}) or {},
+    )
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "approve",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "cursor-cloud",
+            "--task",
+            "sess-approve-3",
+            "--json",
+        ]
+    )
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["reason"] == "unsupported-provider"
+    assert calls == []
+
+
+def test_cli_run_cloud_approve_surfaces_bounded_provider_error(tmp_path: Path, capsys, monkeypatch):
+    monkeypatch.setenv("JULES_API_KEY", "jules-api-key-deadbeef")
+    monkeypatch.setattr(
+        jules_cloud,
+        "approve_plan",
+        lambda *a, **k: (_ for _ in ()).throw(jules_cloud.JulesCloudError("boom", reason="provider-error")),
+    )
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "approve",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "jules",
+            "--task",
+            "sess-approve-4",
+            "--json",
+        ]
+    )
+    assert rc == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload == {
+        "ok": False,
+        "provider": "jules",
+        "task_id": "sess-approve-4",
+        "reason": "provider-error",
+    }
+    assert "Traceback" not in captured.err
+    assert "boom" not in captured.out
+    assert "boom" not in captured.err
+
+
+def test_cli_run_cloud_status_surfaces_jules_session_url(tmp_path: Path, capsys, monkeypatch):
+    _isolate_hosted_providers(monkeypatch)
+    cloud_tracker.register(
+        tmp_path,
+        provider="jules",
+        task_id="sess-url",
+        label="jules-url",
+        prompt_hash=_prompt_hash("x"),
+        dispatched_at=_iso(NOW),
+    )
+    monkeypatch.setattr(
+        cloud_tracker,
+        "observe_provider_details",
+        lambda *a, **k: (
+            {
+                "jules": cloud_tracker.ProviderObservation(
+                    True,
+                    True,
+                    None,
+                    {
+                        "sess-url": {
+                            "state": "completed",
+                            "url": "https://jules.google.com/session/sess-url",
+                            "activity_kinds": ["planGenerated"],
+                        }
+                    },
+                ),
+                "cursor-cloud": cloud_tracker.ProviderObservation(False, False, "unconfigured", {}),
+                "codex-cloud": cloud_tracker.ProviderObservation(False, False, "unconfigured", {}),
+                "grokbot-cloud": cloud_tracker.ProviderObservation(False, False, "unconfigured", {}),
+                "claude-cloud": cloud_tracker.ProviderObservation(False, False, "disabled-by-policy", {}),
+            },
+            {"branches": [], "prs": []},
+        ),
+    )
+    rc = cli.main(["run", "cloud", "status", "--target", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "needs-plan-approval" in out
+    assert "https://jules.google.com/session/sess-url" in out

@@ -64,7 +64,22 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Opt in to provider autoCreatePR. Default is off.",
     )
+    p_launch.add_argument(
+        "--no-plan-approval",
+        action="store_true",
+        help="Jules: skip requirePlanApproval. Default for headless conductor launches. Rejected for Cursor Cloud.",
+    )
     p_launch.add_argument("--json", action="store_true", help="Emit the public launch JSON contract.")
+
+    p_approve = cloud_sub.add_parser("approve", help="Approve a Jules session plan.")
+    p_approve.add_argument("--target", type=Path, default=Path("."), help="Workspace with .brigade/cloud state.")
+    p_approve.add_argument(
+        "--provider",
+        required=True,
+        choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules"),
+    )
+    p_approve.add_argument("--task", required=True, help="Jules session id.")
+    p_approve.add_argument("--json", action="store_true", help="Emit the public approve JSON contract.")
 
     p_register = cloud_sub.add_parser("register", help="Register a dispatched cloud task.")
     p_register.add_argument("--target", type=Path, default=Path("."))
@@ -533,6 +548,8 @@ def dispatch(args) -> int:
 
     if command == "launch":
         return _dispatch_launch(args, target)
+    if command == "approve":
+        return _dispatch_approve(args, target)
 
     if command == "register":
         try:
@@ -642,9 +659,10 @@ def dispatch(args) -> int:
         counts = payload.get("counts") or {}
         print("counts: " + ", ".join(f"{k}={counts.get(k, 0)}" for k in cloud_tracker.CLASSIFICATIONS))
         for row in payload.get("entries", []):
+            extra = f" url={row['url']}" if row.get("url") else ""
             print(
                 f"  - [{row.get('classification')}] {row.get('label')} "
-                f"provider={row.get('provider')} task={row.get('task_id')} branch={row.get('branch')}"
+                f"provider={row.get('provider')} task={row.get('task_id')} branch={row.get('branch')}{extra}"
             )
         return 0
 
@@ -712,7 +730,9 @@ def _dispatch_launch(args, target: Path) -> int:
             as_json=args.json,
             exit_code=2,
         )
-    if provider == "cursor-cloud" and (args.starting_branch is not None or args.title is not None):
+    if provider == "cursor-cloud" and (
+        args.starting_branch is not None or args.title is not None or bool(getattr(args, "no_plan_approval", False))
+    ):
         return _emit_launch_payload(
             {"ok": False, "provider": provider, "label": label, "reason": "unsupported-flag"},
             as_json=args.json,
@@ -759,6 +779,7 @@ def _dispatch_launch(args, target: Path) -> int:
             title=args.title,
             starting_branch=args.starting_branch,
             auto_create_pr=bool(args.auto_create_pr),
+            require_plan_approval=not bool(args.no_plan_approval),
             register_target=target,
             label=label,
         )
@@ -870,6 +891,65 @@ def _emit_launch_payload(payload: dict[str, Any], *, as_json: bool, exit_code: i
         print(f"launched {payload.get('provider')} task={payload.get('task_id')}{extra}")
         return exit_code
     print(f"error: {payload.get('reason', 'launch-failed')}", file=sys.stderr)
+    return exit_code
+
+
+def _dispatch_approve(args, _target: Path) -> int:
+    """Approve a Jules plan. Other providers are rejected without a provider call."""
+    from .. import jules_cloud
+
+    provider = str(args.provider)
+    task_id = str(args.task).strip() if isinstance(args.task, str) else ""
+    if provider != "jules":
+        return _emit_approve_payload(
+            {"ok": False, "provider": provider, "task_id": task_id or args.task, "reason": "unsupported-provider"},
+            as_json=args.json,
+            exit_code=2,
+        )
+    if not task_id:
+        return _emit_approve_payload(
+            {"ok": False, "provider": provider, "task_id": args.task, "reason": "bad-task"},
+            as_json=args.json,
+            exit_code=2,
+        )
+    api_key = _resolve_launch_key(provider)
+    if not api_key:
+        return _emit_approve_payload(
+            {"ok": False, "provider": provider, "task_id": task_id, "reason": "missing-key"},
+            as_json=args.json,
+            exit_code=2,
+        )
+    try:
+        jules_cloud.approve_plan(task_id, api_key)
+    except jules_cloud.JulesCloudError as exc:
+        reason = exc.reason if isinstance(exc.reason, str) and exc.reason else "provider-error"
+        return _emit_approve_payload(
+            {"ok": False, "provider": provider, "task_id": task_id, "reason": reason},
+            as_json=args.json,
+            exit_code=1,
+        )
+    except Exception:
+        return _emit_approve_payload(
+            {"ok": False, "provider": provider, "task_id": task_id, "reason": "provider-error"},
+            as_json=args.json,
+            exit_code=1,
+        )
+    return _emit_approve_payload(
+        {"ok": True, "provider": provider, "task_id": task_id},
+        as_json=args.json,
+        exit_code=0,
+    )
+
+
+def _emit_approve_payload(payload: dict[str, Any], *, as_json: bool, exit_code: int) -> int:
+    """Print a bounded approve result. Bodies and tracebacks stay out."""
+    if as_json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return exit_code
+    if payload.get("ok"):
+        print(f"approved {payload.get('provider')} task={payload.get('task_id')}")
+        return exit_code
+    print(f"error: {payload.get('reason', 'approve-failed')}", file=sys.stderr)
     return exit_code
 
 

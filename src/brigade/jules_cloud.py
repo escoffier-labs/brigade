@@ -39,6 +39,17 @@ MAX_RESPONSE_BYTES = 64 * 1024
 # The only automation mode this adapter will ever send.
 AUTO_CREATE_PR = "AUTO_CREATE_PR"
 
+# Jules activity oneofs this adapter may name. Payloads stay dropped.
+_ACTIVITY_KINDS = (
+    "planGenerated",
+    "sessionCompleted",
+    "sessionFailed",
+    "progressUpdated",
+    "agentMessaged",
+    "userMessaged",
+    "artifacts",
+)
+
 # Jules session states from the v1alpha API.
 _TERMINAL_STATES = frozenset({"failed", "completed"})
 # All non-terminal Jules states consume capacity until explicitly terminal.
@@ -224,6 +235,22 @@ def _id_from_name(value: object, prefix: str) -> str | None:
     return tail
 
 
+def _activity_kind(raw: dict[str, Any]) -> str | None:
+    """Return the first allowlisted activity oneof key, or None."""
+    for kind in _ACTIVITY_KINDS:
+        if kind in raw:
+            return kind
+    return None
+
+
+def _session_has_outputs(raw: dict[str, Any]) -> bool:
+    """True when the session lists at least one object-shaped output."""
+    outputs = raw.get("outputs")
+    if not isinstance(outputs, list):
+        return False
+    return any(isinstance(item, dict) for item in outputs[:20])
+
+
 def _find_pr_url(raw: dict[str, Any]) -> str | None:
     """Look for a GitHub PR URL in the shapes the alpha API has used."""
     candidates: list[Any] = [raw.get("pullRequestUrl")]
@@ -262,11 +289,12 @@ def sanitize_session(raw: object) -> dict[str, Any] | None:
         "update_time": _bounded_timestamp(raw.get("updateTime")),
         "url": _validated_session_url(raw.get("url")),
         "pull_request_url": _find_pr_url(raw),
+        "has_outputs": _session_has_outputs(raw),
     }
 
 
 def sanitize_activity(raw: object) -> dict[str, Any] | None:
-    """Keep an activity's id and timestamp only; payloads and text are dropped."""
+    """Keep an activity's id, timestamp, and bounded kind; payloads stay dropped."""
     if not isinstance(raw, dict):
         return None
     activity_id = raw.get("id")
@@ -277,6 +305,7 @@ def sanitize_activity(raw: object) -> dict[str, Any] | None:
     return {
         "id": activity_id.strip(),
         "create_time": _bounded_timestamp(raw.get("createTime")),
+        "kind": _activity_kind(raw),
     }
 
 
@@ -797,6 +826,7 @@ def launch_agent(
     title: str | None = None,
     starting_branch: str | None = None,
     auto_create_pr: bool = False,
+    require_plan_approval: bool = True,
     base_url: str = DEFAULT_BASE_URL,
     opener=None,
     deadline: float = DEFAULT_DEADLINE,
@@ -814,7 +844,7 @@ def launch_agent(
     The lease label is derived from provider, repo, and prompt hash. Prompt text
     is never persisted as a label.
 
-    ``requirePlanApproval`` is always true and ``automationMode`` is omitted
+    ``requirePlanApproval`` defaults to true and ``automationMode`` is omitted
     unless ``auto_create_pr`` is True. A provider HTTP 4xx/5xx releases the
     unbound lease as ``submit-failed``. A transport timeout, ``URLError``,
     ``OSError``, ``TimeoutError``, or malformed/oversized response after POST is
@@ -871,7 +901,7 @@ def launch_agent(
             source_name=source["name"],
             starting_branch=branch,
             title=title,
-            require_plan_approval=True,
+            require_plan_approval=bool(require_plan_approval),
             automation_mode=automation_mode,
             base_url=base_url,
             opener=opener,

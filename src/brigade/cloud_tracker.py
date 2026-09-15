@@ -38,8 +38,22 @@ JULES_HOLDING_STATES = frozenset(
 ACTIVE_STATES = PENDING_STATES | JULES_HOLDING_STATES | frozenset({"creating", "active"})
 TERMINAL_STATES = FINISHED_STATES | FAILED_STATES | frozenset({"interrupted", "timed_out", "timeout"})
 
+# Jules activity kinds that prove a session worked past its plan and produced
+# something. Seeing one of these rules out "stopped at a plan".
+JULES_WORK_ACTIVITY_KINDS = frozenset({"artifacts"})
+# Bounds for the follow-up activity reads the tracker makes while observing
+# Jules. These are deliberately small: activities are fetched only for sessions
+# whose classification could actually change, never for the whole inventory.
+JULES_ACTIVITY_SESSION_CAP = 10
+JULES_ACTIVITY_MAX_ITEMS = 30
+JULES_ACTIVITY_DEADLINE = 5.0
+JULES_ACTIVITY_BUDGET_SECONDS = 15.0
+# Upper bound on distinct kinds retained per session.
+JULES_ACTIVITY_KIND_CAP = 20
+
 CLASSIFICATIONS = (
     "pending",
+    "needs-plan-approval",
     "ready-to-land",
     "landed",
     "stale",
@@ -322,6 +336,52 @@ def _prs_for_branch(github: dict[str, Any], branch: str | None) -> list[dict[str
     return matched
 
 
+def _jules_session_url(provider_info: dict[str, Any] | None) -> str | None:
+    """Return a sanitized Jules session URL, or None."""
+    if not isinstance(provider_info, dict):
+        return None
+    from . import jules_cloud
+
+    return jules_cloud._validated_session_url(provider_info.get("url"))
+
+
+def _jules_plan_only(
+    provider_info: dict[str, Any] | None,
+    *,
+    branch_exists: bool,
+    open_pr: bool,
+) -> bool:
+    """True when a Jules session stopped at a plan with nothing landable.
+
+    This reads positive evidence only. A ``planGenerated`` activity must
+    actually have been observed for the session; absent, unfetched, or
+    unreadable activity evidence never yields True, so a failed or skipped
+    activity fetch degrades to the ordinary ready/stale path instead of
+    manufacturing a ``needs-plan-approval`` label out of nothing. The caller
+    already gates this on a ready/finished provider state, so no state check is
+    repeated here.
+    """
+    if not isinstance(provider_info, dict):
+        return False
+    if branch_exists or open_pr:
+        return False
+    if provider_info.get("has_outputs") is True:
+        return False
+    if isinstance(provider_info.get("pull_request_url"), str) and provider_info.get("pull_request_url"):
+        return False
+    kinds = provider_info.get("activity_kinds")
+    if not isinstance(kinds, list):
+        return False
+    named = {kind for kind in kinds if isinstance(kind, str) and kind}
+    if "planGenerated" not in named:
+        return False
+    # A real session records several activities (the prompt, agent messages,
+    # progress, completion), so plan-only cannot mean "planGenerated and
+    # nothing else". What disqualifies it is evidence the session worked past
+    # the plan and produced something.
+    return not (named & JULES_WORK_ACTIVITY_KINDS)
+
+
 def _classify_entry(
     entry: dict[str, Any],
     *,
@@ -392,6 +452,12 @@ def _classify_entry(
         # Ready / finished without a merge: landable, stale, or needs investigation.
         if expects_branch and not branch_exists and not open_pr:
             classification = "needs-investigation"
+        elif provider == "jules" and _jules_plan_only(
+            provider_info if isinstance(provider_info, dict) else None,
+            branch_exists=branch_exists,
+            open_pr=open_pr,
+        ):
+            classification = "needs-plan-approval"
         else:
             ready_mark = ready_at or _parse_time(entry.get("dispatched_at"))
             age_hours = _hours_since(ready_mark, now)
@@ -406,7 +472,7 @@ def _classify_entry(
     else:
         classification = "pending"
 
-    return {
+    row = {
         "id": entry.get("id"),
         "provider": provider,
         "task_id": task_id,
@@ -421,6 +487,10 @@ def _classify_entry(
         "evidence": evidence,
         "pr": prs[0] if prs else None,
     }
+    session_url = _jules_session_url(provider_info if isinstance(provider_info, dict) else None)
+    if session_url:
+        row["url"] = session_url
+    return row
 
 
 def _orphan_branch_rows(
@@ -868,7 +938,13 @@ def sweep(target: Path, *, now: datetime | None = None, status: dict[str, Any] |
             "classification": classification,
             "evidence": row.get("evidence"),
         }
-        if classification in {"ready-to-land", "stale", "needs-investigation", "pending"}:
+        if classification in {
+            "ready-to-land",
+            "stale",
+            "needs-investigation",
+            "pending",
+            "needs-plan-approval",
+        }:
             recoverable.append(item)
         elif classification == "orphaned":
             deletable.append(item)
@@ -909,7 +985,14 @@ def _row_is_preserved(row: dict[str, Any]) -> bool:
     """Keep active, ambiguous, orphaned, needs-investigation, and current work."""
     classification = row.get("classification")
     state = row.get("provider_state")
-    if classification in {"orphaned", "needs-investigation", "pending", "ready-to-land", "stale"}:
+    if classification in {
+        "orphaned",
+        "needs-investigation",
+        "pending",
+        "ready-to-land",
+        "stale",
+        "needs-plan-approval",
+    }:
         return True
     if is_active_state(state):
         return True
@@ -1287,6 +1370,12 @@ def _jules_cloud_observation(target: Path) -> ProviderObservation:
     signal only. A failed fetch returns ``{}`` and a truncated page walk simply
     omits ids, and absence of an id is never read as terminal, so unknown or
     truncated inventory can never release capacity.
+
+    Sessions whose label could still turn on plan evidence get one extra
+    bounded ``GET /sessions/{id}/activities`` read so ``activity_kinds``
+    carries real evidence rather than never being set. That second phase is
+    capped by session count, page size, per-call deadline, and a wall-clock
+    budget, and a failure there is skipped rather than propagated.
     """
     api_key = _jules_api_key()
     if not api_key:
@@ -1298,14 +1387,90 @@ def _jules_cloud_observation(target: Path) -> ProviderObservation:
     except Exception as exc:  # noqa: BLE001 - observation must stay bounded
         return _provider_error_observation(exc)
     tasks: dict[str, Any] = {}
+    candidates: list[tuple[str, str]] = []
     for session in sessions:
         if not isinstance(session, dict):
             continue
         session_id = session.get("id")
         if not isinstance(session_id, str):
             continue
-        tasks[session_id] = {"state": normalize_provider_state(session.get("state"))}
+        info: dict[str, Any] = {"state": normalize_provider_state(session.get("state"))}
+        url = session.get("url")
+        if isinstance(url, str):
+            info["url"] = url
+        if session.get("has_outputs") is True:
+            info["has_outputs"] = True
+        pull_request_url = session.get("pull_request_url")
+        if isinstance(pull_request_url, str):
+            info["pull_request_url"] = pull_request_url
+        tasks[session_id] = info
+        if _jules_needs_activity_evidence(info):
+            candidates.append((str(session.get("update_time") or ""), session_id))
+    _attach_jules_activity_kinds(jules_cloud, api_key, tasks, candidates)
     return ProviderObservation(True, True, None, tasks)
+
+
+def _jules_needs_activity_evidence(info: dict[str, Any]) -> bool:
+    """True when activity evidence could still change this session's label.
+
+    Only sessions that would otherwise fall through to the ready/finished path
+    with nothing landable are worth a second API call. Anything with outputs or
+    a pull request is already disqualified from ``needs-plan-approval``, and
+    anything not ready/finished is not classified against a plan at all.
+    """
+    if info.get("has_outputs") is True:
+        return False
+    if isinstance(info.get("pull_request_url"), str) and info.get("pull_request_url"):
+        return False
+    state = _normalize_provider_state(info.get("state"))
+    return state in READY_STATES or state == "finished"
+
+
+def _attach_jules_activity_kinds(
+    jules_cloud: Any,
+    api_key: str,
+    tasks: dict[str, Any],
+    candidates: list[tuple[str, str]],
+) -> None:
+    """Fill in ``activity_kinds`` for a capped set of candidate sessions.
+
+    Newest-updated candidates win the cap, the whole phase is held to a
+    wall-clock budget, and a failing session is skipped rather than allowed to
+    break the observation. A skipped or failed fetch leaves ``activity_kinds``
+    absent, which ``_jules_plan_only`` reads as "no evidence", never as
+    "plan-only".
+    """
+    import time
+
+    candidates.sort(reverse=True)
+    stop_at = time.monotonic() + JULES_ACTIVITY_BUDGET_SECONDS
+    for _update_time, session_id in candidates[:JULES_ACTIVITY_SESSION_CAP]:
+        if time.monotonic() >= stop_at:
+            break
+        try:
+            activities = jules_cloud.list_activities(
+                session_id,
+                api_key,
+                deadline=JULES_ACTIVITY_DEADLINE,
+                page_size=JULES_ACTIVITY_MAX_ITEMS,
+                max_pages=1,
+                max_items=JULES_ACTIVITY_MAX_ITEMS,
+            )
+        except Exception:  # noqa: BLE001 - one bad session must not break observation
+            continue
+        if not isinstance(activities, list):
+            continue
+        named: list[str] = []
+        for activity in activities:
+            if len(named) >= JULES_ACTIVITY_KIND_CAP:
+                break
+            if not isinstance(activity, dict):
+                continue
+            kind = activity.get("kind")
+            if isinstance(kind, str) and kind and kind not in named:
+                named.append(kind)
+        if named:
+            tasks[session_id]["activity_kinds"] = named
 
 
 def observe_jules_cloud_tasks(target: Path) -> dict[str, Any]:
@@ -1396,6 +1561,7 @@ def center_activity_records(
     )
     state_map = {
         "pending": "running",
+        "needs-plan-approval": "running",
         "ready-to-land": "ready",
         "stale": "stale",
         "landed": "succeeded",
