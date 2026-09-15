@@ -64,11 +64,16 @@ _CHECKPOINT_ASSET_SUFFIXES = frozenset(
         ".mov",
     }
 )
+# Every field a degraded body may carry. ``approval_reference`` is admitted
+# here but copied through _bounded_approval_reference rather than verbatim:
+# it is the only retained field whose incoming value is a caller mapping, and
+# the closed shape keeps it small enough to survive the cap (#1506).
 _SLIM_CHECKPOINT_FIELDS = (
     "schema",
     "schema_version",
     "kind",
     "status",
+    "approval_reference",
     "lifecycle_journal_requested",
     "run_journal_authority_requested",
     "tree_fingerprint",
@@ -307,6 +312,33 @@ def _oversized_path_entries(obj: Mapping[str, Any]) -> list[dict[str, Any]]:
     return entries
 
 
+def _bounded_approval_reference(value: Any) -> dict[str, str] | None:
+    """Return the closed approval-reference shape, bounded, or ``None``.
+
+    A degraded body exists to stay under the byte cap, so the reference is
+    admitted only as ``run_lifecycle.APPROVAL_REFERENCE_FIELDS`` mapped to
+    short text -- never an arbitrary caller mapping. At most nine fields of
+    ``run_events.MAX_PAYLOAD_STR_LEN`` chars each is a few kilobytes against
+    a 16 MiB cap, which is why this field is retained rather than dropped:
+    losing it silently converts a deliberately approval-paused run (status
+    ``running`` plus ``approval_reference.decision_state``) into what reads
+    as an ordinary active run, which is then stranded or reaped.
+
+    The copy is tolerant, not strict. Degrading must not raise, so a field
+    that does not fit the shape is dropped instead of failing the publish.
+    """
+    from brigade import run_lifecycle  # lazy: avoid import cycle
+
+    if not isinstance(value, Mapping):
+        return None
+    bounded: dict[str, str] = {}
+    for key in sorted(run_lifecycle.APPROVAL_REFERENCE_FIELDS):
+        item = value.get(key)
+        if isinstance(item, str) and item and len(item) <= run_events.MAX_PAYLOAD_STR_LEN:
+            bounded[key] = item
+    return bounded or None
+
+
 def _projection_base_from_checkpoint(checkpoint_obj: Mapping[str, Any]) -> dict[str, Any]:
     """Drop truncation markers so authority projection stays on owned fields."""
     return {key: value for key, value in checkpoint_obj.items() if key not in _CHECKPOINT_TRUNCATION_KEYS}
@@ -327,6 +359,11 @@ def _degrade_oversized_checkpoint(run_json_bytes: bytes) -> bytes:
         obj = {}
     oversized_paths = _oversized_path_entries(obj)
     slim: dict[str, Any] = {key: obj[key] for key in _SLIM_CHECKPOINT_FIELDS if key in obj}
+    approval_reference = _bounded_approval_reference(slim.get("approval_reference"))
+    if approval_reference is None:
+        slim.pop("approval_reference", None)
+    else:
+        slim["approval_reference"] = approval_reference
     slim["truncated"] = True
     slim["oversized_paths"] = oversized_paths
     try:
@@ -359,6 +396,11 @@ def _degrade_oversized_checkpoint(run_json_bytes: bytes) -> bytes:
     fingerprint = obj.get("tree_fingerprint")
     if isinstance(fingerprint, str) and fingerprint:
         last["tree_fingerprint"] = fingerprint
+    if approval_reference is not None:
+        # Approval state survives even the last-resort body: it is bounded to
+        # a few kilobytes and its loss is the failure this body exists to
+        # avoid making worse.
+        last["approval_reference"] = approval_reference
     encoded = _writer_canonical_bytes(last)
     if len(encoded) > MAX_CHECKPOINT_BYTES:
         raise CheckpointError(_bound("checkpoint bytes exceed MAX_CHECKPOINT_BYTES"), category="byte-size")
@@ -965,8 +1007,9 @@ def write_checkpoint(
     the lifecycle status append and BEFORE the ``run.json`` replacement. An
     oversize snapshot is the one publish failure that degrades instead of
     aborting the live write (issue #1506): the published body keeps status,
-    durable request flags, and the tree fingerprint, records the oversized
-    asset-path list, and marks ``truncated``. Raises
+    durable request flags, the tree fingerprint, and the bounded
+    ``approval_reference`` that marks a deliberately approval-paused run,
+    records the oversized asset-path list, and marks ``truncated``. Raises
     ``LifecycleJournalError`` on a bounded journal read failure.
 
     ``run_lifecycle`` is imported lazily inside this function so the lifecycle
@@ -1422,6 +1465,21 @@ def recover_from_checkpoint(
             restore_bytes = projection.to_bytes()
         except run_projector.ProjectionError as exc:
             raise CheckpointError(_bound("projection failed"), category="projection") from exc
+    elif _CHECKPOINT_TRUNCATION_KEYS & checkpoint_obj.keys():
+        # Legacy-full restore of a degraded body (issue #1506). The truncation
+        # markers describe the checkpoint body's own fidelity, not run state,
+        # and are not owned run.json fields (run_projector.OWNED_FIELDS), so
+        # restoring them verbatim makes run_audit._unknown_run_fields classify
+        # the repaired run.json as an unsupported schema and the recovered run
+        # becomes unauditable. Normalize them away exactly as the authority
+        # path does before projection. The markers stay durable where they
+        # belong -- in the checkpoint body under events/recovery-checkpoints.
+        try:
+            restore_bytes = _writer_canonical_bytes(_projection_base_from_checkpoint(checkpoint_obj))
+        except (RecursionError, TypeError, ValueError) as exc:
+            raise CheckpointError(
+                _bound("could not normalize truncated checkpoint body"), category="json-object"
+            ) from exc
     return _restore_run_json_from_checkpoint(run_dir, restore_bytes, run_meta=run_meta)
 
 

@@ -464,6 +464,21 @@ staleness under version 2.
 
 `publish_checkpoint_file` still refuses a raw body above `MAX_CHECKPOINT_BYTES`.
 `write_checkpoint` now degrades that one case instead of aborting the live
-write: the published body keeps status, durable request flags, and the tree
-fingerprint, records `truncated` plus the oversized asset-path list, and drops
-bulky fields. Authority recovery strips those two keys before projection.
+write: the published body keeps status, durable request flags, the tree
+fingerprint, and `approval_reference`, records `truncated` plus the oversized
+asset-path list, and drops bulky fields.
+
+`approval_reference` is retained because an approval-gated run that pauses
+deliberately holds `status: running` in `run.json` and is distinguished from an
+ordinary active run only by `approval_reference.decision_state`. Dropping it
+would strand or wrongly reap that run after recovery. It is copied through the
+closed `run_lifecycle.APPROVAL_REFERENCE_FIELDS` shape with each value bounded
+by `run_events.MAX_PAYLOAD_STR_LEN`, so at most a few kilobytes reach the body,
+and it is deliberately absent from the progressive-drop list.
+
+`truncated` and `oversized_paths` describe the checkpoint body's own fidelity,
+not run state, and are not owned `run.json` fields. Both recovery paths strip
+them: the authority path before projection, the legacy-full path by re-encoding
+the normalized body. A recovered `run.json` therefore never carries them and
+stays auditable. The markers remain durable in the checkpoint body itself under
+`events/recovery-checkpoints/`.
