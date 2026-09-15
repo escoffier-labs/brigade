@@ -23,8 +23,18 @@ def metadata_plan_blockers(issue_type: str, *, reviewed: date | None) -> list[st
     return ["issue-type-not-supported-for-metadata-plan"]
 
 
-def derived_fresh_until(reviewed: date, stale_after_days: int) -> str:
-    return (reviewed + timedelta(days=stale_after_days)).isoformat()
+def derived_fresh_until(reviewed: date, stale_after_days: int) -> str | None:
+    """Derive the freshness date, or None when it falls outside ``date``'s range.
+
+    A card may carry a near-limit ``last_reviewed`` such as ``9999-12-31``, and
+    ``stale_after_days`` is operator-configured. Either can push the sum past
+    ``date.max`` or below ``date.min``, so the caller treats a non-representable
+    derivation as a blocker instead of letting the arithmetic escape.
+    """
+    try:
+        return (reviewed + timedelta(days=stale_after_days)).isoformat()
+    except (OverflowError, ValueError):
+        return None
 
 
 def block_reason_counts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -86,7 +96,11 @@ def plan_item(issue: dict[str, Any], *, target: Path, scan_date: str, config: Me
         candidate_fields["last_reviewed"] = scan_date
     elif issue_type == "missing-freshness":
         if reviewed is not None:
-            candidate_fields["fresh_until"] = derived_fresh_until(reviewed, config.stale_after_days)
+            derived = derived_fresh_until(reviewed, config.stale_after_days)
+            if derived is None:
+                blockers.append("freshness-date-not-representable")
+            else:
+                candidate_fields["fresh_until"] = derived
         else:
             candidate_fields["fresh_until"] = "<operator-selected-date>"
     blockers.extend(metadata_plan_blockers(issue_type, reviewed=reviewed))
@@ -107,7 +121,7 @@ def plan_item(issue: dict[str, Any], *, target: Path, scan_date: str, config: Me
             "brigade memory care backfill" if unblocked else "brigade memory care import-issues"
         ),
     }
-    if issue_type == "missing-freshness" and reviewed is not None:
+    if issue_type == "missing-freshness" and reviewed is not None and "fresh_until" in candidate_fields:
         item["derivation"] = FRESHNESS_DERIVATION
     return item
 

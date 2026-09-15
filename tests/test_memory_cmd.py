@@ -372,6 +372,47 @@ def test_memory_care_scan_flags_missing_evidence_refs(tmp_path, monkeypatch, cap
     assert "evidence_refs: present=3 missing=1" in out
 
 
+def test_memory_care_plan_blocks_freshness_dates_that_leave_the_supported_range(tmp_path, monkeypatch, capsys):
+    """A near-limit last_reviewed must block, not raise OverflowError.
+
+    ``last_reviewed + stale_after_days`` can exceed ``date.max``. ``health()``
+    runs the same planner, so an escaped OverflowError took down both
+    ``memory care plan-fixes`` and ``memory care status`` after a clean scan.
+    """
+    monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
+    cards = tmp_path / "memory" / "cards"
+    far_future = cards / "far-future.md"
+    _write_card(
+        far_future,
+        {"topic": "far-future", "last_reviewed": "9999-12-31", "confidence": "high", "evidence": ["README.md"]},
+    )
+    (tmp_path / "MEMORY.md").write_text("- [far-future](memory/cards/far-future.md)\n")
+
+    assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+
+    assert memory_cmd.plan_fixes(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    item = next(entry for entry in payload["items"] if entry["issue_type"] == "missing-freshness")
+    assert item["status"] == "blocked"
+    assert "freshness-date-not-representable" in item["blockers"]
+    assert "fresh_until" not in item["candidate_fields"]
+    assert "derivation" not in item
+    assert far_future.read_text().count("fresh_until") == 0
+
+    # health() runs the same planner; it used to crash after the scan succeeded.
+    assert memory_cmd.status(target=tmp_path) == 0
+    assert "freshness-date-not-representable" in capsys.readouterr().out
+
+
+def test_derived_fresh_until_returns_none_outside_the_date_range():
+    from brigade.memory_care_plan import derived_fresh_until
+
+    assert derived_fresh_until(date(2026, 5, 1), 90) == "2026-07-30"
+    assert derived_fresh_until(date(9999, 12, 31), 1) is None
+    assert derived_fresh_until(date(1, 1, 1), -1) is None
+
+
 def test_memory_care_plan_fixes_reports_blockers_and_writes_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     cards = tmp_path / "memory" / "cards"
