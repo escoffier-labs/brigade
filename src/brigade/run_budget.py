@@ -807,13 +807,9 @@ def project_budget_state(
                 ):
                     used[dimension] = max(used.get(dimension, 0), int(payload["used"]))
             terminal_policy = "budget_exhausted"
-        elif event_type == EVENT_CANCEL_REQUESTED:
-            reason = payload.get("reason_class")
-            if reason == "operator_cancel":
-                terminal_policy = "operator_cancelled"
-            elif reason == "budget_cancel" and terminal_policy is None:
-                terminal_policy = "budget_exhausted"
         elif event_type == EVENT_CANCELLED:
+            # ``run_budget.cancel_requested`` is intent only. Terminal policy
+            # and cancel receipts require this matching receipt fact.
             raw_outcomes = payload.get("outcomes")
             outcomes: tuple[CancelOutcome, ...] = ()
             if isinstance(raw_outcomes, list):
@@ -1275,9 +1271,12 @@ def validate_run_budget_payload(event_type: str, payload: Mapping[str, Any]) -> 
         if active_seats is not None:
             if not isinstance(active_seats, list) or len(active_seats) > 16 or active != len(active_seats):
                 raise run_events.CanonicalizationError("run_budget.cancelled active_seats is invalid")
-            if len(set(active_seats)) != len(active_seats) or any(
-                not isinstance(seat, str) or not seat or len(seat) > 80 for seat in active_seats
-            ):
+            # Element types before the dedupe: set() over an unhashable seat
+            # raises a raw TypeError, which escapes validate_event's
+            # CanonicalizationError handler and breaks journal inspection.
+            if any(not isinstance(seat, str) or not seat or len(seat) > 80 for seat in active_seats):
+                raise run_events.CanonicalizationError("run_budget.cancelled active_seats is invalid")
+            if len(set(active_seats)) != len(active_seats):
                 raise run_events.CanonicalizationError("run_budget.cancelled active_seats is invalid")
         if outcomes is not None:
             if not isinstance(outcomes, list) or len(outcomes) > 16:
@@ -1289,10 +1288,15 @@ def validate_run_budget_payload(event_type: str, payload: Mapping[str, Any]) -> 
                     "transport_result",
                 }:
                     raise run_events.CanonicalizationError("run_budget.cancelled outcome is invalid")
+                # isinstance before membership for the same reason: an
+                # unhashable capability or result would make `in` raise
+                # TypeError instead of a bounded diagnostic.
                 if (
                     not isinstance(outcome["seat"], str)
                     or not outcome["seat"]
                     or len(outcome["seat"]) > 80
+                    or not isinstance(outcome["transport_capability"], str)
+                    or not isinstance(outcome["transport_result"], str)
                     or outcome["transport_capability"] not in TRANSPORT_CAPABILITIES
                     or outcome["transport_result"] not in TRANSPORT_RESULTS
                 ):
@@ -1397,10 +1401,11 @@ class BudgetCoordinator:
         return replace(self._projection, used=used)
 
     def _commit(self, event_specs: Sequence[Mapping[str, Any]]) -> None:
+        recorded: list[dict[str, Any]] = []
         for spec in event_specs:
             self.append_event(str(spec["event_type"]), dict(spec["payload"]), str(spec["idempotency_key"]))
-            synthetic = {"event_type": spec["event_type"], "payload": dict(spec["payload"])}
-            self._events_cache.append(synthetic)
+            recorded.append({"event_type": spec["event_type"], "payload": dict(spec["payload"])})
+        self._events_cache.extend(recorded)
         self._projection = project_budget_state(self.declaration, self._events_cache)
 
     def _reserve_unlocked(self, *, request_id: str, units: int = 1) -> ReservationDecision:
@@ -1766,10 +1771,13 @@ class BudgetCoordinator:
         dimension: str,
         cancel_fn: Callable[[], CancellationReport | tuple[str, int]] | None = None,
     ) -> CancelReceipt:
-        """Best-effort cancel of active work with durable cancel receipts.
+        """Cancel active work only after both cancel lifecycle facts are durable.
 
         ``cancel_fn`` returns observations. The legacy tuple form remains
         readable for callers that only have an aggregate transport result.
+        The request and receipt are committed together so a failed
+        ``run_budget.cancelled`` write leaves the in-memory projection
+        non-terminal with no cancel receipt.
         """
         with self._lock:
             for receipt in reversed(self._projection.cancel_receipts):
@@ -1781,7 +1789,6 @@ class BudgetCoordinator:
                 transport_capability=transport_capability,
                 dimension=dimension,
             )
-            self._commit([requested])
             transport_result = "unsupported"
             active_remaining = 0
             outcomes: tuple[CancelOutcome, ...] = ()
@@ -1805,7 +1812,7 @@ class BudgetCoordinator:
                 outcomes=outcomes,
                 active_seats=active_seats,
             )
-            self._commit([cancelled])
+            self._commit([requested, cancelled])
             return CancelReceipt(
                 request_id=request_id,
                 reason_class=reason_class,
