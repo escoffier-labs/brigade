@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from ... import extras as _extras_mod
@@ -26,8 +27,13 @@ def work_verify_run_help_requested(argv: list[str]) -> bool:
 
 def dispatch(args) -> int:
     from ...work_cmd.ledger import guard_task_ledger_dispatch
+    from ...work_cmd.scanner_platform import ScannerDescriptorOperationsUnavailable
 
-    return guard_task_ledger_dispatch(args, _dispatch_impl)
+    try:
+        return guard_task_ledger_dispatch(args, _dispatch_impl)
+    except ScannerDescriptorOperationsUnavailable as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 def _dispatch_impl(args) -> int:
