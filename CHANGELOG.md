@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Contributing policy drops the formal `APPROVED` review gate: merge requires green required checks and resolved conversations, and documents that GitHub ignores the `CHANGELOG.md` union merge driver when computing mergeability.
 - Update-channel documentation now describes beta previews and automatic update-check collection and retention.
 - Document the Arch Linux and Omarchy install path using `python-pipx`, including recovery after a system Python minor-version upgrade.
 - `brigade center serve` views render in the Command Deck theme through the shared `ui_theme` shell: dark tokens, the Deck masthead and nav, and no light-mode colors. Status chip colors are unchanged. (#1495)
