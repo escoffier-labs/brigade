@@ -63,6 +63,8 @@ the bearer reference):
 
 - `fleet-steward`, `backup-steward`, `wazuh-triage`: runtime, ledger,
   action-state, and approval-directory references.
+  What the Wazuh routine may do on its own, propose, or hand to a case is
+  set by the [Wazuh remediation policy](wazuh-remediation-policy.md).
 - `obsidian-operator`: those, plus staging directory, Excalidraw helper
   executable, upstream URL, and upstream key reference.
 - `n8n-operator`: runtime, action-state, and approval-directory references.
