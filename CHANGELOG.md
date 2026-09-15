@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `brigade run` cancellation whose journal append fails no longer drives local state to a terminal result, and a malformed `run_budget.cancelled` list reports a bounded invalid-event diagnostic instead of raising `TypeError` out of journal validation. (#1439)
 - Agent-change verification now separates clean approval-policy refusals as `POLICY-FAIL`, verifies current approval evidence against the signed index tree, and keeps historical approvals from satisfying the required approval. (#1464)
 
 ### Added
