@@ -59,6 +59,130 @@ def test_disjoint_paths_reject_overlap_dots_and_relative():
         validate_disjoint_state_paths("var/lib/a", "/var/lib/b", "/var/lib/c", "/var/lib/d")
 
 
+def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
+    from brigade.grokbot_backup.lifecycle import validate_absolute_reference as validate_ref
+    from brigade.grokbot_backup.runtime_config import _required_absolute_path
+
+    # A drive-less root such as "/var/lib/state" carries no drive on Windows and
+    # resolves against the current drive, so it can alias C:\var\lib\state.
+    if os.name == "nt":
+        with pytest.raises(BackupError):
+            validate_ref("/var/lib/state")
+        with pytest.raises(BackupError):
+            _required_absolute_path("/var/lib/state")
+        for accepted in (r"C:\state\dir", "C:/state/dir"):
+            assert isinstance(validate_ref(accepted), str)
+            assert isinstance(_required_absolute_path(accepted), str)
+    else:
+        assert isinstance(validate_ref("/var/lib/state"), str)
+        assert isinstance(_required_absolute_path("/var/lib/state"), str)
+        for drive_path in (r"C:\state\dir", "C:/state/dir"):
+            with pytest.raises(BackupError):
+                validate_ref(drive_path)
+            with pytest.raises(BackupError):
+                _required_absolute_path(drive_path)
+    for rejected in (
+        r"\\server\share\path",
+        r"\\.\pipe\x",
+        r"\\?\C:\path",
+        "//server/share",
+        r"/\server/share",
+        r"\/server/share",
+        "relative/path",
+        "/var/lib/../escape",
+        r"C:\state\..\escape",
+    ):
+        with pytest.raises(BackupError):
+            validate_ref(rejected)
+        with pytest.raises(BackupError):
+            _required_absolute_path(rejected)
+
+
+def test_paths_overlap_detects_backslash_nesting(monkeypatch):
+    import ntpath
+    from types import SimpleNamespace
+
+    from brigade.grokbot_backup import runtime_config as runtime_mod
+
+    with monkeypatch.context() as patched:
+        patched.setattr(runtime_mod, "os", SimpleNamespace(name="nt", path=ntpath))
+        assert runtime_mod.paths_overlap(r"C:\a", r"C:\a\b") is True
+        assert runtime_mod.paths_overlap(r"C:\a\b", r"C:\a") is True
+
+
+def test_paths_overlap_treats_backslash_as_literal_on_posix():
+    from brigade.grokbot_backup.runtime_config import paths_overlap
+
+    if os.name != "posix":
+        pytest.skip("backslash is a literal filename character only on POSIX")
+    assert paths_overlap("/a/b\\c", "/a/b") is False
+
+
+def test_paths_overlap_is_case_insensitive_on_windows(monkeypatch):
+    import ntpath
+    from types import SimpleNamespace
+
+    from brigade.grokbot_backup import runtime_config as runtime_mod
+
+    with monkeypatch.context() as patched:
+        patched.setattr(runtime_mod, "os", SimpleNamespace(name="nt", path=ntpath))
+        assert runtime_mod.paths_overlap(r"C:\Brigade\State", r"c:\brigade") is True
+        assert runtime_mod.paths_overlap(r"c:\brigade", r"C:\Brigade\State") is True
+
+
+def test_paths_overlap_handles_root_operand_and_rejects_trailing_alias(monkeypatch):
+    import ntpath
+    from types import SimpleNamespace
+
+    from brigade.grokbot_backup import runtime_config as runtime_mod
+    from brigade.grokbot_backup import lifecycle as lifecycle_mod
+    from brigade.grokbot_backup.runtime_config import _required_absolute_path
+
+    assert runtime_mod.paths_overlap("/", "/var/x") is True
+    assert runtime_mod.paths_overlap("/var/x", "/") is True
+    with monkeypatch.context() as patched:
+        patched.setattr(runtime_mod, "os", SimpleNamespace(name="nt", path=ntpath))
+        patched.setattr(lifecycle_mod, "os", SimpleNamespace(name="nt", path=ntpath))
+        assert runtime_mod.paths_overlap("C:\\", r"C:\foo") is True
+        assert runtime_mod.paths_overlap(r"C:\foo", "C:\\") is True
+        assert runtime_mod.paths_overlap(r"C:\a", r"C:\a\b") is True
+        assert isinstance(lifecycle_mod.validate_absolute_reference(r"C:\state"), str)
+        assert isinstance(_required_absolute_path(r"C:\state"), str)
+        for rejected in (r"C:\state.", r"C:\state "):
+            with pytest.raises(BackupError):
+                lifecycle_mod.validate_absolute_reference(rejected)
+            with pytest.raises(BackupError):
+                _required_absolute_path(rejected)
+    for rejected in ("/var/lib/state.", "/var/lib/state "):
+        with pytest.raises(BackupError):
+            lifecycle_mod.validate_absolute_reference(rejected)
+        with pytest.raises(BackupError):
+            _required_absolute_path(rejected)
+    assert isinstance(lifecycle_mod.validate_absolute_reference("/var/lib/my.dir/state"), str)
+    assert isinstance(_required_absolute_path("/var/lib/my.dir/state"), str)
+
+
+def test_disjoint_paths_reject_backslash_nested_drive_paths():
+    with pytest.raises(BackupError):
+        validate_disjoint_state_paths(
+            r"C:\b\state\runtime.json",
+            r"C:\b\other\ledger.json",
+            r"C:\b\state",
+            r"C:\b\approvals",
+        )
+
+
+def test_absolute_reference_rejects_non_ascii_drive_letter():
+    from brigade.grokbot_backup.lifecycle import validate_absolute_reference as validate_ref
+    from brigade.grokbot_backup.runtime_config import _required_absolute_path
+
+    for rejected in ("Ｃ:\\state", "µ:/x"):
+        with pytest.raises(BackupError):
+            validate_ref(rejected)
+        with pytest.raises(BackupError):
+            _required_absolute_path(rejected)
+
+
 def test_pack_setup_doctor_canary_and_unit_hide_secrets(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
     paths = _backup_paths(tmp_path)
@@ -293,3 +417,39 @@ def test_backup_unit_uses_shared_listener_recovery_policy(tmp_path: Path, monkey
         **_backup_paths(tmp_path),
     )
     assert_listener_recovery_policy(render_unit(tmp_path))
+
+
+def test_windows_branch_rejects_drive_less_roots(monkeypatch):
+    """The Windows drive-root gate must be exercised on POSIX hosts too.
+
+    A drive-less root such as "/var/lib/state" resolves against the current
+    drive on Windows, so it can name the same tree as C:\\var\\lib\\state while
+    comparing disjoint. The platform decision is read from each module's own
+    ``os`` binding, which is the seam patched here.
+    """
+    import ntpath
+    from types import SimpleNamespace
+
+    from brigade.grokbot_backup import lifecycle as lifecycle_mod
+    from brigade.grokbot_backup import runtime_config as runtime_mod
+
+    windows = SimpleNamespace(name="nt", path=ntpath)
+    drive_less = ("/var/lib/state", "/var/lib/state/ledger.json", "/", "\\var\\lib\\state")
+    with monkeypatch.context() as patched:
+        patched.setattr(lifecycle_mod, "os", windows)
+        patched.setattr(runtime_mod, "os", windows)
+
+        # Proof the simulated branch is live: a drive root is accepted only here.
+        assert isinstance(lifecycle_mod.validate_absolute_reference(r"C:\var\lib\state"), str)
+        assert isinstance(runtime_mod._required_absolute_path(r"C:\var\lib\state"), str)
+
+        for rejected in drive_less:
+            with pytest.raises(BackupError):
+                lifecycle_mod.validate_absolute_reference(rejected)
+            with pytest.raises(BackupError):
+                runtime_mod._required_absolute_path(rejected)
+
+    # Outside the simulation the POSIX contract is unchanged.
+    assert isinstance(lifecycle_mod.validate_absolute_reference("/var/lib/state"), str)
+    with pytest.raises(BackupError):
+        lifecycle_mod.validate_absolute_reference(r"C:\var\lib\state")

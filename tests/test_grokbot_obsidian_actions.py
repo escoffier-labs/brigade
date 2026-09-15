@@ -39,6 +39,22 @@ POLICY = {
 }
 
 
+def test_windows_ensure_directory_fails_closed_before_io(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(store_mod, "SECURE_OWNER_READ_AVAILABLE", False)
+    with pytest.raises(ObsidianError) as caught:
+        store_mod._ensure_directory(tmp_path / "actions")
+    assert caught.value.code == "unavailable"
+    assert str(caught.value) == "secure-owner-read-unavailable"
+
+
+def test_windows_hex_json_listing_fails_closed_before_io(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(store_mod, "SECURE_OWNER_READ_AVAILABLE", False)
+    with pytest.raises(ObsidianError) as caught:
+        store_mod._hex_json_files(tmp_path / "actions")
+    assert caught.value.code == "unavailable"
+    assert str(caught.value) == "secure-owner-read-unavailable"
+
+
 class MemoryVault:
     def __init__(self) -> None:
         self.files: dict[str, dict[str, object]] = {}

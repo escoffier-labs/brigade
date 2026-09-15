@@ -21,6 +21,7 @@ from .contracts import (
     parse_identifier,
 )
 from .exec import EXEC_DEFAULT_OUTPUT_BYTES, BackupProcessLimiter, ExecRequest, Runner, create_process_limiter, run_exec
+from brigade import dirfd as dirfd_mod
 from .ledger import backup_finding_revision
 from .normalize import sanitize_backup_detail
 
@@ -67,6 +68,24 @@ def _action_state_invalid() -> NoReturn:
 
 def _environment_invalid() -> NoReturn:
     raise BackupError("invalid_request", "Backup environment is invalid")
+
+
+SECURE_OWNER_WRITE_AVAILABLE = os.name == "posix"
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
+
+
+def _require_secure_owner_write() -> None:
+    if not SECURE_OWNER_WRITE_AVAILABLE:
+        raise BackupError("secure-owner-write-unavailable")
+
+
+def _require_secure_owner_read() -> None:
+    """Fail closed on Windows before any filesystem access.
+
+    Owner-SID/DACL enforcement does not exist yet; POSIX behavior is unchanged.
+    """
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise BackupError("unavailable", "secure-owner-read-unavailable")
 
 
 def _write_all(handle: int, data: bytes) -> None:
@@ -261,11 +280,16 @@ def _assert_safe_directory(path: Path) -> None:
         info = path.lstat()
     except OSError:
         _environment_invalid()
-    if path.is_symlink() or not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(info.st_mode)
+        or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700)
+    ):
         _environment_invalid()
 
 
 def _ensure_writable_directory(path: Path) -> None:
+    _require_secure_owner_write()
     try:
         info = path.lstat()
     except FileNotFoundError:
@@ -277,18 +301,27 @@ def _ensure_writable_directory(path: Path) -> None:
         info = path.lstat()
     except OSError:
         _action_state_invalid()
-    if path.is_symlink() or not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(info.st_mode)
+        or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700)
+    ):
         _action_state_invalid()
 
 
 def _read_json_file(path: Path) -> object:
+    _require_secure_owner_read()
     try:
         info = path.lstat()
     except FileNotFoundError:
         raise
     except OSError:
         _action_state_invalid()
-    if path.is_symlink() or not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(info.st_mode)
+        or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600)
+    ):
         _action_state_invalid()
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -297,10 +330,12 @@ def _read_json_file(path: Path) -> object:
 
 
 def _write_exclusive_json(path: Path, record: Mapping[str, Any]) -> None:
+    _require_secure_owner_write()
     handle = None
     try:
-        handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        os.fchmod(handle, 0o600)
+        handle = os.open(path, dirfd_mod.file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL), 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(handle, 0o600)
         _write_all(handle, json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"))
         os.fsync(handle)
         os.close(handle)
@@ -322,11 +357,13 @@ def _write_exclusive_json(path: Path, record: Mapping[str, Any]) -> None:
 
 
 def _write_atomic_json(path: Path, record: Mapping[str, Any]) -> None:
+    _require_secure_owner_write()
     temp = Path(f"{path}.tmp")
     handle = None
     try:
-        handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        os.fchmod(handle, 0o600)
+        handle = os.open(temp, dirfd_mod.file_flags(os.O_WRONLY | os.O_CREAT | os.O_TRUNC), 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(handle, 0o600)
         _write_all(handle, json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"))
         os.fsync(handle)
         os.close(handle)
@@ -505,6 +542,7 @@ class BackupActionStore:
     def _list_json_records(
         self, directory: Path, loader: Callable[[str], dict[str, Any] | None]
     ) -> list[dict[str, Any]]:
+        _require_secure_owner_read()
         try:
             names = os.listdir(directory)
         except FileNotFoundError:
@@ -527,6 +565,7 @@ class BackupActionStore:
         return self._list_json_records(self._root / "operations", self._load_operation)
 
     def _list_consumed(self) -> list[Path]:
+        _require_secure_owner_read()
         directory = self._root / "consumed"
         try:
             return [directory / name for name in os.listdir(directory) if name.endswith(".json")]

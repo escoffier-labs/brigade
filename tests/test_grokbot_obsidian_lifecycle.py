@@ -101,6 +101,141 @@ def test_disjoint_paths_reject_overlap_and_relative():
         validate_disjoint_state_paths("var/lib/a", "/var/lib/b", "/var/lib/c", "/var/lib/d", "/usr/bin/true")
 
 
+def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
+    from brigade.grokbot_obsidian.lifecycle import validate_absolute_reference as validate_ref
+    from brigade.grokbot_obsidian.runtime_config import is_absolute_safe_path, required_absolute_path
+
+    # A drive-less root such as "/var/lib/state" carries no drive on Windows and
+    # resolves against the current drive, so it can alias C:\var\lib\state.
+    if os.name == "nt":
+        with pytest.raises(ObsidianError):
+            validate_ref("/var/lib/state")
+        with pytest.raises(ObsidianError):
+            required_absolute_path("/var/lib/state")
+        assert is_absolute_safe_path("/var/lib/state") is False
+        for accepted in (r"C:\state\dir", "C:/state/dir"):
+            assert isinstance(validate_ref(accepted), str)
+            assert isinstance(required_absolute_path(accepted), str)
+            assert is_absolute_safe_path(accepted) is True
+    else:
+        assert isinstance(validate_ref("/var/lib/state"), str)
+        assert isinstance(required_absolute_path("/var/lib/state"), str)
+        assert is_absolute_safe_path("/var/lib/state") is True
+        for drive_path in (r"C:\state\dir", "C:/state/dir"):
+            with pytest.raises(ObsidianError):
+                validate_ref(drive_path)
+            with pytest.raises(ObsidianError):
+                required_absolute_path(drive_path)
+            assert is_absolute_safe_path(drive_path) is False
+    for rejected in (
+        r"\\server\share\path",
+        r"\\.\pipe\x",
+        r"\\?\C:\path",
+        "//server/share",
+        r"/\server/share",
+        r"\/server/share",
+        "relative/path",
+        "/var/lib/../escape",
+        r"C:\state\..\escape",
+    ):
+        with pytest.raises(ObsidianError):
+            validate_ref(rejected)
+        with pytest.raises(ObsidianError):
+            required_absolute_path(rejected)
+        assert is_absolute_safe_path(rejected) is False
+
+
+def test_paths_overlap_detects_backslash_nesting(monkeypatch):
+    import ntpath
+    from types import SimpleNamespace
+
+    from brigade.grokbot_obsidian import runtime_config as runtime_mod
+
+    with monkeypatch.context() as patched:
+        patched.setattr(runtime_mod, "os", SimpleNamespace(name="nt", path=ntpath))
+        assert runtime_mod.paths_overlap(r"C:\a", r"C:\a\b") is True
+        assert runtime_mod.paths_overlap(r"C:\a\b", r"C:\a") is True
+
+
+def test_paths_overlap_treats_backslash_as_literal_on_posix():
+    from brigade.grokbot_obsidian.runtime_config import paths_overlap
+
+    if os.name != "posix":
+        pytest.skip("backslash is a literal filename character only on POSIX")
+    assert paths_overlap("/a/b\\c", "/a/b") is False
+
+
+def test_paths_overlap_is_case_insensitive_on_windows(monkeypatch):
+    import ntpath
+    from types import SimpleNamespace
+
+    from brigade.grokbot_obsidian import runtime_config as runtime_mod
+
+    with monkeypatch.context() as patched:
+        patched.setattr(runtime_mod, "os", SimpleNamespace(name="nt", path=ntpath))
+        assert runtime_mod.paths_overlap(r"C:\Brigade\State", r"c:\brigade") is True
+        assert runtime_mod.paths_overlap(r"c:\brigade", r"C:\Brigade\State") is True
+
+
+def test_paths_overlap_handles_root_operand_and_rejects_trailing_alias(monkeypatch):
+    import ntpath
+    from types import SimpleNamespace
+
+    from brigade.grokbot_obsidian import runtime_config as runtime_mod
+    from brigade.grokbot_obsidian import lifecycle as lifecycle_mod
+    from brigade.grokbot_obsidian.runtime_config import is_absolute_safe_path, required_absolute_path
+
+    assert runtime_mod.paths_overlap("/", "/var/x") is True
+    assert runtime_mod.paths_overlap("/var/x", "/") is True
+    with monkeypatch.context() as patched:
+        patched.setattr(runtime_mod, "os", SimpleNamespace(name="nt", path=ntpath))
+        patched.setattr(lifecycle_mod, "os", SimpleNamespace(name="nt", path=ntpath))
+        assert runtime_mod.paths_overlap("C:\\", r"C:\foo") is True
+        assert runtime_mod.paths_overlap(r"C:\foo", "C:\\") is True
+        assert runtime_mod.paths_overlap(r"C:\a", r"C:\a\b") is True
+        assert isinstance(lifecycle_mod.validate_absolute_reference(r"C:\state"), str)
+        assert isinstance(required_absolute_path(r"C:\state"), str)
+        assert is_absolute_safe_path(r"C:\state") is True
+        for rejected in (r"C:\state.", r"C:\state "):
+            with pytest.raises(ObsidianError):
+                lifecycle_mod.validate_absolute_reference(rejected)
+            with pytest.raises(ObsidianError):
+                required_absolute_path(rejected)
+            assert is_absolute_safe_path(rejected) is False
+    for rejected in ("/var/lib/state.", "/var/lib/state "):
+        with pytest.raises(ObsidianError):
+            lifecycle_mod.validate_absolute_reference(rejected)
+        with pytest.raises(ObsidianError):
+            required_absolute_path(rejected)
+        assert is_absolute_safe_path(rejected) is False
+    assert isinstance(lifecycle_mod.validate_absolute_reference("/var/lib/my.dir/state"), str)
+    assert isinstance(required_absolute_path("/var/lib/my.dir/state"), str)
+    assert is_absolute_safe_path("/var/lib/my.dir/state") is True
+
+
+def test_disjoint_paths_reject_backslash_nested_drive_paths():
+    with pytest.raises(ObsidianError):
+        validate_disjoint_state_paths(
+            r"C:\b\state\runtime.json",
+            r"C:\b\state",
+            r"C:\b\approvals",
+            r"C:\b\staging",
+            r"C:\b\bin\excalidraw",
+        )
+
+
+def test_absolute_reference_rejects_non_ascii_drive_letter():
+    from brigade.grokbot_obsidian.lifecycle import validate_absolute_reference as validate_ref
+    from brigade.grokbot_obsidian.runtime_config import is_absolute_safe_path, required_absolute_path
+
+    for rejected in ("Ｃ:\\state", "µ:/x"):
+        with pytest.raises(ObsidianError):
+            validate_ref(rejected)
+        with pytest.raises(ObsidianError):
+            required_absolute_path(rejected)
+        assert is_absolute_safe_path(rejected) is False
+
+
 def test_pack_setup_doctor_canary_and_unit_hide_secrets(tmp_path: Path, monkeypatch):
     kwargs = _obsidian_setup_kwargs(tmp_path, monkeypatch)
     preview = grokbot_packs.preview_setup(
@@ -474,3 +609,39 @@ def test_obsidian_unit_uses_shared_listener_recovery_policy(tmp_path: Path, monk
         **_obsidian_setup_kwargs(tmp_path, monkeypatch),
     )
     assert_listener_recovery_policy(render_unit(tmp_path))
+
+
+def test_windows_branch_rejects_drive_less_roots(monkeypatch):
+    """The Windows drive-root gate must be exercised on POSIX hosts too.
+
+    A drive-less root such as "/var/lib/state" resolves against the current
+    drive on Windows, so it can name the same tree as C:\\var\\lib\\state while
+    comparing disjoint. The platform decision is read from each module's own
+    ``os`` binding, which is the seam patched here.
+    """
+    import ntpath
+    from types import SimpleNamespace
+
+    from brigade.grokbot_obsidian import lifecycle as lifecycle_mod
+    from brigade.grokbot_obsidian import runtime_config as runtime_mod
+
+    windows = SimpleNamespace(name="nt", path=ntpath)
+    drive_less = ("/var/lib/state", "/var/lib/state/ledger.json", "/", "\\var\\lib\\state")
+    with monkeypatch.context() as patched:
+        patched.setattr(lifecycle_mod, "os", windows)
+        patched.setattr(runtime_mod, "os", windows)
+
+        # Proof the simulated branch is live: a drive root is accepted only here.
+        assert isinstance(lifecycle_mod.validate_absolute_reference(r"C:\var\lib\state"), str)
+        assert isinstance(runtime_mod.required_absolute_path(r"C:\var\lib\state"), str)
+
+        for rejected in drive_less:
+            with pytest.raises(ObsidianError):
+                lifecycle_mod.validate_absolute_reference(rejected)
+            with pytest.raises(ObsidianError):
+                runtime_mod.required_absolute_path(rejected)
+
+    # Outside the simulation the POSIX contract is unchanged.
+    assert isinstance(lifecycle_mod.validate_absolute_reference("/var/lib/state"), str)
+    with pytest.raises(ObsidianError):
+        lifecycle_mod.validate_absolute_reference(r"C:\var\lib\state")

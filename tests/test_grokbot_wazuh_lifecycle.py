@@ -51,6 +51,127 @@ def test_disjoint_paths_reject_overlap_dots_and_relative():
         validate_disjoint_state_paths("var/lib/a", "/var/lib/b", "/var/lib/c", "/var/lib/d")
 
 
+def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
+    from brigade.grokbot_wazuh.lifecycle import validate_absolute_reference as validate_ref
+
+    # A drive-less root such as "/var/lib/state" carries no drive on Windows and
+    # resolves against the current drive, so it can alias C:\var\lib\state.
+    if os.name == "nt":
+        with pytest.raises(WazuhError):
+            validate_ref("/var/lib/state")
+        for accepted in (r"C:\state\dir", "C:/state/dir"):
+            assert isinstance(validate_ref(accepted), str)
+    else:
+        assert isinstance(validate_ref("/var/lib/state"), str)
+        for drive_path in (r"C:\state\dir", "C:/state/dir"):
+            with pytest.raises(WazuhError):
+                validate_ref(drive_path)
+    for rejected in (
+        r"\\server\share\path",
+        r"\\.\pipe\x",
+        r"\\?\C:\path",
+        "//server/share",
+        r"/\server/share",
+        r"\/server/share",
+        "relative/path",
+        "/var/lib/../escape",
+        r"C:\state\..\escape",
+    ):
+        with pytest.raises(WazuhError):
+            validate_ref(rejected)
+
+
+def test_disjoint_paths_reject_backslash_nested_drive_paths(monkeypatch):
+    import ntpath
+    from types import SimpleNamespace
+
+    from brigade.grokbot_wazuh import lifecycle as lifecycle_mod
+
+    with monkeypatch.context() as patched:
+        patched.setattr(lifecycle_mod, "os", SimpleNamespace(name="nt", path=ntpath))
+        assert validate_disjoint_state_paths(
+            r"C:\b\runtime.json",
+            r"C:\b\ledger.json",
+            r"C:\b\actions",
+            r"C:\b\approvals",
+        ) == {
+            "runtime_path": r"C:\b\runtime.json",
+            "ledger_path": r"C:\b\ledger.json",
+            "action_state_path": r"C:\b\actions",
+            "approval_dir": r"C:\b\approvals",
+        }
+        with pytest.raises(WazuhError):
+            validate_disjoint_state_paths(
+                r"C:\b\state\runtime.json",
+                r"C:\b\other\ledger.json",
+                r"C:\b\state",
+                r"C:\b\approvals",
+            )
+
+
+def test_disjoint_paths_treat_backslash_name_as_disjoint_on_posix():
+    if os.name != "posix":
+        pytest.skip("backslash is a literal filename character only on POSIX")
+    assert validate_disjoint_state_paths("/a/b\\c", "/a/b", "/a/c", "/a/d") == {
+        "runtime_path": "/a/b\\c",
+        "ledger_path": "/a/b",
+        "action_state_path": "/a/c",
+        "approval_dir": "/a/d",
+    }
+
+
+def test_disjoint_paths_are_case_insensitive_on_windows(monkeypatch):
+    import ntpath
+    from types import SimpleNamespace
+
+    from brigade.grokbot_wazuh import lifecycle as lifecycle_mod
+
+    with monkeypatch.context() as patched:
+        patched.setattr(lifecycle_mod, "os", SimpleNamespace(name="nt", path=ntpath))
+        with pytest.raises(WazuhError):
+            validate_disjoint_state_paths(
+                r"C:\Brigade\State",
+                r"C:\Brigade\Other",
+                r"c:\brigade",
+                r"C:\Brigade\Approvals",
+            )
+
+
+def test_disjoint_paths_handle_root_operand_and_reject_trailing_alias(monkeypatch):
+    import ntpath
+    from types import SimpleNamespace
+
+    from brigade.grokbot_wazuh import lifecycle as lifecycle_mod
+    from brigade.grokbot_wazuh.lifecycle import validate_absolute_reference as validate_ref
+
+    with pytest.raises(WazuhError):
+        validate_disjoint_state_paths("/", "/var/x", "/var/y", "/var/z")
+    with pytest.raises(WazuhError):
+        validate_disjoint_state_paths("/var/x", "/", "/var/y", "/var/z")
+    with monkeypatch.context() as patched:
+        patched.setattr(lifecycle_mod, "os", SimpleNamespace(name="nt", path=ntpath))
+        with pytest.raises(WazuhError):
+            validate_disjoint_state_paths("C:\\", r"C:\brigade\state.json", r"C:\b", r"C:\c")
+        with pytest.raises(WazuhError):
+            validate_disjoint_state_paths(r"C:\brigade\state.json", "C:\\", r"C:\b", r"C:\c")
+        assert isinstance(validate_ref(r"C:\state"), str)
+        for rejected in (r"C:\state.", r"C:\state "):
+            with pytest.raises(WazuhError):
+                validate_ref(rejected)
+    for rejected in ("/var/lib/state.", "/var/lib/state "):
+        with pytest.raises(WazuhError):
+            validate_ref(rejected)
+    assert isinstance(validate_ref("/var/lib/my.dir/state"), str)
+
+
+def test_absolute_reference_rejects_non_ascii_drive_letter():
+    from brigade.grokbot_wazuh.lifecycle import validate_absolute_reference as validate_ref
+
+    for rejected in ("Ｃ:\\state", "µ:/x"):
+        with pytest.raises(WazuhError):
+            validate_ref(rejected)
+
+
 def test_pack_setup_doctor_canary_and_unit_hide_secrets(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
     paths = _wazuh_paths(tmp_path)
@@ -272,3 +393,34 @@ def test_wazuh_unit_uses_shared_listener_recovery_policy(tmp_path: Path, monkeyp
         **_wazuh_paths(tmp_path),
     )
     assert_listener_recovery_policy(render_unit(tmp_path))
+
+
+def test_windows_branch_rejects_drive_less_roots(monkeypatch):
+    """The Windows drive-root gate must be exercised on POSIX hosts too.
+
+    A drive-less root such as "/var/lib/state" resolves against the current
+    drive on Windows, so it can name the same tree as C:\\var\\lib\\state while
+    comparing disjoint. The platform decision is read from each module's own
+    ``os`` binding, which is the seam patched here.
+    """
+    import ntpath
+    from types import SimpleNamespace
+
+    from brigade.grokbot_wazuh import lifecycle as lifecycle_mod
+
+    windows = SimpleNamespace(name="nt", path=ntpath)
+    drive_less = ("/var/lib/state", "/var/lib/state/ledger.json", "/", "\\var\\lib\\state")
+    with monkeypatch.context() as patched:
+        patched.setattr(lifecycle_mod, "os", windows)
+
+        # Proof the simulated branch is live: a drive root is accepted only here.
+        assert isinstance(lifecycle_mod.validate_absolute_reference(r"C:\var\lib\state"), str)
+
+        for rejected in drive_less:
+            with pytest.raises(WazuhError):
+                lifecycle_mod.validate_absolute_reference(rejected)
+
+    # Outside the simulation the POSIX contract is unchanged.
+    assert isinstance(lifecycle_mod.validate_absolute_reference("/var/lib/state"), str)
+    with pytest.raises(WazuhError):
+        lifecycle_mod.validate_absolute_reference(r"C:\var\lib\state")

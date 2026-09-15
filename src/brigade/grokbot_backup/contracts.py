@@ -25,6 +25,7 @@ ERROR_MESSAGES = {
     "denied": "Backup request was denied",
     "not_found": "Backup resource was not found",
     "unavailable": "Backup observation is unavailable",
+    "secure-owner-write-unavailable": "Backup observation is unavailable",
     "timeout": "Backup observation timed out",
     "protocol_error": "Backup observation failed",
 }

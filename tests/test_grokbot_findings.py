@@ -39,6 +39,13 @@ def _revision_digest(seed: str = "fleet-revision") -> str:
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
+def test_windows_queue_read_fails_closed_before_io(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(grokbot_findings, "SECURE_OWNER_READ_AVAILABLE", False)
+    with pytest.raises(grokbot_findings.FindingsError) as caught:
+        grokbot_findings._open_queue_child_readonly(tmp_path, "findings")
+    assert caught.value.reason == "secure-owner-read-unavailable"
+
+
 def _live_fleet_record() -> dict[str, object]:
     revision = _revision_digest("fleet-control-plane")
     return {
@@ -261,10 +268,17 @@ def test_preview_rejects_group_readable_manifest_without_writing(tmp_path: Path)
     owner.mkdir()
     manifest = _write_manifest(tmp_path / "findings.json", _manifest(_entry()), mode=0o640)
 
+    if os.name == "posix":
+        with pytest.raises(grokbot_findings.FindingsError) as exc:
+            grokbot_findings.preview(queue, owner, manifest)
+
+        assert exc.value.reason == "unsafe-manifest"
+        assert not _review_inbox(owner).exists()
+        return
+    # Windows lacks SID/DACL owner verification, so private reads fail closed.
     with pytest.raises(grokbot_findings.FindingsError) as exc:
         grokbot_findings.preview(queue, owner, manifest)
-
-    assert exc.value.reason == "unsafe-manifest"
+    assert exc.value.reason == "secure-owner-read-unavailable"
     assert not _review_inbox(owner).exists()
 
 
@@ -315,6 +329,7 @@ def test_preview_rejects_invalid_limits_without_writing(tmp_path: Path, limit: o
     assert not _review_inbox(owner).exists()
 
 
+@pytest.mark.skipif(not grokbot_findings.SECURE_OWNER_WRITE_AVAILABLE, reason="secure-owner-write-unavailable")
 def test_apply_writes_one_quoted_handoff_and_a_private_marker(tmp_path: Path):
     queue = tmp_path / "queue"
     owner = tmp_path / "owner"

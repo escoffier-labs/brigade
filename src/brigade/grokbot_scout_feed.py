@@ -31,6 +31,9 @@ POLICY_KEYS = frozenset(
         "daily_limit",
     }
 )
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
+# Windows interim limitation: owner-SID/DACL enforcement does not exist yet,
+# so private reads fail closed before any filesystem access.
 
 
 class ScoutFeedError(ValueError):
@@ -50,6 +53,15 @@ class ScoutFeedError(ValueError):
         if self.actor_kind:
             parts.append(f"actor={self.actor_kind}")
         return " ".join(parts)
+
+
+def _require_secure_owner_read() -> None:
+    """Fail closed on Windows before any filesystem access.
+
+    Owner-SID/DACL enforcement does not exist yet; POSIX behavior is unchanged.
+    """
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise ScoutFeedError("secure-owner-read-unavailable")
 
 
 def _queue_error(exc: grokbot_jobs.GrokbotJobError) -> ScoutFeedError:
@@ -432,6 +444,7 @@ def _queue_snapshot(target: Path) -> list[dict[str, Any]]:
 
 def _read_policy_snapshot(path: Path) -> bytes:
     """Read an owner-only policy without accepting group or other access."""
+    _require_secure_owner_read()
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if nofollow:
@@ -452,7 +465,7 @@ def _read_policy_snapshot(path: Path) -> bytes:
         owner_uid = getattr(os, "getuid", None)
         if owner_uid is not None and info.st_uid != owner_uid():
             raise grokbot_feed.FeedError("unsafe-manifest")
-        if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        if os.name == "posix" and info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
             raise grokbot_feed.FeedError("unsafe-manifest")
         chunks: list[bytes] = []
         while chunk := os.read(descriptor, 65536):

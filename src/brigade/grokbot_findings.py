@@ -82,6 +82,9 @@ MAX_SOURCE_REF_CHARS = 512
 MAX_OBSERVED_AT_CHARS = 64
 MARKER_MAX_BYTES = 4096
 SECURE_OWNER_WRITE_AVAILABLE = grokbot_reconcile.SECURE_OWNER_WRITE_AVAILABLE
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
+# Windows interim limitation: owner-SID/DACL enforcement does not exist yet,
+# so private reads fail closed with secure-owner-read-unavailable.
 
 
 class FindingsError(ValueError):
@@ -341,6 +344,15 @@ def _validate_owner(owner: Path) -> Path:
         raise FindingsError(exc.reason) from exc
 
 
+def _require_secure_owner_read() -> None:
+    """Fail closed on Windows before any filesystem access.
+
+    Owner-SID/DACL enforcement does not exist yet; POSIX behavior unchanged.
+    """
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise FindingsError("secure-owner-read-unavailable")
+
+
 def _validate_limit(limit: object) -> int:
     try:
         return grokbot_reconcile._validate_limit(limit)
@@ -550,6 +562,7 @@ def _write_manifest_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _read_manifest_snapshot(path: Path) -> bytes:
+    _require_secure_owner_read()
     destination = Path(path).expanduser()
     name = _manifest_name(destination)
     parent_fd: int | None = None
@@ -563,7 +576,7 @@ def _read_manifest_snapshot(path: Path) -> bytes:
         owner_uid = getattr(os, "getuid", None)
         if owner_uid is not None and info.st_uid != owner_uid():
             raise FindingsError("unsafe-manifest")
-        if (info.st_mode & 0o777) != 0o600:
+        if os.name == "posix" and (info.st_mode & 0o777) != 0o600:
             raise FindingsError("unsafe-manifest")
         return grokbot_jobs._read_bounded_bytes(descriptor, MAX_MANIFEST_BYTES)
     except grokbot_jobs.GrokbotJobError as exc:
@@ -808,8 +821,9 @@ def _open_findings_readonly(target: Path) -> grokbot_jobs._Directory | None:
 
 
 def _open_queue_child_readonly(target: Path, child: str) -> grokbot_jobs._Directory | None:
+    _require_secure_owner_read()
     names = (".brigade", "cloud", "grokbot", child)
-    if os.name != "posix":  # pragma: no cover - exercised on Windows.
+    if os.name != "posix":  # pragma: no cover - dormant until SID/DACL support.
         current = Path(target).expanduser()
         for name in names:
             current = current / name

@@ -446,22 +446,51 @@ def _open_windows_parent_nofollow(parent: Path, *, create: bool) -> int:
     from .work_cmd import nt_dirfd
 
     anchor = Path(parent.anchor)
-    descriptor = nt_dirfd.open_root_directory(anchor, writable=create)
     try:
-        for component in parent.relative_to(anchor).parts:
+        relative_parts = parent.relative_to(anchor).parts
+    except ValueError:
+        raise OSError("unsafe output directory") from None
+    if not relative_parts:
+        descriptor = nt_dirfd.open_root_directory(anchor, writable=create)
+        return descriptor
+    descriptor = nt_dirfd.open_root_directory(anchor, writable=False)
+    try:
+        for index, component in enumerate(relative_parts):
+            want_writable = bool(create and index == len(relative_parts) - 1)
             try:
-                child = nt_dirfd.open_child_directory(descriptor, component, writable=create)
+                child = nt_dirfd.open_child_directory(descriptor, component, writable=want_writable)
             except FileNotFoundError:
                 if not create:
                     raise
-                nt_dirfd.mkdir_child(descriptor, component)
-                child = nt_dirfd.open_child_directory(descriptor, component, writable=create)
+                _mkdir_windows_child(descriptor, component)
+                child = nt_dirfd.open_child_directory(descriptor, component, writable=want_writable)
             os.close(descriptor)
             descriptor = child
         return descriptor
     except BaseException:
         os.close(descriptor)
         raise
+
+
+def _mkdir_windows_child(parent_fd: int, component: str) -> None:
+    """Create one Windows child under the already-held parent descriptor.
+
+    The held handle is reopened with mutation access through
+    ``nt_dirfd.reopen_directory_writable`` (NtCreateFile with RootDirectory set
+    to the held descriptor and an empty ObjectName), so the mkdir parent is the
+    same directory object the caller holds instead of a fresh re-walk of the
+    prefix by name from the anchor. The reopened handle is closed immediately.
+    Reparse rejection still fires on every open, so a remaining failure lands
+    as an error rather than a traversal.
+    """
+    from .work_cmd import nt_dirfd
+
+    nt_dirfd.validate_component(component)
+    mkdir_parent = nt_dirfd.reopen_directory_writable(parent_fd)
+    try:
+        nt_dirfd.mkdir_child(mkdir_parent, component)
+    finally:
+        os.close(mkdir_parent)
 
 
 def _read_regular_text(path: Path) -> str:

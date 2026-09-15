@@ -75,6 +75,9 @@ _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 # parent that will mkdir/create/rename children also needs ADD_*|DELETE_CHILD.
 _DIRECTORY_TRAVERSE_ACCESS = _FILE_LIST_DIRECTORY | _FILE_TRAVERSE | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
 _DIRECTORY_MODIFY_ACCESS = _DIRECTORY_TRAVERSE_ACCESS | _FILE_ADD_FILE | _FILE_ADD_SUBDIRECTORY | _FILE_DELETE_CHILD
+# Narrowest mask for the mkdir-only reopen: traverse plus create-subdirectory,
+# without FILE_ADD_FILE or FILE_DELETE_CHILD.
+_DIRECTORY_MKDIR_ACCESS = _DIRECTORY_TRAVERSE_ACCESS | _FILE_ADD_SUBDIRECTORY
 _SHARE_ALL = _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
 _FILE_READ_ACCESS = _FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
 _FILE_WRITE_ACCESS = _FILE_READ_ATTRIBUTES | _FILE_WRITE_DATA | _FILE_APPEND_DATA | _DELETE | _SYNCHRONIZE
@@ -225,6 +228,55 @@ def mkdir_child(parent: int, name: str) -> None:
         _reject_reparse(api, handle, expected_directory=True)
     finally:
         api.CloseHandle(handle)
+
+
+def reopen_directory_writable(parent: int) -> int:
+    """Reopen the held directory handle itself with mutation access.
+
+    ``NtCreateFile`` with ``RootDirectory`` set to the held descriptor and an
+    empty ``ObjectName`` reopens that same directory object, so no pathname
+    component is re-walked and a concurrent rename swap of a prefix component
+    cannot redirect a subsequent ``mkdir_child``. The reopened handle rejects
+    reparse points and is returned as an fd the caller must close.
+    """
+    api = _require_api()
+    empty = _UNICODE_STRING()
+    empty.Length = 0
+    empty.MaximumLength = 0
+    empty.Buffer = None
+    obj = api.OBJECT_ATTRIBUTES()
+    obj.Length = ctypes.sizeof(api.OBJECT_ATTRIBUTES)
+    obj.RootDirectory = _handle_from_fd(parent)
+    obj.ObjectName = ctypes.pointer(empty)
+    obj.Attributes = _OBJ_CASE_INSENSITIVE
+    obj.SecurityDescriptor = None
+    obj.SecurityQualityOfService = None
+    handle = ctypes.c_void_p()
+    iosb = api.IO_STATUS_BLOCK()
+    status = api.NtCreateFile(
+        ctypes.byref(handle),
+        _DIRECTORY_MKDIR_ACCESS,
+        ctypes.byref(obj),
+        ctypes.byref(iosb),
+        None,
+        _FILE_ATTRIBUTE_DIRECTORY,
+        _SHARE_ALL,
+        _FILE_OPEN,
+        _FILE_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
+        None,
+        0,
+    )
+    del empty
+    _raise_ntstatus(status)
+    if _is_invalid_handle(handle.value):
+        raise OSError("NtCreateFile returned an invalid handle")
+    raw = handle.value
+    try:
+        _reject_reparse(api, raw, expected_directory=True)
+        return _handle_to_fd(api, raw, os.O_RDONLY)
+    except BaseException:
+        api.CloseHandle(raw)
+        raise
 
 
 def open_path_file(path: Path | str, flags: int, mode: int = 0o600) -> int:

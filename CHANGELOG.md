@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fleet status and Command Deck report policy authority as staged before migration activation and active afterward, without activating the migration. (#1460)
 
 ### Changed
+- Private Grok Bot manifests, ledgers, action stores, and runtime configuration reads now fail closed on Windows with `secure-owner-read-unavailable` until owner-SID/DACL enforcement is implemented. (#1523)
+- Private Grok Bot state path references must be drive-absolute (`X:\path` or `X:/path`) on Windows. A drive-less root such as `/var/lib/state` carries no drive there and resolves against the current drive, but normalizes to a different string than `C:\var\lib\state`, so two settings naming one state tree passed the disjoint-path check that these gates exist to enforce. The five connector packages now share one absolute-root rule in `brigade/grokbot_paths.py` instead of nine near-identical copies. POSIX still accepts slash-rooted paths, and UNC and device-namespace roots stay rejected on both platforms. (#1476)
+- Fleet action-state reads now fail closed with `secure-owner-read-unavailable` before the file is opened, instead of reporting the write-side `secure-owner-write-unavailable` after the open, and Fleet private-state enumeration is gated like its Backup counterpart. (#1523)
 
 - Contributing policy drops the formal `APPROVED` review gate: merge requires green required checks and resolved conversations, and documents that GitHub ignores the `CHANGELOG.md` union merge driver when computing mergeability.
 - Update-channel documentation now describes beta previews and automatic update-check collection and retention.

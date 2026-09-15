@@ -8,7 +8,7 @@ import stat
 from pathlib import Path
 from typing import Any, Mapping, NoReturn
 
-from .. import grokbot_ops
+from .. import grokbot_ops, grokbot_paths
 from .contracts import (
     PHASE1_ACTION_IDS,
     PHASE2_ONLY_ACTION_IDS,
@@ -23,6 +23,7 @@ COMMAND_FINGERPRINT = __import__("re").compile(r"^sha256:[0-9a-f]{64}$")
 MAX_CA_BYTES = 16_384
 MAX_RECEIPT_BYTES = 8_192
 MAX_RUNTIME_JSON_BYTES = 262_144
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
 ADAPTER_ENVIRONMENT_KEYS = (
     "PATH",
     "HOME",
@@ -44,12 +45,24 @@ def _runtime_error() -> NoReturn:
     raise ObsidianError("invalid_request", "Obsidian runtime configuration is invalid")
 
 
+def _require_secure_owner_read() -> None:
+    """Fail closed until Windows owner-SID/DACL checks are available."""
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise ObsidianError("unavailable", "secure-owner-read-unavailable")
+
+
 def has_explicit_dot_segment(value: str) -> bool:
-    return any(segment in {".", ".."} for segment in value.split("/"))
+    if any(part in {".", ".."} for part in Path(value).parts):
+        return True
+    return any(segment in {".", ".."} for segment in value.replace("\\", "/").split("/"))
 
 
 def is_absolute_safe_path(value: str) -> bool:
-    return value.startswith("/") and "\0" not in value and not has_explicit_dot_segment(value)
+    if "\0" in value or has_explicit_dot_segment(value):
+        return False
+    if any(seg and (seg.endswith(".") or seg.endswith(" ")) for seg in value.replace("\\", "/").split("/")):
+        return False
+    return grokbot_paths.has_allowed_absolute_root(value, windows=os.name == "nt")
 
 
 def normalize_absolute_path(path_value: str) -> str:
@@ -64,11 +77,17 @@ def required_absolute_path(value: object) -> str:
 
 
 def paths_overlap(left: str, right: str) -> bool:
-    normalized_left = normalize_absolute_path(left)
-    normalized_right = normalize_absolute_path(right)
+    if os.name == "nt":
+        normalized_left = os.path.normcase(normalize_absolute_path(left)).replace("\\", "/")
+        normalized_right = os.path.normcase(normalize_absolute_path(right)).replace("\\", "/")
+    else:
+        normalized_left = normalize_absolute_path(left)
+        normalized_right = normalize_absolute_path(right)
     if normalized_left == normalized_right:
         return True
-    return normalized_left.startswith(f"{normalized_right}/") or normalized_right.startswith(f"{normalized_left}/")
+    right_prefix = normalized_right if normalized_right.endswith("/") else f"{normalized_right}/"
+    left_prefix = normalized_left if normalized_left.endswith("/") else f"{normalized_left}/"
+    return normalized_left.startswith(right_prefix) or normalized_right.startswith(left_prefix)
 
 
 def assert_disjoint_paths(paths: list[str]) -> None:
@@ -140,7 +159,7 @@ def open_validated_executable_fd(path_text: str) -> int:
 
 
 def _assert_secure_runtime_stat(info: os.stat_result) -> None:
-    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+    if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600):
         _runtime_error()
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         _runtime_error()
@@ -148,6 +167,7 @@ def _assert_secure_runtime_stat(info: os.stat_result) -> None:
 
 def _read_secure_runtime_bytes(path_text: str, *, max_bytes: int) -> bytes:
     """Read a current-UID-owned mode-0600 file through one no-follow descriptor."""
+    _require_secure_owner_read()
     normalized = required_absolute_path(path_text)
     path = Path(normalized)
     try:
@@ -167,6 +187,7 @@ def _read_secure_runtime_bytes(path_text: str, *, max_bytes: int) -> bytes:
         if os.name == "posix":
             descriptor = os.open(path.name, flags, dir_fd=parent)
         else:
+            # Dormant until owner-SID/DACL enforcement can lift the read guard.
             from ..work_cmd import nt_dirfd
 
             descriptor = nt_dirfd.open_file(parent, path.name, os.O_RDONLY)

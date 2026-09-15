@@ -34,6 +34,9 @@ HEX64 = __import__("re").compile(r"^[0-9a-f]{64}$")
 RECEIPT_FORBIDDEN = ("stdout", "stderr", "api_key", "nonce", "upstream", "authorization")
 ACTION_STATE_SUBDIRS = ("proposals", "consumed", "receipts")
 CURRENT_REVISION = object()
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
+# Windows interim limitation: owner-SID/DACL enforcement does not exist yet,
+# so private reads fail closed before any filesystem access.
 RECEIPT_KINDS = frozenset({"proposal", "approval", "rejection", "execution", "verification"})
 RECEIPT_OUTCOMES = frozenset(
     {
@@ -57,12 +60,29 @@ class ObsidianActionStoreError(ObsidianError):
         super().__init__("denied", ERROR_MESSAGES["denied"])
 
 
+SECURE_OWNER_WRITE_AVAILABLE = os.name == "posix"
+
+
+def _require_secure_owner_write() -> None:
+    if not SECURE_OWNER_WRITE_AVAILABLE:
+        raise ObsidianError("secure-owner-write-unavailable")
+
+
 def _state_invalid() -> NoReturn:
     raise ObsidianError("protocol_error", ERROR_MESSAGES["protocol_error"])
 
 
 def _environment_invalid() -> NoReturn:
     raise ObsidianError("invalid_request", ERROR_MESSAGES["invalid_request"])
+
+
+def _require_secure_owner_read() -> None:
+    """Fail closed on Windows before any filesystem access.
+
+    Owner-SID/DACL enforcement does not exist yet; POSIX behavior unchanged.
+    """
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise ObsidianError("unavailable", "secure-owner-read-unavailable")
 
 
 def _parse_iso(value: str) -> datetime:
@@ -375,11 +395,13 @@ def parse_receipt_record(raw: object, expected_receipt_id: str | None = None) ->
 
 
 def _ensure_directory(path: Path) -> None:
+    _require_secure_owner_read()
+    _require_secure_owner_write()
     if path.exists() or path.is_symlink():
         if grokbot_ops._path_is_symlink(path) or path.is_symlink() or not path.is_dir():
             _state_invalid()
         info = path.lstat()
-        if stat.S_IMODE(info.st_mode) != 0o700:
+        if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700:
             _state_invalid()
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             _state_invalid()
@@ -387,11 +409,12 @@ def _ensure_directory(path: Path) -> None:
     path.mkdir(mode=0o700, parents=True)
     os.chmod(path, 0o700)
     info = path.lstat()
-    if path.is_symlink() or not path.is_dir() or stat.S_IMODE(info.st_mode) != 0o700:
+    if path.is_symlink() or not path.is_dir() or (os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700):
         _state_invalid()
 
 
 def _write_exclusive_json(directory: Path, name: str, record: Mapping[str, Any]) -> None:
+    _require_secure_owner_write()
     payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
     if len(payload.encode("utf-8")) > MAX_RECORD_BYTES:
         _state_invalid()
@@ -407,6 +430,7 @@ def _write_exclusive_json(directory: Path, name: str, record: Mapping[str, Any])
 
 
 def _read_json(directory: Path, name: str) -> object:
+    _require_secure_owner_read()
     path = directory / name
     if grokbot_ops._path_is_symlink(path) or path.is_symlink():
         _state_invalid()
@@ -425,6 +449,7 @@ def _read_json(directory: Path, name: str) -> object:
 
 
 def _hex_json_files(directory: Path) -> list[str]:
+    _require_secure_owner_read()
     names = []
     try:
         for entry in os.listdir(directory):
@@ -515,7 +540,7 @@ class ObsidianActionStore:
         if not self.approval_dir.is_dir() or self.approval_dir.is_symlink():
             _environment_invalid()
         info = self.approval_dir.lstat()
-        if stat.S_IMODE(info.st_mode) != 0o700:
+        if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700:
             _environment_invalid()
 
     def _retain(self) -> None:

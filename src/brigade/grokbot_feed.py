@@ -49,6 +49,9 @@ NO_MERGE_SENTENCE = (
 WORKER_LEASE_RENEW_MINUTES = 5
 WORKER_TIME_CAP_MINUTES = 60
 WORKER_FALLBACK_DONE_PREDICATE = "Implement only the approved issue"
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
+# Windows interim limitation: owner-SID/DACL enforcement does not exist yet,
+# so private reads fail closed before any filesystem access.
 
 
 class FeedError(ValueError):
@@ -87,6 +90,15 @@ class FeedError(ValueError):
         if self.detail:
             parts.append(self.detail)
         return " ".join(parts)
+
+
+def _require_secure_owner_read() -> None:
+    """Fail closed on Windows before any filesystem access.
+
+    Owner-SID/DACL enforcement does not exist yet; POSIX behavior is unchanged.
+    """
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise FeedError("secure-owner-read-unavailable")
 
 
 # Hub refusals the Fleet Hub client already bounded. Safe to name on stderr.
@@ -288,6 +300,7 @@ def _bounded_label(value: object) -> str:
 
 
 def _read_manifest_snapshot(path: Path) -> bytes:
+    _require_secure_owner_read()
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if nofollow:
@@ -308,7 +321,7 @@ def _read_manifest_snapshot(path: Path) -> bytes:
         owner_uid = getattr(os, "getuid", None)
         if owner_uid is not None and info.st_uid != owner_uid():
             raise FeedError("unsafe-manifest")
-        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        if os.name == "posix" and info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             raise FeedError("unsafe-manifest")
         chunks: list[bytes] = []
         while True:
@@ -488,6 +501,7 @@ def _parse_wake_webhooks(value: object, default_key_file: str) -> dict[str, list
 
 
 def _load_wake_config(target: Path) -> dict[str, Any] | None:
+    _require_secure_owner_read()
     path = wake_config_path(target)
     try:
         info = path.lstat()
@@ -497,7 +511,7 @@ def _load_wake_config(target: Path) -> dict[str, Any] | None:
         return None
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         return None
-    if stat.S_IMODE(info.st_mode) != 0o600:
+    if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600:
         return None
     owner_uid = getattr(os, "getuid", None)
     if owner_uid is not None and info.st_uid != owner_uid():
@@ -548,6 +562,7 @@ def _read_wake_sender_key(path: Path) -> str:
 
 
 def _read_owner_regular_file(path: Path, *, maximum: int, require_mode: int | None = 0o600) -> bytes:
+    _require_secure_owner_read()
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if nofollow:
@@ -565,7 +580,7 @@ def _read_owner_regular_file(path: Path, *, maximum: int, require_mode: int | No
         owner_uid = getattr(os, "getuid", None)
         if owner_uid is not None and info.st_uid != owner_uid():
             raise FeedError("unsafe-wake-config")
-        if require_mode is not None and stat.S_IMODE(info.st_mode) != require_mode:
+        if require_mode is not None and os.name == "posix" and stat.S_IMODE(info.st_mode) != require_mode:
             raise FeedError("unsafe-wake-config")
         if info.st_size > maximum:
             raise FeedError("unsafe-wake-config")
@@ -620,15 +635,23 @@ def _post_wake(url: str, key: str, body: dict[str, str]) -> int:
 
 
 def _append_wake_status(target: Path, status: int) -> None:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        return
     path = wake_notify_log_path(target)
     line = (json.dumps({"status": status}, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0)
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    if nofollow:
-        flags |= nofollow
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0) | nofollow
     descriptor: int | None = None
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            prior = path.lstat()
+        except FileNotFoundError:
+            prior = None
+        except OSError:
+            return
+        if prior is not None and (stat.S_ISLNK(prior.st_mode) or not stat.S_ISREG(prior.st_mode)):
+            return
         descriptor = os.open(os.fspath(path), flags, grokbot_jobs.FILE_MODE)
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):

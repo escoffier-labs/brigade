@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from brigade.grokbot_fleet.contracts import FleetError
+from brigade.grokbot_fleet import ledger as ledger_mod
 from brigade.grokbot_fleet.ledger import FleetLedger, MAX_HOST_OBSERVATIONS
 
 HOST = {
@@ -29,11 +30,26 @@ HOST = {
 def test_ledger_creates_owner_only_dir_and_file(tmp_path: Path):
     path = tmp_path / "state" / "ledger.json"
     ledger = FleetLedger(str(path))
+    if os.name != "posix":
+        with pytest.raises(FleetError) as caught:
+            ledger.ready()
+        assert caught.value.code == "unavailable"
+        assert str(caught.value) == "secure-owner-read-unavailable"
+        return
     ledger.ready()
     ledger.record_observation(HOST, "receipt-1")
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert ledger.last_host_observation("control-plane")["alias"] == "control-plane"
+
+
+def test_windows_ensure_state_dir_fails_closed_before_io(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    ledger = FleetLedger(str(tmp_path / "state" / "ledger.json"))
+    monkeypatch.setattr(ledger_mod, "SECURE_OWNER_READ_AVAILABLE", False)
+    with pytest.raises(FleetError) as caught:
+        ledger._ensure_state_dir()
+    assert caught.value.code == "unavailable"
+    assert str(caught.value) == "secure-owner-read-unavailable"
 
 
 def test_ledger_marks_change_and_retains_only_the_bound(tmp_path: Path):
@@ -96,6 +112,7 @@ def test_findings_returns_sorted_detached_copies(tmp_path: Path):
     assert ledger.findings()[0] is not snapshot[0]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission bits")
 def test_ledger_fails_closed_on_unsafe_permissions(tmp_path: Path):
     path = tmp_path / "state" / "ledger.json"
     path.parent.mkdir(parents=True)

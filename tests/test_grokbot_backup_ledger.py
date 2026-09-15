@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from brigade.grokbot_backup.contracts import BackupError
+from brigade.grokbot_backup import ledger as ledger_mod
 from brigade.grokbot_backup.ledger import MAX_RECORDS, BackupLedger, backup_finding_revision
 
 
@@ -18,6 +19,15 @@ def _ledger(tmp_path: Path) -> BackupLedger:
     ledger = BackupLedger(str(directory / "ledger.jsonl"))
     ledger.ready()
     return ledger
+
+
+def test_windows_ensure_state_dir_fails_closed_before_io(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    ledger = BackupLedger(str(tmp_path / "state" / "ledger.jsonl"))
+    monkeypatch.setattr(ledger_mod, "SECURE_OWNER_READ_AVAILABLE", False)
+    with pytest.raises(BackupError) as caught:
+        ledger._ensure_state_dir()
+    assert caught.value.code == "unavailable"
+    assert str(caught.value) == "secure-owner-read-unavailable"
 
 
 def _observation(alias: str = "media-archive", *, health: str = "healthy") -> dict[str, object]:
