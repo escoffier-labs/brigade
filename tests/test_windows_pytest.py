@@ -579,3 +579,169 @@ def test_main_returns_failure_when_driver_errors_and_records_only_measured_resul
     payload = json.loads(record.read_text(encoding="utf-8"))
     assert payload["results"] == []
     assert payload["driver_error"] == "driver boom"
+
+
+def _main_to_completion(tmp_path, monkeypatch, *, allowlisted, results):
+    """Drive main() past every error path so the normal exit-status derivation runs."""
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text(json.dumps({"known_failures": allowlisted, "known_timeouts": []}), encoding="utf-8")
+    record = tmp_path / "record.json"
+    temp_root = tmp_path / "outside"
+    temp_root.mkdir(exist_ok=True)
+    monkeypatch.setattr(windows_pytest, "is_windows", lambda: True)
+    monkeypatch.setattr(windows_pytest, "install_console_handler", lambda: None)
+    monkeypatch.setattr(windows_pytest, "discover_files", lambda repo: [result.name for result in results])
+    monkeypatch.setattr(windows_pytest, "make_temp_root", lambda repo: temp_root)
+    monkeypatch.setattr(windows_pytest, "run_files", lambda **kwargs: results)
+    code = windows_pytest.main(["--repo", str(tmp_path), "--allowlist", str(allowlist), "--record", str(record)])
+    return code, json.loads(record.read_text(encoding="utf-8"))
+
+
+def test_main_exits_nonzero_when_a_measured_failure_is_not_allowlisted(tmp_path, monkeypatch, capsys):
+    code, payload = _main_to_completion(
+        tmp_path,
+        monkeypatch,
+        allowlisted=[],
+        results=[_result("test_regressed.py", "failed")],
+    )
+
+    assert code == 1
+    assert "driver_error" not in payload
+    assert "windows pytest: files=1 regressions=1 removal_candidates=0" in capsys.readouterr().out
+
+
+def test_main_exits_zero_when_every_measured_failure_is_allowlisted(tmp_path, monkeypatch, capsys):
+    code, payload = _main_to_completion(
+        tmp_path,
+        monkeypatch,
+        allowlisted=["test_known_failure.py"],
+        results=[_result("test_known_failure.py", "failed"), _result("test_healthy.py", "passed")],
+    )
+
+    assert code == 0
+    assert "driver_error" not in payload
+    assert {row["name"] for row in payload["results"]} == {"test_known_failure.py", "test_healthy.py"}
+    assert "windows pytest: files=2 regressions=0 removal_candidates=0" in capsys.readouterr().out
+
+
+def test_main_reports_removal_candidates_but_still_exits_zero(tmp_path, monkeypatch, capsys):
+    """An allowlisted file that starts passing is good news: report it, never fail the lane.
+
+    check_allowlist_ratchet already permits shrinking the allowlist, so a newly
+    passing file must not be able to turn the ratchet red before a human prunes it.
+    """
+    code, _ = _main_to_completion(
+        tmp_path,
+        monkeypatch,
+        allowlisted=["test_now_passing.py"],
+        results=[_result("test_now_passing.py", "passed")],
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "windows pytest: files=1 regressions=0 removal_candidates=1" in out
+    assert "allowlist removal candidates: test_now_passing.py" in out
+
+
+def test_main_removal_candidate_never_masks_a_concurrent_regression(tmp_path, monkeypatch, capsys):
+    code, _ = _main_to_completion(
+        tmp_path,
+        monkeypatch,
+        allowlisted=["test_now_passing.py"],
+        results=[_result("test_now_passing.py", "passed"), _result("test_regressed.py", "failed")],
+    )
+
+    assert code == 1
+    assert "windows pytest: files=2 regressions=1 removal_candidates=1" in capsys.readouterr().out
+
+
+def test_cancellation_poll_kills_an_in_flight_child_instead_of_waiting_out_its_budget(monkeypatch):
+    """Once cleanup starts, a running child is killed at the next poll, not at its own deadline."""
+    killed = []
+    waits = []
+
+    class Process:
+        pid = 321
+
+        def wait(self, timeout):
+            waits.append(timeout)
+            raise windows_pytest.subprocess.TimeoutExpired("pytest", timeout)
+
+    tracker = windows_pytest.ProcessTracker()
+    tracker.kill_all()
+    monkeypatch.setattr(windows_pytest, "_kill_process_tree", lambda process: killed.append(process.pid))
+    ticks = iter([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+
+    returncode = windows_pytest._wait_for_process(
+        Process(), timeout_seconds=2, tracker=tracker, clock=lambda: next(ticks)
+    )
+
+    assert returncode is None
+    assert killed == [321]
+    assert waits == []
+
+
+def test_kill_all_terminates_every_tracked_child_and_closes_the_tracker(monkeypatch):
+    killed = []
+    monkeypatch.setattr(windows_pytest, "_kill_process_tree", lambda process: killed.append(process.pid))
+    tracker = windows_pytest.ProcessTracker()
+
+    assert tracker.add(SimpleNamespace(pid=1)) is True
+    assert tracker.add(SimpleNamespace(pid=2)) is True
+    assert tracker.is_closing() is False
+    assert killed == []
+
+    tracker.kill_all()
+
+    assert sorted(killed) == [1, 2]
+    assert tracker.is_closing() is True
+    assert tracker.add(SimpleNamespace(pid=3)) is False
+    assert sorted(killed) == [1, 2, 3]
+
+
+def test_discarded_child_is_not_killed_again_by_cleanup(monkeypatch):
+    killed = []
+    monkeypatch.setattr(windows_pytest, "_kill_process_tree", lambda process: killed.append(process.pid))
+    tracker = windows_pytest.ProcessTracker()
+    finished = SimpleNamespace(pid=11)
+
+    assert tracker.add(finished) is True
+    assert tracker.add(SimpleNamespace(pid=12)) is True
+    tracker.discard(finished)
+    tracker.kill_all()
+
+    assert killed == [12]
+
+
+def test_run_file_abandons_a_child_launched_after_cleanup_started(tmp_path, monkeypatch):
+    killed = []
+    waits = []
+
+    class Process:
+        pid = 777
+
+        def wait(self, timeout):
+            waits.append(timeout)
+            return 0
+
+    tracker = windows_pytest.ProcessTracker()
+    tracker.kill_all()
+    monkeypatch.setattr(windows_pytest.subprocess, "Popen", lambda *args, **kwargs: Process())
+    monkeypatch.setattr(windows_pytest, "_kill_process_tree", lambda process: killed.append(process.pid))
+    temp_root = tmp_path / "outside"
+    temp_root.mkdir()
+
+    result = windows_pytest.run_file(
+        "test_late.py",
+        repo=tmp_path,
+        python=Path("python.exe"),
+        output_dir=tmp_path / "output",
+        temp_root=temp_root,
+        timeout_seconds=900,
+        tracker=tracker,
+    )
+
+    assert result.status == "deadline-exceeded"
+    assert killed == [777]
+    assert waits == []
+    assert "driver aggregate deadline exceeded" in (tmp_path / "output" / result.log).read_text(encoding="utf-8")
