@@ -11,6 +11,7 @@ from typing import Mapping, NoReturn
 from urllib.parse import urlsplit, urlunsplit
 
 from .contracts import N8nError
+from .. import grokbot_paths
 
 RUNTIME_KEYS = frozenset({"version", "base_url", "api_key_file"})
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -44,24 +45,9 @@ def normalize_absolute_path(path_value: str) -> str:
     return trimmed if trimmed else "/"
 
 
-def _is_windows_drive_rooted(value: str) -> bool:
-    if os.name != "nt":
-        return False
-    return len(value) >= 3 and value[0].isascii() and value[0].isalpha() and value[1] == ":" and value[2] in {"\\", "/"}
-
-
 def _reject_windows_network_or_device_root(value: str) -> None:
-    if value.replace("\\", "/").startswith("//"):
+    if not grokbot_paths.has_allowed_absolute_root(value, windows=os.name == "nt"):
         _environment_error()
-    if value.startswith("/"):
-        return
-    if _is_windows_drive_rooted(value):
-        return
-    if Path(value).is_absolute():
-        drive = Path(value).drive
-        if len(drive) == 2 and drive[0].isascii() and drive[0].isalpha() and drive[1] == ":":
-            return
-    _environment_error()
 
 
 def required_absolute_path(value: object) -> str:
@@ -69,9 +55,6 @@ def required_absolute_path(value: object) -> str:
         _environment_error()
     assert isinstance(value, str)
     _reject_windows_network_or_device_root(value)
-    if not Path(value).is_absolute() and not _is_windows_drive_rooted(value):
-        if not value.startswith("/"):
-            _environment_error()
     if _has_explicit_dot_segment(value):
         _environment_error()
     if any(seg and (seg.endswith(".") or seg.endswith(" ")) for seg in value.replace("\\", "/").split("/")):

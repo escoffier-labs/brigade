@@ -124,11 +124,21 @@ class FleetActionStoreError(FleetError):
 
 
 SECURE_OWNER_WRITE_AVAILABLE = os.name == "posix"
+SECURE_OWNER_READ_AVAILABLE = os.name == "posix"
 
 
 def _require_secure_owner_write() -> None:
     if not SECURE_OWNER_WRITE_AVAILABLE:
         raise FleetError("secure-owner-write-unavailable")
+
+
+def _require_secure_owner_read() -> None:
+    """Fail closed on Windows before any filesystem access.
+
+    Owner-SID/DACL enforcement does not exist yet; POSIX behavior is unchanged.
+    """
+    if not SECURE_OWNER_READ_AVAILABLE:
+        raise FleetError("unavailable", "secure-owner-read-unavailable")
 
 
 def _action_state_invalid() -> NoReturn:
@@ -525,6 +535,7 @@ def _replace_json(path: Path, record: Mapping[str, Any]) -> None:
 
 
 def _read_safe_json(path: Path) -> Any:
+    _require_secure_owner_read()
     handle = None
     try:
         handle = os.open(path, dirfd_mod.file_flags(os.O_RDONLY))
@@ -583,6 +594,7 @@ def _proposal_is_live(record: Mapping[str, Any], now: datetime) -> bool:
 
 
 def _list_json_files(directory: Path) -> list[Path]:
+    _require_secure_owner_read()
     try:
         entries = list(directory.iterdir())
     except OSError:

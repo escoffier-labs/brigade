@@ -63,13 +63,19 @@ def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
     from brigade.grokbot_backup.lifecycle import validate_absolute_reference as validate_ref
     from brigade.grokbot_backup.runtime_config import _required_absolute_path
 
-    assert isinstance(validate_ref("/var/lib/state"), str)
-    assert isinstance(_required_absolute_path("/var/lib/state"), str)
+    # A drive-less root such as "/var/lib/state" carries no drive on Windows and
+    # resolves against the current drive, so it can alias C:\var\lib\state.
     if os.name == "nt":
+        with pytest.raises(BackupError):
+            validate_ref("/var/lib/state")
+        with pytest.raises(BackupError):
+            _required_absolute_path("/var/lib/state")
         for accepted in (r"C:\state\dir", "C:/state/dir"):
             assert isinstance(validate_ref(accepted), str)
             assert isinstance(_required_absolute_path(accepted), str)
     else:
+        assert isinstance(validate_ref("/var/lib/state"), str)
+        assert isinstance(_required_absolute_path("/var/lib/state"), str)
         for drive_path in (r"C:\state\dir", "C:/state/dir"):
             with pytest.raises(BackupError):
                 validate_ref(drive_path)
@@ -411,3 +417,39 @@ def test_backup_unit_uses_shared_listener_recovery_policy(tmp_path: Path, monkey
         **_backup_paths(tmp_path),
     )
     assert_listener_recovery_policy(render_unit(tmp_path))
+
+
+def test_windows_branch_rejects_drive_less_roots(monkeypatch):
+    """The Windows drive-root gate must be exercised on POSIX hosts too.
+
+    A drive-less root such as "/var/lib/state" resolves against the current
+    drive on Windows, so it can name the same tree as C:\\var\\lib\\state while
+    comparing disjoint. The platform decision is read from each module's own
+    ``os`` binding, which is the seam patched here.
+    """
+    import ntpath
+    from types import SimpleNamespace
+
+    from brigade.grokbot_backup import lifecycle as lifecycle_mod
+    from brigade.grokbot_backup import runtime_config as runtime_mod
+
+    windows = SimpleNamespace(name="nt", path=ntpath)
+    drive_less = ("/var/lib/state", "/var/lib/state/ledger.json", "/", "\\var\\lib\\state")
+    with monkeypatch.context() as patched:
+        patched.setattr(lifecycle_mod, "os", windows)
+        patched.setattr(runtime_mod, "os", windows)
+
+        # Proof the simulated branch is live: a drive root is accepted only here.
+        assert isinstance(lifecycle_mod.validate_absolute_reference(r"C:\var\lib\state"), str)
+        assert isinstance(runtime_mod._required_absolute_path(r"C:\var\lib\state"), str)
+
+        for rejected in drive_less:
+            with pytest.raises(BackupError):
+                lifecycle_mod.validate_absolute_reference(rejected)
+            with pytest.raises(BackupError):
+                runtime_mod._required_absolute_path(rejected)
+
+    # Outside the simulation the POSIX contract is unchanged.
+    assert isinstance(lifecycle_mod.validate_absolute_reference("/var/lib/state"), str)
+    with pytest.raises(BackupError):
+        lifecycle_mod.validate_absolute_reference(r"C:\var\lib\state")

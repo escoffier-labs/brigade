@@ -8,7 +8,7 @@ import stat
 from pathlib import Path
 from typing import Any, Mapping, NoReturn
 
-from .. import grokbot_ops
+from .. import grokbot_ops, grokbot_paths
 from .contracts import (
     PHASE1_ACTION_IDS,
     PHASE2_ONLY_ACTION_IDS,
@@ -57,27 +57,12 @@ def has_explicit_dot_segment(value: str) -> bool:
     return any(segment in {".", ".."} for segment in value.replace("\\", "/").split("/"))
 
 
-def _is_windows_drive_rooted(value: str) -> bool:
-    if os.name != "nt":
-        return False
-    return len(value) >= 3 and value[0].isascii() and value[0].isalpha() and value[1] == ":" and value[2] in {"\\", "/"}
-
-
 def is_absolute_safe_path(value: str) -> bool:
     if "\0" in value or has_explicit_dot_segment(value):
         return False
     if any(seg and (seg.endswith(".") or seg.endswith(" ")) for seg in value.replace("\\", "/").split("/")):
         return False
-    if value.replace("\\", "/").startswith("//"):
-        return False
-    if value.startswith("/"):
-        return True
-    if _is_windows_drive_rooted(value):
-        return True
-    if Path(value).is_absolute():
-        drive = Path(value).drive
-        return len(drive) == 2 and drive[0].isascii() and drive[0].isalpha() and drive[1] == ":"
-    return False
+    return grokbot_paths.has_allowed_absolute_root(value, windows=os.name == "nt")
 
 
 def normalize_absolute_path(path_value: str) -> str:
