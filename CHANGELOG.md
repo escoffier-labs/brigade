@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `grokbot_queue_claim` accepts an optional bounded `worker_label` (`[a-z0-9-]{1,32}`) so several Builder bots sharing one connector identity stay distinguishable. The listener validates the label, forwards it to the hub unchanged, stores it on local file-backed job rows, and echoes it on the claim, status, renew, and complete projections and in `brigade run cloud grokbot status`. Hub-side storage is a pending fleet control-plane change, so a hub-authority deployment accepts the label and shows none until that column lands. (#1501)
 - The Cosign signer profile now exports agent-change and commit-linkage statements as Sigstore bundles for external verification. (#1404)
 
 ### Changed

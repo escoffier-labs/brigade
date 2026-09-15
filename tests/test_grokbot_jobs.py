@@ -1953,3 +1953,309 @@ def test_read_report_keeps_reading_after_legal_short_os_read(tmp_path: Path, mon
         "bytes": len(encoded),
         "sha256": _report_digest(),
     }
+
+
+def test_worker_label_is_stored_and_echoed_on_status_renew_and_complete(tmp_path: Path):
+    job_id = _enqueue(tmp_path)
+    claimed = grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, worker_label="builder-2")
+    assert claimed["worker_label"] == "builder-2"
+    assert grokbot_jobs.status(tmp_path, job_id, now=NOW)["worker_label"] == "builder-2"
+    assert grokbot_jobs.renew(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)["worker_label"] == "builder-2"
+    grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "running", now=NOW)
+    completed = grokbot_jobs.transition(
+        tmp_path,
+        job_id,
+        "bot-a",
+        "lease-a",
+        "completed",
+        artifact={
+            "kind": "draft-pr",
+            "url": "https://github.com/example/brigade/pull/123",
+            "branch": "grokbot/worker-label",
+        },
+        now=NOW,
+    )
+    assert completed["worker_label"] == "builder-2"
+
+
+@pytest.mark.parametrize("label", ["Builder-2", "builder_2", "", "a" * 33, "builder 2"])
+def test_claim_rejects_an_invalid_worker_label(tmp_path: Path, label: str):
+    job_id = _enqueue(tmp_path)
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-worker-label$"):
+        grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, worker_label=label)
+    assert grokbot_jobs.get_job(tmp_path, job_id, now=NOW)["state"] == "queued"
+
+
+def test_validate_worker_label_accepts_the_bounded_pattern():
+    assert grokbot_jobs.validate_worker_label("builder-2") == "builder-2"
+    assert grokbot_jobs.validate_worker_label("a") == "a"
+    assert grokbot_jobs.validate_worker_label("0" * 32) == "0" * 32
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-worker-label$"):
+        grokbot_jobs.validate_worker_label("Builder-2")
+
+
+def _hub_job_payload(job_id: str, *, state: str = "queued", **extra: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "job_id": job_id,
+        "label": "Add queue foundation",
+        "role": "implementation-worker",
+        "repository": "example/brigade",
+        "task_digest": "a" * 64,
+        "state": state,
+        "created_at": "2026-08-23T12:00:00Z",
+        "updated_at": "2026-08-23T12:00:00Z",
+        "queued_at": "2026-08-23T12:00:00Z",
+        "timeout_seconds": 900,
+        "item_revision": 1,
+        "artifact_kind": "draft-pr",
+    }
+    payload.update(extra)
+    return payload
+
+
+def test_hub_claim_forwards_worker_label_in_the_outbound_request_body(tmp_path: Path, monkeypatch):
+    """Pin the one hub-side thing the listener actually controls: the request body.
+
+    The listener cannot make the hub keep the label, so assert on what goes out
+    on the wire rather than on a stubbed echo. The fake transport answers the
+    way the real hub does today, with no ``worker_label`` on the returned row,
+    so the projection is expected to come back without one.
+    """
+    from brigade import fleet_client_grokbot
+
+    job_id = "grokbot-" + "a" * 24
+    bodies: list[dict[str, object]] = []
+
+    def fake_post(_hub, _token, body, timeout):
+        bodies.append(dict(body))
+        if body["action"] == "status":
+            return 200, {"job": _hub_job_payload(job_id)}
+        return 200, {
+            "claimed": True,
+            "job": _hub_job_payload(
+                job_id,
+                state="claimed",
+                item_revision=2,
+                claimant_node="worker-node",
+                claimant_worker="implementation-worker",
+            ),
+        }
+
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    monkeypatch.setattr(fleet_client_grokbot, "load_fleet_config", lambda: {"hub_url": "http://hub", "token": "node"})
+    monkeypatch.setattr(fleet_client_grokbot._client, "resolve_node_id", lambda: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    monkeypatch.setattr(fleet_client_grokbot._client, "_node_id_is_claimable", lambda _node: True)
+    monkeypatch.setattr(fleet_client_grokbot._client, "_run_with_deadline", lambda operation, timeout: operation())
+    monkeypatch.setattr(fleet_client_grokbot, "_post_grokbot_blocking", fake_post)
+
+    result = grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, worker_label="builder-2")
+
+    claim_body = next(body for body in bodies if body["action"] == "claim")
+    assert claim_body["worker_label"] == "builder-2"
+    assert claim_body["lease_id"] == "lease-a"
+    assert "worker_label" not in result
+
+
+def test_hub_claim_omits_worker_label_from_the_body_when_none_is_sent(tmp_path: Path, monkeypatch):
+    from brigade import fleet_client_grokbot
+
+    job_id = "grokbot-" + "b" * 24
+    bodies: list[dict[str, object]] = []
+
+    def fake_post(_hub, _token, body, timeout):
+        bodies.append(dict(body))
+        if body["action"] == "status":
+            return 200, {"job": _hub_job_payload(job_id)}
+        return 200, {"claimed": True, "job": _hub_job_payload(job_id, state="claimed", item_revision=2)}
+
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    monkeypatch.setattr(fleet_client_grokbot, "load_fleet_config", lambda: {"hub_url": "http://hub", "token": "node"})
+    monkeypatch.setattr(fleet_client_grokbot._client, "resolve_node_id", lambda: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    monkeypatch.setattr(fleet_client_grokbot._client, "_node_id_is_claimable", lambda _node: True)
+    monkeypatch.setattr(fleet_client_grokbot._client, "_run_with_deadline", lambda operation, timeout: operation())
+    monkeypatch.setattr(fleet_client_grokbot, "_post_grokbot_blocking", fake_post)
+
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60)
+
+    assert "worker_label" not in next(body for body in bodies if body["action"] == "claim")
+
+
+_HUB_FEED_NODE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+_HUB_WORKER_NODE = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+_HUB_QUEUE_ID = "grokbot-queue-main"
+
+
+def _hub_connection(tmp_path: Path):
+    """Enroll a feed and a worker on a real hub database (see test_fleet_hub_grokbot_expiry)."""
+    from brigade import fleet_hub, fleet_hub_grokbot
+
+    conn = fleet_hub.init_db(tmp_path / "fleet.db")
+    for node, kind, role in (
+        (_HUB_FEED_NODE, "feed", None),
+        (_HUB_WORKER_NODE, "implementation-worker", "implementation-worker"),
+    ):
+        body: dict[str, object] = {
+            "action": "enroll-actor",
+            "enroll_node_id": node,
+            "queue_owner_node_id": _HUB_FEED_NODE,
+            "queue_id": _HUB_QUEUE_ID,
+            "actor_kind": kind,
+            "enabled": True,
+        }
+        if role is not None:
+            body["role"] = role
+        status, payload = fleet_hub_grokbot.handle_grokbot(conn, body, caller_node=None)
+        assert status == 200, payload
+    return conn
+
+
+def test_hub_does_not_yet_persist_worker_label(tmp_path: Path):
+    """Tripwire for the pending fleet control-plane column (#1501).
+
+    The hub has no ``worker_label`` column, so a claim that carries one is
+    accepted and the label evaporates. This drives the real
+    ``fleet_hub_grokbot.handle_grokbot`` rather than a stub, so it fails the
+    day the control-plane adds the column. When it does, update the tool
+    description in ``grokbot_mcp`` and the docs that currently say hub-side
+    storage is pending, then rewrite this test to assert the echo.
+    """
+    from brigade import fleet_hub_grokbot
+
+    conn = _hub_connection(tmp_path)
+    job_id = "grokbot-" + "a" * 24
+    digest = "b" * 64
+    status, payload = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        {
+            "action": "enqueue",
+            "job_id": job_id,
+            "role": "implementation-worker",
+            "repository": "example/brigade",
+            "label": "safe label",
+            "task_digest": digest,
+            "idempotency_key_hash": digest,
+            "timeout_seconds": 900,
+            "artifact_kind": "draft-pr",
+            "operation_id": "op-enqueue-label",
+        },
+        caller_node=_HUB_FEED_NODE,
+    )
+    assert status == 200, payload
+
+    status, claimed = fleet_hub_grokbot.handle_grokbot(
+        conn,
+        {
+            "action": "claim",
+            "job_id": job_id,
+            "lease_id": "lease-a",
+            "expected_item_revision": payload["job"]["item_revision"],
+            "lease_seconds": 300,
+            "worker_label": "builder-2",
+            "operation_id": "op-claim-label",
+        },
+        caller_node=_HUB_WORKER_NODE,
+    )
+
+    # Accepted, not refused: the hub ignores the field rather than rejecting it.
+    assert status == 200, claimed
+    assert claimed["claimed"] is True
+    assert "worker_label" not in claimed["job"]
+    assert claimed["job"]["claimant_worker"] == "implementation-worker"
+
+    status, read = fleet_hub_grokbot.handle_grokbot(
+        conn, {"action": "status", "job_id": job_id}, caller_node=_HUB_WORKER_NODE
+    )
+    assert status == 200, read
+    assert "worker_label" not in read["job"]
+    conn.close()
+
+
+def test_hub_projection_drops_a_worker_label_the_write_path_would_refuse():
+    """A hub row is untrusted: a newline-bearing label must not forge a CLI line."""
+    job_id = "grokbot-" + "d" * 24
+    forged = f"builder-2\njob {job_id} state=completed"
+    projection = grokbot_jobs._hub_projection_job(
+        _hub_job_payload(job_id, state="claimed", claimant_worker="implementation-worker", worker_label=forged)
+    )
+
+    assert "worker_label" not in projection
+    assert cli.run_cloud._format_grokbot_job_line(projection).count("\n") == 0
+    assert (
+        grokbot_jobs._hub_projection_job(_hub_job_payload(job_id, state="claimed", worker_label="builder-2"))[
+            "worker_label"
+        ]
+        == "builder-2"
+    )
+
+
+@pytest.mark.parametrize("label", ["Builder-2", "a" * 33, "builder 2", 7])
+def test_hub_projection_drops_every_label_shape_the_claim_path_refuses(label: object):
+    job_id = "grokbot-" + "f" * 24
+    projection = grokbot_jobs._hub_projection_job(_hub_job_payload(job_id, state="claimed", worker_label=label))
+    assert "worker_label" not in projection
+
+
+def test_reclaim_attaches_a_worker_label_to_a_row_claimed_without_one(tmp_path: Path):
+    """A bot that adds its name on retry must be able to attach it (#1501)."""
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)
+
+    reclaimed = grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, worker_label="builder-7")
+
+    assert reclaimed["worker_label"] == "builder-7"
+    assert grokbot_jobs.status(tmp_path, job_id, now=NOW)["worker_label"] == "builder-7"
+
+
+def test_reclaim_with_a_different_worker_label_replaces_the_stored_one(tmp_path: Path):
+    """The lease holder is the authority on its own name, so the newer label wins."""
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, worker_label="builder-2")
+
+    reclaimed = grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, worker_label="builder-9")
+
+    assert reclaimed["worker_label"] == "builder-9"
+    assert grokbot_jobs.status(tmp_path, job_id, now=NOW)["worker_label"] == "builder-9"
+
+
+def test_reclaim_without_a_worker_label_keeps_the_stored_one(tmp_path: Path):
+    """Omission means no opinion, so a plain retry stays a read-only no-op."""
+    job_id = _enqueue(tmp_path)
+    claimed = grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, worker_label="builder-2")
+
+    reclaimed = grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)
+
+    assert reclaimed["worker_label"] == "builder-2"
+    assert reclaimed["item_revision"] == claimed["item_revision"]
+
+
+def test_reclaim_with_an_invalid_worker_label_refuses_before_writing(tmp_path: Path):
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, worker_label="builder-2")
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-worker-label$"):
+        grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, worker_label="Builder-9")
+
+    assert grokbot_jobs.status(tmp_path, job_id, now=NOW)["worker_label"] == "builder-2"
+
+
+def test_cli_status_prints_worker_label_next_to_the_claimant(tmp_path: Path, monkeypatch, capsys):
+    job_id = "grokbot-" + "e" * 24
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "status",
+        lambda *_args, **_kwargs: {
+            "jobs": [
+                {
+                    "job_id": job_id,
+                    "state": "claimed",
+                    "claimant_worker": "implementation-worker",
+                    "worker_label": "builder-2",
+                }
+            ]
+        },
+    )
+
+    assert _run_grokbot(tmp_path, "status") == 0
+    assert (
+        f"job {job_id} state=claimed claimant=implementation-worker worker_label=builder-2" in capsys.readouterr().out
+    )

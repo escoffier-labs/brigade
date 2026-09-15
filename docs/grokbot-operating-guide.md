@@ -397,6 +397,17 @@ what the worker carries on start, renew, complete, fail, and ack-cancel for that
 job. A supplied `lease_id` is echoed back unchanged, and a malformed one is
 still refused before any queue mutation.
 
+Optional `worker_label` on claim is a bounded per-bot name (`builder-2`,
+`[a-z0-9-]{1,32}`), so several Builder bots that share one connector identity
+stay distinguishable. The listener validates it, forwards it to the hub
+unchanged, stores it on local file-backed job rows, and echoes it on the claim,
+status, renew, and complete projections and next to the claimant in
+`brigade run cloud grokbot status`. Hub-side storage is a pending fleet
+control-plane change: until that column lands a hub-authority queue accepts the
+label and shows none. A repeat claim from the lease that already holds the job
+replaces the stored label when it sends one, including on a job first claimed
+without a label, and leaves the stored label unchanged when it omits one.
+
 ### Queue tool arguments
 
 `grokbot_queue_list` accepts four optional arguments: `state` (one of the seven

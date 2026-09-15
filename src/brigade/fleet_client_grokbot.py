@@ -48,6 +48,7 @@ _SAFE_JOB_FIELDS = frozenset(
         "owner_node",
         "claimant_node",
         "claimant_worker",
+        "worker_label",
         "queue_id",
         "lease_generation",
         "harness",
