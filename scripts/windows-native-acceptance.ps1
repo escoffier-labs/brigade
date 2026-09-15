@@ -12,7 +12,10 @@ param(
     [string]$BrigadeVersion = "",
 
     [Parameter(Mandatory = $false)]
-    [string]$RepoRoot = ""
+    [string]$RepoRoot = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$EngineBinDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -301,6 +304,38 @@ function Assert-BrigadeVersionMatches {
     $installed = Get-BrigadeCliVersion
     if ($installed -ne $Expected) {
         throw "installed brigade version mismatch: expected $Expected, got $installed"
+    }
+}
+
+function Install-SameCommitEngines {
+    param(
+        [string]$EngineBinDir,
+        [string]$ManagedBin,
+        [string[]]$ComponentIds
+    )
+    if (-not $EngineBinDir -or -not (Test-Path -LiteralPath $EngineBinDir)) {
+        throw "source-mode acceptance requires -EngineBinDir with same-commit engine binaries"
+    }
+    if (-not (Test-Path -LiteralPath $ManagedBin)) {
+        throw "managed bin missing before same-commit engine pin: $ManagedBin"
+    }
+    foreach ($componentId in $ComponentIds) {
+        $source = Join-Path $EngineBinDir ($componentId + ".exe")
+        if (-not (Test-Path -LiteralPath $source)) {
+            throw "same-commit engine missing: $source"
+        }
+        $destination = Join-Path $ManagedBin ($componentId + ".exe")
+        # The pin replaces a managed binary that setup already installed and the
+        # component report already proved healthy; it must never create one.
+        if (-not (Test-Path -LiteralPath $destination)) {
+            throw "managed $componentId missing before same-commit engine pin: $destination"
+        }
+        Copy-Item -LiteralPath $source -Destination $destination -Force
+        $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+        $destinationHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($sourceHash -ne $destinationHash) {
+            throw "managed $componentId digest does not match same-commit engine"
+        }
     }
 }
 
@@ -678,6 +713,9 @@ try {
     Assert-AcceptanceToolchainPresent
 
     if ($InstallMode -eq "source") {
+        if (-not $EngineBinDir) {
+            throw "EngineBinDir is required when InstallMode is source"
+        }
         if (-not $RepoRoot) {
             $RepoRoot = (Get-Location).Path
         }
@@ -725,14 +763,30 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "brigade setup --offline failed" }
     }
 
+    $managedBin = Join-Path $env:LOCALAPPDATA "brigade\bin"
+    # Order is load-bearing. component_report._diagnose_component compares each
+    # managed executable on disk against the byte_size and sha256 the manifest
+    # pins for the released asset, so component health can only be asserted
+    # while the managed install is still exactly what `brigade setup` wrote.
+    # Pinning same-commit engines first makes every pinned component report
+    # "corrupt" and Assert-AllComponentsHealthy aborts before any smoke test.
     $report = Get-ComponentReport -StderrRoot $acceptRoot
     Assert-AllComponentsHealthy -Report $report -Skippable $unpublishedIds
-    $managedBin = Join-Path $env:LOCALAPPDATA "brigade\bin"
     if ($InstallMode -eq "pypi") {
         Assert-ManagedComponentDigests -Manifest $releaseManifest -Report $report -ManagedBin $managedBin
     }
     $requiredIds = @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind") |
         Where-Object { $unpublishedIds -notcontains $_ }
+    if ($InstallMode -eq "source") {
+        # Setup installed the released engines and the report above proved they
+        # match the manifest. Replace them with binaries built from this commit
+        # so the smoke steps below exercise the engines that ship with this
+        # checkout instead of the previous release's.
+        $pinIds = @("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind") |
+            Where-Object { $unpublishedIds -notcontains $_ }
+        Write-Step "pin same-commit engines"
+        Install-SameCommitEngines -EngineBinDir $EngineBinDir -ManagedBin $managedBin -ComponentIds $pinIds
+    }
     $graphtrailExe = Get-ManagedExecutablePath -Report $report -ComponentId "graphtrail" -ManagedBin $managedBin
     $graphtrailMcpExe = Get-ManagedExecutablePath -Report $report -ComponentId "graphtrail-mcp" -ManagedBin $managedBin
     $miseledgerExe = Get-ManagedExecutablePath -Report $report -ComponentId "miseledger" -ManagedBin $managedBin
@@ -960,13 +1014,28 @@ finally:
             throw "miseledger import did not ingest receipts: inserted_items=$inserted already_known=$alreadyKnown"
         }
 
+        Write-Step "miseledger imported item ids"
+        $sqlStdout = Invoke-ExternalCommand -StderrRoot $acceptRoot -Command {
+            & $miseledgerExe sql "select id from items where kind = 'brigade_work_verify_receipt'" --json
+        } -FailureMessage "miseledger sql imported ids failed"
+        $sqlPayload = ($sqlStdout | Out-String).Trim() | ConvertFrom-Json
+        $importedIds = @($sqlPayload.rows | ForEach-Object { [string]$_.id } | Where-Object { $_ })
+        if ($importedIds.Count -lt 1) {
+            throw "miseledger import produced no brigade_work_verify_receipt item ids"
+        }
+
         Write-Step "miseledger search"
         $searchStdout = Invoke-ExternalCommand -StderrRoot $acceptRoot -Command {
-            & $miseledgerExe search $acceptanceMarker --limit 3
+            & $miseledgerExe search $acceptanceMarker --json --limit 3
         } -FailureMessage "miseledger search failed"
-        $searchOutput = $searchStdout | Out-String
-        if ($searchOutput -notmatch [regex]::Escape($acceptanceMarker)) {
-            throw "miseledger search missing acceptance marker: $searchOutput"
+        $searchPayload = ($searchStdout | Out-String).Trim() | ConvertFrom-Json
+        $searchIds = @($searchPayload.results | ForEach-Object { [string]$_.id } | Where-Object { $_ })
+        if ($searchIds.Count -lt 1) {
+            throw "miseledger search returned no results for imported receipts"
+        }
+        $matchedIds = @($searchIds | Where-Object { $importedIds -contains $_ })
+        if ($matchedIds.Count -lt 1) {
+            throw "miseledger search ids $($searchIds -join ',') did not match imported receipts $($importedIds -join ',')"
         }
 
         Write-Step "brigade care install (Windows printed plan)"
