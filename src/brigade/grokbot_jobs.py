@@ -522,6 +522,13 @@ def _claim_job(
         if record["state"] == "claimed":
             if record["bot_id"] == bot_id and record["lease_id"] == lease_id:
                 _require_live_lease(record, instant)
+                # The holder is the authority on its own name, so a repeat claim
+                # that carries a label writes it even when the row already has a
+                # different one. Omitting the label means "no opinion" and leaves
+                # the stored value alone, so a pure retry stays a no-op (#1501).
+                if worker_label is not None and record.get("worker_label") != worker_label:
+                    record["worker_label"] = worker_label
+                    _commit_mutation(storage.jobs, record, timestamp)
                 return _claim_result(record, include_context=include_context)
             raise GrokbotJobError("lease-conflict")
         if record["state"] != "queued":

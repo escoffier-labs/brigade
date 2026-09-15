@@ -12,6 +12,7 @@ from typing import Any
 
 from .grokbot_job_validation import (
     JOB_ID_RE,
+    WORKER_LABEL_RE,
     GrokbotJobError,
     validate_job_id as _validate_job_id,
 )
@@ -159,4 +160,20 @@ def _hub_projection_job(job: dict[str, Any]) -> dict[str, Any]:
     ):
         if key in job and job[key] is not None:
             projection[key] = job[key]
+    _drop_unsafe_worker_label(projection)
     return projection
+
+
+def _drop_unsafe_worker_label(projection: dict[str, Any]) -> None:
+    """Hold a hub-supplied label to the same pattern the write path enforces.
+
+    A hub row is untrusted on the read path. ``_safe_job`` filters keys but
+    never values, and the operator CLI interpolates the label into one line per
+    job, so a newline-bearing or unbounded label would forge output. Drop any
+    value that would not have been accepted on claim (#1501).
+    """
+    label = projection.get("worker_label")
+    if label is None:
+        return
+    if not isinstance(label, str) or not WORKER_LABEL_RE.fullmatch(label):
+        del projection["worker_label"]
