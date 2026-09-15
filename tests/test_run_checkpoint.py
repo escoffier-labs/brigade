@@ -20,7 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from brigade import run_checkpoint, run_events, run_journal, run_lifecycle, runguard
+from brigade import run_audit, run_checkpoint, run_events, run_journal, run_lifecycle, runguard
+from brigade import runs_cmd
 from brigade import localio
 from tests.support import PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE, assert_private_mode
 
@@ -3121,6 +3122,312 @@ def test_recover_from_checkpoint_base_stripped_projection_failure_is_bounded(tmp
     assert isinstance(excinfo.value.__cause__, run_projector.ProjectionError)
     # No restore, no fallback to the earlier legacy-full checkpoint.
     assert not (run_dir / "run.json").exists()
+
+
+# -- Issue #1506: oversize recovery checkpoints degrade instead of killing the run --
+
+
+def test_write_checkpoint_oversize_degrades_to_truncated_snapshot(enabled, tmp_path, monkeypatch):
+    """A snapshot above MAX_CHECKPOINT_BYTES must not raise CheckpointError.
+
+    UI slices that add PNG screenshots under docs/assets/ can push the
+    write-ahead run.json snapshot over the cap. The run has already written
+    its receipt and handoff; failing closed here records the run as failed
+    and drops the final report (issue #1506). Degrade: keep the tree
+    fingerprint and name the oversized asset paths, mark truncated, and
+    publish a bounded checkpoint so the live write can finish.
+    """
+    monkeypatch.setattr(run_checkpoint, "MAX_CHECKPOINT_BYTES", 2048)
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    repo = tmp_path / "repo"
+    screenshot = repo / "docs" / "assets" / "deck" / "home.png"
+    screenshot.parent.mkdir(parents=True)
+    screenshot.write_bytes(b"\x89PNG" + b"p" * 120)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    tree_fingerprint = "a" * 40
+    snapshot = {
+        "schema": "brigade.run.v1",
+        "status": "ok",
+        "task": "x" * 4000,
+        "lifecycle_journal_requested": True,
+        "tree_fingerprint": tree_fingerprint,
+        "cwd": str(repo),
+        "pre_run_snapshot": {
+            "untracked_files": ["docs/assets/deck/home.png", "README.md"],
+        },
+    }
+    run_json_bytes = _writer_bytes(snapshot)
+    assert len(run_json_bytes) > run_checkpoint.MAX_CHECKPOINT_BYTES
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        event = run_checkpoint.write_checkpoint(
+            run_dir, run_json_bytes, workspace=workspace, paired_event_type="run.completed"
+        )
+
+    assert event is not None
+    stored = run_checkpoint.validate_checkpoint(run_dir, event)
+    assert len(stored) <= run_checkpoint.MAX_CHECKPOINT_BYTES
+    obj = json.loads(stored.decode("utf-8"))
+    assert obj["truncated"] is True
+    assert obj["status"] == "ok"
+    assert obj["tree_fingerprint"] == tree_fingerprint
+    assert obj["lifecycle_journal_requested"] is True
+    named = {row["path"]: row for row in obj["oversized_paths"]}
+    assert "docs/assets/deck/home.png" in named
+    assert named["docs/assets/deck/home.png"]["byte_size"] == screenshot.stat().st_size
+    assert "README.md" not in named
+    assert "task" not in obj
+
+
+def test_write_checkpoint_oversize_base_stripped_stays_recoverable(enabled, tmp_path, monkeypatch):
+    """An oversize base-stripped write still projects after truncation."""
+    monkeypatch.setattr(run_checkpoint, "MAX_CHECKPOINT_BYTES", 2048)
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    base = _authority_base(
+        workspace,
+        status="ok",
+        task="y" * 4000,
+        tree_fingerprint="b" * 40,
+        pre_run_snapshot={"untracked_files": ["docs/assets/deck/review.png"]},
+    )
+    run_json_bytes = _writer_bytes(base)
+    assert len(run_json_bytes) > run_checkpoint.MAX_CHECKPOINT_BYTES
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        event = run_checkpoint.write_checkpoint(
+            run_dir,
+            run_json_bytes,
+            workspace=workspace,
+            paired_event_type="run.completed",
+            body_kind="base-stripped",
+        )
+    assert event is not None
+    assert event.payload["body_kind"] == "base-stripped"
+    stored = run_checkpoint.validate_checkpoint(run_dir, event)
+    obj = json.loads(stored.decode("utf-8"))
+    assert obj["truncated"] is True
+    assert obj["run_journal_authority_requested"] is True
+    assert obj["lifecycle_journal_requested"] is True
+    assert any(row["path"] == "docs/assets/deck/review.png" for row in obj["oversized_paths"])
+
+    (run_dir / "run.json").unlink()
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert repaired["status"] == "ok"
+    assert repaired["tree_fingerprint"] == "b" * 40
+    assert repaired["journal_present"] is True
+
+
+_APPROVAL_PAUSE_REFERENCE = {
+    "approval_id": "apr-0001",
+    "source": "tool",
+    "fingerprint": "f" * 64,
+    "source_fingerprint": "s" * 64,
+    "contract_fingerprint": "c" * 64,
+    "evidence_fingerprint": "e" * 64,
+    "decision_state": "pending",
+}
+
+
+def test_degraded_checkpoint_keeps_approval_reference_so_a_paused_run_resumes(enabled, tmp_path, monkeypatch):
+    """A degraded body must not drop the approval state of a paused run.
+
+    An approval-gated run that pauses deliberately keeps ``status ==
+    "running"`` in run.json (aboyeur.run_io._write_json_inner journals the
+    pause but holds the compatibility status) and is distinguished from an
+    ordinary active run only by ``approval_reference.decision_state``. If the
+    degraded body drops the reference, runs_cmd._approval_resume_state returns
+    None after recovery and the run is stranded or reaped instead of taking
+    the approval-resume path.
+    """
+    monkeypatch.setattr(run_checkpoint, "MAX_CHECKPOINT_BYTES", 2048)
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    base = _authority_base(
+        workspace,
+        status="running",
+        task="y" * 4000,
+        tree_fingerprint="b" * 40,
+        approval_reference=dict(_APPROVAL_PAUSE_REFERENCE),
+    )
+    run_json_bytes = _writer_bytes(base)
+    assert len(run_json_bytes) > run_checkpoint.MAX_CHECKPOINT_BYTES
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        event = run_checkpoint.write_checkpoint(
+            run_dir,
+            run_json_bytes,
+            workspace=workspace,
+            paired_event_type="run.resumed",
+            body_kind="base-stripped",
+        )
+    stored = json.loads(run_checkpoint.validate_checkpoint(run_dir, event).decode("utf-8"))
+    assert stored["truncated"] is True
+    assert stored["approval_reference"] == _APPROVAL_PAUSE_REFERENCE
+
+    (run_dir / "run.json").unlink()
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert repaired["status"] == "running"
+    assert repaired["approval_reference"] == _APPROVAL_PAUSE_REFERENCE
+    assert runs_cmd._approval_resume_state(repaired) == "pending"
+    assert runs_cmd._is_intentional_approval_pause(repaired) is True
+
+
+def test_degraded_checkpoint_approval_reference_is_bounded_not_verbatim(tmp_path, monkeypatch):
+    """The retained reference is the closed shape, not an arbitrary mapping.
+
+    The whole point of the slim body is a byte cap, so approval state is
+    admitted only as run_lifecycle.APPROVAL_REFERENCE_FIELDS mapped to text
+    within run_events.MAX_PAYLOAD_STR_LEN. Unknown keys, oversize values and
+    non-text values are dropped rather than copied through.
+    """
+    monkeypatch.setattr(run_checkpoint, "MAX_CHECKPOINT_BYTES", 4096)
+    snapshot = {
+        "schema": "brigade.run.v1",
+        "status": "running",
+        "task": "z" * 8000,
+        "approval_reference": {
+            **_APPROVAL_PAUSE_REFERENCE,
+            "attacker_blob": "q" * 6000,
+            "decided_at": "x" * (run_events.MAX_PAYLOAD_STR_LEN + 1),
+            "consuming_run_id": 17,
+        },
+    }
+    degraded = json.loads(run_checkpoint._degrade_oversized_checkpoint(_writer_bytes(snapshot)).decode("utf-8"))
+    assert degraded["truncated"] is True
+    assert degraded["approval_reference"] == _APPROVAL_PAUSE_REFERENCE
+    assert set(degraded["approval_reference"]) <= run_lifecycle.APPROVAL_REFERENCE_FIELDS
+
+
+def test_degraded_checkpoint_approval_reference_survives_progressive_drop(tmp_path, monkeypatch):
+    """Approval state is deliberately absent from _SLIM_CHECKPOINT_DROPPABLE.
+
+    Losing approval state to save bytes is the bug the retention fixes, and
+    the closed reference shape is a few kilobytes at most, so it must outlive
+    every field the progressive-drop pass is allowed to shed.
+    """
+    assert "approval_reference" not in run_checkpoint._SLIM_CHECKPOINT_DROPPABLE
+    snapshot = {
+        "schema": "brigade.run.v1",
+        "status": "running",
+        "task": "z" * 4000,
+        "cwd": "/tmp/does-not-exist",
+        "worker": "w" * 200,
+        "orchestrator": "chef",
+        "handoff": {"note": "h" * 400},
+        "artifacts": ["a" * 300],
+        "error": "e" * 300,
+        "started_at": "2026-09-14T00:00:00Z",
+        "approval_reference": dict(_APPROVAL_PAUSE_REFERENCE),
+    }
+    raw = _writer_bytes(snapshot)
+
+    # 600 bytes: tight enough that the progressive-drop pass sheds every
+    # droppable field before the body fits.
+    monkeypatch.setattr(run_checkpoint, "MAX_CHECKPOINT_BYTES", 600)
+    degraded = json.loads(run_checkpoint._degrade_oversized_checkpoint(raw).decode("utf-8"))
+    for dropped in run_checkpoint._SLIM_CHECKPOINT_DROPPABLE:
+        assert dropped not in degraded
+    assert degraded["approval_reference"] == _APPROVAL_PAUSE_REFERENCE
+    assert degraded["status"] == "running"
+
+    # 570 bytes: even the fully dropped slim body is over the cap, so the
+    # last-resort body is published. Approval state still survives it.
+    monkeypatch.setattr(run_checkpoint, "MAX_CHECKPOINT_BYTES", 570)
+    last = json.loads(run_checkpoint._degrade_oversized_checkpoint(raw).decode("utf-8"))
+    assert last["truncated"] is True
+    assert last["status"] == "running"
+    assert last["approval_reference"] == _APPROVAL_PAUSE_REFERENCE
+
+
+def test_recover_legacy_truncated_checkpoint_strips_markers_and_stays_auditable(enabled, tmp_path, monkeypatch):
+    """Legacy-full restore must not write truncation markers into run.json.
+
+    ``truncated`` and ``oversized_paths`` are not owned run.json fields
+    (they appear in neither run_projector.OWNED_FIELDS nor run_audit), so a
+    verbatim legacy restore of a degraded body makes
+    run_audit._unknown_run_fields report an unsupported schema and the
+    recovered run becomes unauditable. The authority path already strips
+    them; the legacy path must match.
+    """
+    monkeypatch.setattr(run_checkpoint, "MAX_CHECKPOINT_BYTES", 2048)
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    # Lifecycle journal requested, journal authority NOT requested: recovery
+    # takes the legacy-full restore, not the projector.
+    snapshot = {
+        "schema": "brigade.run.v1",
+        "status": "ok",
+        "task": "x" * 4000,
+        "cwd": str(workspace),
+        "lifecycle_journal_requested": True,
+        "tree_fingerprint": "a" * 40,
+    }
+    run_json_bytes = _writer_bytes(snapshot)
+    assert len(run_json_bytes) > run_checkpoint.MAX_CHECKPOINT_BYTES
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        event = run_checkpoint.write_checkpoint(
+            run_dir, run_json_bytes, workspace=workspace, paired_event_type="run.completed"
+        )
+    # The markers stay durable in the checkpoint body itself.
+    stored = json.loads(run_checkpoint.validate_checkpoint(run_dir, event).decode("utf-8"))
+    assert stored["truncated"] is True
+    assert "oversized_paths" in stored
+
+    (run_dir / "run.json").unlink()
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert repaired["status"] == "ok"
+    assert repaired["tree_fingerprint"] == "a" * 40
+    assert "truncated" not in repaired
+    assert "oversized_paths" not in repaired
+    assert run_audit._unknown_run_fields(repaired) == []
+    on_disk = json.loads((run_dir / "run.json").read_text())
+    assert "truncated" not in on_disk
+    assert "oversized_paths" not in on_disk
+
+
+def test_recover_legacy_untruncated_checkpoint_restores_bytes_verbatim(enabled, tmp_path):
+    """Marker normalization is scoped to degraded bodies only.
+
+    A legacy checkpoint under the cap carries no truncation markers, so the
+    restore must still be the verified bytes verbatim with no re-encode.
+    """
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    run_json_bytes = _writer_bytes(
+        {
+            "schema": "brigade.run.v1",
+            "status": "ok",
+            "cwd": str(workspace),
+            "lifecycle_journal_requested": True,
+        }
+    )
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_checkpoint.write_checkpoint(run_dir, run_json_bytes, workspace=workspace, paired_event_type="run.completed")
+    (run_dir / "run.json").unlink()
+    run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert (run_dir / "run.json").read_bytes() == run_json_bytes
 
 
 # -- Issue #568 slice 7 assignment 6: localio.write_text_atomic SIGKILL crash window --

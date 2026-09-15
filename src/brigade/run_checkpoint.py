@@ -44,6 +44,69 @@ _CHECKPOINT_PAYLOAD_OPTIONAL_KEYS = frozenset({"body_kind", "pairing_key"})
 # the validation logic now treats body_kind as optional.
 _CHECKPOINT_PAYLOAD_KEYS = _CHECKPOINT_PAYLOAD_REQUIRED_KEYS | _CHECKPOINT_PAYLOAD_OPTIONAL_KEYS
 _CHECKPOINT_IDEMPOTENCY_PREFIX = "checkpoint"
+_CHECKPOINT_TRUNCATION_KEYS = frozenset({"truncated", "oversized_paths"})
+_CHECKPOINT_ASSET_SUFFIXES = frozenset(
+    {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".bmp",
+        ".ico",
+        ".pdf",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".otf",
+        ".mp4",
+        ".webm",
+        ".mov",
+    }
+)
+# Every field a degraded body may carry. ``approval_reference`` is admitted
+# here but copied through _bounded_approval_reference rather than verbatim:
+# it is the only retained field whose incoming value is a caller mapping, and
+# the closed shape keeps it small enough to survive the cap (#1506).
+_SLIM_CHECKPOINT_FIELDS = (
+    "schema",
+    "schema_version",
+    "kind",
+    "status",
+    "approval_reference",
+    "lifecycle_journal_requested",
+    "run_journal_authority_requested",
+    "tree_fingerprint",
+    "tree_fingerprint_head",
+    "started_at",
+    "finished_at",
+    "status_started_at",
+    "duration_seconds",
+    "cwd",
+    "lock_workspace",
+    "worker",
+    "orchestrator",
+    "handoff",
+    "artifacts",
+    "error",
+    "failure_phase",
+    "failure_kind",
+    "failure",
+)
+_SLIM_CHECKPOINT_DROPPABLE = (
+    "failure",
+    "error",
+    "handoff",
+    "artifacts",
+    "cwd",
+    "lock_workspace",
+    "started_at",
+    "finished_at",
+    "status_started_at",
+    "duration_seconds",
+    "worker",
+    "orchestrator",
+)
 
 # Journal-derived metadata fields the projector owns over the run.json
 # contract (see run_projector.DERIVED_FIELDS). A base-stripped checkpoint
@@ -196,6 +259,152 @@ def _validate_payload(payload: Any) -> None:
 def _writer_canonical_bytes(obj: Any) -> bytes:
     """Replicate ``aboyeur._write_json`` canonical encoding for writer-byte equality."""
     return (json.dumps(obj, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _is_checkpoint_asset_path(path: str) -> bool:
+    """True for relative binary/asset paths that must not bloat a checkpoint."""
+    if not isinstance(path, str) or not path or path.startswith("/") or "\\" in path:
+        return False
+    parts = path.split("/")
+    if ".." in parts:
+        return False
+    lowered = path.lower()
+    if lowered.startswith("docs/assets/") or "/docs/assets/" in lowered:
+        return True
+    return Path(lowered).suffix in _CHECKPOINT_ASSET_SUFFIXES
+
+
+def _iter_snapshot_paths(value: Any) -> list[str]:
+    found: list[str] = []
+    if isinstance(value, str):
+        if _is_checkpoint_asset_path(value):
+            found.append(value)
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            if isinstance(key, str) and _is_checkpoint_asset_path(key):
+                found.append(key)
+            found.extend(_iter_snapshot_paths(item))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            found.extend(_iter_snapshot_paths(item))
+    return found
+
+
+def _oversized_path_entries(obj: Mapping[str, Any]) -> list[dict[str, Any]]:
+    cwd_raw = obj.get("cwd")
+    cwd = Path(cwd_raw) if isinstance(cwd_raw, str) and cwd_raw else None
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path in _iter_snapshot_paths(obj):
+        if path in seen:
+            continue
+        seen.add(path)
+        entry: dict[str, Any] = {"path": path}
+        if cwd is not None:
+            try:
+                size = (cwd / path).stat().st_size
+            except OSError:
+                size = None
+            else:
+                if not isinstance(size, bool) and isinstance(size, int) and size >= 0:
+                    entry["byte_size"] = size
+        entries.append(entry)
+    return entries
+
+
+def _bounded_approval_reference(value: Any) -> dict[str, str] | None:
+    """Return the closed approval-reference shape, bounded, or ``None``.
+
+    A degraded body exists to stay under the byte cap, so the reference is
+    admitted only as ``run_lifecycle.APPROVAL_REFERENCE_FIELDS`` mapped to
+    short text -- never an arbitrary caller mapping. At most nine fields of
+    ``run_events.MAX_PAYLOAD_STR_LEN`` chars each is a few kilobytes against
+    a 16 MiB cap, which is why this field is retained rather than dropped:
+    losing it silently converts a deliberately approval-paused run (status
+    ``running`` plus ``approval_reference.decision_state``) into what reads
+    as an ordinary active run, which is then stranded or reaped.
+
+    The copy is tolerant, not strict. Degrading must not raise, so a field
+    that does not fit the shape is dropped instead of failing the publish.
+    """
+    from brigade import run_lifecycle  # lazy: avoid import cycle
+
+    if not isinstance(value, Mapping):
+        return None
+    bounded: dict[str, str] = {}
+    for key in sorted(run_lifecycle.APPROVAL_REFERENCE_FIELDS):
+        item = value.get(key)
+        if isinstance(item, str) and item and len(item) <= run_events.MAX_PAYLOAD_STR_LEN:
+            bounded[key] = item
+    return bounded or None
+
+
+def _projection_base_from_checkpoint(checkpoint_obj: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop truncation markers so authority projection stays on owned fields."""
+    return {key: value for key, value in checkpoint_obj.items() if key not in _CHECKPOINT_TRUNCATION_KEYS}
+
+
+def _degrade_oversized_checkpoint(run_json_bytes: bytes) -> bytes:
+    """Replace an over-cap snapshot with a truncated fingerprint-and-paths body.
+
+    The live ``run.json`` write still uses the caller's full bytes. Recovery
+    keeps the tree fingerprint, the run status, durable request flags, and the
+    asset paths that would have been serialized, marked ``truncated``.
+    """
+    try:
+        obj = json.loads(run_json_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+        obj = {}
+    if not isinstance(obj, dict):
+        obj = {}
+    oversized_paths = _oversized_path_entries(obj)
+    slim: dict[str, Any] = {key: obj[key] for key in _SLIM_CHECKPOINT_FIELDS if key in obj}
+    approval_reference = _bounded_approval_reference(slim.get("approval_reference"))
+    if approval_reference is None:
+        slim.pop("approval_reference", None)
+    else:
+        slim["approval_reference"] = approval_reference
+    slim["truncated"] = True
+    slim["oversized_paths"] = oversized_paths
+    try:
+        encoded = _writer_canonical_bytes(slim)
+    except RecursionError as exc:
+        raise CheckpointError(
+            _bound("truncated checkpoint canonical re-encode nesting too deep"), category="json-object"
+        ) from exc
+    if len(encoded) <= MAX_CHECKPOINT_BYTES:
+        return encoded
+    for key in _SLIM_CHECKPOINT_DROPPABLE:
+        slim.pop(key, None)
+        encoded = _writer_canonical_bytes(slim)
+        if len(encoded) <= MAX_CHECKPOINT_BYTES:
+            return encoded
+    while oversized_paths and len(encoded) > MAX_CHECKPOINT_BYTES:
+        oversized_paths = oversized_paths[: max(0, len(oversized_paths) // 2)]
+        slim["oversized_paths"] = oversized_paths
+        encoded = _writer_canonical_bytes(slim)
+    if len(encoded) <= MAX_CHECKPOINT_BYTES:
+        return encoded
+    last: dict[str, Any] = {"truncated": True, "oversized_paths": []}
+    status = obj.get("status")
+    if isinstance(status, str) and status:
+        last["status"] = status
+    if obj.get("lifecycle_journal_requested") is True:
+        last["lifecycle_journal_requested"] = True
+    if obj.get("run_journal_authority_requested") is True:
+        last["run_journal_authority_requested"] = True
+    fingerprint = obj.get("tree_fingerprint")
+    if isinstance(fingerprint, str) and fingerprint:
+        last["tree_fingerprint"] = fingerprint
+    if approval_reference is not None:
+        # Approval state survives even the last-resort body: it is bounded to
+        # a few kilobytes and its loss is the failure this body exists to
+        # avoid making worse.
+        last["approval_reference"] = approval_reference
+    encoded = _writer_canonical_bytes(last)
+    if len(encoded) > MAX_CHECKPOINT_BYTES:
+        raise CheckpointError(_bound("checkpoint bytes exceed MAX_CHECKPOINT_BYTES"), category="byte-size")
+    return encoded
 
 
 def _strip_journal_metadata_from_base(base_bytes: bytes) -> bytes:
@@ -795,7 +1004,12 @@ def write_checkpoint(
     any status (mapped or unmapped). Raises ``CheckpointError`` on any bounded
     checkpoint publish failure (including an unknown ``body_kind`` value or a
     base-stripped request/metadata rule violation); the failure surfaces BEFORE
-    the lifecycle status append and BEFORE the ``run.json`` replacement. Raises
+    the lifecycle status append and BEFORE the ``run.json`` replacement. An
+    oversize snapshot is the one publish failure that degrades instead of
+    aborting the live write (issue #1506): the published body keeps status,
+    durable request flags, the tree fingerprint, and the bounded
+    ``approval_reference`` that marks a deliberately approval-paused run,
+    records the oversized asset-path list, and marks ``truncated``. Raises
     ``LifecycleJournalError`` on a bounded journal read failure.
 
     ``run_lifecycle`` is imported lazily inside this function so the lifecycle
@@ -877,6 +1091,11 @@ def write_checkpoint(
         raise run_lifecycle.LifecycleJournalError(
             run_events._bound("lifecycle journal append requires the active run lock for this run")
         )
+    if len(publish_bytes) > MAX_CHECKPOINT_BYTES:
+        # Keep the live run.json write on the caller's full bytes. Only the
+        # write-ahead recovery snapshot degrades so screenshots and other
+        # asset-heavy trees cannot abort a finished run (#1506).
+        publish_bytes = _degrade_oversized_checkpoint(publish_bytes)
     sha = hashlib.sha256(publish_bytes).hexdigest()
     payload = _checkpoint_payload(
         publish_bytes,
@@ -1233,14 +1452,34 @@ def recover_from_checkpoint(
         # the snapshot over the verified event sequence -- never the stripped
         # bytes verbatim. A projection failure fails closed as a bounded
         # CheckpointError: no fallback to an earlier checkpoint or to a
-        # legacy-full restore.
+        # legacy-full restore. Truncation markers (#1506) are not owned run.json
+        # fields, so they are stripped before projection.
         from brigade import run_projector  # lazy: avoid import cycle
 
         try:
-            projection = run_projector.project_run_snapshot(checkpoint_obj, report.events, journal_present=True)
+            projection = run_projector.project_run_snapshot(
+                _projection_base_from_checkpoint(checkpoint_obj),
+                report.events,
+                journal_present=True,
+            )
             restore_bytes = projection.to_bytes()
         except run_projector.ProjectionError as exc:
             raise CheckpointError(_bound("projection failed"), category="projection") from exc
+    elif _CHECKPOINT_TRUNCATION_KEYS & checkpoint_obj.keys():
+        # Legacy-full restore of a degraded body (issue #1506). The truncation
+        # markers describe the checkpoint body's own fidelity, not run state,
+        # and are not owned run.json fields (run_projector.OWNED_FIELDS), so
+        # restoring them verbatim makes run_audit._unknown_run_fields classify
+        # the repaired run.json as an unsupported schema and the recovered run
+        # becomes unauditable. Normalize them away exactly as the authority
+        # path does before projection. The markers stay durable where they
+        # belong -- in the checkpoint body under events/recovery-checkpoints.
+        try:
+            restore_bytes = _writer_canonical_bytes(_projection_base_from_checkpoint(checkpoint_obj))
+        except (RecursionError, TypeError, ValueError) as exc:
+            raise CheckpointError(
+                _bound("could not normalize truncated checkpoint body"), category="json-object"
+            ) from exc
     return _restore_run_json_from_checkpoint(run_dir, restore_bytes, run_meta=run_meta)
 
 
