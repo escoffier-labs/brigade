@@ -291,12 +291,18 @@ def test_memory_care_status_explains_freshness_metadata(tmp_path, monkeypatch, c
     assert "freshness_dates: present=3 missing=1 expired=1" in out
     assert "evidence_metadata: present=3 missing=1" in out
     assert "confidence_metadata: high=3, low=1" in out
+    assert "autofix_plan: planned=2 blocked=2 would_write=false" in out
+    assert "autofix_plan_block_reasons: requires-current-evidence-review=1, requires-operator-freshness-date=1" in out
 
     assert memory_cmd.status(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["metadata"]["freshness_dates"]["missing"] == 1
     assert payload["autofix_plan"]["plan_count"] == 2
     assert payload["autofix_plan"]["blocked_count"] == 2
+    assert payload["autofix_plan"]["block_reasons"] == [
+        {"reason": "requires-current-evidence-review", "count": 1},
+        {"reason": "requires-operator-freshness-date", "count": 1},
+    ]
 
     assert memory_cmd.import_issues(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -366,6 +372,47 @@ def test_memory_care_scan_flags_missing_evidence_refs(tmp_path, monkeypatch, cap
     assert "evidence_refs: present=3 missing=1" in out
 
 
+def test_memory_care_plan_blocks_freshness_dates_that_leave_the_supported_range(tmp_path, monkeypatch, capsys):
+    """A near-limit last_reviewed must block, not raise OverflowError.
+
+    ``last_reviewed + stale_after_days`` can exceed ``date.max``. ``health()``
+    runs the same planner, so an escaped OverflowError took down both
+    ``memory care plan-fixes`` and ``memory care status`` after a clean scan.
+    """
+    monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
+    cards = tmp_path / "memory" / "cards"
+    far_future = cards / "far-future.md"
+    _write_card(
+        far_future,
+        {"topic": "far-future", "last_reviewed": "9999-12-31", "confidence": "high", "evidence": ["README.md"]},
+    )
+    (tmp_path / "MEMORY.md").write_text("- [far-future](memory/cards/far-future.md)\n")
+
+    assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+
+    assert memory_cmd.plan_fixes(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    item = next(entry for entry in payload["items"] if entry["issue_type"] == "missing-freshness")
+    assert item["status"] == "blocked"
+    assert "freshness-date-not-representable" in item["blockers"]
+    assert "fresh_until" not in item["candidate_fields"]
+    assert "derivation" not in item
+    assert far_future.read_text().count("fresh_until") == 0
+
+    # health() runs the same planner; it used to crash after the scan succeeded.
+    assert memory_cmd.status(target=tmp_path) == 0
+    assert "freshness-date-not-representable" in capsys.readouterr().out
+
+
+def test_derived_fresh_until_returns_none_outside_the_date_range():
+    from brigade.memory_care_plan import derived_fresh_until
+
+    assert derived_fresh_until(date(2026, 5, 1), 90) == "2026-07-30"
+    assert derived_fresh_until(date(9999, 12, 31), 1) is None
+    assert derived_fresh_until(date(1, 1, 1), -1) is None
+
+
 def test_memory_care_plan_fixes_reports_blockers_and_writes_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     cards = tmp_path / "memory" / "cards"
@@ -388,16 +435,28 @@ def test_memory_care_plan_fixes_reports_blockers_and_writes_nothing(tmp_path, mo
 
     assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
     capsys.readouterr()
+    queue = json.loads((tmp_path / ".brigade" / "memory-care" / "decay" / "refresh-queue.json").read_text())
+    queued = {card["issue_type"]: card for card in queue["cards"]}
+    assert queued["missing-freshness"]["safe_autofix_plan"]["blocked"] is False
+    assert queued["missing-freshness"]["safe_autofix_plan"]["blockers"] == []
+    assert queued["missing-reviewed"]["safe_autofix_plan"]["blocked"] is True
     assert memory_cmd.plan_fixes(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["would_write"] is False
     assert payload["plan_count"] == 2
-    assert payload["blocked_count"] == 2
+    assert payload["blocked_count"] == 1
+    assert payload["blocked_count"] < payload["plan_count"]
+    assert payload["block_reasons"] == [{"reason": "requires-current-evidence-review", "count": 1}]
+    assert payload["suggested_next_command"] == "brigade memory care backfill"
     by_type = {item["issue_type"]: item for item in payload["items"]}
     assert by_type["missing-reviewed"]["candidate_fields"] == {"last_reviewed": "2026-05-28"}
     assert by_type["missing-reviewed"]["blockers"] == ["requires-current-evidence-review"]
-    assert by_type["missing-freshness"]["candidate_fields"] == {"fresh_until": "<operator-selected-date>"}
-    assert by_type["missing-freshness"]["blockers"] == ["requires-operator-freshness-date"]
+    assert by_type["missing-reviewed"]["status"] == "blocked"
+    assert by_type["missing-freshness"]["candidate_fields"] == {"fresh_until": "2026-07-30"}
+    assert by_type["missing-freshness"]["blockers"] == []
+    assert by_type["missing-freshness"]["status"] == "planned"
+    assert by_type["missing-freshness"]["derivation"] == "last_reviewed+stale_after_days"
+    assert by_type["missing-freshness"]["suggested_next_command"] == "brigade memory care backfill"
     assert reviewed_missing.read_text() == before_reviewed
     assert freshness_missing.read_text() == before_freshness
 
@@ -405,7 +464,14 @@ def test_memory_care_plan_fixes_reports_blockers_and_writes_nothing(tmp_path, mo
     out = capsys.readouterr().out
     assert "memory care fix plan:" in out
     assert "would_write: false" in out
-    assert "blocked: 2" in out
+    assert "blocked: 1" in out
+    assert "block_reasons: requires-current-evidence-review=1" in out
+    assert "freshness-missing.md missing-freshness planned" in out
+
+    assert memory_cmd.status(target=tmp_path) == 0
+    status_out = capsys.readouterr().out
+    assert "autofix_plan: planned=2 blocked=1 would_write=false" in status_out
+    assert "autofix_plan_block_reasons: requires-current-evidence-review=1" in status_out
 
 
 def test_memory_care_imports_autofix_plan_and_brief_visibility(tmp_path, monkeypatch, capsys):

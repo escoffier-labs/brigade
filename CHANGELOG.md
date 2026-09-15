@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The Command Deck counts missing or unknown control-plane authority as a coverage gap, so a legacy routing snapshot no longer renders `ALL CLEAR` and "all control-plane sections reported" while the panel prints `authority unknown`. (#1460)
 - A `brigade run` cancellation whose journal append fails no longer drives local state to a terminal result, and a malformed `run_budget.cancelled` list reports a bounded invalid-event diagnostic instead of raising `TypeError` out of journal validation. (#1439)
+- `brigade memory care plan-fixes` and `memory care status` now name the reason each metadata fix is blocked, and a freshness date derivable from `last_reviewed` is no longer blocked. A `last_reviewed` near `date.max` reports `freshness-date-not-representable` instead of crashing both commands after a clean scan. (#1467)
 - Agent-change verification now separates clean approval-policy refusals as `POLICY-FAIL`, verifies current approval evidence against the signed index tree, and keeps historical approvals from satisfying the required approval. (#1464)
 
 ### Added

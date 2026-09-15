@@ -990,7 +990,7 @@ Import inbox commands:
 - `brigade work import validate imports.jsonl` checks scanner output against [`docs/import-schema.md`](import-schema.md).
 - `brigade work import ingest imports.jsonl` ingests scanner output.
 - `brigade memory care scan` scans local memory cards for stale, expired, undersourced, contradictory, missing-index-link, orphaned, oversized, missing-frontmatter, missing-reviewed, and missing-freshness issues without editing memory.
-- `brigade memory care plan-fixes` plans low-risk reviewed/freshness metadata repairs, reports safety blockers, and writes no card files.
+- `brigade memory care plan-fixes` plans low-risk reviewed/freshness metadata repairs, reports top block-reason counts, unblocks freshness dates that can be derived from `last_reviewed + stale_after_days`, and writes no card files.
 - `brigade memory care import-issues` routes the latest memory-care refresh queue into the work inbox.
 - `brigade work import memory-care` converts `memory/cards/decay/refresh-queue.json` into imports.
 - `brigade work import memory-refresh` converts memory-refresh candidates into task imports with card identity, reason, evidence summary, and acceptance criteria.
