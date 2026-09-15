@@ -629,7 +629,34 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engines/code-graph
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+      - name: Build same-commit native engines
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path engine-bin | Out-Null
+          Push-Location engines/code-graph
+          cargo build --release --locked --bin graphtrail --bin graphtrail-mcp
+          if ($LASTEXITCODE -ne 0) { throw "graphtrail build failed" }
+          Copy-Item target/release/graphtrail.exe "$env:GITHUB_WORKSPACE/engine-bin/graphtrail.exe"
+          Copy-Item target/release/graphtrail-mcp.exe "$env:GITHUB_WORKSPACE/engine-bin/graphtrail-mcp.exe"
+          Pop-Location
+          Push-Location engines/evidence-ledger
+          $env:CGO_ENABLED = "0"
+          go build -trimpath -o "$env:GITHUB_WORKSPACE/engine-bin/miseledger.exe" ./cmd/miseledger
+          if ($LASTEXITCODE -ne 0) { throw "miseledger build failed" }
+          go build -trimpath -o "$env:GITHUB_WORKSPACE/engine-bin/sessionfind.exe" ./cmd/sessionfind
+          if ($LASTEXITCODE -ne 0) { throw "sessionfind build failed" }
+          Pop-Location
       - name: Run Windows native acceptance (source install)
         shell: powershell
         run: |
-          & "${{ github.workspace }}\scripts\windows-native-acceptance.ps1" -InstallMode source -RepoRoot "${{ github.workspace }}"
+          & "${{ github.workspace }}\scripts\windows-native-acceptance.ps1" -InstallMode source -RepoRoot "${{ github.workspace }}" -EngineBinDir "${{ github.workspace }}\engine-bin"

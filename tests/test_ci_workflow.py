@@ -557,6 +557,9 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "schtasks /Run" not in text
     assert "$importPayload.inserted_items" in text
     assert "$importPayload.already_known" in text
+    assert "$importedIds" in text
+    assert "$searchIds" in text
+    assert "Install-SameCommitEngines" in text
     assert "$acceptanceMarker" in text
     assert "recorded_executable" in text
     assert "$env:XDG_CONFIG_HOME" in text
@@ -818,7 +821,7 @@ def test_windows_native_acceptance_miseledger_marker_is_in_verify_command_filena
     assert '$verifyScriptName = "verify_$acceptanceMarker.py"' in section
     assert "$verifyScript = Join-Path $workRepo $verifyScriptName" in section
     assert '--command "python $verifyScriptName"' in section
-    assert "& $miseledgerExe search $acceptanceMarker" in section
+    assert "& $miseledgerExe search $acceptanceMarker --json --limit 3" in section
     assert "verify_smoke.py" not in section
     assert 'print("{0}")' not in section
 
@@ -1027,3 +1030,76 @@ def test_windows_native_acceptance_pypi_mode_rejects_bare_agent_notify_metadata(
         "[string[]]$unpublishedIds = @(Get-UnpublishedComponentIds -ManifestPath $bundledManifestPath)" in source_block
     )
     assert "Where-Object { $unpublishedIds -notcontains $_ }" in main
+
+
+def test_windows_native_acceptance_search_asserts_imported_ids_not_snippet_text():
+    """Trust-gated search prints id [kind] with an empty snippet (#1492)."""
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    search = text[text.index('Write-Step "miseledger search"') : text.index('Write-Step "brigade care install')]
+
+    assert "missing acceptance marker" not in text
+    assert "--json" in search
+    assert "$importedIds" in text
+    assert "$searchIds" in search or "$searchPayload.results" in search
+    assert "[regex]::Escape($acceptanceMarker)" not in search
+    assert "brigade_work_verify_receipt" in text
+
+
+def test_windows_native_acceptance_source_mode_requires_same_commit_engine_binaries():
+    """Source-mode CI must exercise engines built from this commit, not 0.26.x."""
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    helper = _extract_powershell_function(text, "Install-SameCommitEngines")
+
+    assert "[string]$EngineBinDir" in text
+    assert "EngineBinDir is required when InstallMode is source" in text
+    assert "function Install-SameCommitEngines" in helper
+    assert "Get-FileHash" in helper
+    assert "same-commit engine" in helper
+    main = text[text.index("$acceptRoot = $null") :]
+    assert "Install-SameCommitEngines" in main
+    # The pin must land before the smoke steps so they run the same-commit
+    # engines. It must land *after* the component report; see
+    # test_windows_native_acceptance_asserts_component_health_before_pinning_engines
+    # for why the reverse order cannot work.
+    assert main.index("Install-SameCommitEngines") < main.index("$mcpResponse =")
+
+
+def test_windows_native_acceptance_asserts_component_health_before_pinning_engines():
+    """Pinning before the report makes every pinned component report corrupt.
+
+    ``component_report._diagnose_component`` compares the managed executable on
+    disk against the ``byte_size``/``sha256`` the manifest pins for the released
+    asset. Engines built from this checkout never match those values, so a pin
+    taken before ``brigade version --components`` turns each pinned component
+    "corrupt" and ``Assert-AllComponentsHealthy`` aborts the job before any
+    smoke test runs. Health has to be asserted while the managed install is
+    still exactly what ``brigade setup`` wrote.
+    """
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    main = text[text.index("$acceptRoot = $null") :]
+
+    report_index = main.index("$report = Get-ComponentReport")
+    health_index = main.index("Assert-AllComponentsHealthy -Report $report")
+    pin_index = main.index("Install-SameCommitEngines -EngineBinDir")
+
+    assert report_index < pin_index
+    assert health_index < pin_index
+    # The health assertion still has to cover every published component, so the
+    # ordering fix must not be paired with a narrowed or skipped assertion.
+    assert "Assert-AllComponentsHealthy -Report $report -Skippable $unpublishedIds" in main
+
+    helper = _extract_powershell_function(text, "Install-SameCommitEngines")
+    # The pin replaces binaries setup installed; creating one would mean the
+    # health assertion above never covered it.
+    assert 'throw "managed $componentId missing before same-commit engine pin' in helper
+
+
+def test_ci_windows_native_acceptance_builds_and_pins_same_commit_engines():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    section = _workflow_job_section(text, "windows-native-acceptance")
+
+    assert "cargo build --release --locked --bin graphtrail --bin graphtrail-mcp" in section
+    assert "./cmd/miseledger" in section
+    assert "./cmd/sessionfind" in section
+    assert "-EngineBinDir" in section
+    assert "-InstallMode source" in section
