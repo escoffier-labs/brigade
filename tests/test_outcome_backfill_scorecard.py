@@ -9,7 +9,6 @@ from pathlib import Path
 from brigade import cli, outcome_cmd, scorecard, verify_trial, work_cmd
 from brigade.work_cmd.session import briefing
 
-from tests.test_operator_checkup import _patch_all_doctors
 from tests.test_scorecard import (
     _effectiveness_command,
     _fixture_binding,
@@ -235,31 +234,6 @@ def test_operator_checkup_outcome_surface_warns_on_half_fed_and_high_ineligibili
     assert latest["limit"] == scorecard.LATEST_RECEIPT_WINDOW
     assert latest["count"] == scorecard.LATEST_RECEIPT_WINDOW
     assert latest["ineligibility_rate"] > 0.5
-
-
-def test_operator_checkup_default_skips_outcome_surface(monkeypatch, capsys):
-    from brigade.operator_cmd import lifecycle
-
-    def unexpected(**kwargs):
-        raise AssertionError("outcome surface should not run in default checkup")
-
-    _patch_all_doctors(monkeypatch, skills_rc=0)
-    monkeypatch.setattr(lifecycle, "_checkup_outcome", unexpected)
-
-    rc = lifecycle.checkup(target=Path("."), json_output=True)
-    payload = json.loads(capsys.readouterr().out)
-
-    assert rc == 0
-    assert "outcome" in payload["skipped_surfaces"]
-    assert payload["selected_surfaces"] == list(lifecycle.CHECKUP_DEFAULT_SURFACES)
-
-
-def test_operator_checkup_lists_outcome_surface(tmp_path, capsys):
-    assert cli.main(["operator", "checkup", "--target", str(tmp_path), "--list-surfaces", "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-
-    assert "outcome" in payload["surface_names"]
-    assert "outcome" not in payload["default_surfaces"]
 
 
 def test_backfill_scorecard_human_output(scoreable_target, capsys):

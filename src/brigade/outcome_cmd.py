@@ -1285,13 +1285,6 @@ def _worker_results_ground_truth(run_json: Path) -> dict[str, Any] | None:
     return ground_truth if isinstance(ground_truth, dict) else None
 
 
-def worker_result_failure(result: dict[str, Any]):
-    """Read-time worker failure attribution for a worker-results entry."""
-    from .worker_failure import worker_result_failure as _worker_result_failure
-
-    return _worker_result_failure(result)
-
-
 def _verify_summary_failed_verification(summary: dict[str, Any]) -> bool:
     """Return True when a verify receipt blames the subject rather than the harness.
 
@@ -1373,7 +1366,11 @@ def _run_infrastructure_only(receipt: dict[str, Any], worker_results: list[dict[
     status = _run_receipt_signal_status(receipt)
     if status not in core.RUN_INFRASTRUCTURE_NEUTRAL_STATUSES:
         return False
-    from .worker_failure import resolve_run_failure_taxonomy, run_failure_is_infrastructure_at_read_time
+    from .worker_failure import (
+        resolve_run_failure_taxonomy,
+        run_failure_is_infrastructure_at_read_time,
+        worker_result_failure,
+    )
 
     failure_kind, failure_phase = resolve_run_failure_taxonomy(receipt)
     run_level_infrastructure = run_failure_is_infrastructure_at_read_time(failure_kind, failure_phase)

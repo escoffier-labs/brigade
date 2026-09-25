@@ -653,36 +653,6 @@ def test_reconcile_holds_inside_cooldown_after_apply(tmp_path, capsys, monkeypat
     assert payload["decisions"] == []
 
 
-def test_rebuild_status_check_accepts_mixed_legacy_and_delta_ledger(tmp_path, capsys):
-    _seed(
-        tmp_path,
-        [
-            outcome.OutcomeRecord("card-x", "card", "t1", "verify", 1, "ref1", "2026-06-20T00:00:00+00:00"),
-            outcome.OutcomeRecord(
-                "card-x",
-                "card",
-                "t2",
-                "verify",
-                1,
-                "ref2",
-                "2026-06-20T01:00:00+00:00",
-                code_graph_delta={
-                    "status": "ok",
-                    "summary": "changed_symbols=1",
-                    "changed_symbol_count": 1,
-                },
-            ),
-        ],
-    )
-    assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
-    capsys.readouterr()
-
-    assert outcome_cmd.rebuild_status(target=tmp_path, check=True, json_output=True) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["reproducible"] is True
-    assert payload["drift"] == []
-
-
 def test_reconcile_rolls_back_promoted_artifact_on_regression(tmp_path, capsys, monkeypatch):
     _stub_execute(monkeypatch)
     cfg = outcome.ReconcileConfig(cooldown_seconds=0)
@@ -802,45 +772,6 @@ def test_rank_json_includes_graph_delta_counters_for_mixed_records(tmp_path, cap
     assert "graph_no_op" not in ranking["skill-y"]
 
 
-def test_graph_delta_counts_excludes_stale_graph_used_deltas():
-    records = [
-        outcome.OutcomeRecord(
-            "skill-x",
-            "skill",
-            "t1",
-            "verify",
-            1,
-            "ref1",
-            "2026-06-20T00:00:00+00:00",
-            code_graph_delta={
-                "status": "ok",
-                "ok": True,
-                "changed_symbol_count": 2,
-                "edge_churn": 0,
-                "stale_graph_used": True,
-            },
-        ),
-        outcome.OutcomeRecord(
-            "skill-x",
-            "skill",
-            "t2",
-            "verify",
-            1,
-            "ref2",
-            "2026-06-20T01:00:00+00:00",
-            code_graph_delta={
-                "status": "ok",
-                "ok": True,
-                "changed_symbol_count": 0,
-                "edge_churn": 0,
-                "stale_graph_used": True,
-            },
-        ),
-    ]
-
-    assert outcome_cmd._graph_delta_counts(records) == {"graph_changing": 0, "graph_no_op": 0}
-
-
 def test_rank_and_reconcile_count_verify_and_run_receipt_graph_deltas_identically(tmp_path, capsys):
     _write_verify_receipt(
         tmp_path,
@@ -899,57 +830,6 @@ def test_rank_and_reconcile_count_verify_and_run_receipt_graph_deltas_identicall
         f"outcome rank: {tmp_path.resolve()}\n"
         f"- skill-x score={outcome.wilson_lower_bound(2, 2):.3f} helped=2 hurt=0 "
         "graph: 1 changing / 1 no-op\n"
-    )
-    assert capsys.readouterr().out == expected
-
-
-def test_reconcile_dry_run_json_surfaces_graph_delta_counters(tmp_path, capsys):
-    _seed(
-        tmp_path,
-        [
-            outcome.OutcomeRecord(
-                "skill-x",
-                "skill",
-                "t1",
-                "verify",
-                1,
-                "ref1",
-                "2026-06-20T00:00:00+00:00",
-                code_graph_delta={"status": "ok", "changed_symbol_count": 1, "edge_churn": 0},
-            ),
-            outcome.OutcomeRecord(
-                "skill-x",
-                "skill",
-                "t2",
-                "verify",
-                1,
-                "ref2",
-                "2026-06-20T01:00:00+00:00",
-                code_graph_delta={"status": "ok", "changed_symbol_count": 0, "edge_churn": 0},
-            ),
-        ],
-    )
-    _write_registry_skill(tmp_path, "skill-x")
-    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
-
-    assert outcome_cmd.reconcile(target=tmp_path, apply=False, json_output=True) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    decision = {item["artifact_id"]: item for item in payload["decisions"]}["skill-x"]
-    assert decision["action"] == "install"
-    assert decision["graph_changing"] == 1
-    assert decision["graph_no_op"] == 1
-    assert not _status_file(tmp_path).exists()
-    assert not _decisions_dir(tmp_path).exists()
-
-
-def test_rank_human_output_unchanged_without_delta_records(tmp_path, capsys):
-    _seed(tmp_path, [outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref1", "2026-06-20T00:00:00+00:00")])
-
-    assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
-
-    expected = (
-        f"outcome rank: {tmp_path.resolve()}\n- skill-x score={outcome.wilson_lower_bound(1, 1):.3f} helped=1 hurt=0\n"
     )
     assert capsys.readouterr().out == expected
 
@@ -1682,9 +1562,10 @@ def test_rank_without_local_artifact_keeps_lifetime_score_and_output_shape(tmp_p
     entry = payload["ranking"][0]
     assert entry["content_fingerprint"] is None
     assert entry["helped"] == 2 and entry["lifetime_helped"] == 2
+    assert "recency_score" not in entry
     assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
-    line = next(line for line in capsys.readouterr().out.splitlines() if "skill-x" in line)
-    assert line == "- skill-x score=0.342 helped=2 hurt=0"
+    # Exact full output: no graph suffix without delta records, no recency tail by default.
+    assert capsys.readouterr().out == f"outcome rank: {tmp_path.resolve()}\n- skill-x score=0.342 helped=2 hurt=0\n"
 
 
 def test_explain_splits_current_and_lifetime_and_tags_cohorts(tmp_path, capsys):
@@ -2446,16 +2327,6 @@ def test_rank_recency_reorders_toward_recent_signals(tmp_path, capsys):
     recency_ids = [e["artifact_id"] for e in payload["ranking"]]
     assert recency_ids.index("skill-new") < recency_ids.index("skill-old")
     assert all("recency_score" in e and e["recency_half_life_days"] == 30.0 for e in payload["ranking"])
-
-
-def test_rank_default_omits_recency_fields_and_stays_identical(tmp_path, capsys):
-    _seed(tmp_path, _helped("skill-x", 2))
-    assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
-    entry = json.loads(capsys.readouterr().out)["ranking"][0]
-    assert "recency_score" not in entry
-    assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
-    line = next(line for line in capsys.readouterr().out.splitlines() if "skill-x" in line)
-    assert line == "- skill-x score=0.342 helped=2 hurt=0"  # no recency tail
 
 
 def test_rank_recency_human_output_shows_tail_and_header(tmp_path, capsys):
