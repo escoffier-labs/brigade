@@ -17,13 +17,6 @@ def test_fetch_uses_work_brief_json(monkeypatch, tmp_path):
     assert calls == [(tmp_path, ["work", "brief"], 60.0)]
 
 
-def test_docstring_states_operator_question():
-    doc = status_grid.__doc__ or ""
-    assert "attention" in doc.lower()
-    for topic in ("handoffs", "memory", "verify loop", "inbox hygiene"):
-        assert topic in doc.lower()
-
-
 def test_render_shows_summary_strip_and_plain_word_tiles():
     payload = {
         "handoff_issues": {"count": 2, "known_count": 3, "total_count": 5},

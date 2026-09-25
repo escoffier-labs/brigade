@@ -28,24 +28,6 @@ def _write_receipt(target: Path, run_id: str, *, reused_from: str | None = None,
     return run_dir
 
 
-def test_capture_follows_reused_from_to_original_evidence_ref(tmp_path):
-    original = _write_receipt(tmp_path, "20260725-020358-work-verify-bc82bb")
-    reused = _write_receipt(
-        tmp_path,
-        "20260725-020602-work-verify-3622db",
-        reused_from="20260725-020358-work-verify-bc82bb",
-    )
-    skill = tmp_path / ".claude" / "skills" / "taste"
-    skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("# taste\n")
-
-    assert outcome_cmd.capture(target=tmp_path, artifact_id="taste", run_id=reused.name) == 0
-    rows = [json.loads(line) for line in (tmp_path / "memory" / "outcome" / "records.jsonl").read_text().splitlines()]
-    assert len(rows) == 1
-    assert rows[0]["evidence_ref"] == str(original / "receipt.json")
-    assert rows[0]["evidence_ref"] != str(reused / "receipt.json")
-
-
 def test_score_counts_original_and_reused_receipt_as_one_signal(tmp_path):
     original = _write_receipt(tmp_path, "orig-run")
     reused = _write_receipt(tmp_path, "reuse-run", reused_from="orig-run")

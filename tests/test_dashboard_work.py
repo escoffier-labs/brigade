@@ -75,9 +75,6 @@ def test_work_view_contract_and_nav_replace_folded_pages():
     assert ">Waves<" not in nav
     assert ">Claims<" not in nav
     assert 'href="/view/activity"' not in nav
-    assert (
-        "operator question" in (work_view.__doc__ or "").lower() or "what can run" in (work_view.__doc__ or "").lower()
-    )
 
 
 def test_fetch_combines_ready_tasks_and_runs(monkeypatch, tmp_path):

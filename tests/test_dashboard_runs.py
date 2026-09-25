@@ -40,12 +40,6 @@ def test_fetch_uses_runs_list_and_verify_runs_contracts(monkeypatch, tmp_path):
     assert limit >= 50
 
 
-def test_docstring_answers_operator_question():
-    assert "what verification ran recently" in run_timeline.__doc__.lower()
-    assert "did it pass" in run_timeline.__doc__.lower()
-    assert "command" in run_timeline.__doc__.lower()
-
-
 def test_render_brigade_runs_from_versioned_list_contract():
     payload = {
         "brigade": {

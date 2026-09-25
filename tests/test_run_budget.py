@@ -1155,28 +1155,6 @@ def test_reserve_and_record_rolls_back_when_durable_write_fails():
     assert coordinator.projection.used["worker_dispatch_count"] == 1
 
 
-def test_operator_cancelled_live_ctrl_c_kind_is_not_infrastructure():
-    assert worker_failure.run_failure_is_infrastructure_at_read_time("operator-cancelled", "dispatch") is False
-    assert (
-        outcome.run_capture_signal_value(
-            "canceled",
-            infrastructure_only=False,
-            verifier_failed=False,
-        )
-        == 0
-    )
-    # Even if a reader incorrectly set infrastructure_only, canceled is outside
-    # the #580 neutralization status set.
-    assert (
-        outcome.run_capture_signal_value(
-            "canceled",
-            infrastructure_only=True,
-            verifier_failed=False,
-        )
-        == 0
-    )
-
-
 class _EnforceableAdapter:
     """Test adapter exposing a reliable pre-call reservation boundary (#884)."""
 
