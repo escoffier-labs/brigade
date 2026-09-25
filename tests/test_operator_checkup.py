@@ -51,7 +51,11 @@ def test_operator_checkup_rolls_up_each_first_run_doctor(monkeypatch, capsys):
 
 
 def test_operator_checkup_is_ready_when_all_surfaces_pass(monkeypatch, capsys):
+    def unexpected(**kwargs):
+        raise AssertionError("outcome surface should not run in default checkup")
+
     _patch_all_doctors(monkeypatch, skills_rc=0)
+    monkeypatch.setattr(lifecycle, "_checkup_outcome", unexpected)
     rc = lifecycle.checkup(target=Path("."), json_output=True)
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
@@ -59,6 +63,7 @@ def test_operator_checkup_is_ready_when_all_surfaces_pass(monkeypatch, capsys):
     assert payload["blocking_surface_count"] == 0
     assert payload["next_command"] is None
     assert payload["skipped_surfaces"] == ["work", "graph", "ledger", "outcome"]
+    assert payload["selected_surfaces"] == list(lifecycle.CHECKUP_DEFAULT_SURFACES)
 
 
 def test_operator_checkup_loop_reports_graph_ledger_and_brief_hit_rate(monkeypatch, tmp_path, capsys):

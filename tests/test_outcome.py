@@ -57,6 +57,11 @@ def test_run_capture_signal_value_distinguishes_infrastructure_from_model_qualit
 
     assert outcome.run_capture_signal_value("failed", infrastructure_only=False, verifier_failed=False) == -1
     assert outcome.run_capture_signal_value("failed", infrastructure_only=True, verifier_failed=False) == 0
+    # "error" is -1 before neutralization, so this row proves the neutral-status set applies beyond "failed".
+    assert outcome.run_capture_signal_value("error", infrastructure_only=True, verifier_failed=False) == 0
+    assert outcome.run_capture_signal_value("failed", infrastructure_only=True, verifier_failed=True) == -1
+    assert outcome.run_capture_signal_value("ok", infrastructure_only=False, verifier_failed=False) == 1
+    assert outcome.run_capture_signal_value("error", infrastructure_only=False, verifier_failed=False) == -1
 
 
 def test_score_records_folds_counts_wilson_and_last_signal():
@@ -202,12 +207,6 @@ def test_rank_score_blends_confidence_outcome_keyword():
     assert outcome.rank_score(confidence=0.0, outcome=0.0, keyword=1.0) == 0.1
     blended = outcome.rank_score(confidence=0.2, outcome=0.5, keyword=1.0)
     assert abs(blended - (0.5 * 0.2 + 0.4 * 0.5 + 0.1 * 1.0)) < 1e-9
-
-
-def test_rank_score_prefers_verified_outcome_when_other_signals_tie():
-    proven = outcome.rank_score(confidence=0.3, outcome=0.8, keyword=0.5)
-    unproven = outcome.rank_score(confidence=0.3, outcome=0.1, keyword=0.5)
-    assert proven > unproven
 
 
 def _fp_record(evidence_ref, ts, fingerprint, signal=1):

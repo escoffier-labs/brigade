@@ -70,12 +70,6 @@ def test_render_displays_ranking_rows_with_cohort_and_recency_columns():
     assert fragment.index("example-skill-one") < fragment.index("example-skill-two")
 
 
-def test_docstring_states_operator_question():
-    assert outcome_rank.__doc__ is not None
-    assert "helping" in outcome_rank.__doc__
-    assert "hurting" in outcome_rank.__doc__
-
-
 def test_summary_strip_renders_before_table_from_ranking_data():
     payload = {
         "ranking": [

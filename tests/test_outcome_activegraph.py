@@ -7,6 +7,8 @@ touching live state. See docs/design/activegraph-inspiration.md.
 
 import json
 
+import pytest
+
 from brigade import outcome, outcome_cmd
 
 
@@ -23,10 +25,35 @@ def _helped(artifact_id, kind, n):
     ]
 
 
-def test_rebuild_status_reproduces_persisted(tmp_path, capsys):
+def _mixed_legacy_and_delta(artifact_id, kind):
+    return [
+        outcome.OutcomeRecord(artifact_id, kind, "t1", "verify", 1, "ref1", "2026-06-20T00:00:00+00:00"),
+        outcome.OutcomeRecord(
+            artifact_id,
+            kind,
+            "t2",
+            "verify",
+            1,
+            "ref2",
+            "2026-06-20T01:00:00+00:00",
+            code_graph_delta={
+                "status": "ok",
+                "summary": "changed_symbols=1",
+                "changed_symbol_count": 1,
+            },
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "records",
+    [_helped("card-x", "card", 2), _mixed_legacy_and_delta("card-x", "card")],
+    ids=["legacy", "mixed-legacy-and-delta"],
+)
+def test_rebuild_status_reproduces_persisted(tmp_path, capsys, records):
     # A card with two clean verified signals promotes on reconcile --apply, which
     # writes both a decision receipt and a status entry.
-    _seed(tmp_path, _helped("card-x", "card", 2))
+    _seed(tmp_path, records)
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
     capsys.readouterr()
     assert outcome_cmd.load_status(tmp_path)["card-x"]["status"] == "promoted"

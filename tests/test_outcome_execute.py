@@ -15,13 +15,6 @@ def _import_skill(tmp_path, name="security-review"):
     return name
 
 
-def _helped(artifact_id, n):
-    return [
-        outcome.OutcomeRecord(artifact_id, "skill", f"t{i}", "verify", 1, f"r{i}", f"2026-06-20T0{i}:00:00+00:00")
-        for i in range(n)
-    ]
-
-
 def test_reconcile_apply_physically_installs_a_verified_skill(tmp_path, capsys):
     name = _import_skill(tmp_path)
     seed_registry_skill_scorecard_promotion(tmp_path, name)

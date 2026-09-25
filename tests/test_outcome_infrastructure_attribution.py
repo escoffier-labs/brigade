@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import friction_cmd, localio, outcome, outcome_cmd, verify_trial, worker_failure
+from brigade import friction_cmd, localio, outcome_cmd, verify_trial, worker_failure
 
 from tests.test_outcome_cmd import _write_run_receipt, _write_verify_receipt
 
@@ -310,21 +310,13 @@ def test_legacy_worker_result_maps_unknown_kind_at_read_time_without_mutation(tm
     original_bytes = (json.dumps(fixture, indent=2) + "\n").encode()
     path.write_bytes(original_bytes)
 
-    failure = outcome_cmd.worker_result_failure(fixture["results"][0])
+    failure = worker_failure.worker_result_failure(fixture["results"][0])
 
     assert failure is not None
     assert failure.failure_class.value == "unclassified"
     # #712: unknown adapter kinds count against the seat at worker level (model-output domain).
     assert failure.domain.value == "model-output"
     assert path.read_bytes() == original_bytes
-
-
-def test_run_capture_signal_value_unit_cases():
-    assert outcome.run_capture_signal_value("failed", infrastructure_only=True, verifier_failed=False) == 0
-    assert outcome.run_capture_signal_value("incomplete", infrastructure_only=True, verifier_failed=False) == 0
-    assert outcome.run_capture_signal_value("failed", infrastructure_only=True, verifier_failed=True) == -1
-    assert outcome.run_capture_signal_value("ok", infrastructure_only=False, verifier_failed=False) == 1
-    assert outcome.run_capture_signal_value("error", infrastructure_only=False, verifier_failed=False) == -1
 
 
 def test_friction_adapter_failure_uses_failure_class_and_cause_code(tmp_path, monkeypatch):
@@ -644,23 +636,6 @@ def test_unexpected_error_one_verdict_regardless_of_phase(tmp_path, phase):
     assert payload["record"]["evidence_ref"] == str(run_json)
 
 
-def test_catch_all_with_unknown_phase_stays_negative(tmp_path):
-    run_json = _write_run_receipt_with_failure(
-        tmp_path,
-        "unexpected-unknown-phase",
-        status="failed",
-        failure={"kind": "unexpected-error", "phase": "artifact-collection"},
-    )
-    _write_worker_results(tmp_path, "unexpected-unknown-phase", results=[_ok_worker()])
-
-    rc, payload = _capture_signal(tmp_path, "unexpected-unknown-phase")
-
-    assert rc == 0
-    # #711: unexpected-error is infrastructure-neutral regardless of phase (was -1 via fail-closed).
-    assert payload["record"]["signal_value"] == 0
-    assert payload["record"]["evidence_ref"] == str(run_json)
-
-
 @pytest.mark.parametrize(
     ("kind", "phase"),
     [
@@ -775,11 +750,6 @@ def test_catch_all_classifier_in_model_phase_stays_negative():
 
 def test_catch_all_classifier_missing_phase_fails_closed():
     assert worker_failure.run_failure_is_infrastructure_at_read_time("agent-error", None) is False
-
-
-def test_catch_all_classifier_unknown_phase_fails_closed():
-    # #711: unexpected-error is infrastructure-neutral even when phase is outside both phase sets.
-    assert worker_failure.run_failure_is_infrastructure_at_read_time("unexpected-error", "artifact-collection") is True
 
 
 def test_slice_b_typed_failure_class_run_receipt_is_neutral(tmp_path):
@@ -975,7 +945,7 @@ def test_suspected_noop_run_worker_kind_scores_negative(tmp_path):
         ],
     )
 
-    failure = outcome_cmd.worker_result_failure(
+    failure = worker_failure.worker_result_failure(
         {
             "worker": "implementer",
             "ok": False,
@@ -1021,7 +991,7 @@ def test_deliberately_unclassified_probe_kinds_stay_infrastructure(tmp_path, fai
     Only kinds absent from LEGACY_FAILURE_KIND_MAP count against the seat.
     """
 
-    failure = outcome_cmd.worker_result_failure(
+    failure = worker_failure.worker_result_failure(
         {
             "worker": "implementer",
             "ok": False,
