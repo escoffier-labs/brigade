@@ -1370,16 +1370,6 @@ def test_capture_stamps_content_fingerprint_of_registry_skill(tmp_path, capsys):
     assert outcome_cmd.load_records(tmp_path)[0].content_fingerprint == _sha256_of(skill_md)
 
 
-def test_capture_fingerprint_falls_back_to_harness_install(tmp_path, capsys):
-    skill_md = tmp_path / ".claude" / "skills" / "skill-x" / "SKILL.md"
-    skill_md.parent.mkdir(parents=True)
-    skill_md.write_text("# harness copy\n")
-    _write_verify_receipt(tmp_path)
-    assert outcome_cmd.capture(target=tmp_path, artifact_id="skill-x", json_output=True) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["record"]["content_fingerprint"] == _sha256_of(skill_md)
-
-
 def test_fingerprint_prefers_the_installed_copy_over_a_drifted_registry(tmp_path):
     # The verified run exercises the installed skill; when the registry master
     # has drifted ahead, the signal is evidence about the installed text.
@@ -1777,18 +1767,6 @@ def test_bundle_fingerprint_ignores_skill_json_and_ds_store(tmp_path):
     assert outcome_cmd.artifact_fingerprint(tmp_path, "skill-x", "skill") == _sha256_of(skill_md)
 
 
-def test_bundle_fingerprint_covers_a_bundled_helper(tmp_path):
-    # A real multi-file bundle takes the composite path: its fingerprint differs
-    # from sha256(SKILL.md) because it also folds in the helper.
-    d = _registry_skill_dir(tmp_path, "skill-x")
-    skill_md = d / "SKILL.md"
-    skill_md.write_text("# body\n")
-    (d / "helper.sh").write_text("echo v1\n")
-    fp = outcome_cmd.artifact_fingerprint(tmp_path, "skill-x", "skill")
-    assert fp is not None
-    assert fp != _sha256_of(skill_md)
-
-
 def test_bundle_fingerprint_changes_when_only_the_helper_changes(tmp_path):
     # The core win: editing a bundled helper while SKILL.md is untouched must move
     # the fingerprint, so signals for the old bundle become proven stale.
@@ -1863,13 +1841,6 @@ def test_editing_a_bundled_helper_makes_prior_records_proven_stale_in_rank(tmp_p
     assert entry["content_fingerprint"] == outcome_cmd.artifact_fingerprint(tmp_path, "skill-x", "skill")
 
 
-def test_card_fingerprint_stays_single_file(tmp_path):
-    card = tmp_path / "memory" / "cards" / "card-x.md"
-    card.parent.mkdir(parents=True)
-    card.write_text("# card body\n")
-    assert outcome_cmd.artifact_fingerprint(tmp_path, "card-x", "card") == _sha256_of(card)
-
-
 def _write_card(target, card_id, text):
     card = target / "memory" / "cards" / f"{card_id}.md"
     card.parent.mkdir(parents=True, exist_ok=True)
@@ -1882,14 +1853,6 @@ def test_card_with_no_links_hashes_to_its_own_content(tmp_path):
     # so existing single-card records are never invalidated.
     card = _write_card(tmp_path, "solo", "# solo card, no links\n")
     assert outcome_cmd.artifact_fingerprint(tmp_path, "solo", "card") == _sha256_of(card)
-
-
-def test_card_fingerprint_folds_in_a_linked_card(tmp_path):
-    a = _write_card(tmp_path, "a", "# a\nsee [[b]] for details\n")
-    _write_card(tmp_path, "b", "# b v1\n")
-    fp = outcome_cmd.artifact_fingerprint(tmp_path, "a", "card")
-    assert fp is not None
-    assert fp != _sha256_of(a)  # composite, not the lone-file hash
 
 
 def test_editing_a_linked_card_invalidates_the_referrer(tmp_path):
@@ -2500,59 +2463,6 @@ def test_decision_path_is_collision_safe_within_the_same_second(tmp_path, monkey
     assert a.parent == b.parent
     assert a.name == "20260620-000000-000000-skill-x-00000000.json"
     assert b.name == "20260620-000000-000000-skill-x-00000001.json"
-
-
-def test_write_json_exclusive_never_replaces_an_existing_receipt(tmp_path):
-    # O_EXCL: the second write to the same path raises and leaves the original
-    # file intact, so an existing receipt can never be overwritten.
-    path = tmp_path / "memory" / "outcome" / "decisions" / "receipt.json"
-    localio.write_json_exclusive(path, {"artifact_id": "first", "new_status": "promoted"})
-    with pytest.raises(FileExistsError):
-        localio.write_json_exclusive(path, {"artifact_id": "second", "new_status": "demoted"})
-    assert json.loads(path.read_text())["artifact_id"] == "first"
-
-
-def test_write_json_exclusive_publishes_only_complete_json(tmp_path, monkeypatch):
-    path = tmp_path / "memory" / "outcome" / "decisions" / "receipt.json"
-    publish_ready = threading.Event()
-    allow_publish = threading.Event()
-    real_link = localio.os.link
-
-    def paused_link(source, destination):
-        publish_ready.set()
-        assert allow_publish.wait(timeout=5)
-        real_link(source, destination)
-
-    monkeypatch.setattr(localio.os, "link", paused_link)
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(localio.write_json_exclusive, path, {"artifact_id": "complete"})
-        assert publish_ready.wait(timeout=5)
-        assert not path.exists()
-        allow_publish.set()
-        future.result(timeout=5)
-
-    assert json.loads(path.read_text()) == {"artifact_id": "complete"}
-
-
-def test_write_json_exclusive_allows_exactly_one_concurrent_writer(tmp_path):
-    path = tmp_path / "memory" / "outcome" / "decisions" / "receipt.json"
-    writer_count = 8
-    ready = threading.Barrier(writer_count)
-
-    def write(index):
-        ready.wait()
-        try:
-            localio.write_json_exclusive(path, {"artifact_id": f"writer-{index}"})
-        except FileExistsError:
-            return None
-        return index
-
-    with ThreadPoolExecutor(max_workers=writer_count) as executor:
-        results = list(executor.map(write, range(writer_count)))
-
-    winners = [index for index in results if index is not None]
-    assert len(winners) == 1
-    assert json.loads(path.read_text()) == {"artifact_id": f"writer-{winners[0]}"}
 
 
 def test_concurrent_decision_writers_retry_one_shared_identity(tmp_path, monkeypatch):

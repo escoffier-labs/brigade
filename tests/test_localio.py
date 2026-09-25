@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -264,3 +266,56 @@ def test_tree_fingerprint_with_head_returns_current_head_and_same_tree_as_tree_f
 
 def test_tree_fingerprint_with_head_returns_none_on_failure(tmp_path: Path):
     assert localio.tree_fingerprint_with_head(tmp_path) == (None, None)
+
+
+def test_write_json_exclusive_never_replaces_an_existing_receipt(tmp_path):
+    # O_EXCL: the second write to the same path raises and leaves the original
+    # file intact, so an existing receipt can never be overwritten.
+    path = tmp_path / "memory" / "outcome" / "decisions" / "receipt.json"
+    localio.write_json_exclusive(path, {"artifact_id": "first", "new_status": "promoted"})
+    with pytest.raises(FileExistsError):
+        localio.write_json_exclusive(path, {"artifact_id": "second", "new_status": "demoted"})
+    assert json.loads(path.read_text())["artifact_id"] == "first"
+
+
+def test_write_json_exclusive_publishes_only_complete_json(tmp_path, monkeypatch):
+    path = tmp_path / "memory" / "outcome" / "decisions" / "receipt.json"
+    publish_ready = threading.Event()
+    allow_publish = threading.Event()
+    real_link = localio.os.link
+
+    def paused_link(source, destination):
+        publish_ready.set()
+        assert allow_publish.wait(timeout=5)
+        real_link(source, destination)
+
+    monkeypatch.setattr(localio.os, "link", paused_link)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(localio.write_json_exclusive, path, {"artifact_id": "complete"})
+        assert publish_ready.wait(timeout=5)
+        assert not path.exists()
+        allow_publish.set()
+        future.result(timeout=5)
+
+    assert json.loads(path.read_text()) == {"artifact_id": "complete"}
+
+
+def test_write_json_exclusive_allows_exactly_one_concurrent_writer(tmp_path):
+    path = tmp_path / "memory" / "outcome" / "decisions" / "receipt.json"
+    writer_count = 8
+    ready = threading.Barrier(writer_count)
+
+    def write(index):
+        ready.wait()
+        try:
+            localio.write_json_exclusive(path, {"artifact_id": f"writer-{index}"})
+        except FileExistsError:
+            return None
+        return index
+
+    with ThreadPoolExecutor(max_workers=writer_count) as executor:
+        results = list(executor.map(write, range(writer_count)))
+
+    winners = [index for index in results if index is not None]
+    assert len(winners) == 1
+    assert json.loads(path.read_text()) == {"artifact_id": f"writer-{winners[0]}"}

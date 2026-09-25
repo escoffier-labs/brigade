@@ -62,6 +62,8 @@ def test_run_capture_signal_value_distinguishes_infrastructure_from_model_qualit
     assert outcome.run_capture_signal_value("failed", infrastructure_only=True, verifier_failed=True) == -1
     assert outcome.run_capture_signal_value("ok", infrastructure_only=False, verifier_failed=False) == 1
     assert outcome.run_capture_signal_value("error", infrastructure_only=False, verifier_failed=False) == -1
+    # An operator-cancelled run (#864 live Ctrl-C) is neutral, not a hurt signal.
+    assert outcome.run_capture_signal_value("canceled", infrastructure_only=False, verifier_failed=False) == 0
 
 
 def test_score_records_folds_counts_wilson_and_last_signal():
