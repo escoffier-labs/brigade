@@ -12,7 +12,7 @@ from unittest import mock
 
 import pytest
 
-from brigade import cli, localio, outcome, outcome_cmd, receipts_cmd, scorecard, work_cmd
+from brigade import cli, localio, outcome, outcome_cmd, receipts_cmd, work_cmd
 
 from tests.test_scorecard_reconcile import seed_registry_skill_scorecard_hurt, seed_registry_skill_scorecard_promotion
 from tests.work_cmd_test_helpers import _init_git_repo
@@ -1628,11 +1628,11 @@ def test_explain_without_local_artifact_keeps_pre_fingerprint_output(tmp_path, c
     assert "[legacy]" not in out
 
 
-def _fp_helped(artifact_id, n, fingerprint, start_hour=0):
+def _fp_helped(artifact_id, n, fingerprint, start_hour=0, kind="skill"):
     return [
         outcome.OutcomeRecord(
             artifact_id,
-            "skill",
+            kind,
             f"t{i}",
             "verify",
             1,
@@ -1644,75 +1644,77 @@ def _fp_helped(artifact_id, n, fingerprint, start_hour=0):
     ]
 
 
-def test_reconcile_does_not_promote_a_candidate_on_proven_stale_evidence(tmp_path, capsys, monkeypatch):
+# Skills promote only through receipt scorecards (#503), so the fingerprint
+# ratchet below is exercised on cards, which still use the legacy scorer.
+
+
+def test_reconcile_does_not_promote_a_candidate_on_proven_stale_evidence(tmp_path, capsys):
     # Two helped signals for the old text would cross install_min_helped, but the
-    # skill was edited afterward: the old signals are proven stale, so the ratchet
+    # card was edited afterward: the old signals are proven stale, so the ratchet
     # must NOT promote text that has no verified evidence of its own.
-    _stub_execute(monkeypatch)
-    skill_md = _write_registry_skill(tmp_path, "skill-x", "# old text\n")
-    old_fp = _sha256_of(skill_md)
-    _seed(tmp_path, _fp_helped("skill-x", 2, old_fp))
-    skill_md.write_text("# rewritten text\n")
+    card = _write_card(tmp_path, "card-x", "# old text\n")
+    old_fp = _sha256_of(card)
+    _seed(tmp_path, _fp_helped("card-x", 2, old_fp, kind="card"))
+    card.write_text("# rewritten text\n")
 
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    hold = payload["decisions"][0]
+    hold = {d["artifact_id"]: d for d in payload["decisions"]}["card-x"]
     assert hold["action"] == "hold"
-    assert hold["reason"] == "withheld: missing scorecard"
+    assert hold["new_status"] == "candidate"
+    assert hold["reason"] == "insufficient verified evidence"
+    assert hold["stale_records"] == 2
     assert payload["applied"] == []
     assert not _status_file(tmp_path).exists()
 
 
-def test_reconcile_still_promotes_a_never_edited_skill_grandfathered(tmp_path, capsys, monkeypatch):
-    # Legacy ledger rows alone no longer promote skills; receipt scorecards do.
-    _stub_execute(monkeypatch)
-    _write_registry_skill(tmp_path, "skill-x")
-    _seed(tmp_path, _helped("skill-x", 2))  # legacy, no fingerprint
+def test_reconcile_promotes_an_unedited_card_on_legacy_unfingerprinted_signals(tmp_path, capsys):
+    _write_card(tmp_path, "card-x", "# card text\n")
+    _seed(tmp_path, _fp_helped("card-x", 2, None, kind="card"))  # legacy, no fingerprint
 
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["applied"] == []
-    hold = {d["artifact_id"]: d for d in payload["decisions"]}["skill-x"]
-    assert hold["action"] == "hold"
-    assert hold["reason"] == "withheld: missing scorecard"
-
-    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
-    assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["applied"] == ["skill-x"]
-    decision = {d["artifact_id"]: d for d in payload["decisions"]}["skill-x"]
+    assert payload["applied"] == ["card-x"]
+    decision = {d["artifact_id"]: d for d in payload["decisions"]}["card-x"]
     assert decision["action"] == "install"
-    assert decision["policy_version"] == scorecard.SCORECARD_POLICY_VERSION
+    assert decision["new_status"] == "promoted"
+    # Nothing stale was dropped, so the decision carries no fingerprint audit fields.
+    assert "content_fingerprint" not in decision
+    assert "stale_records" not in decision
+    status = json.loads(_status_file(tmp_path).read_text())
+    assert status["artifacts"]["card-x"]["status"] == "promoted"
 
 
-def test_reconcile_lets_an_edited_skill_re_earn_promotion_on_fresh_signals(tmp_path, capsys, monkeypatch):
-    _stub_execute(monkeypatch)
-    skill_md = _write_registry_skill(tmp_path, "skill-x", "# old text\n")
-    old_fp = _sha256_of(skill_md)
-    _seed(tmp_path, _fp_helped("skill-x", 2, old_fp, start_hour=0))
-    skill_md.write_text("# rewritten text\n")
-    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
+def test_reconcile_lets_an_edited_card_re_earn_promotion_on_fresh_signals(tmp_path, capsys):
+    card = _write_card(tmp_path, "card-x", "# old text\n")
+    old_fp = _sha256_of(card)
+    _seed(tmp_path, _fp_helped("card-x", 2, old_fp, start_hour=0, kind="card"))
+    card.write_text("# rewritten text\n")
+    new_fp = _sha256_of(card)
+    _seed(tmp_path, _fp_helped("card-x", 2, new_fp, start_hour=2, kind="card"))
 
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["applied"] == ["skill-x"]
-    decision = {d["artifact_id"]: d for d in payload["decisions"]}["skill-x"]
+    assert payload["applied"] == ["card-x"]
+    decision = {d["artifact_id"]: d for d in payload["decisions"]}["card-x"]
     assert decision["action"] == "install"
-    assert decision["policy_version"] == scorecard.SCORECARD_POLICY_VERSION
+    assert decision["stale_records"] == 2
+    assert decision["content_fingerprint"] == new_fp
 
 
-def test_reconcile_human_output_notes_a_fingerprint_narrowed_decision(tmp_path, capsys, monkeypatch):
-    _stub_execute(monkeypatch)
-    skill_md = _write_registry_skill(tmp_path, "skill-x", "# old text\n")
-    old_fp = _sha256_of(skill_md)
-    _seed(tmp_path, _fp_helped("skill-x", 2, old_fp, start_hour=0))
-    skill_md.write_text("# rewritten text\n")
-    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
+def test_reconcile_human_output_notes_a_fingerprint_narrowed_decision(tmp_path, capsys):
+    card = _write_card(tmp_path, "card-x", "# old text\n")
+    old_fp = _sha256_of(card)
+    _seed(tmp_path, _fp_helped("card-x", 2, old_fp, start_hour=0, kind="card"))
+    card.write_text("# rewritten text\n")
+    new_fp = _sha256_of(card)
+    _seed(tmp_path, _fp_helped("card-x", 2, new_fp, start_hour=2, kind="card"))
 
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=False) == 0
-    line = next(line for line in capsys.readouterr().out.splitlines() if "skill-x" in line)
-    assert "verified helped, no regressions" in line
+    line = next(line for line in capsys.readouterr().out.splitlines() if "card-x" in line)
     assert "[install]" in line
+    assert f"[rev {new_fp[:12]}; scored current text only" in line
+    assert "stale=2" in line
 
 
 def test_reconcile_output_byte_identical_for_unedited_skill(tmp_path, capsys, monkeypatch):
@@ -1725,21 +1727,29 @@ def test_reconcile_output_byte_identical_for_unedited_skill(tmp_path, capsys, mo
 
 
 def test_fork_projection_uses_the_current_fingerprint_cohort(tmp_path, capsys):
-    # Lifetime legacy rows do not promote; without a current-fingerprint scorecard
-    # the fork projection surfaces an explicit fail-closed hold.
-    skill_md = _write_registry_skill(tmp_path, "skill-x", "# old text\n")
-    old_fp = _sha256_of(skill_md)
-    _seed(tmp_path, _fp_helped("skill-x", 2, old_fp))
-    skill_md.write_text("# rewritten text\n")
+    # Fork scores the current-fingerprint cohort, not lifetime: stale-only evidence
+    # holds, and fresh signals on the current text promote.
+    card = _write_card(tmp_path, "card-x", "# old text\n")
+    old_fp = _sha256_of(card)
+    _seed(tmp_path, _fp_helped("card-x", 2, old_fp, kind="card"))
+    card.write_text("# rewritten text\n")
     out = tmp_path / "fork.json"
 
     assert outcome_cmd.fork(target=tmp_path, out=out, json_output=True) == 0
     capsys.readouterr()
-    projection = json.loads(out.read_text())
-    entry = projection["artifacts"]["skill-x"]
+    entry = json.loads(out.read_text())["artifacts"]["card-x"]
     assert entry["action"] == "hold"
     assert entry["new_status"] == "candidate"
-    assert entry["reason"] == "withheld: missing scorecard"
+    assert entry["reason"] == "insufficient verified evidence"
+    assert entry["helped"] == 0
+
+    _seed(tmp_path, _fp_helped("card-x", 2, _sha256_of(card), start_hour=2, kind="card"))
+    assert outcome_cmd.fork(target=tmp_path, out=out, json_output=True) == 0
+    capsys.readouterr()
+    entry = json.loads(out.read_text())["artifacts"]["card-x"]
+    assert entry["action"] == "install"
+    assert entry["new_status"] == "promoted"
+    assert entry["helped"] == 2
 
 
 def _registry_skill_dir(target, skill_id):

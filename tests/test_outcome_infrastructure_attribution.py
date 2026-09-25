@@ -744,12 +744,14 @@ def test_model_contract_kind_wins_over_legacy_failure_class_map():
     assert worker_failure.run_failure_is_infrastructure_at_read_time("invalid-plan", "dispatch") is False
 
 
-def test_catch_all_classifier_in_model_phase_stays_negative():
-    assert worker_failure.run_failure_is_infrastructure_at_read_time("agent-error", "planning") is False
-
-
-def test_catch_all_classifier_missing_phase_fails_closed():
-    assert worker_failure.run_failure_is_infrastructure_at_read_time("agent-error", None) is False
+@pytest.mark.parametrize(
+    ("failure_kind", "phase"),
+    [("agent-error", "planning"), ("agent-error", None)],
+    ids=["model-phase", "missing-phase"],
+)
+def test_catch_all_classifier_fails_closed_outside_infrastructure_phases(failure_kind, phase):
+    # #710: the catch-all classifier only neutralizes in infrastructure phases.
+    assert worker_failure.run_failure_is_infrastructure_at_read_time(failure_kind, phase) is False
 
 
 def test_slice_b_typed_failure_class_run_receipt_is_neutral(tmp_path):
