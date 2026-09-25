@@ -150,13 +150,13 @@ def test_daily_status_timeout_degrades_slow_candidate_section(tmp_path, capsys, 
 
 def test_daily_status_uses_lightweight_center_snapshot(tmp_path, capsys, monkeypatch):
     _seed_ready_repo(tmp_path, capsys)
-    monkeypatch.setenv("BRIGADE_DAILY_STATUS_SECTION_TIMEOUT", "1")
 
-    def slow_center_status(target):
-        time.sleep(3)
-        return {}
+    # Prove the full center status is never called instead of racing a wall-clock
+    # section timeout, which flaked on loaded Windows runners.
+    def full_center_status(target):
+        raise AssertionError("daily status must use the lightweight center snapshot")
 
-    monkeypatch.setattr(center_cmd, "status_payload", slow_center_status)
+    monkeypatch.setattr(center_cmd, "status_payload", full_center_status)
 
     assert daily_cmd.status(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
