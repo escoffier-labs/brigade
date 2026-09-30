@@ -142,27 +142,33 @@ def _strip_comment(line: str) -> str:
 
 
 def _path(value: str, line_number: int) -> list[str]:
-    # Split a dotted table path on UNQUOTED dots only, stripping the surrounding
-    # quotes per segment, so a quoted dotted key like mcp_servers."io.github.x"
-    # stays a single segment instead of fragmenting into io/github/x.
+    # Split a dotted table path on UNQUOTED dots only, so a quoted dotted key like
+    # mcp_servers."io.github.x" stays one segment. Quotes are kept while splitting
+    # so _parse_key can decode basic-string escapes; a backslash inside a double
+    # quoted segment escapes the next character (an escaped quote or dot).
     parts: list[str] = []
     current: list[str] = []
     quote = ""
+    escaped = False
     for char in value:
         if quote:
-            if char == quote:
+            current.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote == '"':
+                escaped = True
+            elif char == quote:
                 quote = ""
-            else:
-                current.append(char)
         elif char in ("'", '"'):
             quote = char
+            current.append(char)
         elif char == ".":
             parts.append("".join(current).strip())
             current = []
         else:
             current.append(char)
     parts.append("".join(current).strip())
-    parts = [part for part in parts if part]
+    parts = [_parse_key(part, line_number) for part in parts if part]
     if not parts:
         raise TOMLDecodeError(f"invalid TOML table on line {line_number}")
     return parts
@@ -245,7 +251,12 @@ def _parse_inline_table(value: str, line_number: int) -> dict[str, Any]:
 def _parse_key(value: str, line_number: int) -> str:
     if not value:
         raise TOMLDecodeError(f"invalid TOML key on line {line_number}")
-    if value[0] in {"'", '"'}:
+    if value[0] == "'":
+        # TOML literal strings take no escapes; keep backslashes as written.
+        if len(value) < 3 or value[-1] != "'":
+            raise TOMLDecodeError(f"invalid TOML key on line {line_number}")
+        return value[1:-1]
+    if value[0] == '"':
         try:
             parsed = ast.literal_eval(value)
         except (SyntaxError, ValueError) as exc:

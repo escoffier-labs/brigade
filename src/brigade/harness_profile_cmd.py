@@ -1199,8 +1199,7 @@ def _profile_context(live_entry: dict[str, Any], record: Any) -> mcp_cmd.Project
 def _native_auth_record(profile, live_entry: dict[str, Any], record: Any, server) -> dict[str, Any]:
     if profile.mcp_harness not in ("codex", "codex-user"):
         return {}
-    keys = mcp_cmd._codex_native_auth_keys(live_entry, record if isinstance(record, dict) else None, server)
-    return {"native_auth_keys": keys}
+    return mcp_cmd._codex_auth_record(live_entry, record if isinstance(record, dict) else None, server)
 
 
 def _mcp_plan(
@@ -1337,6 +1336,8 @@ def _mcp_plan(
             )
         except ValueError as exc:
             item.update(status="conflict", action="preserve", detail=f"{name}: {exc}")
+            if isinstance(exc, mcp_cmd.NativeAuthConflict):
+                item.update(exc.fields)
             conflicts.append(item)
             items.append(item)
             continue
@@ -1365,7 +1366,7 @@ def _mcp_plan(
                 ownership[name] = {"projected_fingerprint": fingerprint, "managed": False, **auth}
         elif localio.stable_hash(live[name]) == fingerprint:
             item.update(status="current", action="none")
-            ownership[name] = {**record, **auth} if record.get("managed") else record
+            ownership[name] = {**record, **auth}
         elif record.get("managed") and localio.stable_hash(live[name]) == record.get("projected_fingerprint"):
             item.update(status="stale", action="update")
             updates[name] = provider
@@ -1436,6 +1437,8 @@ def _try_project(
         return mcp_cmd._project_server(workspace, harness, server, _profile_context(live_entry, record))
     except ValueError as exc:
         item.update(status="conflict", detail=f"{name}: {exc}")
+        if isinstance(exc, mcp_cmd.NativeAuthConflict):
+            item.update(exc.fields)
         return None
 
 

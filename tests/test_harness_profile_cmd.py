@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from brigade import __version__ as BRIGADE_VERSION
 from brigade import harness_profile_cmd, harness_profiles, managed_block
 
@@ -245,3 +247,88 @@ def test_profile_adopt_preserves_genuine_native_auth(tmp_path):
     assert live["url"] == "https://mcp.example.com/v2"
     _, ok = harness_profile_cmd._verify_mcp(profile, state, tmp_path)
     assert ok is True
+
+
+@pytest.mark.parametrize(
+    "native",
+    [
+        {"http_headers": {"aUtHoRiZaTiOn": "Bearer fake-static"}},
+        {"env_http_headers": {"aUtHoRiZaTiOn": "OLD_HEADER"}},
+        {"bearer_token_env_var": "OLD_TOKEN"},
+    ],
+)
+def test_review_profile_generic_auth_collision_preserves_native(tmp_path, native):
+    from brigade import mcp_adapters, mcp_cmd
+
+    raw = {"transport": "http", "url": "https://mcp.example.com", "headers": {"Authorization": {"ref": "HEADER"}}}
+    profile, path = _codex_profile_workspace(tmp_path, raw)
+    adapter = mcp_adapters.ADAPTERS[profile.mcp_harness]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(adapter.write_file(None, {"docs": {"url": raw["url"], **native}}, set()))
+    state = {**_state(tmp_path), "harness": "codex"}
+    _apply_mcp(profile, state, tmp_path, path, adopt=True)
+    raw["headers"]["X-Other"] = {"ref": "OTHER_HEADER"}
+    server, _ = mcp_adapters.server_from_dict("docs", raw)
+    mcp_cmd._write_canonical(tmp_path, {"docs": server})
+    _apply_mcp(profile, state, tmp_path, path, adopt=True)
+    before = path.read_bytes()
+    raw["headers"]["authorization"] = raw["headers"].pop("Authorization")
+    raw["headers"]["authorization"] = {"ref": "NEW_HEADER"}
+    server, _ = mcp_adapters.server_from_dict("docs", raw)
+    mcp_cmd._write_canonical(tmp_path, {"docs": server})
+    plan = harness_profile_cmd._mcp_plan(profile, state, tmp_path, allow_global_stdio=True, adopt=True)
+    assert plan["conflicts"][0]["reason"] == "native_auth_collision"
+    assert plan["conflicts"][0]["headers"] == ["authorization"]
+    assert plan["updates"] == {}
+    assert path.read_bytes() == before
+    verified, ok = harness_profile_cmd._verify_mcp(profile, state, tmp_path)
+    assert ok is False
+    assert verified["items"][0]["reason"] == "native_auth_collision"
+    for secret in ("fake-static", "OLD_HEADER", "OLD_TOKEN", "HEADER", "NEW_HEADER"):
+        assert secret not in json.dumps(plan["conflicts"])
+        assert secret not in json.dumps(state)
+
+
+@pytest.mark.parametrize("unchanged", [False, True])
+def test_review_profile_legacy_auth_baseline_requires_unchanged_canonical(tmp_path, unchanged):
+    from brigade import mcp_adapters, mcp_cmd
+
+    raw = {"transport": "http", "url": "https://mcp.example.com", "headers": {"Authorization": {"ref": "HEADER"}}}
+    profile, path = _codex_profile_workspace(tmp_path, raw)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('[mcp_servers.docs]\nurl = "https://mcp.example.com"\nbearer_token_env_var = "OLD_TOKEN"\n')
+    state = {**_state(tmp_path), "harness": "codex"}
+    _apply_mcp(profile, state, tmp_path, path, adopt=True)
+    state["mcp"]["docs"].pop("generic_header_fingerprints", None)
+    if not unchanged:
+        raw["url"] += "/v2"
+        server, _ = mcp_adapters.server_from_dict("docs", raw)
+        mcp_cmd._write_canonical(tmp_path, {"docs": server})
+    plan = harness_profile_cmd._mcp_plan(profile, state, tmp_path, allow_global_stdio=True, adopt=True)
+    if unchanged:
+        assert plan["conflicts"] == []
+        assert set(plan["next"]["docs"]["generic_header_fingerprints"]) == {"authorization"}
+    else:
+        assert plan["conflicts"][0]["reason"] == "native_auth_collision"
+
+
+def test_review_profile_explicit_env_auth_removes_adopted_static(tmp_path):
+    from brigade import mcp_adapters, mcp_cmd
+
+    raw = {"transport": "http", "url": "https://mcp.example.com"}
+    profile, path = _codex_profile_workspace(tmp_path, raw)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '[mcp_servers.docs]\nurl = "https://mcp.example.com"\nhttp_headers = { Authorization = "Bearer fake-secret", "X-Public" = "keep" }\n'
+    )
+    state = {**_state(tmp_path), "harness": "codex"}
+    _apply_mcp(profile, state, tmp_path, path, adopt=True)
+    raw["env_http_headers"] = {"AUTHORIZATION": "NEW_HEADER"}
+    server, _ = mcp_adapters.server_from_dict("docs", raw)
+    mcp_cmd._write_canonical(tmp_path, {"docs": server})
+    for _ in range(2):
+        _apply_mcp(profile, state, tmp_path, path, adopt=True)
+        live = mcp_adapters.ADAPTERS[profile.mcp_harness].read_file(path.read_text())["docs"]
+        assert live["http_headers"] == {"X-Public": "keep"}
+        assert live["env_http_headers"] == {"AUTHORIZATION": "NEW_HEADER"}
+        assert "fake-secret" not in path.read_text()

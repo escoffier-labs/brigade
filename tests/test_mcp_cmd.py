@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import subprocess
 
+import pytest
+
 from brigade import mcp_adapters, mcp_cmd
 
 
@@ -401,6 +403,128 @@ required = true
     capsys.readouterr()
     assert mcp_cmd.sync(target=tmp_path, harness="codex", write=True, json_output=True) == 0
     assert _payload(capsys)["terminal_state"] == "unchanged"
+
+
+@pytest.mark.parametrize(
+    "native",
+    [
+        {"http_headers": {"aUtHoRiZaTiOn": "Bearer fake-static"}},
+        {"env_http_headers": {"aUtHoRiZaTiOn": "OLD_HEADER"}},
+        {"bearer_token_env_var": "OLD_TOKEN"},
+    ],
+)
+@pytest.mark.parametrize("initial_header", [False, True])
+def test_review_changed_generic_auth_conflicts_with_adopted_native(tmp_path, capsys, native, initial_header):
+    _init(tmp_path)
+    adapter = mcp_adapters.ADAPTERS["codex"]
+    path = tmp_path / adapter.path
+    path.parent.mkdir()
+    live = {"url": "https://mcp.example.com/v1", **native, "required": True}
+    path.write_text(adapter.write_file(None, {"docs": live}, set()))
+    raw = {"transport": "http", "url": live["url"]}
+    if initial_header:
+        raw["headers"] = {"Authorization": {"ref": "ORIGINAL_HEADER"}}
+    server, _ = mcp_adapters.server_from_dict("docs", raw)
+    mcp_cmd._write_canonical(tmp_path, {"docs": server})
+    assert mcp_cmd.sync(target=tmp_path, harness="codex", adopt=True, write=True, json_output=True) == 0
+    before, state_before = path.read_bytes(), mcp_cmd.state_path(tmp_path).read_bytes()
+    raw["headers"] = {"AUTHORIZATION": {"ref": "NEW_HEADER"}}
+    server, _ = mcp_adapters.server_from_dict("docs", raw)
+    mcp_cmd._write_canonical(tmp_path, {"docs": server})
+    capsys.readouterr()
+    assert mcp_cmd.sync(target=tmp_path, harness="codex", write=True, force=True, json_output=True) == 1
+    payload = _payload(capsys)
+    assert payload["items"][0]["reason"] == "native_auth_collision"
+    assert payload["items"][0]["headers"] == ["authorization"]
+    assert "explicit native canonical auth" in payload["items"][0]["detail"]
+    assert path.read_bytes() == before
+    assert mcp_cmd.state_path(tmp_path).read_bytes() == state_before
+    for secret in ("fake-static", "OLD_HEADER", "OLD_TOKEN", "ORIGINAL_HEADER", "NEW_HEADER"):
+        assert secret not in json.dumps(payload)
+        assert secret not in state_before.decode()
+
+
+@pytest.mark.parametrize("legacy_unchanged", [False, True])
+def test_review_legacy_auth_baseline_requires_unchanged_canonical(tmp_path, capsys, legacy_unchanged):
+    _init(tmp_path)
+    adapter = mcp_adapters.ADAPTERS["codex"]
+    path = tmp_path / adapter.path
+    path.parent.mkdir()
+    path.write_text('[mcp_servers.docs]\nurl = "https://mcp.example.com"\nbearer_token_env_var = "OLD_TOKEN"\n')
+    raw = {"transport": "http", "url": "https://mcp.example.com", "headers": {"Authorization": {"ref": "HEADER"}}}
+    server, _ = mcp_adapters.server_from_dict("docs", raw)
+    mcp_cmd._write_canonical(tmp_path, {"docs": server})
+    assert mcp_cmd.sync(target=tmp_path, harness="codex", adopt=True, write=True, json_output=True) == 0
+    state = mcp_cmd._load_state(tmp_path)
+    record = state["ownership"]["codex"][adapter.path]["docs"]
+    record.pop("generic_header_fingerprints", None)
+    mcp_cmd.state_path(tmp_path).write_text(json.dumps(state))
+    before = path.read_bytes()
+    if not legacy_unchanged:
+        raw["headers"]["X-Other"] = {"literal": "unrelated"}
+        server, _ = mcp_adapters.server_from_dict("docs", raw)
+        mcp_cmd._write_canonical(tmp_path, {"docs": server})
+    capsys.readouterr()
+    rc = mcp_cmd.sync(target=tmp_path, harness="codex", write=True, json_output=True)
+    payload = _payload(capsys)
+    assert rc == (0 if legacy_unchanged else 1)
+    assert path.read_bytes() == before
+    if legacy_unchanged:
+        record = mcp_cmd._load_state(tmp_path)["ownership"]["codex"][adapter.path]["docs"]
+        assert set(record["generic_header_fingerprints"]) == {"authorization"}
+    else:
+        assert payload["items"][0]["reason"] == "native_auth_collision"
+
+
+@pytest.mark.parametrize("harness", ["codex", "codex-user"])
+def test_review_default_import_demotion_removes_adopted_static_auth(tmp_path, capsys, monkeypatch, harness):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _init(tmp_path)
+    adapter = mcp_adapters.ADAPTERS[harness]
+    path = mcp_adapters.resolve_path(adapter, tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '[mcp_servers.docs]\nurl = "https://mcp.example.com"\nhttp_headers = { aUtHoRiZaTiOn = "Bearer fake-secret", "X-Public" = "keep" }\n'
+    )
+    assert (
+        mcp_cmd.import_servers(
+            target=tmp_path, harness=harness, merge=True, user_scope=adapter.user_scope, json_output=True
+        )
+        == 0
+    )
+    for _ in range(2):
+        assert (
+            mcp_cmd.sync(
+                target=tmp_path,
+                harness=harness,
+                adopt=True,
+                write=True,
+                user_scope=adapter.user_scope,
+                json_output=True,
+            )
+            == 0
+        )
+        live = adapter.read_file(path.read_text())["docs"]
+        assert live["http_headers"] == {"X-Public": "keep"}
+        assert live["env_http_headers"] == {"aUtHoRiZaTiOn": "AUTHORIZATION"}
+        assert "fake-secret" not in path.read_text()
+
+
+def test_review_auth_collision_does_not_block_stdio_transition(tmp_path):
+    _init(tmp_path)
+    adapter = mcp_adapters.ADAPTERS["codex"]
+    path = tmp_path / adapter.path
+    path.parent.mkdir()
+    path.write_text('[mcp_servers.docs]\nurl = "https://mcp.example.com"\nbearer_token_env_var = "OLD_TOKEN"\n')
+    server = mcp_adapters.CanonicalServer(name="docs", transport="http", url="https://mcp.example.com")
+    mcp_cmd._write_canonical(tmp_path, {"docs": server})
+    assert mcp_cmd.sync(target=tmp_path, harness="codex", adopt=True, write=True, json_output=True) == 0
+    stdio = mcp_adapters.CanonicalServer(
+        name="docs", command="fake-command", headers={"Authorization": {"ref": "UNUSED_HEADER"}}
+    )
+    mcp_cmd._write_canonical(tmp_path, {"docs": stdio})
+    assert mcp_cmd.sync(target=tmp_path, harness="codex", write=True, json_output=True) == 0
+    assert adapter.read_file(path.read_text())["docs"] == {"command": "fake-command"}
 
 
 def test_codex_unsupported_interpolation_is_a_safe_command_error(tmp_path, capsys):

@@ -209,6 +209,17 @@ class ProjectionContext:
     record: dict[str, Any] | None
 
 
+class NativeAuthConflict(ValueError):
+    """A later generic credential cannot silently shadow retained native auth."""
+
+    def __init__(self, headers: set[str]):
+        super().__init__(
+            "generic headers collide with retained native authentication; live config unchanged; "
+            "use explicit native canonical auth to resolve the collision"
+        )
+        self.fields: dict[str, Any] = {"reason": "native_auth_collision", "headers": sorted(headers)}
+
+
 def _project_server(
     target: Path, harness: str, server: CanonicalServer, context: ProjectionContext | None = None
 ) -> dict[str, Any]:
@@ -227,6 +238,7 @@ def _project_server(
                 native_auth[key] = {k: value[k] for k in names if k in value}
             elif names is True and value:
                 native_auth[key] = value
+        _check_codex_generic_auth(server, native_auth, record)
         return mcp_adapters.codex_merge_server(server, live, native_auth)
     projected = adapter.to_provider(server)
     command_name = Path(server.command or "").name.lower()
@@ -259,17 +271,48 @@ def _codex_native_auth_keys(
         if record is not None
         else {k: sorted(v) if isinstance(v, dict) else True for k, v in mcp_adapters.codex_native_auth(live).items()}
     )
-    for key, value in mcp_adapters.codex_native_auth(vars(server)).items():
-        if isinstance(value, dict):
-            explicit = {name.lower() for name in value}
+    explicit = mcp_adapters.codex_auth_header_names(mcp_adapters.codex_native_auth(vars(server)))
+    for key in list(keys):
+        if key in ("http_headers", "env_http_headers"):
             remaining = [name for name in keys.get(key, []) if name.lower() not in explicit]
             if remaining:
                 keys[key] = remaining
             else:
                 keys.pop(key, None)
-        else:
+        elif key == "bearer_token_env_var" and "authorization" in explicit:
             keys.pop(key, None)
     return keys
+
+
+def _codex_generic_header_fingerprints(server: CanonicalServer) -> dict[str, str]:
+    return {name.lower(): localio.stable_hash(value) for name, value in server.headers.items()}
+
+
+def _codex_auth_record(live: dict[str, Any], record: dict[str, Any] | None, server: CanonicalServer) -> dict[str, Any]:
+    """Shared sync/profile provenance, storing header names and hashes only."""
+    return {
+        "native_auth_keys": _codex_native_auth_keys(live, record, server),
+        "generic_header_fingerprints": _codex_generic_header_fingerprints(server),
+        "canonical_fingerprint": localio.stable_hash(mcp_adapters.server_to_dict(server)),
+    }
+
+
+def _check_codex_generic_auth(
+    server: CanonicalServer, native_auth: dict[str, Any], record: dict[str, Any] | None
+) -> None:
+    if record is None or not server.is_remote:
+        return  # Initial adoption retains native precedence.
+    current = _codex_generic_header_fingerprints(server)
+    overlaps = set(current) & mcp_adapters.codex_auth_header_names(native_auth)
+    baseline = record.get("generic_header_fingerprints")
+    if isinstance(baseline, dict):
+        conflicts = {name for name in overlaps if current[name] != baseline.get(name)}
+    else:
+        # A legacy whole-server hash proves only that everything is unchanged.
+        unchanged = record.get("canonical_fingerprint") == localio.stable_hash(mcp_adapters.server_to_dict(server))
+        conflicts = set() if unchanged else overlaps
+    if conflicts:
+        raise NativeAuthConflict(conflicts)
 
 
 def _plan_for_harness(
@@ -301,6 +344,14 @@ def _plan_for_harness(
             continue
         try:
             provider_dict = _project_server(target, harness, server)
+        except NativeAuthConflict as exc:
+            items.append(
+                {
+                    **_item(harness, rel, name, "conflicted", "conflict", None, None, detail=f"{name}: {exc}"),
+                    **exc.fields,
+                }
+            )
+            continue
         except ValueError as exc:
             items.append(_item(harness, rel, name, "invalid", "conflict", None, None, detail=f"{name}: {exc}"))
             continue
@@ -967,7 +1018,7 @@ def build_sync_plan(
                     "projected_fingerprint": item["_proj_fp"],
                     **(
                         {
-                            "native_auth_keys": _codex_native_auth_keys(
+                            **_codex_auth_record(
                                 live.get(server_name, {}), owner_map.get(server_name), servers[server_name]
                             )
                         }
@@ -990,7 +1041,7 @@ def build_sync_plan(
                     "projected_fingerprint": item["_proj_fp"],
                     **(
                         {
-                            "native_auth_keys": _codex_native_auth_keys(
+                            **_codex_auth_record(
                                 live.get(server_name, {}), owner_map.get(server_name), servers[server_name]
                             )
                         }

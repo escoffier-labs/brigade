@@ -397,6 +397,66 @@ def test_vscode_remote_headers_roundtrip():
     assert back.headers == {"Authorization": {"ref": "TOKEN"}}
 
 
+@pytest.mark.parametrize("transport", ["http", "sse"])
+@pytest.mark.parametrize(
+    "auth,expected",
+    [
+        ({"headers": {"Authorization": {"ref": "HEADER"}}}, "${input:HEADER}"),
+        ({"env_http_headers": {"Authorization": "HEADER"}}, "${input:HEADER}"),
+        ({"bearer_token_env_var": "HEADER"}, "Bearer ${input:HEADER}"),
+        ({"http_headers": {"Authorization": "Bearer ${input:HEADER}"}}, "Bearer ${input:HEADER}"),
+    ],
+)
+def test_review_vscode_remote_auth_defines_inputs(transport, auth, expected):
+    adapter = A.ADAPTERS["vscode"]
+    # Static template-looking native headers are refused rather than expanded.
+    server = CanonicalServer(name="docs", transport=transport, url="https://mcp.example.com", **auth)
+    if "http_headers" in auth:
+        with pytest.raises(ValueError, match="cannot preserve"):
+            adapter.to_provider(server)
+        return
+    projected = adapter.to_provider(server)
+    assert projected["headers"]["Authorization"] == expected
+    custom = {"id": "HEADER", "type": "command", "command": "fake.prompt"}
+    existing = json.dumps({"inputs": [custom, {"id": "UNRELATED", "type": "promptString"}]})
+    doc = json.loads(adapter.write_file(None, {"docs": projected}, set()))
+    assert doc["inputs"] == [
+        {"id": "HEADER", "type": "promptString", "description": "HEADER for MCP", "password": True}
+    ]
+    merged = json.loads(adapter.write_file(existing, {"docs": projected}, set()))
+    assert merged["inputs"] == json.loads(existing)["inputs"]
+    assert adapter.write_file(json.dumps(doc), {"docs": projected}, set()) == adapter.write_file(
+        None, {"docs": projected}, set()
+    )
+
+
+@pytest.mark.parametrize(
+    "explicit",
+    [
+        {"env_http_headers": {"AUTHORIZATION": "NEW_HEADER"}},
+        {"http_headers": {"AUTHORIZATION": "Bearer new-fake"}},
+        {"bearer_token_env_var": "NEW_TOKEN"},
+        {"http_headers": {"AUTHORIZATION": "Bearer new-fake"}, "env_http_headers": {"authorization": "NEW_HEADER"}},
+    ],
+)
+def test_review_explicit_native_auth_replaces_adopted_across_forms(explicit):
+    server = CanonicalServer(name="docs", transport="http", url="https://mcp.example.com", **explicit)
+    adopted = {
+        "http_headers": {"Authorization": "Bearer old-fake", "X-Other": "keep"},
+        "env_http_headers": {"authorization": "OLD_HEADER", "X-Other-Env": "KEEP_ENV"},
+        "bearer_token_env_var": "OLD_TOKEN",
+    }
+    projected = A.codex_merge_server(server, {"required": True}, adopted)
+    assert projected == {
+        "required": True,
+        "url": server.url,
+        "type": "http",
+        "http_headers": {"X-Other": "keep", **explicit.get("http_headers", {})},
+        "env_http_headers": {"X-Other-Env": "KEEP_ENV", **explicit.get("env_http_headers", {})},
+        **({"bearer_token_env_var": explicit["bearer_token_env_var"]} if "bearer_token_env_var" in explicit else {}),
+    }
+
+
 def test_opencode_remote_headers_roundtrip():
     """BUG 3: opencode remote must emit and parse headers."""
     adapter = A.ADAPTERS["opencode"]

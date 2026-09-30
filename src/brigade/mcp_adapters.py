@@ -183,6 +183,14 @@ def codex_native_auth(raw: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def codex_auth_header_names(auth: dict[str, Any]) -> set[str]:
+    """Logical header names for native values or value-free ownership keys."""
+    names = {name.lower() for key in ("http_headers", "env_http_headers") for name in auth.get(key, {})}
+    if auth.get("bearer_token_env_var"):
+        names.add("authorization")
+    return names
+
+
 # --------------------------------------------------------------------------- #
 # Validation (reuses the risk patterns from tools_cmd, single source of truth)
 # --------------------------------------------------------------------------- #
@@ -370,12 +378,14 @@ def _merge_vscode_inputs(doc: dict[str, Any], servers: dict[str, Any]) -> None:
     """Ensure VS Code top-level ``inputs`` has a promptString entry per ${input:VAR}."""
     referenced: set[str] = set()
     for server in servers.values():
-        env = server.get("env") if isinstance(server, dict) else None
-        if isinstance(env, dict):
-            for value in env.values():
-                match = _REF_RE.match(value) if isinstance(value, str) and value.startswith("${input:") else None
-                if match:
-                    referenced.add(match.group(1))
+        if not isinstance(server, dict):
+            continue
+        for field_name in ("env", "headers"):
+            values = server.get(field_name)
+            if isinstance(values, dict):
+                for value in values.values():
+                    if isinstance(value, str):
+                        referenced.update(re.findall(r"\$\{input:([A-Za-z_][A-Za-z0-9_]*)\}", value))
     existing = doc.get("inputs")
     inputs = [i for i in existing if isinstance(i, dict)] if isinstance(existing, list) else []
     have = {i.get("id") for i in inputs}
@@ -602,10 +612,16 @@ def _codex_render_native_table(name: str, server_dict: dict[str, Any]) -> str:
 def _codex_to_provider(server: CanonicalServer, *, native_auth: dict[str, Any] | None = None) -> dict[str, Any]:
     if not server.is_remote:
         return _mcpservers_to_provider(server, "passthrough")
-    # Precedence: explicit canonical native auth > adopted native auth > generic
-    # headers. Keep static and env maps independent, even for the same header.
+    # Canonical native auth replaces adopted auth for the same logical header
+    # across all forms. Explicit canonical static/env fallback pairs stay intact.
     native = codex_native_auth(native_auth or {})
-    for key, value in codex_native_auth(vars(server)).items():
+    canonical = codex_native_auth(vars(server))
+    explicit = codex_auth_header_names(canonical)
+    for key in ("http_headers", "env_http_headers"):
+        native[key] = {name: value for name, value in native.get(key, {}).items() if name.lower() not in explicit}
+    if "authorization" in explicit:
+        native.pop("bearer_token_env_var", None)
+    for key, value in canonical.items():
         if isinstance(value, dict):
             native[key] = {**native.get(key, {}), **value}
         else:
@@ -613,9 +629,7 @@ def _codex_to_provider(server: CanonicalServer, *, native_auth: dict[str, Any] |
     static: dict[str, str] = {}
     env: dict[str, str] = {}
     bearer: str | None = None
-    explicit_headers = {
-        k.lower() for auth_field in ("http_headers", "env_http_headers") for k in native.get(auth_field, {})
-    }
+    explicit_headers = codex_auth_header_names(native)
     for key, value in server.headers.items():
         if key.lower() in explicit_headers:
             continue

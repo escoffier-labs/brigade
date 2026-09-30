@@ -135,3 +135,35 @@ def test_fallback_parses_quoted_dotted_table_key(monkeypatch):
 
     assert payload["mcp_servers"]["io.github.example"]["command"] == "npx"
     assert payload["mcp_servers"]["github"]["command"] == "plain"
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        (r'"srvx\u007fy"', "srvx\x7fy"),
+        (r'"café"', "café"),
+        (r'"a\"b"', 'a"b'),
+        (r'"a\\b"', "a\\b"),
+        (r"'a\u007fb'", "a\\u007fb"),
+        (r"'a\\b'", "a\\\\b"),
+        (r'"io.github.example"', "io.github.example"),
+    ],
+)
+def test_fallback_decodes_quoted_table_key_escapes(monkeypatch, header, expected):
+    source = f'[mcp_servers.{header}]\ncommand = "npx"\n\n[[arr.{header}]]\nname = "x"\n'
+    stdlib_payload = toml_compat.loads(source)
+    monkeypatch.setattr(toml_compat, "_stdlib_tomllib", None)
+
+    payload = toml_compat.loads(source)
+
+    assert payload == stdlib_payload
+    assert payload["mcp_servers"][expected]["command"] == "npx"
+    assert payload["arr"][expected][0]["name"] == "x"
+
+
+def test_fallback_escaped_backslash_before_dot_splits_segments(monkeypatch):
+    source = '[a."b\\\\".c]\nv = 1\n'
+    stdlib_payload = toml_compat.loads(source)
+    monkeypatch.setattr(toml_compat, "_stdlib_tomllib", None)
+
+    assert toml_compat.loads(source) == stdlib_payload == {"a": {"b\\": {"c": {"v": 1}}}}
