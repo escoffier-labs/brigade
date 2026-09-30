@@ -50,6 +50,7 @@ Issues = "https://github.com/escoffier-labs/brigade/issues"
 
 [project.scripts]
 brigade = "brigade.cli:main"
+brigade-hook = "brigade.claude_hooks.entry:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

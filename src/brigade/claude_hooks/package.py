@@ -7,9 +7,10 @@ from pathlib import Path
 from typing import Any
 
 PACKAGE_ID = "brigade-claude-work-loop"
-PACKAGE_VERSION = "1.3.0"
+PACKAGE_VERSION = "1.3.1"
 PACKAGE_REF = f"{PACKAGE_ID}@{PACKAGE_VERSION}"
 COMMAND_PREFIX = "brigade work hook-run"
+DIRECT_ENTRY_COMMAND = "brigade-hook"
 MANAGED_EVENTS = (
     "SessionStart",
     "UserPromptSubmit",
@@ -56,29 +57,41 @@ def managed_groups() -> dict[str, list[dict[str, Any]]]:
 
 
 def hook_script_text(*, pin: Path | None = None) -> str:
+    """Return the user-scope hook script.
+
+    It runs the lightweight ``brigade-hook`` entry point when it is on PATH and
+    falls back to the full CLI otherwise.
+    """
     pin_flag = f" --target {shlex.quote(str(pin))}" if pin is not None else ""
-    return (
-        "#!/usr/bin/env sh\n"
-        f"# Brigade-managed Claude Code work-loop hook ({PACKAGE_REF}).\n"
-        "# Installed by `brigade work hooks install --scope user`; do not edit.\n"
-        "set -eu\n"
-        'event=""\n'
-        'while [ "$#" -gt 0 ]; do\n'
-        '  case "$1" in\n'
-        "    --event)\n"
-        '      event="$2"\n'
-        "      shift 2\n"
-        "      ;;\n"
-        "    *)\n"
-        "      shift\n"
-        "      ;;\n"
-        "  esac\n"
-        "done\n"
-        'if [ -z "$event" ]; then\n'
-        "  exit 0\n"
-        "fi\n"
-        f'exec brigade work hook-run --event "$event" --package "{PACKAGE_REF}"{pin_flag}\n'
-    )
+    args = f'--event "$event" --package "{PACKAGE_REF}"'
+    lines = [
+        "#!/usr/bin/env sh",
+        f"# Brigade-managed Claude Code work-loop hook ({PACKAGE_REF}).",
+        "# Installed by `brigade work hooks install --scope user`; do not edit.",
+        "set -eu",
+        'event=""',
+        'while [ "$#" -gt 0 ]; do',
+        '  case "$1" in',
+        "    --event)",
+        '      event="$2"',
+        "      shift 2",
+        "      ;;",
+        "    *)",
+        "      shift",
+        "      ;;",
+        "  esac",
+        "done",
+        'if [ -z "$event" ]; then',
+        "  exit 0",
+        "fi",
+    ]
+    lines += [
+        f"if command -v {DIRECT_ENTRY_COMMAND} >/dev/null 2>&1; then",
+        f"  exec {DIRECT_ENTRY_COMMAND} {args}{pin_flag}",
+        "fi",
+        f"exec {COMMAND_PREFIX} {args}{pin_flag}",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def managed_user_command(event: str, script_path: Path) -> str:
@@ -136,7 +149,10 @@ def _command_tokens(value: object) -> list[str] | None:
 def is_managed_user_handler(value: object, script_path: Path, event: str | None = None) -> bool:
     if not isinstance(value, dict):
         return False
-    if value.get(MANAGED_MARKER_KEY) != PACKAGE_REF:
+    marker = value.get(MANAGED_MARKER_KEY)
+    # Any released package version stays recognized so an upgrade replaces the
+    # old entries instead of leaving them behind as foreign duplicates.
+    if not isinstance(marker, str) or not marker.startswith(f"{PACKAGE_ID}@") or len(marker) <= len(PACKAGE_ID) + 1:
         return False
     tokens = _command_tokens(value)
     if tokens is None:

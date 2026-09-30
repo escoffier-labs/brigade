@@ -155,7 +155,7 @@ def test_hooks_status_reports_a_pre_session_end_install_as_incomplete(tmp_path: 
     assert managed_command("SessionEnd") in session_end
     assert status_payload(target)["current"] is True
     sidecar = json.loads((target / ".brigade" / "claude-hooks.json").read_text())
-    assert sidecar["package_version"] == PACKAGE_VERSION == "1.3.0"
+    assert sidecar["package_version"] == PACKAGE_VERSION == "1.3.1"
 
 
 def test_hooks_status_reports_matcher_drift_as_stale(tmp_path: Path):

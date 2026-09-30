@@ -10,8 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from .. import localio
-from ..work_cmd import inbox_lock
+from .. import inbox_lock, localio
 from . import envelope
 
 _SESSION_STATE_PROCESS_LOCKS_GUARD = threading.Lock()

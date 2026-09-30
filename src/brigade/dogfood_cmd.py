@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import aboyeur, localio, run_budget, runguard, toml_compat
+from . import localio, run_budget, runguard, toml_compat
 from . import agents
 from . import runs_cmd
 from .roster import Agent, Roster
@@ -512,6 +512,9 @@ def run(
     if timeout_seconds <= 0 or effective_timeout <= 0:
         print("error: --timeout-seconds must be positive", file=sys.stderr)
         return 2
+
+    # Imported here: aboyeur costs ~85 ms and only ``run`` needs it (hook path).
+    from . import aboyeur
 
     artifacts_dir = (
         cfg.artifacts_dir if cfg and cfg.artifacts_dir is not None else effective_target / ".brigade" / "runs"
