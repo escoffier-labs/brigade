@@ -53,6 +53,11 @@ class CanonicalServer:
     enabled: bool = True
     targets: tuple[str, ...] | None = None
     description: str = ""
+    # Native Codex auth keeps static headers, whole-header refs and token-only
+    # refs separate. Generic headers remain the portable harness representation.
+    http_headers: dict[str, str] = field(default_factory=dict)
+    env_http_headers: dict[str, str] = field(default_factory=dict)
+    bearer_token_env_var: str | None = None
 
     @property
     def is_remote(self) -> bool:
@@ -111,6 +116,7 @@ def server_from_dict(name: str, raw: dict[str, Any]) -> tuple[CanonicalServer, l
             enabled=bool(raw.get("enabled", True)),
             targets=targets,
             description=str(raw.get("description") or ""),
+            **codex_native_auth(raw),
         ),
         warnings,
     )
@@ -135,6 +141,45 @@ def server_to_dict(server: CanonicalServer) -> dict[str, Any]:
         out["targets"] = list(server.targets)
     if server.description:
         out["description"] = server.description
+    out.update(codex_native_auth(vars(server)))
+    return out
+
+
+_CODEX_AUTH_FIELDS = ("http_headers", "env_http_headers", "bearer_token_env_var")
+_CODEX_MODELED_FIELDS = {"command", "url", "type", "args", "timeout", "env", "headers", *_CODEX_AUTH_FIELDS}
+_CODEX_STDIO_FIELDS = {"cwd", "env_vars"}
+_CODEX_REMOTE_FIELDS = {"oauth_resource"}
+
+
+def _codex_transport_excluded(is_remote: bool) -> set[str]:
+    """Modeled fields plus the options the other transport rejects."""
+    return _CODEX_MODELED_FIELDS | (_CODEX_STDIO_FIELDS if is_remote else _CODEX_REMOTE_FIELDS)
+
+
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def codex_native_auth(raw: dict[str, Any]) -> dict[str, Any]:
+    """Copy native auth without consulting the environment or including values in errors."""
+    out: dict[str, Any] = {}
+    for key in _CODEX_AUTH_FIELDS:
+        value = raw.get(key)
+        if not value:
+            continue
+        if key == "bearer_token_env_var":
+            if not isinstance(value, str) or not _ENV_NAME_RE.fullmatch(value):
+                raise ValueError("Codex bearer_token_env_var requires an environment variable name")
+            out[key] = value
+        else:
+            if not isinstance(value, dict) or any(
+                not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()
+            ):
+                raise ValueError(f"Codex {key} requires a string map")
+            if key == "env_http_headers" and any(not _ENV_NAME_RE.fullmatch(v) for v in value.values()):
+                raise ValueError(
+                    "Codex env_http_headers requires environment variable names; interpolation is unsupported"
+                )
+            out[key] = dict(value)
     return out
 
 
@@ -145,6 +190,12 @@ def server_to_dict(server: CanonicalServer) -> dict[str, Any]:
 
 def _is_high_risk(command: object) -> bool:
     return isinstance(command, str) and any(p.search(command) for p in HIGH_RISK_COMMAND_PATTERNS)
+
+
+def _sensitive_http_header(name: str) -> bool:
+    return name.lower() in {"authorization", "proxy-authorization", "cookie", "set-cookie"} or bool(
+        UNSAFE_FIELD_PATTERN.search(name)
+    )
 
 
 def validate_server(server: CanonicalServer) -> list[tuple[str, str]]:
@@ -162,8 +213,13 @@ def validate_server(server: CanonicalServer) -> list[tuple[str, str]]:
         issues.append(("warn", f"{server.name}: no timeout set"))
     for scope, mapping in (("env", server.env), ("headers", server.headers)):
         for key, value in mapping.items():
-            if "literal" in value and UNSAFE_FIELD_PATTERN.search(key):
+            if "literal" in value and (
+                _sensitive_http_header(key) if scope == "headers" else UNSAFE_FIELD_PATTERN.search(key)
+            ):
                 issues.append(("warn", f'{server.name}: {scope} {key} is an inlined secret; prefer {{"ref": ...}}'))
+    for key in server.http_headers:
+        if _sensitive_http_header(key):
+            issues.append(("warn", f"{server.name}: http_headers {key} is an inlined secret; prefer env_http_headers"))
     return issues
 
 
@@ -372,6 +428,12 @@ def _toml_blocks(text: str) -> tuple[str, list[tuple[str | None, str]]]:
     return "".join(preamble), [(p, "".join(b)) for p, b in blocks]
 
 
+def _toml_escape(escape: str, digits: str) -> str:
+    if escape == "U":
+        return chr(int(digits, 16))
+    return json.loads(f'"\\{escape}"')
+
+
 def _split_toml_path(path: str) -> list[str]:
     """Split a TOML table path on UNQUOTED dots, stripping quotes per segment.
 
@@ -381,8 +443,17 @@ def _split_toml_path(path: str) -> list[str]:
     parts: list[str] = []
     current: list[str] = []
     quote = ""
-    for char in path:
-        if quote:
+    chars = iter(path)
+    for char in chars:
+        if quote == '"' and char == "\\":
+            escape = next(chars, "")
+            width = {"u": 4, "U": 8}.get(escape, 0)
+            digits = "".join(next(chars, "") for _ in range(width))
+            try:
+                current.append(json.loads(f'"\\{escape}{digits}"') if width == 4 else _toml_escape(escape, digits))
+            except ValueError:
+                current.append(char + escape + digits)
+        elif quote:
             if char == quote:
                 quote = ""
             else:
@@ -446,7 +517,9 @@ def _codex_read_file(text: str | None) -> dict[str, dict[str, Any]]:
     return {str(k): v for k, v in servers.items() if isinstance(v, dict)}
 
 
-def _codex_write_file(text: str | None, owned: dict[str, dict[str, Any]], remove: set[str]) -> str:
+def _codex_write_file(
+    text: str | None, owned: dict[str, dict[str, Any]], remove: set[str], *, native: bool = False
+) -> str:
     preamble, blocks = _toml_blocks(text or "")
     managed = set(owned) | set(remove)
     kept: list[str] = []
@@ -458,7 +531,22 @@ def _codex_write_file(text: str | None, owned: dict[str, dict[str, Any]], remove
                 insert_index = len(kept)
             continue
         kept.append(block)
-    rendered = [_codex_render_table(name, owned[name]) for name in sorted(owned)]
+    render = _codex_render_native_table if native else _codex_render_table
+    live = _codex_read_file(text) if native else {}
+    rendered = [
+        render(
+            name,
+            {
+                **{
+                    k: v
+                    for k, v in live.get(name, {}).items()
+                    if k not in _codex_transport_excluded(bool(owned[name].get("url")))
+                },
+                **owned[name],
+            },
+        )
+        for name in sorted(owned)
+    ]
     if insert_index is None:
         insert_index = len(kept)
     merged_blocks = kept[:insert_index] + rendered + kept[insert_index:]
@@ -468,9 +556,137 @@ def _codex_write_file(text: str | None, owned: dict[str, dict[str, Any]], remove
     return (result + "\n") if result else ""
 
 
+def _native_toml_key(key: str) -> str:
+    """Bare key when legal, else a basic string that keeps non-BMP text and escapes DEL."""
+    if re.fullmatch(r"[A-Za-z0-9_-]+", key):
+        return key
+    return json.dumps(key, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
+def _native_toml_value(value: Any) -> str:
+    """Render preserved native options, including nested OAuth/tool tables."""
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f"{_native_toml_key(k)} = {_native_toml_value(v)}" for k, v in value.items()) + " }"
+    if isinstance(value, list):
+        return "[" + ", ".join(_native_toml_value(v) for v in value) + "]"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    # TOML dates are possible in unrelated options; keep their native type.
+    from datetime import date, datetime, time
+
+    if isinstance(value, (date, datetime, time)):
+        return value.isoformat()
+    raise ValueError("unsupported native TOML option type; refusing to overwrite")
+
+
+def _codex_render_native_table(name: str, server_dict: dict[str, Any]) -> str:
+    fields = dict(server_dict)
+    if fields.get("url"):
+        fields.pop("headers", None)  # obsolete generic remote field
+    lines = [f"[mcp_servers.{_native_toml_key(name)}]\n"]
+    lines.extend(f"{_native_toml_key(k)} = {_native_toml_value(v)}\n" for k, v in fields.items())
+    return "".join(lines)
+
+
 # --------------------------------------------------------------------------- #
 # Per-provider transforms
 # --------------------------------------------------------------------------- #
+
+
+def _codex_to_provider(server: CanonicalServer, *, native_auth: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not server.is_remote:
+        return _mcpservers_to_provider(server, "passthrough")
+    # Precedence: explicit canonical native auth > adopted native auth > generic
+    # headers. Keep static and env maps independent, even for the same header.
+    native = codex_native_auth(native_auth or {})
+    for key, value in codex_native_auth(vars(server)).items():
+        if isinstance(value, dict):
+            native[key] = {**native.get(key, {}), **value}
+        else:
+            native[key] = value
+    static: dict[str, str] = {}
+    env: dict[str, str] = {}
+    bearer: str | None = None
+    explicit_headers = {
+        k.lower() for auth_field in ("http_headers", "env_http_headers") for k in native.get(auth_field, {})
+    }
+    for key, value in server.headers.items():
+        if key.lower() in explicit_headers:
+            continue
+        if "ref" in value:
+            if not _ENV_NAME_RE.fullmatch(value["ref"]):
+                raise ValueError("Codex header ref requires an environment variable name; interpolation is unsupported")
+            env[key] = value["ref"]
+            continue
+        literal = value.get("literal", "")
+        full_ref = _REF_RE.fullmatch(literal)
+        token_ref = (
+            _REF_RE.fullmatch(literal[7:]) if key.lower() == "authorization" and literal.startswith("Bearer ") else None
+        )
+        if full_ref and not literal.startswith("${input:"):
+            env[key] = full_ref.group(1)
+        elif token_ref and not literal[7:].startswith("${input:"):
+            bearer = token_ref.group(1)
+        elif "${" in literal:
+            raise ValueError(
+                "Codex headers contain unsupported interpolation; use native header or bearer environment references"
+            )
+        else:
+            static[key] = literal
+    out: dict[str, Any] = {"url": server.url, "type": server.transport}
+    for auth_field, generic in (("http_headers", static), ("env_http_headers", env)):
+        merged = {**generic, **native.get(auth_field, {})}
+        if merged:
+            out[auth_field] = merged
+    token = native.get("bearer_token_env_var", bearer)
+    if token:
+        out["bearer_token_env_var"] = token
+    return out
+
+
+def _codex_from_provider(
+    name: str, raw: dict[str, Any], *, keep_secrets: bool = False
+) -> tuple[CanonicalServer, list[str]]:
+    server, demoted = _mcpservers_from_provider(name, raw, keep_secrets=keep_secrets)
+    if not server.is_remote:
+        return server, demoted
+    # Native static strings are literal, including strings resembling templates.
+    # Legacy generic headers are migrated without demoting token templates first.
+    headers, _ = _parse_env(raw.get("headers"), keep_secrets=True)
+    legacy = CanonicalServer(
+        name=name, transport=server.transport, url=server.url, headers=headers, **codex_native_auth(raw)
+    )
+    native = codex_native_auth(_codex_to_provider(legacy))
+    demoted = []
+    if not keep_secrets:
+        static = native.get("http_headers", {})
+        env = native.get("env_http_headers", {})
+        for key in list(static):
+            if _sensitive_http_header(key):
+                del static[key]
+                placeholder = re.sub(r"[^A-Za-z0-9_]", "_", key).upper()
+                if not placeholder or placeholder[0].isdigit():
+                    placeholder = "MCP_" + placeholder
+                env.setdefault(key, placeholder)
+                demoted.append(key)
+        if env:
+            native["env_http_headers"] = env
+    return CanonicalServer(name=name, transport=server.transport, url=server.url, **codex_native_auth(native)), demoted
+
+
+def codex_merge_server(
+    server: CanonicalServer, existing: dict[str, Any], native_auth: dict[str, Any]
+) -> dict[str, Any]:
+    """Preserve unmodeled native options while replacing Brigade's modeled fields."""
+    excluded = _codex_transport_excluded(server.is_remote)
+    preserved = {k: v for k, v in existing.items() if k not in excluded}
+    return {**preserved, **_codex_to_provider(server, native_auth=native_auth)}
 
 
 def _remote_transport(raw: dict[str, Any], *, type_key: str = "type") -> str:
@@ -486,6 +702,27 @@ def _looks_like_url(value: object) -> bool:
     return isinstance(value, str) and value.startswith(("http://", "https://"))
 
 
+def _emit_headers(server: CanonicalServer, env_style: str) -> dict[str, str]:
+    """Project native auth without env access; refuse native semantics JSON cannot preserve.
+
+    A static fallback plus an env override cannot be represented by one generic
+    header. Native static template-looking values must also stay literal.
+    """
+    native_names = [key.lower() for mapping in (server.http_headers, server.env_http_headers) for key in mapping]
+    if server.bearer_token_env_var:
+        native_names.append("authorization")
+    if len(native_names) != len(set(native_names)) or any("${" in v for v in server.http_headers.values()):
+        raise ValueError("cannot preserve Codex native header semantics in this harness; scope the server to Codex")
+    generic = {k: v for k, v in server.headers.items() if k.lower() not in native_names}
+    headers = _emit_env(generic, env_style)
+    headers.update(server.http_headers)
+    headers.update(_emit_env({k: {"ref": v} for k, v in server.env_http_headers.items()}, env_style))
+    if server.bearer_token_env_var:
+        token_ref = _emit_env({"Authorization": {"ref": server.bearer_token_env_var}}, env_style)["Authorization"]
+        headers["Authorization"] = "Bearer " + token_ref
+    return headers
+
+
 def _mcpservers_to_provider(server: CanonicalServer, env_style: str, *, remote_url_key: str = "url") -> dict[str, Any]:
     """The common JSON ``mcpServers`` per-server shape (Claude, Cursor, Antigravity).
 
@@ -496,8 +733,9 @@ def _mcpservers_to_provider(server: CanonicalServer, env_style: str, *, remote_u
         out: dict[str, Any] = {remote_url_key: server.url}
         if remote_url_key == "url":
             out["type"] = server.transport
-        if server.headers:
-            out["headers"] = _emit_env(server.headers, env_style)
+        headers = _emit_headers(server, env_style)
+        if headers:
+            out["headers"] = headers
         return out
     out: dict[str, Any] = {"command": server.command}
     if server.args:
@@ -544,8 +782,9 @@ def _mcpservers_from_provider(
 def _vscode_to_provider(server: CanonicalServer) -> dict[str, Any]:
     if server.is_remote:
         out: dict[str, Any] = {"type": server.transport, "url": server.url}
-        if server.headers:
-            out["headers"] = _emit_env(server.headers, "vscode-inputs")
+        headers = _emit_headers(server, "vscode-inputs")
+        if headers:
+            out["headers"] = headers
         return out
     out: dict[str, Any] = {"type": "stdio", "command": server.command}
     if server.args:
@@ -558,8 +797,9 @@ def _vscode_to_provider(server: CanonicalServer) -> dict[str, Any]:
 def _opencode_to_provider(server: CanonicalServer) -> dict[str, Any]:
     if server.is_remote:
         remote: dict[str, Any] = {"type": "remote", "url": server.url, "enabled": server.enabled}
-        if server.headers:
-            remote["headers"] = _emit_env(server.headers, "expand")
+        headers = _emit_headers(server, "expand")
+        if headers:
+            remote["headers"] = headers
         return remote
     command = [server.command, *server.args] if server.command else list(server.args)
     out: dict[str, Any] = {"type": "local", "command": command, "enabled": server.enabled}
@@ -662,8 +902,9 @@ def _hermes_to_provider(server: CanonicalServer) -> dict[str, Any]:
         remote: dict[str, Any] = {"url": server.url}
         if server.transport and server.transport != "http":
             remote["transport"] = server.transport
-        if server.headers:
-            remote["headers"] = _emit_env(server.headers, "passthrough")
+        headers = _emit_headers(server, "passthrough")
+        if headers:
+            remote["headers"] = headers
         if server.timeout is not None:
             remote["timeout"] = server.timeout
         return remote
@@ -864,8 +1105,9 @@ def _openclaw_to_provider(server: CanonicalServer) -> dict[str, Any]:
     """OpenClaw mcp.servers shape: stdio {command,args,env} (no type); remote {url,transport}."""
     if server.is_remote:
         remote: dict[str, Any] = {"url": server.url, "transport": server.transport}
-        if server.headers:
-            remote["headers"] = _emit_env(server.headers, "expand")
+        headers = _emit_headers(server, "expand")
+        if headers:
+            remote["headers"] = headers
         return remote
     out: dict[str, Any] = {"command": server.command}
     if server.args:
@@ -954,10 +1196,10 @@ ADAPTERS: dict[str, McpAdapter] = {
         user_scope=False,
         supports_remote=True,
         env_style="passthrough",
-        to_provider=lambda s: _mcpservers_to_provider(s, "passthrough"),
-        from_provider=lambda n, r, keep_secrets=False: _mcpservers_from_provider(n, r, keep_secrets=keep_secrets),
+        to_provider=_codex_to_provider,
+        from_provider=_codex_from_provider,
         read_file=_codex_read_file,
-        write_file=_codex_write_file,
+        write_file=lambda t, o, r: _codex_write_file(t, o, r, native=True),
     ),
     "grok": McpAdapter(
         harness="grok",
@@ -1039,10 +1281,10 @@ ADAPTERS: dict[str, McpAdapter] = {
         user_scope=True,
         supports_remote=True,
         env_style="passthrough",
-        to_provider=lambda s: _mcpservers_to_provider(s, "passthrough"),
-        from_provider=lambda n, r, keep_secrets=False: _mcpservers_from_provider(n, r, keep_secrets=keep_secrets),
+        to_provider=_codex_to_provider,
+        from_provider=_codex_from_provider,
         read_file=_codex_read_file,
-        write_file=_codex_write_file,
+        write_file=lambda t, o, r: _codex_write_file(t, o, r, native=True),
     ),
     "grok-user": McpAdapter(
         harness="grok-user",

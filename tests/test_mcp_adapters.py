@@ -4,8 +4,19 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from brigade import mcp_adapters as A
 from brigade.mcp_adapters import CanonicalServer
+
+
+# Parent accepted all three fields with `codex -c ... mcp get --json`, offline,
+# using fake values. Keep this versioned consumer contract beside the regression.
+CODEX_NATIVE_AUTH_CONTRACT = {
+    "cli_version": "0.159.1",
+    "source": "https://learn.chatgpt.com/docs/extend/mcp?surface=cli",
+    "fields": ("http_headers", "env_http_headers", "bearer_token_env_var"),
+}
 
 
 def _stdio(name="github"):
@@ -243,15 +254,126 @@ def test_grok_dotted_server_name_is_idempotent_and_valid_toml():
 
 
 def test_codex_remote_headers_roundtrip():
-    """BUG 3: codex remote tables must render and parse Authorization headers."""
+    """Codex stores whole-header environment refs in its native map."""
     adapter = A.ADAPTERS["codex"]
     projected = adapter.to_provider(_remote_with_headers())
-    assert projected["headers"] == {"Authorization": "${TOKEN}"}
+    assert projected["env_http_headers"] == {"Authorization": "TOKEN"}
+    assert "headers" not in projected
     text = adapter.write_file(None, {"docs": projected}, set())
     round_tripped = adapter.read_file(text)["docs"]
     assert round_tripped == projected
     back, _ = adapter.from_provider("docs", round_tripped)
-    assert back.headers == {"Authorization": {"ref": "TOKEN"}}
+    assert back.env_http_headers == {"Authorization": "TOKEN"}
+    assert back.headers == {}
+
+
+def test_codex_projects_full_header_reference_to_native_env_map():
+    projected = A.ADAPTERS["codex"].to_provider(_remote_with_headers())
+    assert projected["env_http_headers"] == {"Authorization": "TOKEN"}
+    assert "headers" not in projected
+
+
+@pytest.mark.parametrize("harness", ["codex", "codex-user"])
+def test_codex_native_auth_survives_canonical_and_toml_roundtrips(harness, monkeypatch):
+    monkeypatch.setenv("FAKE_HEADER", "must-never-be-read")
+    native = {
+        "url": "https://mcp.example.com/v1",
+        "http_headers": {"Authorization": "Bearer fake-static", "X-Literal": "${NOT_INTERPOLATED}"},
+        "env_http_headers": {"Authorization": "FAKE_HEADER", "X-Env": "FAKE_HEADER"},
+        "bearer_token_env_var": "FAKE_TOKEN",
+    }
+    adapter = A.ADAPTERS[harness]
+    server, warnings = adapter.from_provider("docs", native, keep_secrets=True)
+    assert warnings == []
+    canonical = A.server_to_dict(server)
+    for key in CODEX_NATIVE_AUTH_CONTRACT["fields"]:
+        assert canonical[key] == native[key]
+    rebuilt, warnings = A.server_from_dict("docs", canonical)
+    assert warnings == []
+    projected = adapter.to_provider(rebuilt)
+    assert projected == {**native, "type": "http"}
+    text = adapter.write_file(None, {"docs": projected}, set())
+    assert "must-never-be-read" not in text
+    assert adapter.read_file(text)["docs"] == projected
+    assert adapter.write_file(text, {"docs": projected}, set()) == text
+
+
+@pytest.mark.parametrize("harness", ["codex", "codex-user"])
+def test_codex_native_literal_secret_import_demotes_unless_keep_secrets(harness):
+    raw = {
+        "url": "https://mcp.example.com/v1",
+        "http_headers": {"API_KEY": "fake-only", "X-Static": "fake-public"},
+        "env_http_headers": {"X-Env": "FAKE_HEADER"},
+        "bearer_token_env_var": "FAKE_TOKEN",
+    }
+    adapter = A.ADAPTERS[harness]
+    server, demoted = adapter.from_provider("docs", raw)
+    assert demoted == ["API_KEY"]
+    assert server.http_headers == {"X-Static": "fake-public"}
+    assert server.env_http_headers == {"API_KEY": "API_KEY", "X-Env": "FAKE_HEADER"}
+    assert server.bearer_token_env_var == "FAKE_TOKEN"
+    assert "fake-only" not in json.dumps(A.server_to_dict(server))
+    kept, demoted = adapter.from_provider("docs", raw, keep_secrets=True)
+    assert demoted == []
+    assert kept.http_headers == raw["http_headers"]
+
+
+@pytest.mark.parametrize("literal", ["fake\\value\n'quoted'", "fake\\value\nline", 'fake"quoted"'])
+def test_codex_native_literal_headers_escape_as_toml_strings(literal):
+    adapter = A.ADAPTERS["codex"]
+    raw = {"url": "https://mcp.example.com/v1", "http_headers": {"X-Literal": literal}}
+    server, _ = adapter.from_provider("docs", raw, keep_secrets=True)
+    projected = adapter.to_provider(server)
+    rendered = adapter.write_file(None, {"docs": projected}, set())
+    assert adapter.read_file(rendered)["docs"] == projected
+
+
+def test_codex_native_auth_takes_precedence_over_generic_headers():
+    server, _ = A.server_from_dict(
+        "docs",
+        {
+            "transport": "http",
+            "url": "https://mcp.example.com/v1",
+            "headers": {
+                "Authorization": {"literal": "Bearer ${GENERIC_TOKEN}"},
+                "X-Env": {"ref": "GENERIC_HEADER"},
+                "X-Static": {"literal": "generic-static"},
+                "X-Other": {"literal": "other"},
+            },
+            "http_headers": {"X-Static": "native-static"},
+            "env_http_headers": {"X-Env": "NATIVE_HEADER"},
+            "bearer_token_env_var": "NATIVE_TOKEN",
+        },
+    )
+    projected = A.ADAPTERS["codex"].to_provider(server)
+    assert projected["http_headers"] == {"X-Static": "native-static", "X-Other": "other"}
+    assert projected["env_http_headers"] == {"X-Env": "NATIVE_HEADER"}
+    assert projected["bearer_token_env_var"] == "NATIVE_TOKEN"
+    assert "headers" not in projected
+
+
+def test_codex_generic_bearer_interpolation_is_a_token_reference():
+    server = CanonicalServer(
+        name="docs",
+        transport="http",
+        url="https://mcp.example.com/v1",
+        headers={"Authorization": {"literal": "Bearer ${FAKE_TOKEN}"}, "X-Static": {"literal": "fake"}},
+    )
+    projected = A.ADAPTERS["codex"].to_provider(server)
+    assert projected["bearer_token_env_var"] == "FAKE_TOKEN"
+    assert projected["http_headers"] == {"X-Static": "fake"}
+    assert "env_http_headers" not in projected
+
+
+@pytest.mark.parametrize("value", ["prefix-${FAKE_TOKEN}-private", "${env:FAKE_TOKEN}", "Bearer ${FAKE_TOKEN} suffix"])
+def test_codex_rejects_unsupported_generic_header_interpolation_without_values(value):
+    server = CanonicalServer(
+        name="docs", transport="http", url="https://mcp.example.com/v1", headers={"Authorization": {"literal": value}}
+    )
+    with pytest.raises(ValueError, match="unsupported.*interpolation") as exc:
+        A.ADAPTERS["codex"].to_provider(server)
+    assert value not in str(exc.value)
+    assert "FAKE_TOKEN" not in str(exc.value)
 
 
 def test_grok_remote_headers_roundtrip():
@@ -389,3 +511,94 @@ def test_server_dict_roundtrip():
     rebuilt, warnings = A.server_from_dict("github", raw)
     assert rebuilt == s
     assert warnings == []
+
+
+@pytest.mark.parametrize("header", ["Authorization", "Proxy-Authorization", "Cookie", "X-Api-Key", "X-Auth-Token"])
+def test_review_codex_demotes_sensitive_headers_to_valid_refs(header):
+    server, demoted = A.ADAPTERS["codex"].from_provider(
+        "docs", {"url": "https://mcp.example.com", "http_headers": {header: "fake-private"}}
+    )
+    assert demoted == [header]
+    assert server.http_headers == {}
+    assert server.env_http_headers == {header: header.replace("-", "_").upper()}
+    assert "fake-private" not in json.dumps(A.server_to_dict(server))
+
+
+@pytest.mark.parametrize("header", ["Authorization", "Proxy-Authorization", "Cookie"])
+@pytest.mark.parametrize("scope", ["headers", "http_headers"])
+def test_review_doctor_warns_for_standard_credential_headers(header, scope):
+    server, _ = A.server_from_dict(
+        "docs",
+        {
+            "transport": "http",
+            "url": "https://mcp.example.com",
+            scope: {header: {"literal": "fake-private"} if scope == "headers" else "fake-private"},
+        },
+    )
+    assert any("inlined secret" in message for _, message in A.validate_server(server))
+
+
+@pytest.mark.parametrize("harness", ["claude", "cursor", "grok", "vscode", "opencode", "hermes", "openclaw"])
+@pytest.mark.parametrize(
+    "auth,expected",
+    [
+        ({"http_headers": {"X-Static": "fake-public"}}, {"X-Static": "fake-public"}),
+        ({"env_http_headers": {"Authorization": "FAKE_HEADER"}}, {"Authorization": "${FAKE_HEADER}"}),
+        ({"bearer_token_env_var": "FAKE_TOKEN"}, {"Authorization": "Bearer ${FAKE_TOKEN}"}),
+        ({"headers": {"Authorization": "${FAKE_HEADER}"}}, {"Authorization": "${FAKE_HEADER}"}),
+    ],
+)
+def test_review_codex_import_preserves_auth_in_other_projections(harness, auth, expected, monkeypatch):
+    monkeypatch.setenv("FAKE_TOKEN", "must-never-be-read")
+    server, _ = A.ADAPTERS["codex"].from_provider("docs", {"url": "https://mcp.example.com", **auth}, keep_secrets=True)
+    if harness == "vscode":
+        expected = {k: v.replace("${", "${input:") for k, v in expected.items()}
+    assert A.ADAPTERS[harness].to_provider(server)["headers"] == expected
+
+
+@pytest.mark.parametrize("value", [1234567, 1.2345678901234567, "fake 😀", "fake\x7f"])
+def test_review_codex_preserved_options_roundtrip_exactly(value):
+    adapter = A.ADAPTERS["codex"]
+    projected = {"url": "https://mcp.example.com", "fake_option": value}
+    text = adapter.write_file(None, {"docs": projected}, set())
+    assert adapter.read_file(text)["docs"] == projected
+
+
+@pytest.mark.parametrize("key", ["x\U0001f50dy", "x\x7fy", "q\U0001f600"])
+def test_codex_native_keys_with_non_bmp_and_del_roundtrip(key):
+    adapter = A.ADAPTERS["codex"]
+    name = f"srv{key}"
+    projected = {
+        "url": "https://mcp.example.com",
+        "tools": {key: {"approval_mode": "fake"}},
+        "oauth": {key: "v"},
+    }
+    text = adapter.write_file(None, {name: projected}, set())
+    assert "\\ud83d" not in text and "\x7f" not in text
+    assert adapter.read_file(text)[name] == projected
+    again = adapter.write_file(text, {name: adapter.read_file(text)[name]}, set())
+    assert adapter.read_file(again)[name] == projected
+    assert adapter.write_file(again, {name: adapter.read_file(again)[name]}, set()) == again
+
+
+def test_review_codex_stdio_to_remote_drops_stdio_options():
+    server = CanonicalServer(name="docs", transport="http", url="https://mcp.example.com")
+    existing = {"command": "fake", "cwd": "/fake", "env_vars": ["FAKE_ENV"], "enabled_tools": ["fake"]}
+    assert A.codex_merge_server(server, existing, {}) == {
+        "url": server.url,
+        "type": "http",
+        "enabled_tools": ["fake"],
+    }
+
+
+@pytest.mark.parametrize(
+    "auth",
+    [
+        {"http_headers": {"X-Literal": "${KEEP_LITERAL}"}},
+        {"http_headers": {"Authorization": "fake-fallback"}, "env_http_headers": {"authorization": "FAKE_HEADER"}},
+    ],
+)
+def test_review_non_codex_projection_refuses_lossy_native_auth(auth):
+    server, _ = A.ADAPTERS["codex"].from_provider("docs", {"url": "https://mcp.example.com", **auth}, keep_secrets=True)
+    with pytest.raises(ValueError, match="cannot preserve Codex native"):
+        A.ADAPTERS["claude"].to_provider(server)

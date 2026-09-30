@@ -5,6 +5,8 @@ import socket
 import sys
 import threading
 import time
+
+import pytest
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -685,3 +687,83 @@ def test_mcp_verify_cli_supports_harness_and_name_filters(tmp_path, capsys):
         == 0
     )
     assert _payload(capsys)["results"][0]["runtime_healthy"] is True
+
+
+@pytest.mark.parametrize(
+    "auth",
+    [
+        {"http_headers": {"Authorization": "fake-static"}, "env_http_headers": {"authorization": "FAKE_HEADER"}},
+        {"http_headers": {"Authorization": "fake-static"}, "bearer_token_env_var": "FAKE_TOKEN"},
+        {"env_http_headers": {"authorization": "FAKE_HEADER"}, "bearer_token_env_var": "FAKE_TOKEN"},
+        {
+            "http_headers": {"Authorization": "fake-static"},
+            "env_http_headers": {"authorization": "FAKE_HEADER"},
+            "bearer_token_env_var": "FAKE_TOKEN",
+        },
+    ],
+)
+def test_review_runtime_refuses_ambiguous_native_authorization(auth, monkeypatch):
+    def no_environment_reads(*args):
+        raise AssertionError("ambiguous auth must fail before env access")
+
+    monkeypatch.setattr(mcp_runtime.os.environ, "get", no_environment_reads)
+    server = CanonicalServer(name="docs", transport="http", url="https://mcp.example.com", **auth)
+    with pytest.raises(ValueError, match="docs: conflicting Codex native Authorization sources") as exc:
+        mcp_runtime._resolve_headers(server)
+    assert "fake-static" not in str(exc.value)
+    assert "FAKE_TOKEN" not in str(exc.value)
+    result = mcp_runtime.probe_server(server, config_current=True, timeout=1)
+    assert result.runtime_healthy is False
+    assert result.failure_class == "protocol_failure"
+    assert result.detail == str(exc.value)
+
+
+def test_review_runtime_missing_native_env_uses_static_header(monkeypatch):
+    monkeypatch.delenv("FAKE_MISSING_HEADER", raising=False)
+    server = CanonicalServer(
+        name="docs",
+        transport="http",
+        url="https://mcp.example.com",
+        http_headers={"X-Header": "fake-static", "X-Literal": "${KEEP_LITERAL}"},
+        env_http_headers={"x-header": "FAKE_MISSING_HEADER"},
+    )
+    assert mcp_runtime._resolve_headers(server) == {"X-Header": "fake-static", "X-Literal": "${KEEP_LITERAL}"}
+
+
+def test_review_runtime_native_auth_is_sent_and_not_persisted(tmp_path, capsys, monkeypatch):
+    class AuthHandler(_McpHandler):
+        def do_POST(self):  # noqa: N802 - stdlib handler API
+            if (
+                self.headers.get("Authorization") != "Bearer fake-token-only"
+                or self.headers.get("X-Env") != "fake-whole-header"
+                or self.headers.get("X-Static") != "fake-static"
+            ):
+                self.send_response(401)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            super().do_POST()
+
+    monkeypatch.setenv("FAKE_HEADER", "fake-whole-header")
+    monkeypatch.setenv("FAKE_TOKEN", "fake-token-only")
+    with _http_mcp_server(AuthHandler) as url:
+        mcp_cmd.init(target=tmp_path, json_output=True)
+        server = CanonicalServer(
+            name="remote",
+            transport="http",
+            url=url,
+            timeout=2,
+            targets=("codex",),
+            http_headers={"X-Static": "fake-static"},
+            env_http_headers={"X-Env": "FAKE_HEADER"},
+            bearer_token_env_var="FAKE_TOKEN",
+        )
+        mcp_cmd._write_canonical(tmp_path, {"remote": server})
+        assert mcp_cmd.sync(target=tmp_path, harness="codex", write=True, json_output=True) == 0
+        capsys.readouterr()
+        assert mcp_cmd.verify(target=tmp_path, harness="codex", json_output=True) == 0
+    output = capsys.readouterr().out
+    assert json.loads(output)["results"][0]["runtime_healthy"] is True
+    persisted = "".join(p.read_text() for p in (tmp_path / mcp_runtime.VERIFY_RUNS_REL).rglob("*.json"))
+    assert "fake-token-only" not in output + persisted
+    assert "fake-whole-header" not in output + persisted

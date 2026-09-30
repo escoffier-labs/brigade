@@ -131,3 +131,117 @@ def test_load_state_is_read_only_when_package_version_is_stale(tmp_path):
     assert loaded.error is None
     assert loaded.state["package_version"] == "old"
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+def _lossy_native_auth_workspace(tmp_path, monkeypatch):
+    from brigade import mcp_adapters, mcp_cmd
+
+    (tmp_path / ".brigade").mkdir()
+    server, _ = mcp_adapters.server_from_dict(
+        "docs",
+        {
+            "transport": "http",
+            "url": "https://mcp.example.com",
+            "http_headers": {"Authorization": "fake-fallback"},
+            "env_http_headers": {"authorization": "FAKE_HEADER"},
+        },
+    )
+    mcp_cmd._write_canonical(tmp_path, {"docs": server})
+    profile = harness_profiles.resolve_slice1_profiles(harness="claude", home=tmp_path / "home", workspace=tmp_path)[0]
+    return profile
+
+
+def test_mcp_plan_reports_unprojectable_server_as_conflict(tmp_path, monkeypatch):
+    profile = _lossy_native_auth_workspace(tmp_path, monkeypatch)
+    state = {**_state(tmp_path), "harness": "claude"}
+    plan = harness_profile_cmd._mcp_plan(profile, state, tmp_path, allow_global_stdio=True, adopt=False)
+    assert [(c["name"], c["status"]) for c in plan["conflicts"]] == [("docs", "conflict")]
+    assert "cannot preserve Codex native" in plan["conflicts"][0]["detail"]
+
+
+def test_verify_mcp_reports_unprojectable_server_as_conflict(tmp_path, monkeypatch):
+    profile = _lossy_native_auth_workspace(tmp_path, monkeypatch)
+    from brigade import mcp_adapters
+
+    path = profile.mcp_path or mcp_adapters.resolve_path(mcp_adapters.ADAPTERS[profile.mcp_harness], tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"mcpServers": {"docs": {"url": "https://mcp.example.com"}}}))
+    state = {**_state(tmp_path), "harness": "claude", "mcp": {"docs": {"managed": True}}}
+    payload, ok = harness_profile_cmd._verify_mcp(profile, state, tmp_path)
+    assert ok is False
+    assert payload["status"] == "conflict"
+    assert payload["items"][0]["status"] == "conflict"
+
+
+def _codex_profile_workspace(tmp_path, raw):
+    from brigade import mcp_adapters, mcp_cmd
+
+    (tmp_path / ".brigade").mkdir()
+    server, _ = mcp_adapters.server_from_dict("docs", raw)
+    mcp_cmd._write_canonical(tmp_path, {"docs": server})
+    profile = harness_profiles.resolve_slice1_profiles(harness="codex", home=tmp_path / "home", workspace=tmp_path)[0]
+    path = profile.mcp_path or mcp_adapters.resolve_path(mcp_adapters.ADAPTERS[profile.mcp_harness], tmp_path)
+    return profile, path
+
+
+def _apply_mcp(profile, state, workspace, path, *, adopt=False):
+    plan = harness_profile_cmd._mcp_plan(profile, state, workspace, allow_global_stdio=True, adopt=adopt)
+    assert plan["conflicts"] == []
+    if plan["updates"] or plan["remove"]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(plan["adapter"].write_file(plan["text"], plan["updates"], plan["remove"]))
+    state["mcp"] = plan["next"]
+    return plan
+
+
+_AUTH_FIELDS = ("bearer_token_env_var", "http_headers", "env_http_headers")
+
+
+def test_profile_removes_managed_native_auth_when_canonical_drops_it(tmp_path):
+    from brigade import mcp_adapters, mcp_cmd
+
+    raw = {
+        "transport": "http",
+        "url": "https://mcp.example.com",
+        "bearer_token_env_var": "FAKE_TOKEN",
+        "http_headers": {"X-Fake": "fake"},
+        "env_http_headers": {"X-Fake-Env": "FAKE_ENV"},
+    }
+    profile, path = _codex_profile_workspace(tmp_path, raw)
+    state = {**_state(tmp_path), "harness": "codex"}
+    _apply_mcp(profile, state, tmp_path, path)
+    live = mcp_adapters.tomllib.loads(path.read_text())["mcp_servers"]["docs"]
+    assert all(field in live for field in _AUTH_FIELDS)
+
+    server, _ = mcp_adapters.server_from_dict("docs", {"transport": "http", "url": "https://mcp.example.com"})
+    mcp_cmd._write_canonical(tmp_path, {"docs": server})
+    _, ok = harness_profile_cmd._verify_mcp(profile, state, tmp_path)
+    assert ok is False
+    plan = _apply_mcp(profile, state, tmp_path, path)
+    assert [i["action"] for i in plan["items"]] == ["update"]
+    live = mcp_adapters.tomllib.loads(path.read_text())["mcp_servers"]["docs"]
+    assert not any(field in live for field in _AUTH_FIELDS)
+    _, ok = harness_profile_cmd._verify_mcp(profile, state, tmp_path)
+    assert ok is True
+    again = _apply_mcp(profile, state, tmp_path, path)
+    assert [i["action"] for i in again["items"]] == ["none"]
+
+
+def test_profile_adopt_preserves_genuine_native_auth(tmp_path):
+    from brigade import mcp_adapters, mcp_cmd
+
+    profile, path = _codex_profile_workspace(tmp_path, {"transport": "http", "url": "https://mcp.example.com"})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('[mcp_servers.docs]\nurl = "https://mcp.example.com"\nbearer_token_env_var = "NATIVE_TOKEN"\n')
+    state = {**_state(tmp_path), "harness": "codex"}
+    _apply_mcp(profile, state, tmp_path, path, adopt=True)
+    assert state["mcp"]["docs"]["native_auth_keys"] == {"bearer_token_env_var": True}
+    server, _ = mcp_adapters.server_from_dict("docs", {"transport": "http", "url": "https://mcp.example.com/v2"})
+    mcp_cmd._write_canonical(tmp_path, {"docs": server})
+    _apply_mcp(profile, state, tmp_path, path, adopt=True)
+    assert state["mcp"]["docs"]["native_auth_keys"] == {"bearer_token_env_var": True}
+    live = mcp_adapters.tomllib.loads(path.read_text())["mcp_servers"]["docs"]
+    assert live["bearer_token_env_var"] == "NATIVE_TOKEN"
+    assert live["url"] == "https://mcp.example.com/v2"
+    _, ok = harness_profile_cmd._verify_mcp(profile, state, tmp_path)
+    assert ok is True

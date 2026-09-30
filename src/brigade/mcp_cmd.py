@@ -67,7 +67,10 @@ def load_canonical(target: Path) -> tuple[dict[str, CanonicalServer], list[str],
         if not isinstance(raw, dict):
             warnings.append(f"{name}: not an object, skipped")
             continue
-        server, warns = mcp_adapters.server_from_dict(str(name), raw)
+        try:
+            server, warns = mcp_adapters.server_from_dict(str(name), raw)
+        except ValueError as exc:
+            return {}, [f"{name}: {exc}"], warnings
         servers[str(name)] = server
         warnings.extend(warns)
     return servers, [], warnings
@@ -194,8 +197,37 @@ def _without_repo_graphtrail_db_pin(target: Path, args: tuple[str, ...]) -> tupl
     return tuple(cleaned)
 
 
-def _project_server(target: Path, harness: str, server: CanonicalServer) -> dict[str, Any]:
+@dataclass(frozen=True)
+class ProjectionContext:
+    """Live native entry and ownership record that govern native auth preservation.
+
+    A ``record`` of None means unowned (live auth is native); a record without
+    ``native_auth_keys`` means owned with nothing preserved.
+    """
+
+    live: dict[str, Any]
+    record: dict[str, Any] | None
+
+
+def _project_server(
+    target: Path, harness: str, server: CanonicalServer, context: ProjectionContext | None = None
+) -> dict[str, Any]:
     adapter = ADAPTERS[harness]
+    if harness in ("codex", "codex-user"):
+        if context is None:
+            path = mcp_adapters.resolve_path(adapter, target)
+            live = adapter.read_file(path.read_text() if path.is_file() else None).get(server.name, {})
+            record = _load_state(target).get("ownership", {}).get(harness, {}).get(adapter.path, {}).get(server.name)
+        else:
+            live, record = context.live, context.record
+        native_auth: dict[str, Any] = {}
+        for key, names in _codex_native_auth_keys(live, record, server).items():
+            value = live.get(key)
+            if isinstance(names, list) and isinstance(value, dict):
+                native_auth[key] = {k: value[k] for k in names if k in value}
+            elif names is True and value:
+                native_auth[key] = value
+        return mcp_adapters.codex_merge_server(server, live, native_auth)
     projected = adapter.to_provider(server)
     command_name = Path(server.command or "").name.lower()
     if (
@@ -212,6 +244,32 @@ def _project_server(target: Path, harness: str, server: CanonicalServer) -> dict
     else:
         projected.pop("args", None)
     return projected
+
+
+def _codex_native_auth_keys(
+    live: dict[str, Any], record: dict[str, Any] | None, server: CanonicalServer
+) -> dict[str, Any]:
+    """Remember only keys authored before adoption, never credential values.
+
+    Once owned, projected auth is managed unless these keys identify it as native
+    configuration. This lets later canonical updates replace/remove generated refs.
+    """
+    keys = (
+        dict(record.get("native_auth_keys", {}))
+        if record is not None
+        else {k: sorted(v) if isinstance(v, dict) else True for k, v in mcp_adapters.codex_native_auth(live).items()}
+    )
+    for key, value in mcp_adapters.codex_native_auth(vars(server)).items():
+        if isinstance(value, dict):
+            explicit = {name.lower() for name in value}
+            remaining = [name for name in keys.get(key, []) if name.lower() not in explicit]
+            if remaining:
+                keys[key] = remaining
+            else:
+                keys.pop(key, None)
+        else:
+            keys.pop(key, None)
+    return keys
 
 
 def _plan_for_harness(
@@ -241,7 +299,11 @@ def _plan_for_harness(
     for name, server in sorted(desired.items()):
         if name_filter is not None and name != name_filter:
             continue
-        provider_dict = _project_server(target, harness, server)
+        try:
+            provider_dict = _project_server(target, harness, server)
+        except ValueError as exc:
+            items.append(_item(harness, rel, name, "invalid", "conflict", None, None, detail=f"{name}: {exc}"))
+            continue
         desired_fp = localio.stable_hash(provider_dict)
         canon_fp = localio.stable_hash(mcp_adapters.server_to_dict(server))
         record = owned.get(name)
@@ -605,6 +667,9 @@ def plan(
             _plan_for_harness(target, h, servers, state, force=False, prune=True, adopt=False, name_filter=name)
         )
     counts = _counts(items)
+    invalid = [i["detail"] for i in items if i["status"] == "invalid"]
+    if invalid:
+        return _emit({"errors": invalid}, json_output, [f"error: {e}" for e in invalid], 2)
     source_catalog = str(canonical_path(target))
     destination_files = [str(mcp_adapters.resolve_path(ADAPTERS[h], target)) for h in harnesses]
     payload = {
@@ -882,8 +947,10 @@ def build_sync_plan(
             all_items.extend(items)
             continue
         all_items.extend(items)
+        plan_errors.extend(i["detail"] for i in items if i["status"] == "invalid")
         adapter = ADAPTERS[h]
         path = mcp_adapters.resolve_path(adapter, target)
+        live = adapter.read_file(path.read_text() if path.is_file() else None)
         owner_map = desired_state.get("ownership", {}).get(h, {}).get(adapter.path)
         to_write: dict[str, dict[str, Any]] = {}
         to_remove: set[str] = set()
@@ -898,6 +965,15 @@ def build_sync_plan(
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
                     "projected_fingerprint": item["_proj_fp"],
+                    **(
+                        {
+                            "native_auth_keys": _codex_native_auth_keys(
+                                live.get(server_name, {}), owner_map.get(server_name), servers[server_name]
+                            )
+                        }
+                        if h in ("codex", "codex-user")
+                        else {}
+                    ),
                 }
                 changed = True
             elif action == "remove":
@@ -912,6 +988,15 @@ def build_sync_plan(
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
                     "projected_fingerprint": item["_proj_fp"],
+                    **(
+                        {
+                            "native_auth_keys": _codex_native_auth_keys(
+                                live.get(server_name, {}), owner_map.get(server_name), servers[server_name]
+                            )
+                        }
+                        if h in ("codex", "codex-user")
+                        else {}
+                    ),
                 }
         if changed or any(i.get("_reconciled") for i in items):
             existing = path.read_text() if path.is_file() else None
@@ -1252,7 +1337,10 @@ def import_servers(
     skipped_existing: list[str] = []
     to_add: dict[str, CanonicalServer] = {}
     for srv_name, raw in sorted(live.items()):
-        server, demoted = adapter.from_provider(srv_name, raw, keep_secrets=keep_secrets)
+        try:
+            server, demoted = adapter.from_provider(srv_name, raw, keep_secrets=keep_secrets)
+        except ValueError as exc:
+            return _emit({"errors": [f"{srv_name}: {exc}"]}, json_output, [f"error: {srv_name}: {exc}"], 2)
         discovered.append(srv_name)
         secrets_demoted.extend(f"{srv_name}.{d}" for d in demoted)
         if srv_name in existing:

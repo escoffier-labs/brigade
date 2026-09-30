@@ -83,14 +83,48 @@ def _resolve_child_env(server: CanonicalServer) -> dict[str, str]:
 
 
 def _resolve_headers(server: CanonicalServer) -> dict[str, str]:
+    """Resolve native auth only for probes, without guessing Authorization precedence.
+
+    Codex 0.159.1 accepts overlapping native Authorization fields, but the exact
+    request precedence has not been established. Refuse those probes before env
+    access. Otherwise native fields replace generic headers; present, nonblank
+    env headers replace static headers case-insensitively.
+    """
+    authorization_sources = sum(
+        key.lower() == "authorization" for mapping in (server.http_headers, server.env_http_headers) for key in mapping
+    ) + bool(server.bearer_token_env_var)
+    if authorization_sources > 1:
+        raise ValueError(f"{server.name}: conflicting Codex native Authorization sources; cannot verify precedence")
+    native_names = {key.lower() for mapping in (server.http_headers, server.env_http_headers) for key in mapping}
+    if server.bearer_token_env_var:
+        native_names.add("authorization")
     headers: dict[str, str] = {}
+
+    def put(key: str, value: str) -> None:
+        for old in list(headers):
+            if old.lower() == key.lower():
+                del headers[old]
+        headers[key] = value
+
     for key, spec in server.headers.items():
+        if key.lower() in native_names:
+            continue
         if "ref" in spec:
             value = os.environ.get(spec["ref"])
             if value is not None:
-                headers[key] = value
+                put(key, value)
         elif "literal" in spec:
-            headers[key] = spec["literal"]
+            put(key, spec["literal"])
+    for key, value in server.http_headers.items():
+        put(key, value)
+    for key, env_var in server.env_http_headers.items():
+        value = os.environ.get(env_var)
+        if value is not None and value.strip():
+            put(key, value)
+    if server.bearer_token_env_var:
+        token = os.environ.get(server.bearer_token_env_var)
+        if token is not None and token.strip():
+            put("Authorization", "Bearer " + token)
     return headers
 
 
@@ -299,9 +333,14 @@ def _probe_http(server: CanonicalServer, *, config_current: bool, timeout: float
             detail=url_error,
         )
 
-    opener = urlrequest.build_opener(_NoRedirectHandler())
     headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-    headers.update(_resolve_headers(server))
+    try:
+        headers.update(_resolve_headers(server))
+    except ValueError as exc:
+        return _failure(
+            name, transport, config_current=config_current, failure_class="protocol_failure", detail=str(exc)
+        )
+    opener = urlrequest.build_opener(_NoRedirectHandler())
     session_id: str | None = None
     deadline = time.monotonic() + timeout
 

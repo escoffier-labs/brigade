@@ -273,9 +273,12 @@ def _exchange_http(
     url_error = _validate_remote_url(url)
     if url_error:
         return {}, url_error
-    opener = urlrequest.build_opener(_NoRedirectHandler())
     headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-    headers.update(_resolve_headers(server))
+    try:
+        headers.update(_resolve_headers(server))
+    except ValueError:
+        return {}, "conflicting native Authorization sources; cannot verify precedence"
+    opener = urlrequest.build_opener(_NoRedirectHandler())
     session_holder: dict[str, str | None] = {"id": None}
     deadline = time.monotonic() + timeout
     responses: dict[object, dict[str, Any]] = {}

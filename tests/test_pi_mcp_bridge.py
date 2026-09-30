@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 import threading
@@ -484,3 +485,44 @@ def test_extension_generation_uses_node_builtins_only(tmp_path, monkeypatch):
     assert "require(" not in text
     assert 'from "typebox"' not in text
     assert "from 'typebox'" not in text
+
+
+def _ambiguous_auth_server():
+    from brigade.mcp_adapters import CanonicalServer
+
+    return CanonicalServer(
+        name="fixture",
+        transport="http",
+        url="https://example.invalid/mcp",
+        http_headers={"Authorization": "fake-only"},
+        bearer_token_env_var="FAKE_TOKEN",
+    )
+
+
+def _forbid_network_and_env(monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise AssertionError("ambiguous auth must not reach network or env")
+
+    monkeypatch.setattr(pi_mcp_bridge.urlrequest, "build_opener", boom)
+    monkeypatch.setattr(pi_mcp_bridge.urlrequest, "Request", boom)
+    monkeypatch.setattr(os.environ, "get", boom, raising=False)
+
+
+def test_list_ambiguous_native_auth_returns_structured_failure_without_network(monkeypatch):
+    _forbid_network_and_env(monkeypatch)
+    tools, error = pi_mcp_bridge.list_server_tools(_ambiguous_auth_server(), timeout=0.01)
+    assert tools == []
+    assert error["error"] is True
+    assert error["failure_class"] == "protocol_failure"
+    assert "Authorization" in error["message"]
+    assert "fake-only" not in json.dumps(error)
+
+
+def test_call_ambiguous_native_auth_returns_structured_failure_without_network(monkeypatch):
+    _forbid_network_and_env(monkeypatch)
+    result, error = pi_mcp_bridge.call_server_tool(_ambiguous_auth_server(), "boom", {}, timeout=0.01)
+    assert result is None
+    assert error["error"] is True
+    assert error["failure_class"] == "protocol_failure"
+    assert error["tool"] == "boom"
+    assert "fake-only" not in json.dumps(error)
