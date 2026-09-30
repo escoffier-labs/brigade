@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -24,7 +26,7 @@ from brigade.claude_hooks.package import (
     managed_user_command,
 )
 from brigade.claude_hooks.paths import resolve_claude_home
-from tests._home import set_home
+from tests._home import home_env, set_home
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -90,7 +92,14 @@ def test_entry_passes_target_as_path(flag: str, monkeypatch: pytest.MonkeyPatch,
     assert calls == [{"event": "Stop", "package": PACKAGE_REF, "target": tmp_path}]
 
 
-def test_entry_import_does_not_load_brigade_cli():
+def _subprocess_env(home: Path) -> dict[str, str]:
+    env = {"PYTHONPATH": str(REPO_ROOT / "src"), "PATH": os.environ.get("PATH", ""), **home_env(home)}
+    if "SYSTEMROOT" in os.environ:
+        env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
+    return env
+
+
+def test_entry_import_does_not_load_brigade_cli(tmp_path: Path):
     code = (
         "import sys\n"
         "from brigade.claude_hooks.entry import main\n"
@@ -102,7 +111,7 @@ def test_entry_import_does_not_load_brigade_cli():
         "    pass\n"
         "assert 'brigade.cli' not in sys.modules, 'entry run pulled brigade.cli'\n"
     )
-    env = {"PYTHONPATH": str(REPO_ROOT / "src"), "PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}
+    env = _subprocess_env(tmp_path)
     result = subprocess.run(
         [sys.executable, "-c", code], input="{}", capture_output=True, text=True, env=env, timeout=60, check=False
     )
@@ -110,7 +119,7 @@ def test_entry_import_does_not_load_brigade_cli():
     assert result.returncode == 0, result.stderr
 
 
-def test_hook_runtime_import_skips_heavy_command_modules():
+def test_hook_runtime_import_skips_heavy_command_modules(tmp_path: Path):
     code = (
         "import sys\n"
         "import brigade.claude_hooks.entry, brigade.claude_hooks.runtime\n"
@@ -118,7 +127,7 @@ def test_hook_runtime_import_skips_heavy_command_modules():
         "loaded = [name for name in heavy if name in sys.modules]\n"
         "assert not loaded, f'hook import pulled {loaded}'\n"
     )
-    env = {"PYTHONPATH": str(REPO_ROOT / "src"), "PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}
+    env = _subprocess_env(tmp_path)
     result = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=60, check=False
     )
@@ -151,11 +160,10 @@ def test_unpinned_script_tries_brigade_hook_then_cli():
 
 def test_pinned_script_forwards_target():
     text = hook_script_text(pin=Path("/work/my repo"))
+    target = shlex.quote(str(Path("/work/my repo")))
 
-    assert (
-        f'exec "${{cli%/*}}/brigade-hook" --event "$event" --package "{PACKAGE_REF}" --target \'/work/my repo\'' in text
-    )
-    assert f'exec {COMMAND_PREFIX} --event "$event" --package "{PACKAGE_REF}" --target \'/work/my repo\'' in text
+    assert f'exec "${{cli%/*}}/brigade-hook" --event "$event" --package "{PACKAGE_REF}" --target {target}' in text
+    assert f'exec {COMMAND_PREFIX} --event "$event" --package "{PACKAGE_REF}" --target {target}' in text
 
 
 def test_script_is_valid_posix_sh(tmp_path: Path):
@@ -193,6 +201,7 @@ def test_script_prefers_brigade_hook_then_cli(tmp_path: Path):
     assert _run_script(script, base_env).stdout == ""
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX PATH layout")
 def test_script_ignores_brigade_hook_from_another_installation(tmp_path: Path):
     cli_dir = tmp_path / "cli-bin"
     other_dir = tmp_path / "other-bin"
