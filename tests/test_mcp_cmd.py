@@ -8,6 +8,7 @@ import subprocess
 import pytest
 
 from brigade import mcp_adapters, mcp_cmd
+from tests._home import set_home
 
 
 def _init(target):
@@ -478,7 +479,7 @@ def test_review_legacy_auth_baseline_requires_unchanged_canonical(tmp_path, caps
 
 @pytest.mark.parametrize("harness", ["codex", "codex-user"])
 def test_review_default_import_demotion_removes_adopted_static_auth(tmp_path, capsys, monkeypatch, harness):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, tmp_path / "home")
     _init(tmp_path)
     adapter = mcp_adapters.ADAPTERS[harness]
     path = mcp_adapters.resolve_path(adapter, tmp_path)
