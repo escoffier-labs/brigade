@@ -18,8 +18,9 @@ from typing import Any, BinaryIO, Callable, Iterator
 
 from .. import localio
 from ..component_paths import cache_root
-from ..wiring import resolve_wired_target
+from ..wiring import expand_user_path, resolve_wired_target
 from . import compaction_marker, envelope, heartbeat, presence
+from .fingerprint import repo_worktree_fingerprint
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
 from .session_state import (
@@ -76,17 +77,6 @@ _SHELL_CONTROL_PREFIXES = {"!", "{", "do", "elif", "if", "then", "time", "until"
 _SHELL_CONTROL_TOKENS = _SHELL_CONTROL_PREFIXES | {"}", "case", "done", "else", "esac", "fi", "for", "select"}
 _HEREDOC_DELIMITER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _WRITE_TOOLS = {"Edit", "Write", "NotebookEdit"}
-_SNAPSHOT_IGNORE_DIRS = {
-    ".brigade",
-    ".git",
-    ".hg",
-    ".svn",
-    ".tox",
-    ".venv",
-    "__pycache__",
-    "node_modules",
-}
-_SNAPSHOT_GIT_TIMEOUT_SECONDS = 3
 _UNAVAILABLE_FINGERPRINT = "unavailable"
 _BASH_WRITE_COMMANDS = {
     "apply_patch",
@@ -379,7 +369,7 @@ def _strip_heredoc_bodies(command: str) -> str:
 
 
 def _resolve_command_path(raw: str, cwd: Path) -> Path:
-    expanded = Path(os.path.expandvars(raw)).expanduser()
+    expanded = expand_user_path(Path(os.path.expandvars(raw)))
     if not expanded.is_absolute():
         return (cwd / expanded).resolve(strict=False)
     return expanded.resolve(strict=False)
@@ -563,8 +553,8 @@ def _as_tool_input(value: object) -> dict[str, Any]:
 
 def wired_target_from_payload(payload: dict[str, Any]) -> Path | None:
     try:
-        cwd = Path(str(payload.get("cwd") or ".")).expanduser().resolve(strict=False)
-    except OSError:
+        cwd = expand_user_path(Path(str(payload.get("cwd") or "."))).resolve(strict=False)
+    except (OSError, RuntimeError):
         return resolve_wired_target(payload.get("cwd"))
     has_cwd = bool(payload.get("cwd"))
     tool_name = str(payload.get("tool_name") or "")
@@ -1629,147 +1619,6 @@ def _bash_write_targets_handoffs(target: Path, command: object) -> bool:
         if any(not _is_handoff_path(target, path) for path in targets):
             return False
     return found_target
-
-
-def _snapshot_ignore_relative(path: Path) -> bool:
-    parts = path.parts
-    if not parts:
-        return True
-    if parts[0] in _SNAPSHOT_IGNORE_DIRS:
-        return True
-    return any(part in _SNAPSHOT_IGNORE_DIRS for part in parts)
-
-
-def _porcelain_path(line: str) -> str:
-    path = line[3:]
-    if len(path) >= 2 and path[0] == '"' and path[-1] == '"':
-        return bytes(path[1:-1], "utf-8").decode("unicode_escape")
-    return path
-
-
-def _snapshot_git_args(target: Path, *git_args: str) -> list[str]:
-    return ["git", "-C", str(target), *git_args]
-
-
-def _snapshot_pathspec_excludes() -> list[str]:
-    excludes: list[str] = []
-    for name in sorted(_SNAPSHOT_IGNORE_DIRS):
-        excludes.append(f":(exclude){name}")
-        excludes.append(f":(exclude){name}/**")
-    return excludes
-
-
-def _run_snapshot_git(target: Path, *git_args: str) -> subprocess.CompletedProcess[str] | None:
-    try:
-        return subprocess.run(
-            _snapshot_git_args(target, *git_args),
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=_SNAPSHOT_GIT_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-
-
-def _git_worktree_lines(target: Path) -> list[str] | None:
-    result = _run_snapshot_git(target, "status", "--porcelain", "--untracked-files=all", "--no-renames")
-    if result is None or result.returncode != 0:
-        return None
-    lines = [line.rstrip() for line in result.stdout.splitlines() if line.strip()]
-    filtered = [line for line in lines if not _snapshot_ignore_relative(Path(_porcelain_path(line)))]
-    return filtered
-
-
-def _git_diff_head(target: Path) -> str | None:
-    head = _run_snapshot_git(target, "rev-parse", "--verify", "HEAD")
-    if head is None or head.returncode != 0:
-        return ""
-    result = _run_snapshot_git(
-        target,
-        "diff",
-        "HEAD",
-        "--no-renames",
-        "--",
-        ".",
-        *_snapshot_pathspec_excludes(),
-    )
-    if result is None or result.returncode != 0:
-        return None
-    return result.stdout
-
-
-def _confirmed_git_worktree(target: Path) -> bool | None:
-    result = _run_snapshot_git(target, "rev-parse", "--is-inside-work-tree")
-    if result is None:
-        return None
-    if result.returncode != 0:
-        return False
-    return result.stdout.strip() == "true"
-
-
-def _git_untracked_content_signature(target: Path, relative: Path) -> str | None:
-    result = _run_snapshot_git(target, "hash-object", "--", relative.as_posix())
-    if result is None or result.returncode != 0:
-        return None
-    digest = result.stdout.strip()
-    return digest or None
-
-
-def _git_worktree_fingerprint_lines(target: Path) -> list[str] | None:
-    status_lines = _git_worktree_lines(target)
-    if status_lines is None:
-        return None
-    lines = [f"status\t{line}" for line in sorted(status_lines)]
-    diff = _git_diff_head(target)
-    if diff is None:
-        return None
-    lines.append(f"diff\t{localio.stable_hash(diff)}")
-    for line in status_lines:
-        if not line.startswith("??"):
-            continue
-        relative = Path(_porcelain_path(line))
-        if _snapshot_ignore_relative(relative):
-            continue
-        signature = _git_untracked_content_signature(target, relative)
-        if signature is None:
-            return None
-        lines.append(f"untracked\t{relative.as_posix()}\t{signature}")
-    return lines
-
-
-def _directory_worktree_lines(target: Path) -> list[str] | None:
-    entries: list[str] = []
-    try:
-        for path in target.rglob("*"):
-            if not path.is_file():
-                continue
-            try:
-                relative = path.relative_to(target)
-            except ValueError:
-                continue
-            if _snapshot_ignore_relative(relative):
-                continue
-            stat = path.stat()
-            entries.append(f"{relative.as_posix()}\t{stat.st_mtime_ns}\t{stat.st_size}")
-    except OSError:
-        return None
-    return entries
-
-
-def repo_worktree_fingerprint(target: Path) -> str | None:
-    git_worktree = _confirmed_git_worktree(target)
-    if git_worktree is True:
-        lines = _git_worktree_fingerprint_lines(target)
-    elif git_worktree is False:
-        lines = _directory_worktree_lines(target)
-    else:
-        return None
-    if lines is None:
-        return None
-    return localio.stable_hash(sorted(lines))
 
 
 def _session_id_for_fingerprint(target: Path, session_fingerprint: str) -> str | None:

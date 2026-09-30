@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from brigade import cli, localio
 from brigade.claude_hooks import envelope
 from brigade.claude_hooks.package import PACKAGE_REF
+from brigade.claude_hooks import fingerprint as hook_fingerprint
 from brigade.claude_hooks import runtime
 from brigade.install import install_selection
 from brigade.selection import Selection
@@ -1658,17 +1659,17 @@ def test_repo_worktree_fingerprint_hashes_large_untracked_without_read_bytes(tmp
         handle.seek(100 * 1024 * 1024 - 1)
         handle.write(b"\0")
     hash_calls: list[str] = []
-    real_run = runtime._run_snapshot_git
+    real_run = hook_fingerprint._run_snapshot_git
 
-    def tracked_run(repo: Path, *git_args: str):
+    def tracked_run(repo: Path, *git_args: str, stdin_text: str | None = None):
         if git_args[:1] == ("hash-object",):
-            hash_calls.append(git_args[-1])
-        return real_run(repo, *git_args)
+            hash_calls.extend(stdin_text.splitlines() if stdin_text is not None else [git_args[-1]])
+        return real_run(repo, *git_args, stdin_text=stdin_text)
 
     def forbid_read_bytes(self: Path, *args, **kwargs):
         raise AssertionError("repo_worktree_fingerprint must not read whole file bytes in-process")
 
-    monkeypatch.setattr(runtime, "_run_snapshot_git", tracked_run)
+    monkeypatch.setattr(hook_fingerprint, "_run_snapshot_git", tracked_run)
     monkeypatch.setattr(Path, "read_bytes", forbid_read_bytes)
 
     fingerprint = runtime.repo_worktree_fingerprint(target)
@@ -1726,14 +1727,14 @@ def test_wired_target_from_payload_without_cwd_and_no_named_repo_returns_none(tm
 def test_repo_worktree_fingerprint_returns_none_when_hash_object_fails_for_untracked(tmp_path: Path, monkeypatch):
     target = _git_wired_claude(tmp_path)
     (target / "new.txt").write_text("content")
-    real_run = runtime._run_snapshot_git
+    real_run = hook_fingerprint._run_snapshot_git
 
-    def fake_run(repo: Path, *git_args: str):
+    def fake_run(repo: Path, *git_args: str, **kwargs):
         if git_args[:1] == ("hash-object",):
             return None
-        return real_run(repo, *git_args)
+        return real_run(repo, *git_args, **kwargs)
 
-    monkeypatch.setattr(runtime, "_run_snapshot_git", fake_run)
+    monkeypatch.setattr(hook_fingerprint, "_run_snapshot_git", fake_run)
     assert runtime.repo_worktree_fingerprint(target) is None
 
 
@@ -1742,14 +1743,14 @@ def test_posttooluse_fails_closed_when_untracked_state_check_fails(tmp_path: Pat
     session_id = "hash-object-fail"
     out_file = target / "new.txt"
     out_file.write_text("before")
-    real_run = runtime._run_snapshot_git
+    real_run = hook_fingerprint._run_snapshot_git
 
-    def fake_run(repo: Path, *git_args: str):
+    def fake_run(repo: Path, *git_args: str, **kwargs):
         if git_args[:1] == ("hash-object",):
             return None
-        return real_run(repo, *git_args)
+        return real_run(repo, *git_args, **kwargs)
 
-    monkeypatch.setattr(runtime, "_run_snapshot_git", fake_run)
+    monkeypatch.setattr(hook_fingerprint, "_run_snapshot_git", fake_run)
     command = f"{sys.executable} -c \"from pathlib import Path; Path({str(out_file)!r}).write_text('after')\""
     pretool = _payload(
         target,

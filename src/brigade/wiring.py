@@ -13,6 +13,19 @@ from pathlib import Path
 from .config import load_config
 
 
+def expand_user_path(path: Path) -> Path:
+    """``path.expanduser()``, keeping a ``~name`` it cannot expand literal.
+
+    ``Path.expanduser`` raises RuntimeError for an unknown ``~user`` (or when
+    no home directory can be determined). Shells leave such a word unexpanded,
+    so hook target resolution treats it as a relative path the same way.
+    """
+    try:
+        return path.expanduser()
+    except RuntimeError:
+        return path
+
+
 def resolve_wired_target(cwd: object, *, harness: str | None = "claude") -> Path | None:
     """Walk from ``cwd`` upward looking for a Brigade-wired project.
 
@@ -25,8 +38,8 @@ def resolve_wired_target(cwd: object, *, harness: str | None = "claude") -> Path
     if not isinstance(cwd, str) or not cwd.strip():
         return None
     try:
-        current = Path(cwd).expanduser().resolve()
-    except OSError:
+        current = expand_user_path(Path(cwd)).resolve()
+    except (OSError, RuntimeError):
         return None
     if not current.is_dir():
         current = current.parent

@@ -5,11 +5,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from ..wiring import expand_user_path
+
 
 def resolved_path(value: Path) -> Path | None:
     try:
-        return value.expanduser().resolve()
-    except OSError:
+        return expand_user_path(value).resolve()
+    except (OSError, RuntimeError):
         return None
 
 
