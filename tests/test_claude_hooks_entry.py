@@ -143,8 +143,8 @@ def test_unpinned_script_tries_brigade_hook_then_cli():
     assert text.startswith("#!/usr/bin/env sh\n")
     assert "set -eu\n" in text
     assert "--target" not in text
-    entry_probe = text.index("command -v brigade-hook")
-    entry_exec = text.index(f'exec brigade-hook --event "$event" --package "{PACKAGE_REF}"')
+    entry_probe = text.index('cli="$(command -v brigade')
+    entry_exec = text.index(f'exec "${{cli%/*}}/brigade-hook" --event "$event" --package "{PACKAGE_REF}"')
     cli_exec = text.index(f'exec {COMMAND_PREFIX} --event "$event" --package "{PACKAGE_REF}"')
     assert entry_probe < entry_exec < cli_exec
 
@@ -152,7 +152,9 @@ def test_unpinned_script_tries_brigade_hook_then_cli():
 def test_pinned_script_forwards_target():
     text = hook_script_text(pin=Path("/work/my repo"))
 
-    assert f'exec brigade-hook --event "$event" --package "{PACKAGE_REF}" --target \'/work/my repo\'' in text
+    assert (
+        f'exec "${{cli%/*}}/brigade-hook" --event "$event" --package "{PACKAGE_REF}" --target \'/work/my repo\'' in text
+    )
     assert f'exec {COMMAND_PREFIX} --event "$event" --package "{PACKAGE_REF}" --target \'/work/my repo\'' in text
 
 
@@ -191,6 +193,22 @@ def test_script_prefers_brigade_hook_then_cli(tmp_path: Path):
     assert _run_script(script, base_env).stdout == ""
 
 
+def test_script_ignores_brigade_hook_from_another_installation(tmp_path: Path):
+    cli_dir = tmp_path / "cli-bin"
+    other_dir = tmp_path / "other-bin"
+    cli_dir.mkdir()
+    other_dir.mkdir()
+    script = tmp_path / "hook.sh"
+    script.write_text(hook_script_text(), encoding="utf-8")
+    _stub(cli_dir / "brigade", "cli")
+    _stub(other_dir / "brigade-hook", "other-entry")
+    env = {"PATH": f"{other_dir}:{cli_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
+
+    result = _run_script(script, env, "--event", "Stop")
+
+    assert result.stdout.strip() == f"cli work hook-run --event Stop --package {PACKAGE_REF}"
+
+
 def test_script_text_does_not_depend_on_install_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     set_home(monkeypatch, tmp_path / "a")
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data-a"))
@@ -207,6 +225,7 @@ def test_pinned_script_runs_entry_with_target(tmp_path: Path):
     bin_dir.mkdir()
     script = tmp_path / "hook.sh"
     script.write_text(hook_script_text(pin=tmp_path), encoding="utf-8")
+    _stub(bin_dir / "brigade", "cli")
     _stub(bin_dir / "brigade-hook", "entry")
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
 

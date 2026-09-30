@@ -59,8 +59,8 @@ def managed_groups() -> dict[str, list[dict[str, Any]]]:
 def hook_script_text(*, pin: Path | None = None) -> str:
     """Return the user-scope hook script.
 
-    It runs the lightweight ``brigade-hook`` entry point when it is on PATH and
-    falls back to the full CLI otherwise.
+    It runs the lightweight ``brigade-hook`` entry point installed beside the
+    ``brigade`` on PATH and falls back to the full CLI otherwise.
     """
     pin_flag = f" --target {shlex.quote(str(pin))}" if pin is not None else ""
     args = f'--event "$event" --package "{PACKAGE_REF}"'
@@ -85,9 +85,13 @@ def hook_script_text(*, pin: Path | None = None) -> str:
         "  exit 0",
         "fi",
     ]
+    # Only the brigade-hook installed beside the brigade that runs the
+    # fallback: one from another installation could carry a different
+    # package version and no-op the event.
     lines += [
-        f"if command -v {DIRECT_ENTRY_COMMAND} >/dev/null 2>&1; then",
-        f"  exec {DIRECT_ENTRY_COMMAND} {args}{pin_flag}",
+        'cli="$(command -v brigade 2>/dev/null || true)"',
+        f'if [ -n "$cli" ] && [ -x "${{cli%/*}}/{DIRECT_ENTRY_COMMAND}" ]; then',
+        f'  exec "${{cli%/*}}/{DIRECT_ENTRY_COMMAND}" {args}{pin_flag}',
         "fi",
         f"exec {COMMAND_PREFIX} {args}{pin_flag}",
     ]
