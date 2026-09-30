@@ -138,6 +138,10 @@ memory/20[0-9][0-9]-[0-1][0-9]-[0-3][0-9].md
 # Review inbox: ambiguous handoffs awaiting human triage.
 memory/handoff-inbox/
 
+# Local git worktrees (separate checkouts; the hook fingerprint would
+# otherwise walk each one as a nested repo on every Bash call).
+/.worktrees/
+
 # brigade local state (logs, scrub cache, dogfood runs, work sessions).
 .brigade/
 .brigade/receipt-signing-key
