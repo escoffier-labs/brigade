@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import localio, mcp_adapters, mcp_runtime, projection
+from . import localio, mcp_adapters, mcp_fidelity, mcp_runtime, projection, toml_compat as tomllib
 from .mcp_adapters import ADAPTERS, MCP_TARGETS, CanonicalServer
 from .render import emit as _emit
 
@@ -400,6 +400,61 @@ def _check_codex_generic_auth(
         raise NativeAuthConflict(conflicts)
 
 
+def _validate_native_config(harness: str, text: str | None) -> None:
+    """Readers are permissive for import; selected projection must diagnose damage."""
+    if text is None:
+        return
+    if harness in ("opencode", "opencode-user"):
+        mcp_adapters.inspect_opencode_config(text, for_mutation=True)
+        return
+    adapter = ADAPTERS[harness]
+    if adapter.fmt == "yaml":
+        # Hermes owns its bounded YAML parsing semantics. Do not route it
+        # through JSON validation or introduce a second YAML parser.
+        adapter.read_file(text)
+        return
+    if adapter.fmt == "json":
+        # Preflight the existing writer without writing or projecting entries.
+        # Strict user adapters reject blanks, while ordinary JSON accepts them.
+        adapter.write_file(text, {}, set())
+        if not text.strip():
+            return
+    try:
+        doc = tomllib.loads(text) if adapter.fmt == "toml" else json.loads(text)
+    except (ValueError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError("native_config_malformed") from exc
+    if not isinstance(doc, dict):
+        raise ValueError("native_config_malformed")
+    node = doc
+    for key in adapter.top_key.split("."):
+        node = node.get(key, {})
+        if not isinstance(node, dict):
+            raise ValueError("native_config_malformed")
+    if any(not isinstance(value, dict) for value in node.values()):
+        raise ValueError("native_config_malformed")
+
+
+def _fidelity_report(items, servers, harnesses, *, name_filter=None) -> dict[str, Any]:
+    excluded = []
+    for h in harnesses:
+        for name, server in servers.items():
+            if name_filter is not None and name != name_filter:
+                continue
+            reason = (
+                "catalog_disabled"
+                if not server.enabled
+                else ("target_not_selected" if not _server_targets_harness(server, h) else None)
+            )
+            if reason:
+                excluded.append({"harness": h, "server": name, "reason": reason})
+    return mcp_fidelity.build_report([i["_fidelity"] for i in items if "_fidelity" in i], excluded, harnesses=harnesses)
+
+
+def _emit_fidelity(payload, json_output, lines, rc) -> int:
+    report = payload.setdefault("fidelity", mcp_fidelity.build_report([], []))
+    return _emit(payload, json_output, [*lines, *mcp_fidelity.render_lines(report)], rc)
+
+
 def _plan_for_harness(
     target: Path,
     harness: str,
@@ -413,13 +468,25 @@ def _plan_for_harness(
 ) -> list[dict[str, Any]]:
     adapter = ADAPTERS[harness]
     path = mcp_adapters.resolve_path(adapter, target)
-    text = path.read_text() if path.is_file() else None
+    scope = "user" if adapter.user_scope else "project"
     try:
-        if harness in ("opencode", "opencode-user"):
-            mcp_adapters.inspect_opencode_config(text, for_mutation=True)
+        text = path.read_text() if path.is_file() else None
+        _validate_native_config(harness, text)
         live = adapter.read_file(text)
-    except mcp_adapters.OpenCodeLayoutError as exc:
-        return [{**_item(harness, adapter.path, "*", "invalid", "conflict", None, None, detail=str(exc)), **exc.fields}]
+    except (OSError, ValueError) as exc:
+        code = "native_config_unreadable" if isinstance(exc, OSError) else "native_config_malformed"
+        extra = exc.fields if isinstance(exc, mcp_adapters.OpenCodeLayoutError) else {}
+        if extra.get("reason") == "duplicate_layout":
+            code = "native_layout_duplicate"
+        message = mcp_fidelity.projection_error_message(exc, fallback=code) if isinstance(exc, ValueError) else code
+        return [
+            {
+                **_item(harness, adapter.path, "*", "invalid", "conflict", None, None, detail=f"{path}: {message}"),
+                **extra,
+                "scope": scope,
+                "_fidelity": mcp_fidelity.evaluate(None, harness, scope=scope, error_code=code),
+            }
+        ]
     owned = state.get("ownership", {}).get(harness, {}).get(adapter.path, {})
     # `desired` is the FULL set targeting this harness; orphans compare against it so a
     # --name-scoped run never treats the other managed servers as prunable orphans.
@@ -428,18 +495,39 @@ def _plan_for_harness(
     }
     items: list[dict[str, Any]] = []
     rel = adapter.path
+    assessments: dict[str, dict[str, Any]] = {}
 
     for name, server in sorted(desired.items()):
         if name_filter is not None and name != name_filter:
             continue
+        context = {"scope": scope, "live": live.get(name, {}), "native_keys": {}}
         try:
+            location = _opencode_location(harness, text, name)
+            context["location"] = location
+            native_record = _native_record(harness, live.get(name, {}), owned.get(name), server)
+            context["native_keys"] = native_record.get(
+                "native_auth_keys", native_record.get("opencode_native_keys", {})
+            )
             provider_dict = _project_server(
                 target,
                 harness,
                 server,
-                ProjectionContext(live.get(name, {}), owned.get(name), _opencode_location(harness, text, name)),
+                ProjectionContext(live.get(name, {}), owned.get(name), location),
             )
+            assessments[name] = mcp_fidelity.evaluate(server, harness, projected=provider_dict, **context)
+            blocking = sorted({f["reason"] for f in assessments[name]["fields"] if f["blocking"]})
+            if blocking:
+                items.append(
+                    _item(
+                        harness, rel, name, "invalid", "conflict", None, None, detail=f"{name}: {', '.join(blocking)}"
+                    )
+                )
+                continue
+            # File serializers can refuse a valid per-server projection (for
+            # example an OpenCode name colliding with a settings container).
+            adapter.write_file(text, {name: provider_dict}, set())
         except NativeAuthConflict as exc:
+            assessments[name] = mcp_fidelity.evaluate(server, harness, error_code="native_auth_collision", **context)
             items.append(
                 {
                     **_item(harness, rel, name, "conflicted", "conflict", None, None, detail=f"{name}: {exc}"),
@@ -448,7 +536,20 @@ def _plan_for_harness(
             )
             continue
         except ValueError as exc:
-            items.append(_item(harness, rel, name, "invalid", "conflict", None, None, detail=f"{name}: {exc}"))
+            code = mcp_fidelity.projection_error_code(exc)
+            assessments[name] = mcp_fidelity.evaluate(server, harness, error_code=code, **context)
+            items.append(
+                _item(
+                    harness,
+                    rel,
+                    name,
+                    "invalid",
+                    "conflict",
+                    None,
+                    None,
+                    detail=f"{name}: {mcp_fidelity.projection_error_message(exc)}",
+                )
+            )
             continue
         desired_fp = localio.stable_hash(provider_dict)
         canon_fp = localio.stable_hash(mcp_adapters.server_to_dict(server))
@@ -533,6 +634,8 @@ def _plan_for_harness(
     adapter_scope = "user" if adapter.user_scope else "project"
     for item in items:
         item["scope"] = adapter_scope
+        if item["server"] in assessments:
+            item["_fidelity"] = assessments[item["server"]]
         server = servers.get(item["server"])
         item["transport"] = server.transport if server is not None else None
     return items
@@ -804,7 +907,7 @@ def plan(
     target = target.expanduser().resolve()
     servers, errors, _ = load_canonical(target)
     if errors:
-        return _emit({"errors": errors}, json_output, [f"error: {e}" for e in errors], 2)
+        return _emit_fidelity({"errors": errors}, json_output, [f"error: {e}" for e in errors], 2)
     harnesses, notes = active_targets(target, harness=harness, user_scope=user_scope)
     state = _load_state(target)
     items: list[dict[str, Any]] = []
@@ -812,11 +915,18 @@ def plan(
         items.extend(
             _plan_for_harness(target, h, servers, state, force=False, prune=True, adopt=False, name_filter=name)
         )
+    fidelity = _fidelity_report(items, servers, harnesses, name_filter=name)
     counts = _counts(items)
     invalid = [i["detail"] for i in items if i["status"] == "invalid"]
     if invalid:
-        return _emit(
-            {"errors": invalid, "layout_conflicts": _layout_conflicts(items)},
+        return _emit_fidelity(
+            {
+                "errors": invalid,
+                "layout_conflicts": _layout_conflicts(items),
+                "items": _public_items(items),
+                "counts": counts,
+                "fidelity": fidelity,
+            },
             json_output,
             [f"error: {e}" for e in invalid],
             2,
@@ -831,6 +941,7 @@ def plan(
         "notes": notes,
         "items": _public_items(items),
         "counts": counts,
+        "fidelity": fidelity,
     }
     lines = [f"source: {source_catalog}"]
     lines.extend(f"destination: {path}" for path in destination_files)
@@ -839,7 +950,7 @@ def plan(
         lines.append("(nothing to plan)")
     lines.extend(notes)
     rc = 1 if counts["conflict"] else 0
-    return _emit(payload, json_output, lines, rc)
+    return _emit_fidelity(payload, json_output, lines, rc)
 
 
 def _config_current_by_name(
@@ -964,6 +1075,7 @@ class McpSyncPlan:
     destination_files: list[str]
     errors: list[str] = field(default_factory=list)
     native_write_paths: list[Path] = field(default_factory=list)
+    fidelity: dict[str, Any] = field(default_factory=lambda: mcp_fidelity.build_report([], []))
 
 
 def _state_bytes(state: dict[str, Any]) -> bytes:
@@ -1086,7 +1198,7 @@ def build_sync_plan(
     all_items: list[dict[str, Any]] = []
     mutations: list[Any] = []
     native_write_paths: list[Path] = []
-    plan_errors: list[str] = []
+    plan_errors: list[str] = [i["detail"] for _, items in planned for i in items if i["status"] == "invalid"]
     desired_state = copy.deepcopy(state)
     for h, items in planned:
         if h in gated:
@@ -1098,7 +1210,6 @@ def build_sync_plan(
             all_items.extend(items)
             continue
         all_items.extend(items)
-        plan_errors.extend(i["detail"] for i in items if i["status"] == "invalid")
         if any(i["status"] == "invalid" for i in items):
             continue
         adapter = ADAPTERS[h]
@@ -1163,7 +1274,16 @@ def build_sync_plan(
                     for server_name in to_write:
                         owner_map[server_name]["projected_fingerprint"] = localio.stable_hash(final_live[server_name])
             except ValueError as exc:
-                plan_errors.append(f"{path}: {exc}")
+                code = mcp_fidelity.projection_error_code(exc)
+                plan_errors.append(f"{path}: {mcp_fidelity.projection_error_message(exc)}")
+                for item in items:
+                    if item["server"] in servers and item["action"] in ("create", "update"):
+                        item["_fidelity"] = mcp_fidelity.evaluate(
+                            servers[item["server"]],
+                            h,
+                            scope="user" if adapter.user_scope else "project",
+                            error_code=code,
+                        )
                 continue
             mutation = _mutation_for_path(
                 dest=path,
@@ -1217,6 +1337,7 @@ def build_sync_plan(
         destination_files=[str(mcp_adapters.resolve_path(ADAPTERS[h], target)) for h in harnesses],
         errors=plan_errors,
         native_write_paths=native_write_paths,
+        fidelity=_fidelity_report(all_items, servers, harnesses, name_filter=name),
     )
 
 
@@ -1273,10 +1394,10 @@ def sync(
     target = target.expanduser().resolve()
     if verify_runtime and not write:
         message = "--verify requires --write"
-        return _emit({"errors": [message]}, json_output, [f"error: {message}"], 2)
+        return _emit_fidelity({"errors": [message]}, json_output, [f"error: {message}"], 2)
     timeout_error = _verify_timeout_error(verify_timeout, flag="--verify-timeout")
     if timeout_error:
-        return _emit({"errors": [timeout_error]}, json_output, [f"error: {timeout_error}"], 2)
+        return _emit_fidelity({"errors": [timeout_error]}, json_output, [f"error: {timeout_error}"], 2)
     planned = build_sync_plan(
         target=target,
         name=name,
@@ -1290,16 +1411,15 @@ def sync(
         interactive=interactive,
         json_output=json_output,
     )
-    if planned.errors and not planned.items:
-        return _emit(
-            {"errors": planned.errors, "layout_conflicts": _layout_conflicts(planned.items)},
-            json_output,
-            [f"error: {e}" for e in planned.errors],
-            2,
-        )
     if planned.errors:
-        return _emit(
-            {"errors": planned.errors, "layout_conflicts": _layout_conflicts(planned.items)},
+        return _emit_fidelity(
+            {
+                "errors": planned.errors,
+                "layout_conflicts": _layout_conflicts(planned.items),
+                "items": _public_items(planned.items),
+                "counts": _counts(planned.items),
+                "fidelity": planned.fidelity,
+            },
             json_output,
             [f"error: {e}" for e in planned.errors],
             2,
@@ -1326,9 +1446,12 @@ def sync(
             )
         except projection.OverlapBlockedError as exc:
             message = str(exc)
-            return _emit(
+            return _emit_fidelity(
                 {
                     "target": str(target),
+                    "fidelity": planned.fidelity,
+                    "items": _public_items(planned.items),
+                    "counts": _counts(planned.items),
                     "errors": [message],
                     "operation_id": operation_id,
                     "terminal_state": "recovery-required",
@@ -1340,8 +1463,16 @@ def sync(
             )
         except projection.DriftError as exc:
             message = str(exc)
-            return _emit(
-                {"target": str(target), "errors": [message], "operation_id": operation_id, "terminal_state": "planned"},
+            return _emit_fidelity(
+                {
+                    "target": str(target),
+                    "errors": [message],
+                    "operation_id": operation_id,
+                    "terminal_state": "planned",
+                    "fidelity": planned.fidelity,
+                    "items": _public_items(planned.items),
+                    "counts": _counts(planned.items),
+                },
                 json_output,
                 [f"error: {message}"],
                 2,
@@ -1355,6 +1486,7 @@ def sync(
             payload = {
                 "target": str(target),
                 "source_catalog": planned.source_catalog,
+                "fidelity": planned.fidelity,
                 "destination_files": planned.destination_files,
                 "harnesses": planned.harnesses,
                 "wrote": False,
@@ -1368,7 +1500,7 @@ def sync(
                 "projection": projection_view,
                 "errors": [f"projection {terminal_state}"],
             }
-            return _emit(payload, json_output, [f"error: projection {terminal_state}"], 2)
+            return _emit_fidelity(payload, json_output, [f"error: projection {terminal_state}"], 2)
 
     if write and planned.projection is None:
         terminal_state = "unchanged"
@@ -1379,6 +1511,7 @@ def sync(
     payload = {
         "target": str(target),
         "source_catalog": planned.source_catalog,
+        "fidelity": planned.fidelity,
         "destination_files": planned.destination_files,
         "harnesses": planned.harnesses,
         "wrote": write and terminal_state == "committed",
@@ -1438,7 +1571,7 @@ def sync(
     elif planned.gate_declined:
         payload["stdio_gated"] = sorted(planned.gated)
         rc = 1
-    return _emit(payload, json_output, lines, rc)
+    return _emit_fidelity(payload, json_output, lines, rc)
 
 
 def doctor(*, target: Path, json_output: bool = False) -> int:
@@ -1461,19 +1594,42 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
     unsupported: list[str] = []
     if configured:
         unsupported = sorted(h for h in configured if h not in ADAPTERS)
+    harnesses, _ = active_targets(target, harness=None, user_scope=False)
+    state = _load_state(target)
+    items = [
+        item
+        for h in harnesses
+        for item in _plan_for_harness(target, h, servers, state, force=False, prune=False, adopt=False)
+    ]
+    fidelity = _fidelity_report(items, servers, harnesses)
+    for row in fidelity["servers"]:
+        for field_row in row["fields"]:
+            if field_row["blocking"] or field_row["status"] == "unsupported":
+                issues.append(
+                    {
+                        "severity": "error"
+                        if field_row["blocking"] and field_row["reason"] != "native_auth_collision"
+                        else "warn",
+                        "message": f"{row['harness']}/{row['server']}: {field_row['field']} {field_row['reason']}",
+                    }
+                )
     payload = {
+        "fidelity": fidelity,
         "valid": not any(i["severity"] == "error" for i in issues),
         "canonical_path": str(canonical_path(target)),
         "server_count": len(servers),
         "issues": issues,
         "unsupported_harnesses": unsupported,
     }
-    lines = [f"brigade mcp doctor: {len(servers)} server(s), {len(issues)} issue(s)"]
+    lines = [
+        f"brigade mcp doctor: {len(servers)} server(s), {len(issues)} issue(s)",
+        "fidelity assesses default project targets",
+    ]
     lines += [f"[{i['severity']}] {i['message']}" for i in issues]
     if unsupported:
         lines.append(f"no MCP adapter for configured harness(es): {', '.join(unsupported)}")
     rc = 0 if payload["valid"] else 1
-    return _emit(payload, json_output, lines, rc)
+    return _emit_fidelity(payload, json_output, lines, rc)
 
 
 def import_servers(
