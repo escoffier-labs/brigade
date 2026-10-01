@@ -79,6 +79,9 @@ class PolicyContext:
     admission_defaults: dict[str, str] = field(default_factory=dict)
     seats: tuple[str, ...] = ()
     available: bool = False
+    retired_seats: tuple[str, ...] = ()
+    consumer_seats: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    consumer_retired_seats: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -148,7 +151,10 @@ def load_view(
                 t3_instance_id=str(row[7] or ""),
                 t3_service_tier=str(row[8] or ""),
                 notes=row[9],
-                retired=fleet_model_roster.retired_reason(str(row[1]), str(row[2]), retired_rows) is not None,
+                retired=any(
+                    fleet_model_roster.retired_reason(str(row[1]), str(identity), retired_rows) is not None
+                    for identity in (row[2], row[10] or "")
+                ),
             )
         )
     providers = fleet_hub._cloud_policy(conn, config)["providers"]
@@ -189,6 +195,12 @@ def _policy_context(conn: sqlite3.Connection) -> PolicyContext:
         current = fleet_hub_policy.current_policy(conn)
         document = current["document"]
         consumers = document["consumers"]
+        retired_rows = fleet_hub_model_roster._retired_rows(conn)
+        retired_seats = fleet_hub_model_roster.retired_policy_seats(document, retired_rows)
+        consumer_retired_seats = {
+            consumer: fleet_hub_model_roster.retired_policy_seats(document, retired_rows, consumer=consumer)
+            for consumer in CONSUMERS
+        }
         return PolicyContext(
             revision=int(current["revision"]),
             roles={key: str(value) for key, value in (document["defaults"].get("roles") or {}).items()},
@@ -201,8 +213,16 @@ def _policy_context(conn: sqlite3.Connection) -> PolicyContext:
                 )
                 for consumer in CONSUMERS
             },
-            seats=tuple(sorted(document["seats"])),
+            seats=tuple(name for name in sorted(document["seats"]) if name not in retired_seats),
             available=True,
+            retired_seats=retired_seats,
+            consumer_seats={
+                consumer: tuple(
+                    name for name in sorted(document["seats"]) if name not in consumer_retired_seats[consumer]
+                )
+                for consumer in CONSUMERS
+            },
+            consumer_retired_seats=consumer_retired_seats,
         )
     except (fleet_hub.FleetHubError, sqlite3.Error, KeyError, TypeError, ValueError):
         return PolicyContext()
@@ -220,6 +240,8 @@ def _select(name: str, current: str, seats: tuple[SeatRow, ...], *, editable: bo
     usable: list[str] = []
     rest: list[str] = []
     for row in seats:
+        if row.retired:
+            continue
         bound = True if binding is None else bool(getattr(row, binding))
         (usable if row.enabled and not row.retired and bound else rest).append(row.seat)
     disabled = "" if editable else " disabled"
@@ -245,13 +267,13 @@ def _checkbox(name: str, checked: bool, *, editable: bool) -> str:
     )
 
 
-def _policy_select(name: str, current: str, seats: tuple[str, ...]) -> str:
+def _policy_select(name: str, current: str, seats: tuple[str, ...], *, retired_seats: tuple[str, ...] = ()) -> str:
     """A seat dropdown backed by the policy document's own seat names."""
     options = [f'<option value=""{" selected" if not current else ""}>(unset)</option>']
     options.extend(
         f'<option value="{_esc(seat)}"{" selected" if seat == current else ""}>{_esc(seat)}</option>' for seat in seats
     )
-    if current and current not in seats:
+    if current and current not in seats and current not in retired_seats:
         options.append(f'<option value="{_esc(current)}" selected>{_esc(current)} (not in policy)</option>')
     return f'<select name="{_esc(name)}">{"".join(options)}</select>'
 
@@ -292,7 +314,7 @@ def _authoritative_roles_panel(view: RosterView, policy_csrf: str) -> str:
     """The same Roles dropdowns, submitting one scoped ``defaults.roles`` preview."""
     cells = "".join(
         f"<label>{_esc(fleet_policy_page.ROLE_LABELS.get(role, role))} ({_esc(role)})"
-        f"{_policy_select(f'field.role_{role}', view.policy.roles.get(role) or '', view.policy.seats)}</label>"
+        f"{_policy_select(f'field.role_{role}', view.policy.roles.get(role) or '', view.policy.seats, retired_seats=view.policy.retired_seats)}</label>"
         for role in ROLES
     )
     return (
@@ -319,7 +341,8 @@ def _authoritative_admission_panel(view: RosterView, policy_csrf: str) -> str:
         + _policy_select(
             f"field.role_{fleet_policy_page.ADMISSION_ROLE}",
             view.policy.admission_defaults.get(consumer) or "",
-            view.policy.seats,
+            view.policy.consumer_seats.get(consumer, view.policy.seats),
+            retired_seats=view.policy.consumer_retired_seats.get(consumer, view.policy.retired_seats),
         )
         + "</label>"
         + _policy_preview_actions(f"admission fallback for {consumer}")
@@ -447,7 +470,12 @@ def render(
         )
     # 2. seats
     seat_rows = []
-    for row in view.seats:
+    operational_seats = tuple(
+        row
+        for row in view.seats
+        if not row.retired and not (view.activation.active and row.seat in view.policy.retired_seats)
+    )
+    for row in operational_seats:
         cls = ' class="seat--off"' if row.seat not in seats_on else ""
         flag = ' <span class="flag">retired</span>' if row.retired else ""
         box = _checkbox(
@@ -460,7 +488,7 @@ def render(
         )
     parts.append(
         '<section class="panel" aria-labelledby="seats"><header><h2 id="seats">Seats</h2>'
-        f'<p class="panel-count">{len(view.seats)} seat(s)</p></header><div class="table-wrap"><table class="roster-table">'
+        f'<p class="panel-count">{len(operational_seats)} seat(s)</p></header><div class="table-wrap"><table class="roster-table">'
         "<thead><tr><th>Seat</th><th>Provider/model</th><th>Reasoning</th><th>Limit</th><th>Brigade CLI</th>"
         f"<th>T3 instance</th><th>On</th></tr></thead><tbody>{''.join(seat_rows)}</tbody></table></div></section>"
     )
@@ -493,9 +521,18 @@ def render(
         f"{'permanent' if item.get('permanent') else 'operator'} &middot; {_esc(item.get('reason_code'))}</li>"
         for item in view.retired
     )
+    retired_seats = sorted({row.seat for row in view.seats if row.retired} | set(view.policy.retired_seats))
+    retired_seat_history = (
+        '<h3>Retired seats (history)</h3><ul class="observer-list">'
+        + "".join(f"<li>{_esc(seat)}</li>" for seat in retired_seats)
+        + "</ul>"
+        if retired_seats
+        else ""
+    )
     parts.append(
         '<section class="panel" aria-labelledby="retired"><header><h2 id="retired">Retired families</h2></header>'
         + (f'<ul class="observer-list">{retired_items}</ul>' if retired_items else '<p class="empty">None.</p>')
+        + retired_seat_history
         + "</section>"
     )
     if editable:

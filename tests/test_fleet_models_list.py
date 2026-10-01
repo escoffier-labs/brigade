@@ -6,6 +6,8 @@ import json
 from io import StringIO
 from typing import Any
 
+import pytest
+
 from brigade import cli, fleet_model_admission, fleet_model_roster
 
 
@@ -175,3 +177,39 @@ def test_list_uses_cached_lkg_when_hub_unavailable(monkeypatch):
     assert "roster served from cache" in out.getvalue()
     assert "hub is unavailable" in out.getvalue()
     assert "cursor_grok" in out.getvalue()
+
+
+@pytest.mark.parametrize("consumer", ["brigade-run", "t3-fleet"])
+@pytest.mark.parametrize("source", ["hub", "lkg"])
+def test_list_excludes_retired_seats_but_reports_retirement_history(monkeypatch, consumer, source):
+    snapshot = _versioned_snapshot(
+        _versioned_seat("old_coder", "codex", "openai/gpt-5.6-high"),
+        _versioned_seat("old_cursor", "cursor", "composer-2.5", enabled=False),
+        _versioned_seat("current", "provider-a", "model-a", enabled=False),
+    )
+    snapshot["source"] = source
+    snapshot["retired_models"] = [
+        {"provider": "openai", "family": "gpt-5.6", "reason_code": "operator-retired", "permanent": False},
+        {"provider": "cursor", "family": "composer-2.5", "reason_code": "operator-retired", "permanent": True},
+    ]
+    rc, out, err = _run_list(monkeypatch, snapshot, "--consumer", consumer, "--json")
+    assert rc == 0 and err == ""
+    parsed = json.loads(out)
+    assert [item["seat"] for item in parsed["seats"]] == ["current"]
+    assert parsed["retired_models"] == snapshot["retired_models"]
+    rc, out, err = _run_list(monkeypatch, snapshot, "--consumer", consumer)
+    assert rc == 0 and err == ""
+    assert "old_coder" not in out and "old_cursor" not in out
+    assert "Retired families" in out and "openai/gpt-5.6" in out and "cursor/composer-2.5" in out
+    rc, out, err = _run_list(monkeypatch, snapshot, "--seat", "old_coder", "--json")
+    assert rc == 0 and err == ""
+    assert json.loads(out)["seats"] == []
+
+
+def test_list_excludes_a_retired_native_launch_model(monkeypatch):
+    seat = _versioned_seat("native_old", "openai", "current-model")
+    seat["bindings"]["brigade"]["model"] = "openai/gpt-5.4-high"
+    snapshot = _versioned_snapshot(seat)
+    rc, out, err = _run_list(monkeypatch, snapshot, "--json")
+    assert rc == 0 and err == ""
+    assert json.loads(out)["seats"] == []
