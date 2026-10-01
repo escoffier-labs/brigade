@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP plan, sync, and doctor report `native_config_malformed` for VS Code input entries with nonstring IDs, preserving native files and refusing the entire sync transaction before writes. (#1575)
 - OpenCode MCP import and sync preserve existing flat, nested, and mixed layouts, native activation, timeouts, and live credentials, and refuse duplicate locations before mutation. Safe imports omit sensitive literal headers from canonical storage and retain their live values during adoption. Sync now projects explicit canonical timeout seconds as native milliseconds. (#1560)
 - Codex MCP sync preserves native HTTP authentication fields, tracks managed header removal, and reports authentication combinations that cannot be projected safely. (#1559)
 - The Command Deck counts missing or unknown control-plane authority as a coverage gap, so a legacy routing snapshot no longer renders `ALL CLEAR` and "all control-plane sections reported" while the panel prints `authority unknown`. (#1460)
@@ -18,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- MCP plan, sync, and doctor report versioned field fidelity separately from transaction success, with complete Codex/OpenCode contracts and explicit unevaluated adapters. Security field losses refuse the transaction, while nonsecurity omissions remain visible warnings. Doctor assesses default project targets without writing native files. Malformed nonblank JSON and all selected invalid target plans, including those behind global stdio acknowledgment, refuse the transaction. Ordinary JSON blank-file compatibility and strict Cursor/Kimi user diagnostics remain intact. Native-auth collisions remain doctor warnings so operator sync can write safe siblings with exit 1. Explicit `oauth: false` remains protected from loss. (#1561)
 - `grokbot_queue_claim` accepts an optional bounded `worker_label` (`[a-z0-9-]{1,32}`) so several Builder bots sharing one connector identity stay distinguishable. The listener validates the label, forwards it to the hub unchanged, stores it on local file-backed job rows, and echoes it on the claim, status, renew, and complete projections and in `brigade run cloud grokbot status`. Hub-side storage is a pending fleet control-plane change, so a hub-authority deployment accepts the label and shows none until that column lands. (#1501)
 - The Cosign signer profile now exports agent-change and commit-linkage statements as Sigstore bundles for external verification. (#1404)
 - Fleet status and Command Deck report policy authority as staged before migration activation and active afterward, without activating the migration. (#1460)
