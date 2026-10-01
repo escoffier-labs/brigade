@@ -171,8 +171,10 @@ ownership conflicts, and creates no native files. Malformed active native
 configs fail diagnosis while other targets are still assessed. Ordinary JSON
 adapters continue accepting blank or whitespace-only configs. Cursor and Kimi
 user adapters retain their strict blank-file refusals and actionable diagnostics.
-Malformed nonblank JSON now refuses the entire transaction. All selected invalid
-target plans block the transaction, including targets held behind the global
+Malformed nonblank JSON now refuses the entire transaction. VS Code input entries
+must have string IDs. Malformed IDs report `native_config_malformed` before the
+input collector runs, including when the canonical catalog is empty. All selected
+invalid target plans block the transaction, including targets held behind the global
 stdio acknowledgment. Blocking rows other than `native_auth_collision` make
 doctor return exit 1. Nonblocking unsupported fields produce warnings and
 leave its exit status at 0. Use the existing `plan`/`sync --user-scope` options to

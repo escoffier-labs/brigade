@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP plan, sync, and doctor report `native_config_malformed` for VS Code input entries with nonstring IDs, preserving native files and refusing the entire sync transaction before writes. (#1575)
 - OpenCode MCP import and sync preserve existing flat, nested, and mixed layouts, native activation, timeouts, and live credentials, and refuse duplicate locations before mutation. Safe imports omit sensitive literal headers from canonical storage and retain their live values during adoption. Sync now projects explicit canonical timeout seconds as native milliseconds. (#1560)
 - Codex MCP sync preserves native HTTP authentication fields, tracks managed header removal, and reports authentication combinations that cannot be projected safely. (#1559)
 - The Command Deck counts missing or unknown control-plane authority as a coverage gap, so a legacy routing snapshot no longer renders `ALL CLEAR` and "all control-plane sections reported" while the panel prints `authority unknown`. (#1460)

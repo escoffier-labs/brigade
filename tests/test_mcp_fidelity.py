@@ -365,6 +365,78 @@ def test_malformed_native_is_blocked_continues_other_targets(tmp_path, monkeypat
     assert _snapshot(tmp_path) == before
 
 
+@pytest.mark.parametrize("input_id", [[], {}, ["FAKE_SECRET"], {"FAKE_HEADER": "FAKE_SECRET"}, None, 7, True])
+@pytest.mark.parametrize("call", ["plan", "sync", "doctor"])
+@pytest.mark.parametrize("empty_catalog", [True, False])
+def test_malformed_vscode_input_ids_refuse_without_mutation(
+    tmp_path, monkeypatch, capsys, input_id, call, empty_catalog
+):
+    _targets(monkeypatch, "vscode", "opencode")
+    _seed(
+        tmp_path,
+        []
+        if empty_catalog
+        else [replace(REMOTE, targets=("vscode",)), replace(REMOTE, name="safe", targets=("opencode",))],
+    )
+    path = A.resolve_path(A.ADAPTERS["vscode"], tmp_path)
+    path.parent.mkdir()
+    path.write_text(json.dumps({"servers": {}, "inputs": [{"id": input_id, "description": "FAKE_DESCRIPTION"}]}))
+    before = _snapshot(tmp_path)
+    expected_rc = 1 if call == "doctor" else 2
+    for write in [False, True] if call == "sync" else [False]:
+        kwargs = {"write": write, "force": True, "adopt": True} if call == "sync" else {}
+        assert getattr(mcp_cmd, call)(target=tmp_path, json_output=True, **kwargs) == expected_rc
+        payload = _payload(capsys)
+        report = payload["fidelity"]
+        assert {r["harness"] for r in report["targets"]} == {"vscode", "opencode"}
+        assert next(r for r in report["targets"] if r["harness"] == "vscode")["state"] == "blocked"
+        bad = next(r for r in report["servers"] if r["harness"] == "vscode")
+        assert bad["server"] == "*" and bad["scope"] == "project"
+        assert _field(bad, "projection")["reason"] == "native_config_malformed"
+        if call == "doctor":
+            assert payload["valid"] is False
+            assert {"severity": "error", "message": "vscode/*: projection native_config_malformed"} in payload["issues"]
+        else:
+            assert payload["errors"] == [f"{path}: native_config_malformed"]
+            assert any(i["harness"] == "vscode" and i["file"] == ".vscode/mcp.json" for i in payload["items"])
+        if not empty_catalog:
+            assert any(r["harness"] == "opencode" and r["server"] == "safe" for r in report["servers"])
+        assert _snapshot(tmp_path) == before
+        assert not (tmp_path / mcp_cmd.STATE_REL).exists()
+        assert not list(tmp_path.rglob("journal.json"))
+        assert getattr(mcp_cmd, call)(target=tmp_path, **kwargs) == expected_rc
+        rendered = capsys.readouterr().out
+        assert "vscode" in rendered and "native_config_malformed" in rendered
+        for sentinel in ("FAKE_SECRET", "FAKE_HEADER", "FAKE_DESCRIPTION"):
+            assert sentinel not in json.dumps(payload) + rendered
+        assert _snapshot(tmp_path) == before
+
+
+def test_valid_vscode_inputs_preserve_read_only_bytes_and_sync_entries(tmp_path, monkeypatch, capsys):
+    _targets(monkeypatch, "vscode")
+    _seed(tmp_path, [replace(REMOTE, headers={"Authorization": {"ref": "FAKE_TOKEN"}})])
+    path = A.resolve_path(A.ADAPTERS["vscode"], tmp_path)
+    path.parent.mkdir()
+    inputs = [{"id": "FAKE_TOKEN", "type": "promptString", "description": "FAKE_DESCRIPTION", "password": False}]
+    native = {"servers": {}, "inputs": inputs, "FAKE_SETTING": {"nested": [1, 2]}}
+    path.write_text(json.dumps(native, indent=4) + "\n")
+    before = _snapshot(tmp_path)
+    for call in ("plan", "sync", "doctor"):
+        assert getattr(mcp_cmd, call)(target=tmp_path, json_output=True) == 0
+        _payload(capsys)
+        assert _snapshot(tmp_path) == before
+    assert mcp_cmd.sync(target=tmp_path, harness="vscode", write=True, json_output=True) == 0
+    _payload(capsys)
+    after = json.loads(path.read_text())
+    assert after["inputs"] == inputs
+    assert after["FAKE_SETTING"] == native["FAKE_SETTING"]
+    assert after["servers"]["docs"]["headers"]["Authorization"] == "${input:FAKE_TOKEN}"
+    synced = _snapshot(tmp_path)
+    assert mcp_cmd.sync(target=tmp_path, harness="vscode", write=True, json_output=True) == 0
+    _payload(capsys)
+    assert _snapshot(tmp_path) == synced
+
+
 @pytest.mark.parametrize("harness", ["codex-user", "opencode-user"])
 def test_user_scope_and_layout_reports(tmp_path, monkeypatch, capsys, harness):
     set_home(monkeypatch, tmp_path / "home")

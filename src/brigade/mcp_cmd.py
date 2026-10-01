@@ -414,6 +414,15 @@ def _validate_native_config(harness: str, text: str | None) -> None:
         adapter.read_file(text)
         return
     if adapter.fmt == "json":
+        if harness == "vscode" and text.strip():
+            # The input collector builds an ID set. Validate before the writer
+            # so malformed IDs cannot escape preflight as an unhandled TypeError.
+            doc = json.loads(text)
+            inputs = doc.get("inputs") if isinstance(doc, dict) else None
+            if isinstance(inputs, list) and any(
+                isinstance(entry, dict) and not isinstance(entry.get("id"), str) for entry in inputs
+            ):
+                raise ValueError("native_config_malformed")
         # Preflight the existing writer without writing or projecting entries.
         # Strict user adapters reject blanks, while ordinary JSON accepts them.
         adapter.write_file(text, {}, set())
