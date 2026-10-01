@@ -1175,6 +1175,11 @@ def _hook_uninstall_plan(profile, state: dict[str, Any]) -> dict[str, Any]:
 def _malformed_native_config(adapter, text: str | None) -> str | None:
     if text is None:
         return None
+    if adapter.harness in ("opencode", "opencode-user"):
+        try:
+            mcp_adapters.inspect_opencode_config(text, for_mutation=True)
+        except ValueError as exc:
+            return str(exc)
     try:
         doc = json.loads(text) if adapter.fmt == "json" else _toml_loads(text)
     except (json.JSONDecodeError, _TOMLDecodeError):
@@ -1191,15 +1196,13 @@ def _malformed_native_config(adapter, text: str | None) -> str | None:
     return None
 
 
-def _profile_context(live_entry: dict[str, Any], record: Any) -> mcp_cmd.ProjectionContext:
+def _profile_context(live_entry: dict[str, Any], record: Any, location: str | None = None) -> mcp_cmd.ProjectionContext:
     """Let profile ownership, not the generic mcp state file, govern native auth."""
-    return mcp_cmd.ProjectionContext(live_entry, record if isinstance(record, dict) else None)
+    return mcp_cmd.ProjectionContext(live_entry, record if isinstance(record, dict) else None, location)
 
 
 def _native_auth_record(profile, live_entry: dict[str, Any], record: Any, server) -> dict[str, Any]:
-    if profile.mcp_harness not in ("codex", "codex-user"):
-        return {}
-    return mcp_cmd._codex_auth_record(live_entry, record if isinstance(record, dict) else None, server)
+    return mcp_cmd._native_record(profile.mcp_harness, live_entry, record if isinstance(record, dict) else None, server)
 
 
 def _mcp_plan(
@@ -1207,6 +1210,21 @@ def _mcp_plan(
 ) -> dict[str, Any]:
     adapter = mcp_adapters.ADAPTERS[profile.mcp_harness]
     path = profile.mcp_path or mcp_adapters.resolve_path(adapter, workspace)
+    text = path.read_text(encoding="utf-8") if path.is_file() else None
+    malformed = _malformed_native_config(adapter, text)
+    if malformed:
+        item = {"surface": "mcp", "path": str(path), "status": "malformed", "action": "preserve", "detail": malformed}
+        item.update(mcp_cmd._opencode_diagnostics(profile.mcp_harness, text))
+        return {
+            "items": [item],
+            "conflicts": [item],
+            "path": path,
+            "adapter": adapter,
+            "text": text,
+            "updates": {},
+            "remove": set(),
+            "next": state["mcp"],
+        }
     servers, errors, _warnings = mcp_cmd.load_canonical(workspace)
     if errors:
         # A workspace need not opt into project MCP at all.  Existing owned
@@ -1285,20 +1303,6 @@ def _mcp_plan(
             "remove": set(),
             "next": state["mcp"],
         }
-    text = path.read_text(encoding="utf-8") if path.is_file() else None
-    malformed = _malformed_native_config(adapter, text)
-    if malformed:
-        item = {"surface": "mcp", "path": str(path), "status": "malformed", "action": "preserve", "detail": malformed}
-        return {
-            "items": [item],
-            "conflicts": [item],
-            "path": path,
-            "adapter": adapter,
-            "text": text,
-            "updates": {},
-            "remove": set(),
-            "next": state["mcp"],
-        }
     live = adapter.read_file(text)
     items: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
@@ -1319,7 +1323,7 @@ def _mcp_plan(
             elif localio.stable_hash(live[name]) == record.get("projected_fingerprint"):
                 if record.get(_LEGACY_MIGRATED):
                     item.update(status="current", action="none")
-                    ownership[name] = record
+                    ownership[name] = dict(record)
                 else:
                     item.update(status="removed-catalog", action="remove")
                     remove.add(name)
@@ -1332,7 +1336,14 @@ def _mcp_plan(
         item = {"surface": "mcp", "path": str(path), "name": name}
         try:
             provider = mcp_cmd._project_server(
-                workspace, profile.mcp_harness, server, _profile_context(live.get(name, {}), state["mcp"].get(name))
+                workspace,
+                profile.mcp_harness,
+                server,
+                _profile_context(
+                    live.get(name, {}),
+                    state["mcp"].get(name),
+                    mcp_cmd._opencode_location(profile.mcp_harness, text, name),
+                ),
             )
         except ValueError as exc:
             item.update(status="conflict", action="preserve", detail=f"{name}: {exc}")
@@ -1381,6 +1392,13 @@ def _mcp_plan(
             )
             conflicts.append(item)
         items.append(item)
+    if not conflicts and (updates or remove):
+        try:
+            final_live = adapter.read_file(adapter.write_file(text, updates, remove))
+            for name in ownership:
+                ownership[name]["projected_fingerprint"] = localio.stable_hash(final_live[name])
+        except ValueError as exc:
+            conflicts.append({"surface": "mcp", "path": str(path), "status": "conflict", "detail": str(exc)})
     return {
         "items": items,
         "conflicts": conflicts,
@@ -1398,8 +1416,6 @@ def _mcp_uninstall_plan(profile, state: dict[str, Any], workspace: Path) -> dict
     path = profile.mcp_path or mcp_adapters.resolve_path(adapter, workspace)
     items: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
-    if not state["mcp"]:
-        return {"items": items, "conflicts": conflicts, "path": path, "adapter": adapter, "text": None, "remove": set()}
     try:
         text = path.read_text(encoding="utf-8") if path.is_file() else None
     except (OSError, UnicodeDecodeError) as exc:
@@ -1408,6 +1424,7 @@ def _mcp_uninstall_plan(profile, state: dict[str, Any], workspace: Path) -> dict
     malformed = _malformed_native_config(adapter, text)
     if malformed:
         item = {"surface": "mcp", "path": str(path), "status": "conflict", "action": "preserve", "detail": malformed}
+        item.update(mcp_cmd._opencode_diagnostics(profile.mcp_harness, text))
         return {"items": [item], "conflicts": [item], "path": path, "adapter": adapter, "text": text, "remove": set()}
     live = adapter.read_file(text)
     remove: set[str] = set()
@@ -1431,10 +1448,17 @@ def _mcp_uninstall_plan(profile, state: dict[str, Any], workspace: Path) -> dict
 
 
 def _try_project(
-    workspace: Path, harness: str, server, item: dict[str, Any], name: str, live_entry: dict[str, Any], record: Any
+    workspace: Path,
+    harness: str,
+    server,
+    item: dict[str, Any],
+    name: str,
+    live_entry: dict[str, Any],
+    record: Any,
+    location: str | None = None,
 ) -> dict[str, Any] | None:
     try:
-        return mcp_cmd._project_server(workspace, harness, server, _profile_context(live_entry, record))
+        return mcp_cmd._project_server(workspace, harness, server, _profile_context(live_entry, record, location))
     except ValueError as exc:
         item.update(status="conflict", detail=f"{name}: {exc}")
         if isinstance(exc, mcp_cmd.NativeAuthConflict):
@@ -1446,10 +1470,8 @@ def _verify_mcp(profile, state: dict[str, Any], workspace: Path) -> tuple[dict[s
     adapter = mcp_adapters.ADAPTERS[profile.mcp_harness]
     path = profile.mcp_path or mcp_adapters.resolve_path(adapter, workspace)
     items: list[dict[str, Any]] = []
-    if not state["mcp"]:
-        return {"status": "ready", "items": items}, True
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8") if path.is_file() else None
     except (OSError, UnicodeDecodeError):
         return {
             "status": "conflict",
@@ -1460,7 +1482,14 @@ def _verify_mcp(profile, state: dict[str, Any], workspace: Path) -> tuple[dict[s
         return {
             "status": "conflict",
             "items": [
-                {"surface": "mcp", "path": str(path), "status": "malformed", "action": "preserve", "detail": malformed}
+                {
+                    "surface": "mcp",
+                    "path": str(path),
+                    "status": "malformed",
+                    "action": "preserve",
+                    "detail": malformed,
+                    **mcp_cmd._opencode_diagnostics(profile.mcp_harness, text),
+                }
             ],
         }, False
     live = adapter.read_file(text)
@@ -1476,7 +1505,16 @@ def _verify_mcp(profile, state: dict[str, Any], workspace: Path) -> tuple[dict[s
             item.update(status="missing")
             ok = False
         elif (
-            projected := _try_project(workspace, profile.mcp_harness, server, item, name, live[name], record)
+            projected := _try_project(
+                workspace,
+                profile.mcp_harness,
+                server,
+                item,
+                name,
+                live[name],
+                record,
+                mcp_cmd._opencode_location(profile.mcp_harness, text, name),
+            )
         ) is None:
             ok = False
         elif localio.stable_hash(live[name]) != localio.stable_hash(projected):

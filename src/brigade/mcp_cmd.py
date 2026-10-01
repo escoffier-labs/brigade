@@ -207,6 +207,7 @@ class ProjectionContext:
 
     live: dict[str, Any]
     record: dict[str, Any] | None
+    opencode_location: str | None = None
 
 
 class NativeAuthConflict(ValueError):
@@ -240,6 +241,20 @@ def _project_server(
                 native_auth[key] = value
         _check_codex_generic_auth(server, native_auth, record)
         return mcp_adapters.codex_merge_server(server, live, native_auth)
+    if harness in ("opencode", "opencode-user"):
+        if context is None:
+            path = mcp_adapters.resolve_path(adapter, target)
+            text = path.read_text() if path.is_file() else None
+            view = mcp_adapters.inspect_opencode_config(text, for_mutation=True)
+            live = view.servers.get(server.name, {})
+            record = _load_state(target).get("ownership", {}).get(harness, {}).get(adapter.path, {}).get(server.name)
+            location = view.locations.get(server.name, view.new_server_location)
+        else:
+            live, record = context.live, context.record
+            location = context.opencode_location or "flat"
+        return mcp_adapters.opencode_merge_server(
+            server, live, location=location, native_keys=_opencode_native_keys(live, record, server)
+        )
     projected = adapter.to_provider(server)
     command_name = Path(server.command or "").name.lower()
     if (
@@ -256,6 +271,76 @@ def _project_server(
     else:
         projected.pop("args", None)
     return projected
+
+
+def _opencode_location(harness: str, text: str | None, name: str) -> str | None:
+    if harness not in ("opencode", "opencode-user"):
+        return None
+    view = mcp_adapters.inspect_opencode_config(text, for_mutation=True)
+    return view.locations.get(name, view.new_server_location)
+
+
+def _opencode_diagnostics(harness: str, text: str | None) -> dict[str, Any]:
+    if harness in ("opencode", "opencode-user"):
+        try:
+            mcp_adapters.inspect_opencode_config(text, for_mutation=True)
+        except mcp_adapters.OpenCodeLayoutError as exc:
+            return exc.fields
+    return {}
+
+
+def _opencode_native_keys(
+    live: dict[str, Any], record: dict[str, Any] | None, server: CanonicalServer
+) -> dict[str, Any]:
+    """Native provenance contains only option/header names, never values."""
+    keys = (
+        copy.deepcopy(record.get("opencode_native_keys", {}))
+        if record is not None
+        else {
+            k: sorted(v) if k in ("headers", "timeout", "oauth") and isinstance(v, dict) else True
+            for k, v in live.items()
+            if k not in {"type", "url", "command", "environment"}
+        }
+    )
+    for key, value in server.opencode_native.items():
+        if key == "oauth" and isinstance(value, dict) and isinstance(keys.get(key), list):
+            names = [name for name in keys[key] if name not in value]
+            if names:
+                keys[key] = names
+            else:
+                keys.pop(key)
+        else:
+            keys.pop(key, None)
+        if key in ("enabled", "disabled"):
+            keys.pop("disabled" if key == "enabled" else "enabled", None)
+    explicit = {name.lower() for name in mcp_adapters._emit_headers(server, "expand")} if server.is_remote else set()
+    if "headers" in keys:
+        names = [name for name in keys["headers"] if name.lower() not in explicit]
+        if names:
+            keys["headers"] = names
+        else:
+            keys.pop("headers")
+    if server.timeout is not None:
+        names = keys.get("timeout")
+        if isinstance(names, list) and "startup" in names:
+            keys["timeout"] = ["startup"]
+        else:
+            keys.pop("timeout", None)
+    return keys
+
+
+def _native_record(
+    harness: str, live: dict[str, Any], record: dict[str, Any] | None, server: CanonicalServer
+) -> dict[str, Any]:
+    if harness in ("codex", "codex-user"):
+        return _codex_auth_record(live, record, server)
+    if harness in ("opencode", "opencode-user"):
+        return {"opencode_native_keys": _opencode_native_keys(live, record, server)}
+    return {}
+
+
+def _layout_conflicts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [conflict for item in items for conflict in item.get("layout_conflicts", [])]
 
 
 def _codex_native_auth_keys(
@@ -329,7 +414,12 @@ def _plan_for_harness(
     adapter = ADAPTERS[harness]
     path = mcp_adapters.resolve_path(adapter, target)
     text = path.read_text() if path.is_file() else None
-    live = adapter.read_file(text)
+    try:
+        if harness in ("opencode", "opencode-user"):
+            mcp_adapters.inspect_opencode_config(text, for_mutation=True)
+        live = adapter.read_file(text)
+    except mcp_adapters.OpenCodeLayoutError as exc:
+        return [{**_item(harness, adapter.path, "*", "invalid", "conflict", None, None, detail=str(exc)), **exc.fields}]
     owned = state.get("ownership", {}).get(harness, {}).get(adapter.path, {})
     # `desired` is the FULL set targeting this harness; orphans compare against it so a
     # --name-scoped run never treats the other managed servers as prunable orphans.
@@ -343,7 +433,12 @@ def _plan_for_harness(
         if name_filter is not None and name != name_filter:
             continue
         try:
-            provider_dict = _project_server(target, harness, server)
+            provider_dict = _project_server(
+                target,
+                harness,
+                server,
+                ProjectionContext(live.get(name, {}), owned.get(name), _opencode_location(harness, text, name)),
+            )
         except NativeAuthConflict as exc:
             items.append(
                 {
@@ -720,7 +815,12 @@ def plan(
     counts = _counts(items)
     invalid = [i["detail"] for i in items if i["status"] == "invalid"]
     if invalid:
-        return _emit({"errors": invalid}, json_output, [f"error: {e}" for e in invalid], 2)
+        return _emit(
+            {"errors": invalid, "layout_conflicts": _layout_conflicts(items)},
+            json_output,
+            [f"error: {e}" for e in invalid],
+            2,
+        )
     source_catalog = str(canonical_path(target))
     destination_files = [str(mcp_adapters.resolve_path(ADAPTERS[h], target)) for h in harnesses]
     payload = {
@@ -768,7 +868,7 @@ def _config_current_by_name(
                 adopt=False,
                 name_filter=server_name,
             ):
-                if item["server"] == server_name:
+                if item["server"] == server_name or item["status"] == "invalid":
                     applicable_statuses.append(item["status"])
                     break
         if applicable_statuses and all(status == "current" for status in applicable_statuses):
@@ -999,9 +1099,12 @@ def build_sync_plan(
             continue
         all_items.extend(items)
         plan_errors.extend(i["detail"] for i in items if i["status"] == "invalid")
+        if any(i["status"] == "invalid" for i in items):
+            continue
         adapter = ADAPTERS[h]
         path = mcp_adapters.resolve_path(adapter, target)
-        live = adapter.read_file(path.read_text() if path.is_file() else None)
+        existing = path.read_text() if path.is_file() else None
+        live = adapter.read_file(existing)
         owner_map = desired_state.get("ownership", {}).get(h, {}).get(adapter.path)
         to_write: dict[str, dict[str, Any]] = {}
         to_remove: set[str] = set()
@@ -1012,19 +1115,20 @@ def build_sync_plan(
             if action in ("create", "update"):
                 if owner_map is None:
                     owner_map = desired_state.setdefault("ownership", {}).setdefault(h, {}).setdefault(adapter.path, {})
-                to_write[server_name] = _project_server(target, h, servers[server_name])
+                to_write[server_name] = _project_server(
+                    target,
+                    h,
+                    servers[server_name],
+                    ProjectionContext(
+                        live.get(server_name, {}),
+                        owner_map.get(server_name),
+                        _opencode_location(h, existing, server_name),
+                    ),
+                )
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
                     "projected_fingerprint": item["_proj_fp"],
-                    **(
-                        {
-                            **_codex_auth_record(
-                                live.get(server_name, {}), owner_map.get(server_name), servers[server_name]
-                            )
-                        }
-                        if h in ("codex", "codex-user")
-                        else {}
-                    ),
+                    **_native_record(h, live.get(server_name, {}), owner_map.get(server_name), servers[server_name]),
                 }
                 changed = True
             elif action == "remove":
@@ -1035,24 +1139,29 @@ def build_sync_plan(
             elif status == "current":
                 if owner_map is None:
                     owner_map = desired_state.setdefault("ownership", {}).setdefault(h, {}).setdefault(adapter.path, {})
-                to_write[server_name] = _project_server(target, h, servers[server_name])
+                to_write[server_name] = _project_server(
+                    target,
+                    h,
+                    servers[server_name],
+                    ProjectionContext(
+                        live.get(server_name, {}),
+                        owner_map.get(server_name),
+                        _opencode_location(h, existing, server_name),
+                    ),
+                )
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
                     "projected_fingerprint": item["_proj_fp"],
-                    **(
-                        {
-                            **_codex_auth_record(
-                                live.get(server_name, {}), owner_map.get(server_name), servers[server_name]
-                            )
-                        }
-                        if h in ("codex", "codex-user")
-                        else {}
-                    ),
+                    **_native_record(h, live.get(server_name, {}), owner_map.get(server_name), servers[server_name]),
                 }
         if changed or any(i.get("_reconciled") for i in items):
             existing = path.read_text() if path.is_file() else None
             try:
                 new_text = adapter.write_file(existing, to_write, to_remove)
+                final_live = adapter.read_file(new_text)
+                if owner_map is not None:
+                    for server_name in to_write:
+                        owner_map[server_name]["projected_fingerprint"] = localio.stable_hash(final_live[server_name])
             except ValueError as exc:
                 plan_errors.append(f"{path}: {exc}")
                 continue
@@ -1066,6 +1175,10 @@ def build_sync_plan(
                 mutations.append(mutation)
                 native_write_paths.append(path)
 
+    if plan_errors:
+        mutations.clear()
+        native_write_paths.clear()
+        desired_state = state
     ownership_path = state_path(target)
     if ownership_path.is_file() or desired_state != state:
         ownership_mutation = _mutation_for_path(
@@ -1178,9 +1291,19 @@ def sync(
         json_output=json_output,
     )
     if planned.errors and not planned.items:
-        return _emit({"errors": planned.errors}, json_output, [f"error: {e}" for e in planned.errors], 2)
+        return _emit(
+            {"errors": planned.errors, "layout_conflicts": _layout_conflicts(planned.items)},
+            json_output,
+            [f"error: {e}" for e in planned.errors],
+            2,
+        )
     if planned.errors:
-        return _emit({"errors": planned.errors}, json_output, [f"error: {e}" for e in planned.errors], 2)
+        return _emit(
+            {"errors": planned.errors, "layout_conflicts": _layout_conflicts(planned.items)},
+            json_output,
+            [f"error: {e}" for e in planned.errors],
+            2,
+        )
 
     files_written: list[str] = []
     terminal_state = "planned"
@@ -1379,12 +1502,23 @@ def import_servers(
     path = mcp_adapters.resolve_path(adapter, target)
     if not path.is_file():
         return _emit({"errors": [f"{path}: not found"]}, json_output, [f"error: {path} not found"], 2)
-    live = adapter.read_file(path.read_text())
+    warnings: list[str] = []
+    layout_conflicts: list[dict[str, Any]] = []
+    try:
+        text = path.read_text()
+        live = adapter.read_file(text)
+        if harness in ("opencode", "opencode-user"):
+            view = mcp_adapters.inspect_opencode_config(text)
+            warnings = list(view.warnings)
+            layout_conflicts = [{"server": n, "locations": ["flat", "nested"]} for n in view.duplicates]
+    except mcp_adapters.OpenCodeLayoutError as exc:
+        return _emit({"errors": [str(exc)], **exc.fields}, json_output, [f"error: {exc}"], 2)
     existing, errors, _ = load_canonical(target)
     if errors and merge:
         return _emit({"errors": errors}, json_output, [f"error: {e}" for e in errors], 2)
     discovered: list[str] = []
     secrets_demoted: list[str] = []
+    secrets_dropped: list[str] = []
     skipped_existing: list[str] = []
     to_add: dict[str, CanonicalServer] = {}
     for srv_name, raw in sorted(live.items()):
@@ -1393,7 +1527,13 @@ def import_servers(
         except ValueError as exc:
             return _emit({"errors": [f"{srv_name}: {exc}"]}, json_output, [f"error: {srv_name}: {exc}"], 2)
         discovered.append(srv_name)
-        secrets_demoted.extend(f"{srv_name}.{d}" for d in demoted)
+        for field_name in demoted:
+            destination = (
+                secrets_dropped
+                if harness in ("opencode", "opencode-user") and field_name not in (server.headers | server.env)
+                else secrets_demoted
+            )
+            destination.append(f"{srv_name}.{field_name}")
         if srv_name in existing:
             skipped_existing.append(srv_name)
             continue
@@ -1408,10 +1548,15 @@ def import_servers(
         "added": sorted(to_add),
         "skipped_existing": skipped_existing,
         "secrets_demoted": secrets_demoted,
+        "secrets_dropped": secrets_dropped,
+        "warnings": warnings,
+        "layout_conflicts": layout_conflicts,
     }
     lines = [f"brigade mcp import {harness}: {len(discovered)} discovered, {len(to_add)} new"]
+    lines += [f"warning: {warning}" for warning in warnings]
     lines += [f"+ {n}" for n in sorted(to_add)]
     lines += [f"secret demoted to ref: {s}" for s in secrets_demoted]
+    lines += [f"field dropped from canonical: {s}" for s in secrets_dropped]
     if not merge:
         lines.append("(preview only; pass --merge to write into .brigade/mcp.json)")
     return _emit(payload, json_output, lines, 0)

@@ -20,6 +20,7 @@ or ``{"literal": "..."}`` (the user's explicit choice, which doctor flags).
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from dataclasses import dataclass, field
@@ -58,6 +59,7 @@ class CanonicalServer:
     http_headers: dict[str, str] = field(default_factory=dict)
     env_http_headers: dict[str, str] = field(default_factory=dict)
     bearer_token_env_var: str | None = None
+    opencode_native: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_remote(self) -> bool:
@@ -116,6 +118,7 @@ def server_from_dict(name: str, raw: dict[str, Any]) -> tuple[CanonicalServer, l
             enabled=bool(raw.get("enabled", True)),
             targets=targets,
             description=str(raw.get("description") or ""),
+            opencode_native=opencode_native(raw.get("opencode_native", {})),
             **codex_native_auth(raw),
         ),
         warnings,
@@ -141,6 +144,8 @@ def server_to_dict(server: CanonicalServer) -> dict[str, Any]:
         out["targets"] = list(server.targets)
     if server.description:
         out["description"] = server.description
+    if server.opencode_native:
+        out["opencode_native"] = opencode_native(server.opencode_native)
     out.update(codex_native_auth(vars(server)))
     return out
 
@@ -808,31 +813,220 @@ def _vscode_to_provider(server: CanonicalServer) -> dict[str, Any]:
     return out
 
 
-def _opencode_to_provider(server: CanonicalServer) -> dict[str, Any]:
-    if server.is_remote:
-        remote: dict[str, Any] = {"type": "remote", "url": server.url, "enabled": server.enabled}
-        headers = _emit_headers(server, "expand")
-        if headers:
-            remote["headers"] = headers
-        return remote
-    command = [server.command, *server.args] if server.command else list(server.args)
-    out: dict[str, Any] = {"type": "local", "command": command, "enabled": server.enabled}
-    if server.env:
-        out["environment"] = _emit_env(server.env, "expand")
+@dataclass(frozen=True)
+class OpenCodeConfig:
+    servers: dict[str, dict[str, Any]]
+    locations: dict[str, str]
+    new_server_location: str
+    duplicates: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+
+class OpenCodeLayoutError(ValueError):
+    """Value-free layout diagnostics shared by sync and profiles."""
+
+    def __init__(self, message: str, duplicates: tuple[str, ...] = ()):
+        super().__init__(message)
+        self.fields = {
+            "reason": "duplicate_layout" if duplicates else "malformed_layout",
+            "layout_conflicts": [{"server": n, "locations": ["flat", "nested"]} for n in duplicates],
+        }
+
+
+def _opencode_document(text: str | None) -> dict[str, Any]:
+    try:
+        doc = {} if text is None else json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise OpenCodeLayoutError("existing OpenCode config is malformed") from exc
+    if not isinstance(doc, dict) or ("mcp" in doc and not isinstance(doc["mcp"], dict)):
+        raise OpenCodeLayoutError("existing OpenCode config is malformed")
+    return doc
+
+
+def _opencode_direct(value: Any) -> bool:
+    return isinstance(value, dict) and value.get("type") in ("local", "remote")
+
+
+def inspect_opencode_config(text: str | None, *, for_mutation: bool = False) -> OpenCodeConfig:
+    """Inspect pinned v2 normalization, retaining legacy storage locations."""
+    section = _opencode_document(text).get("mcp", {})
+    nested = "servers" in section and not _opencode_direct(section["servers"])
+    if nested and not isinstance(section["servers"], dict):
+        raise OpenCodeLayoutError("existing OpenCode mcp.servers is malformed")
+    if nested and for_mutation and any(not isinstance(entry, dict) for entry in section["servers"].values()):
+        raise OpenCodeLayoutError("existing OpenCode mcp.servers entry is malformed")
+    flat = {
+        name: copy.deepcopy(value)
+        for name, value in section.items()
+        if isinstance(value, dict)
+        and not (name in ("servers", "timeout") and not _opencode_direct(value))
+        and (_opencode_direct(value) or isinstance(value.get("command"), list) or isinstance(value.get("url"), str))
+    }
+    native = (
+        {name: copy.deepcopy(value) for name, value in section.get("servers", {}).items() if isinstance(value, dict)}
+        if nested
+        else {}
+    )
+    duplicates = tuple(sorted(set(flat) & set(native)))
+    if for_mutation and duplicates:
+        raise OpenCodeLayoutError("duplicate OpenCode server locations; refusing mutation", duplicates)
+    return OpenCodeConfig(
+        {**flat, **native},
+        {**dict.fromkeys(flat, "flat"), **dict.fromkeys(native, "nested")},
+        "nested" if nested else "flat",
+        duplicates,
+        tuple(
+            f"{name}: duplicate flat/nested locations; nested entry takes whole-entry precedence" for name in duplicates
+        ),
+    )
+
+
+_OPENCODE_MODELED = {"type", "url", "command", "environment", "headers", "enabled", "disabled", "timeout", "oauth"}
+
+
+def opencode_native(raw: Any, *, keep_secrets: bool = True) -> dict[str, Any]:
+    """Copy only supported canonical native fields, never arbitrary options."""
+    if not isinstance(raw, dict):
+        raise ValueError("OpenCode native metadata requires an object")
+    out: dict[str, Any] = {}
+    for key in ("enabled", "disabled", "timeout", "oauth"):
+        if key not in raw:
+            continue
+        value = raw[key]
+        if key in ("enabled", "disabled"):
+            if not isinstance(value, bool):
+                raise ValueError(f"OpenCode {key} requires a boolean")
+        elif key == "timeout":
+            values = value.values() if isinstance(value, dict) else [value]
+            if isinstance(value, dict) and set(value) - {"startup", "catalog", "execution"}:
+                raise ValueError("OpenCode timeout has unsupported fields")
+            if any(not isinstance(v, int) or isinstance(v, bool) or v <= 0 for v in values):
+                raise ValueError("OpenCode timeout requires positive integer milliseconds")
+        elif value is not False:
+            if not isinstance(value, dict):
+                raise ValueError("OpenCode oauth requires false or an object")
+            fields = {"clientId", "scope"} | ({"clientSecret"} if keep_secrets else set())
+            value = {k: v for k, v in value.items() if k in fields}
+            if any(not isinstance(v, str) for v in value.values()):
+                raise ValueError("OpenCode oauth fields require strings")
+        out[key] = copy.deepcopy(value)
     return out
+
+
+def _opencode_timeout(value: Any, location: str) -> Any:
+    if location == "nested" and isinstance(value, int):
+        return {"catalog": value, "execution": value}
+    if location == "flat" and isinstance(value, dict):
+        if set(value) != {"catalog", "execution"} or value["catalog"] != value["execution"]:
+            raise ValueError("OpenCode timeout cannot be preserved in flat layout")
+        return value["catalog"]
+    return copy.deepcopy(value)
+
+
+def _opencode_transport_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Drop known incompatible fields after every native preservation merge."""
+    if entry.get("type") == "remote":
+        incompatible = {"command", "environment", "cwd"}
+    elif entry.get("type") == "local":
+        incompatible = {"url", "headers", "oauth"}
+    else:
+        incompatible = set()
+    return {key: value for key, value in entry.items() if key not in incompatible}
+
+
+def opencode_merge_server(
+    server: CanonicalServer, existing: dict[str, Any], *, location: str, native_keys: dict[str, Any]
+) -> dict[str, Any]:
+    out = {k: copy.deepcopy(v) for k, v in existing.items() if k not in _OPENCODE_MODELED}
+    native: dict[str, Any] = {}
+    for key, names in native_keys.items():
+        if key not in existing:
+            continue
+        value = existing[key]
+        if isinstance(names, list) and isinstance(value, dict):
+            retained = {k: copy.deepcopy(v) for k, v in value.items() if k in names}
+            if retained:
+                native[key] = retained
+        elif names is True:
+            native[key] = copy.deepcopy(value)
+    explicit_native = opencode_native(server.opencode_native)
+    if isinstance(explicit_native.get("oauth"), dict) and isinstance(native.get("oauth"), dict):
+        explicit_native["oauth"] = {**native["oauth"], **explicit_native["oauth"]}
+    native.update(explicit_native)
+    if server.is_remote:
+        out.update(type="remote", url=server.url)
+    else:
+        out.update(type="local", command=[server.command, *server.args] if server.command else list(server.args))
+        if server.env:
+            out["environment"] = _emit_env(server.env, "expand")
+    activation, other = ("disabled", "enabled") if location == "nested" else ("enabled", "disabled")
+    out[activation] = native.pop(activation, not native.pop(other) if other in native else activation == "enabled")
+    if "timeout" in native and (location == "nested" or server.timeout is None):
+        native["timeout"] = _opencode_timeout(native["timeout"], location)
+    if server.timeout is not None:
+        milliseconds = server.timeout * 1000
+        if location == "nested":
+            timeout = native.get("timeout", {})
+            native["timeout"] = {**timeout, "catalog": milliseconds, "execution": milliseconds}
+        else:
+            native["timeout"] = milliseconds
+    headers = native.pop("headers", {}) if server.is_remote else {}
+    canonical_headers = _emit_headers(server, "expand") if server.is_remote else {}
+    explicit = {k.lower() for k in canonical_headers}
+    headers = {k: v for k, v in headers.items() if k.lower() not in explicit}
+    headers.update(canonical_headers)
+    if headers:
+        out["headers"] = headers
+    out.update(native)
+    return _opencode_transport_entry(out)
+
+
+def _opencode_write_file(text: str | None, owned: dict[str, dict[str, Any]], remove: set[str]) -> str:
+    view = inspect_opencode_config(text, for_mutation=True)
+    doc = _opencode_document(text)
+    section = doc.setdefault("mcp", {})
+    for name in remove:
+        location = view.locations.get(name)
+        if location:
+            (section["servers"] if location == "nested" else section).pop(name, None)
+    for name, entry in owned.items():
+        location = view.locations.get(name, view.new_server_location)
+        if location == "flat" and name in section and name not in view.servers:
+            raise ValueError("OpenCode server would overwrite an existing setting/container")
+        destination = section["servers"] if location == "nested" else section
+        preserved = {k: v for k, v in view.servers.get(name, {}).items() if k not in _OPENCODE_MODELED}
+        destination[name] = _opencode_transport_entry({**preserved, **copy.deepcopy(entry)})
+    return json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+
+
+def _opencode_to_provider(server: CanonicalServer) -> dict[str, Any]:
+    return opencode_merge_server(server, {}, location="flat", native_keys={})
 
 
 def _opencode_from_provider(
     name: str, raw: dict[str, Any], *, keep_secrets: bool = False
 ) -> tuple[CanonicalServer, list[str]]:
+    native = opencode_native(raw, keep_secrets=keep_secrets)
+    dropped = [key for key in raw if key not in _OPENCODE_MODELED and UNSAFE_FIELD_PATTERN.search(key)]
+    oauth = raw.get("oauth")
+    if isinstance(oauth, dict):
+        dropped.extend(f"oauth.{key}" for key in oauth if key not in native.get("oauth", {}))
     if raw.get("type") == "remote" or raw.get("url"):
-        headers, demoted = _parse_env(raw.get("headers"), keep_secrets=keep_secrets)
-        return CanonicalServer(name=name, transport="http", url=str(raw.get("url")), headers=headers), demoted
+        headers, demoted = _parse_env(raw.get("headers"), keep_secrets=True)
+        for key, value in list(headers.items()):
+            if not keep_secrets and _sensitive_http_header(key) and "literal" in value:
+                headers.pop(key)
+                dropped.append(key)
+        return CanonicalServer(
+            name=name, transport="http", url=str(raw.get("url")), headers=headers, opencode_native=native
+        ), demoted + dropped
     env, demoted = _parse_env(raw.get("environment"), keep_secrets=keep_secrets)
     command_list = raw.get("command") or []
     command = str(command_list[0]) if command_list else None
     args = tuple(str(a) for a in command_list[1:])
-    return CanonicalServer(name=name, transport="stdio", command=command, args=args, env=env), demoted
+    return CanonicalServer(
+        name=name, transport="stdio", command=command, args=args, env=env, opencode_native=native
+    ), demoted + dropped
 
 
 def _vscode_from_provider(
@@ -1254,8 +1448,8 @@ ADAPTERS: dict[str, McpAdapter] = {
         env_style="expand",
         to_provider=_opencode_to_provider,
         from_provider=_opencode_from_provider,
-        read_file=lambda t: _json_read_file(t, "mcp"),
-        write_file=lambda t, o, r: _json_write_file(t, o, r, "mcp"),
+        read_file=lambda t: inspect_opencode_config(t).servers,
+        write_file=_opencode_write_file,
     ),
     # User-global scopes: these write the per-user config the tool reads everywhere,
     # not a per-repo file. Gated behind --user-scope. Used to sync a machine's daily tools.
@@ -1284,8 +1478,8 @@ ADAPTERS: dict[str, McpAdapter] = {
         env_style="expand",
         to_provider=_opencode_to_provider,
         from_provider=_opencode_from_provider,
-        read_file=lambda t: _json_read_file(t, "mcp"),
-        write_file=lambda t, o, r: _json_write_file(t, o, r, "mcp"),
+        read_file=lambda t: inspect_opencode_config(t).servers,
+        write_file=_opencode_write_file,
     ),
     "codex-user": McpAdapter(
         harness="codex-user",

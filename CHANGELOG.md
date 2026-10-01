@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- OpenCode MCP import and sync preserve existing flat, nested, and mixed layouts, native activation, timeouts, and live credentials, and refuse duplicate locations before mutation. Safe imports omit sensitive literal headers from canonical storage and retain their live values during adoption. Sync now projects explicit canonical timeout seconds as native milliseconds. (#1560)
 - Codex MCP sync preserves native HTTP authentication fields, tracks managed header removal, and reports authentication combinations that cannot be projected safely. (#1559)
 - The Command Deck counts missing or unknown control-plane authority as a coverage gap, so a legacy routing snapshot no longer renders `ALL CLEAR` and "all control-plane sections reported" while the panel prints `authority unknown`. (#1460)
 - A `brigade run` cancellation whose journal append fails no longer drives local state to a terminal result, and a malformed `run_budget.cancelled` list reports a bounded invalid-event diagnostic instead of raising `TypeError` out of journal validation. (#1439)
