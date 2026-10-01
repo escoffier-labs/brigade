@@ -7,6 +7,7 @@ paths; it never reads untracked file content or writes git objects.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import subprocess
@@ -32,6 +33,9 @@ _SNAPSHOT_GIT_TIMEOUT_SECONDS = 3
 # fingerprint is unavailable (fail closed), never a constant marker.
 _NESTED_REPO_MAX_DEPTH = 4
 _NESTED_REPO_MAX_WORKERS = 8
+# Windows st_ctime is creation time, so stat alone misses a same-size rewrite
+# with mtime restored; there untracked files also sign their content.
+_SIGN_CONTENT = os.name == "nt"
 
 
 def _snapshot_ignore_relative(path: Path) -> bool:
@@ -151,6 +155,17 @@ def _nested_repo_signature(path: Path, depth: int) -> str | None:
     return f"repo:{localio.stable_hash([head_text, *sorted(lines)])}"
 
 
+def _content_digest(path: Path) -> str | None:
+    digest = hashlib.blake2b(digest_size=16)
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def _git_untracked_signature_lines(target: Path, untracked: list[Path], depth: int = 0) -> list[str] | None:
     """Sign untracked paths from ``lstat`` without reading or following them.
 
@@ -176,13 +191,27 @@ def _git_untracked_signature_lines(target: Path, untracked: list[Path], depth: i
             signatures.append(None)
         else:
             fields = (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino, info.st_mode)
-            signatures.append("stat:" + ":".join(map(str, fields)))
+            signature = "stat:" + ":".join(map(str, fields))
+            if _SIGN_CONTENT:
+                content = _content_digest(path)
+                if content is None:
+                    return None
+                signature += f":{content}"
+            signatures.append(signature)
     if nested:
-        # Nested repos cost a few git subprocesses each, which release the GIL.
-        with ThreadPoolExecutor(max_workers=min(_NESTED_REPO_MAX_WORKERS, len(nested))) as pool:
-            results = pool.map(lambda index: _nested_repo_signature(target / untracked[index], depth), nested)
-            for index, signature in zip(nested, results, strict=True):
-                signatures[index] = signature
+
+        def sign(index: int) -> str | None:
+            return _nested_repo_signature(target / untracked[index], depth)
+
+        if depth == 0:
+            # Only the top level fans out, so nested levels never multiply
+            # the pool. Git subprocesses release the GIL.
+            with ThreadPoolExecutor(max_workers=min(_NESTED_REPO_MAX_WORKERS, len(nested))) as pool:
+                results = list(pool.map(sign, nested))
+        else:
+            results = [sign(index) for index in nested]
+        for index, nested_signature in zip(nested, results, strict=True):
+            signatures[index] = nested_signature
     if any(signature is None for signature in signatures):
         return None
     return [f"untracked\t{relative.as_posix()}\t{signatures[index]}" for index, relative in enumerate(untracked)]

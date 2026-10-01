@@ -2415,7 +2415,9 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             if not stop_target.is_dir():
                 continue
             stop_state = read_session_state(stop_target, session_id)
-            stop_state = _normalize_state(stop_target, session_id, stop_state, task_epoch=task_epoch)
+            stop_state = _normalize_state(
+                stop_target, session_id, stop_state, task_epoch=task_epoch, fingerprint=event_fingerprint
+            )
             if not stop_state.get("write_observed"):
                 continue
             fingerprint = stop_state.get("session_fingerprint")

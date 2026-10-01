@@ -477,3 +477,57 @@ def test_one_failing_nested_repo_among_many_fails_closed(tmp_path: Path, monkeyp
     monkeypatch.setattr(fingerprint, "_run_snapshot_git", fail_one_status)
 
     assert runtime.repo_worktree_fingerprint(target) is None
+
+
+def test_content_signing_catches_rewrite_that_stat_misses(tmp_path: Path, monkeypatch):
+    # Windows reports creation time as st_ctime, so a same-size rewrite with
+    # mtime restored leaves every stat field alone. Freeze lstat for the file
+    # to model that; only the content signature can see the write.
+    target = _git_wired_claude(tmp_path)
+    untracked = target / "notes.txt"
+    untracked.write_text("aaaa\n")
+    frozen = os.lstat(untracked)
+    real_lstat = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        if Path(path).name == "notes.txt":
+            return frozen
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(fingerprint.os, "lstat", lstat)
+    monkeypatch.setattr(fingerprint, "_SIGN_CONTENT", False)
+    stat_only_before = runtime.repo_worktree_fingerprint(target)
+    monkeypatch.setattr(fingerprint, "_SIGN_CONTENT", True)
+    content_before = runtime.repo_worktree_fingerprint(target)
+    untracked.write_text("bbbb\n")
+    content_after = runtime.repo_worktree_fingerprint(target)
+    monkeypatch.setattr(fingerprint, "_SIGN_CONTENT", False)
+    stat_only_after = runtime.repo_worktree_fingerprint(target)
+
+    assert stat_only_before == stat_only_after
+    assert content_before is not None and content_after is not None
+    assert content_before != content_after
+
+
+def test_nested_repos_fan_out_only_at_top_level(tmp_path: Path, monkeypatch):
+    target = _git_wired_claude(tmp_path)
+    for name in ("outer-a", "outer-b"):
+        outer = target / name
+        outer.mkdir()
+        _git(outer, "init")
+        (outer / "file.txt").write_text(name)
+        inner = outer / "inner"
+        inner.mkdir()
+        _git(inner, "init")
+        (inner / "file.txt").write_text("inner")
+    pools: list[int] = []
+    real_pool = fingerprint.ThreadPoolExecutor
+
+    def counting_pool(*args, **kwargs):
+        pools.append(kwargs.get("max_workers", 0))
+        return real_pool(*args, **kwargs)
+
+    monkeypatch.setattr(fingerprint, "ThreadPoolExecutor", counting_pool)
+
+    assert runtime.repo_worktree_fingerprint(target) is not None
+    assert pools == [2]
