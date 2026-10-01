@@ -1992,6 +1992,8 @@ def test_journal_configuration_is_idempotent_and_writes_message_only_lines():
 
     logger = logging.getLogger("brigade.grokbot_mcp")
     before = list(logger.handlers)
+    before_propagate = logger.propagate
+    before_level = logger.level
     try:
         grokbot_mcp.configure_journal()
         grokbot_mcp.configure_journal()
@@ -2002,7 +2004,8 @@ def test_journal_configuration_is_idempotent_and_writes_message_only_lines():
         assert added[0].format(record) == "grokbot tool=x"
     finally:
         logger.handlers = before
-        logger.setLevel(logging.NOTSET)
+        logger.propagate = before_propagate
+        logger.setLevel(before_level)
 
 
 def test_advertised_input_schema_and_served_gate_accept_the_documented_list_filters(tmp_path: Path):
