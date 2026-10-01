@@ -1,8 +1,8 @@
 """Read-only worktree fingerprint for the Claude Code work-loop hook.
 
 The fingerprint detects whether a Bash call changed the repository. It reads
-``git status``, ``git diff HEAD``, and content hashes of untracked paths; it
-never writes objects (``hash-object`` runs without ``-w``).
+``git status``, ``git diff HEAD``, and ``lstat`` signatures of untracked
+paths; it never reads untracked file content or writes git objects.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .. import localio
@@ -30,6 +31,7 @@ _SNAPSHOT_GIT_TIMEOUT_SECONDS = 3
 # guard bounds recursion through repos nested inside nested repos; past it the
 # fingerprint is unavailable (fail closed), never a constant marker.
 _NESTED_REPO_MAX_DEPTH = 4
+_NESTED_REPO_MAX_WORKERS = 8
 
 
 def _snapshot_ignore_relative(path: Path) -> bool:
@@ -60,17 +62,12 @@ def _snapshot_pathspec_excludes() -> list[str]:
     return excludes
 
 
-def _run_snapshot_git(
-    target: Path,
-    *git_args: str,
-    stdin_text: str | None = None,
-) -> subprocess.CompletedProcess[str] | None:
+def _run_snapshot_git(target: Path, *git_args: str) -> subprocess.CompletedProcess[str] | None:
     try:
         return subprocess.run(
             _snapshot_git_args(target, *git_args),
             check=False,
-            input=stdin_text,
-            stdin=subprocess.DEVNULL if stdin_text is None else None,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -104,11 +101,13 @@ def _git_diff_output(target: Path, *diff_args: str) -> str | None:
     return result.stdout
 
 
-def _git_diff_head(target: Path) -> str | None:
-    head = _run_snapshot_git(target, "rev-parse", "--verify", "HEAD")
-    if head is None:
-        return None
-    if head.returncode == 0:
+def _git_diff_head(target: Path, has_head: bool | None = None) -> str | None:
+    if has_head is None:
+        head = _run_snapshot_git(target, "rev-parse", "--verify", "HEAD")
+        if head is None:
+            return None
+        has_head = head.returncode == 0
+    if has_head:
         return _git_diff_output(target, "HEAD")
     # Unborn branch: no HEAD to diff against. ``--cached`` compares the index
     # with the empty tree and the plain diff covers unstaged edits, so staged
@@ -129,129 +128,72 @@ def _confirmed_git_worktree(target: Path) -> bool | None:
     return result.stdout.strip() == "true"
 
 
-def _git_untracked_content_signature(target: Path, relative: Path) -> str | None:
-    result = _run_snapshot_git(target, "hash-object", "--", relative.as_posix())
-    if result is None or result.returncode != 0:
-        return None
-    digest = result.stdout.strip()
-    return digest or None
-
-
-def _git_untracked_batch_signatures(target: Path, relatives: list[Path]) -> tuple[bool, list[str] | None]:
-    """Hash regular files in one ``hash-object --stdin-paths`` call.
-
-    Returns ``(True, digests)`` with digests in input order. Returns
-    ``(True, None)`` when git answered but the batch failed or its output count
-    does not match; the caller then falls back to one call per file. Returns
-    ``(False, None)`` when git could not run or timed out: a per-file fallback
-    over the same set would only be slower, so the fingerprint is unavailable.
-    """
-    if not relatives:
-        return True, []
-    stdin_text = "".join(f"{relative.as_posix()}\n" for relative in relatives)
-    result = _run_snapshot_git(target, "hash-object", "--stdin-paths", stdin_text=stdin_text)
-    if result is None:
-        return False, None
-    if result.returncode != 0:
-        return True, None
-    digests = [line.strip() for line in result.stdout.splitlines()]
-    if len(digests) != len(relatives) or not all(digests):
-        return True, None
-    return True, digests
-
-
-def _needs_single_hash(relative: Path) -> bool:
-    """True when ``hash-object --stdin-paths`` cannot carry the path verbatim.
-
-    Git reads one path per line, strips a trailing CR, and C-unquotes any line
-    that starts with a double quote (``hash_stdin_paths`` in hash-object.c), so
-    such a path would name a different file.
-    """
-    text = relative.as_posix()
-    return "\n" in text or "\r" in text or text.startswith('"')
-
-
 def _nested_repo_signature(path: Path, depth: int) -> str | None:
     if depth >= _NESTED_REPO_MAX_DEPTH:
         return None
-    toplevel = _run_snapshot_git(path, "rev-parse", "--show-toplevel")
-    if toplevel is None or toplevel.returncode != 0:
+    # One call answers both questions: stdout is the toplevel, then the HEAD
+    # oid when HEAD resolves. ``--verify -q`` exits 1 with only the toplevel
+    # printed on an unborn branch; any other failure is not a usable repo.
+    probe = _run_snapshot_git(path, "rev-parse", "--show-toplevel", "--verify", "-q", "HEAD")
+    if probe is None or probe.returncode not in (0, 1):
         return None
+    # Drop only git's line terminator: a directory name may end in spaces.
+    output = probe.stdout.removesuffix("\n")
+    toplevel_text, _, head_text = output.rpartition("\n") if probe.returncode == 0 else (output, "", "")
     try:
-        # Drop only git's line terminator: a directory name may end in spaces.
-        toplevel_text = toplevel.stdout.removesuffix("\n")
-        if Path(toplevel_text).resolve() != path.resolve():
+        if not toplevel_text or Path(toplevel_text).resolve() != path.resolve():
             return None
     except OSError:
         return None
-    head = _run_snapshot_git(path, "rev-parse", "--verify", "HEAD")
-    if head is None:
-        return None
-    head_text = head.stdout.strip() if head.returncode == 0 else ""
-    lines = _git_worktree_fingerprint_lines(path, depth=depth + 1)
+    lines = _git_worktree_fingerprint_lines(path, depth=depth + 1, has_head=probe.returncode == 0)
     if lines is None:
         return None
     return f"repo:{localio.stable_hash([head_text, *sorted(lines)])}"
 
 
-def _untracked_special_signature(target: Path, relative: Path, depth: int) -> tuple[bool, str | None]:
-    """Sign symlinks and nested repositories without following symlinks.
-
-    Returns ``(False, None)`` for a path to content-hash as a regular file,
-    ``(True, signature)`` for a signed special path, and ``(True, None)`` when
-    a special path cannot be signed (the fingerprint is then unavailable).
-    """
-    path = target / relative
-    try:
-        mode = os.lstat(path).st_mode
-    except OSError:
-        return False, None
-    if stat.S_ISLNK(mode):
-        try:
-            link_text = os.readlink(path)
-        except OSError:
-            return True, None
-        return True, f"symlink:{localio.stable_hash(link_text)}"
-    if stat.S_ISDIR(mode):
-        return True, _nested_repo_signature(path, depth)
-    return False, None
-
-
 def _git_untracked_signature_lines(target: Path, untracked: list[Path], depth: int = 0) -> list[str] | None:
-    signatures: dict[Path, str] = {}
-    batchable: list[Path] = []
-    single: list[Path] = []
+    """Sign untracked paths from ``lstat`` without reading or following them.
+
+    A regular file signs from stat fields: a content write always moves
+    ``st_ctime_ns``, which ordinary tools cannot restore, so writes are seen
+    even when size and mtime are put back. A symlink signs from its link text
+    and a directory (a nested repository) from its own fingerprint. Any path
+    that cannot be signed makes the fingerprint unavailable.
+    """
+    signatures: list[str | None] = []
+    nested: list[int] = []
     for relative in untracked:
-        special, signature = _untracked_special_signature(target, relative, depth)
-        if special:
-            if signature is None:
-                return None
-            signatures[relative] = signature
-        elif _needs_single_hash(relative):
-            single.append(relative)
-        else:
-            batchable.append(relative)
-    usable, digests = _git_untracked_batch_signatures(target, batchable)
-    if not usable:
-        return None
-    if digests is None:
-        single = batchable + single
-    else:
-        signatures.update(zip(batchable, digests, strict=True))
-    for relative in single:
-        content_signature = _git_untracked_content_signature(target, relative)
-        if content_signature is None:
+        path = target / relative
+        try:
+            info = os.lstat(path)
+            if stat.S_ISLNK(info.st_mode):
+                signatures.append(f"symlink:{localio.stable_hash(os.readlink(path))}")
+                continue
+        except OSError:
             return None
-        signatures[relative] = content_signature
-    return [f"untracked\t{relative.as_posix()}\t{signatures[relative]}" for relative in untracked]
+        if stat.S_ISDIR(info.st_mode):
+            nested.append(len(signatures))
+            signatures.append(None)
+        else:
+            fields = (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino, info.st_mode)
+            signatures.append("stat:" + ":".join(map(str, fields)))
+    if nested:
+        # Nested repos cost a few git subprocesses each, which release the GIL.
+        with ThreadPoolExecutor(max_workers=min(_NESTED_REPO_MAX_WORKERS, len(nested))) as pool:
+            results = pool.map(lambda index: _nested_repo_signature(target / untracked[index], depth), nested)
+            for index, signature in zip(nested, results, strict=True):
+                signatures[index] = signature
+    if any(signature is None for signature in signatures):
+        return None
+    return [f"untracked\t{relative.as_posix()}\t{signatures[index]}" for index, relative in enumerate(untracked)]
 
 
-def _git_worktree_fingerprint_lines(target: Path, *, depth: int = 0) -> list[str] | None:
+def _git_worktree_fingerprint_lines(target: Path, *, depth: int = 0, has_head: bool | None = None) -> list[str] | None:
     status_lines = _git_worktree_lines(target)
     if status_lines is None:
         return None
     lines = [f"status\t{line}" for line in sorted(status_lines)]
-    diff = _git_diff_head(target)
+    diff = _git_diff_head(target, has_head)
     if diff is None:
         return None
     lines.append(f"diff\t{localio.stable_hash(diff)}")

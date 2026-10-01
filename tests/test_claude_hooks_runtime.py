@@ -1276,12 +1276,10 @@ def test_posttooluse_snapshot_fails_closed_when_state_cannot_be_inspected(tmp_pa
 def test_posttooluse_fails_closed_when_post_command_snapshot_is_unavailable(tmp_path: Path, monkeypatch):
     target = _wired_claude(tmp_path)
     session_id = "post-snapshot-unavailable"
-    fingerprint_calls = 0
+    post_command = False
 
     def sequenced_fingerprint(repo: Path) -> str | None:
-        nonlocal fingerprint_calls
-        fingerprint_calls += 1
-        return "baseline" if fingerprint_calls < 4 else None
+        return None if post_command else "baseline"
 
     monkeypatch.setattr(runtime, "repo_worktree_fingerprint", sequenced_fingerprint)
     pretool = _payload(
@@ -1294,6 +1292,7 @@ def test_posttooluse_fails_closed_when_post_command_snapshot_is_unavailable(tmp_
 
     assert runtime.handle_payload("PreToolUse", pretool) is None
     assert runtime.read_session_state(target, session_id)["pending_bash_fingerprint"] == "baseline"
+    post_command = True
     assert runtime.handle_payload("PostToolUse", {**pretool, "hook_event_name": "PostToolUse"}) is None
 
     assert runtime.read_session_state(target, session_id)["write_observed"] is True
@@ -1652,30 +1651,33 @@ def test_repo_worktree_fingerprint_detects_untracked_tail_byte_change(tmp_path: 
     assert baseline != updated
 
 
-def test_repo_worktree_fingerprint_hashes_large_untracked_without_read_bytes(tmp_path: Path, monkeypatch):
+def test_repo_worktree_fingerprint_signs_large_untracked_without_reading_it(tmp_path: Path, monkeypatch):
     target = _git_wired_claude(tmp_path)
     large = target / "model.cache"
     with large.open("wb") as handle:
         handle.seek(100 * 1024 * 1024 - 1)
         handle.write(b"\0")
-    hash_calls: list[str] = []
+    git_calls: list[tuple[str, ...]] = []
     real_run = hook_fingerprint._run_snapshot_git
 
-    def tracked_run(repo: Path, *git_args: str, stdin_text: str | None = None):
-        if git_args[:1] == ("hash-object",):
-            hash_calls.extend(stdin_text.splitlines() if stdin_text is not None else [git_args[-1]])
-        return real_run(repo, *git_args, stdin_text=stdin_text)
+    def tracked_run(repo: Path, *git_args: str):
+        git_calls.append(git_args)
+        return real_run(repo, *git_args)
 
-    def forbid_read_bytes(self: Path, *args, **kwargs):
-        raise AssertionError("repo_worktree_fingerprint must not read whole file bytes in-process")
+    def forbid_read(self: Path, *args, **kwargs):
+        raise AssertionError("repo_worktree_fingerprint must not read untracked file content")
 
     monkeypatch.setattr(hook_fingerprint, "_run_snapshot_git", tracked_run)
-    monkeypatch.setattr(Path, "read_bytes", forbid_read_bytes)
+    monkeypatch.setattr(Path, "read_bytes", forbid_read)
+    monkeypatch.setattr(Path, "open", forbid_read)
 
     fingerprint = runtime.repo_worktree_fingerprint(target)
+    lines = hook_fingerprint._git_worktree_fingerprint_lines(target)
 
     assert fingerprint is not None
-    assert "model.cache" in hash_calls
+    assert lines is not None
+    assert any(line.startswith("untracked\tmodel.cache\tstat:104857600:") for line in lines)
+    assert not any("model.cache" in arg for args in git_calls for arg in args)
 
 
 def test_wired_target_from_payload_ignores_incidental_repo_paths(tmp_path: Path):
@@ -1724,33 +1726,30 @@ def test_wired_target_from_payload_without_cwd_and_no_named_repo_returns_none(tm
     assert resolved is None
 
 
-def test_repo_worktree_fingerprint_returns_none_when_hash_object_fails_for_untracked(tmp_path: Path, monkeypatch):
+def _fail_untracked_lstat(monkeypatch, name: str) -> None:
+    real_lstat = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        if Path(path).name == name:
+            raise PermissionError(path)
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(hook_fingerprint.os, "lstat", lstat)
+
+
+def test_repo_worktree_fingerprint_returns_none_when_untracked_lstat_fails(tmp_path: Path, monkeypatch):
     target = _git_wired_claude(tmp_path)
     (target / "new.txt").write_text("content")
-    real_run = hook_fingerprint._run_snapshot_git
-
-    def fake_run(repo: Path, *git_args: str, **kwargs):
-        if git_args[:1] == ("hash-object",):
-            return None
-        return real_run(repo, *git_args, **kwargs)
-
-    monkeypatch.setattr(hook_fingerprint, "_run_snapshot_git", fake_run)
+    _fail_untracked_lstat(monkeypatch, "new.txt")
     assert runtime.repo_worktree_fingerprint(target) is None
 
 
 def test_posttooluse_fails_closed_when_untracked_state_check_fails(tmp_path: Path, monkeypatch):
     target = _git_wired_claude(tmp_path)
-    session_id = "hash-object-fail"
+    session_id = "untracked-lstat-fail"
     out_file = target / "new.txt"
     out_file.write_text("before")
-    real_run = hook_fingerprint._run_snapshot_git
-
-    def fake_run(repo: Path, *git_args: str, **kwargs):
-        if git_args[:1] == ("hash-object",):
-            return None
-        return real_run(repo, *git_args, **kwargs)
-
-    monkeypatch.setattr(hook_fingerprint, "_run_snapshot_git", fake_run)
+    _fail_untracked_lstat(monkeypatch, "new.txt")
     command = f"{sys.executable} -c \"from pathlib import Path; Path({str(out_file)!r}).write_text('after')\""
     pretool = _payload(
         target,
@@ -3167,3 +3166,29 @@ def test_session_end_reaches_the_heartbeat_and_stop_never_ends_the_session(targe
 
     assert runtime.handle_payload("SessionEnd", _payload(target, "SessionEnd", session_id="s1", reason="clear")) is None
     assert events[-1] == ("SessionEnd", "s1")
+
+
+def test_bash_hook_events_fingerprint_the_worktree_once_each(tmp_path: Path, monkeypatch):
+    target = _git_wired_claude(tmp_path)
+    calls: list[str] = []
+
+    def counted(repo: Path) -> str:
+        calls.append(str(repo))
+        return f"fp-{len(calls)}"
+
+    monkeypatch.setattr(runtime, "repo_worktree_fingerprint", counted)
+    pretool = _payload(target, "PreToolUse", session_id="fp-once", tool_name="Bash", tool_input={"command": "ls"})
+    posttool = {**pretool, "hook_event_name": "PostToolUse"}
+    # New session state and the Bash baseline share one fingerprint.
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+    assert len(calls) == 1
+    assert runtime.read_session_state(target, "fp-once")["pending_bash_fingerprint"] == "fp-1"
+    # A changed worktree is detected and recorded from the same post-command fingerprint.
+    assert runtime.handle_payload("PostToolUse", posttool) is None
+    assert len(calls) == 2
+    state = runtime.read_session_state(target, "fp-once")
+    assert state["write_observed"] is True
+    assert state["repo_fingerprint"] == "fp-2"
+    # Later events keep the recorded baseline instead of re-fingerprinting for it.
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+    assert len(calls) == 3

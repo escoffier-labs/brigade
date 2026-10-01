@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import multiprocessing as mp
 import os
@@ -78,6 +79,9 @@ _SHELL_CONTROL_TOKENS = _SHELL_CONTROL_PREFIXES | {"}", "case", "done", "else", 
 _HEREDOC_DELIMITER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _WRITE_TOOLS = {"Edit", "Write", "NotebookEdit"}
 _UNAVAILABLE_FINGERPRINT = "unavailable"
+_STATE_TIMESTAMP_KEYS = tuple(
+    "pending_bash_started_at pending_write_at last_write_at last_verification_write_at last_attributed_write_at".split()
+)
 _BASH_WRITE_COMMANDS = {
     "apply_patch",
     "cp",
@@ -1774,12 +1778,13 @@ def _bash_write_detected(
     *,
     session_id: str,
     started_at: object,
+    fingerprint: Callable[[Path], str | None],
 ) -> bool:
     if not isinstance(baseline, str) or not baseline:
         return False
     if baseline == _UNAVAILABLE_FINGERPRINT:
         return True
-    current = repo_worktree_fingerprint(target)
+    current = fingerprint(target)
     if current is None:
         return True
     if current == baseline:
@@ -1899,7 +1904,7 @@ def _verify_replacement(
     )
 
 
-def _new_state(target: Path, session_id: str, *, task_epoch: str | None = None) -> dict[str, Any]:
+def _new_state(target: Path, session_id: str, repo_fp: str | None, *, task_epoch: str | None = None) -> dict[str, Any]:
     state: dict[str, Any] = {
         "session_id": session_id,
         "session_fingerprint": _session_fingerprint(session_id),
@@ -1911,7 +1916,7 @@ def _new_state(target: Path, session_id: str, *, task_epoch: str | None = None) 
         "hook_timeout_count": 0,
         "hook_latched": False,
         "hook_latch_announced": False,
-        "repo_fingerprint": repo_worktree_fingerprint(target),
+        "repo_fingerprint": repo_fp,
     }
     if task_epoch is not None:
         state["task_epoch"] = task_epoch
@@ -1942,8 +1947,14 @@ def _normalize_state(
     payload: dict[str, Any] | None,
     *,
     task_epoch: str | None = None,
+    fingerprint: Callable[[Path], str | None] | None = None,
 ) -> dict[str, Any]:
-    normalized = _new_state(target, session_id, task_epoch=task_epoch)
+    # Keep a recorded baseline; fingerprint the worktree only when there is none.
+    kept = payload if isinstance(payload, dict) and task_epoch in (None, payload.get("task_epoch")) else {}
+    recorded = kept.get("repo_fingerprint")
+    if not isinstance(recorded, str) or not recorded:
+        recorded = (fingerprint or repo_worktree_fingerprint)(target)
+    normalized = _new_state(target, session_id, recorded, task_epoch=task_epoch)
     if not isinstance(payload, dict):
         return normalized
     if task_epoch is not None and payload.get("task_epoch") != task_epoch:
@@ -1960,18 +1971,13 @@ def _normalize_state(
         normalized["started_at"] = started.isoformat()
     normalized["briefed"] = payload.get("briefed") is True
     normalized["write_observed"] = payload.get("write_observed") is True
-    repo_fp = payload.get("repo_fingerprint")
-    if isinstance(repo_fp, str) and repo_fp:
-        normalized["repo_fingerprint"] = repo_fp
     pending_fp = payload.get("pending_bash_fingerprint")
     if isinstance(pending_fp, str) and pending_fp:
         normalized["pending_bash_fingerprint"] = pending_fp
-    pending_started = localio.parse_iso_datetime(payload.get("pending_bash_started_at"))
-    if pending_started is not None and pending_started <= now:
-        normalized["pending_bash_started_at"] = pending_started.isoformat()
-    pending_write = localio.parse_iso_datetime(payload.get("pending_write_at"))
-    if pending_write is not None and pending_write <= now:
-        normalized["pending_write_at"] = pending_write.isoformat()
+    for key in _STATE_TIMESTAMP_KEYS:
+        stamp = localio.parse_iso_datetime(payload.get(key))
+        if stamp is not None and stamp <= now:
+            normalized[key] = stamp.isoformat()
     denied = payload.get("verify_denied_count")
     if isinstance(denied, int) and not isinstance(denied, bool) and denied >= 0:
         normalized["verify_denied_count"] = denied
@@ -1980,15 +1986,6 @@ def _normalize_state(
         normalized["hook_timeout_count"] = timeout_count
     normalized["hook_latched"] = payload.get("hook_latched") is True
     normalized["hook_latch_announced"] = payload.get("hook_latch_announced") is True
-    last_write = localio.parse_iso_datetime(payload.get("last_write_at"))
-    if last_write is not None and last_write <= now:
-        normalized["last_write_at"] = last_write.isoformat()
-    last_verification_write = localio.parse_iso_datetime(payload.get("last_verification_write_at"))
-    if last_verification_write is not None and last_verification_write <= now:
-        normalized["last_verification_write_at"] = last_verification_write.isoformat()
-    last_attributed_write = localio.parse_iso_datetime(payload.get("last_attributed_write_at"))
-    if last_attributed_write is not None and last_attributed_write <= now:
-        normalized["last_attributed_write_at"] = last_attributed_write.isoformat()
     session_repos = payload.get("session_repos")
     if isinstance(session_repos, list) and all(isinstance(item, str) for item in session_repos):
         normalized["session_repos"] = list(session_repos)
@@ -2221,7 +2218,9 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
 
     task_epoch = _task_epoch_for_event(event, payload, session_id)
     persisted_state = read_session_state(target, session_id)
-    state = _normalize_state(target, session_id, persisted_state, task_epoch=task_epoch)
+    # No tool runs inside one hook event, so its fingerprints are reused within it.
+    event_fingerprint = functools.cache(repo_worktree_fingerprint)
+    state = _normalize_state(target, session_id, persisted_state, task_epoch=task_epoch, fingerprint=event_fingerprint)
     if persisted_state != state:
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
     if event not in {"Stop", "SessionEnd"}:
@@ -2288,7 +2287,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
         raw_tool_input = payload.get("tool_input")
         tool_input: dict[str, Any] = raw_tool_input if isinstance(raw_tool_input, dict) else {}
         command = tool_input.get("command")
-        baseline = repo_worktree_fingerprint(target)
+        baseline = event_fingerprint(target)
         state["pending_bash_fingerprint"] = baseline or _UNAVAILABLE_FINGERPRINT
         state["pending_bash_started_at"] = localio.utc_now_iso()
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
@@ -2355,6 +2354,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
                 state.get("pending_bash_fingerprint"),
                 session_id=session_id,
                 started_at=state.get("pending_bash_started_at"),
+                fingerprint=event_fingerprint,
             )
         if wrote:
             state["write_observed"] = True
@@ -2366,7 +2366,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             )
             if not handoff_write:
                 state["last_verification_write_at"] = written_at
-            updated_fp = repo_worktree_fingerprint(target)
+            updated_fp = event_fingerprint(target)
             if updated_fp is not None:
                 state["repo_fingerprint"] = updated_fp
             state.pop("pending_bash_fingerprint", None)

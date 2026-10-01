@@ -1,9 +1,10 @@
-"""Worktree fingerprint: batched untracked hashing, symlinks, nested repos."""
+"""Worktree fingerprint: untracked stat signatures, symlinks, nested repos."""
 
 from __future__ import annotations
 
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -31,17 +32,32 @@ def _git_wired_claude(tmp_path: Path) -> Path:
     return target
 
 
-def _hash_calls(monkeypatch) -> list[tuple[str, ...]]:
-    calls: list[tuple[str, ...]] = []
+def _git_calls(monkeypatch) -> list[tuple[Path, tuple[str, ...]]]:
+    calls: list[tuple[Path, tuple[str, ...]]] = []
     real_run = fingerprint._run_snapshot_git
 
-    def tracked(repo: Path, *git_args: str, **kwargs):
-        if git_args[:1] == ("hash-object",):
-            calls.append(git_args)
-        return real_run(repo, *git_args, **kwargs)
+    def tracked(repo: Path, *git_args: str):
+        calls.append((Path(repo), git_args))
+        return real_run(repo, *git_args)
 
     monkeypatch.setattr(fingerprint, "_run_snapshot_git", tracked)
     return calls
+
+
+def _stat_signature(path: Path) -> str:
+    info = os.lstat(path)
+    return f"stat:{info.st_size}:{info.st_mtime_ns}:{info.st_ctime_ns}:{info.st_ino}:{info.st_mode}"
+
+
+def _fail_lstat_for(monkeypatch, name: str) -> None:
+    real_lstat = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        if Path(path).name == name:
+            raise PermissionError(path)
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(fingerprint.os, "lstat", lstat)
 
 
 def test_runtime_keeps_repo_worktree_fingerprint_name():
@@ -87,20 +103,20 @@ def test_dangling_untracked_symlink_signs(tmp_path: Path):
     assert runtime.repo_worktree_fingerprint(target) is not None
 
 
-def test_untracked_regular_files_hash_in_one_batch(tmp_path: Path, monkeypatch):
+def test_untracked_regular_files_sign_without_git_subprocess(tmp_path: Path, monkeypatch):
     target = _git_wired_claude(tmp_path)
     for index in range(25):
         (target / f"file-{index}.txt").write_text(f"content {index}\n")
-    calls = _hash_calls(monkeypatch)
+    calls = _git_calls(monkeypatch)
 
     lines = fingerprint._git_worktree_fingerprint_lines(target)
 
     assert lines is not None
-    assert len(calls) == 1
-    assert "--stdin-paths" in calls[0]
+    assert {args[0] for _, args in calls} == {"status", "rev-parse", "diff"}
+    assert not any("file-" in arg for _, args in calls for arg in args)
 
 
-def test_regular_file_lines_match_per_file_hash_object(tmp_path: Path):
+def test_regular_file_lines_carry_lstat_signature(tmp_path: Path):
     target = _git_wired_claude(tmp_path)
     (target / "sub").mkdir()
     names = ["one.txt", "sub/two.bin", "with space.txt"]
@@ -112,49 +128,77 @@ def test_regular_file_lines_match_per_file_hash_object(tmp_path: Path):
 
     assert lines is not None
     for name in names:
-        digest = _git(target, "hash-object", "--", name).strip()
-        assert f"untracked\t{name}\t{digest}" in lines
+        assert f"untracked\t{name}\t{_stat_signature(target / name)}" in lines
 
 
 @_POSIX_ONLY
-def test_newline_path_falls_back_to_per_file_hash(tmp_path: Path, monkeypatch):
+def test_same_size_write_with_restored_mtime_changes_fingerprint(tmp_path: Path):
+    # POSIX ctime is the inode change time; Windows reports creation time.
+    target = _git_wired_claude(tmp_path)
+    untracked = target / "notes.txt"
+    untracked.write_text("aaaa\n")
+    before_stat = os.stat(untracked)
+    before = runtime.repo_worktree_fingerprint(target)
+    time.sleep(0.01)
+    untracked.write_text("bbbb\n")
+    os.utime(untracked, ns=(before_stat.st_atime_ns, before_stat.st_mtime_ns))
+    after_stat = os.stat(untracked)
+    after = runtime.repo_worktree_fingerprint(target)
+
+    assert (after_stat.st_size, after_stat.st_mtime_ns) == (before_stat.st_size, before_stat.st_mtime_ns)
+    assert after_stat.st_ctime_ns != before_stat.st_ctime_ns
+    assert before is not None and after is not None
+    assert before != after
+
+
+@_POSIX_ONLY
+def test_newline_path_signs_and_detects_writes(tmp_path: Path):
     target = _git_wired_claude(tmp_path)
     (target / "plain.txt").write_text("plain\n")
-    (target / "odd\nname.txt").write_text("odd\n")
-    calls = _hash_calls(monkeypatch)
+    odd = target / "odd\nname.txt"
+    odd.write_text("odd\n")
 
     lines = fingerprint._git_worktree_fingerprint_lines(target)
+    signature = _stat_signature(odd)
+    before = runtime.repo_worktree_fingerprint(target)
+    odd.write_text("odd and longer\n")
+    after = runtime.repo_worktree_fingerprint(target)
 
     assert lines is not None
-    digest = _git(target, "hash-object", "--", "odd\nname.txt").strip()
-    assert f"untracked\todd\nname.txt\t{digest}" in lines
-    assert ("hash-object", "--", "odd\nname.txt") in calls
-    assert any("--stdin-paths" in call for call in calls)
+    assert f"untracked\todd\nname.txt\t{signature}" in lines
+    assert before is not None and after is not None
+    assert before != after
 
 
-def test_batch_count_mismatch_falls_back_to_per_file(tmp_path: Path, monkeypatch):
+def test_consecutive_fingerprints_without_writes_are_identical(tmp_path: Path):
     target = _git_wired_claude(tmp_path)
-    for name in ("a.txt", "b.txt", "c.txt"):
-        (target / name).write_text(name)
-    real_run = fingerprint._run_snapshot_git
-    per_file: list[str] = []
+    (target / "tracked.txt").write_text("t\n")
+    _git(target, "add", "tracked.txt")
+    _git(target, "commit", "-m", "init")
+    (target / "tracked.txt").write_text("dirty\n")
+    (target / "untracked.txt").write_text("u\n")
+    _nested_repo(target)
+    first_lines = fingerprint._git_worktree_fingerprint_lines(target)
+    first = runtime.repo_worktree_fingerprint(target)
+    for path in (target / "untracked.txt", target / "nested" / "inner.txt", target / "nested" / "tracked.txt"):
+        path.read_bytes()
+    _git(target / "nested", "status")
+    second = runtime.repo_worktree_fingerprint(target)
+    second_lines = fingerprint._git_worktree_fingerprint_lines(target)
 
-    def short_batch(repo: Path, *git_args: str, **kwargs):
-        result = real_run(repo, *git_args, **kwargs)
-        if git_args[:2] == ("hash-object", "--stdin-paths") and result is not None:
-            result.stdout = result.stdout.splitlines()[0] + "\n"
-        elif git_args[:2] == ("hash-object", "--"):
-            per_file.append(git_args[-1])
-        return result
+    assert first is not None
+    assert first == second
+    assert first_lines == second_lines
+    untracked_paths = [Path(line.split("\t")[1]) for line in first_lines or [] if line.startswith("untracked\t")]
+    assert not any(".git" in path.parts or path.name.endswith(".lock") for path in untracked_paths)
 
-    monkeypatch.setattr(fingerprint, "_run_snapshot_git", short_batch)
-    lines = fingerprint._git_worktree_fingerprint_lines(target)
 
-    assert lines is not None
-    assert {"a.txt", "b.txt", "c.txt"} <= set(per_file)
-    for name in ("a.txt", "b.txt", "c.txt"):
-        digest = _git(target, "hash-object", "--", name).strip()
-        assert f"untracked\t{name}\t{digest}" in lines
+def test_untracked_lstat_failure_returns_none(tmp_path: Path, monkeypatch):
+    target = _git_wired_claude(tmp_path)
+    (target / "new.txt").write_text("content")
+    _fail_lstat_for(monkeypatch, "new.txt")
+
+    assert runtime.repo_worktree_fingerprint(target) is None
 
 
 def _nested_repo(target: Path) -> Path:
@@ -269,66 +313,15 @@ def test_leading_quote_filename_is_not_unquoted_by_batch(tmp_path: Path):
     (target / '"foo"').write_text("quoted\n")
 
     lines = fingerprint._git_worktree_fingerprint_lines(target)
-    quoted_digest = _git(target, "hash-object", "--", '"foo"').strip()
+    quoted_signature = _stat_signature(target / '"foo"')
     before = runtime.repo_worktree_fingerprint(target)
     (target / '"foo"').write_text("quoted and rewritten\n")
     after = runtime.repo_worktree_fingerprint(target)
 
     assert lines is not None
-    assert f'untracked\t"foo"\t{quoted_digest}' in lines
+    assert f'untracked\t"foo"\t{quoted_signature}' in lines
     assert before is not None and after is not None
     assert before != after
-
-
-def test_batch_hash_failure_still_returns_none(tmp_path: Path, monkeypatch):
-    target = _git_wired_claude(tmp_path)
-    (target / "new.txt").write_text("content")
-    real_run = fingerprint._run_snapshot_git
-
-    def fail_hash(repo: Path, *git_args: str, **kwargs):
-        if git_args[:1] == ("hash-object",):
-            return None
-        return real_run(repo, *git_args, **kwargs)
-
-    monkeypatch.setattr(fingerprint, "_run_snapshot_git", fail_hash)
-    assert runtime.repo_worktree_fingerprint(target) is None
-
-
-def test_batch_unavailable_skips_per_file_fallback(tmp_path: Path, monkeypatch):
-    target = _git_wired_claude(tmp_path)
-    (target / "a.txt").write_text("a")
-    real_run = fingerprint._run_snapshot_git
-    per_file: list[str] = []
-
-    def timed_out_batch(repo: Path, *args: str, **kwargs):
-        if args[:2] == ("hash-object", "--stdin-paths"):
-            return None
-        if args[:2] == ("hash-object", "--"):
-            per_file.append(args[-1])
-        return real_run(repo, *args, **kwargs)
-
-    monkeypatch.setattr(fingerprint, "_run_snapshot_git", timed_out_batch)
-
-    assert fingerprint._git_worktree_fingerprint_lines(target) is None
-    assert per_file == []
-
-
-def test_batch_nonzero_exit_falls_back_to_per_file(tmp_path: Path, monkeypatch):
-    target = _git_wired_claude(tmp_path)
-    (target / "a.txt").write_text("a")
-    real_run = fingerprint._run_snapshot_git
-
-    def failing_batch(repo: Path, *args: str, **kwargs):
-        if args[:2] == ("hash-object", "--stdin-paths"):
-            return subprocess.CompletedProcess(args=list(args), returncode=128, stdout="")
-        return real_run(repo, *args, **kwargs)
-
-    monkeypatch.setattr(fingerprint, "_run_snapshot_git", failing_batch)
-    lines = fingerprint._git_worktree_fingerprint_lines(target)
-
-    assert lines is not None
-    digest = _git(target, "hash-object", "--", "a.txt").strip()
-    assert f"untracked\ta.txt\t{digest}" in lines
 
 
 def test_fingerprint_unchanged_for_plain_repo_shape(tmp_path: Path):
@@ -346,7 +339,7 @@ def test_fingerprint_unchanged_for_plain_repo_shape(tmp_path: Path):
     assert any(line.startswith("untracked\tuntracked.txt\t") for line in untracked)
     for line in untracked:
         _, relative, signature = line.split("\t")
-        assert signature == _git(target, "hash-object", "--", relative).strip()
+        assert signature == _stat_signature(target / relative)
 
 
 def _unborn_repo_with_staged_file(repo: Path) -> None:
@@ -420,12 +413,67 @@ def test_nested_repo_name_with_trailing_space_is_signed(tmp_path: Path):
 
 
 @_POSIX_ONLY
-def test_untracked_file_name_with_trailing_space_is_hashed(tmp_path: Path):
+def test_untracked_file_name_with_trailing_space_is_signed(tmp_path: Path):
     target = _git_wired_claude(tmp_path)
     (target / "trail ").write_text("spaced\n")
 
     lines = fingerprint._git_worktree_fingerprint_lines(target)
 
     assert lines is not None
-    digest = _git(target, "hash-object", "--", "trail ").strip()
-    assert f"untracked\ttrail \t{digest}" in lines
+    assert f"untracked\ttrail \t{_stat_signature(target / 'trail ')}" in lines
+
+
+def _nested_repos(target: Path) -> list[Path]:
+    repos = [_nested_repo(target)]
+    for name in ("second", "third", "unborn"):
+        repo = target / name
+        repo.mkdir()
+        _git(repo, "init")
+        (repo / "file.txt").write_text(f"{name}\n")
+        if name != "unborn":
+            _git(repo, "add", "file.txt")
+            _git(repo, "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-m", "init")
+            (repo / "extra.txt").write_text("extra\n")
+        repos.append(repo)
+    (target / "plain.txt").write_text("plain\n")
+    return repos
+
+
+def test_concurrent_nested_signatures_match_serial_run(tmp_path: Path, monkeypatch):
+    target = _git_wired_claude(tmp_path)
+    _nested_repos(target)
+
+    concurrent_lines = fingerprint._git_worktree_fingerprint_lines(target)
+    monkeypatch.setattr(fingerprint, "_NESTED_REPO_MAX_WORKERS", 1)
+    serial_lines = fingerprint._git_worktree_fingerprint_lines(target)
+
+    assert concurrent_lines is not None
+    assert concurrent_lines == serial_lines
+    assert sum("\trepo:" in line for line in concurrent_lines) == 4
+
+
+def test_nested_repo_probe_is_one_rev_parse_call(tmp_path: Path, monkeypatch):
+    target = _git_wired_claude(tmp_path)
+    repos = _nested_repos(target)
+    calls = _git_calls(monkeypatch)
+
+    assert fingerprint._git_worktree_fingerprint_lines(target) is not None
+
+    for repo in repos:
+        rev_parses = [args for path, args in calls if path == repo and args[0] == "rev-parse"]
+        assert rev_parses == [("rev-parse", "--show-toplevel", "--verify", "-q", "HEAD")]
+
+
+def test_one_failing_nested_repo_among_many_fails_closed(tmp_path: Path, monkeypatch):
+    target = _git_wired_claude(tmp_path)
+    failing = _nested_repos(target)[2]
+    real_run = fingerprint._run_snapshot_git
+
+    def fail_one_status(repo: Path, *args: str):
+        if Path(repo) == failing and args[:1] == ("status",):
+            return None
+        return real_run(repo, *args)
+
+    monkeypatch.setattr(fingerprint, "_run_snapshot_git", fail_one_status)
+
+    assert runtime.repo_worktree_fingerprint(target) is None
