@@ -46,7 +46,10 @@ def _git_calls(monkeypatch) -> list[tuple[Path, tuple[str, ...]]]:
 
 def _stat_signature(path: Path) -> str:
     info = os.lstat(path)
-    return f"stat:{info.st_size}:{info.st_mtime_ns}:{info.st_ctime_ns}:{info.st_ino}:{info.st_mode}"
+    signature = f"stat:{info.st_size}:{info.st_mtime_ns}:{info.st_ctime_ns}:{info.st_ino}:{info.st_mode}"
+    if fingerprint._SIGN_CONTENT:
+        signature += f":{fingerprint._content_digest(path)}"
+    return signature
 
 
 def _fail_lstat_for(monkeypatch, name: str) -> None:

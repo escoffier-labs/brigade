@@ -1652,6 +1652,9 @@ def test_repo_worktree_fingerprint_detects_untracked_tail_byte_change(tmp_path: 
 
 
 def test_repo_worktree_fingerprint_signs_large_untracked_without_reading_it(tmp_path: Path, monkeypatch):
+    # The stat-only path (POSIX). Windows also signs content; see the
+    # fingerprint tests.
+    monkeypatch.setattr(hook_fingerprint, "_SIGN_CONTENT", False)
     target = _git_wired_claude(tmp_path)
     large = target / "model.cache"
     with large.open("wb") as handle:
