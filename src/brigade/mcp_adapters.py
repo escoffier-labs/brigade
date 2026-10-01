@@ -853,7 +853,7 @@ def inspect_opencode_config(text: str | None, *, for_mutation: bool = False) -> 
     nested = "servers" in section and not _opencode_direct(section["servers"])
     if nested and not isinstance(section["servers"], dict):
         raise OpenCodeLayoutError("existing OpenCode mcp.servers is malformed")
-    if nested and for_mutation and any(not isinstance(entry, dict) for entry in section["servers"].values()):
+    if nested and any(not isinstance(entry, dict) for entry in section["servers"].values()):
         raise OpenCodeLayoutError("existing OpenCode mcp.servers entry is malformed")
     flat = {
         name: copy.deepcopy(value)

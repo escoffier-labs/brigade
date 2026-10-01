@@ -8,6 +8,48 @@ import pytest
 from brigade import harness_profile_cmd as H, localio, mcp_adapters as A, mcp_cmd
 
 
+@pytest.mark.parametrize("harness", ["opencode", "opencode-user"])
+@pytest.mark.parametrize(
+    "text",
+    [None, "{}", '{"mcp":{"servers":{}}}', '{"mcp":{"docs":{"type":"remote","url":"https://docs.example/mcp"}}}'],
+)
+def test_empty_profile_verifies_without_canonical_catalog(tmp_path, harness, text):
+    path = tmp_path / "opencode.json"
+    if text is not None:
+        path.write_text(text)
+    profile = SimpleNamespace(mcp_harness=harness, mcp_path=path)
+    state = {"mcp": {}}
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    assert H._verify_mcp(profile, state, tmp_path) == ({"status": "ready", "items": []}, True)
+    assert state == {"mcp": {}}
+    assert before == {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("harness", ["opencode", "opencode-user"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "{FAKE_SECRET",
+        '{"mcp":[]}',
+        '{"mcp":{"servers":[]}}',
+        '{"mcp":{"servers":{"bad":"FAKE_SECRET"}}}',
+        '{"mcp":{"docs":{"type":"remote","url":"https://docs.example/mcp"},"servers":{"docs":{"type":"remote","url":"https://docs.example/mcp","headers":{"Authorization":"FAKE_SECRET"}}}}}',
+    ],
+)
+def test_empty_profile_verification_still_refuses_malformed_native(tmp_path, harness, text):
+    path = tmp_path / "opencode.json"
+    path.write_text(text)
+    profile = SimpleNamespace(mcp_harness=harness, mcp_path=path)
+    state = {"mcp": {}}
+    before = path.read_bytes()
+    result, ready = H._verify_mcp(profile, state, tmp_path)
+    assert not ready and result["status"] == "conflict"
+    assert result["items"][0]["status"] == "malformed"
+    assert "FAKE_SECRET" not in json.dumps(result)
+    assert state == {"mcp": {}} and path.read_bytes() == before
+    assert not mcp_cmd.canonical_path(tmp_path).exists()
+
+
 def test_custom_empty_nested_profile_path_and_ownership(tmp_path):
     path = tmp_path / "custom" / "opencode.json"
     path.parent.mkdir()

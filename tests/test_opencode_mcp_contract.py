@@ -444,6 +444,56 @@ def test_malformed_nested_entry_refuses_overwrite(value):
         A.ADAPTERS["opencode"].write_file(text, {"docs": REMOTE}, set())
 
 
+@pytest.mark.parametrize("harness", ["opencode", "opencode-user"])
+@pytest.mark.parametrize("merge", [False, True])
+@pytest.mark.parametrize("value", [5, "FAKE_SECRET", None, [], True])
+def test_import_refuses_malformed_nested_entry_without_writes(tmp_path, monkeypatch, capsys, harness, merge, value):
+    set_home(monkeypatch, tmp_path / "home")
+    path = A.resolve_path(A.ADAPTERS[harness], tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"mcp": {"servers": {"bad": value, "docs": REMOTE}}}))
+    mcp_cmd._write_canonical(tmp_path, {})
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    assert (
+        mcp_cmd.import_servers(
+            target=tmp_path, harness=harness, user_scope=harness.endswith("-user"), merge=merge, json_output=True
+        )
+        == 2
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reason"] == "malformed_layout"
+    assert payload["errors"] == ["existing OpenCode mcp.servers entry is malformed"]
+    assert "FAKE_SECRET" not in json.dumps(payload)
+    assert before == {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("harness", ["opencode", "opencode-user"])
+@pytest.mark.parametrize("identical", [False, True])
+def test_duplicate_import_keeps_whole_nested_entry_in_both_scopes(tmp_path, monkeypatch, capsys, harness, identical):
+    set_home(monkeypatch, tmp_path / "home")
+    path = A.resolve_path(A.ADAPTERS[harness], tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nested = {**REMOTE, "disabled": True}
+    flat = nested if identical else {**REMOTE, "url": "https://old.example/mcp", "headers": {"X-Old": "discard"}}
+    path.write_text(json.dumps({"mcp": {"docs": flat, "servers": {"docs": nested}}}))
+    before = path.read_bytes()
+    mcp_cmd._write_canonical(tmp_path, {})
+    assert (
+        mcp_cmd.import_servers(
+            target=tmp_path, harness=harness, user_scope=harness.endswith("-user"), merge=True, json_output=True
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["warnings"] == ["docs: duplicate flat/nested locations; nested entry takes whole-entry precedence"]
+    assert payload["layout_conflicts"] == [{"server": "docs", "locations": ["flat", "nested"]}]
+    servers, errors, _ = mcp_cmd.load_canonical(tmp_path)
+    assert not errors and set(servers) == {"docs"}
+    assert servers["docs"].url == REMOTE["url"] and servers["docs"].headers == {}
+    assert servers["docs"].opencode_native == {"disabled": True}
+    assert path.read_bytes() == before
+
+
 @pytest.mark.parametrize("location", ["flat", "nested"])
 @pytest.mark.parametrize("explicit_native", [False, True])
 def test_explicit_timeout_precedes_native_conversion(location, explicit_native):

@@ -1492,6 +1492,8 @@ def _verify_mcp(profile, state: dict[str, Any], workspace: Path) -> tuple[dict[s
                 }
             ],
         }, False
+    if not state["mcp"]:
+        return {"status": "ready", "items": []}, True
     live = adapter.read_file(text)
     servers, errors, _warnings = mcp_cmd.load_canonical(workspace)
     ok = not errors
