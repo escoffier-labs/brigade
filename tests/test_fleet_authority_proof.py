@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import json
+import re
+from datetime import datetime, timezone
 from io import StringIO
 
 import pytest
 
 from brigade import (
     cli,
+    fleet_command_deck,
     fleet_hub,
     fleet_hub_model_roster,
     fleet_hub_policy,
     fleet_hub_policy_api,
+    fleet_hub_roster_page,
     fleet_model_admission,
     fleet_model_roster,
     fleet_policy,
     fleet_policy_migration,
+    fleet_policy_page,
     fleet_session_bootstrap,
 )
 
@@ -562,6 +567,139 @@ def test_consumer_launch_bindings_are_projected_and_not_inherited(conn):
     assert "unknown-consumer" not in projected
     copied = dict(projected["brigade-run"][SEAT])
     assert fleet_model_roster.adapter_plan_binding("other", copied) is None
+
+
+def _retired_native_policy(conn, launch_scope):
+    _activate(conn)
+    current = fleet_hub_policy.current_policy(conn)
+    document = json.loads(json.dumps(current["document"]))
+    seat = document["seats"][SEAT]
+    seat["provider"] = "openai"
+    seat["model"] = "gpt-6.1-sol"
+    seat["bindings"]["native"] = {"instance_id": "inst-alpha", "model": "gpt-6.1-sol"}
+    if launch_scope == "base":
+        seat["bindings"]["native"]["model"] = "gpt-5.4"
+    else:
+        document["consumers"]["t3-fleet"]["seat_bindings"] = {SEAT: {"native": {"model": "gpt-5.4"}}}
+    document["seats"]["seat-safe"] = {"provider": "openai", "model": "gpt-6.1-sol"}
+    document["defaults"]["roles"] = {"impl": SEAT}
+    for consumer in ("brigade-run", "t3-fleet"):
+        document["consumers"][consumer]["default_patches"] = {"roles": {"admission_default": SEAT}}
+    fleet_hub_policy.save_policy(
+        conn, document, expected_version=current["revision"], actor="operator", reason="retired native projection"
+    )
+    assert fleet_policy_migration.is_activated(conn)
+
+
+@pytest.mark.parametrize("launch_scope", ["base", "consumer"])
+def test_activated_models_exclude_retired_native_launch_and_preserve_signed_rows(conn, launch_scope):
+    _retired_native_policy(conn, launch_scope)
+    before = "\n".join(conn.iterdump())
+    signed_seats = fleet_policy_migration.projected_seats(conn)
+    launch_bindings = fleet_hub_model_roster.project_consumer_launch_bindings(conn)
+    roster = fleet_hub_model_roster.project_roster(conn, audience_node_id=NODE_A, raw_node_bearer="test-token")
+    assert roster["seats"] == signed_seats
+    assert roster["consumer_launch_bindings"] == launch_bindings
+    assert launch_bindings["t3-fleet"][SEAT]["native"]["model"] == "gpt-5.4"
+    assert fleet_model_roster.roster_digest(roster) == roster["document_sha256"]
+    assert fleet_model_roster.roster_mac("test-token", roster) == roster["mac"]["value"]
+    assert fleet_model_roster.validate_roster_rows(roster) is None
+    assert "\n".join(conn.iterdump()) == before
+    assert {row["seat"] for row in roster["models"] if row.get("seat")} == {"seat-safe"}
+
+
+@pytest.mark.parametrize("launch_scope", ["base", "consumer"])
+def test_activated_selectors_filter_effective_native_launch_per_consumer(conn, launch_scope):
+    _retired_native_policy(conn, launch_scope)
+    before = "\n".join(conn.iterdump())
+    view = fleet_hub_roster_page.load_view(
+        conn,
+        fleet_command_deck.DeckConfig(),
+        activation=fleet_policy_page.Activation("active", "activated", "authority-owned", "test"),
+    )
+    page = fleet_hub_roster_page.render(
+        view,
+        nonce="test-nonce",
+        now=datetime(2026, 10, 1, tzinfo=timezone.utc),
+        csrf="test-csrf",
+        editable=True,
+        policy_csrf="test-policy-csrf",
+    )
+    assert "\n".join(conn.iterdump()) == before
+    forms = re.findall(r"<form .*?</form>", page, re.S)
+    role_form = next(form for form in forms if 'name="field.role_impl"' in form)
+    assert f'value="{SEAT}"' not in role_form
+    for consumer in ("brigade-run", "t3-fleet"):
+        form = next(form for form in forms if f'name="target" value="{consumer}"' in form)
+        selector = re.search(r"<select .*?</select>", form, re.S).group(0)
+        assert 'value="seat-safe"' in selector
+        if launch_scope == "base" or consumer == "t3-fleet":
+            assert f'value="{SEAT}"' not in selector
+        else:
+            assert f'value="{SEAT}" selected' in selector
+    table = page.split('aria-labelledby="seats"', 1)[1].split("</section>", 1)[0]
+    assert SEAT not in table
+    history = page.split('aria-labelledby="retired"', 1)[1].split("</section>", 1)[0]
+    assert SEAT in history
+
+
+@pytest.mark.parametrize("consumer", ["brigade-run", "t3-fleet"])
+def test_activated_selector_preserves_retired_base_binding_with_current_consumer_override(conn, consumer):
+    _activate(conn)
+    current = fleet_hub_policy.current_policy(conn)
+    document = json.loads(json.dumps(current["document"]))
+    seat = document["seats"][SEAT]
+    seat["provider"] = "openai"
+    seat["model"] = "gpt-6.1-sol"
+    seat["bindings"]["brigade"]["model"] = "gpt-5.4"
+    document["consumers"][consumer]["seat_bindings"] = {SEAT: {"brigade": {"model": "gpt-6.1-sol"}}}
+    document["consumers"][consumer]["default_patches"] = {"roles": {"admission_default": SEAT}}
+    document["defaults"]["roles"] = {"impl": SEAT}
+    document["seats"]["seat-safe"] = {"provider": "openai", "model": "gpt-6.1-sol"}
+    fleet_hub_policy.save_policy(
+        conn, document, expected_version=current["revision"], actor="operator", reason="retired base binding override"
+    )
+    before = "\n".join(conn.iterdump())
+    signed_seats = fleet_policy_migration.projected_seats(conn)
+    launch_bindings = fleet_hub_model_roster.project_consumer_launch_bindings(conn)
+    roster = fleet_hub_model_roster.project_roster(conn, audience_node_id=NODE_A, raw_node_bearer="test-token")
+    assert roster["seats"] == signed_seats
+    assert roster["consumer_launch_bindings"] == launch_bindings
+    base_seat = next(row for row in signed_seats if row["seat"] == SEAT)
+    assert base_seat["bindings"]["brigade"]["model"] == "gpt-5.4"
+    groups = fleet_model_roster.consumer_launch_groups(roster, consumer, SEAT)
+    assert groups["brigade"]["model"] == "gpt-6.1-sol"
+    assert fleet_model_roster.binding_launch_models(base_seat, launch_groups=groups) == ("gpt-6.1-sol", "gpt-5.4")
+    assert fleet_model_admission._resolve_from_roster(roster, consumer=consumer, seat=SEAT, source="hub").reason == (
+        "retired-model"
+    )
+    assert fleet_model_roster.roster_digest(roster) == roster["document_sha256"]
+    assert fleet_model_roster.roster_mac("test-token", roster) == roster["mac"]["value"]
+    assert fleet_model_roster.validate_roster_rows(roster) is None
+    assert {row["seat"] for row in roster["models"] if row.get("seat")} == {"seat-safe"}
+    view = fleet_hub_roster_page.load_view(
+        conn,
+        fleet_command_deck.DeckConfig(),
+        activation=fleet_policy_page.Activation("active", "activated", "authority-owned", "test"),
+    )
+    page = fleet_hub_roster_page.render(
+        view,
+        nonce="test-nonce",
+        now=datetime(2026, 10, 1, tzinfo=timezone.utc),
+        csrf="test-csrf",
+        editable=True,
+        policy_csrf="test-policy-csrf",
+    )
+    assert "\n".join(conn.iterdump()) == before
+    forms = re.findall(r"<form .*?</form>", page, re.S)
+    role_form = next(form for form in forms if 'name="field.role_impl"' in form)
+    assert f'value="{SEAT}"' not in role_form
+    form = next(form for form in forms if f'name="target" value="{consumer}"' in form)
+    selector = re.search(r"<select .*?</select>", form, re.S).group(0)
+    assert 'value="seat-safe"' in selector
+    assert f'value="{SEAT}"' not in selector
+    assert SEAT not in page.split('aria-labelledby="seats"', 1)[1].split("</section>", 1)[0]
+    assert SEAT in page.split('aria-labelledby="retired"', 1)[1].split("</section>", 1)[0]
 
 
 def test_launch_requires_repo_and_policy_context_hash(conn):

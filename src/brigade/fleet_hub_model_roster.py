@@ -348,6 +348,36 @@ def _require_legacy_writable(conn: sqlite3.Connection) -> None:
     fleet_policy_migration.refuse_legacy_write(conn)
 
 
+def retired_policy_seats(
+    document: Mapping[str, Any],
+    retired_rows: list[dict[str, Any]],
+    *,
+    consumer: str | None = None,
+) -> tuple[str, ...]:
+    """Retired launch identities in the authority, before legacy binding projection.
+
+    Shared lists cover base bindings and every configured consumer. A consumer
+    selector retains base identities alongside its effective launch bindings,
+    matching admission even when an override replaces a retired base model.
+    """
+    from . import fleet_policy
+
+    parsed = fleet_policy.parse_document(document)
+    scopes = [consumer] if consumer is not None else [None, *parsed["consumers"]]
+    retired: list[str] = []
+    for name, seat in sorted(parsed["seats"].items()):
+        if any(
+            fleet_model_roster.retired_reason(seat["provider"], identity, retired_rows)
+            for scope in scopes
+            for identity in fleet_model_roster.binding_launch_models(
+                seat,
+                launch_groups=fleet_policy.effective_seat_bindings(parsed, scope, name, _parsed=parsed),
+            )
+        ):
+            retired.append(name)
+    return tuple(retired)
+
+
 def project_roster(
     conn: sqlite3.Connection,
     *,
@@ -391,7 +421,24 @@ def project_roster(
     if audience_node_id:
         payload["audience_node_id"] = audience_node_id
     payload["document_sha256"] = fleet_model_roster.roster_digest(payload)
-    payload["models"] = models
+    # Signed seat identities remain available for admission and replay. The
+    # legacy models list is an operational projection, not historical storage.
+    if authority_meta is not None:
+        from . import fleet_hub_policy
+
+        retired_seats = set(
+            retired_policy_seats(fleet_hub_policy.current_policy(conn)["document"], payload["retired_models"])
+        )
+    else:
+        retired_seats = {
+            seat["seat"]
+            for seat in seats
+            if any(
+                fleet_model_roster.retired_reason(str(seat["provider"]), identity, payload["retired_models"])
+                for identity in fleet_model_roster.binding_launch_models(seat)
+            )
+        }
+    payload["models"] = [item for item in models if item.get("seat") not in retired_seats]
     if audience_node_id and raw_node_bearer:
         payload["mac"] = {
             "algorithm": fleet_model_roster.MAC_ALGORITHM,
@@ -509,9 +556,11 @@ def _retired_conflict(conn: sqlite3.Connection, provider: str, model: str) -> di
 
 def _write_set(conn: sqlite3.Connection, request: dict[str, Any]) -> dict[str, Any]:
     _require_legacy_writable(conn)
-    denied = _retired_conflict(conn, str(request["provider"]), str(request["model"]))
-    if denied is not None:
-        return denied
+    if request["enabled"]:
+        for identity in (request["model"], request["brigade_model"]):
+            denied = _retired_conflict(conn, str(request["provider"]), str(identity))
+            if denied is not None:
+                return denied
     conn.execute(
         "INSERT INTO model_policy "
         "(seat, provider, model, reasoning, enabled, limit_count, brigade_cli, brigade_model, t3_instance_id, "

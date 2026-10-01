@@ -232,6 +232,62 @@ def test_roster_page_deck_nav_links_to_it(tmp_path):
         assert '<a href="/deck/roster">roster</a>' in deck
 
 
+def test_retired_seats_leave_the_table_and_legacy_selectors_but_keep_history(tmp_path):
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        for provider, family in (("openai", "gpt-5.6"), ("cursor", "cursor-grok-4.6")):
+            status, payload = _json(
+                hub,
+                "POST",
+                "/models",
+                {"action": "retire", "provider": provider, "family": family, "expected_revision": _revision(hub)},
+            )
+            assert status == 200, payload
+        page = _request(hub, "GET", "/deck/roster", headers=_bearer())[2]
+        table = page.split('aria-labelledby="seats"', 1)[1].split("</section>", 1)[0]
+        assert "coder" not in table and "cursor_grok" not in table
+        assert "2 seat(s)" in table and "daybreak" in table
+        for selector in re.findall(r"<select .*?</select>", page, re.S):
+            assert 'value="coder"' not in selector and 'value="cursor_grok"' not in selector
+        history = page.split('aria-labelledby="retired"', 1)[1].split("</section>", 1)[0]
+        assert "openai/gpt-5.6" in history and "cursor/cursor-grok-4.6" in history
+        assert "coder" in history and "cursor_grok" in history
+        # A normal save after filtering must leave the hidden historical rows intact.
+        cookie = _login_cookie(hub)
+        status, _headers, text = _form(hub, _current_form(hub, cookie), cookie=cookie)
+        assert status == 303, text
+        conn = fleet_hub.open_db(db)
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM model_policy").fetchone()[0] == len(SEATS)
+            assert conn.execute("SELECT enabled FROM model_policy WHERE seat='coder'").fetchone()[0] == 1
+        finally:
+            conn.close()
+
+
+def test_retired_policy_seats_are_excluded_even_when_current_role_or_default(tmp_path):
+    active = fleet_policy_page.Activation("active", "activated", "authority-owned", "test")
+    with _hub(tmp_path) as (_hub_address, db):
+        conn = fleet_hub.open_db(db)
+        try:
+            document = json.loads(json.dumps(POLICY_DOCUMENT))
+            document["seats"]["seat-alpha"]["model"] = "gpt-5.4"
+            document["seats"]["seat-alpha"]["provider"] = "openai"
+            document["consumers"]["brigade-run"]["default_patches"] = {"roles": {"admission_default": "seat-alpha"}}
+            fleet_hub_policy.save_policy(
+                conn,
+                document,
+                expected_version=fleet_hub_policy.current_policy(conn)["revision"],
+                actor="operator",
+                reason="retired selector test",
+            )
+        finally:
+            conn.close()
+        page = _page(db, activation=active)
+        for selector in re.findall(r"<select .*?</select>", page, re.S):
+            assert 'value="seat-alpha"' not in selector
+            assert 'value="seat-beta"' in selector
+
+
 def test_roster_page_read_only_under_tailscale_identity(tmp_path):
     with _hub(tmp_path, trust_tailscale=True) as (hub, _db):
         _seed(hub)

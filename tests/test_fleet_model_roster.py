@@ -165,6 +165,155 @@ def _admin_set(hub, **fields: object):
 
 
 @pytest.mark.parametrize(
+    "provider,model,family", [("openai", "gpt-5.6-high", "gpt-5.6"), ("cursor", "composer-2.5", "composer-2.5")]
+)
+def test_retired_seat_can_be_disabled_without_erasing_run_or_admission_history(tmp_path, provider, model, family):
+    from brigade import fleet_model_admission
+
+    with _hub(tmp_path) as hub:
+        token = _enroll(hub)
+        fields = {"seat": "disposable", "provider": provider, "model": model}
+        assert _admin_set(hub, **fields)[0] == 200
+        db = fleet_hub.open_db(hub[2])
+        try:
+            fleet_hub.store_events(
+                db,
+                {
+                    "node_id": NODE_A,
+                    "run_id": "old-run",
+                    "sequence": 1,
+                    "digest": "old-digest",
+                    "repo": "example-repo",
+                    "seat": "disposable",
+                    "harness": "example",
+                    "state": "succeeded",
+                    "ts": "2026-09-01T00:00:00Z",
+                },
+            )
+            events_before = db.execute("SELECT * FROM events").fetchall()
+        finally:
+            db.close()
+        admission = {
+            "action": "admit",
+            "schema": fleet_model_roster.ADMISSION_REQUEST_SCHEMA,
+            "consumer": "brigade-run",
+            "seat": "disposable",
+            "phase": "controller",
+            "request_id": "22222222-2222-4222-8222-222222222222",
+        }
+        status, old_admission = _request(hub, "POST", "/models", token=token, body=admission)
+        assert status == 200, old_admission
+        db = fleet_hub.open_db(hub[2])
+        try:
+            audit_before = db.execute("SELECT * FROM model_admission_audit").fetchall()
+        finally:
+            db.close()
+        assert (
+            _request(
+                hub,
+                "POST",
+                "/models",
+                token=ADMIN_TOKEN,
+                body={
+                    "action": "retire",
+                    "provider": provider,
+                    "family": family,
+                    "permanent": True,
+                    "expected_revision": _current_revision(hub),
+                },
+            )[0]
+            == 200
+        )
+        status, signed = _request(hub, "GET", "/models", token=token)
+        assert status == 200
+        assert signed["models"] == []
+        assert signed["seats"][0]["seat"] == "disposable"
+        assert any(item["family"] == family for item in signed["retired_models"])
+        assert hmac.compare_digest(signed["mac"]["value"], _expected_mac(token, signed))
+        assert (
+            fleet_model_admission._resolve_from_roster(
+                signed,
+                consumer="brigade-run",
+                seat="disposable",
+                source="lkg",
+            ).reason
+            == "retired-model"
+        )
+        retired_revision = signed["revision"]
+        status, disabled = _admin_set(hub, **fields, enabled=False)
+        assert status == 200, disabled
+        assert disabled["revision"] == retired_revision + 1
+        assert disabled["policy"]["enabled"] is False
+        db = fleet_hub.open_db(hub[2])
+        try:
+            before_enable = _dump(db)
+            assert db.execute("SELECT * FROM events").fetchall() == events_before
+            assert db.execute("SELECT * FROM model_admission_audit").fetchall() == audit_before
+            assert db.execute("SELECT enabled FROM model_policy WHERE seat='disposable'").fetchone() == (0,)
+        finally:
+            db.close()
+        status, denied = _admin_set(hub, **fields, enabled=True)
+        assert status == 409 and denied["error"] == "retired-model"
+        db = fleet_hub.open_db(hub[2])
+        try:
+            assert _dump(db) == before_enable
+        finally:
+            db.close()
+        # Old admission evidence is replayable even after retirement and disabling.
+        assert _request(hub, "POST", "/models", token=token, body=admission) == (200, old_admission)
+
+
+def test_retired_native_binding_is_not_an_operational_model(tmp_path):
+    with _hub(tmp_path) as hub:
+        assert _admin_set(hub, provider="openai", model="current-model", brigade_model="gpt-5.6-high")[0] == 200
+        assert (
+            _request(
+                hub,
+                "POST",
+                "/models",
+                token=ADMIN_TOKEN,
+                body={
+                    "action": "retire",
+                    "provider": "openai",
+                    "family": "gpt-5.6",
+                    "expected_revision": _current_revision(hub),
+                },
+            )[0]
+            == 200
+        )
+        assert _request(hub, "GET", "/models", token=ADMIN_TOKEN)[1]["models"] == []
+        assert (
+            _admin_set(hub, provider="openai", model="current-model", brigade_model="gpt-5.6-high", enabled=False)[0]
+            == 200
+        )
+        status, denied = _admin_set(hub, provider="openai", model="current-model", brigade_model="gpt-5.6-high")
+        assert status == 409 and denied["error"] == "retired-model"
+
+
+def test_disabling_a_retired_seat_is_allowed(tmp_path):
+    with _hub(tmp_path) as hub:
+        assert _admin_set(hub)[0] == 200
+        assert (
+            _request(
+                hub,
+                "POST",
+                "/models",
+                token=ADMIN_TOKEN,
+                body={
+                    "action": "retire",
+                    "provider": "cursor",
+                    "family": "cursor-grok-4.6",
+                    "expected_revision": _current_revision(hub),
+                },
+            )[0]
+            == 200
+        )
+        status, disabled = _admin_set(hub, enabled=False)
+        assert status == 200, disabled
+        assert disabled["policy"]["enabled"] is False
+
+
+@pytest.mark.parametrize(
     "model",
     ["gpt-5.4", "openai/gpt-5.4", "gpt-5.4-high", "gpt-5.5:preview"],
 )
