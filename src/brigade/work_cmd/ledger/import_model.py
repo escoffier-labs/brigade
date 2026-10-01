@@ -181,6 +181,93 @@ def _read_imports(target: Path) -> list[dict[str, Any]]:
         return []
 
 
+@contextmanager
+def _import_inbox_for_archive(
+    target: Path,
+) -> Iterator[tuple[list[dict[str, Any]], Callable[[list[dict[str, Any]]], None]]]:
+    """Read bounded JSONL records for retention, retaining exact rollback bytes.
+
+    Only archive bypasses the aggregate snapshot cap. Its existing result and
+    rollback contract still retain rows and bytes in memory; each input record
+    is limited to 4 MiB. Malformed records fail before any archive append.
+    """
+    verify_canonical_write_locks(target)
+    parent = descriptor = -1
+    try:
+        try:
+            parent, name = inbox_provenance._open_import_inbox_parent(target, create=False)
+            descriptor = authority_store._dirfd_open_file(
+                parent,
+                name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            )
+        except FileNotFoundError:
+            yield [], lambda _items: None
+            return
+        inbox_provenance._validate_import_inbox_descriptor(descriptor)
+        before = os.fstat(descriptor)
+        raw_lines: list[bytes] = []
+        imports: list[dict[str, Any]] = []
+        record_limit = 4 * 1024 * 1024
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            line_number = 0
+            while line := handle.readline(record_limit + 1):
+                line_number += 1
+                if len(line) > record_limit:
+                    raise OSError(f"import inbox record {line_number} exceeds {record_limit} byte archive limit")
+                raw_lines.append(line)
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+                    raise OSError(f"import inbox record {line_number} is not a valid UTF-8 JSON object") from exc
+                if not isinstance(item, dict):
+                    raise OSError(f"import inbox record {line_number} is not a JSON object")
+                imports.append(item)
+        raw = b"".join(raw_lines)
+        del raw_lines
+
+        def check_generation() -> None:
+            after = os.fstat(descriptor)
+            if (before.st_dev, before.st_ino, before.st_mode, before.st_nlink, before.st_size, before.st_mtime_ns) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_nlink,
+                after.st_size,
+                after.st_mtime_ns,
+            ) or len(raw) != after.st_size:
+                raise OSError("import inbox changed while archiving")
+            inbox_provenance._validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            digest = hashlib.sha256()
+            while chunk := os.read(descriptor, 1024 * 1024):
+                digest.update(chunk)
+            if digest.digest() != hashlib.sha256(raw).digest():
+                raise OSError("import inbox changed while archiving")
+
+        def publish(items: list[dict[str, Any]]) -> None:
+            nonlocal descriptor
+            verify_canonical_write_locks(target)
+            check_generation()
+            rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in items).encode("utf-8")
+            # NT replacement requires closing the held inbox descriptor first.
+            os.close(descriptor)
+            descriptor = -1
+            inbox_provenance._write_import_inbox_bytes_at(
+                parent, name, rendered, previous_raw=raw, previous_exists=True
+            )
+
+        check_generation()
+        yield imports, publish
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+        if parent != -1:
+            os.close(parent)
+
+
 def _write_imports(target: Path, imports: list[dict[str, Any]]) -> None:
     """Publish the inbox under the canonical writer exclusion.
 
