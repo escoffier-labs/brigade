@@ -12,8 +12,10 @@ from urllib.parse import urlencode
 
 from datetime import datetime, timezone
 
+import pytest
+
 from brigade import fleet_command_deck, fleet_hub, fleet_hub_preference, fleet_hub_roster_page
-from brigade import fleet_hub_policy, fleet_policy, fleet_policy_page
+from brigade import fleet_hub_model_roster, fleet_hub_policy, fleet_policy, fleet_policy_page
 
 TOKEN = "test-admin-token-roster"  # content-guard: allow api-key-assignment
 NODE_A = "11111111-1111-4111-8111-111111111111"
@@ -675,6 +677,71 @@ def test_authority_refusal_is_scoped_to_roles_and_the_admission_fallback(tmp_pat
         assert fleet_hub_roster_page._authority_refusal(view, unchanged) is None
         assert "policy page" in fleet_hub_roster_page._authority_refusal(view, changed_role)
         assert "admission_default" in fleet_hub_roster_page._authority_refusal(view, changed_default)
+
+
+@pytest.mark.parametrize("consumer", ["brigade-run", "t3-fleet"])
+@pytest.mark.parametrize("state", ["missing-binding", "disabled", "retired", "unknown", "valid", "enable-and-default"])
+def test_roster_form_consumer_default_eligibility_is_atomic(tmp_path, monkeypatch, consumer, state):
+    conn = fleet_hub.init_db(tmp_path / "fleet.db")
+    config = fleet_command_deck.DeckConfig()
+    try:
+
+        def mutate(request):
+            revision = conn.execute("SELECT revision FROM model_roster_meta WHERE singleton=1").fetchone()[0]
+            return fleet_hub_model_roster.handle_model_policy(conn, {**request, "expected_revision": revision})
+
+        monkeypatch.setattr(fleet_hub_model_roster, "_utc_now", lambda: "2026-01-01T00:00:00+00:00")
+        assert mutate({"action": "set", "seat": "previous", "enabled": True, **SEATS["coder"]})[0] == 200
+        assert mutate({"action": "set-default", "consumer": consumer, "seat": "previous"})[0] == 200
+        candidate = {
+            "action": "set",
+            "seat": "candidate",
+            "enabled": state not in {"disabled", "enable-and-default"},
+            **SEATS["cursor_grok"],
+        }
+        if state == "missing-binding":
+            candidate["brigade_cli" if consumer == "brigade-run" else "t3_instance_id"] = ""
+        if state != "unknown":
+            assert mutate(candidate)[0] == 200
+        if state == "retired":
+            assert (
+                mutate({"action": "retire", "provider": candidate["provider"], "family": candidate["model"]})[0] == 200
+            )
+        view = fleet_hub_roster_page.load_view(conn, config)
+        fields = {
+            "expected_revision": str(view.revision),
+            "expected_preference_updated_at": view.preference_updated_at,
+            "expected_cloud_state": view.cloud_state,
+            "default." + consumer: "candidate",
+            "seat.previous": "1",
+            "notes": "all changes must be atomic",
+            **{"cloud." + row.provider: "1" for row in view.cloud if row.enabled},
+        }
+        if state != "disabled":
+            fields["seat.candidate"] = "1"
+        submission = fleet_hub_roster_page.parse_form(urlencode(fields).encode())
+        before = "\n".join(conn.iterdump())
+        monkeypatch.setattr(fleet_hub_roster_page, "_utc_now", lambda: "2026-01-02T00:00:00+00:00")
+        result = fleet_hub_roster_page.apply(conn, config, submission)
+        if state in {"missing-binding", "disabled", "retired", "unknown"}:
+            assert result.status == "invalid"
+            expected = {
+                "missing-binding": f"no {consumer} binding",
+                "disabled": "disabled or retired",
+                "retired": "disabled or retired",
+                "unknown": "unknown seat candidate",
+            }
+            assert expected[state] in result.message
+            assert "\n".join(conn.iterdump()) == before
+        else:
+            assert result.status == "saved", result.message
+            assert result.revision == view.revision + 1
+            assert conn.execute("SELECT enabled FROM model_policy WHERE seat='candidate'").fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT seat, updated_at FROM model_consumer_defaults WHERE consumer=?", (consumer,)
+            ).fetchone() == ("candidate", "2026-01-02T00:00:00+00:00")
+    finally:
+        conn.close()
 
 
 def test_roster_apply_without_activation_keeps_legacy_behaviour(tmp_path):
