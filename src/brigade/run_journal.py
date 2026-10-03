@@ -42,6 +42,7 @@ import os
 import signal
 import stat
 import threading
+from copy import deepcopy
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -274,7 +275,7 @@ class RunEvent:
             "request_digest": self.request_digest,
             "previous_digest": self.previous_digest,
             "event_digest": self.event_digest,
-            "payload": dict(self.payload),
+            "payload": deepcopy(self.payload),
         }
 
 
@@ -910,7 +911,7 @@ def _envelope_to_event(env: dict[str, Any]) -> RunEvent:
             request_digest=env["request_digest"],
             previous_digest=env["previous_digest"],
             event_digest=env["event_digest"],
-            payload=dict(env["payload"]),
+            payload=deepcopy(env["payload"]),
         )
     except (KeyError, TypeError) as exc:
         raise ChainIntegrityError(_bound(f"envelope fields are malformed: {exc}")) from exc
@@ -962,6 +963,30 @@ def lookup_idempotent_event(
         )
 
 
+def _sync_existing_journal(journal_path: Path) -> None:
+    """Acknowledge visible history with a fresh sync barrier, without appending."""
+    try:
+        fd = _open_nofollow(journal_path, os.O_WRONLY | os.O_APPEND)
+    except OSError as exc:
+        raise RunJournalError(_bound("journal replay fsync failed")) from exc
+    primary: RunJournalError | None = None
+    try:
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise RunJournalError(_bound("journal replay path is not a regular file"))
+            os.fsync(fd)
+            _fsync_directory(journal_path.parent)
+        except OSError as exc:
+            raise RunJournalError(_bound("journal replay fsync failed")) from exc
+    except RunJournalError as exc:
+        primary = exc
+        raise
+    finally:
+        close_error = _close_guarded(fd, primary)
+        if primary is None and close_error is not None:
+            raise close_error
+
+
 def append_event(
     journal_path: Path,
     *,
@@ -975,7 +1000,8 @@ def append_event(
     """Append one event to the journal under the slice-1 contract.
 
     Idempotency: same key + same request digest returns the existing event with
-    no write; same key + different digest raises IdempotencyConflict with no
+    no write after a fresh file and directory sync barrier; same key + different
+    digest raises IdempotencyConflict with no
     write. Concurrency: ``expected_previous_sequence`` must equal the current
     tail sequence (0 for an empty journal) else StaleSequenceError, no write.
     The write is a single bounded ``os.write`` to an ``O_APPEND`` descriptor
@@ -983,6 +1009,12 @@ def append_event(
     """
     journal_path = Path(journal_path)
     ensure_journal(journal_path)
+    # Structured payloads must stay stable through digesting, durable write,
+    # fleet reporting and construction of the returned accepted event.
+    try:
+        payload = deepcopy(payload)
+    except Exception as exc:
+        raise CanonicalizationError("payload cannot be copied for canonicalization") from exc
 
     if recorded_at is None:
         from datetime import datetime, timezone
@@ -1003,6 +1035,7 @@ def append_event(
             request_digest=rd,
         )
         if existing is not None:
+            _sync_existing_journal(journal_path)
             return existing
 
         if expected_previous_sequence != last_sequence:
@@ -1040,6 +1073,7 @@ def append_event(
             if written != len(line):
                 raise PartialWriteError(_bound(f"partial write: wrote {written} of {len(line)} bytes"))
             os.fsync(fd)
+            _fsync_directory(journal_path.parent)
         finally:
             os.close(fd)
 

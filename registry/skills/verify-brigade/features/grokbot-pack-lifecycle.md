@@ -16,8 +16,9 @@ it, canary it, remove it. No step here needs a real credential.
   `--action-state-path`, `--approval-dir`, ...). The bearer is stored as a
   *reference*, never a value.
 - `pack doctor --id` - sanitized checks: `dependency`, `config`, `permissions`,
-  `queue`, `feed-authority`, `endpoint`. Details never carry credentials or job
-  content.
+  `queue`, `host-wide-feed-authority`, `endpoint`. Details never carry credentials or job
+  content. The host-wide feed check reports `unavailable` for hub outages and
+  `fail` for authorization refusals. Both produce a nonzero doctor exit.
 - `pack canary --id` - bounded non-mutating authentication and inventory check
   against the listener.
 - `pack remove --id` - previews the owned config and unit files, deletes them
@@ -66,7 +67,7 @@ Observed end state on a fresh target, with no listener running:
 - `doctor` -> exit 0 from the helper (the CLI itself exits 1), with
   `"config_resolved": true`, `"listener_running": false`, and checks
   `dependency=fail, config=ok, permissions=ok, queue=fail,
-  feed-authority=skipped, endpoint=fail`.
+  host-wide-feed-authority=skipped, endpoint=fail`.
 - `canary` -> exit 0 from the helper (the CLI exits 1), `"reason": "health"`,
   `"listener_running": false`, `"expected_without_listener": true`.
 - `remove` preview -> exit 0, `"applied": false`, `"paths"` listing the two
