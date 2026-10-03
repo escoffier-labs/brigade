@@ -823,7 +823,13 @@ def record_lifecycle_event(
                 idempotency_key=idempotency_key,
             )
             if existing is not None:
-                return existing
+                return _append_owner_event(
+                    journal_path,
+                    run_id=run_id,
+                    event_type=event_type,
+                    payload=payload,
+                    idempotency_key=idempotency_key,
+                )
             # Keep every explicit fact recoverable under the same authoritative
             # prior gate used by status and per-worker dispatch pairs.
             from brigade import aboyeur, run_shadow
@@ -969,7 +975,14 @@ def record_lifecycle_transition(
         mapped_event_types = frozenset(STATUS_EVENT_TYPE.values())
         status_events = [e for e in report.events if e.event_type in mapped_event_types]
         if prior_status == status and status_events:
-            return status_events[-1]
+            original = status_events[-1]
+            return _append_owner_event(
+                journal_path,
+                run_id=run_id,
+                event_type=original.event_type,
+                payload=original.payload,
+                idempotency_key=original.idempotency_key,
+            )
         # Real transition: the idempotency key binds the prior snapshot digest
         # to the target event request. A crash/retry after the journal fsync
         # but before the run.json replacement sees the unchanged prior
