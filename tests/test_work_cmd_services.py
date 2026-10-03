@@ -3070,6 +3070,175 @@ def test_work_inbox_archive_preserves_pending_and_archives_closed(tmp_path, monk
     assert all(item["archived_at"] == "2026-05-30T12:00:00+00:00" for item in archived)
 
 
+def test_inbox_archive_recovers_inbox_above_snapshot_limit(tmp_path, monkeypatch, capsys):
+    from brigade.work_cmd import ledger
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    closed = [
+        {
+            "id": f"closed-{index}",
+            "status": "dismissed",
+            "updated_at": "2026-05-20T12:00:00+00:00",
+            "text": "x" * (64 * 1024),
+            "unknown_field": {"keep": True},
+        }
+        for index in range(70)
+    ]
+    kept = [
+        {"id": "pending", "status": "pending", "updated_at": "2026-05-20T12:00:00+00:00"},
+        {"id": "recent", "status": "dismissed", "updated_at": "2026-05-30T11:00:00+00:00"},
+        {"id": "unknown", "status": "future-status", "unknown_field": [1, 2]},
+    ]
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text("".join(json.dumps(item) + "\n" for item in [*closed, *kept]))
+    inbox.chmod(0o600)
+    assert inbox.stat().st_size > ledger._IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES
+    with pytest.raises(ledger.ImportInboxSnapshotLimitExceeded):
+        ledger._read_import_inbox_raw(tmp_path)
+
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["archived"] == len(closed)
+    assert payload["kept"] == len(kept)
+    assert work_cmd._read_imports(tmp_path) == kept
+    archived = [json.loads(line) for line in work_cmd.helpers._imports_archive_path(tmp_path).read_text().splitlines()]
+    assert [item["id"] for item in archived] == [item["id"] for item in closed]
+    assert all(item["unknown_field"] == {"keep": True} for item in archived)
+    assert inbox.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(
+    "bad_record",
+    [b"{broken}\n", b"\xff\n", b"[]\n", b"x" * (4 * 1024 * 1024 + 1)],
+    ids=["malformed-json", "invalid-utf8", "non-object", "oversized-record"],
+)
+def test_inbox_archive_rejects_invalid_record_without_data_loss(tmp_path, monkeypatch, capsys, bad_record):
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    original = b'{"id":"old","status":"promoted","updated_at":"2026-05-20T12:00:00+00:00"}\n' + bad_record
+    inbox.write_bytes(original)
+    archive = work_cmd.helpers._imports_archive_path(tmp_path)
+    archive.write_bytes(b'{"id":"already-archived"}\n')
+    archive_before = archive.read_bytes()
+
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+    captured = capsys.readouterr()
+    assert "error:" in captured.err
+    assert "Traceback" not in captured.err
+    assert len(captured.err) < 500
+    assert inbox.read_bytes() == original
+    assert archive.read_bytes() == archive_before
+
+
+@pytest.mark.parametrize("failure", ["unreadable", "archive-append", "publish-fsync"])
+def test_inbox_archive_failure_keeps_oversized_inbox(tmp_path, monkeypatch, capsys, failure):
+    from brigade.work_cmd import ledger
+    from brigade.work_cmd.ledger import authority_store
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    row = {"id": "old", "status": "dismissed", "updated_at": "2026-05-20T12:00:00+00:00", "text": "x" * (64 * 1024)}
+    original = ((json.dumps(row) + "\n") * 70 + '{"id":"pending","status":"pending"}\n').encode()
+    inbox.write_bytes(original)
+    assert len(original) > ledger._IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES
+    archive = work_cmd.helpers._imports_archive_path(tmp_path)
+    archive.write_bytes(b'{"id":"already-archived"}\n')
+    archive_before = archive.read_bytes()
+    fired = False
+    if failure == "unreadable":
+        real_open = authority_store._dirfd_open_file
+
+        def failing_open(parent, name, flags, mode=0o600):
+            if name == inbox.name:
+                raise PermissionError("synthetic unreadable inbox")
+            return real_open(parent, name, flags, mode)
+
+        monkeypatch.setattr(authority_store, "_dirfd_open_file", failing_open)
+    elif failure == "archive-append":
+
+        def failing_append(_target, _items):
+            raise OSError("synthetic archive append failure")
+
+        monkeypatch.setattr(ledger, "_append_archived_imports", failing_append)
+    else:
+        real_fsync = authority_store._dirfd_fsync
+
+        def failing_fsync(parent):
+            nonlocal fired
+            if not fired:
+                fired = True
+                raise OSError("synthetic publication fsync failure")
+            real_fsync(parent)
+
+        monkeypatch.setattr(authority_store, "_dirfd_fsync", failing_fsync)
+
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+    captured = capsys.readouterr()
+    assert "synthetic" in captured.err
+    assert "Traceback" not in captured.err
+    assert inbox.read_bytes() == original
+    if failure == "publish-fsync":
+        assert fired
+        assert len(archive.read_text().splitlines()) == 71
+    else:
+        assert archive.read_bytes() == archive_before
+
+
+@pytest.mark.parametrize("mutation", ["append", "replace", "in-place"])
+def test_inbox_archive_refuses_changed_generation_before_publication(tmp_path, monkeypatch, capsys, mutation):
+    from brigade.work_cmd import ledger
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    original = b'{"id":"old","status":"promoted","updated_at":"2026-05-20T12:00:00+00:00"}\n'
+    incoming = b'{"id":"scanner-row","status":"pending"}\n'
+    inbox.write_bytes(original)
+    real_append = ledger._append_archived_imports
+
+    def append_then_mutate(target, items):
+        real_append(target, items)
+        if mutation == "append":
+            with inbox.open("ab") as handle:
+                handle.write(incoming)
+        elif mutation == "replace":
+            replacement = inbox.with_suffix(".replacement")
+            replacement.write_bytes(incoming)
+            replacement.replace(inbox)
+        else:
+            before = inbox.stat()
+            inbox.write_bytes(original.replace(b"old", b"new"))
+            os.utime(inbox, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    monkeypatch.setattr(ledger, "_append_archived_imports", append_then_mutate)
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+    assert "error:" in capsys.readouterr().err
+    expected = {"append": original + incoming, "replace": incoming, "in-place": original.replace(b"old", b"new")}
+    assert inbox.read_bytes() == expected[mutation]
+
+
+@pytest.mark.parametrize("link", ["symlink", "hardlink"])
+def test_inbox_archive_rejects_linked_inbox_without_data_loss(tmp_path, capsys, link):
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.jsonl"
+    original = b'{"id":"old","status":"dismissed","updated_at":"2020-01-01T00:00:00+00:00"}\n'
+    outside.write_bytes(original)
+    if link == "symlink":
+        inbox.symlink_to(outside)
+    else:
+        os.link(outside, inbox)
+
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+    assert "error:" in capsys.readouterr().err
+    assert outside.read_bytes() == original
+    assert inbox.read_bytes() == original
+    assert not work_cmd.helpers._imports_archive_path(tmp_path).exists()
+
+
 def test_work_brief_and_doctor_include_security_health(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
