@@ -373,6 +373,51 @@ stderr write can neither swallow a credential-refusal abort (kind
 `fleet-credentials-rejected`) nor downgrade a lost-claim abort to a user
 cancel.
 
+Confirmed lease deadlines (#1219): `repo_claim` records monotonic time
+immediately before each acquire, renew, or re-acquire and accepts a grant
+only before request start plus the exact integer TTL sent to the hub. It
+also checks the previous confirmed deadline before accepting renew or
+re-acquire. Server `expires_at` and client wall time do not govern local
+authority. An independent watcher marks authority lost at its first
+observation of the deadline, even when a renewal request is still in flight.
+Under abort policy it sets `cancel_event` before invoking the one-shot
+claim-loss callback with `lease-expired`. A late success cannot restore
+authority or restart renewal. TTL1 receives a renewal opportunity at ttl/3.
+
+A delayed initial grant is released with its holder token and refused with
+`FleetClaimExpiredError`, a `FleetClaimHeldError` subclass. Continue mode
+receives an ungranted `lease-expired` decision. Mid-run continue mode logs
+expiry once, stops renew and re-acquire permanently, and keeps work under
+the local lock without cancellation, callbacks, or interrupts. Credential
+refusal keeps its separate callback and stops deadline watching.
+
+Local authority loss requests cancellation. It does not prove the worker
+or its process group stopped before hub expiry: callback grace is five
+seconds and cancellation of blocked subprocesses remains outside this
+slice. Issue #1219 stays open for that residual. Shutdown disarms both
+threads before joining and ignores in-flight successes for authority.
+If loss wins the authority lock before shutdown, its callback is delivered
+once outside the lock even after shutdown begins. If shutdown wins first,
+no new loss callback is admitted. Main-thread interrupt dispatch shares
+the shutdown lock, so an unfinished callback cannot later interrupt
+unrelated work after shutdown. Late renew and re-acquire grants receive
+holder-fenced cleanup before notification can block. An unavailable
+release uses the existing orphan cleanup. An initial unavailable acquire
+also retains that cleanup when its retry returns `missing`, since the
+first request may still commit after the retry.
+
+When an initial acquire times out and its retry succeeds, cleanup waits
+until admitted work exits. Delayed-grant refusal uses the same cleanup
+before abort raises or continue yields an ungranted decision. Both paths
+perform an immediate holder-fenced release and two further releases,
+each after a 2.5-second pause, even if an earlier release answers `ok` or
+`missing`. Each call has a 2.5-second client deadline, so the inline release
+sequence has a nominal 12.5-second budget, apart from scheduling overhead
+and the existing thread joins. An unresolved unavailable release retains
+best-effort background cleanup. A server request can still commit beyond
+the cleanup window, which remains #1189. This sequence does not prove
+process quiescence, and HIGH2 remains open.
+
 Off-main-thread owners (#1157 round 2): `_thread.interrupt_main()` targets
 the process main thread, so when `repo_claim` is entered from a worker
 thread the abort is delivered cooperatively instead — the yielded decision's

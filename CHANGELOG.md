@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fleet claims now expire local authority at the last confirmed request-start deadline, even while renewal is in flight. Late grants cannot revive authority and receive holder-fenced cleanup, delayed initial grants refuse admission, and continue mode stops renewing after expiry. Committed loss callbacks survive shutdown while delayed main-thread interrupts are suppressed. Ambiguous initial acquires retain orphan cleanup after a missing retry. Successful retries and delayed-grant refusals preserve two spaced cleanup releases despite earlier positive replies, with a nominal 12.5-second inline release budget. Server commits beyond that window remain possible (#1189). Cancellation is requested at expiry but does not prove worker termination before the hub lease ends. (#1219)
+
 - MCP plan, sync, and doctor report `native_config_malformed` for VS Code input entries with nonstring IDs, preserving native files and refusing the entire sync transaction before writes. (#1575)
 - OpenCode MCP import and sync preserve existing flat, nested, and mixed layouts, native activation, timeouts, and live credentials, and refuse duplicate locations before mutation. Safe imports omit sensitive literal headers from canonical storage and retain their live values during adoption. Sync now projects explicit canonical timeout seconds as native milliseconds. (#1560)
 - Codex MCP sync preserves native HTTP authentication fields, tracks managed header removal, and reports authentication combinations that cannot be projected safely. (#1559)

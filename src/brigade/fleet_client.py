@@ -69,10 +69,11 @@ exception is a credential refusal: HTTP 401/403 are stable ``auth-failed``
 outcomes (never retried, no orphan-release fallback) and ``repo_claim``
 fails closed rather than running unprotected on bad credentials.
 
-Known liveness gaps, tracked in escoffier-labs/brigade#1219: a node whose claim
-renewals are selectively blocked keeps retrying without a local lease-expiry
-deadline, and a worker blocked in a silent child wait may outlive a lost claim
-until the queued KeyboardInterrupt is delivered.
+Confirmed lease deadlines (#1219) expire local authority and request
+cancellation even when claim renewals are selectively blocked. Cancellation
+does not prove process quiescence before hub expiry: callback grace lasts
+five seconds, and HIGH2 remains open for workers blocked in a silent child
+wait until the queued KeyboardInterrupt is delivered.
 """
 
 from __future__ import annotations
@@ -1109,7 +1110,8 @@ class ClaimDecision:
     refused this node's credentials (HTTP 401/403), a stable outcome that
     is never retried or fallen back from; see ``FleetClaimAuthError``), or
     ``"hub-unavailable"`` (network/hub failure; callers fall back to the
-    local run lock).
+    local run lock), or ``"lease-expired"`` (a granted response arrived
+    too late for admission).
     ``holder`` is the fencing token this operation used; renew and release
     must present the same token. ``superseded`` is the unexpired same-node
     claim a ``supersede_dead_owner`` acquire replaced (issue #1141); a
@@ -1137,6 +1139,10 @@ class FleetClaimHeldError(FleetClientError):
     def __init__(self, message: str, owner: dict[str, Any] | None = None):
         super().__init__(message)
         self.owner = owner
+
+
+class FleetClaimExpiredError(FleetClaimHeldError):
+    """A granted response arrived after its conservative local deadline."""
 
 
 class FleetClaimAuthError(FleetClaimHeldError):
@@ -1578,7 +1584,121 @@ def fetch_nodes() -> list[dict[str, Any]]:
 
 
 def _claim_renew_interval(ttl_seconds: int) -> float:
-    return max(1.0, ttl_seconds / 3)
+    return ttl_seconds / 3
+
+
+class _ConfirmedClaimLease:
+    """Serialize local authority independently of in-flight hub requests.
+
+    A deadline is request-start plus the exact integer TTL. LOST is sticky:
+    a late success cannot restore authority, even before the watcher runs.
+    Notification happens outside the Condition, after cancellation is set.
+    """
+
+    def __init__(
+        self,
+        request_start: float,
+        ttl_seconds: int,
+        *,
+        cancel_event: threading.Event,
+        abort: bool,
+        on_loss: Callable[[str], None],
+    ) -> None:
+        self.condition = threading.Condition()
+        self.stopped = threading.Event()
+        self._state = "ACTIVE"
+        self._loss_reason: str | None = None
+        self._deadline = request_start + ttl_seconds
+        self._ttl_seconds = ttl_seconds
+        self._cancel_event = cancel_event
+        self._abort = abort
+        self._on_loss = on_loss
+
+    def _lose_locked(self, reason: str, *, notify: bool) -> str | None:
+        self._state = "LOST"
+        self._loss_reason = reason
+        if notify and self._abort:
+            self._cancel_event.set()
+        self.condition.notify_all()
+        return reason if notify else None
+
+    def _expire_locked(self, now: float) -> str | None:
+        if self._state == "ACTIVE" and now >= self._deadline:
+            return self._lose_locked("lease-expired", notify=True)
+        return None
+
+    def _publish(self, reason: str | None) -> None:
+        # Only the winning ACTIVE -> LOST transition returns a reason. It
+        # admits this one-shot notification under the authority lock, so a
+        # later STOPPING cannot erase the obligation. Arbitrary callbacks
+        # run outside the lock, independently of interrupt suppression.
+        if reason is not None:
+            self._on_loss(reason)
+
+    def active(self, *, pending_orphan: threading.Event | None = None) -> bool:
+        with self.condition:
+            reason = self._expire_locked(time.monotonic())
+            active = self._state == "ACTIVE"
+            if active and pending_orphan is not None:
+                pending_orphan.set()
+        self._publish(reason)
+        return active
+
+    def confirm(self, request_start: float, *, on_rejected: Callable[[], None] | None = None) -> bool:
+        with self.condition:
+            now = time.monotonic()
+            reason = self._expire_locked(now)
+            candidate = request_start + self._ttl_seconds
+            if self._state == "ACTIVE" and now >= candidate:
+                reason = self._lose_locked("lease-expired", notify=True)
+            accepted = self._state == "ACTIVE"
+            if accepted:
+                self._deadline = candidate
+                self.condition.notify_all()
+        try:
+            if not accepted and on_rejected is not None:
+                # A successful but rejected request may have extended the
+                # hub row. Fence it off before notifying: the heartbeat can
+                # itself discover expiry, and its callback may block.
+                on_rejected()
+        finally:
+            self._publish(reason)
+        return accepted
+
+    def terminate(self, reason: str, *, notify: bool = False) -> bool:
+        with self.condition:
+            expiry = self._expire_locked(time.monotonic())
+            accepted = self._state == "ACTIVE"
+            loss = self._lose_locked(reason, notify=notify) if accepted else expiry
+        self._publish(loss)
+        return accepted
+
+    def watch(self) -> None:
+        with self.condition:
+            while self._state == "ACTIVE":
+                reason = self._expire_locked(time.monotonic())
+                if reason is not None:
+                    break
+                self.condition.wait(timeout=max(0.0, self._deadline - time.monotonic()))
+            else:
+                return
+        self._publish(reason)
+
+    def stop(self) -> None:
+        with self.condition:
+            # Shutdown control is separate from the terminal loss cause and
+            # any notification already admitted by that loss transition.
+            self._state = "STOPPING"
+            self.stopped.set()
+            self.condition.notify_all()
+
+    def _dispatch_interrupt(self) -> None:
+        # This bounded process signal and stop share the authority lock.
+        # A false outer stop snapshot is insufficient: STOPPING may win
+        # between that snapshot and dispatch into subsequent main-thread work.
+        with self.condition:
+            if self._state != "STOPPING":
+                _thread.interrupt_main()
 
 
 ORPHAN_RELEASE_RETRY_SECONDS = 30.0
@@ -1648,6 +1768,8 @@ def _abort_claim_owner(
     owner_thread: threading.Thread,
     cancel_event: threading.Event,
     on_claim_lost: Callable[[str | None], None] | None,
+    stop_event: threading.Event | None = None,
+    _interrupt_dispatcher: Callable[[], None] | None = None,
 ) -> None:
     """Fail-closed abort of a guarded block whose claim was lost (#1152).
 
@@ -1672,16 +1794,22 @@ def _abort_claim_owner(
     cancel_event.set()
 
     def _interrupt() -> None:
-        if owner_is_main:
-            _thread.interrupt_main()
-        else:
-            # Not a silent no-op (#1157 round 2): name the requirement.
+        if not owner_is_main:
+            # Committed cooperative notification survives shutdown. Only
+            # main-thread signaling needs stale-interrupt suppression.
             _LOG.warning(
                 "fleet claim on %s lost (%s): repo_claim was entered off the main thread; "
                 "the guarded block must unwind via ClaimDecision.cancel_event",
                 target,
                 reason,
             )
+            return
+        if stop_event is not None and stop_event.is_set():
+            return
+        if _interrupt_dispatcher is None:
+            _thread.interrupt_main()
+        else:
+            _interrupt_dispatcher()
 
     if on_claim_lost is None:
         _interrupt()
@@ -1713,7 +1841,12 @@ def _abort_claim_owner(
 
     threading.Thread(target=_watchdog, name="brigade-fleet-claim-abort", daemon=True).start()
     try:
-        on_claim_lost(reason)
+        # repo_claim supplies the dispatcher only for a callback admitted by
+        # its locked loss transition. That callback survives STOPPING, while
+        # the final interrupt remains fenced by the dispatcher's lock.
+        # Direct users without the dispatcher retain their stop behavior.
+        if _interrupt_dispatcher is not None or stop_event is None or not stop_event.is_set():
+            on_claim_lost(reason)
     except BaseException:
         _LOG.warning("fleet claim-lost callback raised; interrupting anyway", exc_info=True)
     finally:
@@ -1750,8 +1883,14 @@ def repo_claim(
     the hub is still unreachable a background thread keeps trying to release
     any row the lost request may have committed. A 409 with no owner (the
     target freed mid-request) is also retried once instead of failing
-    closed. A granted claim is renewed on a daemon heartbeat (every ttl/3; a
-    claim the hub lost is re-acquired) and released on exit, best-effort.
+    closed. A granted claim is renewed on a daemon heartbeat relative to
+    request start (every ttl/3; a claim the hub lost is re-acquired while
+    local authority remains active) and released on exit, best-effort. An
+    independent watcher expires authority at the last confirmed request
+    start plus the exact integer TTL, even while renew is in flight. A late
+    successful response cannot revive that authority. A delayed initial
+    grant raises ``FleetClaimExpiredError`` under abort policy, or yields
+    an ungranted ``lease-expired`` decision under continue policy.
 
     When that heartbeat's renew/re-acquire is refused on credentials (the
     token was revoked mid-run), the heartbeat stops and ``on_credential_failure``
@@ -1763,7 +1902,8 @@ def repo_claim(
 
     Lost ownership (#1152) fails closed by default: when the heartbeat learns
     another owner holds the claim (a renew answered 409 held-by-another, or
-    the re-acquire refused as ``held``), it logs once and aborts — with no
+    the re-acquire refused as ``held``), or the confirmed deadline expires,
+    it logs once and requests cancellation. With no
     ``on_claim_lost`` callback the main thread is interrupted through the
     same path as Ctrl-C, unwinding the active dispatch so two machines never
     keep working one repo unarbitrated. The abort is independent of any
@@ -1773,7 +1913,11 @@ def repo_claim(
     either way. Pass ``on_claim_lost`` to react yourself, or set
     ``claim_loss_policy="continue"`` / the environment variable
     ``BRIGADE_FLEET_CLAIM_LOSS=continue`` as the documented opt-out for solo
-    machines, restoring the old log-and-continue behavior.
+    machines. Continue mode permanently stops renew/re-acquire after loss
+    and keeps work running under the local lock. Cancellation does not prove
+    the worker or its process group stopped before hub expiry: callback
+    grace can last five seconds, and blocked subprocess cancellation is a
+    separate concern.
 
     Off-main-thread owners (#1157 round 2): ``_thread.interrupt_main()``
     targets the process main thread, so when ``repo_claim`` is entered from
@@ -1807,6 +1951,8 @@ def repo_claim(
         _LOG.warning("no usable fleet node identity (%r); relying on the local run lock alone for %s", node_id, target)
         yield ClaimDecision(granted=False, reason="no-identity", detail=node_id)
         return
+    ttl_seconds = int(ttl_seconds)
+    loss_policy = _claim_loss_policy(claim_loss_policy)
     holder = uuid4().hex
     acquire_kwargs: dict[str, Any] = {
         "holder": holder,
@@ -1815,11 +1961,14 @@ def repo_claim(
         "ttl_seconds": ttl_seconds,
         "lock_owner": lock_owner,
     }
+    request_start = time.monotonic()
     decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
+    ambiguous_initial_acquire = not decision.granted and decision.reason == "hub-unavailable"
     if not decision.granted and decision.reason in ("hub-unavailable", "missing"):
         # One retry with the same fencing token: a lost response may have
         # committed the row (idempotent for this holder), and a 409 with no
         # owner means the target freed mid-request.
+        request_start = time.monotonic()
         decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
     if not decision.granted and decision.reason == "auth-failed":
         # Fail closed (#1161): bad credentials would turn "the hub refused"
@@ -1841,6 +1990,13 @@ def repo_claim(
         # real holder. Fail open on the local lock rather than refusing a
         # target nobody holds.
         _LOG.warning("fleet hub refused %s twice without naming an owner; relying on the local run lock", target)
+        if ambiguous_initial_acquire:
+            # A final missing result cannot account for an earlier request
+            # still in flight. Preserve degraded admission and fence any
+            # later commit using the original retry holder token.
+            _schedule_orphan_release(
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds
+            )
         yield decision
         return
     if not decision.granted:
@@ -1861,6 +2017,52 @@ def repo_claim(
         raise FleetClaimHeldError(
             f"repo {target!r} is claimed by node {held_by} until {until}; {hint}", owner=decision.owner
         )
+    pending_orphan_release = threading.Event()
+    if ambiguous_initial_acquire:
+        # Successful retry admission does not account for the first request
+        # still in flight. Retain uncertainty until guarded work has ended.
+        pending_orphan_release.set()
+
+    def _release_on_exit(*, admission_refused: bool = False) -> None:
+        release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
+        if ambiguous_initial_acquire or (
+            pending_orphan_release.is_set() and release_outcome.reason in ("hub-unavailable", "missing")
+        ):
+            # Inline cleanup survives imminent CLI exit: two further calls,
+            # each spaced by one request timeout and bounded by that timeout.
+            # For initial ambiguity even positive replies only delete the
+            # retry's row, not a first request that has yet to commit. Keep
+            # both retries. Pending re-acquire cleanup retains its early exit
+            # on a definitive reply when no initial uncertainty exists.
+            for _ in range(EXIT_ORPHAN_RELEASE_RETRIES):
+                time.sleep(CLAIM_TIMEOUT_SECONDS)
+                release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
+                if not ambiguous_initial_acquire and release_outcome.reason not in ("hub-unavailable", "missing"):
+                    break
+            if release_outcome.reason in ("hub-unavailable", "missing"):
+                _LOG.warning(
+                    "fleet claim on %s: exit cleanup could not confirm the orphaned claim's release "
+                    "(last answer: %s); the row lives until its TTL expires",
+                    target,
+                    release_outcome.reason,
+                )
+        if release_outcome.reason == "hub-unavailable" and (admission_refused or ambiguous_initial_acquire):
+            _schedule_orphan_release(
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds
+            )
+        # This window cannot fence a server request that commits beyond it
+        # (#1189), even when every release received a positive acknowledgement.
+
+    if time.monotonic() >= request_start + ttl_seconds:
+        # Admission must never lend authority from a response-receipt clock.
+        # This successful request has finished, so its row can be fenced off
+        # before either refusing admission or yielding the continue opt-out.
+        _release_on_exit(admission_refused=True)
+        if loss_policy == "abort":
+            raise FleetClaimExpiredError(f"fleet claim on {target!r}: lease-expired before admission")
+        _LOG.warning("fleet claim on %s: lease-expired before admission; continuing on the local run lock", target)
+        yield replace(decision, granted=False, reason="lease-expired")
+        return
     if decision.superseded is not None:
         _LOG.warning(
             "fleet claim on %s superseded this node's unexpired claim (conductor %s, acquired %s): "
@@ -1870,130 +2072,118 @@ def repo_claim(
             decision.superseded.get("acquired_at") or "-",
         )
     stop = threading.Event()
-    pending_orphan_release = threading.Event()
     # Cooperative cancel channel (#1157 round 2): set on lost ownership so
     # the owner thread's guarded block can observe it — the only abort path
     # when repo_claim was entered off the main thread.
     cancel_event = threading.Event()
     owner_thread = threading.current_thread()
-    generation = [0]
+
+    def _notify_loss(reason: str) -> None:
+        if loss_policy == "continue":
+            _LOG.warning(
+                "fleet claim heartbeat for %s lost ownership (%s); continuing on the local run lock", target, reason
+            )
+            return
+        _LOG.warning(
+            "fleet claim heartbeat for %s lost ownership (%s); aborting the guarded run (opt out with %s=continue)",
+            target,
+            reason,
+            CLAIM_LOSS_ENV,
+        )
+        _abort_claim_owner(
+            target,
+            reason,
+            owner_thread=owner_thread,
+            cancel_event=cancel_event,
+            on_claim_lost=on_claim_lost,
+            stop_event=lease.stopped,
+            _interrupt_dispatcher=lease._dispatch_interrupt,
+        )
+
+    lease = _ConfirmedClaimLease(
+        request_start, ttl_seconds, cancel_event=cancel_event, abort=loss_policy == "abort", on_loss=_notify_loss
+    )
+
+    def _release_rejected_grant() -> None:
+        release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
+        if release_outcome.reason == "hub-unavailable":
+            _schedule_orphan_release(
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds
+            )
 
     def _renew_loop() -> None:
         warned_unavailable = False
-        while not stop.wait(_claim_renew_interval(ttl_seconds)):
-            current_gen = generation[0]
+        next_request = request_start + _claim_renew_interval(ttl_seconds)
+        while not stop.wait(max(0.0, next_request - time.monotonic())):
+            if not lease.active():
+                return
+            attempt_start = time.monotonic()
             outcome = renew_claim(target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds)
             if not outcome.granted and outcome.reason == "missing":
-                if stop.is_set() or generation[0] != current_gen:
-                    # "missing" during shutdown is our own release landing
-                    # first; re-acquiring here would resurrect the released
-                    # claim for a full TTL that nothing ever frees.
+                # Check deadline and authority, and mark the possible orphan,
+                # together before sending. Shutdown cannot miss this request.
+                if not lease.active(pending_orphan=pending_orphan_release):
                     return
-                # The hub lost or expired our row (e.g. hub restart from
-                # backup); take it back under the same fencing token and
-                # lease, never superseding. Record the possible orphan
-                # before starting the request so shutdown cannot miss it if
-                # the bounded heartbeat join ends while the re-acquire is
-                # still in flight.
-                pending_orphan_release.set()
+                attempt_start = time.monotonic()
                 outcome = acquire_claim(target, **acquire_kwargs)
+            next_request = attempt_start + _claim_renew_interval(ttl_seconds)
             if outcome.granted:
+                if not lease.confirm(attempt_start, on_rejected=_release_rejected_grant):
+                    return
                 warned_unavailable = False
                 continue
+            if not lease.active():
+                return
             if outcome.reason == "hub-unavailable":
                 if not warned_unavailable:
                     _LOG.warning("fleet claim heartbeat for %s: hub unreachable; retrying", target)
                     warned_unavailable = True
                 continue
             if outcome.reason == "auth-failed":
-                # The token was revoked (or never valid) mid-run (#1161).
-                # Unlike other lost-ownership outcomes this must not be read
-                # as "continue on the local lock": the credential problem is
-                # the operator's to fix, so hand the news to the caller and
-                # stop heartbeating. Network failures keep retrying above.
+                # Terminal credential failures disarm expiry without adding
+                # library signaling. Preserve the caller's credential channel.
+                if not lease.terminate(outcome.reason):
+                    return
                 _LOG.warning(
                     "fleet claim heartbeat for %s: the hub rejected this node's credentials (%s); "
                     "canceling the guarded run",
                     target,
                     outcome.detail,
                 )
-                if on_credential_failure is not None:
+                if on_credential_failure is not None and not lease.stopped.is_set():
                     try:
                         on_credential_failure(outcome.detail)
                     except Exception:
                         _LOG.warning("fleet credential-failure callback raised; the run keeps unwinding", exc_info=True)
                 return
-            if _claim_loss_policy(claim_loss_policy) == "continue":
-                # Documented opt-out (#1152) for solo machines: the old
-                # log-and-keep-going behavior, still loud.
-                _LOG.warning(
-                    "fleet claim heartbeat for %s lost ownership (%s); continuing on the local run lock",
-                    target,
-                    outcome.reason,
-                )
+            if outcome.reason == "held":
+                lease.terminate(outcome.reason, notify=True)
                 return
-            if outcome.reason != "held":
-                # No live claim anywhere (e.g. the re-acquire raced a
-                # concurrent release): nothing to arbitrate, so this keeps
-                # the old log-and-stop behavior rather than interrupting.
+            if lease.terminate(outcome.reason):
                 _LOG.warning(
                     "fleet claim heartbeat for %s lost the claim (%s); continuing on the local run lock",
                     target,
                     outcome.reason,
                 )
-                return
-            _LOG.warning(
-                "fleet claim heartbeat for %s lost ownership (%s); another owner holds the claim — "
-                "aborting the guarded run (opt out with %s=continue)",
-                target,
-                outcome.reason,
-                CLAIM_LOSS_ENV,
-            )
-            _abort_claim_owner(
-                target,
-                outcome.reason,
-                owner_thread=owner_thread,
-                cancel_event=cancel_event,
-                on_claim_lost=on_claim_lost,
-            )
             return
 
     heartbeat = threading.Thread(target=_renew_loop, name="brigade-fleet-claim-renew", daemon=True)
-    heartbeat.start()
+    watcher = threading.Thread(target=lease.watch, name="brigade-fleet-claim-deadline", daemon=True)
     try:
+        heartbeat.start()
+        watcher.start()
         yield replace(decision, cancel_event=cancel_event)
     finally:
-        generation[0] += 1
+        lease.stop()
         stop.set()
         # Drain the heartbeat before releasing: an in-flight renew/acquire
         # landing after the DELETE would resurrect the row for a full TTL.
         # The join is bounded (one renew plus one acquire round-trip); a
         # thread stuck longer than that is covered by the stop.is_set()
         # guard above.
-        heartbeat.join(timeout=2 * CLAIM_TIMEOUT_SECONDS + max(1.0, CLAIM_TIMEOUT_SECONDS))
-        release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
-        if pending_orphan_release.is_set() and release_outcome.reason in ("hub-unavailable", "missing"):
-            # The CLI normally exits as soon as this context unwinds, so a
-            # daemon retry would die before its first request. Keep the retry
-            # budget inline and short: two additional calls, each already
-            # bounded by CLAIM_TIMEOUT_SECONDS. A definitive "missing" is
-            # retried too (#1157): an abandoned re-acquire may still be in
-            # flight and commit its row right after this release was told
-            # the claim is gone, which would leak it for the full TTL.
-            for _ in range(EXIT_ORPHAN_RELEASE_RETRIES):
-                # Space each retry across one outstanding-request timeout
-                # (#1157): back-to-back retries can all complete before an
-                # abandoned re-acquire commits its row; sleeping one request
-                # deadline first gives that late commit time to land where
-                # this release can still delete it.
-                time.sleep(CLAIM_TIMEOUT_SECONDS)
-                release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
-                if release_outcome.reason not in ("hub-unavailable", "missing"):
-                    break
-            if release_outcome.reason in ("hub-unavailable", "missing"):
-                _LOG.warning(
-                    "fleet claim on %s: exit cleanup could not confirm the orphaned claim's release "
-                    "(last answer: %s); the row lives until its TTL expires",
-                    target,
-                    release_outcome.reason,
-                )
+        join_timeout = 2 * CLAIM_TIMEOUT_SECONDS + max(1.0, CLAIM_TIMEOUT_SECONDS)
+        if heartbeat.ident is not None:
+            heartbeat.join(timeout=join_timeout)
+        if watcher.ident is not None:
+            watcher.join(timeout=join_timeout)
+        _release_on_exit()
