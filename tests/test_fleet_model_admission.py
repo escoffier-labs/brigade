@@ -1673,7 +1673,11 @@ def test_model_admission_decision_is_frozen_and_secret_free():
 
 @REQUIRES_SAFE_CACHE
 def test_valid_node_roster_is_cached_after_mac_and_digest_checks(tmp_path, monkeypatch):
+    from brigade import fleet_hub_model_roster
     from brigade import fleet_model_admission
+
+    now = fleet_hub_model_roster.utc_now()
+    monkeypatch.setattr(fleet_hub_model_roster, "utc_now", lambda: now)
 
     with _hub(tmp_path) as hub:
         node_token = _enroll(hub)
