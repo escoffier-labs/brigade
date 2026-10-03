@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -940,3 +941,166 @@ def test_events_follow_refuses_suffix_after_redaction_rewrites_emitted_prefix(tm
     assert not thread.is_alive()
     assert result.get("rc") == 2
     assert "continuity" in captured.err.lower()
+
+
+@pytest.mark.parametrize("terminal_ok", [True, False], ids=["observed", "failed"])
+@pytest.mark.parametrize("failure", ["file", "directory"])
+def test_terminal_sync_failure_retry_never_resends_transport(tmp_path, monkeypatch, terminal_ok, failure):
+    run_dir = _run_dir(tmp_path)
+    _seed_lifecycle(run_dir)
+    path = _journal_path(run_dir)
+    calls = []
+    real_fsync = os.fsync
+    journal_inode = path.stat()
+
+    def fail_file(fd):
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) == (journal_inode.st_dev, journal_inode.st_ino):
+            raise OSError(errno.EIO, "injected terminal sync failure")
+        return real_fsync(fd)
+
+    def fail_directory(directory):
+        raise OSError(errno.EIO, "injected terminal directory sync failure")
+
+    with monkeypatch.context() as patch:
+
+        def send(payload):
+            calls.append(dict(payload))
+            if failure == "file":
+                patch.setattr(os, "fsync", fail_file)
+            else:
+                patch.setattr(run_journal, "_fsync_directory", fail_directory)
+            return {"ok": terminal_ok, "error": "rejected"}
+
+        def execute():
+            return run_control_journal.execute_control_request(
+                run_dir,
+                op="interrupt",
+                request_id="req-sync-1",
+                send=send,
+            )
+
+        with pytest.raises(ControlJournalError) as excinfo:
+            execute()
+        assert excinfo.value.code == "control_append_failed"
+        before = path.read_bytes()
+        terminal = run_journal.read_journal_bounded(path).events[-1]
+        assert terminal.event_type == ("control.observed" if terminal_ok else "control.failed")
+        for _ in range(2):
+            with pytest.raises(ControlJournalError) as excinfo:
+                execute()
+            assert excinfo.value.code == "control_append_failed"
+            assert path.read_bytes() == before
+            assert len(calls) == 1
+
+    replay = execute()
+    assert replay.replayed is True
+    assert replay.terminal_event.to_dict() == terminal.to_dict()
+    assert path.read_bytes() == before
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("terminal_type", ["control.observed", "control.failed"])
+def test_control_replay_rejects_terminal_with_wrong_original_key(tmp_path, monkeypatch, terminal_type):
+    run_dir = _run_dir(tmp_path)
+    _seed_lifecycle(run_dir)
+    path = _journal_path(run_dir)
+    request_id = "req-malformed-key"
+    fingerprint = run_control_journal.control_fingerprint_payload(op="interrupt", request_id=request_id)
+    _append(
+        path,
+        run_id=RUN_ID,
+        event_type="control.requested",
+        payload=fingerprint,
+        idempotency_key=run_control_journal.requested_idempotency_key(request_id),
+        expected_previous_sequence=2,
+        recorded_at=RECORDED_AT,
+    )
+    terminal_payload = {"op": "interrupt", "request_id": request_id}
+    if terminal_type == "control.observed":
+        terminal_payload["detail"] = "ok"
+    else:
+        terminal_payload.update(error_class="transport_rejected", detail_digest="0" * 64)
+    _append(
+        path,
+        run_id=RUN_ID,
+        event_type=terminal_type,
+        payload=terminal_payload,
+        idempotency_key="unexpected-terminal-key",
+        expected_previous_sequence=3,
+        recorded_at=RECORDED_AT,
+    )
+    before = path.read_bytes()
+
+    def forbidden(*args):
+        raise AssertionError("malformed terminal must not sync or send")
+
+    monkeypatch.setattr(os, "fsync", forbidden)
+    monkeypatch.setattr(run_journal, "_fsync_directory", forbidden)
+    with pytest.raises(ControlJournalError) as excinfo:
+        run_control_journal.execute_control_request(run_dir, op="interrupt", request_id=request_id, send=forbidden)
+    assert excinfo.value.code == "control_append_failed"
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("terminal", [True, False], ids=["replay", "indeterminate"])
+def test_control_inspection_is_read_only_and_indeterminate_does_not_sync(tmp_path, monkeypatch, terminal):
+    run_dir = _run_dir(tmp_path)
+    _seed_lifecycle(run_dir)
+    path = _journal_path(run_dir)
+    request_id = "req-inspect"
+    fingerprint = run_control_journal.control_fingerprint_payload(op="interrupt", request_id=request_id)
+    _append(
+        path,
+        run_id=RUN_ID,
+        event_type="control.requested",
+        payload=fingerprint,
+        idempotency_key=run_control_journal.requested_idempotency_key(request_id),
+        expected_previous_sequence=2,
+        recorded_at=RECORDED_AT,
+    )
+    if terminal:
+        _append(
+            path,
+            run_id=RUN_ID,
+            event_type="control.observed",
+            payload={"op": "interrupt", "request_id": request_id, "detail": "ok"},
+            idempotency_key=run_control_journal.observed_idempotency_key(request_id),
+            expected_previous_sequence=3,
+            recorded_at=RECORDED_AT,
+        )
+    before = path.read_bytes()
+
+    def forbidden(*args):
+        raise AssertionError("inspection or indeterminate request must not sync or send")
+
+    monkeypatch.setattr(os, "fsync", forbidden)
+    monkeypatch.setattr(run_journal, "_fsync_directory", forbidden)
+    state, _, _ = run_control_journal.inspect_control_request(run_dir, request_id=request_id, fingerprint=fingerprint)
+    assert state == ("replay" if terminal else "indeterminate")
+    if not terminal:
+        with pytest.raises(ControlJournalError) as excinfo:
+            run_control_journal.execute_control_request(run_dir, op="interrupt", request_id=request_id, send=forbidden)
+        assert excinfo.value.code == "indeterminate"
+    assert path.read_bytes() == before
+
+
+def test_fresh_control_claim_sync_failure_is_bounded_before_transport(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    _seed_lifecycle(run_dir)
+
+    def fail_sync(fd):
+        raise OSError(errno.EIO, "injected claim sync failure")
+
+    def forbidden_send(payload):
+        raise AssertionError("unacknowledged claim must not send")
+
+    monkeypatch.setattr(os, "fsync", fail_sync)
+    with pytest.raises(ControlJournalError) as excinfo:
+        run_control_journal.execute_control_request(
+            run_dir,
+            op="interrupt",
+            request_id="req-claim-sync",
+            send=forbidden_send,
+        )
+    assert excinfo.value.code == "control_append_failed"

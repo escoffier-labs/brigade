@@ -284,7 +284,7 @@ def _append_control_event(
                     raise ControlJournalError(_bound(str(exc)), code="control_payload_invalid") from exc
                 _sync_shadow_after_control(run_dir)
                 return event
-        except run_lifecycle.LifecycleJournalError as exc:
+        except (run_lifecycle.LifecycleJournalError, run_journal.RunJournalError, OSError) as exc:
             raise ControlJournalError(_bound(str(exc)), code="control_append_failed") from exc
     raise ControlJournalError(
         _bound(f"control append raced the journal tail: {last_error}"),
@@ -301,17 +301,37 @@ def _claim_control_request(
     fingerprint: Mapping[str, Any],
 ) -> tuple[str, run_journal.RunEvent | None, run_journal.RunEvent | None]:
     """Inspect and claim ``control.requested`` under one journal lock."""
-    with run_lifecycle.checkpoint_event_pair():
-        with run_journal.journal_mutation(journal_path):
-            state, requested, terminal = _inspect_control_request(
-                run_dir,
-                request_id=request_id,
-                fingerprint=fingerprint,
-            )
-            if state != "absent":
-                return state, requested, terminal
-            events = _read_verified(journal_path)
-            try:
+    try:
+        with run_lifecycle.checkpoint_event_pair():
+            with run_journal.journal_mutation(journal_path):
+                state, requested, terminal = _inspect_control_request(
+                    run_dir,
+                    request_id=request_id,
+                    fingerprint=fingerprint,
+                )
+                if state == "replay":
+                    assert terminal is not None
+                    expected_key = (
+                        observed_idempotency_key(request_id)
+                        if terminal.event_type == CONTROL_OBSERVED
+                        else failed_idempotency_key(request_id)
+                    )
+                    if terminal.idempotency_key != expected_key:
+                        raise ControlJournalError(
+                            "control terminal idempotency key mismatch", code="control_append_failed"
+                        )
+                    terminal = run_journal.append_event(
+                        journal_path,
+                        run_id=run_id,
+                        event_type=terminal.event_type,
+                        payload=terminal.payload,
+                        idempotency_key=terminal.idempotency_key,
+                        expected_previous_sequence=terminal.sequence,
+                    )
+                    return state, requested, terminal
+                if state != "absent":
+                    return state, requested, terminal
+                events = _read_verified(journal_path)
                 requested = run_journal.append_event(
                     journal_path,
                     run_id=run_id,
@@ -320,12 +340,14 @@ def _claim_control_request(
                     idempotency_key=requested_idempotency_key(request_id),
                     expected_previous_sequence=events[-1].sequence if events else 0,
                 )
-            except run_journal.IdempotencyConflict as exc:
-                raise ControlJournalError(_bound(exc.diagnostic), code="control_fingerprint_conflict") from exc
-            except run_events.CanonicalizationError as exc:
-                raise ControlJournalError(_bound(str(exc)), code="control_payload_invalid") from exc
-            _sync_shadow_after_control(run_dir)
-            return "claimed", requested, None
+                _sync_shadow_after_control(run_dir)
+                return "claimed", requested, None
+    except run_journal.IdempotencyConflict as exc:
+        raise ControlJournalError(_bound(exc.diagnostic), code="control_fingerprint_conflict") from exc
+    except run_events.CanonicalizationError as exc:
+        raise ControlJournalError(_bound(str(exc)), code="control_payload_invalid") from exc
+    except (run_lifecycle.LifecycleJournalError, run_journal.RunJournalError, OSError) as exc:
+        raise ControlJournalError(_bound(str(exc)), code="control_append_failed") from exc
 
 
 def inspect_control_request(
@@ -404,15 +426,6 @@ def execute_control_request(
         raise ControlJournalError(
             _bound(f"control request {resolved_id!r} is indeterminate"),
             code="indeterminate",
-        )
-    if state == "replay":
-        assert prior_terminal is not None
-        return ControlResult(
-            request_id=resolved_id,
-            response=_response_from_terminal(prior_terminal),
-            replayed=True,
-            requested_event=prior_requested,
-            terminal_event=prior_terminal,
         )
 
     state, prior_requested, prior_terminal = _claim_control_request(
