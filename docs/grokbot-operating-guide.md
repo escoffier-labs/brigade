@@ -497,10 +497,14 @@ matches another pack's packaged default or installed port is refused as
 
 Doctor emits sanitized named checks. Queue roles emit `dependency`, `config`,
 `permissions`, `queue`, and `endpoint`. Under hub authority with a configured
-feed token, and with the #1343 fix in place, a queue role also emits
-`feed-authority` with a status of `ok`, `fail`, or `skipped`; a `skipped`
-`feed-authority` check does not fail the command. The `operations-relay` pack
-emits `dependency`, `config`, `permissions`, and `endpoint`; it has no `queue`
+feed token, a queue role also emits `host-wide-feed-authority` (formerly
+`feed-authority`) with a status of `ok`, `fail`, `unavailable`, or `skipped`.
+This check covers the host-wide feed configuration even when doctor targets
+one queue instance. A hub outage reports `unavailable`. An authorization
+refusal reports `fail`. Both statuses fail the command, while `skipped` does
+not. Each of the three feed probes uses the doctor timeout, which defaults to
+5 seconds per request. The `operations-relay` pack
+emits `dependency`, `config`, `permissions`, and `endpoint`. It has no `queue`
 check.
 The legacy `--instance` commands (`setup`, `doctor`, `canary`,
 `install-service`) remain supported and interoperate with pack config.
@@ -710,12 +714,13 @@ itself. The sibling `brigade run cloud grokbot feed --apply` command enqueues
 only, never calls `list`, and still reports its failures in the opaque
 `queue-error index=N` form, which the #1343 fix does not change.
 
-**Doctor is green while the feed lane is dead.** The queue-role doctor checks
-dependency, config, permissions, queue, and endpoint. None of those exercises
-the feed actor's hub authority, so a feed lane refused at the hub reports no
-failing check and the queue simply stays empty. The #1343 fix adds a
-feed-authority doctor check that covers this. Until it is deployed, confirm the
-lane by watching for newly enqueued jobs, not by reading a green doctor.
+**Doctor is green while the feed lane is dead.** Check the
+`host-wide-feed-authority` result. A `skipped` result means no feed token is
+configured, so doctor has not checked feed authorization. With a feed token,
+`fail` identifies a configuration or authorization failure, and `unavailable`
+identifies a hub outage. Both fail the command. An `ok` result proves the feed
+actor can read both queue roles. Confirm delivery by checking for newly
+enqueued jobs.
 
 **A Grok run that finished is reported as a failure.** The structured-output
 check compares the stop reason against the exact string `EndTurn`, so a CLI

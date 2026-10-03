@@ -203,7 +203,7 @@ def doctor(target: Path, instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECOND
     except (grokbot_jobs.GrokbotJobError, grokbot_mcp.ConfigurationError, ValueError, OSError):
         record("queue", False)
 
-    feed_authority = _feed_authority_check(target)
+    feed_authority = _feed_authority_check(target, timeout=timeout)
     if feed_authority is not None:
         checks.append(feed_authority)
 
@@ -211,8 +211,8 @@ def doctor(target: Path, instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECOND
     return checks
 
 
-def _feed_authority_check(target: Path) -> dict[str, str] | None:
-    """Prove read-only that the feed actor holds the reads both feeds' --apply needs.
+def _feed_authority_check(target: Path, *, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> dict[str, str] | None:
+    """Prove read-only that the host-wide feed actor holds both feeds' --apply reads.
 
     ``scout-feed`` lists repository-scout jobs and ``build-feed`` lists
     implementation-worker jobs, so both roles are probed. Only ``whoami`` and
@@ -222,28 +222,32 @@ def _feed_authority_check(target: Path) -> dict[str, str] | None:
 
     if not grokbot_jobs.hub_authority(target):
         return None
+    check = "host-wide-feed-authority"
     try:
         token = grokbot_mcp.load_feed_hub_token()
     except (grokbot_mcp.ConfigurationError, OSError, ValueError):
-        return {"check": "feed-authority", "status": "fail"}
+        return {"check": check, "status": "fail"}
     if token is None:
-        return {"check": "feed-authority", "status": "skipped"}
+        return {"check": check, "status": "skipped"}
     try:
         with fleet_client_grokbot.listener_identity(token):
-            identity = fleet_client_grokbot.whoami()
+            identity = fleet_client_grokbot.whoami(timeout=timeout)
             listings = [
-                fleet_client_grokbot.list_jobs(role=role, include_all=True)
+                fleet_client_grokbot.list_jobs(role=role, include_all=True, timeout=timeout)
                 for role in ("repository-scout", "implementation-worker")
             ]
     except (grokbot_mcp.ConfigurationError, OSError, ValueError):
-        return {"check": "feed-authority", "status": "fail"}
-    ok = (
-        identity.granted
-        and isinstance(identity.job, dict)
-        and identity.job.get("actor_kind") in {"feed", "control"}
-        and all(listing.granted for listing in listings)
-    )
-    return {"check": "feed-authority", "status": "ok" if ok else "fail"}
+        return {"check": check, "status": "fail"}
+    identity_ok = isinstance(identity.job, dict) and identity.job.get("actor_kind") in ("feed", "control")
+    if identity.granted and not identity_ok:
+        return {"check": check, "status": "fail"}
+    decisions = [identity, *listings]
+    if any(not decision.granted and decision.reason != "hub-unavailable" for decision in decisions):
+        return {"check": check, "status": "fail"}
+    if any(not decision.granted and decision.reason == "hub-unavailable" for decision in decisions):
+        return {"check": check, "status": "unavailable", "reason": "hub-unavailable"}
+    ok = identity.granted and identity_ok and all(listing.granted for listing in listings)
+    return {"check": check, "status": "ok" if ok else "fail"}
 
 
 def canary(target: Path, instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
