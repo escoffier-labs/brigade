@@ -3573,16 +3573,7 @@ def test_doctor_and_reconcile_remediate_migrated_empty_bindings(tmp_path, monkey
 
     with _hub(tmp_path) as hub:
         node_token = _enroll(hub)
-        assert (
-            _admin_set(
-                hub,
-                reasoning="none",
-                brigade_cli="",
-                t3_instance_id="",
-                t3_service_tier="",
-            )[0]
-            == 200
-        )
+        assert _admin_set(hub, reasoning="none")[0] == 200
         assert (
             _request(
                 hub,
@@ -3595,6 +3586,17 @@ def test_doctor_and_reconcile_remediate_migrated_empty_bindings(tmp_path, monkey
                     "seat": "cursor_grok",
                     "expected_revision": _current_revision(hub),
                 },
+            )[0]
+            == 200
+        )
+        # Reproduce a migrated default whose bindings were lost after selection.
+        assert (
+            _admin_set(
+                hub,
+                reasoning="none",
+                brigade_cli="",
+                t3_instance_id="",
+                t3_service_tier="",
             )[0]
             == 200
         )
