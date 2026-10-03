@@ -284,7 +284,11 @@ def _append_control_event(
                     raise ControlJournalError(_bound(str(exc)), code="control_payload_invalid") from exc
                 _sync_shadow_after_control(run_dir)
                 return event
-        except (run_lifecycle.LifecycleJournalError, run_journal.RunJournalError, OSError) as exc:
+        except OSError as exc:
+            raise ControlJournalError(
+                _bound(str(run_lifecycle._bound_journal_failure(exc))), code="control_append_failed"
+            ) from exc
+        except (run_lifecycle.LifecycleJournalError, run_journal.RunJournalError) as exc:
             raise ControlJournalError(_bound(str(exc)), code="control_append_failed") from exc
     raise ControlJournalError(
         _bound(f"control append raced the journal tail: {last_error}"),
@@ -346,7 +350,11 @@ def _claim_control_request(
         raise ControlJournalError(_bound(exc.diagnostic), code="control_fingerprint_conflict") from exc
     except run_events.CanonicalizationError as exc:
         raise ControlJournalError(_bound(str(exc)), code="control_payload_invalid") from exc
-    except (run_lifecycle.LifecycleJournalError, run_journal.RunJournalError, OSError) as exc:
+    except OSError as exc:
+        raise ControlJournalError(
+            _bound(str(run_lifecycle._bound_journal_failure(exc))), code="control_append_failed"
+        ) from exc
+    except (run_lifecycle.LifecycleJournalError, run_journal.RunJournalError) as exc:
         raise ControlJournalError(_bound(str(exc)), code="control_append_failed") from exc
 
 

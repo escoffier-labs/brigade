@@ -945,7 +945,7 @@ def test_events_follow_refuses_suffix_after_redaction_rewrites_emitted_prefix(tm
 
 @pytest.mark.parametrize("terminal_ok", [True, False], ids=["observed", "failed"])
 @pytest.mark.parametrize("failure", ["file", "directory"])
-def test_terminal_sync_failure_retry_never_resends_transport(tmp_path, monkeypatch, terminal_ok, failure):
+def test_terminal_sync_failure_retry_never_resends_transport(tmp_path, monkeypatch, capsys, terminal_ok, failure):
     run_dir = _run_dir(tmp_path)
     _seed_lifecycle(run_dir)
     path = _journal_path(run_dir)
@@ -953,14 +953,16 @@ def test_terminal_sync_failure_retry_never_resends_transport(tmp_path, monkeypat
     real_fsync = os.fsync
     journal_inode = path.stat()
 
+    private_marker = "PRIVATE_CONTROL_IO_MARKER"
+
     def fail_file(fd):
         info = os.fstat(fd)
         if (info.st_dev, info.st_ino) == (journal_inode.st_dev, journal_inode.st_ino):
-            raise OSError(errno.EIO, "injected terminal sync failure")
+            raise OSError(errno.EIO, private_marker + "x" * 600)
         return real_fsync(fd)
 
     def fail_directory(directory):
-        raise OSError(errno.EIO, "injected terminal directory sync failure")
+        raise OSError(errno.EIO, private_marker + "x" * 600)
 
     with monkeypatch.context() as patch:
 
@@ -983,6 +985,9 @@ def test_terminal_sync_failure_retry_never_resends_transport(tmp_path, monkeypat
         with pytest.raises(ControlJournalError) as excinfo:
             execute()
         assert excinfo.value.code == "control_append_failed"
+        assert private_marker not in str(excinfo.value)
+        assert private_marker not in excinfo.value.diagnostic
+        assert len(excinfo.value.diagnostic) <= run_events.MAX_DIAGNOSTIC_LEN
         before = path.read_bytes()
         terminal = run_journal.read_journal_bounded(path).events[-1]
         assert terminal.event_type == ("control.observed" if terminal_ok else "control.failed")
@@ -990,8 +995,19 @@ def test_terminal_sync_failure_retry_never_resends_transport(tmp_path, monkeypat
             with pytest.raises(ControlJournalError) as excinfo:
                 execute()
             assert excinfo.value.code == "control_append_failed"
+            assert private_marker not in str(excinfo.value)
+            assert private_marker not in excinfo.value.diagnostic
             assert path.read_bytes() == before
             assert len(calls) == 1
+
+        patch.setattr(run_control, "control_transport_from_run", lambda run_dir: None)
+        patch.setattr(run_control, "send_request_with_retry", lambda run_dir, transport, payload: send(payload))
+        assert cli.main(["runs", "interrupt", str(run_dir), "--request-id", "req-sync-1"]) == 2
+        captured = capsys.readouterr()
+        assert "control_append_failed" in captured.err
+        assert private_marker not in captured.out + captured.err
+        assert path.read_bytes() == before
+        assert len(calls) == 1
 
     replay = execute()
     assert replay.replayed is True
@@ -1085,22 +1101,46 @@ def test_control_inspection_is_read_only_and_indeterminate_does_not_sync(tmp_pat
     assert path.read_bytes() == before
 
 
-def test_fresh_control_claim_sync_failure_is_bounded_before_transport(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["file", "directory"])
+def test_fresh_control_claim_sync_failure_is_bounded_before_transport(tmp_path, monkeypatch, capsys, failure):
     run_dir = _run_dir(tmp_path)
     _seed_lifecycle(run_dir)
 
+    private_marker = "PRIVATE_CONTROL_CLAIM_MARKER"
+    calls = []
+
     def fail_sync(fd):
-        raise OSError(errno.EIO, "injected claim sync failure")
+        raise OSError(errno.EIO, private_marker + "x" * 600)
 
     def forbidden_send(payload):
+        calls.append(payload)
         raise AssertionError("unacknowledged claim must not send")
 
-    monkeypatch.setattr(os, "fsync", fail_sync)
-    with pytest.raises(ControlJournalError) as excinfo:
-        run_control_journal.execute_control_request(
-            run_dir,
-            op="interrupt",
-            request_id="req-claim-sync",
-            send=forbidden_send,
-        )
-    assert excinfo.value.code == "control_append_failed"
+    if failure == "file":
+        monkeypatch.setattr(os, "fsync", fail_sync)
+    else:
+        monkeypatch.setattr(run_journal, "_fsync_directory", fail_sync)
+    for attempt in range(2):
+        with pytest.raises(ControlJournalError) as excinfo:
+            run_control_journal.execute_control_request(
+                run_dir,
+                op="interrupt",
+                request_id="req-claim-sync",
+                send=forbidden_send,
+            )
+        if attempt == 0:
+            assert excinfo.value.code == "control_append_failed"
+        else:
+            assert excinfo.value.code == "indeterminate"
+        assert private_marker not in str(excinfo.value)
+        assert private_marker not in excinfo.value.diagnostic
+        assert len(excinfo.value.diagnostic) <= run_events.MAX_DIAGNOSTIC_LEN
+    monkeypatch.setattr(run_control, "control_transport_from_run", lambda run_dir: None)
+    monkeypatch.setattr(
+        run_control, "send_request_with_retry", lambda run_dir, transport, payload: forbidden_send(payload)
+    )
+    assert cli.main(["runs", "interrupt", str(run_dir), "--request-id", "req-claim-sync"]) == 2
+    captured = capsys.readouterr()
+    assert "indeterminate" in captured.err
+    assert private_marker not in captured.out + captured.err
+    assert calls == []

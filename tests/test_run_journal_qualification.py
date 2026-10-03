@@ -7,6 +7,7 @@ import os
 import select
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -36,6 +37,34 @@ def _cancel_payload():
         "active_seats": [],
         "outcomes": [{"seat": "coder", "transport_capability": "interrupt", "transport_result": "interrupted"}],
     }
+
+
+@pytest.mark.parametrize("failure", ["lock", "nesting", "private-copy-error"])
+def test_payload_copy_failure_is_typed_and_preserves_journal(tmp_path, failure):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    _append(path)
+    before = path.read_bytes()
+    private_marker = "PRIVATE_COPY_FAILURE_MARKER"
+
+    class Uncopyable:
+        def __deepcopy__(self, memo):
+            raise TypeError(private_marker + "x" * 600)
+
+    if failure == "lock":
+        value = threading.Lock()
+    elif failure == "nesting":
+        value = []
+        for _ in range(sys.getrecursionlimit()):
+            value = [value]
+    else:
+        value = Uncopyable()
+
+    with pytest.raises(run_events.CanonicalizationError) as excinfo:
+        _append(path, payload={"status": value}, key="invalid-copy", previous=1)
+    assert private_marker not in str(excinfo.value)
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+    assert path.read_bytes() == before
+    assert len(run_journal.read_journal_bounded(path).events) == 1
 
 
 def test_caller_nested_mutation_does_not_change_returned_accepted_event(tmp_path):

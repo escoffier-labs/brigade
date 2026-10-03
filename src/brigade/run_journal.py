@@ -1011,7 +1011,10 @@ def append_event(
     ensure_journal(journal_path)
     # Structured payloads must stay stable through digesting, durable write,
     # fleet reporting and construction of the returned accepted event.
-    payload = deepcopy(payload)
+    try:
+        payload = deepcopy(payload)
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise CanonicalizationError("payload cannot be copied for canonicalization") from exc
 
     if recorded_at is None:
         from datetime import datetime, timezone
