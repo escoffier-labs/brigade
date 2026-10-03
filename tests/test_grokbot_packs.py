@@ -1473,16 +1473,16 @@ def test_first_party_pack_units_use_shared_listener_recovery_policy(tmp_path: Pa
 
 @pytest.mark.parametrize(
     ("feed_status", "exit_code"),
-    (("skipped", 0), ("ok", 0), ("fail", 1), ("unrecognized", 1)),
+    (("skipped", 0), ("ok", 0), ("fail", 1), ("unavailable", 1), ("unrecognized", 1)),
 )
 def test_pack_doctor_cli_fails_only_on_non_allowlisted_statuses(
     tmp_path: Path, monkeypatch, capsys, feed_status: str, exit_code: int
 ):
-    checks = [{"check": "queue", "status": "ok"}, {"check": "feed-authority", "status": feed_status}]
+    checks = [{"check": "queue", "status": "ok"}, {"check": "host-wide-feed-authority", "status": feed_status}]
     monkeypatch.setattr(grokbot_packs, "doctor", lambda *_args, **_kwargs: checks)
 
     assert cli.main(_pack_argv(tmp_path, "doctor", "--id", "repository-scout")) == exit_code
-    assert f"feed-authority: {feed_status}" in capsys.readouterr().out
+    assert f"host-wide-feed-authority: {feed_status}" in capsys.readouterr().out
 
 
 PUBLIC_HOST = "obsidian.packs.test"
