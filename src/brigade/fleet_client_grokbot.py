@@ -200,7 +200,16 @@ def ack_cancel(job_id: str, *, lease_id: str, **fields: Any) -> GrokbotHubDecisi
     return _op("ack-cancel", job_id=job_id, lease_id=lease_id, **fields)
 
 
-def _op(action: str, **fields: Any) -> GrokbotHubDecision:
+def _op(action: str, *, timeout: float = GROKBOT_TIMEOUT_SECONDS, **fields: Any) -> GrokbotHubDecision:
+    """Keep the transport deadline local; job ``timeout_seconds`` remains a hub field."""
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        return GrokbotHubDecision(False, "invalid-request")
+    try:
+        timeout = float(timeout)
+    except OverflowError:
+        return GrokbotHubDecision(False, "invalid-request")
+    if not 0 < timeout < float("inf"):
+        return GrokbotHubDecision(False, "invalid-request")
     try:
         config = load_fleet_config()
         fields.pop("hub_url", None)
@@ -220,8 +229,8 @@ def _op(action: str, **fields: Any) -> GrokbotHubDecision:
         body = {"action": action}
         body.update({key: value for key, value in fields.items() if value is not None})
         status, payload = _client._run_with_deadline(
-            lambda: _post_grokbot_blocking(hub, token, body, timeout=GROKBOT_TIMEOUT_SECONDS),
-            timeout=GROKBOT_TIMEOUT_SECONDS,
+            lambda: _post_grokbot_blocking(hub, token, body, timeout=timeout),
+            timeout=timeout,
         )
     except Exception:
         return GrokbotHubDecision(False, "hub-unavailable")

@@ -554,6 +554,20 @@ def _write_set(conn: sqlite3.Connection, request: dict[str, Any]) -> dict[str, A
     }
 
 
+def _default_eligibility_error(
+    consumer: str, *, enabled: bool, retired: bool, brigade_cli: str, t3_instance_id: str
+) -> str | None:
+    """Validate a defined legacy seat using its current or proposed enabled state."""
+    if retired:
+        return "retired-model"
+    if not enabled:
+        return "seat-disabled"
+    binding = brigade_cli if consumer == "brigade-run" else t3_instance_id
+    if not binding:
+        return "binding-missing"
+    return None
+
+
 def _write_default(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
     _require_legacy_writable(conn)
     if not isinstance(raw, dict):
@@ -565,12 +579,20 @@ def _write_default(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
     if consumer not in fleet_model_roster.CONSUMERS:
         raise FleetHubError("model policy field 'consumer' must be brigade-run or t3-fleet")
     seat = fleet_hub._model_policy_name(raw.get("seat"), "seat")
-    row = conn.execute("SELECT provider, model FROM model_policy WHERE seat=?", (seat,)).fetchone()
+    row = conn.execute(
+        "SELECT provider, model, enabled, brigade_cli, t3_instance_id FROM model_policy WHERE seat=?", (seat,)
+    ).fetchone()
     if row is None:
         raise FleetHubError(f"model policy seat {seat!r} is not defined")
-    denied = _retired_conflict(conn, str(row[0]), str(row[1]))
-    if denied is not None:
-        return denied
+    error = _default_eligibility_error(
+        consumer,
+        enabled=bool(row[2]),
+        retired=fleet_model_roster.retired_reason(str(row[0]), str(row[1]), _retired_rows(conn)) is not None,
+        brigade_cli=str(row[3] or ""),
+        t3_instance_id=str(row[4] or ""),
+    )
+    if error is not None:
+        return {"error": error}
     conn.execute(
         "INSERT INTO model_consumer_defaults (consumer, seat, updated_at) VALUES (?, ?, ?) "
         "ON CONFLICT(consumer) DO UPDATE SET seat=excluded.seat, updated_at=excluded.updated_at",
