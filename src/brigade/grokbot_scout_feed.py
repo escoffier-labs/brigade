@@ -76,7 +76,7 @@ def _queue_error(exc: grokbot_jobs.GrokbotJobError) -> ScoutFeedError:
 
 
 def preflight(target: Path, policy_path: Path, *, now: datetime | None = None) -> dict[str, object]:
-    """Validate a private policy and discover the first approved issue number."""
+    """Validate a private policy and discover the next approved scout candidate."""
     policy = load_policy(policy_path)
     numbers = _discover_issue_numbers(policy)
     instant = _resolve_now(now)
@@ -198,7 +198,7 @@ def _selection(
     records: list[dict[str, Any]],
     listing: dict[str, str] | None,
 ) -> tuple[dict[str, object], str | None]:
-    """Pick one issue and the idempotency key its next attempt must carry."""
+    """Pick the least-attempted issue and its next attempt's idempotency key."""
     daily_limit = policy["daily_limit"]
     repository = policy["repository"]
     assert isinstance(daily_limit, int)
@@ -216,6 +216,8 @@ def _selection(
         "terminal_retry_candidates": 0,
         "retry_exhausted": 0,
     }
+    if listing is None:
+        result["listing"] = "none"
     if not numbers:
         return {**result, "reason": "no-approved-issues"}, None
     survey = [(number, *_next_attempt(target, repository, number, listing)) for number in numbers]
@@ -230,9 +232,9 @@ def _selection(
         return {**result, "reason": "active-scout"}, None
     if created_today >= daily_limit:
         return {**result, "reason": "daily-limit-reached"}, None
-    for number, revision, _status in survey:
-        if revision is None:
-            continue
+    eligible = [(revision, number) for number, revision, _status in survey if revision is not None]
+    if eligible:
+        revision, number = min(eligible)
         return {**result, "issue_number": number}, _scout_key(repository, number, revision)
     return {**result, "reason": "retry-exhausted" if exhausted else "all-known"}, None
 
