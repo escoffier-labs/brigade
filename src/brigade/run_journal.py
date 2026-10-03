@@ -1013,7 +1013,7 @@ def append_event(
     # fleet reporting and construction of the returned accepted event.
     try:
         payload = deepcopy(payload)
-    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+    except Exception as exc:
         raise CanonicalizationError("payload cannot be copied for canonicalization") from exc
 
     if recorded_at is None:

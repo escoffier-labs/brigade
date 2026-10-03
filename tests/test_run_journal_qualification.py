@@ -39,7 +39,11 @@ def _cancel_payload():
     }
 
 
-@pytest.mark.parametrize("failure", ["lock", "nesting", "private-copy-error"])
+@pytest.mark.parametrize(
+    "failure",
+    ["lock", "nesting", TypeError, RuntimeError, OSError],
+    ids=["lock", "nesting", "private-copy-error", "private-copy-runtime-error", "private-copy-os-error"],
+)
 def test_payload_copy_failure_is_typed_and_preserves_journal(tmp_path, failure):
     path = tmp_path / "events" / "lifecycle.jsonl"
     _append(path)
@@ -48,7 +52,7 @@ def test_payload_copy_failure_is_typed_and_preserves_journal(tmp_path, failure):
 
     class Uncopyable:
         def __deepcopy__(self, memo):
-            raise TypeError(private_marker + "x" * 600)
+            raise failure(private_marker + "x" * 600)
 
     if failure == "lock":
         value = threading.Lock()
@@ -65,6 +69,21 @@ def test_payload_copy_failure_is_typed_and_preserves_journal(tmp_path, failure):
     assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
     assert path.read_bytes() == before
     assert len(run_journal.read_journal_bounded(path).events) == 1
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
+def test_payload_copy_preserves_base_exception(tmp_path, error_type):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    _append(path)
+    before = path.read_bytes()
+
+    class InterruptedCopy:
+        def __deepcopy__(self, memo):
+            raise error_type("copy interrupted")
+
+    with pytest.raises(error_type, match="copy interrupted"):
+        _append(path, payload={"status": InterruptedCopy()}, key="interrupted-copy", previous=1)
+    assert path.read_bytes() == before
 
 
 def test_caller_nested_mutation_does_not_change_returned_accepted_event(tmp_path):
