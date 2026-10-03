@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Verification cleanup retains recorded targets when removal fails or a directory has been replaced by a file. Dry-run reports those replacements as skipped. (#1351)
 - MCP plan, sync, and doctor report `native_config_malformed` for VS Code input entries with nonstring IDs, preserving native files and refusing the entire sync transaction before writes. (#1575)
 - OpenCode MCP import and sync preserve existing flat, nested, and mixed layouts, native activation, timeouts, and live credentials, and refuse duplicate locations before mutation. Safe imports omit sensitive literal headers from canonical storage and retain their live values during adoption. Sync now projects explicit canonical timeout seconds as native milliseconds. (#1560)
 - Codex MCP sync preserves native HTTP authentication fields, tracks managed header removal, and reports authentication combinations that cannot be projected safely. (#1559)
