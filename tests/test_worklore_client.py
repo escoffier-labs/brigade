@@ -659,9 +659,27 @@ def test_burn_queue_passes_paging_through_and_omits_it_by_default(monkeypatch):
     assert "limit=10" in str(captured["url"]) and "cursor=cur-1" in str(captured["url"])
 
 
+@pytest.mark.parametrize("helper", ["get_item", "list_items", "burn_queue"])
+def test_existing_read_helpers_still_omit_optional_blank_strings(monkeypatch, helper):
+    captured: dict[str, object] = {}
+    _capture_urlopen(monkeypatch, captured)
+    if helper == "get_item":
+        worklore_client.get_item("wl-example", links_limit=2, links_cursor="")
+        expected = {"links_limit": ["2"]}
+    elif helper == "list_items":
+        worklore_client.list_items(source="", limit=2, cursor="")
+        expected = {"limit": ["2"]}
+    else:
+        worklore_client.burn_queue(limit=2, cursor="")
+        expected = {"limit": ["2"]}
+    parsed = urllib.parse.urlsplit(str(captured["url"]))
+    assert urllib.parse.parse_qs(parsed.query, keep_blank_values=True) == expected
+
+
 @pytest.mark.parametrize("route", ["item", "global"])
 @pytest.mark.parametrize(
-    "paging", [{}, {"limit": 0}, {"cursor": "opaque+/=&?# space"}, {"limit": 2, "cursor": "opaque+/=&?# space"}]
+    "paging",
+    [{}, {"limit": 0}, {"cursor": ""}, {"cursor": "opaque+/=&?# space"}, {"limit": 2, "cursor": "opaque+/=&?# space"}],
 )
 def test_event_page_transport_keeps_routes_auth_and_encoded_queries(monkeypatch, route, paging):
     _settings(monkeypatch, "https://hub.example")
@@ -688,12 +706,24 @@ def test_event_page_transport_keeps_routes_auth_and_encoded_queries(monkeypatch,
     request = requests[0]
     parsed = urllib.parse.urlsplit(request.full_url)
     assert parsed.scheme == "https" and parsed.netloc == "hub.example" and parsed.path == path
-    assert urllib.parse.parse_qs(parsed.query) == {key: [str(value)] for key, value in query.items()}
+    assert urllib.parse.parse_qs(parsed.query, keep_blank_values=True) == {
+        key: [str(value)] for key, value in query.items()
+    }
     if not query:
         assert request.full_url == f"https://hub.example{path}"
     assert request.get_method() == "GET" and request.data is None
     headers = {key.lower(): value for key, value in request.header_items()}
     assert headers == {"authorization": "Bearer node-secret"}
+
+
+@pytest.mark.parametrize("field", ["work_id", "event_type"])
+def test_global_event_transport_preserves_explicit_blank_filters(monkeypatch, field):
+    captured: dict[str, object] = {}
+    _capture_urlopen(monkeypatch, captured, {"events": [], "next_cursor": None})
+    worklore_client.list_all_events(**{field: ""})
+    parsed = urllib.parse.urlsplit(str(captured["url"]))
+    assert parsed.path == "/work/events"
+    assert urllib.parse.parse_qs(parsed.query, keep_blank_values=True) == {field: [""]}
 
 
 @pytest.fixture
@@ -828,3 +858,24 @@ def test_event_page_server_refusals_propagate_without_escalation(
     assert excinfo.value.code == code
     assert f"HTTP {status}" in str(excinfo.value)
     assert len(seen) == 1 and seen[0][1] == status
+
+
+@pytest.mark.parametrize(
+    ("route", "query", "code"),
+    [
+        ("item", {"cursor": ""}, "field-bound"),
+        ("global", {"cursor": ""}, "field-bound"),
+        ("global", {"work_id": ""}, "field-bound"),
+        ("global", {"event_type": ""}, "field-bound"),
+    ],
+)
+def test_blank_event_queries_retain_server_refusals(event_history_transport, route, query, code):
+    _, work_id, seen = event_history_transport
+    with pytest.raises(worklore_client.WorkloreClientError) as excinfo:
+        if route == "item":
+            worklore_client.list_events(work_id, **query)
+        else:
+            worklore_client.list_all_events(**query)
+    assert excinfo.value.code == code
+    assert "HTTP 400" in str(excinfo.value)
+    assert len(seen) == 1 and seen[0][0:2] == ("node-a", 400)

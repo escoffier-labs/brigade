@@ -29,7 +29,9 @@ if cursor is not None:
 in ascending order. `list_all_events(*, work_id=None, event_type=None,
 limit=None, cursor=None)` uses `/work/events`. Global history is newest first
 by `occurred_at`, then insertion sequence. Global reads can filter by work item,
-event type, or both. Keep those filters when following a returned cursor.
+event type, or both. The global cursor does not encode or enforce filter
+identity. Callers must preserve the original filters when following a returned
+cursor.
 Filtered pages can contain fewer events than the limit, including none, while
 still returning a cursor for remaining candidates. Follow `next_cursor` to
 determine whether the traversal continues.
