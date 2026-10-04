@@ -6,12 +6,13 @@ import io
 import json
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from brigade import cli, worklore_client
+from brigade import cli, fleet_hub, worklore_client, worklore_http, worklore_store
 from brigade.cli import fleet as fleet_cli
 
 
@@ -656,3 +657,225 @@ def test_burn_queue_passes_paging_through_and_omits_it_by_default(monkeypatch):
     assert captured["url"] == "http://127.0.0.1:9/work/queue/burn"  # content-guard: allow loopback-ipv4
     worklore_client.burn_queue(limit=10, cursor="cur-1")
     assert "limit=10" in str(captured["url"]) and "cursor=cur-1" in str(captured["url"])
+
+
+@pytest.mark.parametrize("helper", ["get_item", "list_items", "burn_queue"])
+def test_existing_read_helpers_still_omit_optional_blank_strings(monkeypatch, helper):
+    captured: dict[str, object] = {}
+    _capture_urlopen(monkeypatch, captured)
+    if helper == "get_item":
+        worklore_client.get_item("wl-example", links_limit=2, links_cursor="")
+        expected = {"links_limit": ["2"]}
+    elif helper == "list_items":
+        worklore_client.list_items(source="", limit=2, cursor="")
+        expected = {"limit": ["2"]}
+    else:
+        worklore_client.burn_queue(limit=2, cursor="")
+        expected = {"limit": ["2"]}
+    parsed = urllib.parse.urlsplit(str(captured["url"]))
+    assert urllib.parse.parse_qs(parsed.query, keep_blank_values=True) == expected
+
+
+@pytest.mark.parametrize("route", ["item", "global"])
+@pytest.mark.parametrize(
+    "paging",
+    [{}, {"limit": 0}, {"cursor": ""}, {"cursor": "opaque+/=&?# space"}, {"limit": 2, "cursor": "opaque+/=&?# space"}],
+)
+def test_event_page_transport_keeps_routes_auth_and_encoded_queries(monkeypatch, route, paging):
+    _settings(monkeypatch, "https://hub.example")
+    requests = []
+    payload = {"events": [{"event_id": "evt-failure", "event_type": "attempt-failed"}], "next_cursor": "opaque+/="}
+
+    def fake_open(request, timeout=None):
+        requests.append(request)
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr(worklore_client, "_hub_open", fake_open)
+    query = dict(paging)
+    if route == "item":
+        result = worklore_client.list_events("wl/a?b#c", **query)
+        path = "/work/items/wl%2Fa%3Fb%23c/events"
+    else:
+        if paging:
+            query.update(work_id="wl/a?b#c&other=x", event_type="failed+reset&limit=99")
+        result = worklore_client.list_all_events(**query)
+        path = "/work/events"
+
+    assert result == payload
+    assert len(requests) == 1
+    request = requests[0]
+    parsed = urllib.parse.urlsplit(request.full_url)
+    assert parsed.scheme == "https" and parsed.netloc == "hub.example" and parsed.path == path
+    assert urllib.parse.parse_qs(parsed.query, keep_blank_values=True) == {
+        key: [str(value)] for key, value in query.items()
+    }
+    if not query:
+        assert request.full_url == f"https://hub.example{path}"
+    assert request.get_method() == "GET" and request.data is None
+    headers = {key.lower(): value for key, value in request.header_items()}
+    assert headers == {"authorization": "Bearer node-secret"}
+
+
+@pytest.mark.parametrize("field", ["work_id", "event_type"])
+def test_global_event_transport_preserves_explicit_blank_filters(monkeypatch, field):
+    captured: dict[str, object] = {}
+    _capture_urlopen(monkeypatch, captured, {"events": [], "next_cursor": None})
+    worklore_client.list_all_events(**{field: ""})
+    parsed = urllib.parse.urlsplit(str(captured["url"]))
+    assert parsed.path == "/work/events"
+    assert urllib.parse.parse_qs(parsed.query, keep_blank_values=True) == {field: [""]}
+
+
+@pytest.fixture
+def event_history_transport(tmp_path, monkeypatch):
+    conn = fleet_hub.init_db(tmp_path / "history.db")
+    try:
+        item = worklore_store.create_item(conn, {"title": "Resume history", "kind": "fleet"}, actor_id="operator-a")
+        work_id = item["work_id"]
+        for action in ("started", "failed", "reset", "failed"):
+            item = worklore_store.record_attempt(
+                conn, work_id, action=action, expected_version=item["version"], actor_id="operator-a"
+            )
+        other = worklore_store.create_item(conn, {"title": "Other history", "kind": "fleet"}, actor_id="operator-a")
+        worklore_store.record_attempt(
+            conn, other["work_id"], action="failed", expected_version=other["version"], actor_id="operator-a"
+        )
+        # Shared timestamps exercise the server's sequence tie-break in both orders.
+        conn.execute("UPDATE work_events SET occurred_at = ?", ("2026-01-01T00:00:00Z",))
+        conn.commit()
+        _settings(monkeypatch, "https://hub.example")
+        seen = []
+
+        def handler_open(request, timeout=None):
+            headers = {key.lower(): value for key, value in request.header_items()}
+            identity = {
+                "Bearer node-secret": "node-a",
+                "Bearer replacement-secret": "node-b",
+                "Bearer reserved-secret": worklore_http.RESERVED_NODE_ID,
+            }.get(headers.get("authorization"))
+            parsed = urllib.parse.urlsplit(request.full_url)
+            path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+            status, body = worklore_http.handle(
+                conn,
+                worklore_http.Request(
+                    method=request.get_method(), path=path, node_id=identity, operator_authorization_resolved=True
+                ),
+            )
+            seen.append((identity, status, body))
+            if status >= 400:
+                raise urllib.error.HTTPError(
+                    request.full_url, status, "Refused", {}, io.BytesIO(json.dumps(body).encode())
+                )
+            return _FakeResponse(body)
+
+        monkeypatch.setattr(worklore_client, "_hub_open", handler_open)
+        yield conn, work_id, seen
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("route", ["item", "global", "global-work", "global-type", "global-both"])
+def test_event_page_resume_reconstructs_reader_and_preserves_history(event_history_transport, monkeypatch, route):
+    conn, work_id, seen = event_history_transport
+    filters = {}
+    if route in {"global-work", "global-both"}:
+        filters["work_id"] = work_id
+    if route in {"global-type", "global-both"}:
+        filters["event_type"] = "attempt-failed"
+    clauses, params = [], []
+    if route == "item":
+        clauses.append("work_id = ?")
+        params.append(work_id)
+    for key, value in filters.items():
+        clauses.append(f"{key} = ?")
+        params.append(value)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    order = "seq ASC" if route == "item" else "occurred_at DESC, seq DESC"
+    expected_ids = [row[0] for row in conn.execute(f"SELECT event_id FROM work_events{where} ORDER BY {order}", params)]
+
+    def reader():
+        # Each reader retains only its request arguments, with no client paging state.
+        if route == "item":
+            return lambda cursor=None: worklore_client.list_events(work_id, limit=1, cursor=cursor)
+        return lambda cursor=None: worklore_client.list_all_events(**filters, limit=1, cursor=cursor)
+
+    page = reader()()
+    assert len(seen) == 1 and len(page["events"]) == 1
+    cursor = page["next_cursor"]
+    assert isinstance(cursor, str) and cursor
+    events = list(page["events"])
+    # Resume using the server's opaque cursor and a fresh caller's node identity.
+    _settings(monkeypatch, "https://hub.example", node_token="replacement-secret")
+    for _ in range(10):
+        if cursor is None:
+            break
+        request_count = len(seen)
+        page = reader()(cursor)
+        assert len(seen) == request_count + 1
+        assert len(page["events"]) <= 1
+        assert page == seen[-1][2]
+        events.extend(page["events"])
+        cursor = page["next_cursor"]
+    assert cursor is None
+    assert [event["event_id"] for event in events] == expected_ids
+    assert len({event["event_id"] for event in events}) == len(expected_ids)
+    assert [identity for identity, _, _ in seen] == ["node-a"] + ["node-b"] * (len(seen) - 1)
+    assert events == [event for _, _, body in seen for event in body["events"]]
+    assert any(event["event_type"] == "attempt-failed" for event in events)
+    if route == "item":
+        assert [event["event_type"] for event in events] == [
+            "created",
+            "attempt-started",
+            "attempt-failed",
+            "attempt-reset",
+            "attempt-failed",
+        ]
+        assert all(event["from_status"] == event["to_status"] == "captured" for event in events[1:])
+
+
+@pytest.mark.parametrize("route", ["item", "global"])
+@pytest.mark.parametrize(
+    ("query", "token", "status", "code"),
+    [
+        ({"cursor": "invalid-cursor"}, "node-secret", 400, "field-bound"),
+        ({"limit": 0}, "node-secret", 400, "field-bound"),
+        ({"limit": -1}, "node-secret", 400, "field-bound"),
+        ({"limit": 101}, "node-secret", 400, "field-bound"),
+        ({"limit": 1}, "unrecognized-secret", 401, "unauthorized"),
+        ({"limit": 1}, "reserved-secret", 403, "forbidden"),
+    ],
+)
+def test_event_page_server_refusals_propagate_without_escalation(
+    event_history_transport, monkeypatch, route, query, token, status, code
+):
+    _, work_id, seen = event_history_transport
+    _settings(monkeypatch, "https://hub.example", node_token=token)
+    with pytest.raises(worklore_client.WorkloreClientError) as excinfo:
+        if route == "item":
+            worklore_client.list_events(work_id, **query)
+        else:
+            worklore_client.list_all_events(**query)
+    assert excinfo.value.code == code
+    assert f"HTTP {status}" in str(excinfo.value)
+    assert len(seen) == 1 and seen[0][1] == status
+
+
+@pytest.mark.parametrize(
+    ("route", "query", "code"),
+    [
+        ("item", {"cursor": ""}, "field-bound"),
+        ("global", {"cursor": ""}, "field-bound"),
+        ("global", {"work_id": ""}, "field-bound"),
+        ("global", {"event_type": ""}, "field-bound"),
+    ],
+)
+def test_blank_event_queries_retain_server_refusals(event_history_transport, route, query, code):
+    _, work_id, seen = event_history_transport
+    with pytest.raises(worklore_client.WorkloreClientError) as excinfo:
+        if route == "item":
+            worklore_client.list_events(work_id, **query)
+        else:
+            worklore_client.list_all_events(**query)
+    assert excinfo.value.code == code
+    assert "HTTP 400" in str(excinfo.value)
+    assert len(seen) == 1 and seen[0][0:2] == ("node-a", 400)

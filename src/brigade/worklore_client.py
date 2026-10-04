@@ -169,9 +169,7 @@ def _request(
 ) -> dict[str, Any]:
     url = _hub_url() + path
     if query:
-        filtered = {key: value for key, value in query.items() if value}
-        if filtered:
-            url = f"{url}?{urllib.parse.urlencode(filtered)}"
+        url = f"{url}?{urllib.parse.urlencode(query)}"
     headers = {"Authorization": f"Bearer {token}"}
     data = None
     if body is not None:
@@ -313,12 +311,34 @@ def list_item_links_all(
     raise WorkloreListingError(f"fleet hub work failed: link listing exceeded {max_pages} pages")
 
 
-def list_events(work_id: str) -> dict[str, Any]:
-    return _request("GET", _item_path(work_id, "events"), token=_token())
+def list_events(work_id: str, *, limit: int | None = None, cursor: str | None = None) -> dict[str, Any]:
+    """Return one item history page in insertion order, with the hub's next cursor."""
+    query: dict[str, str] = {}
+    if limit is not None:
+        query["limit"] = str(limit)
+    if cursor is not None:
+        query["cursor"] = cursor
+    return _request("GET", _item_path(work_id, "events"), token=_token(), query=query or None)
 
 
-def list_all_events() -> dict[str, Any]:
-    return _request("GET", "/work/events", token=_token())
+def list_all_events(
+    *,
+    work_id: str | None = None,
+    event_type: str | None = None,
+    limit: int | None = None,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """Return one filtered global history page, newest first, with the hub's next cursor."""
+    query: dict[str, str] = {}
+    if work_id is not None:
+        query["work_id"] = work_id
+    if event_type is not None:
+        query["event_type"] = event_type
+    if limit is not None:
+        query["limit"] = str(limit)
+    if cursor is not None:
+        query["cursor"] = cursor
+    return _request("GET", "/work/events", token=_token(), query=query or None)
 
 
 def burn_queue(*, limit: int | None = None, cursor: str | None = None) -> dict[str, Any]:
