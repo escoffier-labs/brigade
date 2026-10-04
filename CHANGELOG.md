@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Windows journal writes preserve binary LF framing, and recovery preserves complete legacy CRLF records while quarantining the exact partial suffix. Bound recovery uses directory handles and supports nonexclusive creation and append. (#1565)
 - Journal append results and exported event dictionaries detach nested payloads from caller-owned data so later mutations cannot change the accepted event copy. (#1565)
 - Journal, lifecycle, and control retries synchronize the existing event before acknowledging it again. Fresh appends also synchronize the events directory, and control retries preserve the original event without repeating transport. (#1565)
 - Grok Bot scout feeds select issues with fewer failed attempts before retrying lower issue numbers. Hub previews report `listing=none` when queue state has not been fetched. (#1351)
