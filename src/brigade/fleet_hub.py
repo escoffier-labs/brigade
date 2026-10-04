@@ -75,20 +75,10 @@ Endpoints:
   attributed to its own ``node_id``.
 - ``GET /claims`` — admin or node token; active claims (``?all=1`` includes
   expired).
-- ``GET /`` and ``GET /deck`` — the server-rendered Command Deck, with the
-  legacy Fleet dashboard retained at ``/view/{machines,repos}``. The classic
-  boards reuse latest-state-per-run, window terminal history to the deck
-  horizon (default 24h) unless ``all=1``, and cap each page with LIMIT plus
-  a ``more`` link. Same bearer auth,
-  or the ``brigade_fleet_view`` cookie: opening the page once with
-  ``?token=<fleet token>`` from a phone sets an HttpOnly, SameSite=Strict
-  cookie and 303-redirects to the same URL without the token. The cookie
-  value is an HMAC of the token, never the token: the cookie derived from the
-  admin token reads the dashboards and edits the roster page (never
-  ``/status``, ``/claims``, or ``/events``), and rotating the hub token
-  revokes it. Tradeoff: the token transits once in a URL (browser history on
-  that device; the hub logs nothing) and the cookie is a 30-day capability on
-  that device, which is why it is scoped to the HTML routes only.
+- HTML dashboards accept admin headers or read-only dashboard sessions.
+  ``brigade fleet enroll`` mints a five-minute code. Browser confirmation
+  creates an independent, revocable 30-day session. Bearer query URLs and
+  legacy derived cookies are refused.
 
 The admin token comes from ``BRIGADE_FLEET_TOKEN`` or ``--token-file``; it
 is never persisted by Brigade, and node tokens are persisted only as SHA-256
@@ -123,14 +113,13 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
-# Dashboard cookie (issue #1124): a derived, read-only capability, not the token.
+# Dashboard cookie (#1153): an independent, revocable read-only capability.
 DASHBOARD_COOKIE = "brigade_fleet_view"
 DASHBOARD_COOKIE_MAX_AGE = 30 * 86400
-_DASHBOARD_COOKIE_PURPOSE = b"brigade-fleet-dashboard-cookie-v1"
 _DASHBOARD_PREFIX = "/view/"
 _TAILSCALE_IDENTITY_HEADER = "Tailscale-User-Login"
 _TAILSCALE_IDENTITY_MAX_LEN = 256
@@ -594,6 +583,9 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     from . import fleet_policy_delegation
 
     fleet_policy_delegation.ensure_schema(conn)
+    from . import fleet_hub_enrollment
+
+    fleet_hub_enrollment.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -849,14 +841,6 @@ def node_summary(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         {"node_id": node_id, "last_received_at": latest[node_id], "events": counts[node_id]}
         for node_id in sorted(latest)
     ]
-
-
-def dashboard_cookie_value(token: str) -> str:
-    """Cookie value derived from the hub token; never the token itself."""
-    return hmac.new(token.encode("utf-8"), _DASHBOARD_COOKIE_PURPOSE, hashlib.sha256).hexdigest()
-
-
-# --- claims (issue #1125, phase 4) ------------------------------------------
 
 
 def _now_epoch() -> float:
@@ -1892,6 +1876,7 @@ def make_handler(
     allow_admin_writes: bool = False,
     deck_config: fleet_command_deck.DeckConfig | None = None,
     trust_tailscale_identity: bool = False,
+    trust_forwarded_proto: bool = False,
 ) -> type[BaseHTTPRequestHandler]:
     """Build the HTTP adapter around the hub domain operations."""
     from .fleet_hub_http import make_handler as _make_handler
@@ -1902,6 +1887,7 @@ def make_handler(
         allow_admin_writes=allow_admin_writes,
         deck_config=deck_config,
         trust_tailscale_identity=trust_tailscale_identity,
+        trust_forwarded_proto=trust_forwarded_proto,
     )
 
 
@@ -1914,6 +1900,7 @@ def make_server(
     allow_admin_writes: bool = False,
     deck_config_path: Path | None = None,
     trust_tailscale_identity: bool = False,
+    trust_forwarded_proto: bool = False,
 ) -> ThreadingHTTPServer:
     """Build (but do not serve) the hub HTTPServer; used by tests.
 
@@ -1925,6 +1912,8 @@ def make_server(
     socket is bound; an invalid file raises ``DeckConfigError`` without
     creating anything.
     """
+    if trust_forwarded_proto and not _is_loopback_address(host):
+        raise FleetHubError("--trust-forwarded-proto requires a numeric loopback --host")
     if trust_tailscale_identity and not _is_loopback_address(host):
         raise FleetHubError("--trust-tailscale-identity requires a loopback --host")
     if deck_config_path is not None:
@@ -1940,6 +1929,7 @@ def make_server(
             allow_admin_writes=allow_admin_writes,
             deck_config=deck_config,
             trust_tailscale_identity=trust_tailscale_identity,
+            trust_forwarded_proto=trust_forwarded_proto,
         ),
     )
 
@@ -1953,6 +1943,7 @@ def run(
     allow_admin_writes: bool = False,
     deck_config_path: Path | None = None,
     trust_tailscale_identity: bool = False,
+    trust_forwarded_proto: bool = False,
 ) -> int:
     if not host:
         print("error: --host is required (the hub never binds all interfaces by default)", file=sys.stderr)
@@ -1971,6 +1962,7 @@ def run(
             allow_admin_writes=allow_admin_writes,
             deck_config_path=deck_config_path,
             trust_tailscale_identity=trust_tailscale_identity,
+            trust_forwarded_proto=trust_forwarded_proto,
         )
     except (FleetHubError, sqlite3.Error, fleet_command_deck.DeckConfigError) as exc:
         # Startup migration is the one place the hub touches the schema: if

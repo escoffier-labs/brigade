@@ -1634,9 +1634,45 @@ class TestDispatchWiring:
         monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "irrelevant")
         ws, roster_path = workspace
         dispatched = []
+        acquire_requests = []
+        scheduled_releases = []
+        real_post = fleet_client._post_claim_blocking
+
+        def record_post(hub_url, tok, body, *, timeout):
+            acquire_requests.append(dict(body))
+            return real_post(hub_url, tok, body, timeout=timeout)
+
+        def record_orphan_release(target, **kwargs):
+            scheduled_releases.append((target, kwargs))
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", record_post)
+        # This dispatch test owns the scheduling request. Dedicated orphan
+        # cleanup tests own the daemon and its real release attempts.
+        monkeypatch.setattr(fleet_client, "_schedule_orphan_release", record_orphan_release)
         monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: dispatched.append(1) or 0)
         assert self._run(ws, roster_path) == 0
         assert dispatched == [1]
+        assert len(acquire_requests) == 2
+        holder = acquire_requests[0]["holder"]
+        assert isinstance(holder, str) and holder
+        for body in acquire_requests:
+            assert body["action"] == "acquire"
+            assert body["target"] == "ws"
+            assert body["node_id"] == NODE_A
+            assert body["conductor"] == "chef"
+            assert body["ttl_seconds"] == fleet_client.DEFAULT_CLAIM_TTL_SECONDS
+            assert body["holder"] == holder
+        assert scheduled_releases == [
+            (
+                "ws",
+                {
+                    "node_id": NODE_A,
+                    "holder": holder,
+                    "conductor": "chef",
+                    "ttl_seconds": fleet_client.DEFAULT_CLAIM_TTL_SECONDS,
+                },
+            )
+        ]
 
     @staticmethod
     def _receipt(ws: Path) -> dict:

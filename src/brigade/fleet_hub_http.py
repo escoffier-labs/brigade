@@ -5,19 +5,21 @@ SQLite domain module makes the hub's security boundary easier to inspect.
 """
 
 import hmac
+import html
+import ssl
 import importlib.resources
 import json
 import re
 import secrets
 import sqlite3
 from datetime import datetime, timezone
-from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import parse_qs, urlencode
 
+from . import fleet_hub_enrollment as enrollment
 from . import fleet_claim_display
 from . import fleet_command_deck, fleet_dashboard, fleet_hub_grokbot, fleet_hub_sessions, worklore_http
 from . import fleet_hub as _hub
@@ -43,7 +45,6 @@ from .fleet_hub import (
     _DASHBOARD_PREFIX,
     _TAILSCALE_IDENTITY_HEADER,
     _TAILSCALE_IDENTITY_MAX_LEN,
-    dashboard_cookie_value,
 )
 
 
@@ -162,6 +163,7 @@ def make_handler(
     allow_admin_writes: bool = False,
     deck_config: fleet_command_deck.DeckConfig | None = None,
     trust_tailscale_identity: bool = False,
+    trust_forwarded_proto: bool = False,
     policy_inventory: Callable[[], fleet_policy_page.Inventory] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Request handler bound to the admin ``token`` and the hub database.
@@ -225,18 +227,201 @@ def make_handler(
             return False, node_id
 
         def _cookie_authorized(self) -> bool:
-            header = self.headers.get("Cookie", "")
-            if not header:
+            credential = enrollment.cookie_credential(self.headers.get_all("Cookie", []), DASHBOARD_COOKIE)
+            if credential is None:
                 return False
-            jar: SimpleCookie = SimpleCookie()
             try:
-                jar.load(header)
-            except CookieError:
+                conn = open_db(Path(db_path))
+                try:
+                    return enrollment.authorized(conn, credential)
+                finally:
+                    conn.close()
+            except (FleetHubError, sqlite3.Error):
                 return False
-            morsel = jar.get(DASHBOARD_COOKIE)
-            if morsel is None:
+
+        def _secure_transport(self) -> bool:
+            if isinstance(self.connection, ssl.SSLSocket):
+                return True
+            bound = self.server.server_address
+            return (
+                trust_forwarded_proto
+                and isinstance(bound, tuple)
+                and _is_loopback_address(str(bound[0]))
+                and _is_loopback_address(self.client_address[0])
+                and self.headers.get_all("X-Forwarded-Proto", []) == ["https"]
+            )
+
+        def _enrollment_same_origin(self) -> bool:
+            hosts = self.headers.get_all("Host", [])
+            origins = self.headers.get_all("Origin", [])
+            sites = self.headers.get_all("Sec-Fetch-Site", [])
+            if len(hosts) != 1 or len(origins) > 1 or len(sites) > 1:
                 return False
-            return hmac.compare_digest(morsel.value.encode("utf-8"), dashboard_cookie_value(token).encode("utf-8"))
+            try:
+                expected = enrollment.canonical_origin("https" if self._secure_transport() else "http", hosts[0])
+            except enrollment.EnrollmentError:
+                return False
+            if sites and sites != ["same-origin"]:
+                return False
+            try:
+                return enrollment.serialized_origin(origins[0]) == expected if origins else sites == ["same-origin"]
+            except enrollment.EnrollmentError:
+                return False
+
+        def _prefetch(self) -> bool:
+            return any(
+                "prefetch" in value.lower()
+                for header in ("Purpose", "Sec-Purpose")
+                for value in self.headers.get_all(header, [])
+            )
+
+        def _dashboard_error(self, status: int) -> None:
+            self._send_html(status, "Dashboard request refused.\n", content_type="text/plain; charset=utf-8")
+
+        def _bounded_dashboard_body(self, media_type: str) -> bytes | None:
+            lengths = self.headers.get_all("Content-Length", [])
+            types = self.headers.get_all("Content-Type", [])
+            if self.headers.get_all("Transfer-Encoding", []) or len(lengths) != 1:
+                self._dashboard_error(400)
+                return None
+            if len(types) != 1 or types[0].partition(";")[0].strip().lower() != media_type:
+                self._dashboard_error(415)
+                return None
+            try:
+                length = int(lengths[0])
+            except ValueError:
+                self._dashboard_error(400)
+                return None
+            if not 0 < length <= enrollment.BODY_LIMIT:
+                self._dashboard_error(413 if length > enrollment.BODY_LIMIT else 400)
+                return None
+            return self.rfile.read(length)
+
+        def _serve_enrollment(self, query: str) -> None:
+            try:
+                if self._prefetch():
+                    raise enrollment.EnrollmentError()
+                code = enrollment.code_param(query)
+                conn = open_db(Path(db_path))
+                try:
+                    if not enrollment.available(conn, code):
+                        raise enrollment.EnrollmentError()
+                finally:
+                    conn.close()
+            except enrollment.EnrollmentError:
+                self._dashboard_error(400)
+                return
+            except (FleetHubError, sqlite3.Error):
+                self._dashboard_error(500)
+                return
+            page = (
+                '<!doctype html><html lang="en"><meta charset="utf-8">'
+                "<title>Confirm dashboard access</title><h1>Read-only dashboard access</h1>"
+                '<p>Confirm access for this browser for 30 days.</p><form method="post" action="/enroll">'
+                f'<input type="hidden" name="code" value="{html.escape(code, quote=True)}">'
+                '<button type="submit">Enroll this browser</button></form></html>'
+            )
+            self._send_html(200, page)
+
+        def _post_enrollment(self, query: str) -> None:
+            if query or self._prefetch() or not self._enrollment_same_origin():
+                self._dashboard_error(403)
+                return
+            body = self._bounded_dashboard_body("application/x-www-form-urlencoded")
+            if body is None:
+                return
+            try:
+                code = enrollment.code_param(body.decode("ascii"))
+                conn = open_db(Path(db_path))
+                try:
+                    credential = enrollment.redeem(conn, code)
+                finally:
+                    conn.close()
+            except (enrollment.EnrollmentError, UnicodeError):
+                self._dashboard_error(400)
+                return
+            except (FleetHubError, sqlite3.Error):
+                self._dashboard_error(500)
+                return
+            cookie = (
+                f"{DASHBOARD_COOKIE}={credential}; Path=/; HttpOnly; SameSite=Strict; "
+                f"Max-Age={DASHBOARD_COOKIE_MAX_AGE}" + ("; Secure" if self._secure_transport() else "")
+            )
+            self._send_html(303, "", extra_headers={"Location": "/deck", "Set-Cookie": cookie})
+
+        def _dashboard_api(self, path: str, query: str) -> None:
+            # Authenticate before reading a mutation body. Never fall back to a node token.
+            if not self._authorized():
+                self._send_json(403 if self._bearer() else 401, {"error": "unauthorized"})
+                return
+            try:
+                params = enrollment.strict_params(query)
+                if self.command == "GET":
+                    if path != "/dashboard/sessions" or set(params) - {"all", "after"}:
+                        raise enrollment.EnrollmentError()
+                    if "all" in params and params["all"] != "1":
+                        raise enrollment.EnrollmentError()
+                    after = params.get("after")
+                    if after is not None and not enrollment.valid_session_id(after):
+                        raise enrollment.EnrollmentError()
+                    conn = open_db(Path(db_path))
+                    try:
+                        payload = enrollment.list_sessions(conn, include_all=params.get("all") == "1", after=after)
+                    finally:
+                        conn.close()
+                    status = 200
+                else:
+                    if params:
+                        raise enrollment.EnrollmentError()
+                    body = self._bounded_dashboard_body("application/json")
+                    if body is None:
+                        return
+
+                    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+                        result = dict(pairs)
+                        if len(result) != len(pairs):
+                            raise enrollment.EnrollmentError()
+                        return result
+
+                    raw = json.loads(body.decode("utf-8"), object_pairs_hook=unique)
+                    if not isinstance(raw, dict):
+                        raise enrollment.EnrollmentError()
+                    if path == "/dashboard/enrollment":
+                        if set(raw) - {"label"}:
+                            raise enrollment.EnrollmentError()
+                        label = enrollment.label_value(raw.get("label"))
+                    elif (
+                        set(raw) != {"action", "session_id"}
+                        or raw["action"] != "revoke"
+                        or not enrollment.valid_session_id(raw["session_id"])
+                    ):
+                        raise enrollment.EnrollmentError()
+                    conn = open_db(Path(db_path))
+                    try:
+                        if path == "/dashboard/enrollment":
+                            payload = enrollment.mint(conn, label)
+                            status = 201
+                        elif enrollment.revoke(conn, raw["session_id"]):
+                            payload = {"revoked": True, "session_id": raw["session_id"]}
+                            status = 200
+                        else:
+                            payload = {"error": "dashboard session not found"}
+                            status = 404
+                    finally:
+                        conn.close()
+            except (enrollment.EnrollmentError, ValueError, UnicodeError, RecursionError):
+                self._send_json(400, {"error": "dashboard request refused"})
+                return
+            except (FleetHubError, sqlite3.Error):
+                self._send_json(500, {"error": "hub database error"})
+                return
+            self._send_json(status, payload)
+
+        def _refuse_token_query(self, query: str) -> bool:
+            if "token" in parse_qs(query, keep_blank_values=True):
+                self._dashboard_error(401)
+                return True
+            return False
 
         def _tailscale_identity_authorized(self) -> bool:
             """True when a trusted Tailscale Serve proxy presents a valid user login header.
@@ -340,6 +525,8 @@ def make_handler(
             body = json.dumps(payload).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -408,28 +595,10 @@ def make_handler(
                 self._send_html(404, "Not found.\n", content_type=plain)
                 return
             params = parse_qs(query, keep_blank_values=False)
-            presented = params.pop("token", [""])[0]
-            if presented:
-                if not hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8")):
-                    self._send_html(401, "Unauthorized.\n", content_type=plain)
-                    return
-                # Redirect to the same page without the token so it does not
-                # linger in the address bar; the view is validated above, so
-                # the Location is always one of our own relative routes.
-                cookie = (
-                    f"{DASHBOARD_COOKIE}={dashboard_cookie_value(token)}; Path=/; HttpOnly; "
-                    f"SameSite=Strict; Max-Age={DASHBOARD_COOKIE_MAX_AGE}"
-                )
-                rest = urlencode(params, doseq=True)
-                location = path + (f"?{rest}" if rest else "")
-                self._send_html(303, "", content_type=plain, extra_headers={"Location": location, "Set-Cookie": cookie})
-                return
             if not (self._authorized() or self._cookie_authorized() or self._tailscale_identity_authorized()):
                 self._send_html(
                     401,
-                    "Unauthorized: send the fleet bearer token, or open this page once with "
-                    "?token=<fleet token> to set the dashboard cookie derived from the admin token "
-                    "that reads the dashboards and edits the roster page (rotating the hub token revokes it).\n",
+                    "Unauthorized: use brigade fleet enroll for read-only dashboard access.\n",
                     content_type=plain,
                 )
                 return
@@ -491,33 +660,20 @@ def make_handler(
             self._send_html(200, page, nonce=nonce)
 
         def _serve_deck(self, path: str, query: str) -> None:
-            """Command Deck HTML (/, /deck, /deck/repos): the same enrollment,
-            redirect, bearer-or-cookie authorization, and security headers as
-            ``_serve_dashboard``; non-token query parameters are ignored,
-            never reflected. Renders from the startup-frozen deck config."""
+            """Command Deck HTML (/, /deck, /deck/repos): admin bearer, live
+            read-only session, or trusted Tailscale identity authorization,
+            with the same security headers as ``_serve_dashboard``. Token query
+            parameters are refused before dispatch. Other query parameters are
+            ignored, never reflected. Renders from the startup-frozen config."""
             plain = "text/plain; charset=utf-8"
             repos_page = path == "/deck/repos"
             if path not in ("/", "/deck") and not repos_page:
                 self._send_html(404, "Not found.\n", content_type=plain)
                 return
-            params = parse_qs(query, keep_blank_values=False)
-            presented = params.pop("token", [""])[0]
-            if presented:
-                if not hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8")):
-                    self._send_html(401, "Unauthorized.\n", content_type=plain)
-                    return
-                cookie = (
-                    f"{DASHBOARD_COOKIE}={dashboard_cookie_value(token)}; Path=/; HttpOnly; "
-                    f"SameSite=Strict; Max-Age={DASHBOARD_COOKIE_MAX_AGE}"
-                )
-                self._send_html(303, "", content_type=plain, extra_headers={"Location": path, "Set-Cookie": cookie})
-                return
             if not (self._authorized() or self._cookie_authorized() or self._tailscale_identity_authorized()):
                 self._send_html(
                     401,
-                    "Unauthorized: send the fleet bearer token, or open this page once with "
-                    "?token=<fleet token> to set the dashboard cookie derived from the admin token "
-                    "that reads the dashboards and edits the roster page (rotating the hub token revokes it).\n",
+                    "Unauthorized: use brigade fleet enroll for read-only dashboard access.\n",
                     content_type=plain,
                 )
                 return
@@ -620,10 +776,10 @@ def make_handler(
             self._send_html(200, page, nonce=nonce)
 
         def _roster_auth(self) -> tuple[bool, bool]:
-            """``(authorized, editable)``: bearer/cookie edit; Tailscale identity reads."""
-            if self._authorized() or self._cookie_authorized():
+            """Only the admin header permits editing. Browser capabilities read."""
+            if self._authorized():
                 return True, True
-            if self._tailscale_identity_authorized():
+            if self._cookie_authorized() or self._tailscale_identity_authorized():
                 return True, False
             return False, False
 
@@ -657,38 +813,23 @@ def make_handler(
                 view,
                 nonce=nonce,
                 now=datetime.now(timezone.utc),
-                csrf=fleet_hub_roster_page.csrf_value(token),
+                csrf=fleet_hub_roster_page.csrf_value(token) if editable else "",
                 editable=editable,
                 banner=banner,
                 error=error,
                 submission=submission,
-                policy_csrf=fleet_policy_page.csrf_value(token),
+                policy_csrf=fleet_policy_page.csrf_value(token) if editable else "",
             )
             self._send_html(status, page, nonce=nonce)
 
         def _serve_roster(self, query: str) -> None:
             plain = "text/plain; charset=utf-8"
             params = parse_qs(query, keep_blank_values=False)
-            presented = params.pop("token", [""])[0]
-            if presented:
-                if not hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8")):
-                    self._send_html(401, "Unauthorized.\n", content_type=plain)
-                    return
-                cookie = (
-                    f"{DASHBOARD_COOKIE}={dashboard_cookie_value(token)}; Path=/; HttpOnly; "
-                    f"SameSite=Strict; Max-Age={DASHBOARD_COOKIE_MAX_AGE}"
-                )
-                self._send_html(
-                    303, "", content_type=plain, extra_headers={"Location": "/deck/roster", "Set-Cookie": cookie}
-                )
-                return
             authorized, editable = self._roster_auth()
             if not authorized:
                 self._send_html(
                     401,
-                    "Unauthorized: send the fleet bearer token, or open this page once with "
-                    "?token=<fleet token> to set the dashboard cookie derived from the admin token "
-                    "that reads the dashboards and edits the roster page (rotating the hub token revokes it).\n",
+                    "Unauthorized: use brigade fleet enroll for read-only dashboard access.\n",
                     content_type=plain,
                 )
                 return
@@ -738,7 +879,7 @@ def make_handler(
                 view,
                 nonce=nonce,
                 now=datetime.now(timezone.utc),
-                csrf=fleet_policy_page.csrf_value(token),
+                csrf=fleet_policy_page.csrf_value(token) if editable else "",
                 editable=editable,
                 banner=banner,
                 error=error,
@@ -751,26 +892,11 @@ def make_handler(
         def _serve_policy_page(self, query: str) -> None:
             plain = "text/plain; charset=utf-8"
             params = parse_qs(query, keep_blank_values=False)
-            presented = params.pop("token", [""])[0]
-            if presented:
-                if not hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8")):
-                    self._send_html(401, "Unauthorized.\n", content_type=plain)
-                    return
-                cookie = (
-                    f"{DASHBOARD_COOKIE}={dashboard_cookie_value(token)}; Path=/; HttpOnly; "
-                    f"SameSite=Strict; Max-Age={DASHBOARD_COOKIE_MAX_AGE}"
-                )
-                self._send_html(
-                    303, "", content_type=plain, extra_headers={"Location": "/deck/policy", "Set-Cookie": cookie}
-                )
-                return
             authorized, editable = self._roster_auth()
             if not authorized:
                 self._send_html(
                     401,
-                    "Unauthorized: send the fleet bearer token, or open this page once with "
-                    "?token=<fleet token> to set the dashboard cookie derived from the admin token "
-                    "that reads the dashboards and edits the policy page (rotating the hub token revokes it).\n",
+                    "Unauthorized: use brigade fleet enroll for read-only dashboard access.\n",
                     content_type=plain,
                 )
                 return
@@ -872,10 +998,8 @@ def make_handler(
                 if not is_admin:
                     self._send_html(403, "the admin token is required to edit fleet policy\n", content_type=plain)
                     return None
-            elif self._cookie_authorized():
-                pass
-            elif self._tailscale_identity_authorized():
-                self._send_html(403, "read-only: enroll with the fleet token to edit\n", content_type=plain)
+            elif self._cookie_authorized() or self._tailscale_identity_authorized():
+                self._send_html(403, "read-only: an admin bearer header is required to edit\n", content_type=plain)
                 return None
             else:
                 self._send_html(401, "Unauthorized.\n", content_type=plain)
@@ -938,10 +1062,8 @@ def make_handler(
                 if not is_admin:
                     self._send_html(403, "the admin token is required to edit the roster\n", content_type=plain)
                     return
-            elif self._cookie_authorized():
-                pass
-            elif self._tailscale_identity_authorized():
-                self._send_html(403, "read-only: enroll with the fleet token to edit\n", content_type=plain)
+            elif self._cookie_authorized() or self._tailscale_identity_authorized():
+                self._send_html(403, "read-only: an admin bearer header is required to edit\n", content_type=plain)
                 return
             else:
                 self._send_html(401, "Unauthorized.\n", content_type=plain)
@@ -985,6 +1107,14 @@ def make_handler(
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
             path, _, query = self.path.partition("?")
+            if self._refuse_token_query(query):
+                return
+            if path == "/enroll":
+                self._serve_enrollment(query)
+                return
+            if path == "/dashboard/sessions":
+                self._dashboard_api(path, query)
+                return
             if path in _ASSET_ROUTES:
                 self._serve_asset(path)
                 return
@@ -1156,7 +1286,15 @@ def make_handler(
             self._handle_worklore()
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
-            path = self.path.partition("?")[0]
+            path, _, query = self.path.partition("?")
+            if self._refuse_token_query(query):
+                return
+            if path == "/enroll":
+                self._post_enrollment(query)
+                return
+            if path in ("/dashboard/enrollment", "/dashboard/sessions"):
+                self._dashboard_api(path, query)
+                return
             if path == "/deck/roster":
                 self._post_roster()
                 return

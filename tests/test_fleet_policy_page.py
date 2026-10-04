@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
@@ -1277,15 +1278,29 @@ class _RouteHub:
         return result
 
     def cookie(self):
-        status, headers, _ = self.request("GET", f"/deck/policy?token={self.token}")
+        status, _headers, text = self.request(
+            "POST",
+            "/dashboard/enrollment",
+            headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
+            body=b"{}",
+        )
+        assert status == 201
+        code = json.loads(text)["code"]
+        status, headers, _ = self.request(
+            "POST",
+            "/enroll",
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"},
+            body=f"code={code}".encode(),
+        )
         assert status == 303
-        assert headers["location"] == "/deck/policy"
         return headers["set-cookie"].split(";")[0]
 
-    def form(self, fields, *, cookie=None, extra=None):
+    def form(self, fields, *, cookie=None, admin=False, extra=None):
         headers = {"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"}
         if cookie:
             headers["Cookie"] = cookie
+        if admin:
+            headers["Authorization"] = f"Bearer {self.token}"
         headers.update(extra or {})
         return self.request("POST", "/deck/policy", headers=headers, body=urlencode(fields).encode())
 
@@ -1302,11 +1317,11 @@ def test_policy_route_requires_authorization(tmp_path):
     with _RouteHub(tmp_path) as hub:
         status, _headers, text = hub.request("GET", "/deck/policy")
         assert status == 401
-        assert "edits the policy page" in text
+        assert "brigade fleet enroll" in text
         assert hub.token not in text
 
 
-def test_policy_route_renders_for_the_admin_cookie_and_bearer(tmp_path):
+def test_policy_route_renders_for_read_only_cookie_and_admin_bearer(tmp_path):
     with _RouteHub(tmp_path) as hub:
         cookie = hub.cookie()
         status, headers, page = hub.request("GET", "/deck/policy", headers={"Cookie": cookie})
@@ -1335,10 +1350,9 @@ def test_policy_route_is_read_only_under_tailscale_identity(tmp_path):
 
 def test_policy_route_refuses_a_cross_origin_post(tmp_path):
     with _RouteHub(tmp_path) as hub:
-        cookie = hub.cookie()
         status, _headers, text = hub.form(
             {"scope": "defaults", "action": "save", "expected_version": "1", "csrf": "x"},
-            cookie=cookie,
+            admin=True,
             extra={"Sec-Fetch-Site": "cross-site"},
         )
         assert status == 403
@@ -1347,9 +1361,8 @@ def test_policy_route_refuses_a_cross_origin_post(tmp_path):
 
 def test_policy_route_refuses_a_bad_form_token(tmp_path):
     with _RouteHub(tmp_path) as hub:
-        cookie = hub.cookie()
         status, _headers, text = hub.form(
-            {"scope": "defaults", "action": "save", "expected_version": "1", "csrf": "wrong"}, cookie=cookie
+            {"scope": "defaults", "action": "save", "expected_version": "1", "csrf": "wrong"}, admin=True
         )
         assert status == 403
         assert "form token mismatch" in text
@@ -1362,7 +1375,6 @@ def test_policy_route_previews_and_saves(tmp_path):
             revision = _seed(conn)
         finally:
             conn.close()
-        cookie = hub.cookie()
         csrf = fleet_policy_page.csrf_value(hub.token)
         base = {
             "scope": "defaults",
@@ -1372,7 +1384,7 @@ def test_policy_route_previews_and_saves(tmp_path):
             "field.role_impl": "seat-beta",
         }
         # A save that was never previewed is refused, and nothing is written.
-        status, _headers, page = hub.form({**base, "action": "save"}, cookie=cookie)
+        status, _headers, page = hub.form({**base, "action": "save"}, admin=True)
         assert status == 422
         assert "not confirmed against a preview" in page
         conn = fleet_hub.open_db(hub.db)
@@ -1380,7 +1392,7 @@ def test_policy_route_previews_and_saves(tmp_path):
             assert fleet_hub_policy.current_policy(conn)["revision"] == revision
         finally:
             conn.close()
-        status, _headers, page = hub.form({**base, "action": "preview"}, cookie=cookie)
+        status, _headers, page = hub.form({**base, "action": "preview"}, admin=True)
         assert status == 200
         assert "defaults.roles.impl" in page
         assert "Confirm save" in page
@@ -1390,7 +1402,7 @@ def test_policy_route_previews_and_saves(tmp_path):
         finally:
             conn.close()
         # Confirm exactly what the preview rendered, the way a browser would.
-        status, headers, _text = hub.form(_confirm_fields(page), cookie=cookie)
+        status, headers, _text = hub.form(_confirm_fields(page), admin=True)
         assert status == 303
         assert headers["location"] == f"/deck/policy?saved={revision + 1}"
         conn = fleet_hub.open_db(hub.db)
@@ -1410,7 +1422,6 @@ def test_policy_route_returns_409_on_a_stale_version(tmp_path):
             _seed(conn, _document(), reason="someone else")
         finally:
             conn.close()
-        cookie = hub.cookie()
         status, _headers, page = hub.form(
             {
                 "scope": "defaults",
@@ -1420,7 +1431,7 @@ def test_policy_route_returns_409_on_a_stale_version(tmp_path):
                 "reason": "stale",
                 "field.role_impl": "seat-beta",
             },
-            cookie=cookie,
+            admin=True,
         )
         assert status == 409
         assert "changed underneath you" in page
@@ -1434,7 +1445,6 @@ def test_policy_route_blocks_an_unverified_identity_by_default(tmp_path):
             revision = _seed(conn)
         finally:
             conn.close()
-        cookie = hub.cookie()
         status, _headers, page = hub.form(
             {
                 "scope": "seat",
@@ -1448,7 +1458,7 @@ def test_policy_route_blocks_an_unverified_identity_by_default(tmp_path):
                 "field.concurrency": "1",
                 "field.enabled": "1",
             },
-            cookie=cookie,
+            admin=True,
         )
         assert status == 422
         assert "unavailable" in page
@@ -2086,7 +2096,6 @@ def test_policy_route_revalidates_changed_inventory_between_preview_and_save(tmp
             conn.commit()
         finally:
             conn.close()
-        cookie = hub.cookie()
         csrf = fleet_policy_page.csrf_value(hub.token)
         fields = {
             "scope": "seat",
@@ -2099,7 +2108,7 @@ def test_policy_route_revalidates_changed_inventory_between_preview_and_save(tmp
             "field.concurrency": "1",
             "field.enabled": "1",
         }
-        status, _headers, page = hub.form({**fields, "action": "preview"}, cookie=cookie)
+        status, _headers, page = hub.form({**fields, "action": "preview"}, admin=True)
         assert status == 200, page
         assert "Confirm save" in page
         conn = fleet_hub.open_db(hub.db)
@@ -2112,7 +2121,7 @@ def test_policy_route_revalidates_changed_inventory_between_preview_and_save(tmp
             conn.commit()
         finally:
             conn.close()
-        status, _headers, blocked = hub.form(_confirm_fields(page), cookie=cookie)
+        status, _headers, blocked = hub.form(_confirm_fields(page), admin=True)
         assert status == 422
         assert "unavailable" in blocked
         conn = fleet_hub.open_db(hub.db)
