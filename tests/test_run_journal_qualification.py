@@ -326,12 +326,11 @@ def test_nt_bound_recovery_then_append_preserves_accepted_bytes(tmp_path, monkey
         import fcntl
         import stat
 
-        real_open_child = dirfd.open_child_file
         monkeypatch.setattr(nt_dirfd, "_require_api", lambda: SimpleNamespace(CloseHandle=os.close))
 
         def create(api, parent, name, *, access, disposition, options, attributes):
             nt_dirfd.validate_component(name)
-            flags = os.O_NOFOLLOW
+            flags = dirfd.file_flags(os.O_RDONLY)
             if access & 1 and access & (2 | 4):
                 flags |= os.O_RDWR
             elif access & (2 | 4):
@@ -353,15 +352,10 @@ def test_nt_bound_recovery_then_append_preserves_accepted_bytes(tmp_path, monkey
             fcntl.fcntl(handle, fcntl.F_SETFL, current | (flags & os.O_APPEND))
             return handle
 
-        def open_child(parent, name, flags, mode=0o600):
-            if flags & os.O_DIRECTORY:
-                return real_open_child(parent, name, flags, mode)
-            return nt_dirfd.open_file(parent, name, flags, mode)
-
         monkeypatch.setattr(nt_dirfd, "_nt_create", create)
         monkeypatch.setattr(nt_dirfd, "_reject_reparse", reject_reparse)
         monkeypatch.setattr(nt_dirfd, "_handle_to_fd", convert)
-        monkeypatch.setattr(dirfd, "open_child_file", open_child)
+        monkeypatch.setattr(dirfd, "open_child_file", nt_dirfd.open_file)
 
     with run_dirfd.bound_run_dir(tmp_path) as bound:
         assert bound is not None
