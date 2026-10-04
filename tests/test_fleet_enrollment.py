@@ -46,6 +46,48 @@ def request(hub, method, path, *, headers=None, body=None):
     return result
 
 
+@pytest.fixture(params=["native", "python310-empty"])
+def query_parser(request, monkeypatch):
+    if request.param == "python310-empty":
+        native_parse_qsl = store.parse_qsl
+
+        def parse_qsl_310_empty(raw, *args, **kwargs):
+            # CPython 3.10 treats empty input as a malformed field in strict mode.
+            # Delegate every nonempty input to the runtime's real parser.
+            if raw == "" and kwargs.get("strict_parsing"):
+                raise ValueError("bad query field: ''")
+            return native_parse_qsl(raw, *args, **kwargs)
+
+        monkeypatch.setattr(store, "parse_qsl", parse_qsl_310_empty)
+
+
+def test_empty_params_accepted_but_missing_code_refused(query_parser):
+    assert store.strict_params("") == {}
+    with pytest.raises(store.EnrollmentError, match="^dashboard request refused$"):
+        store.code_param("")
+    assert store.strict_params("one=&two=2&three=3&four=4") == {"one": "", "two": "2", "three": "3", "four": "4"}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "missing-equals",
+        "one=1&",
+        "&",
+        "one=1&one=2",
+        "one=1&two=2&three=3&four=4&five=5",
+        "one=%",
+        "one=%ZZ",
+        "one=%FF",
+        "one=%C3%28",
+        "one=" + "x" * store.BODY_LIMIT,
+    ],
+)
+def test_nonempty_params_remain_strict(query_parser, raw):
+    with pytest.raises(store.EnrollmentError, match="^dashboard request refused$"):
+        store.strict_params(raw)
+
+
 @pytest.mark.parametrize(
     "path", ["/", "/deck", "/deck/repos", "/view/machines", "/view/repos", "/deck/roster", "/deck/policy"]
 )
@@ -159,7 +201,7 @@ def test_read_only_cookie_cannot_mutate_with_correct_csrf_and_origin_or_access_j
         )
 
 
-def test_admin_only_control_and_revocation(hub):
+def test_admin_only_control_and_revocation(hub, query_parser):
     conn = fleet_hub.open_db(hub[1])
     _, node = fleet_hub.add_node(conn, "11111111-1111-4111-8111-111111111111", "fixture node")
     conn.close()
@@ -293,7 +335,7 @@ def test_mutation_body_bounds_and_auth_before_body(hub):
     "suffix",
     ["", "code=", "code=bad", "code={code}&code={code}", "code={code}&other=1", "code=%ZZ", "code=" + "x" * 44],
 )
-def test_enrollment_code_parse(hub, suffix):
+def test_enrollment_code_parse(hub, suffix, query_parser):
     code = mint(hub)
     suffix = suffix.format(code=code)
     assert request(hub, "GET", "/enroll?" + suffix)[0] == 400

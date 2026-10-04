@@ -14,6 +14,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from .dirfd import directory_flags
+
 MAX_CARD_BYTES = 256 * 1024
 MAX_STATE_BYTES = 8 * 1024 * 1024
 MAX_INPUT_BYTES = 4 * 1024 * 1024
@@ -49,7 +51,7 @@ def directory(path: Path, *, create: bool = False, private: bool = False) -> Ite
     absolute = Path(os.path.abspath(path))
     if ".." in path.parts:
         raise OSError("unsafe directory traversal")
-    fd = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    fd = os.open(absolute.anchor, directory_flags())
     try:
         for component in absolute.parts[1:]:
             if create:
@@ -57,7 +59,7 @@ def directory(path: Path, *, create: bool = False, private: bool = False) -> Ite
                     os.mkdir(component, 0o700, dir_fd=fd)
                 except FileExistsError:
                     pass
-            next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            next_fd = os.open(component, directory_flags(), dir_fd=fd)
             os.close(fd)
             fd = next_fd
         if private:

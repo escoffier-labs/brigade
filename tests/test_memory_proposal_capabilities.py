@@ -31,7 +31,7 @@ def _snapshot(target):
     }
 
 
-def _assert_capability_refusal(target, command, capsys):
+def _assert_capability_refusal(target, command, capsys, *, cause_message="safe directory descriptors unavailable"):
     before = _snapshot(target)
     kwargs = {"target": target}
     args = ["memory", "proposal", command]
@@ -63,7 +63,7 @@ def _assert_capability_refusal(target, command, capsys):
         getattr(api, command + "_payload")(**kwargs)
     assert result.value.exit_code == exit_code
     assert isinstance(result.value.__cause__, OSError)
-    assert str(result.value.__cause__) == "safe directory descriptors unavailable"
+    assert str(result.value.__cause__) == cause_message
     assert cli.main([*args, "--target", str(target)]) == exit_code
     capsys.readouterr()
     assert _snapshot(target) == before
@@ -72,15 +72,21 @@ def _assert_capability_refusal(target, command, capsys):
 
 
 @pytest.mark.parametrize("command", COMMANDS)
-@pytest.mark.parametrize("unavailable", ["dir-fd", "nofollow"])
+@pytest.mark.parametrize("unavailable", ["dir-fd", "nofollow", "directory"])
 def test_proposal_requires_safe_directory_capability_before_any_artifact(
     minimal_target, monkeypatch, capsys, command, unavailable
 ):
+    cause_message = "safe directory descriptors unavailable"
     if unavailable == "dir-fd":
         monkeypatch.setattr(os, "supports_dir_fd", set())
-    else:
+    elif unavailable == "nofollow":
         monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
-    _assert_capability_refusal(minimal_target, command, capsys)
+    else:
+        monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {os.open})
+        monkeypatch.setattr(os, "O_NOFOLLOW", 1, raising=False)
+        monkeypatch.delattr(os, "O_DIRECTORY", raising=False)
+        cause_message = "descriptor-relative directory operations are unavailable"
+    _assert_capability_refusal(minimal_target, command, capsys, cause_message=cause_message)
 
 
 @pytest.mark.skipif(SAFE_DIRECTORY_CAPABILITY, reason="native safe directory descriptors available")
