@@ -24,11 +24,11 @@ The hub exposes these endpoints:
 - `POST /claims` (node token) and `GET /claims` (admin or node token), repo claims
 - `GET /nodes` and `POST /nodes`, admin-token-only node enrollment
 - `GET /` and `GET /view/{machines,repos}`, the Fleet dashboard (admin token or the dashboard cookie; see below)
-- `GET /deck/roster` and `POST /deck/roster`, the roster page (admin token or the dashboard cookie to save; see `docs/fleet-sync.md`)
+- `GET /deck/roster` and `POST /deck/roster`, the roster page (admin Authorization bearer header required to save, see `docs/fleet-sync.md`)
 
 Events are deduplicated by `(node_id, run_id, sequence, digest)`. Reposting after a lost response is safe.
 
-Two credentials exist (see the trust model in `docs/fleet-sync.md`). The **admin token** in `/etc/brigade/fleet-hub.env` is the control plane: it enrolls nodes, reads status and claims, and sets the dashboard cookie. Each machine's **node token** (`brigade fleet nodes add`) is that machine's identity: the hub derives `node_id` from it and refuses an event or claim for any other node with HTTP 403. The hub stores only a SHA-256 of each node token.
+Two bearer credential classes exist (see the trust model in `docs/fleet-sync.md`). The **admin token** in `/etc/brigade/fleet-hub.env` is the control plane: it enrolls nodes, reads status and claims, and mints dashboard enrollment codes. Each machine's **node token** (`brigade fleet nodes add`) is that machine's identity: the hub derives `node_id` from it and refuses an event or claim for any other node with HTTP 403. The hub stores only a SHA-256 of each node token.
 
 ## 1. Create the CT on the Proxmox host
 
@@ -331,13 +331,47 @@ curl --silent --show-error \
   http://brigade-hub:3774/ | head
 ```
 
-A phone browser cannot send a bearer header, so open the page once with the token in the query string:
+For a phone, use a configured admin client to mint a private five-minute
+read-only enrollment URL:
 
-```text
-http://brigade-hub:3774/?token=<FLEET_TOKEN>
+```bash
+brigade fleet enroll --label "phone" --base-url https://hub.example.test
 ```
 
-The hub answers a redirect to `/` without the token and sets a `brigade_fleet_view` cookie (HttpOnly, SameSite=Strict, 30 days). The cookie is an HMAC of the token, not the token: it opens only the dashboard pages, never `/status`, `/claims`, or `/events`, and rotating the hub token invalidates it. Tradeoffs to accept before using it: the token passes once through that device's browser history, and the cookie is a 30-day read-only view of the fleet on that device. Only do this on a device you would enrol in the tailnet, and rotate the token (section 4) if the device is lost. The cookie is not marked `Secure` because the hub is plain HTTP inside Tailscale's encrypted link; do not expose the hub outside the tailnet.
+Open the printed URL on the device and confirm the form. GET does not consume
+the code. Same-origin POST consumes it once and redirects to `/deck` with an
+independent, host-only 30-day cookie. Old bearer query URLs and derived HMAC
+cookies are refused. Each device must enroll once after upgrade. The cookie
+reads HTML only, without roster/policy writes or JSON access.
+
+For a lost device, list browser sessions, identify its label and revoke each
+unwanted session id:
+
+```bash
+brigade fleet sessions --dashboard
+brigade fleet sessions --dashboard --revoke SESSION_ID
+```
+
+Follow the next-page cursor when listings exceed 100 sessions. Repeat listing
+from page one during incident response to catch concurrent inserts before an
+existing cursor. `--all` includes expired and revoked records. Bearer rotation
+does not revoke browser sessions. Use individual session revocation instead.
+These dashboard operations require the current admin token, never a node token.
+Unadorned `fleet sessions` still reports interactive editor presence.
+
+The configured hub URL and optional browser-facing base URL must use HTTPS,
+except loopback HTTP, and contain only an origin. When administering a local
+hub through loopback, `--base-url` can name its browser-accessible HTTPS proxy.
+Configure that proxy to preserve the browser-facing Host, overwrite scheme
+headers and forward to a numeric loopback bind. Start the hub with
+`--trust-forwarded-proto` to recognize exactly one `X-Forwarded-Proto: https`
+from an immediate loopback peer and set Secure. Tailscale Serve HTTPS needs
+this proxy configuration and explicit opt-in. Scheme trust is independent of
+Tailscale identity trust. Ordinary HTTP ignores forwarding headers.
+
+Only an injected admin Authorization header enables HTML editors. For routine
+changes use `fleet models set`, `fleet preference set` or the `fleet policy` CLI. Schema 23 is additive at startup. An older binary
+refuses that newer database schema on rollback.
 
 Sort and filter with query parameters, for example `/?attention=1` (only failed, awaiting-approval, or stale runs), `/view/repos?sort=repo`, `/?node=<prefix>`, `/?all=1` (include finished runs). The page refreshes every 10 seconds and works with JavaScript disabled.
 
@@ -373,7 +407,7 @@ A fleet deployed before per-node credentials has one token in `/etc/brigade/flee
 3. Upgrade the clients to the same ref.
 4. For each machine, run `brigade fleet nodes add <NODE_ID> --label <HOSTNAME>` from the operator machine, deliver the token, and set `[fleet] node_token_file` on that machine (section 7). Leave `token_file` in place only where `brigade fleet nodes` will run. Check with `brigade fleet nodes list` and, on the machine, `brigade fleet status` followed by a run: the shared-token warning stops once the node token is in use.
 5. When every machine in `brigade fleet nodes list` has posted with its own token (the `WARNING` no longer appears in any client log), remove `--allow-admin-writes` from `ExecStart`, `systemctl daemon-reload`, and restart the service. From then on a machine still on the shared token gets HTTP 403, keeps its events in the local spool, and delivers them once enrolled.
-6. Rotate the admin token (section 4): it was on every machine, and it still enrolls nodes and sets the dashboard cookie.
+6. Rotate the admin token (section 4): it was on every machine, and it still enrolls nodes and mints dashboard enrollment codes.
 
 ## 8. Back up the SQLite database
 

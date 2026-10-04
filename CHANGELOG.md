@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Dashboard enrollment now uses five-minute single-use codes and independently revocable 30-day read-only browser sessions. Bearer query URLs and old HMAC cookies are refused. Browser cookies no longer edit roster/policy pages or access JSON APIs. `fleet enroll` and `fleet sessions --dashboard` support labeled devices, listing and revocation. (#1153)
+
+- Grok Bot scout feeds select issues with fewer failed attempts before retrying lower issue numbers. Hub previews report `listing=none` when queue state has not been fetched. (#1351)
+- Grok Bot doctor applies its timeout to feed authority requests and names the check `host-wide-feed-authority`. Hub outages report `unavailable`, authorization refusals report `fail`, and both retain a nonzero exit. Local request timeouts stay out of hub job payloads. (#1351)
 - Fleet model defaults require an enabled, non-retired seat with a launch binding for the selected consumer. CLI and roster-page validation now use the same eligibility rules, and rejected defaults leave the roster revision and previous default unchanged. (#1572)
 - MCP plan, sync, and doctor report `native_config_malformed` for VS Code input entries with nonstring IDs, preserving native files and refusing the entire sync transaction before writes. (#1575)
 - OpenCode MCP import and sync preserve existing flat, nested, and mixed layouts, native activation, timeouts, and live credentials, and refuse duplicate locations before mutation. Safe imports omit sensitive literal headers from canonical storage and retain their live values during adoption. Sync now projects explicit canonical timeout seconds as native milliseconds. (#1560)

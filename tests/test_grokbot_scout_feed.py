@@ -292,7 +292,8 @@ def test_preflight_and_apply_enforce_the_utc_daily_limit_including_failed_and_ex
     from brigade import grokbot_jobs
 
     policy = _write_policy(tmp_path / "policy.json", _policy())
-    _gh_numbers(monkeypatch, [7])
+    _gh_numbers(monkeypatch, [7, 42])
+    _exhaust_retry_revisions(tmp_path, 7, revisions=1)
     failed = _enqueue_scout(tmp_path, issue_number=1)
     grokbot_jobs.claim(tmp_path, failed, "bot-a", "lease-a", 30, now=NOW)
     grokbot_jobs.transition(tmp_path, failed, "bot-a", "lease-a", "failed", now=NOW + timedelta(seconds=1))
@@ -312,7 +313,7 @@ def test_preflight_and_apply_enforce_the_utc_daily_limit_including_failed_and_ex
         "daily_limit": 3,
         "created_today": 3,
         "known": 0,
-        "terminal_retry_candidates": 0,
+        "terminal_retry_candidates": 1,
         "retry_exhausted": 0,
     }
     assert result == {**preview, "handle": None}
@@ -431,6 +432,59 @@ def test_retries_stop_at_the_revision_bound_and_report_retry_exhausted(tmp_path:
     assert sorted(
         path.stem for path in (tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs").glob("grokbot-*.json")
     ) == sorted(dead)
+
+
+@pytest.mark.parametrize(
+    ("low_attempts", "high_attempts", "selected"),
+    [(1, 0, 42), (3, 1, 42), (1, 1, 7)],
+    ids=["unattempted-first", "fewer-dead-attempts-first", "issue-number-breaks-tie"],
+)
+def test_preflight_and_apply_prioritize_fewer_dead_attempts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, low_attempts: int, high_attempts: int, selected: int
+):
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [42, 7, 2, 1])
+    yesterday = NOW - timedelta(days=1)
+    _complete_scout(tmp_path, _enqueue_scout(tmp_path, issue_number=1, now=yesterday), now=yesterday)
+    _exhaust_retry_revisions(tmp_path, 2, revisions=grokbot_scout_feed.MAX_RETRY_REVISIONS)
+    _exhaust_retry_revisions(tmp_path, 7, revisions=low_attempts)
+    _exhaust_retry_revisions(tmp_path, 42, revisions=high_attempts)
+
+    preview = grokbot_scout_feed.preflight(tmp_path, policy, now=NOW)
+    result = grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+
+    assert preview == {
+        "created": 0,
+        "reason": "ready",
+        "issue_number": selected,
+        "daily_limit": 3,
+        "created_today": 0,
+        "known": 1,
+        "terminal_retry_candidates": 1 + bool(high_attempts),
+        "retry_exhausted": 1,
+    }
+    assert result == {
+        **preview,
+        "created": 1,
+        "reason": "created",
+        "handle": {"job_id": result["handle"]["job_id"], "state": "queued", "idempotent": False},
+    }
+    record = json.loads(
+        (tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{result['handle']['job_id']}.json").read_text()
+    )
+    revision = low_attempts if selected == 7 else high_attempts
+    material = b"example/brigade\x00" + selected.to_bytes(1, "big")
+    if revision:
+        material += b"\x00" + f"retry-{revision}".encode()
+    expected_key = sha256(material).hexdigest()
+    assert record["idempotency_key_hash"] == "sha256:" + sha256(expected_key.encode()).hexdigest()
+
+    # Admission of the fair selection still blocks every other issue while it is active.
+    assert grokbot_scout_feed.preflight(tmp_path, policy, now=NOW)["reason"] == "active-scout"
+    blocked = grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
+    assert blocked["reason"] == "active-scout"
+    assert blocked["created"] == 0
+    assert blocked["issue_number"] is None
 
 
 def test_an_exhausted_issue_is_not_counted_as_known(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -747,6 +801,7 @@ def test_a_snapshot_the_hub_listing_omits_is_not_known(tmp_path: Path, monkeypat
     assert result["issue_number"] == 7
     assert result["known"] == 0
     assert result["terminal_retry_candidates"] == 0
+    assert "listing" not in result
     assert enqueued[0]["job_id"] == _derived_job_id(grokbot_scout_feed._scout_key("example/brigade", 7))
 
 
@@ -891,6 +946,54 @@ def test_cli_scout_feed_preview_json_discovers_without_creating_queue(
         "retry_exhausted": 0,
         "terminal_retry_candidates": 0,
     }
+    _assert_no_queue_state(tmp_path)
+
+
+@pytest.mark.parametrize("numbers", [[7], []], ids=["approved-issue", "no-approved-issues"])
+@pytest.mark.parametrize("hub_authority", [True, False], ids=["missing-listing", "available-empty-listing"])
+def test_cli_scout_feed_preview_reports_missing_listing_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, hub_authority: bool, numbers: list[int]
+):
+    policy = _write_policy(
+        tmp_path / "policy.json",
+        _policy(ownership_paths=["PRIVATE_PATH"], verification_commands=["PRIVATE_COMMAND"]),
+    )
+    _gh_numbers(monkeypatch, numbers)
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: hub_authority)
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "list_jobs",
+        lambda **_kwargs: pytest.fail("preview requested a hub listing"),
+    )
+
+    assert _run_scout_feed(tmp_path, policy, "--json") == 0
+    captured = capsys.readouterr()
+    expected: dict[str, object] = {
+        "created": 0,
+        "created_today": 0,
+        "daily_limit": 3,
+        "issue_number": 7 if numbers else None,
+        "known": 0,
+        "reason": "ready" if numbers else "no-approved-issues",
+        "retry_exhausted": 0,
+        "terminal_retry_candidates": 0,
+    }
+    if hub_authority:
+        expected["listing"] = "none"
+    assert json.loads(captured.out) == expected
+    assert captured.err == ""
+    assert "PRIVATE_" not in captured.out
+
+    assert _run_scout_feed(tmp_path, policy) == 0
+    captured = capsys.readouterr()
+    expected_text = f"grokbot scout-feed: created=0 reason={expected['reason']}"
+    if numbers:
+        expected_text += " issue=7"
+    expected_text += " known=0 terminal_retry_candidates=0 retry_exhausted=0"
+    if hub_authority:
+        expected_text += " listing=none"
+    assert captured.out == expected_text + "\n"
+    assert captured.err == ""
     _assert_no_queue_state(tmp_path)
 
 
