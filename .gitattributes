@@ -3,3 +3,5 @@
 # Slash-anchored so nested CHANGELOG.md files stay unspecified.
 /CHANGELOG.md merge=union
 
+# Golden journal bytes use canonical LF framing on every platform.
+/tests/fixtures/run-lifecycle/golden-lifecycle.jsonl text eol=lf
