@@ -666,7 +666,7 @@ def test_boards_render_through_the_shared_deck_shell():
     )
     assert "--canvas: #111617;" in page
     assert '<body class="deck"' in page
-    assert '<nav aria-label="Command Deck">' in page
+    assert '<nav class="deck-nav" aria-label="Command Deck">' in page
     assert 'href="/deck"' in page and 'href="/view/repos"' in page
     assert '<a href="/view/machines" aria-current="page">machines board</a>' in page
     assert "Command Deck &middot; Machines" in page

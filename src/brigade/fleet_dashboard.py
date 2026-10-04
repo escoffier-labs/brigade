@@ -440,7 +440,7 @@ def _nav(query: DashboardQuery) -> str:
         is_board = label.endswith("board")
         current = ' aria-current="page"' if is_board and label.startswith(query.view) else ""
         items.append(f'<a href="{esc(href)}"{current}>{esc(label)}</a>')
-    return f'<nav aria-label="Command Deck">{" ".join(items)}</nav>'
+    return f'<nav class="deck-nav" aria-label="Command Deck">{" ".join(items)}</nav>'
 
 
 def _controls(query: DashboardQuery) -> str:
@@ -492,8 +492,8 @@ def _run_table(rows: list[RunRow], table_id: str, *, with_node: bool) -> str:
     if not body:
         return f'<p class="machine-empty">{esc("No runs match.")}</p>'
     return (
-        f'<table class="data-table" id="{esc(table_id)}"><thead><tr>{head}</tr></thead>'
-        f"<tbody>{''.join(body)}</tbody></table>"
+        f'<div class="table-wrap"><table class="data-table" id="{esc(table_id)}"><thead><tr>{head}</tr></thead>'
+        f"<tbody>{''.join(body)}</tbody></table></div>"
     )
 
 
@@ -692,8 +692,8 @@ def _repo_board(entries: list[_RepoEntry], sort: str) -> str:
     if not body:
         return f'<p class="machine-empty">{esc("No repos match.")}</p>'
     return (
-        f'<table class="data-table" id="repo-board"><thead><tr>{head}</tr></thead>'
-        f"<tbody>{''.join(body)}</tbody></table>"
+        f'<div class="table-wrap"><table class="data-table" id="repo-board"><thead><tr>{head}</tr></thead>'
+        f"<tbody>{''.join(body)}</tbody></table></div>"
     )
 
 
@@ -759,14 +759,15 @@ _BOARD_CSS = """
 .page-summary { margin: 16px 0 8px; font-weight: 600; color: var(--ink); }
 .state-legend { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 12px; font-size: 12px; color: var(--muted); }
 .legend-entry { white-space: nowrap; }
-.fleet-controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: end; margin-bottom: 12px; font-size: 12px; color: var(--muted); }
-.fleet-controls label { display: grid; gap: 6px; }
+.fleet-controls { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: end; margin-bottom: 12px; font-size: 12px; color: var(--muted); }
+.fleet-controls label { display: grid; gap: 6px; min-width: 0; text-transform: uppercase; }
+.fleet-controls input, .fleet-controls select { max-width: 100%; min-width: 0; text-transform: none; }
 .fleet-controls input[type="search"], .fleet-controls select { min-height: 36px; padding: 8px 10px; border: 1px solid var(--line); background: var(--surface-raised); color: var(--ink); font: inherit; width: 10rem; }
-.fleet-controls button { min-height: 36px; padding: 0 14px; border: 1px solid var(--signal); background: var(--signal-quiet); color: var(--ink); font: inherit; font-weight: 700; cursor: pointer; }
+.fleet-controls button { min-height: 40px; padding: 0 14px; border: 1px solid var(--signal); background: var(--signal-quiet); color: var(--ink); font: inherit; font-weight: 700; cursor: pointer; }
 .fleet-quick { color: var(--muted); }
 .fleet-quick-filter { display: grid; gap: 6px; margin-bottom: 16px; font-size: 12px; color: var(--muted); }
-.fleet-quick-filter input { min-height: 36px; padding: 8px 10px; border: 1px solid var(--line); background: var(--surface-raised); color: var(--ink); font: inherit; max-width: 24rem; }
-.machine-board { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-bottom: 16px; }
+.fleet-quick-filter input { min-height: 36px; padding: 8px 10px; border: 1px solid var(--line); background: var(--surface-raised); color: var(--ink); font: inherit; width: 100%; max-width: 24rem; min-width: 0; }
+.machine-board { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 16px; margin-bottom: 16px; }
 .machine-card { min-width: 0; padding: 16px; border: 1px solid var(--line-quiet); background: var(--surface); }
 .machine-card-header { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
 .machine-glyph { flex: 0 0 auto; stroke: var(--muted); fill: none; stroke-width: 1.6; }
