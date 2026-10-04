@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import http.client
 import json
 import threading
@@ -34,7 +36,7 @@ def _request(hub, method: str, path: str, *, headers: dict | None = None, body=N
     """Raw request so redirects are not followed and Set-Cookie is visible."""
     host, port = hub[0], hub[1]
     conn = http.client.HTTPConnection(host, port, timeout=5)
-    data = json.dumps(body).encode() if body is not None else None
+    data = body if isinstance(body, bytes) else json.dumps(body).encode() if body is not None else None
     conn.request(method, path, body=data, headers=headers or {})
     response = conn.getresponse()
     text = response.read().decode("utf-8")
@@ -109,7 +111,16 @@ def _insert_grokbot_job(conn, *, job_id: str, state: str, lease_expires_at: str)
 
 
 def _login_cookie(hub) -> str:
-    status, headers, _text = _request(hub, "GET", f"/view/machines?token={TOKEN}")
+    status, _headers, text = _request(hub, "POST", "/dashboard/enrollment", headers=_bearer(), body={})
+    assert status == 201
+    code = json.loads(text)["code"]
+    status, headers, _text = _request(
+        hub,
+        "POST",
+        "/enroll",
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"},
+        body=f"code={code}".encode(),
+    )
     assert status == 303
     return headers["set-cookie"].split(";")[0]
 
@@ -143,21 +154,10 @@ class TestDashboardAuth:
         status, _headers, _text = _request(hub, "GET", "/view/", headers=_bearer())
         assert status == 404
 
-    def test_token_query_sets_httponly_cookie_and_redirects_without_token(self, hub):
-        status, headers, text = _request(hub, "GET", f"/view/repos?token={TOKEN}&sort=node&repo=a")
-        assert status == 303
-        assert headers["location"] == "/view/repos?sort=node&repo=a"
-        assert "token" not in headers["location"]
-        cookie = headers["set-cookie"]
+    def test_enrollment_sets_httponly_cookie_and_redirects_without_secret(self, hub):
+        cookie = _login_cookie(hub)
         assert cookie.startswith(f"{fleet_hub.DASHBOARD_COOKIE}=")
-        assert "HttpOnly" in cookie
-        assert "SameSite=Strict" in cookie
-        assert "Path=/" in cookie
-        value = cookie.split(";")[0].split("=", 1)[1]
-        assert value != TOKEN
         assert TOKEN not in cookie
-        assert value == fleet_hub.dashboard_cookie_value(TOKEN)
-        assert TOKEN not in text
 
     def test_wrong_token_query_sets_no_cookie(self, hub):
         status, headers, _text = _request(hub, "GET", "/view/machines?token=wrong")
@@ -179,10 +179,9 @@ class TestDashboardAuth:
         )
         assert status == 401
 
-    def test_cookie_is_derived_not_the_token(self):
-        value = fleet_hub.dashboard_cookie_value(TOKEN)
-        assert value != TOKEN and TOKEN not in value
-        assert value != fleet_hub.dashboard_cookie_value("other-token")
+    def test_legacy_derived_cookie_is_refused(self, hub):
+        value = hmac.new(TOKEN.encode(), b"brigade-fleet-dashboard-cookie-v1", hashlib.sha256).hexdigest()
+        assert _request(hub, "GET", "/deck", headers={"Cookie": f"{fleet_hub.DASHBOARD_COOKIE}={value}"})[0] == 401
 
 
 class TestBoards:
