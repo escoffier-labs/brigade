@@ -331,11 +331,29 @@ curl --silent --show-error \
   http://brigade-hub:3774/ | head
 ```
 
-For a phone, use a configured admin client to mint a private five-minute
-read-only enrollment URL:
+Before enrolling a phone, configure an HTTPS proxy that forwards to a hub
+bound to numeric loopback (`127.0.0.1`) with
+`--trust-forwarded-proto`. The proxy must preserve the browser-facing Host
+and overwrite `X-Forwarded-Proto` with exactly one `https` value. The hub
+recognizes this scheme only from an immediate loopback peer and sets Secure
+on the cookie. Tailscale Serve HTTPS needs this configuration and explicit
+opt-in. Tailscale identity trust is optional for this enrollment flow.
+
+The direct Tailnet HTTP setup above supports the node/event flow. Dashboard
+admin operations require an HTTPS hub origin or numeric loopback HTTP.
+`--base-url` changes only the printed browser origin, never the admin request
+endpoint. It cannot make a direct Tailnet HTTP admin endpoint acceptable.
+Both URLs must contain only an origin. When moving the earlier Tailnet bind
+behind a loopback proxy, update node clients' `hub_url` to the HTTPS origin
+and preserve their existing node credentials.
+
+Replace `https://hub.example.test` in these examples with the real configured
+HTTPS origin. On the admin client with its already configured admin credential,
+override the earlier HTTP `hub_url` to mint a private five-minute read-only
+enrollment URL:
 
 ```bash
-brigade fleet enroll --label "phone" --base-url https://hub.example.test
+BRIGADE_FLEET_HUB_URL=https://hub.example.test brigade fleet enroll --label "phone" --base-url https://hub.example.test
 ```
 
 Open the printed URL on the device and confirm the form. GET does not consume
@@ -348,26 +366,21 @@ For a lost device, list browser sessions, identify its label and revoke each
 unwanted session id:
 
 ```bash
-brigade fleet sessions --dashboard
-brigade fleet sessions --dashboard --revoke SESSION_ID
+BRIGADE_FLEET_HUB_URL=https://hub.example.test brigade fleet sessions --dashboard
+BRIGADE_FLEET_HUB_URL=https://hub.example.test brigade fleet sessions --dashboard --revoke SESSION_ID
 ```
 
 Follow the next-page cursor when listings exceed 100 sessions. Repeat listing
 from page one during incident response to catch concurrent inserts before an
-existing cursor. `--all` includes expired and revoked records. Bearer rotation
-does not revoke browser sessions. Use individual session revocation instead.
+existing cursor. `--all` includes metadata records retained after access expires
+or a session is revoked. Bearer rotation does not revoke browser sessions.
+Use individual session revocation instead.
 These dashboard operations require the current admin token, never a node token.
 Unadorned `fleet sessions` still reports interactive editor presence.
 
-The configured hub URL and optional browser-facing base URL must use HTTPS,
-except loopback HTTP, and contain only an origin. When administering a local
-hub through loopback, `--base-url` can name its browser-accessible HTTPS proxy.
-Configure that proxy to preserve the browser-facing Host, overwrite scheme
-headers and forward to a numeric loopback bind. Start the hub with
-`--trust-forwarded-proto` to recognize exactly one `X-Forwarded-Proto: https`
-from an immediate loopback peer and set Secure. Tailscale Serve HTTPS needs
-this proxy configuration and explicit opt-in. Scheme trust is independent of
-Tailscale identity trust. Ordinary HTTP ignores forwarding headers.
+When administering a local hub through numeric loopback HTTP, `--base-url`
+can name its browser-accessible HTTPS proxy. Ordinary HTTP without
+`--trust-forwarded-proto` ignores forwarding headers.
 
 Only an injected admin Authorization header enables HTML editors. For routine
 changes use `fleet models set`, `fleet preference set` or the `fleet policy` CLI. Schema 23 is additive at startup. An older binary
@@ -381,7 +394,7 @@ The hub can be started with `--trust-tailscale-identity` so that dashboard route
 
 Safe deployment contract: do not enable this unless all of the following are true:
 
-1. The hub is bound to a loopback interface only (`127.0.0.1` or `::1`). Never bind it to all interfaces or to a routable address when this flag is on.
+1. The hub is bound to a loopback interface only (`127.0.0.1`). Never bind it to all interfaces or to a routable address when this flag is on.
 2. The dashboard request reaches the hub only through a Tailscale Serve reverse proxy that terminates Tailscale identity and strips any spoofed incoming `Tailscale-User-Login` header. The proxy must run on the same host as the hub, so the immediate TCP peer is loopback.
 3. The backend is never exposed directly to the tailnet or to any other network without the proxy in front.
 

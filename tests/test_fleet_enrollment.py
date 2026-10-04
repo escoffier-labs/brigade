@@ -768,6 +768,51 @@ def test_client_url_refused_before_mint(hub, monkeypatch, value):
     conn.close()
 
 
+def test_cli_dashboard_session_labels_escape_format_controls_and_preserve_json(hub, monkeypatch, capsys):
+    base = f"http://127.0.0.1:{hub[0].server_address[1]}"
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "admin_token": ADMIN})
+    label = "téléphone 東京 \u202ephone\u200b"
+    assert cli.main(["fleet", "enroll", "--label", label]) == 0
+    code = capsys.readouterr().out.strip().split("code=")[1]
+    assert redeem(hub, code)[0] == 303
+    assert cli.main(["fleet", "sessions", "--dashboard", "--json"]) == 0
+    row = json.loads(capsys.readouterr().out)["sessions"][0]
+    assert row["label"] == label
+    assert cli.main(["fleet", "sessions", "--dashboard"]) == 0
+    output = capsys.readouterr().out
+    assert "téléphone 東京 \\u202ephone\\u200b" in output
+    assert "\u202e" not in output and "\u200b" not in output
+    assert row["session_id"] in output and row["expires_at"] in output
+    assert "read-only" in output and "revoked -" in output
+
+
+@pytest.mark.parametrize("field,separator", [("expires_at", "\u202e"), ("revoked_at", "\u200b")])
+def test_cli_dashboard_session_timestamps_escape_unicode_separators(monkeypatch, capsys, field, separator):
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test", "admin_token": ADMIN}
+    )
+    row = {
+        "session_id": "ds_" + "0" * 32,
+        "label": "fixture browser",
+        "scope": "read-only",
+        "created_at": "2026-01-01T00:00:00Z",
+        "expires_at": "2026-02-01T00:00:00Z",
+        "revoked_at": None,
+    }
+    row[field] = "2026-02-01" + separator + "00:00:00Z"
+    result = {"sessions": [row], "next_after": None}
+    # Keep the real client's response validation, including fromisoformat.
+    monkeypatch.setattr(client, "_request", lambda *args, **kwargs: result)
+    assert cli.main(["fleet", "sessions", "--dashboard", "--all", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == result
+    assert cli.main(["fleet", "sessions", "--dashboard", "--all"]) == 0
+    output = capsys.readouterr().out
+    assert separator not in output
+    escaped = "\\u202e" if separator == "\u202e" else "\\u200b"
+    prefix = "expires" if field == "expires_at" else "revoked"
+    assert f"{prefix} 2026-02-01{escaped}00:00:00Z" in output
+
+
 def test_cli_enroll_session_list_revoke_and_activity_compatibility(hub, monkeypatch, capsys):
     base = f"http://127.0.0.1:{hub[0].server_address[1]}"
     monkeypatch.setattr(
