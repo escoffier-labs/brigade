@@ -1,5 +1,11 @@
 # Fleet roster page implementation plan
 
+> Historical design: #1153 supersedes bearer query enrollment and cookie edit
+> authority in this document. Current enrollment uses a five-minute code and
+> same-origin confirmation POST. Browser cookies grant read-only HTML access,
+> independent expiry and revocation. See [Fleet sync](fleet-sync.md#browser-enrollment-and-lost-device-revocation)
+> for current commands. Any token-query examples below describe retired behavior.
+
 Spec: `docs/phase-fleet-roster-deck-page.md` (approved 2026-09-02). Tracked
 here because `docs/plans/` is gitignored in this repo.
 
