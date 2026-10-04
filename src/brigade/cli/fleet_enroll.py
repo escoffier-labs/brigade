@@ -6,6 +6,7 @@ import sys
 from typing import Any
 
 from .. import fleet_client_enrollment as client
+from .fleet import _safe_table_cell
 
 
 def register(fleet_sub: Any, sessions_parser: argparse.ArgumentParser) -> None:
@@ -52,16 +53,19 @@ def dispatch_sessions(args: argparse.Namespace) -> int | None:
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     elif revoke is not None:
-        print(f"revoked browser session {result['session_id']}")
+        print(f"revoked browser session {_safe_table_cell(result['session_id'])}")
     else:
         for session in result["sessions"]:
             print(
-                f"{session['session_id']}  {session['label'] or '-'}  {session['scope']}  expires {session['expires_at']}  revoked {session['revoked_at'] or '-'}"
+                f"{_safe_table_cell(session['session_id'])}  {_safe_table_cell(session['label'] or '-')}  "
+                f"{_safe_table_cell(session['scope'])}  expires {_safe_table_cell(session['expires_at'])}  "
+                f"revoked {_safe_table_cell(session['revoked_at'] or '-')}"
             )
         if not result["sessions"]:
             print("(no dashboard sessions)")
         if result["next_after"]:
             print(
-                f"next page: brigade fleet sessions --dashboard{' --all' if args.all else ''} --after {result['next_after']}"
+                f"next page: brigade fleet sessions --dashboard{' --all' if args.all else ''} "
+                f"--after {_safe_table_cell(result['next_after'])}"
             )
     return 0
