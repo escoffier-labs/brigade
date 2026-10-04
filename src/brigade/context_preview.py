@@ -18,6 +18,16 @@ SOURCE_COMMIT = "a956835d020762cb2b570053af06f643a11c0ecc"
 RESOURCE_MAX_BYTES = 1024 * 1024  # Brigade ceiling, never a consumer-cap clamp.
 RUST_WHITESPACE = "\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
 
+# Native capabilities are fixed at import, independent of later instrumentation.
+_NATIVE_OPEN, _NATIVE_STAT = os.open, os.stat
+_POSIX_NOFOLLOW_SUPPORTED = (
+    os.name == "posix"
+    and {_NATIVE_OPEN, _NATIVE_STAT} <= os.supports_dir_fd
+    and _NATIVE_STAT in os.supports_follow_symlinks
+    and all(hasattr(os, flag) for flag in ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK"))
+)
+_Selection = tuple[int, list[str], tuple[str, os.stat_result] | None]
+
 
 class _Boundary(Exception):
     def __init__(self, reason: str, *, divergent: bool = False):
@@ -61,6 +71,8 @@ def _metadata(fd: int, name: str) -> os.stat_result | None:
         info = os.stat(name, dir_fd=fd, follow_symlinks=False)
     except FileNotFoundError:
         return None
+    except (TypeError, NotImplementedError):
+        raise _Boundary("posix_nofollow_required") from None
     except (OSError, UnicodeError, ValueError):
         raise _Boundary("metadata_not_evaluated") from None
     if stat.S_ISLNK(info.st_mode):
@@ -78,6 +90,8 @@ def _directory(stack: ExitStack, name: str, parent: int | None = None) -> int:
         return fd
     except _Boundary:
         raise
+    except (TypeError, NotImplementedError):
+        raise _Boundary("posix_nofollow_required") from None
     except (OSError, UnicodeError, ValueError):
         # Check metadata without following links to distinguish a refused link.
         if parent is not None:
@@ -99,6 +113,21 @@ def _candidate(fd: int, names: list[str]) -> tuple[str, os.stat_result] | None:
         if info is not None and stat.S_ISREG(info.st_mode):
             return name, info
     return None
+
+
+def _revalidate(selections: list[_Selection]) -> None:
+    """Recheck winners and absences using only nofollow metadata."""
+    for fd, names, before in selections:
+        after = _candidate(fd, names)
+        if before is None and after is None:
+            continue
+        if (
+            before is None
+            or after is None
+            or before[0] != after[0]
+            or _fingerprint(before[1]) != _fingerprint(after[1])
+        ):
+            raise _Boundary("selection_changed")
 
 
 def _read(fd: int, name: str, selected: os.stat_result, limit: int) -> bytes:
@@ -123,6 +152,8 @@ def _read(fd: int, name: str, selected: os.stat_result, limit: int) -> bytes:
         return b"".join(chunks)[:limit]
     except _Boundary:
         raise
+    except (TypeError, NotImplementedError):
+        raise _Boundary("posix_nofollow_required") from None
     except (OSError, UnicodeError, ValueError):
         raise _Boundary("file_read_not_evaluated") from None
     finally:
@@ -153,15 +184,7 @@ def _totals(rows: list[dict[str, Any]], scope: str) -> dict[str, int | None]:
     }
 
 
-def _project(
-    stack: ExitStack,
-    result: dict[str, Any],
-    target: str,
-    cwd: str,
-    markers: list[str],
-    names: list[str],
-    cap: int,
-) -> None:
+def _project_directories(stack: ExitStack, target: str, cwd: str) -> list[tuple[str, int]]:
     scope_fd = _scope(stack, target)
     directories: list[tuple[str, int]] = [("", scope_fd)]
     relative = os.path.relpath(cwd, target)
@@ -170,6 +193,12 @@ def _project(
             prefix, parent = directories[-1]
             fd = _directory(stack, part, parent)
             directories.append((f"{prefix}/{part}".lstrip("/"), fd))
+    return directories
+
+
+def _project(
+    result: dict[str, Any], directories: list[tuple[str, int]], markers: list[str], names: list[str], cap: int
+) -> list[_Selection]:
     start = len(directories) - 1
     if markers:
         found = False
@@ -181,9 +210,11 @@ def _project(
         if not found:
             raise _Boundary("root_outside_scope_or_unknown")
     cumulative = 0
+    selections: list[_Selection] = []
     candidates: list[tuple[int, str, os.stat_result, dict[str, Any]]] = []
     for prefix, fd in directories[start:]:
         selected = _candidate(fd, names)
+        selections.append((fd, names, selected))
         if selected is None:
             continue
         name, info = selected
@@ -209,13 +240,16 @@ def _project(
         )
         remaining -= len(raw)
     result["totals"]["project"] = _totals(result["files"], "project")
+    return selections
 
 
-def _global(stack: ExitStack, result: dict[str, Any], root: str, cap: int) -> None:
+def _global(stack: ExitStack, result: dict[str, Any], root: str, cap: int) -> list[_Selection]:
     fd = _scope(stack, root)
     cumulative = 0
+    selections: list[_Selection] = []
     for name in ["AGENTS.override.md", "AGENTS.md"]:
         selected = _candidate(fd, [name])
+        selections.append((fd, [name], selected))
         if selected is None:
             continue
         _, info = selected
@@ -234,6 +268,23 @@ def _global(stack: ExitStack, result: dict[str, Any], root: str, cap: int) -> No
         if text:
             break
     result["totals"]["global"] = _totals(result["files"], "global")
+    return selections
+
+
+def _invalidate(result: dict[str, Any], scope: str, exc: _Boundary) -> None:
+    result["limitations"].append(exc.reason)
+    if exc.divergent:
+        result["matches_codex"] = False
+    # An unknown scope discards its load, never treating unknown as zero.
+    for row in result["files"]:
+        if row["scope"] == scope:
+            row.update(
+                consumed_raw_bytes=None,
+                rendered_utf8_bytes=None,
+                cumulative_selected_bytes=None,
+                contribution="unknown",
+            )
+    result["totals"][scope] = dict.fromkeys(["selected_bytes", "consumed_raw_bytes", "rendered_utf8_bytes"])
 
 
 def preview(
@@ -270,6 +321,7 @@ def preview(
         "limitations": [
             "fresh_disk_only",
             "no_atomic_snapshot",
+            "timestamp_granularity_limits_change_detection",
             "access_times_may_change",
             "thread_and_session_state_unknown",
         ],
@@ -301,11 +353,14 @@ def preview(
         elif not isinstance(value, int):
             value = None
         if key == "fallback_filenames" and isinstance(value, list):
-            value = [
+            normalized = [
                 name.strip(RUST_WHITESPACE)
                 for name in value
                 if isinstance(name, str) and _basename(name.strip(RUST_WHITESPACE))
             ]
+            if len(normalized) != len(value):
+                result["limitations"].append("invalid_fallback_entries_ignored")
+            value = normalized
         if key == "root_markers" and isinstance(value, list) and not all(_basename(name) for name in value):
             value = None
         result["settings"][key] = {"value": value, "source": source}
@@ -328,8 +383,10 @@ def preview(
         }
     )
     scope = "global" if codex_home is not None else "project"
+    requested = {"project", "global"} if codex_home is not None else {"project"}
+    completed: set[str] = set()
     try:
-        if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or os.stat not in os.supports_dir_fd:
+        if not _POSIX_NOFOLLOW_SUPPORTED:
             raise _Boundary("posix_nofollow_required")
         if encoding_unknown:
             raise _Boundary("filename_encoding_not_evaluated")
@@ -359,36 +416,42 @@ def preview(
             raise _Boundary("cwd_outside_scope")
         global_root = _absolute(codex_home) if codex_home is not None else None
         with ExitStack() as stack:
-            if global_root is not None and global_max_bytes is not None:
-                _global(stack, result, global_root, global_max_bytes)
-            else:
-                result["totals"]["global"] = dict.fromkeys(
-                    ["selected_bytes", "consumed_raw_bytes", "rendered_utf8_bytes"], 0
-                )
-                result["limitations"].append("global_not_requested")
-            scope = "project"
-            if trust == "untrusted" or cap == 0:
-                result["totals"]["project"] = dict.fromkeys(
-                    ["selected_bytes", "consumed_raw_bytes", "rendered_utf8_bytes"], 0
-                )
-            else:
-                _project(
-                    stack, result, project_root, working, markers, ["AGENTS.override.md", "AGENTS.md", *fallbacks], cap
-                )
-        result.update(status="complete", matches_codex=True)
+            selections: dict[str, list[_Selection]] = {}
+            try:
+                if global_root is not None and global_max_bytes is not None:
+                    selections["global"] = _global(stack, result, global_root, global_max_bytes)
+                else:
+                    result["totals"]["global"] = dict.fromkeys(
+                        ["selected_bytes", "consumed_raw_bytes", "rendered_utf8_bytes"], 0
+                    )
+                    result["limitations"].append("global_not_requested")
+                scope = "project"
+                directories = _project_directories(stack, project_root, working)
+                if trust == "untrusted" or cap == 0:
+                    result["totals"]["project"] = dict.fromkeys(
+                        ["selected_bytes", "consumed_raw_bytes", "rendered_utf8_bytes"], 0
+                    )
+                    selections["project"] = []
+                else:
+                    selections["project"] = _project(
+                        result, directories, markers, ["AGENTS.override.md", "AGENTS.md", *fallbacks], cap
+                    )
+            except _Boundary as exc:
+                _invalidate(result, scope, exc)
+            # Keep descriptors alive for final validation, even after a load
+            # failure in the other scope. Empty requested scopes count too.
+            for scope, snapshots in selections.items():
+                try:
+                    _revalidate(snapshots)
+                except _Boundary as exc:
+                    _invalidate(result, scope, exc)
+                else:
+                    completed.add(scope)
     except _Boundary as exc:
-        result["limitations"].append(exc.reason)
-        result["matches_codex"] = False if exc.divergent else None
-        result["status"] = "partial" if any(row["consumed_raw_bytes"] for row in result["files"]) else "not_evaluated"
-        # Environment read errors discard its load upstream. Fresh inspection
-        # cannot infer an alternate winner or trustworthy cumulative accounting.
-        for row in result["files"]:
-            if row["scope"] == scope:
-                row.update(
-                    consumed_raw_bytes=None,
-                    rendered_utf8_bytes=None,
-                    cumulative_selected_bytes=None,
-                    contribution="unknown",
-                )
-        result["totals"][scope] = dict.fromkeys(["selected_bytes", "consumed_raw_bytes", "rendered_utf8_bytes"])
+        _invalidate(result, scope, exc)
+        completed.discard(scope)
+    if completed == requested:
+        result.update(status="complete", matches_codex=True)
+    else:
+        result["status"] = "partial" if completed else "not_evaluated"
     return result

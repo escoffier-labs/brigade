@@ -17,7 +17,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_preview.add_argument("--codex-version", required=True, help="Caller-supplied consumer version (0.160.0).")
     p_preview.add_argument("--trust", required=True, help="Effective trusted, untrusted, unset, or unknown trust.")
     p_preview.add_argument(
-        "--read-access", required=True, help="Effective full, restricted, or unknown disk read access."
+        "--read-access",
+        required=True,
+        help="Supplied full, restricted, or unknown disk read access, gating inspection.",
     )
     p_preview.add_argument(
         "--assume-codex-defaults", action="store_true", help="Label omitted settings as default assumptions."

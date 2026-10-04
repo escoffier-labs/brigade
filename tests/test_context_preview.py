@@ -87,7 +87,7 @@ def tree(tmp_path):
         ("rust_non_whitespace_controls", b"\x1c\x1d\x1e\x1f", 32768, 4, 4, "loaded"),
         ("invalid_utf8_replacement", b"\xff\xfea", 32768, 3, 7, "loaded"),
         ("utf8_surrogate", b"\xed\xa0\x80", 32768, 3, 9, "loaded"),
-        ("utf8_overlong", b"\xe0\x80\x80", 32768, 3, 9, "loaded"),
+        ("utf8_overlong", b"\xe0\x80\xaf", 32768, 3, 9, "loaded"),
         ("utf8_above_max", b"\xf4\x90\x80\x80", 32768, 4, 12, "loaded"),
     ],
 )
@@ -142,15 +142,15 @@ def test_oracle_whitespace_uncharged(tree):
     ("case", "trust", "cap", "raw"),
     [
         ("untrusted_project", "untrusted", 32768, 0),
-        ("linked_main_untrusted", "untrusted", 32768, 0),
+        ("supplied_untrusted_linked_outcome", "untrusted", 32768, 0),
         ("unset_trust_docs_load", "unset", 32768, 10),
-        ("cli_cap_overrides_user", "trusted", 7, 7),
-        ("project_config_trusted", "trusted", 7, 7),
-        ("project_config_unset_disabled", "unset", 2, 2),
+        ("supplied_cli_cap", "trusted", 7, 7),
+        ("supplied_trusted_project_cap", "trusted", 7, 7),
+        ("supplied_unset_user_cap", "unset", 2, 2),
         ("zero_cap_global_unbounded", "trusted", 0, 0),
     ],
 )
-def test_oracle_supplied_effective_config(tree, tmp_path, case, trust, cap, raw):
+def test_supplied_effective_config_outcomes(tree, tmp_path, case, trust, cap, raw):
     from brigade.context_preview import preview
 
     repo, cwd = tree
@@ -326,6 +326,7 @@ def test_mutation_during_read_invalidates_accounting(tree, monkeypatch, mutation
     repo, cwd = tree
     doc = cwd / "AGENTS.md"
     doc.write_bytes(b"first")
+    initial = doc.stat()
     original = os.read
     changed = False
 
@@ -336,6 +337,7 @@ def test_mutation_during_read_invalidates_accounting(tree, monkeypatch, mutation
             changed = True
             if mutation == "rewrite":
                 doc.write_bytes(b"other")  # same size, still must be unknown
+                os.utime(doc, ns=(initial.st_atime_ns, initial.st_mtime_ns + 2_000_000_000))
             else:
                 doc.unlink()
                 if mutation == "replace":
@@ -492,3 +494,317 @@ def test_discovery_error_after_would_be_cap_exhaustion_prevents_project_reads(tr
     result = inspect(repo, cwd, project_doc_max_bytes=3)
     assert result["matches_codex"] is False
     assert result["totals"]["project"]["consumed_raw_bytes"] is None
+
+
+@pytest.mark.parametrize("global_state", ["not_requested", "absent", "empty", "loaded"])
+@pytest.mark.parametrize("read_access", ["full", "restricted"])
+def test_failed_project_status_uses_only_completed_requested_scope(
+    tree, tmp_path, monkeypatch, global_state, read_access
+):
+    from brigade.context_preview import preview
+
+    repo, cwd = tree
+    (repo / "AGENTS.md").write_bytes(b"root")
+    child = cwd / "AGENTS.md"
+    child.write_bytes(b"child")
+    options = {}
+    if global_state != "not_requested":
+        home = tmp_path / "global"
+        home.mkdir()
+        if global_state != "absent":
+            (home / "AGENTS.md").write_bytes(b"global" if global_state == "loaded" else b"")
+        options.update(codex_home=home, global_max_bytes=100)
+    original_read = os.read
+    changed = False
+
+    def racing_read(fd, count):
+        nonlocal changed
+        data = original_read(fd, count)
+        if data == b"root" and not changed:
+            changed = True
+            child.unlink()
+        return data
+
+    monkeypatch.setattr(os, "read", racing_read)
+    result = preview(
+        target=repo,
+        cwd=cwd,
+        codex_version="0.160.0",
+        trust="trusted",
+        read_access=read_access,
+        assume_codex_defaults=True,
+        **options,
+    )
+    assert result["status"] == ("not_evaluated" if global_state == "not_requested" else "partial")
+    assert result["totals"]["project"]["consumed_raw_bytes"] is None
+    assert all(row["consumed_raw_bytes"] is None for row in result["files"] if row["scope"] == "project")
+    if global_state != "not_requested":
+        assert result["totals"]["global"]["consumed_raw_bytes"] == (6 if global_state == "loaded" else 0)
+
+
+@pytest.mark.parametrize("shortcut", ["untrusted", "zero_cap"])
+@pytest.mark.parametrize("invalid", ["missing_scope", "missing_cwd", "symlink_scope", "symlink_cwd"])
+def test_shortcuts_validate_scope_and_cwd_without_content_reads(tree, monkeypatch, shortcut, invalid):
+    from brigade.context_preview import preview
+
+    repo, cwd = tree
+    if invalid == "missing_scope":
+        repo = repo / "missing"
+        cwd = repo / "child"
+    elif invalid == "missing_cwd":
+        cwd = cwd / "missing"
+    elif invalid == "symlink_scope":
+        link = repo.parent / "link"
+        link.symlink_to(repo, target_is_directory=True)
+        repo, cwd = link, link / "sub"
+    else:
+        link = repo / "link"
+        link.symlink_to(cwd, target_is_directory=True)
+        cwd = link
+    monkeypatch.setattr(os, "read", lambda *args: pytest.fail("shortcut read document content"))
+    result = preview(
+        target=repo,
+        cwd=cwd,
+        codex_version="0.160.0",
+        trust="untrusted" if shortcut == "untrusted" else "trusted",
+        read_access="full",
+        assume_codex_defaults=True,
+        project_doc_max_bytes=0 if shortcut == "zero_cap" else 32768,
+    )
+    assert result["status"] == "not_evaluated"
+    assert result["totals"]["project"]["consumed_raw_bytes"] is None
+    assert result["files"] == []
+    assert ("symlink_not_evaluated" if invalid.startswith("symlink") else "directory_not_evaluated") in result[
+        "limitations"
+    ]
+    assert str(repo) not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    "missing", ["open_dir_fd", "stat_dir_fd", "stat_nofollow", "O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK"]
+)
+def test_native_capability_is_checked_at_import(tree, monkeypatch, missing):
+    import importlib.util
+    from brigade import context_preview
+
+    repo, cwd = tree
+    if missing.endswith("dir_fd"):
+        primitive = os.open if missing.startswith("open") else os.stat
+        monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd - {primitive})
+    elif missing == "stat_nofollow":
+        monkeypatch.setattr(os, "supports_follow_symlinks", os.supports_follow_symlinks - {os.stat})
+    else:
+        monkeypatch.delattr(os, missing)
+    spec = importlib.util.spec_from_file_location("brigade._preview_capability_probe", context_preview.__file__)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(os, "read", lambda *args: pytest.fail("unsupported native capabilities read content"))
+    result = module.preview(
+        target=repo, cwd=cwd, codex_version="0.160.0", trust="trusted", read_access="full", assume_codex_defaults=True
+    )
+    assert result["status"] == "not_evaluated"
+    assert "posix_nofollow_required" in result["limitations"]
+
+
+@pytest.mark.parametrize("primitive", ["open", "stat", "fstat", "read"])
+@pytest.mark.parametrize("error", [TypeError, NotImplementedError])
+def test_runtime_unsupported_filesystem_operations_are_opaque(tree, monkeypatch, primitive, error):
+    repo, cwd = tree
+    (cwd / "AGENTS.md").write_bytes(b"SECRET")
+
+    def unsupported(*args, **kwargs):
+        raise error(str(repo / "private"))
+
+    monkeypatch.setattr(os, primitive, unsupported)
+    result = inspect(repo, cwd)
+    assert result["status"] == "not_evaluated"
+    assert "posix_nofollow_required" in result["limitations"]
+    assert str(repo) not in json.dumps(result)
+
+
+@pytest.mark.parametrize("mutation", ["grow", "replace", "remove", "override", "absent_addition", "symlink"])
+@pytest.mark.parametrize("cap", [4, 100])
+def test_final_project_selection_revalidation_is_metadata_only(tree, monkeypatch, mutation, cap):
+    repo, cwd = tree
+    (repo / "AGENTS.md").write_bytes(b"root")
+    child = cwd / "AGENTS.md"
+    if mutation != "absent_addition":
+        child.write_bytes(b"child")
+    original_read = os.read
+    reads = []
+    changed = False
+
+    def racing_read(fd, count):
+        nonlocal changed
+        data = original_read(fd, count)
+        reads.append(data)
+        if data == b"root" and not changed:
+            changed = True
+            if mutation == "grow":
+                child.write_bytes(b"larger child")
+            elif mutation == "replace":
+                replacement = cwd / "replacement.md"
+                replacement.write_bytes(b"other")
+                replacement.replace(child)
+            elif mutation in {"remove", "symlink"}:
+                child.unlink()
+                if mutation == "symlink":
+                    child.symlink_to("missing")
+            elif mutation == "override":
+                (cwd / "AGENTS.override.md").write_bytes(b"override")
+            else:
+                child.write_bytes(b"new")
+        return data
+
+    monkeypatch.setattr(os, "read", racing_read)
+    result = inspect(repo, cwd, project_doc_max_bytes=cap)
+    assert changed
+    assert result["status"] == "not_evaluated"
+    assert result["totals"]["project"]["selected_bytes"] is None
+    assert result["totals"]["project"]["consumed_raw_bytes"] is None
+    assert all(row["contribution"] == "unknown" and row["cumulative_selected_bytes"] is None for row in result["files"])
+    if cap == 4:
+        assert reads == [b"root", b""]  # no child content read, including final validation
+
+
+@pytest.mark.parametrize("initial", ["absent", "empty"])
+def test_examined_global_override_revalidated_after_normal_read(tree, tmp_path, monkeypatch, initial):
+    repo, cwd = tree
+    home = tmp_path / "global"
+    home.mkdir()
+    override = home / "AGENTS.override.md"
+    if initial == "empty":
+        override.write_bytes(b"")
+    (home / "AGENTS.md").write_bytes(b"global")
+    original_read = os.read
+
+    def racing_read(fd, count):
+        data = original_read(fd, count)
+        if data == b"global":
+            override.write_bytes(b"new override")
+        return data
+
+    monkeypatch.setattr(os, "read", racing_read)
+    result = inspect(repo, cwd, codex_home=home, global_max_bytes=100)
+    assert result["status"] != "complete"
+    assert result["totals"]["global"]["consumed_raw_bytes"] is None
+    assert all(row["contribution"] == "unknown" for row in result["files"] if row["scope"] == "global")
+
+
+def test_global_selection_revalidated_after_project_read(tree, tmp_path, monkeypatch):
+    repo, cwd = tree
+    (cwd / "AGENTS.md").write_bytes(b"project")
+    home = tmp_path / "global"
+    home.mkdir()
+    (home / "AGENTS.md").write_bytes(b"global")
+    original_read = os.read
+
+    def racing_read(fd, count):
+        data = original_read(fd, count)
+        if data == b"project":
+            (home / "AGENTS.override.md").write_bytes(b"new override")
+        return data
+
+    monkeypatch.setattr(os, "read", racing_read)
+    result = inspect(repo, cwd, codex_home=home, global_max_bytes=100)
+    assert result["status"] == "partial"
+    assert result["totals"]["global"]["consumed_raw_bytes"] is None
+    assert result["totals"]["project"]["consumed_raw_bytes"] == 7
+
+
+def test_discarded_invalid_fallbacks_are_labeled_without_values(tree):
+    repo, cwd = tree
+    (cwd / "TEAM.md").write_bytes(b"team")
+    result = inspect(repo, cwd, fallback_filenames=[str(repo / "private"), "../private", "", "TEAM.md"])
+    assert result["status"] == "complete"
+    assert "invalid_fallback_entries_ignored" in result["limitations"]
+    assert result["settings"]["fallback_filenames"]["value"] == ["TEAM.md"]
+    assert "private" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("global_state", ["not_requested", "absent", "empty", "loaded"])
+@pytest.mark.parametrize("read_access", ["full", "restricted"])
+def test_project_permission_error_retains_only_completed_global(tree, tmp_path, global_state, read_access):
+    from brigade.context_preview import preview
+
+    repo, cwd = tree
+    (repo / "AGENTS.md").write_bytes(b"root")
+    child = cwd / "AGENTS.md"
+    child.write_bytes(b"child")
+    home = tmp_path / "global"
+    home.mkdir()
+    if global_state in {"empty", "loaded"}:
+        (home / "AGENTS.md").write_bytes(b"global" if global_state == "loaded" else b"")
+    options = {} if global_state == "not_requested" else dict(codex_home=home, global_max_bytes=100)
+    child.chmod(0)
+    try:
+        result = preview(
+            target=repo,
+            cwd=cwd,
+            codex_version="0.160.0",
+            trust="trusted",
+            read_access=read_access,
+            assume_codex_defaults=True,
+            **options,
+        )
+    finally:
+        child.chmod(0o600)
+    assert result["status"] == ("not_evaluated" if global_state == "not_requested" else "partial")
+    assert "file_read_not_evaluated" in result["limitations"]
+    assert result["totals"]["project"]["consumed_raw_bytes"] is None
+    assert all(row["contribution"] == "unknown" for row in result["files"] if row["scope"] == "project")
+
+
+@pytest.mark.parametrize("global_state", ["absent", "empty"])
+def test_completed_zero_byte_global_is_partial_after_project_discovery_error(tree, tmp_path, global_state):
+    repo, cwd = tree
+    (cwd / "AGENTS.override.md").symlink_to("missing")
+    home = tmp_path / "global"
+    home.mkdir()
+    if global_state == "empty":
+        (home / "AGENTS.md").write_bytes(b"")
+    result = inspect(repo, cwd, codex_home=home, global_max_bytes=100)
+    assert result["status"] == "partial"
+    assert result["totals"]["global"]["consumed_raw_bytes"] == 0
+    assert result["totals"]["project"]["consumed_raw_bytes"] is None
+
+
+@pytest.mark.parametrize("read_access", ["full", "restricted"])
+def test_partial_scope_is_revalidated_when_project_mutates_global_then_fails(tree, tmp_path, monkeypatch, read_access):
+    from brigade.context_preview import preview
+
+    repo, cwd = tree
+    (cwd / "AGENTS.md").write_bytes(b"project")
+    home = tmp_path / "global"
+    home.mkdir()
+    (home / "AGENTS.md").write_bytes(b"global")
+    original_read = os.read
+    changed = False
+
+    def racing_read(fd, count):
+        nonlocal changed
+        data = original_read(fd, count)
+        if data == b"project":
+            changed = True
+            (home / "AGENTS.override.md").write_bytes(b"new override")
+            raise PermissionError(str(repo / "private"))
+        return data
+
+    monkeypatch.setattr(os, "read", racing_read)
+    result = preview(
+        target=repo,
+        cwd=cwd,
+        codex_version="0.160.0",
+        trust="trusted",
+        read_access=read_access,
+        assume_codex_defaults=True,
+        codex_home=home,
+        global_max_bytes=100,
+    )
+    assert changed
+    assert result["status"] == "not_evaluated"
+    assert "file_read_not_evaluated" in result["limitations"]
+    assert "selection_changed" in result["limitations"]
+    assert all(total["consumed_raw_bytes"] is None for total in result["totals"].values())
+    assert all(row["contribution"] == "unknown" for row in result["files"])
+    assert str(repo) not in json.dumps(result)

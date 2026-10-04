@@ -50,10 +50,12 @@ common directory. See pinned
 [worktree trust tests](https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/core/src/worktree_trust_tests.rs),
 and [instruction loader](https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/core/src/agents_md.rs).
 
-`--read-access full|restricted|unknown` records the supplied filesystem profile.
+`--read-access full|restricted|unknown` gates inspection and records the supplied
+filesystem profile. An unknown value prevents document content reads. For known
+values it reports the caller's mode, without changing Brigade's error outcome.
 Codex discards an environment load on non-NotFound errors. Callers with full disk
 read access log and continue, while restricted callers error. Brigade reports
-uncertainty instead of manufacturing a successful chain. It does not infer
+unknown accounting for the affected scope in both modes. It does not infer
 access from the sandbox's name.
 
 ## Accounting and selection
@@ -74,7 +76,8 @@ Discovery completes before project reads, including candidates whose eventual
 contribution is `cap_exhausted`. POSIX colon and backslash names and valid
 surrogateescaped bytes are supported. Unencodable names are unevaluated.
 Fallback trimming uses Rust's explicit Unicode White_Space set. U+001C through
-U+001F remain content. See pinned
+U+001F remain content. Invalid fallback entries are discarded and labeled
+`invalid_fallback_entries_ignored`, without disclosing their values. See pinned
 [discovery and loading](https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/core/src/agents_md.rs)
 and [loader tests](https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/core/src/agents_md_tests.rs).
 
@@ -103,9 +106,21 @@ Brigade opens absolute path components and descendants with retained directory
 descriptors and `O_NOFOLLOW`, then opens only regular documents with
 `O_NONBLOCK`. Reads are bounded to the remaining limit plus one byte. It compares
 held-file device, inode, ctime, mtime and size before and after reading, and
-checks that the name still identifies that file. Changed or disappearing files
-make the affected scope's accounting unknown. No lower-priority candidate is
-inferred after a selected-file race. There is no atomic multi-file snapshot.
+checks that the name still identifies that file. Before completion it rechecks
+every discovered project winner or absence, including cap-exhausted rows, and
+every examined global candidate. These final checks use nofollow metadata only.
+Changed sizes, replacements, missing winners, new higher-priority overrides and
+new candidates in previously empty directories make the affected accounting
+unknown. Final checks never read cap-exhausted content or select a replacement
+winner for accounting. There is no atomic multi-file snapshot. Same-size
+rewrites can escape detection when the filesystem preserves both timestamps
+within its timestamp granularity. Changes after a final check can also escape.
+
+Scope and cwd directory chains are validated even when untrusted settings or
+a zero cap suppress project content reads. Native POSIX support must include
+directory-relative open and stat, nofollow stat, `O_DIRECTORY`, `O_NONBLOCK`
+and `O_NOFOLLOW`. Missing capabilities or unsupported runtime calls produce
+`posix_nofollow_required` without filesystem error details.
 
 All symlinks are refused, including in-scope links, dangling override links,
 markers, cwd, and scope prefixes. `symlink_not_evaluated` sets
@@ -115,8 +130,12 @@ file is marker metadata only: Brigade reads neither its body nor a common
 directory. Bodies and absolute input paths are excluded from text and JSON. Filename controls are JSON-escaped in both formats.
 
 `complete` and `matches_codex: true` apply only to fresh-disk accounting under
-the supplied settings and requested scopes. `partial` retains separately known
-scope results when another scope fails. Affected accounting becomes null.
+the supplied settings and requested scopes. `partial` retains a separately
+completed requested scope when another scope fails. A valid empty global scope
+counts as completed. A global scope that was not requested cannot justify
+`partial`. Retained scopes receive final metadata validation even after another
+scope fails. A scope counts as completed only after that validation. Status is
+calculated after failed accounting becomes null.
 `not_evaluated` means the inspection could not establish those results. Every
 result discloses fresh-disk and active-session uncertainty. Inspection performs
 no intentional writes. Reads can update access times.
