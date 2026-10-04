@@ -8,7 +8,7 @@ and enforces contiguous sequence, previous-digest chaining, and idempotency by
 key + request digest (same key + same digest returns the existing event; same
 key + different digest raises a typed conflict without appending). Tail state
 is derived fail-closed: every complete line must be a validated envelope whose
-raw bytes exactly equal its canonical form, continuing a gap-free,
+bytes, excluding LF or CRLF framing, exactly equal its canonical form, continuing a gap-free,
 duplicate-free, digest-linked sequence; any deviation raises a bounded typed
 error and no state is derived from it. Run-artifact permissions are private:
 the ``events`` and quarantine directories are 0o700 and journal/quarantine
@@ -48,15 +48,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from brigade import run_dirfd, run_events
+from brigade import dirfd, run_dirfd, run_events
 from brigade.run_events import CanonicalizationError, canonical_bytes
 
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+# Preserve directory intent on hosts without the POSIX flag. The synthetic
+# bit is consumed internally and never passed to an OS file-open primitive.
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0) or (1 << 29)
 _HAS_O_NOFOLLOW = _O_NOFOLLOW != 0
-_HAS_O_DIRECTORY = _O_DIRECTORY != 0
+_HAS_O_DIRECTORY = bool(getattr(os, "O_DIRECTORY", 0))
 _HAS_FCHMOD = hasattr(os, "fchmod") and os.name == "posix"
 # O_NOFOLLOW rejects symlinked targets so a pre-placed symlink cannot redirect
 # journal writes or quarantine captures outside the private run-artifact tree.
@@ -362,25 +364,18 @@ def _open_bound(
     """Open a bound path descriptor-relative through the held run handles."""
     bound, components, name = target
     wants_directory = bool(flags & _O_DIRECTORY)
-    open_flags = flags
-    if wants_directory and not _HAS_O_DIRECTORY:
-        open_flags &= ~_O_DIRECTORY
     try:
-        fd = bound.open_file(components, name, open_flags, mode)
+        if wants_directory:
+            # The caller closes this fresh descriptor. Never return a cached
+            # bound.dir_fd here, since its lifetime belongs to the binding.
+            parent = bound.dir_fd(*components)
+            return dirfd.open_child_directory(parent, name)
+        return bound.open_file(components, name, flags, mode)
     except OSError as exc:
         refusal = _symlink_refusal(path, exc, wants_directory=wants_directory)
         if refusal is not None:
             raise refusal from exc
         raise
-    if not wants_directory or _HAS_O_DIRECTORY:
-        return fd
-    try:
-        if not stat.S_ISDIR(os.fstat(fd).st_mode):
-            raise RunJournalError(_bound(f"path is not a directory: {path.name}"))
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
 
 
 def bound_lstat(path: Path) -> os.stat_result | None:
@@ -549,7 +544,7 @@ def _fsync_directory(path: Path) -> None:
     """
     if not _supports_directory_fsync():
         return
-    dir_flags = os.O_RDONLY | _O_DIRECTORY if _HAS_O_DIRECTORY else os.O_RDONLY
+    dir_flags = os.O_RDONLY | _O_DIRECTORY
     try:
         fd = _open_nofollow(path, dir_flags)
     except RunJournalError:
@@ -591,6 +586,8 @@ def _open_nofollow(path: Path, flags: int, mode: int = 0o666) -> int:
     swapped after bind can only reach the original bound inode, or the open
     fails closed. There is no pathname fallback for a bound path.
     """
+    # CRT text translation would invalidate byte offsets and verbatim writes.
+    flags |= getattr(os, "O_BINARY", 0)
     target = _bound_target(path)
     if target is not None:
         return _open_bound(target, path, flags, mode)
@@ -775,14 +772,17 @@ def _object_pairs_no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _parse_canonical_line(line: bytes) -> dict[str, Any]:
     """Parse one journal line, failing closed on any deviation.
 
-    The line must be a validated run_event.v1 envelope whose raw bytes exactly
-    equal its canonical form. Raises ChainIntegrityError with a bounded
+    The line must be a validated run_event.v1 envelope whose bytes, excluding
+    a CRLF terminator's CR, exactly equal its canonical form.
+    Raises ChainIntegrityError with a bounded
     diagnostic on: invalid UTF-8 or JSON, duplicate JSON keys, non-object JSON,
     uncanonicalizable values (floats, booleans, oversized integers), byte-level
     differences from canonical form (whitespace, key order, ASCII escapes), or
     failed envelope validation (bad fields, recomputed-digest or event_id
     mismatch).
     """
+    if line.endswith(b"\r"):
+        line = line[:-1]
     try:
         text = line.decode("utf-8")
     except UnicodeDecodeError as exc:
