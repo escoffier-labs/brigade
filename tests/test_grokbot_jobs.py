@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import stat
 import subprocess
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from multiprocessing import Pipe, Process
 from pathlib import Path
@@ -1499,6 +1501,95 @@ def test_hub_validation_refusal_is_not_hub_unavailable(monkeypatch):
     assert decision.granted is False
     assert decision.reason != "hub-unavailable"
     assert decision.reason in {"invalid-artifact", "invalid-request", "refused"}
+
+
+@pytest.mark.parametrize("action", ("whoami", "list", "enqueue"))
+@pytest.mark.parametrize("timeout", (None, 0.25))
+def test_hub_transport_timeout_is_local_and_preserves_job_timeout(monkeypatch, action, timeout):
+    monkeypatch.setattr(
+        fleet_client_grokbot, "load_fleet_config", lambda: {"hub_url": "http://hub.example", "token": "host-token"}
+    )
+    requests = []
+    deadlines = []
+
+    def open_request(request, *, timeout):
+        requests.append((json.loads(request.data), request.get_header("Authorization"), timeout))
+        payload = {"actor_kind": "feed", "jobs": [], "enqueued": True}
+        response = io.BytesIO(json.dumps(payload).encode())
+        response.status = 200
+        return response
+
+    def run_deadline(operation, *, timeout):
+        deadlines.append(timeout)
+        return operation()
+
+    monkeypatch.setattr(fleet_client_grokbot._client, "_hub_open", open_request)
+    monkeypatch.setattr(fleet_client_grokbot._client, "_run_with_deadline", run_deadline)
+    fields = {"timeout_seconds": 900} if action == "enqueue" else {}
+    if timeout is not None:
+        fields["timeout"] = timeout
+    with fleet_client_grokbot.listener_identity("feed-token"):
+        decision = getattr(fleet_client_grokbot, {"list": "list_jobs"}.get(action, action))(**fields)
+
+    assert decision.granted
+    body, authorization, socket_timeout = requests[0]
+    assert "timeout" not in body
+    assert socket_timeout == (timeout if timeout is not None else fleet_client_grokbot.GROKBOT_TIMEOUT_SECONDS)
+    assert deadlines == [socket_timeout]
+    assert authorization == "Bearer feed-token"
+    if action == "enqueue":
+        assert body["timeout_seconds"] == 900
+
+
+@pytest.mark.parametrize("timeout", (0, -1, float("inf"), float("nan"), True, "1", None))
+def test_hub_transport_timeout_rejects_invalid_values_before_network(monkeypatch, timeout):
+    calls = []
+    monkeypatch.setattr(
+        fleet_client_grokbot, "load_fleet_config", lambda: {"hub_url": "http://hub.example", "token": "host-token"}
+    )
+    monkeypatch.setattr(
+        fleet_client_grokbot._client, "_run_with_deadline", lambda *args, **kwargs: calls.append(kwargs) or (200, {})
+    )
+    with fleet_client_grokbot.listener_identity("feed-token"):
+        decision = fleet_client_grokbot.whoami(timeout=timeout)
+
+    assert not decision.granted
+    assert decision.reason == "invalid-request"
+    assert calls == []
+
+
+def test_hub_transport_timeout_enforces_a_real_deadline(monkeypatch):
+    monkeypatch.setattr(
+        fleet_client_grokbot, "load_fleet_config", lambda: {"hub_url": "http://hub.example", "token": "host-token"}
+    )
+    release = threading.Event()
+    finished = threading.Event()
+    returned = threading.Event()
+    decisions = []
+
+    def blocked_post(*args, **kwargs):
+        try:
+            release.wait(2)
+            return 200, {"actor_kind": "feed"}
+        finally:
+            finished.set()
+
+    def probe():
+        with fleet_client_grokbot.listener_identity("feed-token"):
+            decisions.append(fleet_client_grokbot.whoami(timeout=0.01))
+        returned.set()
+
+    monkeypatch.setattr(fleet_client_grokbot, "_post_grokbot_blocking", blocked_post)
+    caller = threading.Thread(target=probe)
+    caller.start()
+    try:
+        assert returned.wait(1), "probe exceeded its local transport deadline"
+        assert decisions[0].reason == "hub-unavailable"
+        assert not decisions[0].granted
+    finally:
+        release.set()
+        caller.join(2)
+        assert finished.wait(2)
 
 
 def test_hub_complete_report_accepts_claimed_and_cleans_failed_orphan_only(tmp_path: Path, monkeypatch):
