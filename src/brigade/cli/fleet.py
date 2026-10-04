@@ -124,6 +124,9 @@ def register(sub: argparse._SubParsersAction) -> None:
             "proxy strips spoofed identity headers."
         ),
     )
+    p_serve.add_argument(
+        "--trust-forwarded-proto", action="store_true", help="Trust HTTPS scheme from an overwriting loopback proxy."
+    )
     p_serve.set_defaults(func=_dispatch_serve)
 
     p_nodes = fleet_sub.add_parser(
@@ -181,6 +184,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_sessions.add_argument("--all", action="store_true", help="Include ended and expired sessions.")
     p_sessions.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
     p_sessions.set_defaults(func=_dispatch_sessions)
+    from . import fleet_enroll
+
+    fleet_enroll.register(fleet_sub, p_sessions)
 
     p_flush = fleet_sub.add_parser("flush", help="Re-POST locally spooled events to the fleet hub.")
     p_flush.set_defaults(func=_dispatch_flush)
@@ -566,6 +572,7 @@ def _dispatch_serve(args: argparse.Namespace, *, environ: Mapping[str, str] | No
             args.deck_config, os.environ if environ is None else environ
         ),
         trust_tailscale_identity=bool(args.trust_tailscale_identity),
+        trust_forwarded_proto=bool(getattr(args, "trust_forwarded_proto", False)),
     )
 
 
@@ -678,6 +685,11 @@ def _dispatch_sink(args: argparse.Namespace) -> int:
 
 
 def _dispatch_sessions(args: argparse.Namespace) -> int:
+    from . import fleet_enroll
+
+    dashboard_result = fleet_enroll.dispatch_sessions(args)
+    if dashboard_result is not None:
+        return dashboard_result
     import json as _json
 
     from .. import fleet_client

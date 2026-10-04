@@ -1,5 +1,11 @@
 # Fleet Command Deck implementation plan
 
+> Historical design: #1153 supersedes bearer query enrollment and cookie edit
+> authority in this document. Current enrollment uses a five-minute code and
+> same-origin confirmation POST. Browser cookies grant read-only HTML access,
+> independent expiry and revocation. See [Fleet sync](fleet-sync.md#browser-enrollment-and-lost-device-revocation)
+> for current commands. Any token-query examples below describe retired behavior.
+
 ## Goal
 
 Add the read-only, server-rendered Command Deck at `/deck` and `/deck/repos` without changing schema, dependencies, `/`, legacy boards, or the rollout runbook. Execute the three tasks in order, completing every checkbox before beginning the next task.
