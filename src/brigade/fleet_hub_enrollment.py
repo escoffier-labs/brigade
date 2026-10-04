@@ -169,6 +169,8 @@ def revoke(conn: sqlite3.Connection, session_id: str) -> bool:
 
 
 def strict_params(raw: str) -> dict[str, str]:
+    if raw == "":
+        return {}
     if len(raw) > BODY_LIMIT or re.search(r"%(?![0-9a-fA-F]{2})", raw):
         raise EnrollmentError()
     try:
