@@ -12,6 +12,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
+from . import dirfd
 from .budgets import bootstrap_budget
 
 SOURCE_COMMIT = "a956835d020762cb2b570053af06f643a11c0ecc"
@@ -83,7 +84,7 @@ def _metadata(fd: int, name: str) -> os.stat_result | None:
 def _directory(stack: ExitStack, name: str, parent: int | None = None) -> int:
     try:
         before = _metadata(parent, name) if parent is not None else None
-        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        fd = os.open(name, dirfd.directory_flags(nofollow=True) | os.O_NONBLOCK, dir_fd=parent)
         stack.callback(os.close, fd)
         if before is not None and _fingerprint(before) != _fingerprint(os.fstat(fd)):
             raise _Boundary("directory_changed")

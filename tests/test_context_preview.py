@@ -8,6 +8,8 @@ import os
 import pytest
 
 from brigade.cli import main
+from brigade.context_preview import preview
+from tests._posix import requires_dirfd
 
 
 def test_preview_cli_counts_cumulative_prefix_without_disclosing_text(tmp_path, capsys):
@@ -55,8 +57,6 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX preview contra
 
 
 def inspect(repo, cwd, **kwargs):
-    from brigade.context_preview import preview
-
     return preview(
         target=repo,
         cwd=cwd,
@@ -390,20 +390,61 @@ def test_text_escapes_filename_controls_and_cli_invalid_settings(tree, capsys):
     assert str(repo) not in output.out + output.err
 
 
+@requires_dirfd
 def test_no_intentional_writes_or_consumer_process(tree, monkeypatch):
     import subprocess
 
     repo, cwd = tree
     (cwd / "AGENTS.md").write_bytes(b"abc")
     original_open = os.open
+    opened = []
 
     def readonly_open(path, flags, *args, **kwargs):
         assert not flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC)
-        return original_open(path, flags, *args, **kwargs)
+        assert flags & os.O_NOFOLLOW
+        assert flags & os.O_NONBLOCK
+        assert kwargs["dir_fd"] is not None or path == "/"
+        fd = original_open(path, flags, *args, **kwargs)
+        if path != "AGENTS.md":
+            assert flags & os.O_DIRECTORY
+        opened.append(path)
+        return fd
 
     monkeypatch.setattr(os, "open", readonly_open)
     monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: pytest.fail("consumer subprocess"))
     assert inspect(repo, cwd)["status"] == "complete"
+    assert "/" in opened and "sub" in opened and "AGENTS.md" in opened
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (OSError, "directory_not_evaluated"),
+        (TypeError, "posix_nofollow_required"),
+        (NotImplementedError, "posix_nofollow_required"),
+    ],
+)
+def test_directory_flag_factory_failure_is_opaque_before_open(tree, monkeypatch, error, reason):
+    from brigade import dirfd
+
+    repo, cwd = tree
+    (cwd / "AGENTS.md").write_bytes(b"PRIVATE_BODY")
+
+    def unavailable(*, nofollow):
+        assert nofollow is True
+        raise error(str(repo / "private"))
+
+    monkeypatch.setattr(dirfd, "directory_flags", unavailable)
+    monkeypatch.setattr(os, "open", lambda *args, **kwargs: pytest.fail("factory failure must prevent open"))
+    monkeypatch.setattr(os, "read", lambda *args: pytest.fail("factory failure must prevent content reads"))
+    result = inspect(repo, cwd)
+    assert result["status"] == "not_evaluated"
+    assert result["matches_codex"] is None
+    assert reason in result["limitations"]
+    assert result["files"] == []
+    assert result["totals"]["project"]["consumed_raw_bytes"] is None
+    output = json.dumps(result)
+    assert str(repo) not in output and "private" not in output and "PRIVATE_BODY" not in output
 
 
 @pytest.mark.parametrize("flag", ["--fallback-filenames", "--root-markers"])
