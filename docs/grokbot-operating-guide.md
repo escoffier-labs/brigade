@@ -702,6 +702,17 @@ is the deliverable. A run without a handle is a failed run.
 
 ## Troubleshooting
 
+**Scout retries delay issues that have not been attempted.** The feed selects
+eligible issues by the fewest prior failed, expired, or canceled attempts,
+then by issue number. Active jobs, completed issues, daily limits, and the
+retry limit still control eligibility.
+
+**A hub preview reports zero queue counts.** Without `--apply`, scout-feed
+does not fetch the hub listing. Its text and JSON output include
+`listing=none` to identify that missing information. Those counts do not
+establish that the hub queue is empty. The suggested issue is provisional:
+`--apply` can select a different issue after fetching the listing.
+
 **`scout-feed --apply` fails with an opaque queue error.** Under hub authority,
 `brigade run cloud grokbot scout-feed --apply` reads the existing scout jobs
 through the hub `list` action before it enqueues, so a credential refusal on
