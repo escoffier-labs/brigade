@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from brigade.card_fingerprint import ensure_card_id_frontmatter, reinforce_existing_card
 from brigade.card_identity import (
     IdentityIndex,
@@ -54,6 +56,68 @@ def test_claim_marks_alias_collisions_unresolvable_without_rewriting():
     assert index.is_collision("memory/cards/beta.md")
     assert index.resolve("memory/cards/beta.md") is None
     assert index.colliding_keys() == ("memory/cards/beta.md",)
+
+
+@pytest.mark.parametrize("id_field", ["id", "card_id"])
+def test_migrated_keys_resolve_to_survivor_and_third_card_collision_stays_unresolvable(id_field):
+    survivor_id = "card-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    removed_id = "card-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    keys = [removed_id, "memory/cards/removed.md", "removed"]
+    survivor = object()
+    identity = card_identity(
+        {id_field: survivor_id, "aliases": [*keys, " removed ", survivor_id]},
+        "memory/cards/survivor.md",
+    )
+    index: IdentityIndex[object] = IdentityIndex()
+    index.claim_identity(identity, survivor)
+    assert identity.card_id == survivor_id
+    assert identity.aliases[-3:] == tuple(keys)
+    for key in [survivor_id, *keys]:
+        assert index.resolve(key) is survivor
+
+    third = object()
+    index.claim_identity(card_identity({"topic": "removed"}, "memory/cards/third.md"), third)
+    assert index.resolve("removed") is None
+    assert index.is_collision("removed")
+    assert index.resolve(removed_id) is survivor
+    index.claim_identity(identity, survivor)
+    assert index.resolve("removed") is None
+
+
+@pytest.mark.parametrize("metadata", [{}, {"id": "legacy"}, {"id": 42}, {"card_id": "card-invalid"}])
+def test_explicit_aliases_cannot_grant_identity_to_legacy_cards(metadata):
+    identity = card_identity({**metadata, "aliases": ["removed"]}, "memory/cards/current.md")
+    index: IdentityIndex[object] = IdentityIndex()
+    index.claim_identity(identity, object())
+    assert index.resolve("removed") is None
+    assert index.resolve("current") is not None
+
+
+@pytest.mark.parametrize(
+    "aliases",
+    [
+        "removed",
+        ("removed",),
+        {"removed": True},
+        ["removed", 42],
+        ["removed", None],
+        ["removed", ["nested"]],
+        ["removed", {"nested": "value"}],
+        ["removed", " "],
+        ["removed", "line\nbreak"],
+        ["removed", "x" * 1025],
+        ["removed", *[f"old-{i}" for i in range(64)]],
+    ],
+)
+def test_malformed_or_unbounded_alias_lists_do_not_resolve_any_migrated_key(aliases):
+    identity = card_identity(
+        {"id": "card-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "aliases": aliases},
+        "memory/cards/current.md",
+    )
+    index: IdentityIndex[object] = IdentityIndex()
+    index.claim_identity(identity, object())
+    assert index.resolve("removed") is None
+    assert index.resolve("current") is not None
 
 
 def test_mint_claimed_card_id_never_replaces_existing():

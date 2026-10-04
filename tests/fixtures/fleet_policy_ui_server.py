@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from http.server import ThreadingHTTPServer  # noqa: E402
 
 from brigade import fleet_command_deck, fleet_hub, fleet_hub_http, fleet_hub_policy  # noqa: E402
-from brigade import fleet_policy, fleet_policy_page  # noqa: E402
+from brigade import fleet_hub_enrollment, fleet_policy, fleet_policy_page  # noqa: E402
 
 FIXTURE_TOKEN = "fixture-token-not-a-real-credential"  # content-guard: allow api-key-assignment
 LOOPBACK = "127.0.0.1"  # content-guard: allow loopback-ipv4
@@ -281,10 +281,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     port = server.server_address[1]
     print(f"fixture hub database: {db_path}")
-    print(f"open:  http://{LOOPBACK}:{port}/deck/policy?token={FIXTURE_TOKEN}")
-    print(f"       http://{LOOPBACK}:{port}/deck/repos?token={FIXTURE_TOKEN}")
-    print(f"       http://{LOOPBACK}:{port}/deck/roster?token={FIXTURE_TOKEN}")
-    print(f"       http://{LOOPBACK}:{port}/?token={FIXTURE_TOKEN}")
+    conn = fleet_hub.open_db(db_path)
+    try:
+        enrollment = fleet_hub_enrollment.mint(conn, "fixture browser")
+    finally:
+        conn.close()
+    print(f"open: http://{LOOPBACK}:{port}/enroll?code={enrollment['code']}")
+    print("Confirm read-only access, then visit /deck/policy, /deck/repos or /deck/roster.")
+    print("For editor fixtures, inject Authorization: Bearer with the fixture token.")
+    print(f"fixture editor token: {FIXTURE_TOKEN}")
     print("ctrl-c to stop")
     try:
         server.serve_forever()

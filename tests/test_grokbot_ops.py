@@ -421,7 +421,7 @@ def test_doctor_reports_feed_authority_ok_when_feed_can_list(tmp_path: Path, mon
 
     checks = grokbot_ops.doctor(tmp_path, "operator")
 
-    assert {check["check"]: check["status"] for check in checks}["feed-authority"] == "ok"
+    assert {check["check"]: check["status"] for check in checks}["host-wide-feed-authority"] == "ok"
     assert token not in json.dumps(checks)
 
 
@@ -433,7 +433,7 @@ def test_doctor_reports_feed_authority_fail_when_feed_list_is_refused(tmp_path: 
 
     checks = grokbot_ops.doctor(tmp_path, "operator")
 
-    assert {check["check"]: check["status"] for check in checks}["feed-authority"] == "fail"
+    assert {check["check"]: check["status"] for check in checks}["host-wide-feed-authority"] == "fail"
 
 
 def test_doctor_reports_feed_authority_fail_when_only_the_worker_listing_is_refused(
@@ -455,7 +455,7 @@ def test_doctor_reports_feed_authority_fail_when_only_the_worker_listing_is_refu
 
     checks = grokbot_ops.doctor(tmp_path, "operator")
 
-    assert {check["check"]: check["status"] for check in checks}["feed-authority"] == "fail"
+    assert {check["check"]: check["status"] for check in checks}["host-wide-feed-authority"] == "fail"
 
 
 def test_doctor_skips_feed_authority_without_a_configured_feed_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -466,7 +466,7 @@ def test_doctor_skips_feed_authority_without_a_configured_feed_token(tmp_path: P
 
     checks = grokbot_ops.doctor(tmp_path, "operator")
 
-    assert {check["check"]: check["status"] for check in checks}["feed-authority"] == "skipped"
+    assert {check["check"]: check["status"] for check in checks}["host-wide-feed-authority"] == "skipped"
     assert actions == []
 
 
@@ -479,7 +479,7 @@ def test_doctor_omits_feed_authority_without_hub_authority(tmp_path: Path, monke
 
     checks = grokbot_ops.doctor(tmp_path, "operator")
 
-    assert "feed-authority" not in {check["check"] for check in checks}
+    assert "host-wide-feed-authority" not in {check["check"] for check in checks}
     assert actions == []
 
 
@@ -499,20 +499,131 @@ def test_doctor_feed_authority_probe_lists_both_feed_roles_with_no_mutating_hub_
     assert not {action.split(":")[0] for action in actions} & fleet_hub_grokbot.MUTATING_ACTIONS
 
 
+@pytest.mark.parametrize("instance", ("operator", "repository-scout", "implementation-worker"))
+@pytest.mark.parametrize("timeout", (None, 1))
+def test_doctor_host_wide_feed_authority_forwards_timeout_to_every_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, instance: str, timeout: int | None
+):
+    from brigade import fleet_client_grokbot
+
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    assert _setup(tmp_path, instance) == 0
+    token = _feed_token(tmp_path, monkeypatch)
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: True)
+    monkeypatch.setattr(grokbot_jobs, "status", lambda _target: {"jobs": []})
+    monkeypatch.setattr(grokbot_ops, "_health_check", lambda *_args: True)
+    monkeypatch.setattr(
+        fleet_client_grokbot, "load_fleet_config", lambda: {"hub_url": "http://hub.example", "token": "host-token"}
+    )
+    probes = []
+    deadlines = []
+
+    def post(_hub, actor_token, body, *, timeout):
+        probes.append((actor_token, body, timeout))
+        return 200, {"actor_kind": "feed"} if body["action"] == "whoami" else {"jobs": []}
+
+    def run_deadline(operation, *, timeout):
+        deadlines.append(timeout)
+        return operation()
+
+    monkeypatch.setattr(fleet_client_grokbot, "_post_grokbot_blocking", post)
+    monkeypatch.setattr(fleet_client_grokbot._client, "_run_with_deadline", run_deadline)
+
+    if timeout is None:
+        checks = grokbot_ops.doctor(tmp_path, instance)
+        expected_timeout = grokbot_ops.DEFAULT_TIMEOUT_SECONDS
+    else:
+        checks = grokbot_ops.doctor(tmp_path, instance, timeout=timeout)
+        expected_timeout = timeout
+
+    assert deadlines == [expected_timeout, expected_timeout, expected_timeout]
+    assert probes == [
+        (token, {"action": "whoami"}, expected_timeout),
+        (token, {"action": "list", "role": "repository-scout", "include_all": True}, expected_timeout),
+        (token, {"action": "list", "role": "implementation-worker", "include_all": True}, expected_timeout),
+    ]
+    assert {"check": "host-wide-feed-authority", "status": "ok"} in checks
+    assert fleet_client_grokbot.current_listener_token() is None
+
+
+@pytest.mark.parametrize("failed_probe", ("whoami", "repository-scout", "implementation-worker"))
+@pytest.mark.parametrize("reason", ("hub-unavailable", "auth-failed"))
+def test_doctor_feed_authority_distinguishes_unavailable_from_auth_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_probe: str, reason: str
+):
+    from brigade import fleet_client_grokbot
+
+    _feed_token(tmp_path, monkeypatch)
+    _stub_hub(monkeypatch)
+
+    def probe(name):
+        if name == failed_probe:
+            return fleet_client_grokbot.GrokbotHubDecision(False, reason)
+        return fleet_client_grokbot.GrokbotHubDecision(True, "ok", job={"actor_kind": "feed"}, jobs=[])
+
+    monkeypatch.setattr(fleet_client_grokbot, "whoami", lambda **_fields: probe("whoami"))
+    monkeypatch.setattr(fleet_client_grokbot, "list_jobs", lambda role, **_fields: probe(role))
+
+    check = grokbot_ops._feed_authority_check(tmp_path)
+
+    expected = {"check": "host-wide-feed-authority", "status": "fail"}
+    if reason == "hub-unavailable":
+        expected.update(status="unavailable", reason="hub-unavailable")
+    assert check == expected
+
+
+@pytest.mark.parametrize("unavailable_role", ("repository-scout", "implementation-worker"))
+@pytest.mark.parametrize(
+    "identity_job",
+    (
+        {"actor_kind": "implementation-worker"},
+        {"actor_kind": "operator"},
+        None,
+        "malformed",
+        {},
+        {"actor_kind": None},
+        {"actor_kind": []},
+        {"actor_kind": {}},
+    ),
+)
+def test_doctor_feed_authority_invalid_granted_identity_precedes_listing_outage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unavailable_role: str, identity_job
+):
+    from brigade import fleet_client_grokbot
+
+    _feed_token(tmp_path, monkeypatch)
+    _stub_hub(monkeypatch)
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "whoami",
+        lambda **_fields: fleet_client_grokbot.GrokbotHubDecision(True, "ok", job=identity_job),
+    )
+
+    def list_jobs(*, role, **_fields):
+        if role == unavailable_role:
+            return fleet_client_grokbot.GrokbotHubDecision(False, "hub-unavailable")
+        return fleet_client_grokbot.GrokbotHubDecision(True, "ok", jobs=[])
+
+    monkeypatch.setattr(fleet_client_grokbot, "list_jobs", list_jobs)
+
+    assert grokbot_ops._feed_authority_check(tmp_path) == {"check": "host-wide-feed-authority", "status": "fail"}
+    assert fleet_client_grokbot.current_listener_token() is None
+
+
 @pytest.mark.parametrize(
     ("feed_status", "exit_code"),
-    (("skipped", 0), ("ok", 0), ("fail", 1), ("unrecognized", 1)),
+    (("skipped", 0), ("ok", 0), ("fail", 1), ("unavailable", 1), ("unrecognized", 1)),
 )
 def test_doctor_command_treats_a_skipped_feed_authority_probe_as_non_failing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, feed_status: str, exit_code: int
 ):
-    checks = [{"check": "queue", "status": "ok"}, {"check": "feed-authority", "status": feed_status}]
+    checks = [{"check": "queue", "status": "ok"}, {"check": "host-wide-feed-authority", "status": feed_status}]
     monkeypatch.setattr(grokbot_ops, "doctor", lambda *_args, **_kwargs: checks)
 
     argv = ["run", "cloud", "grokbot", "doctor", "--target", str(tmp_path), "--instance", "operator"]
 
     assert cli.main(argv) == exit_code
-    assert f"feed-authority: {feed_status}" in capsys.readouterr().out
+    assert f"host-wide-feed-authority: {feed_status}" in capsys.readouterr().out
 
 
 def test_doctor_fails_cleanly_on_missing_config(tmp_path: Path, capsys):

@@ -1,5 +1,11 @@
 # Command Deck: Fleet Hub Dashboard Replacement
 
+> Historical design: #1153 supersedes bearer query enrollment and cookie edit
+> authority in this document. Current enrollment uses a five-minute code and
+> same-origin confirmation POST. Browser cookies grant read-only HTML access,
+> independent expiry and revocation. See [Fleet sync](fleet-sync.md#browser-enrollment-and-lost-device-revocation)
+> for current commands. Any token-query examples below describe retired behavior.
+
 Status: reviewed implementation specification, awaiting operator approval before any code lands.
 Scope: design only. The implementing agent works test-first from this document.
 Deployment line: Brigade beta main (`main`). Version 0.27.0 stays as it is. nothing here cuts or bumps a release.
