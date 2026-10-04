@@ -332,7 +332,7 @@ curl --silent --show-error \
 ```
 
 Before enrolling a phone, configure an HTTPS proxy that forwards to a hub
-bound to numeric loopback (`127.0.0.1` or `::1`) with
+bound to numeric loopback (`127.0.0.1`) with
 `--trust-forwarded-proto`. The proxy must preserve the browser-facing Host
 and overwrite `X-Forwarded-Proto` with exactly one `https` value. The hub
 recognizes this scheme only from an immediate loopback peer and sets Secure
@@ -394,7 +394,7 @@ The hub can be started with `--trust-tailscale-identity` so that dashboard route
 
 Safe deployment contract: do not enable this unless all of the following are true:
 
-1. The hub is bound to a loopback interface only (`127.0.0.1` or `::1`). Never bind it to all interfaces or to a routable address when this flag is on.
+1. The hub is bound to a loopback interface only (`127.0.0.1`). Never bind it to all interfaces or to a routable address when this flag is on.
 2. The dashboard request reaches the hub only through a Tailscale Serve reverse proxy that terminates Tailscale identity and strips any spoofed incoming `Tailscale-User-Login` header. The proxy must run on the same host as the hub, so the immediate TCP peer is loopback.
 3. The backend is never exposed directly to the tailnet or to any other network without the proxy in front.
 
