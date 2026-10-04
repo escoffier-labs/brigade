@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Worklore records explicit operator offers, fenced node ownership, metadata checkpoints, handoffs, release, and withdrawal without changing item status or enforcing filesystem conflicts. (#1595)
 - `brigade context preview` reports scoped Codex 0.160.0 instruction selection and cumulative byte accounting from supplied settings, with explicit unknown boundaries and separate advisory limits. (#1564)
 - Worklore Python clients can read and resume bounded item or filtered global event history pages using the Hub's existing cursors and authorization. (#1595)
 - Memory recall accepts bounded explicit queries through its Python APIs and standalone module and uses stable repository hints for conventional linked worktrees. Existing fallback and recall limits remain. Production CLI query wiring, retrieval evaluation, and repeat-search telemetry remain follow-up work. (#1563)
