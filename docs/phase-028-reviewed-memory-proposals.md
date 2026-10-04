@@ -29,16 +29,29 @@ hard links. Reads are descriptor-bound and preserve exact UTF-8 bytes. Exclusion
 apply before composition. Namespace, scope, owner, repository, task, operator,
 branch and worktree metadata must agree whenever either source declares a
 value. Sources must belong to the same configured card root.
+Scope checks include nested metadata and the active provenance repository.
+Conflicting declarations within either source also block composition.
 
 Legacy cards already in the selected canonical owner workspace are eligible
 after a clean injection scan. Explicit unknown, untrusted or quarantined labels,
 and pending, error or flagged injection states, are ineligible. Declared
-provenance must pass the existing trust gate as well. Proposal creation never
-silently upgrades a source's trust. Citations preserve source identifiers and
-hashes. External cited content is not fetched or incorporated.
+provenance must pass the existing trust gate as well. Every declared envelope
+and scalar trust or injection field is checked, including nested metadata.
+Conflicting declarations refuse even when a preferred envelope is eligible.
+Proposal creation never silently upgrades a source's trust. Citations preserve
+source identifiers and hashes. External cited content is not fetched or
+incorporated.
 
 Merge combines the two eligible bodies and preserves both sets of provenance.
 A detected polarity conflict blocks merge and requires explicit supersession.
+For two declared envelopes, merge derives provenance for the combined body,
+capped at reviewed trust, and retains the original envelopes in the archive.
+A merge mixing legacy and enveloped sources refuses because edit acceptance
+does not grant content trust. Two unlabelled legacy sources remain unlabelled.
+If both legacy sources declare eligible trust labels, the merged label is
+capped at reviewed. A labelled and unlabelled legacy pair cannot merge.
+A merge that would change the meaning of relative links by moving a body also
+refuses.
 Supersession keeps only the chosen survivor's assertions. Both retain the
 survivor's valid stable ID. A legacy survivor receives a deterministic stable ID
 and retains its old keys as aliases. The losing card's ID, path and legacy keys
@@ -62,6 +75,8 @@ at apply so newly added conflicts invalidate the old proposal.
 a standard memory-owner handoff containing the proposal reference, citations
 and review instructions. The handoff uses a no-card action and does not contain
 an ingest-promotable canonical rewrite. Handoff lint status is not approval.
+An explicit proposal-notification section makes ordinary ingest route the
+handoff to review, including with card promotion and document routing enabled.
 
 `review` and `reject` require the exact proposal digest and a reason. They reuse
 the existing digest-bound provenance event ledger with a dedicated proposal
@@ -84,12 +99,25 @@ committed receipt and expected after-state. It never reruns a committed kernel
 operation merely because a later bookkeeping step failed. An unfinished kernel
 operation requires recovery before another apply. A restored attempt uses a
 fresh operation ID after full validation. Finding, configuration, trust,
-identity, reference or source drift invalidates the old acceptance. Reverting
-a completed apply requires a separate reviewed compensating change.
+identity, reference or source drift invalidates acceptance for a pending apply.
+The owner can still inspect or reject the archived proposal after source drift.
+A committed retry verifies its receipts and live after-state even after a care
+rescan removes the resolved finding. Workspace and owner checks still apply.
+Reverting a completed apply requires a separate reviewed compensating change.
 
 Review uses the existing local operator trust boundary. A process able to alter
 the operator's files can also write review events. This feature does not add a
 separate authenticated approval service.
+
+Proposal commands refuse on platforms without safe no-follow directory
+descriptors. Ordinary ingest retains its existing platform fallback and checks
+for governed card metadata again at publication.
+Capability-refusal and input-syntax tests run on every platform. Canonical
+workflow tests require safe directory descriptors.
+Ordinary ingest routes full replacements of governed cards to review so they
+cannot discard or bypass reviewed aliases and relation metadata.
+The presence of a reserved field, including an empty `aliases` field, makes a
+card governed.
 
 ## Implementation plan
 
@@ -118,7 +146,7 @@ projection APIs. Add no runtime dependencies or model-provider integration.
 The focused command is:
 
 ```bash
-brigade work verify run --target . --argv-json '["./scripts/verify-focused","tests/test_memory_proposals.py","tests/test_card_identity.py","tests/test_ingest.py","tests/test_memory_cmd.py","tests/test_memory_retrieval_eval.py","tests/test_memory_vault_projection.py","tests/memory_doctor"]' --capture brigade-work
+brigade work verify run --target . --argv-json '["./scripts/verify-focused","tests/test_memory_proposals.py","tests/test_memory_proposal_capabilities.py","tests/test_card_identity.py","tests/test_ingest.py","tests/test_memory_cmd.py","tests/test_memory_retrieval_eval.py","tests/test_memory_vault_projection.py","tests/memory_doctor","tests/test_cli_inventory_contract.py"]' --capture brigade-work
 ```
 
 This slice does not discover pairs across the corpus, rewrite cards in the
