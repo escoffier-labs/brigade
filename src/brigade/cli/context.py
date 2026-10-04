@@ -11,6 +11,23 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_context = sub.add_parser("context", help="Plan and build local context engineering packs.")
     context_sub = p_context.add_subparsers(dest="context_command", metavar="<context-command>")
     context_sub.required = True
+    p_preview = context_sub.add_parser("preview", help="Inspect fresh Codex instruction bytes for supplied settings.")
+    p_preview.add_argument("--target", required=True, help="Absolute approved project scope.")
+    p_preview.add_argument("--cwd", required=True, help="Absolute lexical working directory.")
+    p_preview.add_argument("--codex-version", required=True, help="Caller-supplied consumer version (0.160.0).")
+    p_preview.add_argument("--trust", required=True, help="Effective trusted, untrusted, unset, or unknown trust.")
+    p_preview.add_argument(
+        "--read-access", required=True, help="Effective full, restricted, or unknown disk read access."
+    )
+    p_preview.add_argument(
+        "--assume-codex-defaults", action="store_true", help="Label omitted settings as default assumptions."
+    )
+    p_preview.add_argument("--project-doc-max-bytes", help="Effective consumer project cap, at most 1048576 bytes.")
+    p_preview.add_argument("--fallback-filenames", help="JSON list of effective fallback filenames.")
+    p_preview.add_argument("--root-markers", help="JSON list of effective non-Project root markers.")
+    p_preview.add_argument("--codex-home", help="Absolute explicit global scope; never inferred.")
+    p_preview.add_argument("--global-max-bytes", help="Explicit Brigade global safety limit, at most 1048576 bytes.")
+    p_preview.add_argument("--json", action="store_true", help="Print body-free machine-readable JSON.")
     for name in ("plan", "build"):
         p_context_action = context_sub.add_parser(name, help=f"{name.title()} a local context pack.")
         p_context_action.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace.")
@@ -56,6 +73,21 @@ def dispatch(args) -> int:
 def _dispatch_impl(args) -> int:
     from .. import context_cmd
 
+    if args.context_command == "preview":
+        return context_cmd.preview(
+            target=args.target,
+            cwd=args.cwd,
+            codex_version=args.codex_version,
+            trust=args.trust,
+            read_access=args.read_access,
+            assume_codex_defaults=args.assume_codex_defaults,
+            project_doc_max_bytes=args.project_doc_max_bytes,
+            fallback_filenames=args.fallback_filenames,
+            root_markers=args.root_markers,
+            codex_home=args.codex_home,
+            global_max_bytes=args.global_max_bytes,
+            json_output=args.json,
+        )
     if args.context_command == "plan":
         return context_cmd.plan(
             target=args.target,
