@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_memory_proposal_capabilities import SAFE_DIRECTORY_CAPABILITY
+
 from brigade import cli, obsidian_vault
 from brigade.projection import kernel
 
@@ -554,3 +556,56 @@ def test_project_vault_emits_alias_frontmatter_for_rename_resolution(tmp_path: P
     assert "  - alpha" in text
     assert "  - legacy-rollout-topic" in text
     assert "  - card-00000000-0000-4000-8000-00000000000a" not in text
+
+
+@pytest.mark.skipif(not SAFE_DIRECTORY_CAPABILITY, reason="safe directory descriptors unavailable")
+@pytest.mark.parametrize("workflow", ["accepted", "rejected", "stale", "contradictory", "cross-scope"])
+def test_reviewed_proposal_actual_vault_projection(tmp_path, vault, capsys, workflow):
+    from brigade import memory_proposals as api
+    from tests.test_memory_proposals import LOSER, SURVIVOR, pair_target
+
+    issue = pair_target(tmp_path, opposite=workflow in ("accepted", "contradictory"))
+    _project(tmp_path, vault, capsys)
+    projection = vault / "Brigade Memory/Cards"
+    assert (projection / "Previous.md").is_file()
+    if workflow == "cross-scope":
+        path = tmp_path / LOSER
+        path.write_text(path.read_text().replace("---\n", "---\nscope: another-task\n", 1))
+    if workflow in ("contradictory", "cross-scope"):
+        before = {p: (tmp_path / p).read_bytes() for p in (SURVIVOR, LOSER, "MEMORY.md")}
+        with pytest.raises(api.ProposalError):
+            api.create_payload(
+                target=tmp_path, issue_id=issue, survivor=SURVIVOR, relation="merge", reason="Inspect exact pair."
+            )
+    else:
+        proposal = api.create_payload(
+            target=tmp_path, issue_id=issue, survivor=SURVIVOR, relation="supersede", reason="Keep current assertions."
+        )
+        if workflow == "rejected":
+            api.reject_payload(
+                target=tmp_path, proposal_id=proposal["id"], digest=proposal["digest"], reason="Reject exact revision."
+            )
+        else:
+            api.review_payload(
+                target=tmp_path, proposal_id=proposal["id"], digest=proposal["digest"], reason="Accept exact revision."
+            )
+        if workflow == "stale":
+            path = tmp_path / SURVIVOR
+            path.write_text(path.read_text() + "Later source assertion.\n")
+        before = {p: (tmp_path / p).read_bytes() for p in (SURVIVOR, LOSER, "MEMORY.md")}
+        if workflow == "accepted":
+            assert (
+                api.apply_payload(target=tmp_path, proposal_id=proposal["id"], digest=proposal["digest"])["status"]
+                == "committed"
+            )
+            _project(tmp_path, vault, capsys)
+            assert not (projection / "Previous.md").exists()
+            current = (projection / "Current.md").read_text()
+            assert "cedar assertion" in current and "juniper" not in current
+            return
+        with pytest.raises(api.ProposalError):
+            api.apply_payload(target=tmp_path, proposal_id=proposal["id"], digest=proposal["digest"])
+    assert {p: (tmp_path / p).read_bytes() for p in before} == before
+    _project(tmp_path, vault, capsys)
+    assert (projection / "Previous.md").is_file()
+    assert "cedar assertion" in (projection / "Current.md").read_text()
