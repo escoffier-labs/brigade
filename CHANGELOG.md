@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `brigade context preview` reports scoped Codex 0.160.0 instruction selection and cumulative byte accounting from supplied settings, with explicit unknown boundaries and separate advisory limits. (#1564)
 - Worklore Python clients can read and resume bounded item or filtered global event history pages using the Hub's existing cursors and authorization. (#1595)
 - Memory recall accepts bounded explicit queries through its Python APIs and standalone module and uses stable repository hints for conventional linked worktrees. Existing fallback and recall limits remain. Production CLI query wiring, retrieval evaluation, and repeat-search telemetry remain follow-up work. (#1563)
 - MCP plan, sync, and doctor report versioned field fidelity separately from transaction success, with complete Codex/OpenCode contracts and explicit unevaluated adapters. Security field losses refuse the transaction, while nonsecurity omissions remain visible warnings. Doctor assesses default project targets without writing native files. Malformed nonblank JSON and all selected invalid target plans, including those behind global stdio acknowledgment, refuse the transaction. Ordinary JSON blank-file compatibility and strict Cursor/Kimi user diagnostics remain intact. Native-auth collisions remain doctor warnings so operator sync can write safe siblings with exit 1. Explicit `oauth: false` remains protected from loss. (#1561)
