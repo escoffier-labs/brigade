@@ -41,6 +41,47 @@ def test_nt_dirfd_available_only_on_windows() -> None:
     assert ledger._nt_dirfd_available() is (sys.platform == "win32")
 
 
+@pytest.mark.parametrize("create_flags, disposition", [(0, 1), (os.O_CREAT, 3), (os.O_CREAT | os.O_EXCL, 2)])
+def test_nt_file_create_append_preserves_crt_flags_without_truncation(monkeypatch, create_flags, disposition):
+    from types import SimpleNamespace
+
+    opened = {}
+    monkeypatch.setattr(nt_dirfd, "_require_api", lambda: SimpleNamespace(CloseHandle=lambda handle: None))
+
+    def create(api, parent, name, **kwargs):
+        opened.update(kwargs)
+        return 123
+
+    monkeypatch.setattr(nt_dirfd, "_nt_create", create)
+    monkeypatch.setattr(nt_dirfd, "_reject_reparse", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nt_dirfd, "_handle_to_fd", lambda api, handle, flags: opened.update(flags=flags) or 42)
+    assert nt_dirfd.open_file(1, "history.jsonl", os.O_WRONLY | create_flags | os.O_APPEND) == 42
+    assert opened["disposition"] == disposition  # OPEN / OPEN_IF / CREATE, never OVERWRITE_IF
+    assert opened["flags"] & os.O_APPEND
+
+
+@pytest.mark.parametrize("access_mode", [os.O_WRONLY, os.O_RDWR])
+def test_nt_append_requests_kernel_append_only_access(monkeypatch, access_mode):
+    from types import SimpleNamespace
+
+    opened = {}
+    monkeypatch.setattr(nt_dirfd, "_require_api", lambda: SimpleNamespace(CloseHandle=lambda handle: None))
+
+    def create(api, parent, name, **kwargs):
+        opened.update(kwargs)
+        return 123
+
+    monkeypatch.setattr(nt_dirfd, "_nt_create", create)
+    monkeypatch.setattr(nt_dirfd, "_reject_reparse", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nt_dirfd, "_handle_to_fd", lambda *args: 42)
+    assert nt_dirfd.open_file(1, "history.jsonl", access_mode | os.O_APPEND) == 42
+    # Win32 FILE_APPEND_DATA=4 without FILE_WRITE_DATA=2 prevents overwrites.
+    assert opened["access"] & 4
+    assert not opened["access"] & 2
+    if access_mode == os.O_RDWR:
+        assert opened["access"] & 1  # FILE_READ_DATA remains available.
+
+
 def test_nt_dirfd_api_binder_does_not_nameerror() -> None:
     """Regression: nested class-body assignment raised NameError on Windows CI."""
     api = nt_dirfd._bind_api_namespace()

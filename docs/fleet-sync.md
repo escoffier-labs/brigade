@@ -45,9 +45,9 @@ ever logged or rendered:
   `brigade fleet claims` work on every machine.
 - **The admin token is the control plane.** The one shared bearer from
   before (`BRIGADE_FLEET_TOKEN` / `--token-file` on the hub, `token_file`
-  on a client) manages `/nodes`, reads `/status` and `/claims`, and enrols
-  the dashboard cookie. The cookie derived from the admin token reads the
-  dashboards and edits the roster page, and rotating the hub token revokes it.
+  on a client) manages `/nodes`, reads `/status` and `/claims`, and mints
+  dashboard enrollment codes. Browser sessions are independent read-only
+  credentials, with fixed expiry and individual revocation.
   It may post events or claims under *any* `node_id`
   only when the hub runs with `brigade fleet serve --allow-admin-writes`
   (off by default), which is the explicit switch for a fleet that is still
@@ -62,9 +62,7 @@ ever logged or rendered:
   keeps honest clients from stealing each other's claims (a same-basename
   workspace, a cloned node identity), and any enrolled node may still
   `force`-release a claim — attributed to its own `node_id`, which is the
-  difference from before. Everything else on the hub (Tailscale-only bind,
-  plain HTTP on the encrypted tailnet, dashboard cookie derived from the
-  admin token) is unchanged.
+  difference from before. Dashboard session authority is described below.
 
 ## Decisions (closed)
 
@@ -110,7 +108,8 @@ Hub (`src/brigade/fleet_hub.py`):
 - `GET /deck/roster`, `POST /deck/roster` — the hub roster page (spec:
   `docs/phase-fleet-roster-deck-page.md`). Read with the admin bearer, the
   dashboard cookie, or a trusted Tailscale identity (read-only). Save with
-  the admin bearer or the dashboard cookie only; the form carries a CSRF
+  an admin Authorization bearer header only. Cookies and trusted identities
+  cannot edit, and their pages contain no admin CSRF value. The form carries a CSRF
   token derived from the admin token, the roster revision, and the
   preference row's `updated_at`. One Save is one `BEGIN IMMEDIATE`
   transaction: seat on/off and consumer defaults bump the roster revision
@@ -305,22 +304,76 @@ phone over Tailscale:
   and filtering are plain HTML + query params and work with JavaScript off;
   refresh is a `<meta http-equiv="refresh" content="10">`. The inline
   script only ticks elapsed timers and adds a client-side text filter.
-- Same bearer auth as the JSON endpoints, plus a cookie for phone use: open
-  the page once with `?token=<fleet token>` and the hub answers a 303 to the
-  same URL without the token and sets `brigade_fleet_view` (HttpOnly,
-  SameSite=Strict, 30 days). The cookie value is an HMAC of the token, never
-  the token, and it authorizes only the HTML routes: the cookie derived from the
-  admin token reads the dashboards and edits the roster page (never
-  `/status`, `/claims`, or `/events`), and rotating the hub token revokes it.
-  Tradeoff: the token transits once in a URL (it
-  lands in that device's browser history; the hub logs nothing) and the
-  cookie is a 30-day capability on that device — treat the device
-  like a tailnet member, and rotate the token if it is lost. Tailscale
-  encrypts the link, so the cookie is not marked `Secure` (the hub is plain
-  HTTP on the tailnet).
-- No token, cookie value, or claim holder token is ever rendered; the
-  response carries the same CSP / no-store / no-referrer headers as
-  `brigade center serve`.
+- Admin bearer headers can read HTML and enable roster/policy editors.
+  Browser sessions and trusted Tailscale identities read HTML only. A cookie
+  never authorizes a JSON API or an HTML mutation, even with valid CSRF and
+  Origin headers. CLI edits remain available through `fleet models set`,
+  `fleet preference set` and `fleet policy` commands.
+
+### Browser enrollment and lost-device revocation
+
+On an administrator's configured client, run:
+
+```bash
+brigade fleet enroll --label "phone"
+```
+
+The command prints a URL containing a random single-use code valid for exactly
+five minutes. Open it on the intended device and confirm the form. GET only
+shows confirmation, so a link preview cannot consume the code. POST requires
+same-origin browser signals. Browsers sending neither Origin nor
+`Sec-Fetch-Site: same-origin` cannot enroll. The code is a transferable
+read-only capability until consumed or expired, so keep the printed URL private.
+The admin bearer never appears in a generated URL. Bearer query enrollment is
+refused on all HTML routes, including when another credential is present.
+
+Confirmation creates a separate random session credential in the host-only
+`brigade_fleet_view` cookie with Path=/, HttpOnly, SameSite=Strict, and an
+absolute 30-day expiry. Page reads check the database for live expiry and
+revocation without extending that expiry. Only credential digests are stored.
+The fixed redirect is `/deck`. Old HMAC cookies cease authenticating on upgrade,
+so existing devices must enroll again. Rotating the admin bearer leaves these
+sessions valid and individually revocable.
+
+```bash
+brigade fleet sessions --dashboard
+brigade fleet sessions --dashboard --all --json
+brigade fleet sessions --dashboard --after SESSION_ID
+brigade fleet sessions --dashboard --revoke SESSION_ID
+```
+
+List and revoke each unwanted session by its non-secret id and optional device
+label. Listings return safe metadata only. Active pages contain at most 100
+records, with `next_after` in JSON and a next-page command in text. `--all`
+includes revoked and expired records. Repeat revocation preserves its original
+timestamp. During an incident, repeat listing from page one because concurrent
+insertions before the cursor can be missed. These commands require the admin
+token and never fall back to a node credential. Unadorned `fleet sessions` and
+its `--all` and JSON behavior still describe interactive editor presence.
+
+Both the configured hub URL and an optional `fleet enroll --base-url` must be
+absolute HTTPS origins, or loopback HTTP origins, with no credentials, extra
+path, query or fragment. `--base-url` supports a browser-facing HTTPS proxy URL
+when administration uses loopback HTTP. The client disables proxy environment
+settings, follows no redirects, and caps response reads at 128 KiB.
+
+Secure is set for an actual TLS connection. HTTPS termination at a local proxy
+requires `fleet serve --trust-forwarded-proto`, a numeric loopback bind and an
+immediate loopback peer. The proxy must preserve the browser-facing Host and
+overwrite client-supplied X-Forwarded-Proto with one exact `https` value.
+Duplicate, comma-separated or unknown values do not assert HTTPS. Direct HTTP
+ignores forwarding headers by default. X-Forwarded-Host/Port are never trusted.
+This setting is independent of `--trust-tailscale-identity`, which still grants
+HTML reads only. Local processes are inside this proxy trust boundary.
+
+Schema 23 adds dashboard enrollment and session tables at startup, preserving
+node, event, claim and interactive presence rows. An older binary refuses this
+newer schema on rollback. No migration is performed by enrollment requests.
+
+HTML views omit bearers, session credentials and claim holder tokens. Enrollment
+codes appear only in authenticated mint responses, private enrollment URLs and
+the escaped hidden confirmation field. Enrollment responses carry no-store
+and no-referrer headers.
 
 ## Phase 4 claims
 

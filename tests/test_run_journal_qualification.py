@@ -1,6 +1,7 @@
 """Cross-boundary qualification of journal acceptance, replay and projection."""
 
 from copy import deepcopy
+from contextlib import nullcontext
 import errno
 import json
 import os
@@ -8,10 +9,22 @@ import select
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 
 import pytest
 
-from brigade import aboyeur, run_checkpoint, run_events, run_journal, run_lifecycle, run_projector, runguard
+from brigade import (
+    aboyeur,
+    dirfd,
+    run_checkpoint,
+    run_dirfd,
+    run_events,
+    run_journal,
+    run_lifecycle,
+    run_projector,
+    runguard,
+)
+from brigade.work_cmd import nt_dirfd
 
 RUN_ID = "20260727-153045-a1b2c3d4"
 RECORDED_AT = "2026-07-27T15:30:45.123456Z"
@@ -235,6 +248,199 @@ def test_same_key_process_race_has_one_record_and_consistent_result(tmp_path, co
     replay = _append(path, event_type=accepted.event_type, payload=accepted.payload, key="shared-request", previous=0)
     assert replay.to_dict() == accepted.to_dict()
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["pathname", "bound-directory"])
+def test_crlf_recovery_preserves_complete_bytes_and_quarantines_exact_suffix(tmp_path, monkeypatch, bound):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    first = _append(path)
+    complete = path.read_bytes().rstrip(b"\r\n") + b"\r\n"
+    partial = b'{"incomplete":\r'
+    path.write_bytes(complete + partial)
+
+    binding = run_dirfd.bound_run_dir(tmp_path) if bound else nullcontext()
+    with binding, monkeypatch.context() as patch:
+        if os.name == "posix":
+            # Model CRT translation on real descriptors, not on recovery itself.
+            # The fixture fits in one journal read, so CRLF cannot straddle chunks.
+            binary_flag = 1 << 30
+            real_open, real_read, real_write, real_close = os.open, os.read, os.write, os.close
+            text_fds = set()
+
+            def crt_open(opened_path, flags, mode=0o777, *, dir_fd=None):
+                fd = real_open(opened_path, flags & ~binary_flag, mode, dir_fd=dir_fd)
+                text_fds.discard(fd)
+                if not flags & binary_flag:
+                    text_fds.add(fd)
+                return fd
+
+            def crt_read(fd, size):
+                data = real_read(fd, size)
+                return data.replace(b"\r\n", b"\n") if fd in text_fds else data
+
+            def crt_write(fd, data):
+                physical = data.replace(b"\n", b"\r\n") if fd in text_fds else data
+                written = real_write(fd, physical)
+                return len(data) if written == len(physical) else written
+
+            def crt_close(fd):
+                try:
+                    return real_close(fd)
+                finally:
+                    text_fds.discard(fd)
+
+            patch.setattr(os, "O_BINARY", binary_flag, raising=False)
+            patch.setattr(os, "open", crt_open)
+            patch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {crt_open})
+            patch.setattr(os, "read", crt_read)
+            patch.setattr(os, "write", crt_write)
+            patch.setattr(os, "close", crt_close)
+
+        report = run_journal.read_journal_bounded(path)
+        assert report.events == [first] and report.chain_errors == []
+        assert report.partial_tail == partial
+        recovery = run_journal.recover_partial_tail(path, tmp_path / "quarantine")
+        assert recovery.partial_bytes == partial
+        assert recovery.quarantine_path.read_bytes() == partial
+        assert path.read_bytes() == complete
+
+        second = _append(
+            path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1
+        )
+        appended = path.read_bytes()[len(complete) :]
+        assert appended.endswith(b"\n") and b"\r" not in appended
+        assert path.read_bytes() == complete + appended
+        report = run_journal.read_journal_bounded(path)
+        assert report.events == [first, second] and report.chain_errors == [] and report.partial_tail is None
+
+
+def test_nt_bound_recovery_then_append_preserves_accepted_bytes(tmp_path, monkeypatch):
+    """Use real NT calls on Windows, translating only the OS boundary on POSIX."""
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    first = _append(path)
+    complete = path.read_bytes()
+    partial = b'{"incomplete":'
+    path.write_bytes(complete + partial)
+
+    if sys.platform != "win32":
+        import fcntl
+        import stat
+
+        real_open_child = dirfd.open_child_file
+        monkeypatch.setattr(nt_dirfd, "_require_api", lambda: SimpleNamespace(CloseHandle=os.close))
+
+        def create(api, parent, name, *, access, disposition, options, attributes):
+            nt_dirfd.validate_component(name)
+            flags = os.O_NOFOLLOW
+            if access & 1 and access & (2 | 4):
+                flags |= os.O_RDWR
+            elif access & (2 | 4):
+                flags |= os.O_WRONLY
+            if disposition == 2:  # FILE_CREATE
+                flags |= os.O_CREAT | os.O_EXCL
+            elif disposition == 3:  # FILE_OPEN_IF
+                flags |= os.O_CREAT
+            else:
+                assert disposition == 1  # FILE_OPEN
+            return os.open(name, flags, 0o600, dir_fd=parent)
+
+        def reject_reparse(api, handle, *, expected_directory):
+            assert not expected_directory
+            assert stat.S_ISREG(os.fstat(handle).st_mode)
+
+        def convert(api, handle, flags):
+            current = fcntl.fcntl(handle, fcntl.F_GETFL)
+            fcntl.fcntl(handle, fcntl.F_SETFL, current | (flags & os.O_APPEND))
+            return handle
+
+        def open_child(parent, name, flags, mode=0o600):
+            if flags & os.O_DIRECTORY:
+                return real_open_child(parent, name, flags, mode)
+            return nt_dirfd.open_file(parent, name, flags, mode)
+
+        monkeypatch.setattr(nt_dirfd, "_nt_create", create)
+        monkeypatch.setattr(nt_dirfd, "_reject_reparse", reject_reparse)
+        monkeypatch.setattr(nt_dirfd, "_handle_to_fd", convert)
+        monkeypatch.setattr(dirfd, "open_child_file", open_child)
+
+    with run_dirfd.bound_run_dir(tmp_path) as bound:
+        assert bound is not None
+        recovery = run_journal.recover_partial_tail(path, tmp_path / "quarantine")
+        assert recovery.partial_bytes == partial
+        assert recovery.quarantine_path.read_bytes() == partial
+        assert path.read_bytes() == complete
+        second = _append(
+            path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1
+        )
+        assert path.read_bytes().startswith(complete)
+        report = run_journal.read_journal_bounded(path)
+        assert report.events == [first, second] and report.chain_errors == [] and report.partial_tail is None
+
+
+def test_bound_recovery_directory_handles_without_posix_flag(tmp_path, monkeypatch):
+    """Recovery owns its directory fd, while the binding keeps its cached fd."""
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    first = _append(path)
+    complete = path.read_bytes()
+    partial = b'{"incomplete":'
+    quarantine = tmp_path / "quarantine"
+    quarantine.mkdir(mode=0o700)
+
+    if sys.platform != "win32":
+        import stat
+
+        # Model the missing POSIX flag and NT's file-only open contract.
+        monkeypatch.setattr(run_journal, "_O_DIRECTORY", 1 << 29)
+        monkeypatch.setattr(run_journal, "_HAS_O_DIRECTORY", False)
+        real_open_file = dirfd.open_child_file
+
+        def file_only_open(parent, name, flags, mode=0o600):
+            fd = real_open_file(parent, name, flags, mode)
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                os.close(fd)
+                raise IsADirectoryError("path component is a directory")
+            return fd
+
+        monkeypatch.setattr(dirfd, "open_child_file", file_only_open)
+
+    with run_dirfd.bound_run_dir(tmp_path) as bound:
+        assert bound is not None
+        parent_fd = bound.dir_fd()
+        bound.dir_fd("events")
+        cached_fd = bound.dir_fd("quarantine")
+        held_identity = os.fstat(cached_fd)
+        opened = []
+        real_open_directory = dirfd.open_child_directory
+
+        def track_directory(parent, name):
+            fd = real_open_directory(parent, name)
+            opened.append(fd)
+            return fd
+
+        monkeypatch.setattr(dirfd, "open_child_directory", track_directory)
+        # Repeat after callers close their temporary descriptors. The held
+        # parent and cached quarantine handle must remain usable both times.
+        for _ in range(2):
+            path.write_bytes(complete + partial)
+            recovery = run_journal.recover_partial_tail(path, quarantine)
+            assert recovery.partial_bytes == partial
+            assert recovery.quarantine_path.read_bytes() == partial
+            assert path.read_bytes() == complete
+            os.fstat(parent_fd)
+            current = os.fstat(cached_fd)
+            assert (current.st_dev, current.st_ino) == (held_identity.st_dev, held_identity.st_ino)
+            assert opened
+            for fd in opened:
+                with pytest.raises(OSError):
+                    os.fstat(fd)
+            opened.clear()
+
+        second = _append(
+            path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1
+        )
+        assert path.read_bytes().startswith(complete)
+        report = run_journal.read_journal_bounded(path)
+        assert report.events == [first, second] and report.chain_errors == [] and report.partial_tail is None
 
 
 def test_short_write_recovery_then_retry_accepts_exactly_once(tmp_path, monkeypatch):

@@ -126,9 +126,19 @@ def _seed(hub) -> None:
 
 
 def _login_cookie(hub) -> str:
-    status, headers, _text = _request(hub, "GET", f"/deck/roster?token={TOKEN}")
+    status, _headers, text = _request(
+        hub, "POST", "/dashboard/enrollment", headers={**_bearer(), "Content-Type": "application/json"}, body=b"{}"
+    )
+    assert status == 201
+    code = json.loads(text)["code"]
+    status, headers, _text = _request(
+        hub,
+        "POST",
+        "/enroll",
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"},
+        body=f"code={code}".encode(),
+    )
     assert status == 303
-    assert headers["location"] == "/deck/roster"
     return headers["set-cookie"].split(";")[0]
 
 
@@ -141,17 +151,19 @@ def _enroll_node(db) -> str:
     return node_token
 
 
-def _form(hub, fields: dict, *, cookie: str | None = None, extra: dict | None = None) -> tuple:
+def _form(hub, fields: dict, *, cookie: str | None = None, admin: bool = False, extra: dict | None = None) -> tuple:
     headers = {"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"}
     if cookie:
         headers["Cookie"] = cookie
+    if admin:
+        headers.update(_bearer())
     headers.update(extra or {})
     return _request(hub, "POST", "/deck/roster", headers=headers, body=urlencode(fields, doseq=True).encode())
 
 
 def _current_form(hub, cookie: str) -> dict:
     """The field set a browser would submit from the freshly rendered page."""
-    status, _headers, page = _request(hub, "GET", "/deck/roster", headers={"Cookie": cookie})
+    status, _headers, page = _request(hub, "GET", "/deck/roster", headers=_bearer())
     assert status == 200
     fields = {"csrf": fleet_hub_roster_page.csrf_value(TOKEN)}
     fields["expected_revision"] = re.search(r'name="expected_revision" value="(\d+)"', page).group(1)
@@ -203,9 +215,9 @@ def test_roster_page_requires_auth_and_renders_every_block(tmp_path):
         _seed(hub)
         status, _headers, unauth_page = _request(hub, "GET", "/deck/roster")
         assert status == 401
-        assert "edits the roster" in unauth_page
+        assert "brigade fleet enroll" in unauth_page
         cookie = _login_cookie(hub)
-        status, headers, page = _request(hub, "GET", "/deck/roster", headers={"Cookie": cookie})
+        status, headers, page = _request(hub, "GET", "/deck/roster", headers=_bearer())
         assert status == 200
         assert headers["cache-control"] == "no-store"
         assert 'http-equiv="refresh"' not in page
@@ -269,8 +281,8 @@ def test_roster_post_auth_csrf_origin_and_body_rules(tmp_path):
         node_token = _enroll_node(db)
         assert _form(hub, good, extra={"Authorization": f"Bearer {node_token}"})[0] == 403
         bad_csrf = {**good, "csrf": "0" * 64}
-        assert _form(hub, bad_csrf, cookie=cookie)[0] == 403
-        assert _form(hub, good, cookie=cookie, extra={"Sec-Fetch-Site": "cross-site"})[0] == 403
+        assert _form(hub, bad_csrf, admin=True)[0] == 403
+        assert _form(hub, good, admin=True, extra={"Sec-Fetch-Site": "cross-site"})[0] == 403
         headers = {"Cookie": cookie, "Content-Type": "application/json"}
         assert _request(hub, "POST", "/deck/roster", headers=headers, body=b"{}")[0] == 415
         big = urlencode({**good, "notes": "x" * (64 * 1024)}).encode()
@@ -285,7 +297,7 @@ def test_roster_post_auth_csrf_origin_and_body_rules(tmp_path):
             assert _request(hub, "POST", "/deck/roster", headers=headers, body=big)[0] == 413
         except (BrokenPipeError, ConnectionResetError):
             pass
-        assert _form(hub, {**good, "expected_revision": "x"}, cookie=cookie)[0] == 400
+        assert _form(hub, {**good, "expected_revision": "x"}, admin=True)[0] == 400
 
 
 def test_roster_post_tailscale_identity_cannot_write(tmp_path):
@@ -313,7 +325,7 @@ def test_roster_post_stale_revision_and_stale_preference_write_nothing(tmp_path)
         )
         assert status == 200, payload
         before = _tables(db)
-        status, _headers, page = _form(hub, {**form, "role.security": "daybreak"}, cookie=cookie)
+        status, _headers, page = _form(hub, {**form, "role.security": "daybreak"}, admin=True)
         assert status == 409
         assert "changed underneath you" in page
         assert _tables(db) == before
@@ -324,7 +336,7 @@ def test_roster_post_stale_revision_and_stale_preference_write_nothing(tmp_path)
         status, payload = _json(hub, "PUT", "/preference", {"impl": "agy_flash"})
         assert status == 200, payload
         before = _tables(db)
-        status, _headers, page = _form(hub, {**form, "role.security": "daybreak"}, cookie=cookie)
+        status, _headers, page = _form(hub, {**form, "role.security": "daybreak"}, admin=True)
         assert status == 409
         assert "run preference changed" in page
         assert _tables(db) == before
@@ -346,7 +358,7 @@ def test_roster_post_applies_everything_in_one_revision(tmp_path):
         form["role.security"] = "daybreak"
         form["default.brigade-run"] = "agy_flash"
         form["notes"] = "cursor via Other Models only"
-        status, headers, _text = _form(hub, form, cookie=cookie)
+        status, headers, _text = _form(hub, form, admin=True)
         assert status == 303
         assert headers["location"] == f"/deck/roster?saved={start + 1}"
         assert _revision(hub) == start + 1
@@ -363,7 +375,7 @@ def test_roster_post_applies_everything_in_one_revision(tmp_path):
         _status, _headers, cloud = _request(hub, "GET", "/cloud", headers=_bearer())
         providers = {row["provider"]: row["enabled"] for row in json.loads(cloud)["policy"]["providers"]}
         assert providers["claude"] is True and providers["codex"] is False
-        page = _request(hub, "GET", f"/deck/roster?saved={start + 1}", headers={"Cookie": cookie})[2]
+        page = _request(hub, "GET", f"/deck/roster?saved={start + 1}", headers=_bearer())[2]
         assert f"saved as revision {start + 1}" in page
         assert "by deck-form" in page
         conn = sqlite3.connect(db)
@@ -371,7 +383,7 @@ def test_roster_post_applies_everything_in_one_revision(tmp_path):
         conn.close()
         # A no-op save leaves the revision alone.
         again = _current_form(hub, cookie)
-        status, headers, _text = _form(hub, again, cookie=cookie)
+        status, headers, _text = _form(hub, again, admin=True)
         assert status == 303 and headers["location"] == f"/deck/roster?saved={start + 1}"
         assert _revision(hub) == start + 1
 
@@ -384,7 +396,7 @@ def test_roster_post_rejects_role_on_seat_disabled_in_same_save(tmp_path):
         form.pop("seat.daybreak")
         form["role.security"] = "daybreak"
         before = _tables(db)
-        status, _headers, page = _form(hub, form, cookie=cookie)
+        status, _headers, page = _form(hub, form, admin=True)
         assert status == 422
         assert "role security names seat daybreak" in page
         assert 'name="role.security"' in page and '<option value="daybreak" selected' in page
@@ -392,12 +404,12 @@ def test_roster_post_rejects_role_on_seat_disabled_in_same_save(tmp_path):
         # A consumer default needs the consumer's binding.
         form = _current_form(hub, cookie)
         form["default.t3-fleet"] = "agy_flash"
-        status, _headers, page = _form(hub, form, cookie=cookie)
+        status, _headers, page = _form(hub, form, admin=True)
         assert status == 422 and "no t3-fleet binding" in page
         # Notes still go through the secret regexes.
         form = _current_form(hub, cookie)
         form["notes"] = "see keepass://roster for the real pins"
-        status, _headers, page = _form(hub, form, cookie=cookie)
+        status, _headers, page = _form(hub, form, admin=True)
         assert status == 422 and "home paths" in page
         assert "keepass://roster" in page  # echoed back, escaped, so the operator can fix it
         assert _tables(db) == before
@@ -413,7 +425,7 @@ def test_roster_post_stale_cloud_lane_writes_nothing(tmp_path):
         )
         assert status == 200, payload
         before = _tables(db)
-        status, _headers, page = _form(hub, {**form, "notes": "unrelated edit"}, cookie=cookie)
+        status, _headers, page = _form(hub, {**form, "notes": "unrelated edit"}, admin=True)
         assert status == 409
         assert "cloud lanes changed" in page
         assert _tables(db) == before
@@ -421,7 +433,7 @@ def test_roster_post_stale_cloud_lane_writes_nothing(tmp_path):
         form = _current_form(hub, cookie)
         assert "cloud.jules" not in form
         form["cloud.jules"] = "1"
-        status, _headers, _text = _form(hub, form, cookie=cookie)
+        status, _headers, _text = _form(hub, form, admin=True)
         assert status == 303
         _status, _headers, cloud = _request(hub, "GET", "/cloud", headers=_bearer())
         jules = next(row for row in json.loads(cloud)["policy"]["providers"] if row["provider"] == "jules")
@@ -563,7 +575,6 @@ def test_active_authority_dropdown_edits_reach_the_policy_preview_and_save(tmp_p
     with _hub(tmp_path) as (hub, db):
         _seed(hub)
         revision = _seed_policy(db)
-        cookie = _login_cookie(hub)
         page = _page(db, activation=active, policy_csrf=fleet_policy_page.csrf_value(TOKEN))
         fields = _form_fields(page, 'name="field.role_impl"')
         fields["field.role_impl"] = "seat-beta"
@@ -576,7 +587,7 @@ def test_active_authority_dropdown_edits_reach_the_policy_preview_and_save(tmp_p
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Sec-Fetch-Site": "same-origin",
-                "Cookie": cookie,
+                "Authorization": f"Bearer {TOKEN}",
             },
             body=urlencode(fields).encode(),
         )
@@ -597,7 +608,7 @@ def test_active_authority_dropdown_edits_reach_the_policy_preview_and_save(tmp_p
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Sec-Fetch-Site": "same-origin",
-                "Cookie": cookie,
+                "Authorization": f"Bearer {TOKEN}",
             },
             body=urlencode(dict(re.findall(r'name="([^"]+)" value="([^"]*)">', confirm))).encode(),
         )

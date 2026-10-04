@@ -132,7 +132,7 @@ def test_append_event_writes_canonical_line_with_fsync(tmp_path, monkeypatch):
 
     lines = journal_path.read_bytes().splitlines(keepends=True)
     assert len(lines) == 1
-    assert lines[0] == run_events.canonical_bytes(event.to_dict()) + os.linesep.encode("ascii")
+    assert lines[0] == run_events.canonical_bytes(event.to_dict()) + b"\n"
     assert fsync_calls
 
 
