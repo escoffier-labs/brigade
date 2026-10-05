@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import http.client
 import json
 import re
@@ -286,6 +287,306 @@ def test_retired_policy_seats_are_excluded_even_when_current_role_or_default(tmp
         for selector in re.findall(r"<select .*?</select>", page, re.S):
             assert 'value="seat-alpha"' not in selector
             assert 'value="seat-beta"' in selector
+
+
+def test_legacy_save_keeps_retired_assignments_until_the_operator_changes_them(tmp_path):
+    """A browser roundtrip of the legacy form must not clear a retired role or default."""
+    with _hub(tmp_path) as (hub, db):
+        _seed(hub)
+        cookie = _login_cookie(hub)
+        fields = _current_form(hub, cookie)
+        fields["default.brigade-run"] = "coder"
+        fields["default.t3-fleet"] = "coder"
+        assert _form(hub, fields, cookie=cookie)[0] == 303
+        status, payload = _json(
+            hub,
+            "POST",
+            "/models",
+            {"action": "retire", "provider": "openai", "family": "gpt-5.6", "expected_revision": _revision(hub)},
+        )
+        assert status == 200, payload
+        page = _request(hub, "GET", "/deck/roster", headers={"Cookie": cookie})[2]
+        for selector in re.findall(r"<select .*?</select>", page, re.S):
+            assert 'value="coder"' not in selector
+        # An unrelated edit keeps every retired assignment.
+        fields = _current_form(hub, cookie)
+        assert fields["role.impl"] == fleet_hub_roster_page.KEEP_CURRENT
+        fields["role.scout"] = "daybreak"
+        status, _headers, text = _form(hub, fields, cookie=cookie)
+        assert status == 303, text
+        conn = fleet_hub.open_db(db)
+        try:
+            preference = fleet_hub_preference.get_run_preference(conn)
+            assert (preference["impl"], preference["review"], preference["chef"]) == ("coder", "coder", "coder")
+            assert preference["scout"] == "daybreak"
+            defaults = dict(conn.execute("SELECT consumer, seat FROM model_consumer_defaults").fetchall())
+            assert defaults == {"brigade-run": "coder", "t3-fleet": "coder"}
+        finally:
+            conn.close()
+        # A retired seat is never accepted as a new choice.
+        fields = _current_form(hub, cookie)
+        fields["role.security"] = "coder"
+        before = _tables(db)
+        status, _headers, text = _form(hub, fields, cookie=cookie)
+        assert status == 422 and "role security names seat coder" in text
+        assert _tables(db) == before
+        # Clearing or replacing a kept value is still deliberate and allowed.
+        fields = _current_form(hub, cookie)
+        fields["role.impl"] = ""
+        fields["default.brigade-run"] = "daybreak"
+        status, _headers, text = _form(hub, fields, cookie=cookie)
+        assert status == 303, text
+        conn = fleet_hub.open_db(db)
+        try:
+            preference = fleet_hub_preference.get_run_preference(conn)
+            assert "impl" not in preference or not preference["impl"]
+            assert preference["review"] == "coder"
+            defaults = dict(conn.execute("SELECT consumer, seat FROM model_consumer_defaults").fetchall())
+            assert defaults == {"brigade-run": "daybreak", "t3-fleet": "coder"}
+        finally:
+            conn.close()
+
+
+def _post_policy(hub, cookie: str, fields: dict) -> tuple:
+    return _request(
+        hub,
+        "POST",
+        "/deck/policy",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Sec-Fetch-Site": "same-origin",
+            "Cookie": cookie,
+        },
+        body=urlencode(fields).encode(),
+    )
+
+
+def _preview_and_save(hub, cookie: str, fields: dict) -> None:
+    status, _headers, previewed = _post_policy(hub, cookie, {**fields, "action": "preview"})
+    assert status == 200 and "Confirm save" in previewed, previewed
+    confirm = next(part for part in previewed.split("<form ")[1:] if "confirm-save" in part).split("</form>")[0]
+    status, _headers, text = _post_policy(hub, cookie, dict(re.findall(r'name="([^"]+)" value="([^"]*)">', confirm)))
+    assert status == 303, text
+
+
+def test_authoritative_save_keeps_retired_roles_and_both_admission_defaults(tmp_path):
+    """The policy-backed dropdowns roundtrip a retired current value instead of clearing it."""
+    active = fleet_policy_page.Activation("active", "activated", "authority-owned", "test")
+    admission = f"field.role_{fleet_policy_page.ADMISSION_ROLE}"
+    with _hub(tmp_path) as (hub, db):
+        conn = fleet_hub.open_db(db)
+        try:
+            document = json.loads(json.dumps(POLICY_DOCUMENT))
+            document["seats"]["seat-alpha"].update(provider="openai", model="gpt-5.4")
+            document["seats"]["seat-gamma"] = {"provider": "provider-c", "model": "model-c-1"}
+            for consumer in fleet_hub_roster_page.CONSUMERS:
+                document["consumers"][consumer]["default_patches"] = {"roles": {"admission_default": "seat-alpha"}}
+            fleet_hub_policy.save_policy(
+                conn,
+                document,
+                expected_version=fleet_hub_policy.current_policy(conn)["revision"],
+                actor="operator",
+                reason="retired roundtrip seed",
+            )
+        finally:
+            conn.close()
+        cookie = _login_cookie(hub)
+
+        def page() -> str:
+            return _page(db, activation=active, policy_csrf=fleet_policy_page.csrf_value(TOKEN))
+
+        def current() -> dict:
+            conn = fleet_hub.open_db(db)
+            try:
+                return fleet_hub_policy.current_policy(conn)["document"]
+            finally:
+                conn.close()
+
+        rendered = page()
+        for selector in re.findall(r"<select .*?</select>", rendered, re.S):
+            assert 'value="seat-alpha"' not in selector
+        policy_editor = _request(hub, "GET", "/deck/policy", headers={"Cookie": cookie})[2]
+        for selector in re.findall(r"<select .*?</select>", policy_editor, re.S):
+            assert 'value="seat-alpha"' not in selector
+        editor = _editor_fields(policy_editor, 'name="scope" value="defaults"')
+        assert editor["field.role_impl"] == fleet_hub_roster_page.KEEP_CURRENT
+        # Unrelated role edit: impl stays on the retired seat.
+        fields = _form_fields(rendered, 'name="field.role_impl"')
+        assert fields["field.role_impl"] == fleet_hub_roster_page.KEEP_CURRENT
+        fields["field.role_review"] = "seat-gamma"
+        _preview_and_save(hub, cookie, fields)
+        roles = current()["defaults"]["roles"]
+        assert roles["impl"] == "seat-alpha" and roles["review"] == "seat-gamma"
+        # Each consumer's admission form keeps its retired value on an untouched submit.
+        rendered = page()
+        for consumer in fleet_hub_roster_page.CONSUMERS:
+            fields = _form_fields(rendered, f'name="target" value="{consumer}"')
+            assert fields[admission] == fleet_hub_roster_page.KEEP_CURRENT
+            submission = fleet_policy_page.parse_form(urlencode({**fields, "action": "preview"}).encode())
+            built = fleet_policy_page.build_document(current(), submission)
+            assert built["consumers"][consumer]["default_patches"]["roles"]["admission_default"] == "seat-alpha"
+        # Deliberate replacement and clearing still go through.
+        fields = _form_fields(rendered, 'name="target" value="t3-fleet"')
+        fields[admission] = "seat-beta"
+        _preview_and_save(hub, cookie, fields)
+        fields = _form_fields(page(), 'name="field.role_impl"')
+        fields["field.role_impl"] = ""
+        _preview_and_save(hub, cookie, fields)
+        document = current()
+        assert "impl" not in document["defaults"]["roles"]
+        assert document["consumers"]["t3-fleet"]["default_patches"]["roles"]["admission_default"] == "seat-beta"
+        assert document["consumers"]["brigade-run"]["default_patches"]["roles"]["admission_default"] == "seat-alpha"
+
+
+def _editor_fields(page: str, *markers: str) -> dict:
+    """What a browser submits from the preview page's editor form: not the confirm form.
+
+    Covers every enabled control the editor renders. A ``<select>`` with no
+    ``selected`` option submits its first option, as a browser would.
+    """
+    form = next(
+        part
+        for part in page.split("<form ")[1:]
+        if "confirm-save" not in part.split(">", 1)[0]
+        and all(marker in part.split("</form>", 1)[0] for marker in markers)
+    ).split("</form>", 1)[0]
+    fields: dict[str, str] = {}
+    for tag in re.findall(r"<input [^>]*>", form):
+        if " disabled" in tag:
+            continue
+        name = re.search(r'name="([^"]+)"', tag)
+        value = re.search(r'value="([^"]*)"', tag)
+        kind = re.search(r'type="([^"]+)"', tag)
+        if name is None or (kind and kind.group(1) == "checkbox" and " checked" not in tag):
+            continue
+        fields[name.group(1)] = html.unescape(value.group(1)) if value else ""
+    for name, body in re.findall(r'<textarea name="([^"]+)"[^>]*>(.*?)</textarea>', form, re.S):
+        fields[name] = html.unescape(body)
+    for name, attrs, body in re.findall(r'<select name="([^"]+)"([^>]*)>(.*?)</select>', form, re.S):
+        if " disabled" in attrs:
+            continue
+        options = re.findall(r'<option value="([^"]*)"( selected)?', body)
+        chosen = [value for value, mark in options if mark] or [options[0][0]]
+        fields[name] = html.unescape(chosen[-1])
+    return fields
+
+
+def test_preview_editor_resubmit_keeps_retired_roles_and_both_admission_defaults(tmp_path):
+    """Preview, edit the re-rendered editor, preview again, confirm: retired values survive."""
+    active = fleet_policy_page.Activation("active", "activated", "authority-owned", "test")
+    admission = f"field.role_{fleet_policy_page.ADMISSION_ROLE}"
+    with _hub(tmp_path) as (hub, db):
+        conn = fleet_hub.open_db(db)
+        try:
+            document = json.loads(json.dumps(POLICY_DOCUMENT))
+            document["seats"]["seat-alpha"].update(provider="openai", model="gpt-5.4")
+            document["seats"]["seat-gamma"] = {"provider": "provider-c", "model": "model-c-1"}
+            for consumer in fleet_hub_roster_page.CONSUMERS:
+                document["consumers"][consumer]["default_patches"] = {"roles": {"admission_default": "seat-alpha"}}
+            fleet_hub_policy.save_policy(
+                conn,
+                document,
+                expected_version=fleet_hub_policy.current_policy(conn)["revision"],
+                actor="operator",
+                reason="retired preview-editor seed",
+            )
+        finally:
+            conn.close()
+        cookie = _login_cookie(hub)
+
+        def page() -> str:
+            return _page(db, activation=active, policy_csrf=fleet_policy_page.csrf_value(TOKEN))
+
+        def current() -> dict:
+            conn = fleet_hub.open_db(db)
+            try:
+                return fleet_hub_policy.current_policy(conn)["document"]
+            finally:
+                conn.close()
+
+        def preview(fields: dict) -> str:
+            status, _headers, previewed = _post_policy(hub, cookie, {**fields, "action": "preview"})
+            assert status == 200 and "Confirm save" in previewed, previewed
+            return previewed
+
+        # Defaults: the roster form previews, the operator edits the editor and previews again.
+        fields = _form_fields(page(), 'name="field.role_impl"')
+        assert fields["field.role_impl"] == fleet_hub_roster_page.KEEP_CURRENT
+        fields["field.role_review"] = "seat-gamma"
+        previewed = preview(fields)
+        editor = _editor_fields(previewed, '<select name="field.role_impl"', 'name="scope" value="defaults"')
+        assert editor["field.role_impl"] == fleet_hub_roster_page.KEEP_CURRENT
+        assert re.search(r'<option value="@keep-current" selected>seat-alpha \(retired', previewed)
+        editor["field.role_chef"] = "seat-beta"
+        _preview_and_save(hub, cookie, editor)
+        roles = current()["defaults"]["roles"]
+        assert (roles["impl"], roles["review"], roles["chef"]) == ("seat-alpha", "seat-gamma", "seat-beta")
+
+        # Both consumers: an edited admission editor still keeps its retired default.
+        for consumer in fleet_hub_roster_page.CONSUMERS:
+            fields = _form_fields(page(), f'name="target" value="{consumer}"')
+            assert fields[admission] == fleet_hub_roster_page.KEEP_CURRENT
+            previewed = preview(fields)
+            markers = (f'<select name="{admission}"', f'name="target" value="{consumer}"')
+            editor = _editor_fields(previewed, *markers)
+            assert editor[admission] == fleet_hub_roster_page.KEEP_CURRENT
+            editor["field.role_review"] = "seat-gamma"
+            _preview_and_save(hub, cookie, editor)
+            patches = current()["consumers"][consumer]["default_patches"]["roles"]
+            assert patches["admission_default"] == "seat-alpha" and patches["review"] == "seat-gamma"
+
+        # An explicit clear and a replacement made in the preview editor still land.
+        previewed = preview(_form_fields(page(), 'name="field.role_impl"'))
+        editor = _editor_fields(previewed, '<select name="field.role_impl"', 'name="scope" value="defaults"')
+        editor["field.role_impl"] = ""
+        _preview_and_save(hub, cookie, editor)
+        previewed = preview(_form_fields(page(), 'name="target" value="t3-fleet"'))
+        editor = _editor_fields(previewed, f'<select name="{admission}"', 'name="target" value="t3-fleet"')
+        editor[admission] = "seat-beta"
+        _preview_and_save(hub, cookie, editor)
+        document = current()
+        assert "impl" not in document["defaults"]["roles"]
+        assert document["consumers"]["t3-fleet"]["default_patches"]["roles"]["admission_default"] == "seat-beta"
+        assert document["consumers"]["brigade-run"]["default_patches"]["roles"]["admission_default"] == "seat-alpha"
+
+
+def test_policy_page_refuses_new_retired_role_and_admission_assignments(tmp_path):
+    with _hub(tmp_path) as (hub, db):
+        conn = fleet_hub.open_db(db)
+        try:
+            document = json.loads(json.dumps(POLICY_DOCUMENT))
+            document["seats"]["seat-alpha"].update(provider="openai", model="gpt-5.4")
+            fleet_hub_policy.save_policy(
+                conn,
+                document,
+                expected_version=fleet_hub_policy.current_policy(conn)["revision"],
+                actor="operator",
+                reason="retired assignment guard seed",
+            )
+            before = fleet_hub_policy.current_policy(conn)
+        finally:
+            conn.close()
+        cookie = _login_cookie(hub)
+        for scope, target, role in (
+            ("defaults", "", "review"),
+            ("consumer", "brigade-run", "admission_default"),
+            ("consumer", "t3-fleet", "admission_default"),
+        ):
+            fields = {
+                "scope": scope,
+                "target": target,
+                "expected_version": before["revision"],
+                "csrf": fleet_policy_page.csrf_value(TOKEN),
+                f"field.role_{role}": "seat-alpha",
+            }
+            for action in ("preview", "save"):
+                status, _headers, text = _post_policy(hub, cookie, {**fields, "action": action})
+                assert status == 422 and "retired" in text, text
+            conn = fleet_hub.open_db(db)
+            try:
+                assert fleet_hub_policy.current_policy(conn) == before
+            finally:
+                conn.close()
 
 
 def test_roster_page_read_only_under_tailscale_identity(tmp_path):

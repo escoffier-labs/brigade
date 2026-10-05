@@ -25,6 +25,10 @@ SEAT_TEXT_FIELDS = ("provider", "model", "effort", "cost_class", "retention", "q
 SEAT_INT_FIELDS = ("concurrency", "timeout_seconds")
 SEAT_LIST_FIELDS = ("eligible_machines", "fallback")
 SEAT_BOOL_FIELDS = ("training_allowed", "enabled", "pinned")
+# A seat dropdown whose stored value is retired renders this instead of the
+# seat name: it means "leave the stored leaf alone". It cannot be a seat name
+# (names start with an alphanumeric), so it never selects a retired seat anew.
+KEEP_CURRENT = "@keep-current"
 _TRUE = frozenset({"1", "yes", "true", "on"})
 _FALSE = frozenset({"0", "no", "false"})
 
@@ -145,7 +149,7 @@ def _patch_from(fields: Mapping[str, str], prefix: str) -> dict[str, Any] | None
     tree: dict[str, dict[str, Any]] = {"roles": {}, "data": {}, "execution": {}}
     for role in POLICY_ROLES:
         raw = fields.get(f"{prefix}role_{role}")
-        if raw is None:
+        if raw is None or raw.strip() == KEEP_CURRENT:
             continue
         touched = True
         value = raw.strip()
@@ -191,7 +195,11 @@ def _merge_patch(existing: Mapping[str, Any], fields: Mapping[str, str], prefix:
 
 def _submitted_keys(fields: Mapping[str, str], prefix: str, section: str) -> list[str]:
     if section == "roles":
-        return [role for role in POLICY_ROLES if f"{prefix}role_{role}" in fields]
+        return [
+            role
+            for role in POLICY_ROLES
+            if f"{prefix}role_{role}" in fields and fields[f"{prefix}role_{role}"].strip() != KEEP_CURRENT
+        ]
     if section == "data":
         return [name for name in ("allow_training", "retention", "allow_free") if f"{prefix}data_{name}" in fields]
     return [name for name in ("machine", "concurrency", "timeout_seconds") if f"{prefix}execution_{name}" in fields]

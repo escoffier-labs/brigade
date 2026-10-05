@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Roster and policy forms preserve retired role assignments and admission defaults during unrelated edits and repeated previews. Operators can clear or replace them, while retired seats remain unavailable as new choices. (#1580)
 - Fleet model lists and roster-page seat tables and selectors exclude retired seats, while separate retirement history and signed admission identities remain available. Retired seats can be disabled safely, and re-enabling stays blocked without deleting run or audit records. (#1571)
 - OpenCode MCP import and sync preserve existing flat, nested, and mixed layouts, native activation, timeouts, and live credentials, and refuse duplicate locations before mutation. Safe imports omit sensitive literal headers from canonical storage and retain their live values during adoption. Sync now projects explicit canonical timeout seconds as native milliseconds. (#1560)
 - Codex MCP sync preserves native HTTP authentication fields, tracks managed header removal, and reports authentication combinations that cannot be projected safely. (#1559)

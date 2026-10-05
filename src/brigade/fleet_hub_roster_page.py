@@ -13,13 +13,14 @@ import hashlib
 import hmac
 import html
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs
 
 from . import fleet_command_deck, fleet_hub, fleet_hub_model_roster, fleet_hub_preference, fleet_model_roster
 from . import fleet_hub_policy, fleet_policy_page, run_preference
+from .fleet_policy_form import KEEP_CURRENT as KEEP_CURRENT
 
 CSRF_PURPOSE = b"brigade.fleet-roster-form.v1"
 MAX_FORM_BYTES = 64 * 1024
@@ -239,8 +240,10 @@ def _select(name: str, current: str, seats: tuple[SeatRow, ...], *, editable: bo
     """One ``<select>``: ``(unset)`` first, usable seats, then an optgroup of the rest."""
     usable: list[str] = []
     rest: list[str] = []
+    retired: set[str] = set()
     for row in seats:
         if row.retired:
+            retired.add(row.seat)
             continue
         bound = True if binding is None else bool(getattr(row, binding))
         (usable if row.enabled and not row.retired and bound else rest).append(row.seat)
@@ -252,6 +255,8 @@ def _select(name: str, current: str, seats: tuple[SeatRow, ...], *, editable: bo
 
     parts = [f'<select name="{_esc(name)}"{disabled}>']
     parts.append(f'<option value=""{" selected" if not current else ""}>(unset)</option>')
+    if current in retired:
+        parts.append(fleet_policy_page.keep_option(current))
     parts.extend(option(seat) for seat in usable)
     if rest:
         label = "disabled" if binding is None else "no binding"
@@ -270,6 +275,8 @@ def _checkbox(name: str, checked: bool, *, editable: bool) -> str:
 def _policy_select(name: str, current: str, seats: tuple[str, ...], *, retired_seats: tuple[str, ...] = ()) -> str:
     """A seat dropdown backed by the policy document's own seat names."""
     options = [f'<option value=""{" selected" if not current else ""}>(unset)</option>']
+    if current and current in retired_seats:
+        options.append(fleet_policy_page.keep_option(current))
     options.extend(
         f'<option value="{_esc(seat)}"{" selected" if seat == current else ""}>{_esc(seat)}</option>' for seat in seats
     )
@@ -403,11 +410,11 @@ def render(
     cloud_on = {row.provider for row in view.cloud if row.enabled}
     defaults = dict(view.defaults)
     if submission is not None:
-        roles.update(submission.roles)
+        roles.update({role: seat for role, seat in submission.roles.items() if seat != KEEP_CURRENT})
         notes = submission.notes
         seats_on = set(submission.seats_on)
         cloud_on = set(submission.cloud_on)
-        defaults.update(submission.defaults)
+        defaults.update({consumer: seat for consumer, seat in submission.defaults.items() if seat != KEEP_CURRENT})
     # A live policy authority owns roles and the admission fallback. The
     # controls stay usable, but they stop writing the legacy store: they submit
     # a scoped preview against the policy document instead. If the document
@@ -579,19 +586,43 @@ def _utc_now() -> str:
     return fleet_hub._utc_now()
 
 
+def _resolve_kept(view: RosterView, submission: Submission) -> Submission:
+    """``KEEP_CURRENT`` stands for whatever is stored now; it never names a seat itself."""
+    return replace(
+        submission,
+        roles={
+            role: (view.preference.get(role) or "") if seat == KEEP_CURRENT else seat
+            for role, seat in submission.roles.items()
+        },
+        defaults={
+            consumer: (view.defaults.get(consumer) or "") if seat == KEEP_CURRENT else seat
+            for consumer, seat in submission.defaults.items()
+        },
+    )
+
+
 def _validate(view: RosterView, submission: Submission) -> tuple[str | None, dict[str, bool]]:
-    """``(error, target_enabled)``; ``error`` is ``None`` when the save is admissible."""
+    """``(error, target_enabled)``; ``error`` is ``None`` when the save is admissible.
+
+    A retired seat is never a new choice, but an assignment that already names
+    one and is left unchanged is history, not a selection, so it is let through.
+    """
     known = {row.seat: row for row in view.seats}
     target = {name: (name in submission.seats_on) and not row.retired for name, row in known.items()}
+
+    def kept(seat: str, stored: str | None) -> bool:
+        row = known.get(seat)
+        return row is not None and row.retired and seat == (stored or "")
+
     for role, seat in submission.roles.items():
-        if not seat:
+        if not seat or kept(seat, view.preference.get(role)):
             continue
         if seat not in known:
             return f"role {role} names unknown seat {seat}", target
         if not target[seat]:
             return f"role {role} names seat {seat}, which is disabled or retired in this save", target
     for consumer, seat in submission.defaults.items():
-        if not seat:
+        if not seat or kept(seat, view.defaults.get(consumer)):
             continue
         if seat not in known:
             return f"default {consumer} names unknown seat {seat}", target
@@ -667,6 +698,7 @@ def apply(
     conn.execute("BEGIN IMMEDIATE")
     try:
         view = load_view(conn, config, activation=activation)
+        submission = _resolve_kept(view, submission)
         refusal = _authority_refusal(view, submission)
         if refusal is not None:
             conn.rollback()
