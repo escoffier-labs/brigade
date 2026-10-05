@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -15,18 +15,42 @@ import time
 from concurrent.futures import FIRST_COMPLETED, CancelledError, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from threading import Lock
 from typing import Callable, Sequence
 
 
-CREATE_NEW_PROCESS_GROUP = 0x00000200
-CREATE_NO_WINDOW = 0x08000000
+if __package__:
+    from .windows_job import (
+        AGGREGATE_DEADLINE,
+        DRIVER_ABORT,
+        FILE_TIMEOUT,
+        REASONS,
+        CleanupError,
+        LaunchClosed,
+        ProcessTracker,
+        console_handler,
+        launch_process,
+    )
+else:
+    from windows_job import (
+        AGGREGATE_DEADLINE,
+        DRIVER_ABORT,
+        FILE_TIMEOUT,
+        REASONS,
+        CleanupError,
+        LaunchClosed,
+        ProcessTracker,
+        console_handler,
+        launch_process,
+    )
 CONSOLE_INTERRUPT = 0xC000013A
 CLEANUP_TIMEOUT_SECONDS = 15
 PROCESS_POLL_SECONDS = 1
 GIT_TIMEOUT_SECONDS = 5
 DEFAULT_TIMEOUT_SECONDS = 900
 DEFAULT_JOB_TIMEOUT_SECONDS = 3300
+DEFAULT_STARTUP_RESERVE_SECONDS = 120
+DEFAULT_FINALIZE_RESERVE_SECONDS = 300
+REPLACE_ATTEMPTS = 4
 DEFAULT_WORKERS = 6
 INITIAL_ALLOWLIST_ENTRIES = 182
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +64,8 @@ class FileResult:
     returncode: int | None
     seconds: float
     log: str
+    diagnostic: str | None = None
+    cleanup_error: str | None = None
 
 
 def is_windows() -> bool:
@@ -48,8 +74,7 @@ def is_windows() -> bool:
 
 def install_console_handler() -> None:
     """Keep Ctrl+C directed at the driver from terminating the parent."""
-    if not ctypes.windll.kernel32.SetConsoleCtrlHandler(None, True):
-        raise RuntimeError("SetConsoleCtrlHandler(None, True) failed")
+    console_handler()
 
 
 def portable_test_name(value: str) -> str:
@@ -190,70 +215,40 @@ def _child_environment() -> dict[str, str]:
     return environment
 
 
-def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
-    try:
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            capture_output=True,
-            check=False,
-            timeout=CLEANUP_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    try:
-        process.wait(timeout=CLEANUP_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        pass
-
-
-class ProcessTracker:
-    def __init__(self) -> None:
-        self._lock = Lock()
-        self._processes: dict[int, subprocess.Popen[bytes]] = {}
-        self._closing = False
-
-    def add(self, process: subprocess.Popen[bytes]) -> bool:
-        with self._lock:
-            if not self._closing:
-                self._processes[process.pid] = process
-                return True
-        _kill_process_tree(process)
-        return False
-
-    def is_closing(self) -> bool:
-        with self._lock:
-            return self._closing
-
-    def discard(self, process: subprocess.Popen[bytes]) -> None:
-        with self._lock:
-            self._processes.pop(process.pid, None)
-
-    def kill_all(self) -> None:
-        with self._lock:
-            self._closing = True
-            processes = list(self._processes.values())
-            self._processes.clear()
-        for process in processes:
-            _kill_process_tree(process)
+class CleanupUnconfirmed(CleanupError):
+    """Job emptiness or worker finalization could not be confirmed."""
 
 
 def _wait_for_process(
-    process: subprocess.Popen[bytes],
+    process,
     *,
     timeout_seconds: int,
-    tracker: ProcessTracker | None,
+    tracker: ProcessTracker,
     clock: Callable[[], float] = time.monotonic,
-) -> int | None:
-    deadline = clock() + timeout_seconds
+    aggregate_deadline: float | None = None,
+) -> int:
+    file_deadline = clock() + timeout_seconds
+    deadline = min(file_deadline, aggregate_deadline) if aggregate_deadline is not None else file_deadline
     while True:
-        if tracker is not None and tracker.is_closing():
-            _kill_process_tree(process)
-            return None
         remaining = deadline - clock()
-        if remaining <= 0:
-            _kill_process_tree(process)
-            return None
+        if remaining <= 0 or tracker.is_closing():
+            cause = (
+                tracker.closing_cause
+                if tracker.is_closing()
+                else (
+                    AGGREGATE_DEADLINE
+                    if aggregate_deadline is not None and aggregate_deadline <= file_deadline
+                    else FILE_TIMEOUT
+                )
+            )
+            process.terminate(cause)
+            cleanup_deadline = tracker.cleanup_deadline(time.monotonic() + CLEANUP_TIMEOUT_SECONDS)
+            try:
+                return process.wait(timeout=max(0.0, cleanup_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                raise CleanupUnconfirmed("cleanup unconfirmed: root process wait expired") from None
         try:
+            # A natural code retains its meaning even when shutdown races this wait.
             return process.wait(timeout=min(remaining, PROCESS_POLL_SECONDS))
         except subprocess.TimeoutExpired:
             continue
@@ -269,6 +264,7 @@ def run_file(
     timeout_seconds: int,
     tracker: ProcessTracker | None = None,
     clock: Callable[[], float] = time.monotonic,
+    deadline: float | None = None,
 ) -> FileResult:
     if timeout_seconds < 1:
         raise ValueError("timeout must be positive")
@@ -294,45 +290,90 @@ def run_file(
         f"--basetemp={basetemp}",
         f"tests/{name}",
     ]
+    tracker = tracker if tracker is not None else ProcessTracker()
+    returncode = None
+    process = None
+    if deadline is not None and clock() >= deadline:
+        return _deadline_failure(name, output_dir, unstarted=True)
     try:
         with log.open("wb") as stream:
-            process = subprocess.Popen(
-                argv,
-                cwd=repo,
+            process = launch_process(
+                python=python.resolve(),
+                args=argv[1:],
+                cwd=repo.resolve(),
                 env=_child_environment(),
-                stdin=subprocess.DEVNULL,
-                stdout=stream,
-                stderr=subprocess.STDOUT,
-                creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+                log=stream,
+                tracker=tracker,
+                deadline=deadline,
+                clock=clock,
             )
-            if tracker is not None:
-                if not tracker.add(process):
-                    return _deadline_failure(name, output_dir)
             try:
-                returncode = _wait_for_process(process, timeout_seconds=timeout_seconds, tracker=tracker, clock=clock)
+                returncode = _wait_for_process(
+                    process,
+                    timeout_seconds=timeout_seconds,
+                    tracker=tracker,
+                    clock=clock,
+                    aggregate_deadline=deadline,
+                )
             finally:
-                if tracker is not None:
-                    tracker.discard(process)
-            if returncode is None:
-                return FileResult(name, "timeout", None, clock() - started, log.relative_to(output_dir).as_posix())
+                try:
+                    process.finish(
+                        deadline=tracker.cleanup_deadline(time.monotonic() + CLEANUP_TIMEOUT_SECONDS),
+                        natural=returncode is not None and returncode not in REASONS,
+                    )
+                finally:
+                    process.close()
+    except LaunchClosed:
+        return _deadline_failure(name, output_dir, unstarted=True)
+    except CleanupError as exc:
+        if returncode is not None and returncode not in REASONS and _status(returncode) == "failed":
+            return FileResult(
+                name,
+                "failed",
+                returncode,
+                clock() - started,
+                log.relative_to(output_dir).as_posix(),
+                str(exc),
+                cleanup_error=str(exc),
+            )
+        return FileResult(
+            name, "cleanup-unconfirmed", None, clock() - started, log.relative_to(output_dir).as_posix(), str(exc)
+        )
     except OSError as exc:
-        log.write_text(f"launch failure: {exc!r}\n", encoding="utf-8")
-        return FileResult(name, "launch-failure", None, clock() - started, log.relative_to(output_dir).as_posix())
-    return FileResult(name, _status(returncode), returncode, clock() - started, log.relative_to(output_dir).as_posix())
+        return FileResult(
+            name,
+            "launch-failure",
+            None,
+            clock() - started,
+            log.relative_to(output_dir).as_posix(),
+            f"launch failure: {exc!r}",
+        )
+    status = REASONS.get(returncode, _status(returncode))
+    diagnostic = None
+    if returncode in REASONS:
+        diagnostic = f"job termination: {status}"
+    if process.token.leaked_descendants:
+        diagnostic = f"{diagnostic + '; ' if diagnostic else ''}leaked_descendants={process.token.leaked_descendants}"
+    return FileResult(name, status, returncode, clock() - started, log.relative_to(output_dir).as_posix(), diagnostic)
 
 
 def _launch_failure(name: str, output_dir: Path, error: Exception) -> FileResult:
     log = output_dir / "logs" / f"{name}.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    log.write_text(f"launch failure: {error!r}\n", encoding="utf-8")
-    return FileResult(name, "launch-failure", None, 0.0, log.relative_to(output_dir).as_posix())
+    return FileResult(
+        name, "launch-failure", None, 0.0, log.relative_to(output_dir).as_posix(), f"launch failure: {error!r}"
+    )
 
 
-def _deadline_failure(name: str, output_dir: Path) -> FileResult:
+def _deadline_failure(name: str, output_dir: Path, *, unstarted: bool = False) -> FileResult:
     log = output_dir / "logs" / f"{name}.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    log.write_text("driver aggregate deadline exceeded\n", encoding="utf-8")
-    return FileResult(name, "deadline-exceeded", None, 0.0, log.relative_to(output_dir).as_posix())
+    return FileResult(
+        name,
+        "unstarted" if unstarted else "deadline-exceeded",
+        None,
+        0.0,
+        log.relative_to(output_dir).as_posix(),
+        "driver aggregate deadline exceeded",
+    )
 
 
 def result_from_future(future: Future[FileResult], name: str, output_dir: Path) -> FileResult:
@@ -362,12 +403,15 @@ def run_files(
         raise ValueError("workers must be at least 1")
     if not files:
         raise RuntimeError("no test files discovered")
+    validate_allowlist(serial, files)
     parallel = [name for name in files if name not in serial]
     serial_files = [name for name in files if name in serial]
     tracker = ProcessTracker()
     results: list[FileResult] = []
 
     def runner(name: str) -> FileResult:
+        if tracker.is_closing() or clock() >= deadline:
+            return _deadline_failure(name, output_dir, unstarted=True)
         return run_file(
             name,
             repo=repo,
@@ -377,11 +421,14 @@ def run_files(
             timeout_seconds=timeout_seconds,
             tracker=tracker,
             clock=clock,
+            deadline=deadline,
         )
 
     def safe_runner(name: str) -> FileResult:
         try:
             return runner(name)
+        except CleanupUnconfirmed as exc:
+            return FileResult(name, "cleanup-unconfirmed", None, 0.0, f"logs/{name}.log", str(exc))
         except Exception as exc:  # noqa: BLE001 - each file must yield a failure row.
             return _launch_failure(name, output_dir, exc)
 
@@ -392,15 +439,16 @@ def run_files(
 
     parallel_pending = parallel
     serial_pending = serial_files
-    serial_phase = False
+    serial_phase = bool(serial_pending)
     active: dict[Future[FileResult], str] = {}
     executor = ThreadPoolExecutor(max_workers=workers)
     expired = False
     cleanup_required = False
     try:
         while parallel_pending or serial_pending or active:
-            if not active and not parallel_pending and serial_pending:
-                serial_phase = True
+            # Drain the isolated phase completely before submitting parallel work.
+            if serial_phase and not active and not serial_pending:
+                serial_phase = False
             pending = serial_pending if serial_phase else parallel_pending
             limit = 1 if serial_phase else workers
             while pending and len(active) < limit and clock() < deadline:
@@ -422,40 +470,104 @@ def run_files(
             for future in done:
                 name = active.pop(future)
                 record(result_from_future(future, name, output_dir))
+                if results[-1].status == "cleanup-unconfirmed" or results[-1].cleanup_error is not None:
+                    raise CleanupUnconfirmed("cleanup unconfirmed; retaining temporary target")
     except BaseException:
         cleanup_required = True
         raise
     finally:
         if expired or cleanup_required:
-            active_names = list(active.values())
             for future in active:
                 future.cancel()
-            tracker.kill_all()
+            cleanup_deadline = time.monotonic() + CLEANUP_TIMEOUT_SECONDS
+            cleanup_error = None
+            try:
+                tracker.kill_all(
+                    cause=AGGREGATE_DEADLINE if expired else DRIVER_ABORT,
+                    deadline=cleanup_deadline,
+                )
+            except CleanupError as exc:
+                cleanup_error = exc
+            for future in active:
+                if not future.cancelled():
+                    try:
+                        future.result(timeout=max(0.0, cleanup_deadline - time.monotonic()))
+                    except Exception:  # noqa: BLE001 - inspect actual completion below.
+                        pass
             if expired:
-                for name in [*active_names, *parallel_pending, *serial_pending]:
-                    record(_deadline_failure(name, output_dir))
+                for future, name in active.items():
+                    if future.done():
+                        record(result_from_future(future, name, output_dir))
+                    else:
+                        record(_deadline_failure(name, output_dir))
+                for name in [*parallel_pending, *serial_pending]:
+                    record(_deadline_failure(name, output_dir, unstarted=True))
+            executor.shutdown(wait=False, cancel_futures=True)
+            if cleanup_error or any(not future.done() for future in active):
+                raise CleanupUnconfirmed(
+                    f"cleanup unconfirmed; retained temporary target: {temp_root}"
+                ) from cleanup_error
         executor.shutdown(wait=False, cancel_futures=expired or cleanup_required)
     return sorted(results, key=lambda result: result.name)
 
 
 def regressions(results: list[FileResult], allowlist: set[str]) -> list[FileResult]:
-    infra_errors = {"console-interrupt", "deadline-exceeded", "launch-failure"}
+    return [result for result in results if result.status in {"failed", "timeout"} and result.name not in allowlist]
+
+
+def infrastructure_results(results: list[FileResult]) -> list[FileResult]:
     return [
         result
         for result in results
-        if result.status != "passed" and (result.status in infra_errors or result.name not in allowlist)
+        if result.status not in {"passed", "failed", "timeout"} or result.cleanup_error is not None
     ]
 
 
-def write_record(path: Path, *, results: list[FileResult], driver_error: str | None = None) -> None:
+def write_record(
+    path: Path,
+    *,
+    results: list[FileResult],
+    driver_error: str | None = None,
+    expected_files: list[str] | None = None,
+    status: str = "running",
+    retained_temp_root: Path | None = None,
+    aggregate_deadline_exceeded: bool = False,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, object] = {
-        "schema": "brigade.windows_pytest.v1",
+        "schema": "brigade.windows_pytest.v2",
+        "status": status,
+        "aggregate_deadline_exceeded": aggregate_deadline_exceeded,
+        "expected_files": expected_files,
+        "expected_count": None if expected_files is None else len(expected_files),
+        "completed_count": sum(result.status in {"passed", "failed", "timeout"} for result in results),
+        "accounted_count": len(results),
         "results": [asdict(result) for result in results],
     }
     if driver_error is not None:
         payload["driver_error"] = driver_error
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if retained_temp_root is not None:
+        payload["retained_temp_root"] = str(retained_temp_root)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        for attempt in range(REPLACE_ATTEMPTS):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -469,39 +581,78 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--job-timeout", type=int, default=DEFAULT_JOB_TIMEOUT_SECONDS)
+    parser.add_argument("--job-started-at", type=float, help="wall-clock epoch captured before CI checkout/setup")
+    parser.add_argument("--job-limit", type=float, default=3600)
+    parser.add_argument("--startup-reserve", type=float, default=DEFAULT_STARTUP_RESERVE_SECONDS)
+    parser.add_argument("--finalize-reserve", type=float, default=DEFAULT_FINALIZE_RESERVE_SECONDS)
     parser.add_argument("--base-ref", help="compare the allowlist with this pull request base commit")
     parser.add_argument("--serial", action="append", default=[], metavar="TEST_FILE")
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    entered_monotonic = time.monotonic()
+    entered_wall = time.time()
     args = parse_args(sys.argv[1:] if argv is None else argv)
     results: list[FileResult] = []
     partial_results: list[FileResult] = []
     temp_root: Path | None = None
     driver_error: str | None = None
+    files: list[str] | None = None
+    allowlist: set[str] = set()
+    status = "running"
+    aggregate_deadline_exceeded = False
 
     def record_progress(snapshot: list[FileResult]) -> None:
         partial_results[:] = snapshot
-        write_record(args.record, results=snapshot)
+        write_record(args.record, results=snapshot, expected_files=files)
 
     try:
+        if args.job_timeout < 1:
+            raise ValueError("job timeout must be positive")
+        if not math.isfinite(args.job_limit) or args.job_limit <= 0:
+            raise ValueError("job limit must be finite and positive")
+        if any(not math.isfinite(value) or value < 0 for value in (args.startup_reserve, args.finalize_reserve)):
+            raise ValueError("budget reserves must be finite and nonnegative")
+        allowance = float(args.job_timeout)
+        if args.job_started_at is not None:
+            if not math.isfinite(args.job_started_at) or not 0 <= args.job_started_at <= entered_wall:
+                raise ValueError("job started epoch must be finite, nonnegative and not in the future")
+            allowance = min(
+                allowance,
+                args.job_limit - (entered_wall - args.job_started_at) - args.startup_reserve - args.finalize_reserve,
+            )
+        deadline = entered_monotonic + allowance
+        write_record(args.record, results=[])
         if not is_windows():
             raise RuntimeError("windows_pytest.py must run on Windows")
         repo = args.repo.resolve()
         allowlist = load_allowlist(args.allowlist)
-        serial = {portable_test_name(name) for name in args.serial}
+        selectors = [portable_test_name(name) for name in args.serial]
+        if len(selectors) != len(set(selectors)):
+            raise ValueError("duplicate serial selectors")
+        serial = set(selectors)
         install_console_handler()
         if args.timeout < 1:
             raise ValueError("timeout must be positive")
-        if args.job_timeout < 1:
-            raise ValueError("job timeout must be positive")
+        if args.workers < 1:
+            raise ValueError("workers must be at least 1")
         files = discover_files(repo)
         validate_allowlist(allowlist, files)
+        unknown_serial = sorted(serial.difference(files))
+        if unknown_serial:
+            raise ValueError("serial selectors not discovered: " + ", ".join(unknown_serial))
+        record_progress([])
         if args.base_ref:
             check_allowlist_ratchet(allowlist, load_allowlist_from_ref(repo, args.base_ref, args.allowlist))
-        temp_root = make_temp_root(repo)
-        try:
+        if time.monotonic() >= deadline:
+            aggregate_deadline_exceeded = True
+            results = [_deadline_failure(name, args.record.parent, unstarted=True) for name in files]
+        else:
+            temp_root = make_temp_root(repo)
+            if not files:
+                shutil.rmtree(temp_root)
+                raise RuntimeError("no test files discovered")
             results = run_files(
                 files=files,
                 serial=serial,
@@ -511,32 +662,60 @@ def main(argv: Sequence[str] | None = None) -> int:
                 temp_root=temp_root,
                 workers=args.workers,
                 timeout_seconds=args.timeout,
-                deadline=time.monotonic() + args.job_timeout,
+                deadline=deadline,
                 on_result=record_progress,
             )
-        finally:
-            if temp_root is not None:
-                shutil.rmtree(temp_root, ignore_errors=True)
-    except Exception as exc:  # noqa: BLE001 - record any ordinary driver failure before exiting.
+            aggregate_deadline_exceeded = time.monotonic() >= deadline
+            if any(result.status == "cleanup-unconfirmed" or result.cleanup_error is not None for result in results):
+                raise CleanupUnconfirmed("cleanup unconfirmed; retaining temporary target")
+            # run_files returns only after its worker writers have finished.
+            shutil.rmtree(temp_root)
+        if not files:
+            raise RuntimeError("no test files discovered")
+        status = (
+            "complete"
+            if {result.name for result in results} == set(files)
+            and not infrastructure_results(results)
+            and not aggregate_deadline_exceeded
+            else "incomplete"
+        )
+    except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - persist partial coverage on driver failures.
         results = results or partial_results
-        driver_error = str(exc)
+        driver_error = str(exc) or type(exc).__name__
+        status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "error"
 
     try:
-        write_record(args.record, results=results, driver_error=driver_error)
+        write_record(
+            args.record,
+            results=results,
+            driver_error=driver_error,
+            expected_files=files,
+            status=status,
+            retained_temp_root=temp_root if temp_root is not None and temp_root.exists() else None,
+            aggregate_deadline_exceeded=aggregate_deadline_exceeded,
+        )
     except OSError as exc:
         print(f"windows pytest driver error: unable to write record: {exc}", file=sys.stderr)
         return 2
-    if driver_error is not None:
-        print(f"windows pytest driver error: {driver_error}", file=sys.stderr)
-        return 2
     failures = regressions(results, allowlist)
+    infra = infrastructure_results(results)
+    missing_count = len(set(files or []).difference(result.name for result in results))
+    allowlisted_failures = [
+        result for result in results if result.status in {"failed", "timeout"} and result.name in allowlist
+    ]
     removal_candidates = [result.name for result in results if result.status == "passed" and result.name in allowlist]
     print(
-        f"windows pytest: files={len(results)} regressions={len(failures)} removal_candidates={len(removal_candidates)}"
+        f"windows pytest: files={len(results)} regressions={len(failures)} removal_candidates={len(removal_candidates)} "
+        f"infrastructure_incomplete={len(infra) + missing_count + int(aggregate_deadline_exceeded)} "
+        f"allowlisted_failures={len(allowlisted_failures)} "
+        f"driver_errors={int(driver_error is not None)} status={status}"
     )
     if removal_candidates:
         print("allowlist removal candidates: " + ", ".join(removal_candidates))
-    return 1 if failures else 0
+    if driver_error is not None:
+        print(f"windows pytest driver error: {driver_error}", file=sys.stderr)
+        return 2
+    return 1 if failures or status != "complete" else 0
 
 
 if __name__ == "__main__":

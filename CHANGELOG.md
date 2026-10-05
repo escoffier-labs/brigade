@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Journal append results and exported event dictionaries detach nested payloads from caller-owned data so later mutations cannot change the accepted event copy. (#1565)
 - Journal, lifecycle, and control retries synchronize the existing event before acknowledging it again. Fresh appends also synchronize the events directory, and control retries preserve the original event without repeating transport. (#1565)
 - `brigade memory status` no longer counts an inbox's `TEMPLATE.md` or dotfiles as pending handoffs, so its pending count and oldest-pending age match `brigade handoff doctor`.
+- Windows per-file pytest now separates product regressions from incomplete infrastructure coverage, records atomic v2 progress and coverage counts, accounts for CI setup time, and runs validated serial selectors before parallel files. Each child now launches atomically into a noninheritable kill-on-close Windows job, with orphan cleanup, immutable termination causes, and a shared cleanup deadline. Launch and cleanup failures retain incomplete evidence and fail closed. (#1551)
+
 - Dashboard enrollment now uses five-minute single-use codes and independently revocable 30-day read-only browser sessions. Bearer query URLs and old HMAC cookies are refused. Browser cookies no longer edit roster/policy pages or access JSON APIs. `fleet enroll` and `fleet sessions --dashboard` support labeled devices, listing and revocation. (#1153)
 
 - Grok Bot scout feeds select issues with fewer failed attempts before retrying lower issue numbers. Hub previews report `listing=none` when queue state has not been fetched. (#1351)
