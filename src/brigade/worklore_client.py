@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import secrets
@@ -39,6 +40,9 @@ __all__ = [
     "create_item",
     "delete_link",
     "get_item",
+    "get_ownership",
+    "ownership_action",
+    "new_ownership_nonce",
     "import_batch",
     "link_execution",
     "list_item_links_all",
@@ -166,6 +170,7 @@ def _request(
     query: Mapping[str, str] | None = None,
     timeout: float = REQUEST_TIMEOUT_SECONDS,
     idempotency_key: str | None = None,
+    holder_nonce: str | None = None,
 ) -> dict[str, Any]:
     url = _hub_url() + path
     if query:
@@ -179,6 +184,16 @@ def _request(
         headers["If-Match"] = str(if_match)
     if idempotency_key is not None and str(idempotency_key) != "":
         headers["Idempotency-Key"] = str(idempotency_key)
+    if holder_nonce is not None:
+        # Only this fixed capability header is accepted, never arbitrary headers.
+        from .worklore_ownership import nonce_hash
+        from .worklore_validate import WorkloreValidationError
+
+        try:
+            nonce_hash(holder_nonce)
+        except WorkloreValidationError:
+            raise FleetClientError("invalid ownership holder nonce") from None
+        headers["X-Worklore-Holder"] = holder_nonce
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with _hub_open(request, timeout=timeout) as response:
@@ -225,6 +240,36 @@ def get_item(
     if links_cursor:
         query["links_cursor"] = links_cursor
     return _request("GET", _item_path(work_id), token=_token(), query=query or None)
+
+
+def new_ownership_nonce() -> str:
+    """Create a capability for the caller to retain privately, without persistence."""
+    return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii").rstrip("=")
+
+
+def get_ownership(work_id: str) -> dict[str, Any]:
+    """Read metadata using the same authentication preference as item reads."""
+    return _request("GET", _item_path(work_id, "ownership"), token=_token())
+
+
+def ownership_action(
+    work_id: str,
+    body: Mapping[str, Any],
+    *,
+    if_match: object,
+    idempotency_key: str,
+    holder_nonce: str | None = None,
+) -> dict[str, Any]:
+    """Submit an explicit node-authenticated ownership action with header-only nonce."""
+    return _request(
+        "POST",
+        _item_path(work_id, "ownership"),
+        token=_token(admin=False),
+        body=body,
+        if_match=if_match,
+        idempotency_key=idempotency_key,
+        holder_nonce=holder_nonce,
+    )
 
 
 def list_items(
