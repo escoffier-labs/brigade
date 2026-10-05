@@ -1941,7 +1941,9 @@ def repo_claim(
                     target,
                     outcome.detail,
                 )
-                if on_credential_failure is not None and not lease.stopped.is_set():
+                # terminate() admitted this callback under the authority lock;
+                # subsequent shutdown cannot discard the committed failure.
+                if on_credential_failure is not None:
                     try:
                         on_credential_failure(outcome.detail)
                     except Exception:

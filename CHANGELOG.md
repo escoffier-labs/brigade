@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Committed fleet claim-loss notification and its abort grace proceed independently of rejected-grant cleanup, while holder-fenced cleanup continues during blocking callbacks. Committed heartbeat credential failures retain their callback after shutdown. Failures arriving after shutdown remain suppressed. (#1219)
+
 - Fleet claims now expire local authority at the last confirmed request-start deadline, even while renewal is in flight. Late grants cannot revive authority and receive holder-fenced cleanup, delayed initial grants refuse admission, and continue mode stops renewing after expiry. Committed loss callbacks survive shutdown while delayed main-thread interrupts are suppressed. Ambiguous initial acquires retain orphan cleanup after a missing retry. Successful retries and delayed-grant refusals preserve two spaced cleanup releases despite earlier positive replies, with a nominal 12.5-second inline release budget. Server commits beyond that window remain possible (#1189). Cancellation is requested at expiry but does not prove worker termination before the hub lease ends. (#1219)
 
 - Windows journal writes preserve binary LF framing, and recovery preserves complete legacy CRLF records while quarantining the exact partial suffix. Bound recovery uses directory handles and supports nonexclusive creation and append. (#1565)

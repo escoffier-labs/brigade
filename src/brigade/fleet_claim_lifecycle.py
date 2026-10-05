@@ -89,11 +89,21 @@ class _ConfirmedClaimLease:
             if accepted:
                 self._deadline = candidate
                 self.condition.notify_all()
+        if reason is not None and on_rejected is not None:
+            # This transition owns the one-shot notification. Publish on a
+            # separate thread so neither a slow release nor a blocking loss
+            # callback delays the other; fenced cleanup stays on the heartbeat.
+            try:
+                _client().threading.Thread(
+                    target=lambda: self._publish(reason), name="brigade-fleet-claim-loss", daemon=True
+                ).start()
+            finally:
+                on_rejected()
+            return False
         try:
             if not accepted and on_rejected is not None:
                 # A successful but rejected request may have extended the
-                # hub row. Fence it off before notifying: the heartbeat can
-                # itself discover expiry, and its callback may block.
+                # hub row even if another thread already committed the loss.
                 on_rejected()
         finally:
             self._publish(reason)
