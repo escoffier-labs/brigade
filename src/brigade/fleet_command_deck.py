@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from brigade.fleet_deck_brands import (
+    BRANDS,
     UNKNOWN_BRAND,
     Brand,
     harness_brand,
@@ -223,12 +224,11 @@ def _badge_html(brand: Brand, raw_name: str) -> str:
     title = raw_name.strip() or UNKNOWN
     if brand.svg:
         return (
-            f'<span class="badge" style="background:{_esc(brand.accent)}" '
-            f'title="{_esc(title)}" aria-label="{_esc(brand.label)}">'
-            f"{brand.svg}</span>"
+            f'<span class="badge badge-color-{_esc(brand.accent[1:])}" '
+            f'title="{_esc(title)}" aria-label="{_esc(brand.label)}">' + brand.svg + "</span>"
         )
     return (
-        f'<span class="badge" style="background:{_esc(UNKNOWN_BRAND.accent)}" '
+        f'<span class="badge badge-color-{_esc(UNKNOWN_BRAND.accent[1:])}" '
         f'title="{_esc(title)}">{_esc(UNKNOWN_BRAND.label)}</span>'
     )
 
@@ -1508,8 +1508,16 @@ def _quota_effective_html(control_plane: ControlPlane) -> str:
     return f'<ul class="attention-list">{rows}</ul>'
 
 
-_STYLE = """
+# Classes and declarations come only from the fixed brand table, never names
+# supplied by a run or provider. The shared document stamps this style's nonce.
+_STYLE = (
+    "".join(
+        f".badge-color-{accent[1:]} {{ background: {accent}; }}\n"
+        for accent in sorted({brand.accent for brand in BRANDS.values()} | {UNKNOWN_BRAND.accent})
+    )
+    + """
 .stations { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.stations + .panel { margin-top: 16px; }
 .station-card { min-width: 0; padding: 16px; border: 1px solid var(--line-quiet); background: var(--surface); }
 .station-card > header { display: flex; align-items: start; justify-content: space-between; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line-quiet); }
 .capacity { color: var(--signal); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
@@ -1520,10 +1528,11 @@ _STYLE = """
 .tile-badges { display: flex; gap: 4px; justify-content: flex-end; margin: 4px 0 0; }
 .badge { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; min-height: 22px; padding: 2px 6px; border-radius: 999px; color: #fff; font-size: 11px; font-weight: 800; letter-spacing: .04em; text-align: center; white-space: nowrap; }
 .badge svg { width: 18px; height: 18px; display: block; }
+.badge svg mask { mask-type: alpha; }
 .tile-model { margin: 4px 0 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; text-align: right; }
 .cloud-worker-card h3 .badge, .attention-list li .badge { margin-right: 6px; }
 .tile-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; margin: 10px 0 0; color: var(--muted); font-size: 12px; }
-.tile-facts dt { color: var(--faint); }
+.tile-facts dt { color: var(--muted); }
 .tile-facts dd { min-width: 0; margin: 0; }
 .claim, .collision { margin: 10px 0 0; font-size: 12px; }
 .collision { color: var(--signal); font-weight: 800; }
@@ -1558,6 +1567,7 @@ th:nth-child(1) { width: 22%; } th:nth-child(2) { width: 20%; } th:nth-child(3) 
   .timeline li { grid-template-columns: 1fr; gap: 2px; }
 }
 """
+)
 
 _SCRIPT = (
     "function tickElapsed() {"
@@ -1590,7 +1600,7 @@ def render_deck(view: DeckView, *, nonce: str, now: datetime) -> str:
         '<header class="masthead"><div><p class="eyebrow">Fleet operations</p><h1>Command Deck</h1>',
         f'<p class="verdict">{_esc(verdict)}</p></div><p class="header-meta">'
         f"{total_busy}/{total_capacity} slots busy<br>{_esc(_stamp(now))}</p></header>",
-        '<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> <a href="/view/machines">machines board</a></nav>',
+        '<nav class="deck-nav" aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> <a href="/view/machines">machines board</a></nav>',
     ]
     if not view.stations:
         parts.append(

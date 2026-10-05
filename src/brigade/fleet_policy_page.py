@@ -1870,7 +1870,7 @@ def render(
         f'<p class="header-meta">{_esc(fleet_command_deck._stamp(now))}</p></header>'
     )
     parts.append(
-        '<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> '
+        '<nav class="deck-nav" aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> '
         '<a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> '
         '<a href="/view/machines">machines board</a></nav>'
     )

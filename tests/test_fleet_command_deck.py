@@ -767,7 +767,7 @@ def _start_hub(tmp_path, config: dict | None):
 def _request(hub, method: str, path: str, *, headers: dict | None = None, body=None):
     host, port = hub
     conn = http.client.HTTPConnection(host, port, timeout=5)
-    data = json.dumps(body).encode() if body is not None else None
+    data = body if isinstance(body, bytes) else json.dumps(body).encode() if body is not None else None
     conn.request(method, path, body=data, headers=headers or {})
     response = conn.getresponse()
     text = response.read().decode("utf-8")
@@ -781,7 +781,16 @@ def _bearer(extra: dict | None = None) -> dict:
 
 
 def _login_cookie(hub, path: str = "/") -> str:
-    status, headers, _text = _request(hub, "GET", f"{path}?token={TOKEN}")
+    status, _headers, text = _request(hub, "POST", "/dashboard/enrollment", headers=_bearer(), body={})
+    assert status == 201
+    code = json.loads(text)["code"]
+    status, headers, _text = _request(
+        hub,
+        "POST",
+        "/enroll",
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"},
+        body=f"code={code}".encode(),
+    )
     assert status == 303
     return headers["set-cookie"].split(";")[0]
 

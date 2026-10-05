@@ -44,3 +44,10 @@ def test_document_emits_shell_with_nonce_and_optional_refresh():
     assert '<meta http-equiv="refresh" content="10">' in refreshed
     assert ".x{}" in refreshed
     assert '<script nonce="n">tick();</script>' in refreshed
+
+
+def test_spacing_export_and_shared_component_alias_contract():
+    assert ui_theme.SPACING == (4, 8, 12, 16, 20, 24, 32, 40)
+    for component in ("page-kicker", "page-title", "page-meta", "deck-nav"):
+        assert f".{component}" in ui_theme.BASE_CSS
+    assert ".hint { display: block; margin-top: 8px; color: var(--muted);" in ui_theme.BASE_CSS

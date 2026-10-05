@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import os
 import sqlite3
 import sys
@@ -660,6 +662,7 @@ class TestCli:
             "allow_admin_writes": False,
             "deck_config_path": None,
             "trust_tailscale_identity": False,
+            "trust_forwarded_proto": False,
         }
 
     def test_status_json_and_table(self, hub, monkeypatch, capsys):
@@ -1340,7 +1343,7 @@ def _upsert(**overrides: object) -> dict[str, object]:
 
 
 def _dashboard_cookie() -> str:
-    return f"{fleet_hub.DASHBOARD_COOKIE}={fleet_hub.dashboard_cookie_value(ADMIN_TOKEN)}"
+    return f"{fleet_hub.DASHBOARD_COOKIE}={hmac.new(ADMIN_TOKEN.encode(), b'brigade-fleet-dashboard-cookie-v1', hashlib.sha256).hexdigest()}"
 
 
 def _create_session(hub, token: str) -> None:

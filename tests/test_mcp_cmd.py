@@ -511,7 +511,7 @@ def test_review_default_import_demotion_removes_adopted_static_auth(tmp_path, ca
         assert "fake-secret" not in path.read_text()
 
 
-def test_review_auth_collision_does_not_block_stdio_transition(tmp_path):
+def test_review_canonical_http_auth_refuses_stdio_transition(tmp_path, capsys):
     _init(tmp_path)
     adapter = mcp_adapters.ADAPTERS["codex"]
     path = tmp_path / adapter.path
@@ -524,8 +524,20 @@ def test_review_auth_collision_does_not_block_stdio_transition(tmp_path):
         name="docs", command="fake-command", headers={"Authorization": {"ref": "UNUSED_HEADER"}}
     )
     mcp_cmd._write_canonical(tmp_path, {"docs": stdio})
-    assert mcp_cmd.sync(target=tmp_path, harness="codex", write=True, json_output=True) == 0
-    assert adapter.read_file(path.read_text())["docs"] == {"command": "fake-command"}
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    capsys.readouterr()
+    assert mcp_cmd.sync(target=tmp_path, harness="codex", write=True, json_output=True) == 2
+    payload = _payload(capsys)
+    assert before == {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    assert payload["items"][0]["status"] == "invalid"
+    row = payload["fidelity"]["servers"][0]
+    assert row["faithful"] is False
+    assert any(
+        f["field"] == "headers" and f["blocking"] and f["reason"] == "auth_transport_incompatible"
+        for f in row["fields"]
+    )
+    assert "auth_transport_incompatible" in payload["errors"][0]
+    assert "UNUSED_HEADER" not in json.dumps(payload)
 
 
 def test_codex_unsupported_interpolation_is_a_safe_command_error(tmp_path, capsys):

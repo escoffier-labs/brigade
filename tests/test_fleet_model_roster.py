@@ -926,6 +926,94 @@ def test_set_and_set_default_reject_retired_models_before_revision_bump(tmp_path
         assert _current_revision(hub) == retired_revision
 
 
+@pytest.mark.parametrize("consumer", ["brigade-run", "t3-fleet"])
+@pytest.mark.parametrize(
+    ("state", "error"),
+    [
+        ("missing-binding", "binding-missing"),
+        ("disabled", "seat-disabled"),
+        ("retired", "retired-model"),
+        ("valid", None),
+    ],
+)
+def test_consumer_default_eligibility_is_atomic(tmp_path, monkeypatch, consumer, state, error):
+    conn = fleet_hub.init_db(tmp_path / "fleet.db")
+    try:
+
+        def mutate(request):
+            return fleet_hub_model_roster.handle_model_policy(conn, {**request, "expected_revision": _revision(conn)})
+
+        monkeypatch.setattr(fleet_hub_model_roster, "_utc_now", lambda: "2026-01-01T00:00:00+00:00")
+        assert mutate({**SEAT, "seat": "previous"})[0] == 200
+        assert mutate({"action": "set-default", "consumer": consumer, "seat": "previous"})[0] == 200
+        candidate = {**SEAT, "seat": "candidate", "enabled": state != "disabled"}
+        if state == "missing-binding":
+            candidate["brigade_cli" if consumer == "brigade-run" else "t3_instance_id"] = ""
+        assert mutate(candidate)[0] == 200
+        if state == "retired":
+            assert mutate({"action": "retire", "provider": SEAT["provider"], "family": SEAT["model"]})[0] == 200
+        before = _dump(conn)
+        revision = _revision(conn)
+        monkeypatch.setattr(fleet_hub_model_roster, "_utc_now", lambda: "2026-01-02T00:00:00+00:00")
+        status, payload = mutate({"action": "set-default", "consumer": consumer, "seat": "candidate"})
+        if error:
+            assert (status, payload) == (409, {"error": error})
+            assert _dump(conn) == before  # Includes default seat/timestamp and revision metadata.
+        else:
+            assert status == 200, payload
+            assert payload["revision"] == revision + 1
+            assert conn.execute(
+                "SELECT seat, updated_at FROM model_consumer_defaults WHERE consumer=?", (consumer,)
+            ).fetchone() == ("candidate", "2026-01-02T00:00:00+00:00")
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("consumer", ["brigade-run", "t3-fleet"])
+@pytest.mark.parametrize(
+    ("state", "status", "error"),
+    [
+        ("missing-binding", 409, "binding-missing"),
+        ("disabled", 409, "seat-disabled"),
+        ("retired", 409, "retired-model"),
+        ("unknown", 400, "model policy seat 'candidate' is not defined"),
+    ],
+)
+def test_http_rejects_ineligible_consumer_default_atomically(tmp_path, monkeypatch, consumer, state, status, error):
+    with _hub(tmp_path) as hub:
+        monkeypatch.setattr(fleet_hub_model_roster, "_utc_now", lambda: "2026-01-01T00:00:00+00:00")
+        assert _admin_set(hub, seat="previous")[0] == 200
+
+        def mutate(request):
+            return _request(
+                hub,
+                "POST",
+                "/models",
+                token=ADMIN_TOKEN,
+                body={**request, "expected_revision": _current_revision(hub)},
+            )
+
+        assert mutate({"action": "set-default", "consumer": consumer, "seat": "previous"})[0] == 200
+        if state != "unknown":
+            fields = {"seat": "candidate", "enabled": state != "disabled"}
+            if state == "missing-binding":
+                fields["brigade_cli" if consumer == "brigade-run" else "t3_instance_id"] = ""
+            assert _admin_set(hub, **fields)[0] == 200
+        if state == "retired":
+            assert mutate({"action": "retire", "provider": SEAT["provider"], "family": SEAT["model"]})[0] == 200
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            before = _dump(conn)
+            monkeypatch.setattr(fleet_hub_model_roster, "_utc_now", lambda: "2026-01-02T00:00:00+00:00")
+            assert mutate({"action": "set-default", "consumer": consumer, "seat": "candidate"}) == (
+                status,
+                {"error": error},
+            )
+            assert _dump(conn) == before
+        finally:
+            conn.close()
+
+
 def test_new_set_requires_explicit_reasoning(tmp_path):
     with _hub(tmp_path) as hub:
         status, payload = _request(

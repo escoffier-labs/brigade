@@ -13,8 +13,10 @@ from urllib.parse import urlencode
 
 from datetime import datetime, timezone
 
+import pytest
+
 from brigade import fleet_command_deck, fleet_hub, fleet_hub_preference, fleet_hub_roster_page
-from brigade import fleet_hub_policy, fleet_policy, fleet_policy_page
+from brigade import fleet_hub_model_roster, fleet_hub_policy, fleet_policy, fleet_policy_page
 
 TOKEN = "test-admin-token-roster"  # content-guard: allow api-key-assignment
 NODE_A = "11111111-1111-4111-8111-111111111111"
@@ -125,9 +127,19 @@ def _seed(hub) -> None:
 
 
 def _login_cookie(hub) -> str:
-    status, headers, _text = _request(hub, "GET", f"/deck/roster?token={TOKEN}")
+    status, _headers, text = _request(
+        hub, "POST", "/dashboard/enrollment", headers={**_bearer(), "Content-Type": "application/json"}, body=b"{}"
+    )
+    assert status == 201
+    code = json.loads(text)["code"]
+    status, headers, _text = _request(
+        hub,
+        "POST",
+        "/enroll",
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"},
+        body=f"code={code}".encode(),
+    )
     assert status == 303
-    assert headers["location"] == "/deck/roster"
     return headers["set-cookie"].split(";")[0]
 
 
@@ -140,17 +152,19 @@ def _enroll_node(db) -> str:
     return node_token
 
 
-def _form(hub, fields: dict, *, cookie: str | None = None, extra: dict | None = None) -> tuple:
+def _form(hub, fields: dict, *, cookie: str | None = None, admin: bool = False, extra: dict | None = None) -> tuple:
     headers = {"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"}
     if cookie:
         headers["Cookie"] = cookie
+    if admin:
+        headers.update(_bearer())
     headers.update(extra or {})
     return _request(hub, "POST", "/deck/roster", headers=headers, body=urlencode(fields, doseq=True).encode())
 
 
 def _current_form(hub, cookie: str) -> dict:
     """The field set a browser would submit from the freshly rendered page."""
-    status, _headers, page = _request(hub, "GET", "/deck/roster", headers={"Cookie": cookie})
+    status, _headers, page = _request(hub, "GET", "/deck/roster", headers=_bearer())
     assert status == 200
     fields = {"csrf": fleet_hub_roster_page.csrf_value(TOKEN)}
     fields["expected_revision"] = re.search(r'name="expected_revision" value="(\d+)"', page).group(1)
@@ -202,9 +216,9 @@ def test_roster_page_requires_auth_and_renders_every_block(tmp_path):
         _seed(hub)
         status, _headers, unauth_page = _request(hub, "GET", "/deck/roster")
         assert status == 401
-        assert "edits the roster" in unauth_page
+        assert "brigade fleet enroll" in unauth_page
         cookie = _login_cookie(hub)
-        status, headers, page = _request(hub, "GET", "/deck/roster", headers={"Cookie": cookie})
+        status, headers, page = _request(hub, "GET", "/deck/roster", headers=_bearer())
         assert status == 200
         assert headers["cache-control"] == "no-store"
         assert 'http-equiv="refresh"' not in page
@@ -624,8 +638,8 @@ def test_roster_post_auth_csrf_origin_and_body_rules(tmp_path):
         node_token = _enroll_node(db)
         assert _form(hub, good, extra={"Authorization": f"Bearer {node_token}"})[0] == 403
         bad_csrf = {**good, "csrf": "0" * 64}
-        assert _form(hub, bad_csrf, cookie=cookie)[0] == 403
-        assert _form(hub, good, cookie=cookie, extra={"Sec-Fetch-Site": "cross-site"})[0] == 403
+        assert _form(hub, bad_csrf, admin=True)[0] == 403
+        assert _form(hub, good, admin=True, extra={"Sec-Fetch-Site": "cross-site"})[0] == 403
         headers = {"Cookie": cookie, "Content-Type": "application/json"}
         assert _request(hub, "POST", "/deck/roster", headers=headers, body=b"{}")[0] == 415
         big = urlencode({**good, "notes": "x" * (64 * 1024)}).encode()
@@ -640,7 +654,7 @@ def test_roster_post_auth_csrf_origin_and_body_rules(tmp_path):
             assert _request(hub, "POST", "/deck/roster", headers=headers, body=big)[0] == 413
         except (BrokenPipeError, ConnectionResetError):
             pass
-        assert _form(hub, {**good, "expected_revision": "x"}, cookie=cookie)[0] == 400
+        assert _form(hub, {**good, "expected_revision": "x"}, admin=True)[0] == 400
 
 
 def test_roster_post_tailscale_identity_cannot_write(tmp_path):
@@ -668,7 +682,7 @@ def test_roster_post_stale_revision_and_stale_preference_write_nothing(tmp_path)
         )
         assert status == 200, payload
         before = _tables(db)
-        status, _headers, page = _form(hub, {**form, "role.security": "daybreak"}, cookie=cookie)
+        status, _headers, page = _form(hub, {**form, "role.security": "daybreak"}, admin=True)
         assert status == 409
         assert "changed underneath you" in page
         assert _tables(db) == before
@@ -679,7 +693,7 @@ def test_roster_post_stale_revision_and_stale_preference_write_nothing(tmp_path)
         status, payload = _json(hub, "PUT", "/preference", {"impl": "agy_flash"})
         assert status == 200, payload
         before = _tables(db)
-        status, _headers, page = _form(hub, {**form, "role.security": "daybreak"}, cookie=cookie)
+        status, _headers, page = _form(hub, {**form, "role.security": "daybreak"}, admin=True)
         assert status == 409
         assert "run preference changed" in page
         assert _tables(db) == before
@@ -701,7 +715,7 @@ def test_roster_post_applies_everything_in_one_revision(tmp_path):
         form["role.security"] = "daybreak"
         form["default.brigade-run"] = "agy_flash"
         form["notes"] = "cursor via Other Models only"
-        status, headers, _text = _form(hub, form, cookie=cookie)
+        status, headers, _text = _form(hub, form, admin=True)
         assert status == 303
         assert headers["location"] == f"/deck/roster?saved={start + 1}"
         assert _revision(hub) == start + 1
@@ -718,7 +732,7 @@ def test_roster_post_applies_everything_in_one_revision(tmp_path):
         _status, _headers, cloud = _request(hub, "GET", "/cloud", headers=_bearer())
         providers = {row["provider"]: row["enabled"] for row in json.loads(cloud)["policy"]["providers"]}
         assert providers["claude"] is True and providers["codex"] is False
-        page = _request(hub, "GET", f"/deck/roster?saved={start + 1}", headers={"Cookie": cookie})[2]
+        page = _request(hub, "GET", f"/deck/roster?saved={start + 1}", headers=_bearer())[2]
         assert f"saved as revision {start + 1}" in page
         assert "by deck-form" in page
         conn = sqlite3.connect(db)
@@ -726,7 +740,7 @@ def test_roster_post_applies_everything_in_one_revision(tmp_path):
         conn.close()
         # A no-op save leaves the revision alone.
         again = _current_form(hub, cookie)
-        status, headers, _text = _form(hub, again, cookie=cookie)
+        status, headers, _text = _form(hub, again, admin=True)
         assert status == 303 and headers["location"] == f"/deck/roster?saved={start + 1}"
         assert _revision(hub) == start + 1
 
@@ -739,7 +753,7 @@ def test_roster_post_rejects_role_on_seat_disabled_in_same_save(tmp_path):
         form.pop("seat.daybreak")
         form["role.security"] = "daybreak"
         before = _tables(db)
-        status, _headers, page = _form(hub, form, cookie=cookie)
+        status, _headers, page = _form(hub, form, admin=True)
         assert status == 422
         assert "role security names seat daybreak" in page
         assert 'name="role.security"' in page and '<option value="daybreak" selected' in page
@@ -747,12 +761,12 @@ def test_roster_post_rejects_role_on_seat_disabled_in_same_save(tmp_path):
         # A consumer default needs the consumer's binding.
         form = _current_form(hub, cookie)
         form["default.t3-fleet"] = "agy_flash"
-        status, _headers, page = _form(hub, form, cookie=cookie)
+        status, _headers, page = _form(hub, form, admin=True)
         assert status == 422 and "no t3-fleet binding" in page
         # Notes still go through the secret regexes.
         form = _current_form(hub, cookie)
         form["notes"] = "see keepass://roster for the real pins"
-        status, _headers, page = _form(hub, form, cookie=cookie)
+        status, _headers, page = _form(hub, form, admin=True)
         assert status == 422 and "home paths" in page
         assert "keepass://roster" in page  # echoed back, escaped, so the operator can fix it
         assert _tables(db) == before
@@ -768,7 +782,7 @@ def test_roster_post_stale_cloud_lane_writes_nothing(tmp_path):
         )
         assert status == 200, payload
         before = _tables(db)
-        status, _headers, page = _form(hub, {**form, "notes": "unrelated edit"}, cookie=cookie)
+        status, _headers, page = _form(hub, {**form, "notes": "unrelated edit"}, admin=True)
         assert status == 409
         assert "cloud lanes changed" in page
         assert _tables(db) == before
@@ -776,7 +790,7 @@ def test_roster_post_stale_cloud_lane_writes_nothing(tmp_path):
         form = _current_form(hub, cookie)
         assert "cloud.jules" not in form
         form["cloud.jules"] = "1"
-        status, _headers, _text = _form(hub, form, cookie=cookie)
+        status, _headers, _text = _form(hub, form, admin=True)
         assert status == 303
         _status, _headers, cloud = _request(hub, "GET", "/cloud", headers=_bearer())
         jules = next(row for row in json.loads(cloud)["policy"]["providers"] if row["provider"] == "jules")
@@ -918,7 +932,6 @@ def test_active_authority_dropdown_edits_reach_the_policy_preview_and_save(tmp_p
     with _hub(tmp_path) as (hub, db):
         _seed(hub)
         revision = _seed_policy(db)
-        cookie = _login_cookie(hub)
         page = _page(db, activation=active, policy_csrf=fleet_policy_page.csrf_value(TOKEN))
         fields = _form_fields(page, 'name="field.role_impl"')
         fields["field.role_impl"] = "seat-beta"
@@ -931,7 +944,7 @@ def test_active_authority_dropdown_edits_reach_the_policy_preview_and_save(tmp_p
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Sec-Fetch-Site": "same-origin",
-                "Cookie": cookie,
+                "Authorization": f"Bearer {TOKEN}",
             },
             body=urlencode(fields).encode(),
         )
@@ -952,7 +965,7 @@ def test_active_authority_dropdown_edits_reach_the_policy_preview_and_save(tmp_p
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Sec-Fetch-Site": "same-origin",
-                "Cookie": cookie,
+                "Authorization": f"Bearer {TOKEN}",
             },
             body=urlencode(dict(re.findall(r'name="([^"]+)" value="([^"]*)">', confirm))).encode(),
         )
@@ -1032,6 +1045,71 @@ def test_authority_refusal_is_scoped_to_roles_and_the_admission_fallback(tmp_pat
         assert fleet_hub_roster_page._authority_refusal(view, unchanged) is None
         assert "policy page" in fleet_hub_roster_page._authority_refusal(view, changed_role)
         assert "admission_default" in fleet_hub_roster_page._authority_refusal(view, changed_default)
+
+
+@pytest.mark.parametrize("consumer", ["brigade-run", "t3-fleet"])
+@pytest.mark.parametrize("state", ["missing-binding", "disabled", "retired", "unknown", "valid", "enable-and-default"])
+def test_roster_form_consumer_default_eligibility_is_atomic(tmp_path, monkeypatch, consumer, state):
+    conn = fleet_hub.init_db(tmp_path / "fleet.db")
+    config = fleet_command_deck.DeckConfig()
+    try:
+
+        def mutate(request):
+            revision = conn.execute("SELECT revision FROM model_roster_meta WHERE singleton=1").fetchone()[0]
+            return fleet_hub_model_roster.handle_model_policy(conn, {**request, "expected_revision": revision})
+
+        monkeypatch.setattr(fleet_hub_model_roster, "_utc_now", lambda: "2026-01-01T00:00:00+00:00")
+        assert mutate({"action": "set", "seat": "previous", "enabled": True, **SEATS["coder"]})[0] == 200
+        assert mutate({"action": "set-default", "consumer": consumer, "seat": "previous"})[0] == 200
+        candidate = {
+            "action": "set",
+            "seat": "candidate",
+            "enabled": state not in {"disabled", "enable-and-default"},
+            **SEATS["cursor_grok"],
+        }
+        if state == "missing-binding":
+            candidate["brigade_cli" if consumer == "brigade-run" else "t3_instance_id"] = ""
+        if state != "unknown":
+            assert mutate(candidate)[0] == 200
+        if state == "retired":
+            assert (
+                mutate({"action": "retire", "provider": candidate["provider"], "family": candidate["model"]})[0] == 200
+            )
+        view = fleet_hub_roster_page.load_view(conn, config)
+        fields = {
+            "expected_revision": str(view.revision),
+            "expected_preference_updated_at": view.preference_updated_at,
+            "expected_cloud_state": view.cloud_state,
+            "default." + consumer: "candidate",
+            "seat.previous": "1",
+            "notes": "all changes must be atomic",
+            **{"cloud." + row.provider: "1" for row in view.cloud if row.enabled},
+        }
+        if state != "disabled":
+            fields["seat.candidate"] = "1"
+        submission = fleet_hub_roster_page.parse_form(urlencode(fields).encode())
+        before = "\n".join(conn.iterdump())
+        monkeypatch.setattr(fleet_hub_roster_page, "_utc_now", lambda: "2026-01-02T00:00:00+00:00")
+        result = fleet_hub_roster_page.apply(conn, config, submission)
+        if state in {"missing-binding", "disabled", "retired", "unknown"}:
+            assert result.status == "invalid"
+            expected = {
+                "missing-binding": f"no {consumer} binding",
+                "disabled": "disabled or retired",
+                "retired": "disabled or retired",
+                "unknown": "unknown seat candidate",
+            }
+            assert expected[state] in result.message
+            assert "\n".join(conn.iterdump()) == before
+        else:
+            assert result.status == "saved", result.message
+            assert result.revision == view.revision + 1
+            assert conn.execute("SELECT enabled FROM model_policy WHERE seat='candidate'").fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT seat, updated_at FROM model_consumer_defaults WHERE consumer=?", (consumer,)
+            ).fetchone() == ("candidate", "2026-01-02T00:00:00+00:00")
+    finally:
+        conn.close()
 
 
 def test_roster_apply_without_activation_keeps_legacy_behaviour(tmp_path):
