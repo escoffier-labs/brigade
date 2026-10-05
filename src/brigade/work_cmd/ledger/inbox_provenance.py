@@ -306,7 +306,13 @@ def _write_import_inbox_bytes_at(
             except FileNotFoundError:
                 pass
             raise
-        _restore_import_inbox_snapshot(parent, name, previous_raw or b"", bool(previous_exists))
+        _restore_import_inbox_snapshot(
+            parent,
+            name,
+            previous_raw or b"",
+            bool(previous_exists),
+            allow_in_place=expected_generation is None,
+        )
         raise
     finally:
         if existing != -1:
@@ -368,8 +374,10 @@ def _snapshot_import_inbox(target: Path) -> tuple[int, str, bytes, bool]:
             os.close(descriptor)
 
 
-def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: bool) -> None:
-    """Restore an ordinary import transaction through its original parent."""
+def _restore_import_inbox_snapshot(
+    parent: int, name: str, data: bytes, exists: bool, *, allow_in_place: bool = True
+) -> None:
+    """Restore an import transaction, optionally requiring atomic replacement."""
     if not exists:
         try:
             authority_store._dirfd_unlink(parent, name)
@@ -414,6 +422,10 @@ def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: 
                     authority_store._dirfd_unlink(parent, temporary_name)
                 except FileNotFoundError:
                     pass
+    if not allow_in_place:
+        # Archive publication already retains every pending row. If atomic
+        # rollback fails, truncating that inbox risks losing those rows too.
+        raise OSError("import inbox rollback could not restore its retained snapshot; published inbox preserved")
     descriptor = -1
     try:
         descriptor = authority_store._dirfd_open_file(

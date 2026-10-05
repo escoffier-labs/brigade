@@ -3424,6 +3424,75 @@ def test_inbox_archive_publication_failure_before_replace_keeps_original(tmp_pat
     assert not list(inbox.parent.glob("*.tmp"))
 
 
+@pytest.mark.parametrize("failure", ["parent-fsync", "interrupt"])
+@pytest.mark.parametrize("rollback_failure", ["temp-create", "temp-replace"])
+def test_inbox_archive_failed_rollback_preserves_published_pending(
+    tmp_path, monkeypatch, capsys, failure, rollback_failure
+):
+    from brigade.work_cmd.ledger import authority_store
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    original = (
+        b'{"id":"old","status":"dismissed","updated_at":"2026-05-20T12:00:00+00:00"}\n'
+        b'{"id":"pending-one","status":"pending"}\n'
+        b'{"id":"pending-two","status":"pending"}\n'
+    )
+    inbox.write_bytes(original)
+    real_open = authority_store._dirfd_open_file
+    real_replace = authority_store._dirfd_replace
+    real_fsync = authority_store._dirfd_fsync
+    published = False
+    rollback_attempts = 0
+    failed_fsync = False
+
+    def full_disk_open(parent, name, flags, mode=0o600):
+        nonlocal rollback_attempts
+        if published and flags & os.O_CREAT and rollback_failure == "temp-create":
+            rollback_attempts += 1
+            raise OSError(errno.ENOSPC, "synthetic rollback full disk")
+        return real_open(parent, name, flags, mode)
+
+    def replace_then_fail(parent, source, destination):
+        nonlocal published, rollback_attempts
+        if published and rollback_failure == "temp-replace":
+            rollback_attempts += 1
+            raise OSError(errno.ENOSPC, "synthetic rollback full disk")
+        real_replace(parent, source, destination)
+        published = True
+        if failure == "interrupt":
+            raise KeyboardInterrupt
+
+    def fail_parent_fsync(parent):
+        nonlocal failed_fsync
+        if published and not failed_fsync and failure == "parent-fsync":
+            failed_fsync = True
+            raise OSError("synthetic publication fsync failure")
+        return real_fsync(parent)
+
+    def full_disk_write(_fd, _data):
+        raise OSError(errno.ENOSPC, "synthetic rollback full disk")
+
+    with monkeypatch.context() as publication:
+        publication.setattr(authority_store, "_dirfd_open_file", full_disk_open)
+        publication.setattr(authority_store, "_dirfd_replace", replace_then_fail)
+        publication.setattr(authority_store, "_dirfd_fsync", fail_parent_fsync)
+        publication.setattr(os, "write", full_disk_write)
+        assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+
+    assert "rollback could not restore" in capsys.readouterr().err
+    assert published
+    assert rollback_attempts == 3
+    assert [json.loads(line) for line in inbox.read_bytes().splitlines()] == [
+        {"id": "pending-one", "status": "pending"},
+        {"id": "pending-two", "status": "pending"},
+    ]
+    archive = work_cmd.helpers._imports_archive_path(tmp_path)
+    assert [json.loads(line)["id"] for line in archive.read_bytes().splitlines()] == ["old"]
+    assert not list(inbox.parent.glob("*.tmp"))
+
+
 @pytest.mark.parametrize("stage", ["before", "after"])
 def test_inbox_archive_interrupted_replace_preserves_original(tmp_path, monkeypatch, stage):
     from brigade.work_cmd.ledger import authority_store
