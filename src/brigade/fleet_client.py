@@ -1941,7 +1941,9 @@ def repo_claim(
                     target,
                     outcome.detail,
                 )
-                if on_credential_failure is not None and not lease.stopped.is_set():
+                # terminate() admitted this callback under the authority lock;
+                # subsequent shutdown cannot discard the committed failure.
+                if on_credential_failure is not None:
                     try:
                         on_credential_failure(outcome.detail)
                     except Exception:
@@ -1977,4 +1979,10 @@ def repo_claim(
             heartbeat.join(timeout=join_timeout)
         if watcher.ident is not None:
             watcher.join(timeout=join_timeout)
-        _release_on_exit()
+        try:
+            _release_on_exit()
+        finally:
+            # Loss publication may outlive the heartbeat that committed it.
+            # Drain only after fenced cleanup, with the same bounded budget,
+            # so an arbitrary callback cannot hold the hub row during exit.
+            lease.drain_publication(timeout=join_timeout)

@@ -40,6 +40,8 @@ class _ConfirmedClaimLease:
     ) -> None:
         self.condition = _client().threading.Condition()
         self.stopped = _client().threading.Event()
+        self._publication_done = _client().threading.Event()
+        self._publication_done.set()
         self._state = "ACTIVE"
         self._loss_reason: str | None = None
         self._deadline = request_start + ttl_seconds
@@ -78,6 +80,17 @@ class _ConfirmedClaimLease:
         self._publish(reason)
         return active
 
+    def _publish_tracked(self, reason: str | None) -> None:
+        try:
+            self._publish(reason)
+        finally:
+            self._publication_done.set()
+
+    def drain_publication(self, *, timeout: float) -> None:
+        # Called after stop and fenced release. Registration shares the loss
+        # lock, so shutdown also accounts for a publisher not yet started.
+        self._publication_done.wait(timeout)
+
     def confirm(self, request_start: float, *, on_rejected: Callable[[], None] | None = None) -> bool:
         with self.condition:
             now = _client().time.monotonic()
@@ -89,11 +102,37 @@ class _ConfirmedClaimLease:
             if accepted:
                 self._deadline = candidate
                 self.condition.notify_all()
+            if reason is not None and on_rejected is not None:
+                self._publication_done.clear()
+        if reason is not None and on_rejected is not None:
+            # This transition owns the one-shot notification. Publish on a
+            # separate thread so neither a slow release nor a blocking loss
+            # callback delays the other; fenced cleanup stays on the heartbeat.
+            started = False
+            try:
+                try:
+                    _client().threading.Thread(
+                        target=lambda: self._publish_tracked(reason), name="brigade-fleet-claim-loss", daemon=True
+                    ).start()
+                except RuntimeError:
+                    _client()._LOG.warning(
+                        "fleet claim-loss publisher could not start; notifying after cleanup", exc_info=True
+                    )
+                else:
+                    started = True
+            finally:
+                try:
+                    on_rejected()
+                finally:
+                    if not started:
+                        # Resource exhaustion must not erase the committed
+                        # notification or put arbitrary callbacks before cleanup.
+                        self._publish_tracked(reason)
+            return False
         try:
             if not accepted and on_rejected is not None:
                 # A successful but rejected request may have extended the
-                # hub row. Fence it off before notifying: the heartbeat can
-                # itself discover expiry, and its callback may block.
+                # hub row even if another thread already committed the loss.
                 on_rejected()
         finally:
             self._publish(reason)
@@ -251,7 +290,13 @@ def _abort_claim_owner(
             return
         _fire_once(forced=True)
 
-    _client().threading.Thread(target=_watchdog, name="brigade-fleet-claim-abort", daemon=True).start()
+    try:
+        _client().threading.Thread(target=_watchdog, name="brigade-fleet-claim-abort", daemon=True).start()
+    except RuntimeError:
+        # The publisher fallback can run under thread exhaustion too. Fail
+        # closed before invoking an arbitrary callback without a watchdog.
+        _client()._LOG.warning("fleet claim-abort watchdog could not start; forcing the abort", exc_info=True)
+        _fire_once(forced=False)
     try:
         # repo_claim supplies the dispatcher only for a callback admitted by
         # its locked loss transition. That callback survives STOPPING, while
