@@ -278,7 +278,10 @@ def handle_grokbot(
     request["queue_owner_node_id"] = policy["queue_owner_node_id"]
     _refuse_unscoped_jobs(conn)
     if action == "whoami":
-        return 200, {"actor_kind": policy["actor_kind"], "role": policy["role"]}
+        identity = {"actor_kind": policy["actor_kind"], "role": policy["role"]}
+        if request.get("include_node_id") is True:
+            identity["node_id"] = policy["node_id"]
+        return 200, identity
     if action in {"list", "status"} and "role" not in request and policy.get("role"):
         request["role"] = policy["role"]
     if action == "list":
@@ -1255,6 +1258,12 @@ def _validate_request(raw: Any) -> dict[str, Any]:
     if unknown_sensitive:
         raise FleetHubError("grokbot request must not include private task, identity, or credential fields")
     request: dict[str, Any] = {"action": action}
+    if "include_node_id" in raw:
+        if action != "whoami":
+            raise FleetHubError("grokbot field 'include_node_id' is not accepted for this action")
+        if type(raw["include_node_id"]) is not bool:
+            raise FleetHubError("grokbot field 'include_node_id' must be a boolean")
+        request["include_node_id"] = raw["include_node_id"]
     if action == "enroll-actor":
         return _validate_enroll(raw, request)
     if "role" in raw:
