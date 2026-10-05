@@ -620,6 +620,16 @@ def projected_seats(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         launch_model = brigade.get("model")
         if isinstance(launch_model, str) and launch_model:
             brigade_binding["model"] = launch_model
+        projected_bindings = {
+            "brigade": brigade_binding,
+            "t3_fleet": {
+                "instance_id": t3_fleet.get("instance_id") or "",
+                "service_tier": t3_fleet.get("service_tier") or None,
+            },
+        }
+        native = {key: value for key, value in _as_mapping(bindings.get("native")).items() if value is not None}
+        if native:
+            projected_bindings["native"] = native
         rows.append(
             {
                 "seat": name,
@@ -628,13 +638,7 @@ def projected_seats(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 "model": seat["model"],
                 "reasoning": seat.get("effort") or "none",
                 "limit": seat.get("concurrency"),
-                "bindings": {
-                    "brigade": brigade_binding,
-                    "t3_fleet": {
-                        "instance_id": t3_fleet.get("instance_id") or "",
-                        "service_tier": t3_fleet.get("service_tier") or None,
-                    },
-                },
+                "bindings": projected_bindings,
                 "notes": seat.get("notes"),
             }
         )

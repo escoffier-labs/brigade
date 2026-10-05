@@ -177,7 +177,10 @@ def validate_roster_rows(payload: Mapping[str, Any]) -> str | None:
         if type(item.get("enabled")) is not bool:
             return "malformed-roster"
         bindings = item.get("bindings")
-        if not isinstance(bindings, dict) or set(bindings) != {"brigade", "t3_fleet"}:
+        if not isinstance(bindings, dict) or set(bindings) not in (
+            {"brigade", "t3_fleet"},
+            {"brigade", "t3_fleet", "native"},
+        ):
             return "malformed-roster"
         brigade = bindings.get("brigade")
         if not isinstance(brigade, dict) or not isinstance(brigade.get("cli"), str):
@@ -195,6 +198,16 @@ def validate_roster_rows(payload: Mapping[str, Any]) -> str | None:
             return "malformed-roster"
         if t3_fleet.get("service_tier") is not None and not isinstance(t3_fleet.get("service_tier"), str):
             return "malformed-roster"
+        if "native" in bindings:
+            native = bindings["native"]
+            if not isinstance(native, dict) or set(native) - LAUNCH_BINDING_GROUPS["native"]:
+                return "malformed-roster"
+            for value in native.values():
+                try:
+                    if _launch_leaf(value, identity=True) is None:
+                        return "malformed-roster"
+                except ValueError:
+                    return "malformed-roster"
     defaults = payload.get("consumer_defaults")
     if not isinstance(defaults, dict):
         return "malformed-roster"

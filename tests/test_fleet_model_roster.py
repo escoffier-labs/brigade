@@ -1225,6 +1225,55 @@ def test_validate_roster_rows_accepts_optional_brigade_launch_model():
     )
 
 
+@pytest.mark.parametrize(
+    "native",
+    [
+        {},
+        {"instance_id": "inst-alpha"},
+        {"model": "provider-a/model-slash-id"},
+        {"instance_id": "inst-alpha", "model": "provider-a/model-slash-id"},
+    ],
+)
+def test_validate_roster_rows_accepts_optional_native_binding(native):
+    payload = _roster_rows_payload({"cli": "cli-alpha"})
+    payload["seats"][0]["bindings"]["native"] = native
+    assert fleet_model_roster.validate_roster_rows(payload) is None
+
+
+@pytest.mark.parametrize(
+    "native",
+    [
+        None,
+        [],
+        "inst-alpha",
+        {"alias": "fuzzy"},
+        {"model": "safe", "extra": "unexpected"},
+        {"model": None},
+        {"model": ""},
+        {"model": 3},
+        {"model": True},
+        {"model": []},
+        {"instance_id": None},
+        {"instance_id": ""},
+        {"instance_id": 3},
+        {"instance_id": False},
+        {"instance_id": {}},
+        {"model": "bad\nmodel"},
+        {"instance_id": "bad instance"},
+    ],
+)
+def test_validate_roster_rows_rejects_malformed_native_binding(native):
+    payload = _roster_rows_payload({"cli": "cli-alpha"})
+    payload["seats"][0]["bindings"]["native"] = native
+    assert fleet_model_roster.validate_roster_rows(payload) == "malformed-roster"
+
+
+def test_validate_roster_rows_rejects_unknown_binding_group_with_valid_native():
+    payload = _roster_rows_payload({"cli": "cli-alpha"})
+    payload["seats"][0]["bindings"].update({"native": {"model": "safe"}, "unknown": {}})
+    assert fleet_model_roster.validate_roster_rows(payload) == "malformed-roster"
+
+
 def test_validate_roster_rows_requires_strict_authority_metadata_when_present():
     valid = _roster_rows_payload(
         {"cli": "cli-alpha"},

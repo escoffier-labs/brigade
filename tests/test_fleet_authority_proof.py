@@ -688,21 +688,23 @@ def test_activated_selectors_filter_effective_native_launch_per_consumer(conn, l
 
 
 @pytest.mark.parametrize("consumer", ["brigade-run", "t3-fleet"])
-def test_activated_selector_preserves_retired_base_binding_with_current_consumer_override(conn, consumer):
+@pytest.mark.parametrize("group", ["brigade", "native"])
+def test_activated_selector_preserves_retired_base_binding_with_current_consumer_override(conn, consumer, group):
     _activate(conn)
     current = fleet_hub_policy.current_policy(conn)
     document = json.loads(json.dumps(current["document"]))
     seat = document["seats"][SEAT]
     seat["provider"] = "openai"
     seat["model"] = "gpt-6.1-sol"
-    seat["bindings"]["brigade"]["model"] = "gpt-5.4"
-    document["consumers"][consumer]["seat_bindings"] = {SEAT: {"brigade": {"model": "gpt-6.1-sol"}}}
+    seat["bindings"][group]["model"] = "gpt-5.4"
+    document["consumers"][consumer]["seat_bindings"] = {SEAT: {group: {"model": "gpt-6.1-sol"}}}
     document["consumers"][consumer]["default_patches"] = {"roles": {"admission_default": SEAT}}
     document["defaults"]["roles"] = {"impl": SEAT}
     document["seats"]["seat-safe"] = {"provider": "openai", "model": "gpt-6.1-sol"}
     fleet_hub_policy.save_policy(
         conn, document, expected_version=current["revision"], actor="operator", reason="retired base binding override"
     )
+    policy_before = fleet_hub_policy.current_policy(conn)
     before = "\n".join(conn.iterdump())
     signed_seats = fleet_policy_migration.projected_seats(conn)
     launch_bindings = fleet_hub_model_roster.project_consumer_launch_bindings(conn)
@@ -710,13 +712,8 @@ def test_activated_selector_preserves_retired_base_binding_with_current_consumer
     assert roster["seats"] == signed_seats
     assert roster["consumer_launch_bindings"] == launch_bindings
     base_seat = next(row for row in signed_seats if row["seat"] == SEAT)
-    assert base_seat["bindings"]["brigade"]["model"] == "gpt-5.4"
     groups = fleet_model_roster.consumer_launch_groups(roster, consumer, SEAT)
-    assert groups["brigade"]["model"] == "gpt-6.1-sol"
-    assert fleet_model_roster.binding_launch_models(base_seat, launch_groups=groups) == ("gpt-6.1-sol", "gpt-5.4")
-    assert fleet_model_admission._resolve_from_roster(roster, consumer=consumer, seat=SEAT, source="hub").reason == (
-        "retired-model"
-    )
+    assert groups[group]["model"] == "gpt-6.1-sol"
     assert fleet_model_roster.roster_digest(roster) == roster["document_sha256"]
     assert fleet_model_roster.roster_mac("test-token", roster) == roster["mac"]["value"]
     assert fleet_model_roster.validate_roster_rows(roster) is None
@@ -744,6 +741,21 @@ def test_activated_selector_preserves_retired_base_binding_with_current_consumer
     assert f'value="{SEAT}"' not in selector
     assert SEAT not in page.split('aria-labelledby="seats"', 1)[1].split("</section>", 1)[0]
     assert SEAT in page.split('aria-labelledby="retired"', 1)[1].split("</section>", 1)[0]
+    client = fleet_model_admission._resolve_from_roster(roster, consumer=consumer, seat=SEAT, source="hub")
+    status, denied = _admit(conn, phase="controller", request_id="retired-base-override", consumer=consumer)
+    assert (client.reason, status, denied.get("error")) == ("retired-model", 409, "retired-model")
+    assert client.ok is False
+    assert denied["state"] == "denied"
+    assert denied["binding"] is None
+    assert conn.execute(
+        "SELECT decision, consumer_binding FROM model_admission_audit WHERE request_id='retired-base-override'"
+    ).fetchone() == ("retired-model", None)
+    assert base_seat["bindings"][group]["model"] == "gpt-5.4"
+    assert fleet_model_roster.binding_launch_models(base_seat, launch_groups=groups) == ("gpt-6.1-sol", "gpt-5.4")
+    assert fleet_hub_policy.current_policy(conn) == policy_before
+    roster_after = fleet_hub_model_roster.project_roster(conn)
+    assert roster_after["revision"] == roster["revision"]
+    assert roster_after["consumer_defaults"] == roster["consumer_defaults"]
 
 
 def test_launch_requires_repo_and_policy_context_hash(conn):
