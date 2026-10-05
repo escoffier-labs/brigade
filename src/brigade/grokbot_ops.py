@@ -41,25 +41,28 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def unit_name(instance: str) -> str:
-    return f"brigade-grokbot-{instance}.service"
+def unit_name(instance: str, client_id: str | None = None) -> str:
+    name = instance if client_id is None else grokbot_mcp.deployment_name(instance, client_id)
+    return f"brigade-grokbot-{name}.service"
 
 
-def service_result_argv(instance: str) -> list[str]:
+def service_result_argv(instance: str, client_id: str | None = None) -> list[str]:
     return [
         "systemctl",
         "--user",
         "show",
-        unit_name(instance),
+        unit_name(instance, client_id),
         "--property=Result",
         "--value",
     ]
 
 
-def inspect_service_result(instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> dict[str, str]:
+def inspect_service_result(
+    instance: str, *, client_id: str | None = None, timeout: int = DEFAULT_TIMEOUT_SECONDS
+) -> dict[str, str]:
     """Return a sanitized service-result check. Never mutates systemd or echoes raw output."""
     failed = {"check": "service-result", "status": "fail"}
-    argv = service_result_argv(instance)
+    argv = service_result_argv(instance, client_id)
     try:
         completed = subprocess.run(
             argv,
@@ -76,8 +79,9 @@ def inspect_service_result(instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECO
     return failed
 
 
-def config_path(target: Path, instance: str) -> Path:
-    return target / CONFIG_DIR / f"{instance}.json"
+def config_path(target: Path, instance: str, client_id: str | None = None) -> Path:
+    name = instance if client_id is None else grokbot_mcp.deployment_name(instance, client_id)
+    return target / CONFIG_DIR / f"{name}.json"
 
 
 def save_config(
@@ -90,8 +94,10 @@ def save_config(
     bearer_env: str | None,
     bearer_file: Path | None,
     hub_token_file: Path | None = None,
+    client_id: str | None = None,
 ) -> dict[str, Any]:
     """Persist only non-secret settings plus a secret reference."""
+    grokbot_mcp.deployment_name(instance, client_id)
     if instance not in grokbot_mcp.INSTANCES:
         raise grokbot_mcp.ConfigurationError("invalid")
     host, port = grokbot_mcp.parse_bind(bind)
@@ -112,28 +118,41 @@ def save_config(
         "allowed_origins": sorted(set(allowed_origins)),
         "bearer": reference,
     }
+    if client_id is not None:
+        payload["client_id"] = client_id
     if hub_token_file is not None:
         payload["hub_token_file"] = _validated_hub_token_file(hub_token_file)
     _validate_config(payload)
     with grokbot_jobs._storage_paths(target):
         pass
-    path = config_path(target, instance)
+    path = config_path(target, instance, client_id)
     try:
-        _write_text_nofollow_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n", mode=0o600)
+        if client_id is not None:
+            try:
+                existing = json.loads(_read_regular_text(path))
+            except FileNotFoundError:
+                existing = None
+            if existing is not None:
+                if existing != payload:
+                    raise grokbot_mcp.ConfigurationError("invalid")
+                return payload
+        _write_text_nofollow_atomic(
+            path, json.dumps(payload, indent=2, sort_keys=True) + "\n", mode=0o600, replace=client_id is None
+        )
     except OSError as exc:
         raise grokbot_mcp.ConfigurationError("invalid") from exc
     return payload
 
 
-def load_config(target: Path, instance: str) -> dict[str, Any]:
-    path = config_path(target, instance)
+def load_config(target: Path, instance: str, client_id: str | None = None) -> dict[str, Any]:
+    path = config_path(target, instance, client_id)
     try:
         payload = json.loads(_read_regular_text(path))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise grokbot_mcp.ConfigurationError("invalid") from exc
     if not isinstance(payload, dict) or payload.get("schema") != CONFIG_SCHEMA:
         raise grokbot_mcp.ConfigurationError("invalid")
-    if payload.get("instance") != instance:
+    if payload.get("instance") != instance or payload.get("client_id") != client_id:
         raise grokbot_mcp.ConfigurationError("invalid")
     return _validate_config(payload)
 
@@ -153,12 +172,14 @@ def _resolve_bearer(reference: dict[str, Any]) -> str:
     raise grokbot_mcp.ConfigurationError("invalid")
 
 
-def build_request_config(target: Path, instance: str) -> tuple[dict[str, Any], str]:
-    config = load_config(target, instance)
+def build_request_config(target: Path, instance: str, client_id: str | None = None) -> tuple[dict[str, Any], str]:
+    config = load_config(target, instance, client_id)
     return config, _resolve_bearer(config["bearer"])
 
 
-def doctor(target: Path, instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> list[dict[str, str]]:
+def doctor(
+    target: Path, instance: str, *, client_id: str | None = None, timeout: int = DEFAULT_TIMEOUT_SECONDS
+) -> list[dict[str, str]]:
     """Run sanitized diagnostics; details never include credentials or job content."""
     checks: list[dict[str, str]] = []
 
@@ -173,7 +194,7 @@ def doctor(target: Path, instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECOND
         record("dependency", False)
 
     try:
-        config, bearer = build_request_config(target, instance)
+        config, bearer = build_request_config(target, instance, client_id)
         record("config", True)
     except (grokbot_mcp.ConfigurationError, OSError, ValueError, KeyError):
         record("config", False)
@@ -183,20 +204,39 @@ def doctor(target: Path, instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECOND
     writable = (
         os.access(queue_dir, os.W_OK)
         if queue_dir.is_dir()
-        else os.access(config_path(target, instance).parent, os.W_OK)
+        else os.access(config_path(target, instance, client_id).parent, os.W_OK)
     )
     record("permissions", bool(writable))
 
     try:
         hub_token_file = config.get("hub_token_file")
-        if hub_token_file is None:
+        if hub_token_file is None and client_id is None:
             grokbot_jobs.status(target)
         else:
-            if not isinstance(hub_token_file, str):
+            if hub_token_file is not None and not isinstance(hub_token_file, str):
                 raise grokbot_mcp.ConfigurationError("invalid")
             from . import fleet_client_grokbot
 
-            hub_token = grokbot_mcp.load_hub_token_file(Path(hub_token_file))
+            hub_token = (
+                grokbot_mcp.load_hub_token_file(Path(hub_token_file))
+                if hub_token_file is not None
+                else grokbot_mcp.load_hub_token(instance=instance)
+            )
+            if client_id is not None:
+                host, port = grokbot_mcp.parse_bind(config["bind"])
+                grokbot_mcp.GrokbotAdapter(
+                    grokbot_mcp.ListenerConfig(
+                        target=target,
+                        instance=instance,
+                        bind_host=host,
+                        bind_port=port,
+                        allowed_hosts=tuple(config["allowed_hosts"]),
+                        allowed_origins=tuple(config["allowed_origins"]),
+                        bearer=bearer,
+                        hub_token=hub_token,
+                        client_id=client_id,
+                    )
+                ).ensure_hub_actor()
             with fleet_client_grokbot.listener_identity(hub_token):
                 grokbot_jobs.status(target)
         record("queue", True)
@@ -250,11 +290,13 @@ def _feed_authority_check(target: Path, *, timeout: int = DEFAULT_TIMEOUT_SECOND
     return {"check": check, "status": "ok" if ok else "fail"}
 
 
-def canary(target: Path, instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
+def canary(
+    target: Path, instance: str, *, client_id: str | None = None, timeout: int = DEFAULT_TIMEOUT_SECONDS
+) -> dict[str, Any]:
     """Bounded non-mutating authentication and inventory verification."""
     result: dict[str, Any] = {"ok": False, "instance": instance}
     try:
-        config, bearer = build_request_config(target, instance)
+        config, bearer = build_request_config(target, instance, client_id)
     except (grokbot_mcp.ConfigurationError, OSError, ValueError, KeyError):
         result["reason"] = "config"
         return result
@@ -266,6 +308,12 @@ def canary(target: Path, instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECOND
 
     if health is None or health.get("ok") is not True or health.get("role") != instance:
         result["reason"] = "health"
+        return result
+    if client_id is not None and (
+        health.get("client_id") != client_id
+        or health.get("bot_id") != f"grokbot-{grokbot_mcp.deployment_name(instance, client_id)}"
+    ):
+        result["reason"] = "identity"
         return result
     if anonymous_status not in {401, 403}:
         result["reason"] = "auth"
@@ -293,6 +341,7 @@ def canary(target: Path, instance: str, *, timeout: int = DEFAULT_TIMEOUT_SECOND
 def render_unit(config: dict[str, Any], *, python: str, exec_root: Path) -> str:
     config = _validate_config(config)
     instance = config["instance"]
+    client_id = config.get("client_id")
     bind = config["bind"]
     reference = config["bearer"]
     hub_token_file = config.get("hub_token_file")
@@ -311,6 +360,8 @@ def render_unit(config: dict[str, Any], *, python: str, exec_root: Path) -> str:
         "--bind",
         bind,
     ]
+    if client_id is not None:
+        args += ["--client-id", client_id]
     for host in config.get("allowed_hosts", []):
         args += ["--allow-host", host]
     for origin in config.get("allowed_origins", []):
@@ -327,7 +378,7 @@ def render_unit(config: dict[str, Any], *, python: str, exec_root: Path) -> str:
         hub_environment = f"Environment={env_name}={_systemd_quote(hub_token_file)}\n"
     return (
         "# Generated by brigade run cloud grokbot install-service.\n"
-        f"# Unit: {unit_name(instance)}\n"
+        f"# Unit: {unit_name(instance, client_id)}\n"
         "[Unit]\n"
         f"Description=Brigade Grok Bot MCP listener ({instance})\n"
         "After=network.target\n"
@@ -358,7 +409,7 @@ def write_unit(
 ) -> Path:
     """Render one role-scoped unit; never overwrites anything without force."""
     rendered = render_unit(config, python=python or sys.executable, exec_root=exec_root)
-    path = out_dir / unit_name(config["instance"])
+    path = out_dir / unit_name(config["instance"], config.get("client_id"))
     try:
         existing = _read_regular_text(path)
     except FileNotFoundError:
@@ -659,8 +710,11 @@ def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(config, dict) or config.get("schema") != CONFIG_SCHEMA:
         raise grokbot_mcp.ConfigurationError("invalid")
     required = {"schema", "instance", "bind", "allowed_hosts", "allowed_origins", "bearer"}
-    if set(config) not in (required, required | {"hub_token_file"}):
+    if not required <= set(config) or set(config) - required - {"hub_token_file", "client_id"}:
         raise grokbot_mcp.ConfigurationError("invalid")
+    if "client_id" in config and config["client_id"] is None:
+        raise grokbot_mcp.ConfigurationError("invalid")
+    grokbot_mcp.validate_client_id(config.get("client_id"))
     instance = config.get("instance")
     bind = config.get("bind")
     allowed_hosts = config.get("allowed_hosts")
