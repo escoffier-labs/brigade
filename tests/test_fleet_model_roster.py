@@ -933,6 +933,7 @@ def test_set_and_set_default_reject_retired_models_before_revision_bump(tmp_path
         ("missing-binding", "binding-missing"),
         ("disabled", "seat-disabled"),
         ("retired", "retired-model"),
+        ("retired-launch", "retired-model"),
         ("valid", None),
     ],
 )
@@ -947,11 +948,18 @@ def test_consumer_default_eligibility_is_atomic(tmp_path, monkeypatch, consumer,
         assert mutate({**SEAT, "seat": "previous"})[0] == 200
         assert mutate({"action": "set-default", "consumer": consumer, "seat": "previous"})[0] == 200
         candidate = {**SEAT, "seat": "candidate", "enabled": state != "disabled"}
+        if state == "retired-launch":
+            candidate["brigade_model"] = "composer-2.5"
         if state == "missing-binding":
             candidate["brigade_cli" if consumer == "brigade-run" else "t3_instance_id"] = ""
         assert mutate(candidate)[0] == 200
         if state == "retired":
             assert mutate({"action": "retire", "provider": SEAT["provider"], "family": SEAT["model"]})[0] == 200
+        if state == "retired-launch":
+            assert mutate({"action": "set-default", "consumer": consumer, "seat": "candidate"})[0] == 200
+            assert mutate({"action": "retire", "provider": SEAT["provider"], "family": "composer-2.5"})[0] == 200
+            assert fleet_hub_model_roster.project_roster(conn)["consumer_defaults"][consumer] == "candidate"
+            assert mutate({"action": "set-default", "consumer": consumer, "seat": "previous"})[0] == 200
         before = _dump(conn)
         revision = _revision(conn)
         monkeypatch.setattr(fleet_hub_model_roster, "_utc_now", lambda: "2026-01-02T00:00:00+00:00")

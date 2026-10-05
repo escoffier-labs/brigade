@@ -629,14 +629,18 @@ def _write_default(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
         raise FleetHubError("model policy field 'consumer' must be brigade-run or t3-fleet")
     seat = fleet_hub._model_policy_name(raw.get("seat"), "seat")
     row = conn.execute(
-        "SELECT provider, model, enabled, brigade_cli, t3_instance_id FROM model_policy WHERE seat=?", (seat,)
+        "SELECT provider, model, enabled, brigade_cli, t3_instance_id, brigade_model FROM model_policy WHERE seat=?",
+        (seat,),
     ).fetchone()
     if row is None:
         raise FleetHubError(f"model policy seat {seat!r} is not defined")
     error = _default_eligibility_error(
         consumer,
         enabled=bool(row[2]),
-        retired=fleet_model_roster.retired_reason(str(row[0]), str(row[1]), _retired_rows(conn)) is not None,
+        retired=any(
+            fleet_model_roster.retired_reason(str(row[0]), str(identity), _retired_rows(conn)) is not None
+            for identity in (row[1], row[5])
+        ),
         brigade_cli=str(row[3] or ""),
         t3_instance_id=str(row[4] or ""),
     )
@@ -1380,8 +1384,14 @@ def _admit(conn: sqlite3.Connection, raw: Any, *, caller_node: str) -> tuple[int
                 seat = {"seat": seat_name}
             else:
                 seat = found
+                launch_groups = None
+                roster_bindings = roster.get("consumer_launch_bindings")
+                if isinstance(roster_bindings, Mapping):
+                    consumer_map = roster_bindings.get(consumer)
+                    if isinstance(consumer_map, Mapping):
+                        launch_groups = consumer_map.get(seat["seat"])
                 retired = None
-                for identity in fleet_model_roster.binding_launch_models(seat):
+                for identity in fleet_model_roster.binding_launch_models(seat, launch_groups=launch_groups):
                     retired = fleet_model_roster.retired_reason(str(seat["provider"]), identity, _retired_rows(conn))
                     if retired is not None:
                         break
@@ -1392,12 +1402,6 @@ def _admit(conn: sqlite3.Connection, raw: Any, *, caller_node: str) -> tuple[int
                 elif not isinstance(seat["reasoning"], str) or not seat["reasoning"].strip():
                     decision = "binding-missing"
                 else:
-                    launch_groups = None
-                    roster_bindings = roster.get("consumer_launch_bindings")
-                    if isinstance(roster_bindings, Mapping):
-                        consumer_map = roster_bindings.get(consumer)
-                        if isinstance(consumer_map, Mapping):
-                            launch_groups = consumer_map.get(seat["seat"])
                     binding = _binding_for(consumer, seat, launch_groups=launch_groups)
                     if binding is None:
                         decision = "binding-missing"

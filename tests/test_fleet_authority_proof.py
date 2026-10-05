@@ -608,6 +608,50 @@ def test_activated_models_exclude_retired_native_launch_and_preserve_signed_rows
     assert {row["seat"] for row in roster["models"] if row.get("seat")} == {"seat-safe"}
 
 
+@pytest.mark.parametrize("consumer", ["brigade-run", "t3-fleet"])
+@pytest.mark.parametrize("group", ["brigade", "native"])
+def test_activated_admission_rejects_retired_consumer_launch_override(conn, consumer, group):
+    _activate(conn)
+    current = fleet_hub_policy.current_policy(conn)
+    document = json.loads(json.dumps(current["document"]))
+    seat = document["seats"][SEAT]
+    seat["provider"] = "openai"
+    seat["model"] = "gpt-6.1-sol"
+    seat["bindings"][group] = (
+        {"instance_id": "inst-alpha", "model": "gpt-6.1-sol"}
+        if group == "native"
+        else {"cli": "cli-alpha", "model": "gpt-6.1-sol"}
+    )
+    fleet_hub_policy.save_policy(
+        conn, document, expected_version=current["revision"], actor="operator", reason="safe launch binding"
+    )
+    status, admitted = _admit(conn, phase="controller", request_id="safe-override", consumer=consumer)
+    assert status == 200, admitted
+
+    current = fleet_hub_policy.current_policy(conn)
+    document["consumers"][consumer]["seat_bindings"] = {SEAT: {group: {"model": "gpt-5.4"}}}
+    fleet_hub_policy.save_policy(
+        conn, document, expected_version=current["revision"], actor="operator", reason="retired consumer override"
+    )
+    policy_before = fleet_hub_policy.current_policy(conn)
+    roster_before = fleet_hub_model_roster.project_roster(conn)
+    status, denied = _admit(conn, phase="controller", request_id="retired-override", consumer=consumer)
+    assert status == 409, denied
+    assert denied["error"] == "retired-model"
+    assert denied["state"] == "denied"
+    assert denied["binding"] is None
+    assert conn.execute(
+        "SELECT decision, consumer_binding FROM model_admission_audit WHERE request_id='retired-override'"
+    ).fetchone() == ("retired-model", None)
+    assert conn.execute("SELECT decision FROM model_admission_audit WHERE request_id='safe-override'").fetchone() == (
+        "admitted",
+    )
+    assert fleet_hub_policy.current_policy(conn) == policy_before
+    roster_after = fleet_hub_model_roster.project_roster(conn)
+    assert roster_after["revision"] == roster_before["revision"]
+    assert roster_after["consumer_defaults"] == roster_before["consumer_defaults"]
+
+
 @pytest.mark.parametrize("launch_scope", ["base", "consumer"])
 def test_activated_selectors_filter_effective_native_launch_per_consumer(conn, launch_scope):
     _retired_native_policy(conn, launch_scope)
