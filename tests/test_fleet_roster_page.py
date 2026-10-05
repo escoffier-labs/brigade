@@ -269,7 +269,7 @@ def test_retired_seats_leave_the_table_and_legacy_selectors_but_keep_history(tmp
         assert "coder" in history and "cursor_grok" in history
         # A normal save after filtering must leave the hidden historical rows intact.
         cookie = _login_cookie(hub)
-        status, _headers, text = _form(hub, _current_form(hub, cookie), cookie=cookie)
+        status, _headers, text = _form(hub, _current_form(hub, cookie), admin=True)
         assert status == 303, text
         conn = fleet_hub.open_db(db)
         try:
@@ -311,7 +311,7 @@ def test_legacy_save_keeps_retired_assignments_until_the_operator_changes_them(t
         fields = _current_form(hub, cookie)
         fields["default.brigade-run"] = "coder"
         fields["default.t3-fleet"] = "coder"
-        assert _form(hub, fields, cookie=cookie)[0] == 303
+        assert _form(hub, fields, admin=True)[0] == 303
         status, payload = _json(
             hub,
             "POST",
@@ -319,14 +319,14 @@ def test_legacy_save_keeps_retired_assignments_until_the_operator_changes_them(t
             {"action": "retire", "provider": "openai", "family": "gpt-5.6", "expected_revision": _revision(hub)},
         )
         assert status == 200, payload
-        page = _request(hub, "GET", "/deck/roster", headers={"Cookie": cookie})[2]
+        page = _request(hub, "GET", "/deck/roster", headers=_bearer())[2]
         for selector in re.findall(r"<select .*?</select>", page, re.S):
             assert 'value="coder"' not in selector
         # An unrelated edit keeps every retired assignment.
         fields = _current_form(hub, cookie)
         assert fields["role.impl"] == fleet_hub_roster_page.KEEP_CURRENT
         fields["role.scout"] = "daybreak"
-        status, _headers, text = _form(hub, fields, cookie=cookie)
+        status, _headers, text = _form(hub, fields, admin=True)
         assert status == 303, text
         conn = fleet_hub.open_db(db)
         try:
@@ -341,14 +341,14 @@ def test_legacy_save_keeps_retired_assignments_until_the_operator_changes_them(t
         fields = _current_form(hub, cookie)
         fields["role.security"] = "coder"
         before = _tables(db)
-        status, _headers, text = _form(hub, fields, cookie=cookie)
+        status, _headers, text = _form(hub, fields, admin=True)
         assert status == 422 and "role security names seat coder" in text
         assert _tables(db) == before
         # Clearing or replacing a kept value is still deliberate and allowed.
         fields = _current_form(hub, cookie)
         fields["role.impl"] = ""
         fields["default.brigade-run"] = "daybreak"
-        status, _headers, text = _form(hub, fields, cookie=cookie)
+        status, _headers, text = _form(hub, fields, admin=True)
         assert status == 303, text
         conn = fleet_hub.open_db(db)
         try:
@@ -370,6 +370,7 @@ def _post_policy(hub, cookie: str, fields: dict) -> tuple:
             "Content-Type": "application/x-www-form-urlencoded",
             "Sec-Fetch-Site": "same-origin",
             "Cookie": cookie,
+            **_bearer(),
         },
         body=urlencode(fields).encode(),
     )
@@ -419,7 +420,7 @@ def test_authoritative_save_keeps_retired_roles_and_both_admission_defaults(tmp_
         rendered = page()
         for selector in re.findall(r"<select .*?</select>", rendered, re.S):
             assert 'value="seat-alpha"' not in selector
-        policy_editor = _request(hub, "GET", "/deck/policy", headers={"Cookie": cookie})[2]
+        policy_editor = _request(hub, "GET", "/deck/policy", headers=_bearer())[2]
         for selector in re.findall(r"<select .*?</select>", policy_editor, re.S):
             assert 'value="seat-alpha"' not in selector
         editor = _editor_fields(policy_editor, 'name="scope" value="defaults"')
