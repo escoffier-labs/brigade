@@ -209,6 +209,7 @@ def _import_inbox_for_archive(
         before = os.fstat(descriptor)
         raw_buffer = BytesIO()
         imports: list[dict[str, Any]] = []
+        record_offsets: dict[int, tuple[int, int]] = {}
         record_limit = 4 * 1024 * 1024
         with os.fdopen(os.dup(descriptor), "rb") as handle:
             line_number = 0
@@ -216,6 +217,7 @@ def _import_inbox_for_archive(
                 line_number += 1
                 if len(line) > record_limit:
                     raise OSError(f"import inbox record {line_number} exceeds {record_limit} byte archive limit")
+                start = raw_buffer.tell()
                 raw_buffer.write(line)
                 if not line.strip():
                     continue
@@ -226,6 +228,7 @@ def _import_inbox_for_archive(
                 if not isinstance(item, dict):
                     raise OSError(f"import inbox record {line_number} is not a JSON object")
                 imports.append(item)
+                record_offsets[id(item)] = (start, raw_buffer.tell())
         # BytesIO releases the growing buffer as one immutable snapshot without
         # retaining all input lines alongside a joined copy of the whole inbox.
         raw = raw_buffer.getvalue()
@@ -254,7 +257,20 @@ def _import_inbox_for_archive(
             nonlocal descriptor
             verify_canonical_write_locks(target)
             check_generation()
-            rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in items).encode("utf-8")
+            # Retention selects unchanged original dicts in input order. Keep
+            # them alive in imports so object IDs cannot be reused, and reject
+            # copies/reordering rather than serialize a row beyond its limit
+            # or concatenate an unterminated final row with another record.
+            retained: list[memoryview] = []
+            raw_view = memoryview(raw)
+            previous_end = 0
+            for item in items:
+                offsets = record_offsets.get(id(item))
+                if offsets is None or offsets[0] < previous_end:
+                    raise OSError("archive publication requires original inbox records in order")
+                start, previous_end = offsets
+                retained.append(raw_view[start:previous_end])
+            rendered = b"".join(retained)
             # NT replacement requires closing the held inbox descriptor first.
             os.close(descriptor)
             descriptor = -1

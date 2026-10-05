@@ -3110,6 +3110,65 @@ def test_inbox_archive_recovers_inbox_above_snapshot_limit(tmp_path, monkeypatch
         assert inbox.stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.parametrize("payload_kind", ["unicode", "dense-array"])
+def test_inbox_archive_preserves_retained_record_bytes_across_publications(tmp_path, monkeypatch, capsys, payload_kind):
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    if payload_kind == "unicode":
+        value = b'"' + ("é" * 820_000).encode("utf-8") + b'"'
+    else:
+        value = b"[" + b"0," * 1_450_000 + b"0]"
+    # Duplicate logical IDs must still refer to distinct original records.
+    first = b' {"status":"pending", "id":"same", "unknown_field":{"keep":true}} \r\n'
+    final = b'{"id":"same","status":"pending","unknown_field":' + value + b"}"
+    assert len(final) < 4 * 1024 * 1024
+    assert len(json.dumps(json.loads(final)).encode("utf-8")) > 4 * 1024 * 1024
+    retained = first + final
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(first + b"\n" + final)
+    for index in range(2):
+        closed = (
+            b'{"id":"closed-'
+            + str(index).encode("ascii")
+            + b'","status":"dismissed","updated_at":"2026-05-20T12:00:00+00:00"}\n'
+        )
+        inbox.write_bytes(b"\n" + closed + inbox.read_bytes())
+        inbox.chmod(0o600)
+        assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert (payload["archived"], payload["kept"]) == (1, 2)
+        # A subsequent read must accept the preserved unterminated final row.
+        assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert (payload["archived"], payload["kept"]) == (0, 2)
+        assert inbox.read_bytes() == retained
+    archived = [json.loads(line) for line in work_cmd.helpers._imports_archive_path(tmp_path).read_bytes().splitlines()]
+    assert [item["id"] for item in archived] == ["closed-0", "closed-1"]
+
+
+@pytest.mark.parametrize("selection", ["copy", "reordered", "duplicate"])
+def test_inbox_archive_publication_requires_original_ordered_records(tmp_path, selection):
+    from brigade.work_cmd import ledger
+    from brigade.work_cmd.ledger import import_model
+
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    original = b'{"id":"same","status":"pending"}\n{"id":"same","status":"pending"}'
+    inbox.write_bytes(original)
+    inbox.chmod(0o600)
+    with ledger._canonical_inbox_write(tmp_path):
+        with import_model._import_inbox_for_archive(tmp_path) as (records, publish):
+            if selection == "copy":
+                kept = [dict(records[0])]
+            elif selection == "reordered":
+                kept = list(reversed(records))
+            else:
+                kept = [records[0], records[0]]
+            with pytest.raises(OSError, match="archive publication requires original inbox records in order"):
+                publish(kept)
+    assert inbox.read_bytes() == original
+
+
 def test_inbox_archive_reader_avoids_duplicate_full_raw_buffers(tmp_path):
     import tracemalloc
 
