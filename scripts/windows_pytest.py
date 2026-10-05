@@ -219,11 +219,23 @@ class CleanupUnconfirmed(CleanupError):
     """Job emptiness or worker finalization could not be confirmed."""
 
 
+@dataclass
+class _CleanupDeadline:
+    deadline: float | None = None
+
+    def get(self, tracker: ProcessTracker) -> float:
+        if self.deadline is None:
+            self.deadline = time.monotonic() + CLEANUP_TIMEOUT_SECONDS
+        self.deadline = tracker.cleanup_deadline(self.deadline)
+        return self.deadline
+
+
 def _wait_for_process(
     process,
     *,
     timeout_seconds: int,
     tracker: ProcessTracker,
+    cleanup: _CleanupDeadline,
     clock: Callable[[], float] = time.monotonic,
     aggregate_deadline: float | None = None,
 ) -> int:
@@ -241,10 +253,10 @@ def _wait_for_process(
                     else FILE_TIMEOUT
                 )
             )
+            cleanup.get(tracker)
             process.terminate(cause)
-            cleanup_deadline = tracker.cleanup_deadline(time.monotonic() + CLEANUP_TIMEOUT_SECONDS)
             try:
-                return process.wait(timeout=max(0.0, cleanup_deadline - time.monotonic()))
+                return process.wait(timeout=max(0.0, cleanup.get(tracker) - time.monotonic()))
             except subprocess.TimeoutExpired:
                 raise CleanupUnconfirmed("cleanup unconfirmed: root process wait expired") from None
         try:
@@ -292,6 +304,8 @@ def run_file(
     ]
     tracker = tracker if tracker is not None else ProcessTracker()
     returncode = None
+    termination_status = None
+    cleanup = _CleanupDeadline()
     process = None
     if deadline is not None and clock() >= deadline:
         return _deadline_failure(name, output_dir, unstarted=True)
@@ -312,21 +326,30 @@ def run_file(
                     process,
                     timeout_seconds=timeout_seconds,
                     tracker=tracker,
+                    cleanup=cleanup,
                     clock=clock,
                     aggregate_deadline=deadline,
                 )
+                # Natural finalization can itself record DRIVER_ABORT for descendants.
+                if process.cause == returncode:
+                    termination_status = REASONS.get(returncode)
             finally:
                 try:
                     process.finish(
-                        deadline=tracker.cleanup_deadline(time.monotonic() + CLEANUP_TIMEOUT_SECONDS),
-                        natural=returncode is not None and returncode not in REASONS,
+                        deadline=cleanup.get(tracker),
+                        natural=returncode is not None and termination_status is None,
                     )
                 finally:
                     process.close()
     except LaunchClosed:
-        return _deadline_failure(name, output_dir, unstarted=True, cause=tracker.closing_cause or AGGREGATE_DEADLINE)
+        return _deadline_failure(
+            name,
+            output_dir,
+            unstarted=True,
+            cause=tracker.closing_cause if tracker.is_closing() else AGGREGATE_DEADLINE,
+        )
     except CleanupError as exc:
-        if returncode is not None and returncode not in REASONS and _status(returncode) == "failed":
+        if returncode is not None and termination_status is None and _status(returncode) == "failed":
             return FileResult(
                 name,
                 "failed",
@@ -348,9 +371,9 @@ def run_file(
             log.relative_to(output_dir).as_posix(),
             f"launch failure: {exc!r}",
         )
-    status = REASONS.get(returncode, _status(returncode))
+    status = termination_status or _status(returncode)
     diagnostic = None
-    if returncode in REASONS:
+    if termination_status is not None:
         diagnostic = f"job termination: {status}"
     if process.token.leaked_descendants:
         diagnostic = f"{diagnostic + '; ' if diagnostic else ''}leaked_descendants={process.token.leaked_descendants}"
@@ -416,7 +439,10 @@ def run_files(
     def runner(name: str) -> FileResult:
         if tracker.is_closing() or clock() >= deadline:
             return _deadline_failure(
-                name, output_dir, unstarted=True, cause=tracker.closing_cause or AGGREGATE_DEADLINE
+                name,
+                output_dir,
+                unstarted=True,
+                cause=tracker.closing_cause if tracker.is_closing() else AGGREGATE_DEADLINE,
             )
         return run_file(
             name,
@@ -527,7 +553,13 @@ def run_files(
                 if cleanup_error is not None:
                     active_names = set(active.values())
                     results[:] = [
-                        replace(row, cleanup_error=f"driver cleanup failed: {cleanup_error}")
+                        replace(
+                            row,
+                            cleanup_error=(
+                                f"{row.cleanup_error + '; ' if row.cleanup_error else ''}"
+                                f"driver cleanup failed: {cleanup_error}"
+                            ),
+                        )
                         if row.name in active_names
                         else row
                         for row in results

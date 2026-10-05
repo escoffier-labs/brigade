@@ -13,12 +13,15 @@ from scripts import windows_job, windows_pytest
 
 class FakeProcess:
     token = SimpleNamespace(leaked_descendants=0)
+    cause = None
 
     def terminate(self, cause):
-        pass
+        if self.cause is None:
+            self.cause = cause
 
     def finish(self, **kwargs):
-        pass
+        # Natural finalization can terminate leftover descendants with this cause.
+        self.terminate(windows_job.DRIVER_ABORT)
 
     def close(self):
         pass
@@ -64,12 +67,60 @@ def test_budget_consumed_by_file_setup_prevents_launch(tmp_path, monkeypatch):
     assert result.status == "unstarted"
 
 
-def test_cleanup_failure_retains_observed_product_failure_and_infrastructure_error(tmp_path, monkeypatch):
+@pytest.mark.parametrize("boundary", ["launch-budget", "queued-worker"])
+def test_deadline_only_unstarted_row_uses_aggregate_diagnostic(tmp_path, monkeypatch, boundary):
+    tracker = windows_pytest.ProcessTracker()
+    monkeypatch.setattr(windows_pytest, "ProcessTracker", lambda: tracker)
+    monkeypatch.setattr(windows_pytest, "_child_environment", lambda: {"A": "1"})
+    kwargs = {
+        "repo": tmp_path,
+        "python": Path("python.exe").absolute(),
+        "output_dir": tmp_path / "out",
+        "temp_root": tmp_path,
+        "timeout_seconds": 900,
+        "deadline": 5.0,
+    }
+    name = "test_late.py"
+    if boundary == "launch-budget":
+        # Cross between run_file's check and the real launcher's budget check.
+        ticks = iter([0.0, 0.0, 10.0])
+        rows = [windows_pytest.run_file(name, **kwargs, tracker=tracker, clock=lambda: next(ticks))]
+    else:
+        coordinator = threading.get_ident()
+        rows = windows_pytest.run_files(
+            files=[name],
+            serial=set(),
+            workers=1,
+            **kwargs,
+            clock=lambda: 0.0 if threading.get_ident() == coordinator else 10.0,
+        )
+    assert not tracker.is_closing()
+    assert tracker.closing_cause == windows_job.DRIVER_ABORT
+    assert len(rows) == 1
+    assert rows[0].status == "unstarted"
+    assert rows[0].returncode is None
+    assert rows[0].diagnostic == "driver aggregate deadline exceeded"
+    assert windows_pytest.regressions(rows, set()) == []
+    assert windows_pytest.infrastructure_results(rows) == rows
+    record = tmp_path / "record.json"
+    windows_pytest.write_record(record, results=rows, expected_files=[name], status="incomplete")
+    payload = json.loads(record.read_text())
+    assert payload["expected_count"] == payload["accounted_count"] == 1
+    assert payload["completed_count"] == 0
+    assert payload["status"] == "incomplete"
+
+
+@pytest.mark.parametrize("returncode", [7, *windows_job.REASONS])
+def test_cleanup_failure_retains_observed_product_failure_and_infrastructure_error(tmp_path, monkeypatch, returncode):
+    natural = []
+
     class Process(FakeProcess):
         def wait(self, timeout):
-            return 7
+            return returncode
 
         def finish(self, **kwargs):
+            natural.append(kwargs["natural"])
+            super().finish(**kwargs)
             raise windows_job.CleanupError("QueryInformationJobObject", 5)
 
     monkeypatch.setattr(windows_pytest, "launch_process", lambda **kwargs: Process())
@@ -81,9 +132,109 @@ def test_cleanup_failure_retains_observed_product_failure_and_infrastructure_err
         temp_root=tmp_path,
         timeout_seconds=900,
     )
-    assert (result.status, result.returncode) == ("failed", 7)
+    assert (result.status, result.returncode) == ("failed", returncode)
+    assert natural == [True]
+    assert result.cleanup_error is not None
     assert windows_pytest.regressions([result], set()) == [result]
     assert windows_pytest.infrastructure_results([result]) == [result]
+
+
+@pytest.mark.parametrize("returncode", list(windows_job.REASONS))
+@pytest.mark.parametrize("cause_state", ["none", "different", "matching"])
+def test_reserved_root_result_uses_cause_observed_before_finish(tmp_path, monkeypatch, returncode, cause_state):
+    natural = []
+
+    class Process(FakeProcess):
+        def wait(self, timeout):
+            return returncode
+
+        def finish(self, **kwargs):
+            natural.append(kwargs["natural"])
+            super().finish(**kwargs)
+
+    process = Process()
+    if cause_state == "matching":
+        process.cause = returncode
+    elif cause_state == "different":
+        process.cause = next(code for code in windows_job.REASONS if code != returncode)
+    monkeypatch.setattr(windows_pytest, "launch_process", lambda **kwargs: process)
+    result = windows_pytest.run_file(
+        "test_reserved.py",
+        repo=tmp_path,
+        python=Path("python.exe"),
+        output_dir=tmp_path / "out",
+        temp_root=tmp_path,
+        timeout_seconds=900,
+    )
+    caused = cause_state == "matching"
+    assert (result.status, result.returncode) == (
+        windows_job.REASONS[returncode] if caused else "failed",
+        returncode,
+    )
+    assert natural == [not caused]
+    assert result.diagnostic == (f"job termination: {result.status}" if caused else None)
+    if cause_state == "none":
+        assert process.cause == windows_job.DRIVER_ABORT
+
+
+@pytest.mark.parametrize("root_outcome", ["return", "timeout", "error", "terminate-error"])
+@pytest.mark.parametrize("aggregate_cleanup_deadline", [None, 10.0])
+def test_run_file_shares_cleanup_deadline_from_before_termination(
+    tmp_path, monkeypatch, root_outcome, aggregate_cleanup_deadline
+):
+    execution_clock = [0.0]
+    cleanup_clock = [0.0]
+    waits, finishes, closed = [], [], []
+    tracker = windows_pytest.ProcessTracker()
+    if aggregate_cleanup_deadline is not None:
+        tracker.kill_all(deadline=aggregate_cleanup_deadline)
+    monkeypatch.setattr(windows_pytest.time, "monotonic", lambda: cleanup_clock[0])
+
+    class Process(FakeProcess):
+        def terminate(self, cause):
+            super().terminate(cause)
+            cleanup_clock[0] = 2.0
+            if root_outcome == "terminate-error":
+                raise windows_job.CleanupError("TerminateJobObject", 5)
+
+        def wait(self, timeout):
+            if self.cause is None:
+                execution_clock[0] = 1.0
+                raise subprocess.TimeoutExpired("pytest", timeout)
+            waits.append(timeout)
+            cleanup_clock[0] = 14.0
+            if root_outcome == "timeout":
+                raise subprocess.TimeoutExpired("pytest", timeout)
+            if root_outcome == "error":
+                raise windows_job.CleanupError("WaitForSingleObject", 5)
+            return self.cause
+
+        def finish(self, **kwargs):
+            finishes.append(kwargs)
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(windows_pytest, "launch_process", lambda **kwargs: Process())
+    result = windows_pytest.run_file(
+        "test_cleanup_budget.py",
+        repo=tmp_path,
+        python=Path("python.exe"),
+        output_dir=tmp_path / "out",
+        temp_root=tmp_path,
+        timeout_seconds=1,
+        tracker=tracker,
+        clock=lambda: execution_clock[0],
+    )
+    expected_deadline = 15.0 if aggregate_cleanup_deadline is None else 10.0
+    assert finishes == [{"deadline": expected_deadline, "natural": False}]
+    assert waits == ([] if root_outcome == "terminate-error" else [expected_deadline - 2.0])
+    assert closed == [True]
+    assert result.status == (
+        ("timeout" if aggregate_cleanup_deadline is None else "deadline-exceeded")
+        if root_outcome == "return"
+        else "cleanup-unconfirmed"
+    )
 
 
 def _result(name: str, status: str) -> windows_pytest.FileResult:
@@ -308,6 +459,7 @@ def test_timeout_terminates_job_and_waits_for_cleanup(tmp_path, monkeypatch):
             return windows_job.FILE_TIMEOUT
 
         def terminate(self, cause):
+            super().terminate(cause)
             calls.append(("terminate", cause))
 
         def finish(self, **kwargs):
@@ -735,15 +887,18 @@ def test_cancellation_poll_terminates_with_aggregate_cause_and_waits(monkeypatch
 
     tracker = windows_pytest.ProcessTracker()
     tracker.kill_all()
-    code = windows_pytest._wait_for_process(Process(), timeout_seconds=900, tracker=tracker)
+    code = windows_pytest._wait_for_process(
+        Process(), timeout_seconds=900, tracker=tracker, cleanup=windows_pytest._CleanupDeadline()
+    )
     assert code == windows_job.AGGREGATE_DEADLINE
     assert calls[0] == ("terminate", windows_job.AGGREGATE_DEADLINE)
     assert 0 <= calls[1][1] <= windows_pytest.CLEANUP_TIMEOUT_SECONDS
 
 
-def test_run_file_cannot_launch_after_cleanup_started(tmp_path):
+@pytest.mark.parametrize("cause", [windows_job.AGGREGATE_DEADLINE, windows_job.DRIVER_ABORT])
+def test_run_file_cannot_launch_after_cleanup_started(tmp_path, cause):
     tracker = windows_pytest.ProcessTracker()
-    tracker.kill_all()
+    tracker.kill_all(cause=cause)
     result = windows_pytest.run_file(
         "test_late.py",
         repo=tmp_path,
@@ -754,7 +909,9 @@ def test_run_file_cannot_launch_after_cleanup_started(tmp_path):
         tracker=tracker,
     )
     assert result.status == "unstarted"
-    assert "driver aggregate deadline exceeded" in result.diagnostic
+    assert result.diagnostic == (
+        "driver aggregate deadline exceeded" if cause == windows_job.AGGREGATE_DEADLINE else "driver abort"
+    )
     assert (tmp_path / "output" / result.log).read_bytes() == b""
 
 
@@ -1011,6 +1168,9 @@ def test_cleanup_timeout_retains_temp_and_records_partial_evidence(tmp_path, mon
     release = threading.Event()
     cleanup_started = threading.Event()
     real_monotonic = time.monotonic
+    real_write = windows_pytest.write_record
+    writes = []
+    cleanup_failure = windows_job.CleanupError("cleanup unconfirmed")
     root = tmp_path / "outside"
     root.mkdir()
     monkeypatch.setattr(windows_pytest, "is_windows", lambda: True)
@@ -1026,7 +1186,11 @@ def test_cleanup_timeout_retains_temp_and_records_partial_evidence(tmp_path, mon
 
     def cleanup(self, **kwargs):
         cleanup_started.set()
-        raise windows_job.CleanupError("cleanup unconfirmed")
+        raise cleanup_failure
+
+    def write(path, **kwargs):
+        writes.append((kwargs.get("status", "running"), list(kwargs["results"])))
+        real_write(path, **kwargs)
 
     def expire(active, **kwargs):
         assert started.wait(1)
@@ -1035,6 +1199,7 @@ def test_cleanup_timeout_retains_temp_and_records_partial_evidence(tmp_path, mon
     monkeypatch.setattr(windows_pytest, "run_file", worker)
     monkeypatch.setattr(windows_pytest.ProcessTracker, "kill_all", cleanup)
     monkeypatch.setattr(windows_pytest, "wait", expire)
+    monkeypatch.setattr(windows_pytest, "write_record", write)
     allowlist = tmp_path / "allowlist.json"
     allowlist.write_text('{"known_failures": [], "known_timeouts": []}')
     record = tmp_path / "record.json"
@@ -1050,6 +1215,12 @@ def test_cleanup_timeout_retains_temp_and_records_partial_evidence(tmp_path, mon
         assert payload["completed_count"] == 0
         assert payload["accounted_count"] == payload["expected_count"] == 1
         assert payload["results"][0]["status"] == "deadline-exceeded"
+        assert payload["results"][0]["returncode"] is None
+        assert payload["results"][0]["cleanup_error"] == (
+            f"worker unfinished after cleanup deadline; driver cleanup failed: {cleanup_failure}"
+        )
+        assert [status for status, _ in writes if status != "running"] == ["error"]
+        assert all(not rows for status, rows in writes if status == "running")
         assert payload["retained_temp_root"] == str(root)
         assert payload["status"] == "error"
         assert "cleanup unconfirmed" in payload["driver_error"]
@@ -1228,7 +1399,10 @@ def test_main_abort_drains_natural_failure_and_accounts_pending(tmp_path, monkey
     root.mkdir()
     files = ["test_trigger.py", "test_natural.py", "test_pending.py"]
     launches, progress, causes = [], [], []
+    terminal_writes = []
     failure = OSError("original record failure")
+    worker_cleanup_error = "worker cleanup failure"
+    cleanup_failure = windows_job.CleanupError("secondary cleanup failure")
 
     def worker(name, **kwargs):
         launches.append(name)
@@ -1237,7 +1411,7 @@ def test_main_abort_drains_natural_failure_and_accounts_pending(tmp_path, monkey
             return _result(name, "cleanup-unconfirmed" if abort == "cleanup" else "passed")
         started.set()
         assert release.wait(2)
-        return _result(name, "failed")
+        return windows_pytest.FileResult(name, "failed", 1, 1.0, f"logs/{name}.log", cleanup_error=worker_cleanup_error)
 
     def wait_for_trigger(active, **kwargs):
         assert started.wait(2)
@@ -1251,10 +1425,11 @@ def test_main_abort_drains_natural_failure_and_accounts_pending(tmp_path, monkey
     def cleanup(self, **kwargs):
         causes.append(kwargs["cause"])
         release.set()
-        if abort == "record":
-            raise windows_job.CleanupError("secondary cleanup failure")
+        raise cleanup_failure
 
     def write(path, **kwargs):
+        if kwargs.get("status", "running") != "running":
+            terminal_writes.append(kwargs["status"])
         if kwargs.get("status", "running") == "running" and kwargs["results"]:
             progress.append(kwargs["results"])
             if abort == "record":
@@ -1298,9 +1473,11 @@ def test_main_abort_drains_natural_failure_and_accounts_pending(tmp_path, monkey
             "interrupt": "original interrupt",
         }[abort]
     )
-    if abort == "record":
-        assert len(progress) == 1
-        assert "secondary cleanup failure" in rows["test_natural.py"]["cleanup_error"]
+    assert len(progress) == (0 if abort == "interrupt" else 1)
+    assert terminal_writes == [payload["status"]]
+    assert rows["test_natural.py"]["cleanup_error"] == (
+        f"{worker_cleanup_error}; driver cleanup failed: {cleanup_failure}"
+    )
     assert payload["retained_temp_root"] == str(root)
 
 
