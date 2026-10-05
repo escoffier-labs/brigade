@@ -14,6 +14,7 @@ from brigade import worklore_store as store
 
 NONCE_A = base64.urlsafe_b64encode(b"a" * 32).decode().rstrip("=")
 NONCE_B = base64.urlsafe_b64encode(b"b" * 32).decode().rstrip("=")
+NONCE_C = base64.urlsafe_b64encode(b"c" * 32).decode().rstrip("=")
 REVISION = "a" * 40
 OFFER = {
     "action": "offer",
@@ -209,7 +210,12 @@ def test_handoff_fences_old_holder_and_preserves_grant(ledger, target):
     assert released["generation"] == 2 and released["state"] == "unowned"
     assert checkpoint["revision"] == 3 and checkpoint["evidence_refs"] == CHECKPOINT["evidence_refs"]
     post(conn, work_id, OFFER, admin=True, revision=6, key="reoffer")
-    third = post(conn, work_id, {"action": "accept", "generation": 2}, revision=7, key="accept-3", nonce=NONCE_A)
+    status, refusal = request(
+        conn, work_id, {"action": "accept", "generation": 2}, revision=7, key="reuse", nonce=NONCE_A
+    )
+    assert status == 409 and refusal["code"] == "ownership-conflict"
+    assert event_count(conn, work_id) == 7
+    third = post(conn, work_id, {"action": "accept", "generation": 2}, revision=7, key="accept-3", nonce=NONCE_C)
     assert third["generation"] == 3
 
 
@@ -324,7 +330,8 @@ def test_revocation_and_lost_operator_privilege_refuse_replays_without_transfer(
 
 
 @pytest.mark.parametrize("action", ["release", "withdraw"])
-def test_terminal_items_allow_safety_exits(ledger, action):
+@pytest.mark.parametrize("terminal", ["canceled", "completed", "archived"])
+def test_terminal_items_allow_safety_exits(ledger, action, terminal):
     conn, work_id, _ = ledger
     if action == "release":
         owned(conn, work_id)
@@ -332,7 +339,7 @@ def test_terminal_items_allow_safety_exits(ledger, action):
     else:
         post(conn, work_id, OFFER, admin=True, key="offer")
         revision, body = 1, {"action": action}
-    store.transition(conn, work_id, to_status="canceled", expected_version=1, actor_id="admin", actor_type="operator")
+    make_terminal(conn, work_id, terminal)
     result = post(conn, work_id, body, admin=action == "withdraw", revision=revision, key="exit", nonce=NONCE_A)
     assert result["state"] == "unowned"
     assert (
@@ -342,7 +349,8 @@ def test_terminal_items_allow_safety_exits(ledger, action):
 
 
 @pytest.mark.parametrize("action", ["accept", "checkpoint", "handoff"])
-def test_terminal_items_refuse_new_owner_progress(ledger, action):
+@pytest.mark.parametrize("terminal", ["canceled", "completed", "archived"])
+def test_terminal_items_refuse_new_owner_progress(ledger, action, terminal):
     conn, work_id, _ = ledger
     if action == "accept":
         post(conn, work_id, OFFER, admin=True, key="offer")
@@ -351,7 +359,7 @@ def test_terminal_items_refuse_new_owner_progress(ledger, action):
         owned(conn, work_id)
         body = CHECKPOINT if action == "checkpoint" else {"action": action, "generation": 1, "target_node": "node-b"}
         revision = 2
-    store.transition(conn, work_id, to_status="canceled", expected_version=1, actor_id="admin", actor_type="operator")
+    make_terminal(conn, work_id, terminal)
     assert (
         request(conn, work_id, body, revision=revision, key="terminal", nonce=NONCE_A)[1]["code"]
         == "ownership-conflict"
@@ -718,3 +726,309 @@ def test_capacity_checks_preexisting_offered_chains(ledger, action, count, expec
     else:
         assert status == 200 and payload["ownership"]["revision"] == expected
         assert event_count(conn, work_id) == expected
+
+
+def metadata_body(field, value):
+    body = json.loads(json.dumps(OFFER if field in {"exclusions", "authorization_ref", "source_ref"} else CHECKPOINT))
+    if field == "resume_condition":
+        body["next_action"][field] = value
+    elif field == "ref":
+        body["evidence_refs"][0][field] = value
+    elif field == "source_ref":
+        body["attempt_budget"][field] = value
+    else:
+        body[field] = [value] if field in {"write_scope", "exclusions"} else value
+    return body
+
+
+@pytest.mark.parametrize("decoded", [b"a" * 32, b"\xfb\xff" * 16])
+@pytest.mark.parametrize("encoding", ["raw", "base64", "unpadded", "hex", "HEX"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "repo_identity",
+        "write_scope",
+        "resume_condition",
+        "ref",
+        "exclusions",
+        "authorization_ref",
+        "source_ref",
+        "key",
+        "body-key",
+    ],
+)
+def test_presented_nonce_echo_is_private_before_validation_or_storage(ledger, decoded, encoding, field):
+    conn, work_id, _ = ledger
+    nonce = base64.urlsafe_b64encode(decoded).decode().rstrip("=")
+    variants = {
+        "raw": nonce,
+        "base64": base64.b64encode(decoded).decode(),
+        "unpadded": base64.b64encode(decoded).decode().rstrip("="),
+        "hex": decoded.hex(),
+        "HEX": decoded.hex().upper(),
+    }
+    value = "prefix-" + variants[encoding] + "-suffix"
+    offer = field in {"exclusions", "authorization_ref", "source_ref"}
+    if not offer:
+        post(conn, work_id, OFFER, admin=True, key="offer")
+        post(conn, work_id, {"action": "accept", "generation": 0}, revision=1, key="accept", nonce=nonce)
+    body = metadata_body(field, value) if field not in {"key", "body-key"} else dict(CHECKPOINT)
+    if field == "body-key":
+        body[value] = "value"
+    before = store.list_all_events(conn, work_id=work_id)["events"]
+    status, refusal = request(
+        conn,
+        work_id,
+        body,
+        admin=offer,
+        revision=0 if offer else 2,
+        key=value if field == "key" else "echo",
+        nonce=nonce,
+    )
+    assert status == 400 and refusal["code"] == "private-data"
+    assert refusal["error"] == "ownership metadata must not contain holder secret"
+    assert variants[encoding] not in json.dumps(refusal)
+    assert store.list_all_events(conn, work_id=work_id)["events"] == before
+
+
+@pytest.mark.parametrize("initial_operator", [False, True])
+@pytest.mark.parametrize("action", ["accept", "checkpoint", "release"])
+def test_holder_replay_uses_stable_node_principal_after_role_change(ledger, initial_operator, action):
+    conn, work_id, _ = ledger
+    post(conn, work_id, OFFER, admin=True, key="offer")
+    accept = {"action": "accept", "generation": 0}
+    if action == "accept":
+        body, revision = accept, 1
+    else:
+        post(conn, work_id, accept, revision=1, key="accept", nonce=NONCE_A)
+        body, revision = CHECKPOINT if action == "checkpoint" else {"action": "release", "generation": 1}, 2
+    original = post(conn, work_id, body, revision=revision, key="original", operator=initial_operator, nonce=NONCE_A)
+    if action != "release":
+        post(
+            conn,
+            work_id,
+            {"action": "release", "generation": 1},
+            revision=original["revision"],
+            key="later",
+            nonce=NONCE_A,
+        )
+    else:
+        post(conn, work_id, OFFER, revision=original["revision"], key="later", admin=True)
+    before = store.list_all_events(conn, work_id=work_id)["events"]
+    assert (
+        post(conn, work_id, body, revision=revision, key="original", operator=not initial_operator, nonce=NONCE_A)
+        == original
+    )
+    status, refusal = request(
+        conn, work_id, body, revision=revision + 1, key="original", operator=not initial_operator, nonce=NONCE_A
+    )
+    assert status == 409 and refusal["code"] == "idempotency-conflict"
+    conflicting_body = (
+        {**body, "write_scope": ["src/another.py"]}
+        if action == "checkpoint"
+        else {"action": "handoff", "generation": 1, "target_node": "node-b"}
+    )
+    status, refusal = request(
+        conn,
+        work_id,
+        conflicting_body,
+        revision=revision,
+        key="original",
+        operator=not initial_operator,
+        nonce=NONCE_A,
+    )
+    assert status == 409 and refusal["code"] == "idempotency-conflict"
+    assert store.list_all_events(conn, work_id=work_id)["events"] == before
+    holder_events = conn.execute(
+        "SELECT actor_type FROM work_events WHERE work_id=? AND event_type IN ('ownership-accepted','ownership-checkpoint','ownership-released')",
+        (work_id,),
+    ).fetchall()
+    assert all(row[0] == "node" for row in holder_events)
+
+
+@pytest.mark.parametrize("action", ["offer", "withdraw"])
+def test_operator_replay_still_requires_current_privilege(ledger, action):
+    conn, work_id, _ = ledger
+    if action == "withdraw":
+        post(conn, work_id, OFFER, admin=True, key="offer")
+    body, revision = (OFFER, 0) if action == "offer" else ({"action": "withdraw"}, 1)
+    original = post(conn, work_id, body, node="node-op", operator=True, revision=revision, key="original")
+    before = store.list_all_events(conn, work_id=work_id)["events"]
+    status, refusal = request(conn, work_id, body, node="node-op", operator=False, revision=revision, key="original")
+    assert status == 403 and refusal["code"] == "forbidden"
+    assert post(conn, work_id, body, node="node-op", operator=True, revision=revision, key="original") == original
+    assert store.list_all_events(conn, work_id=work_id)["events"] == before
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/srv/example/repo", "C:/work/example", r"C:\work\example", r"\\example\share\repo", "//example/share/repo"],
+)
+@pytest.mark.parametrize("embedded", [False, True])
+@pytest.mark.parametrize(
+    "field",
+    ["repo_identity", "write_scope", "resume_condition", "ref", "exclusions", "authorization_ref", "source_ref"],
+)
+def test_ownership_metadata_refuses_absolute_paths(ledger, path, embedded, field):
+    conn, work_id, _ = ledger
+    value = "review ('" + path + "') later" if embedded else path
+    offer = field in {"exclusions", "authorization_ref", "source_ref"}
+    if not offer:
+        owned(conn, work_id)
+    status, refusal = request(
+        conn,
+        work_id,
+        metadata_body(field, value),
+        admin=offer,
+        revision=0 if offer else 2,
+        nonce=None if offer else NONCE_A,
+    )
+    assert status == 400 and refusal["code"] in {"field-bound", "private-data"}
+    assert path not in refusal["error"]
+    assert event_count(conn, work_id) == (0 if offer else 2)
+
+
+@pytest.mark.parametrize(
+    "identity", ["../repo", "repo/../other", "./repo", "repo//other", "repo/", "repo name", "repo/*"]
+)
+def test_repository_identity_is_canonical_relative(ledger, identity):
+    conn, work_id, _ = ledger
+    owned(conn, work_id)
+    assert request(conn, work_id, {**CHECKPOINT, "repo_identity": identity}, revision=2, nonce=NONCE_A)[0] == 400
+    assert event_count(conn, work_id) == 2
+
+
+@pytest.mark.parametrize("char", ["é", "😀"])
+def test_serialized_event_byte_bound_and_small_safety_exit(ledger, char):
+    conn, work_id, _ = ledger
+    offer = {**OFFER, "exclusions": [char * 256] * 32}
+    if char == "😀":
+        status, refusal = request(conn, work_id, offer, admin=True)
+        assert status == 400 and refusal["code"] == "field-bound"
+        assert event_count(conn, work_id) == 0
+        post(conn, work_id, OFFER, admin=True, key="small-offer")
+        post(conn, work_id, {"action": "withdraw"}, admin=True, revision=1, key="exit")
+    else:
+        post(conn, work_id, offer, admin=True, key="offer")
+        post(conn, work_id, {"action": "accept", "generation": 0}, revision=1, key="accept", nonce=NONCE_A)
+        body = {**CHECKPOINT, "write_scope": [f"{i:02d}" + char * 254 for i in range(32)]}
+        before = store.list_all_events(conn, work_id=work_id)["events"]
+        status, refusal = request(conn, work_id, body, revision=2, key="large", nonce=NONCE_A)
+        assert status == 400 and refusal["code"] == "field-bound"
+        assert store.list_all_events(conn, work_id=work_id)["events"] == before
+        post(conn, work_id, {"action": "release", "generation": 1}, revision=2, key="exit", nonce=NONCE_A)
+    details = conn.execute(
+        "SELECT detail_json FROM work_events WHERE work_id=? AND event_type LIKE 'ownership-%'", (work_id,)
+    ).fetchall()
+    assert all(len(row[0].encode()) <= 65536 for row in details)
+
+
+@pytest.mark.parametrize("reacquire", [False, True])
+def test_new_accept_cannot_reuse_any_prior_nonce_but_historical_replay_works(ledger, reacquire):
+    conn, work_id, _ = ledger
+    original = owned(conn, work_id)
+    if reacquire:
+        post(conn, work_id, {"action": "release", "generation": 1}, revision=2, key="release", nonce=NONCE_A)
+        post(conn, work_id, OFFER, admin=True, revision=3, key="reoffer")
+        revision = 4
+    else:
+        post(
+            conn,
+            work_id,
+            {"action": "handoff", "generation": 1, "target_node": "node-a"},
+            revision=2,
+            key="handoff",
+            nonce=NONCE_A,
+        )
+        revision = 3
+    before = store.list_all_events(conn, work_id=work_id)["events"]
+    status, refusal = request(
+        conn, work_id, {"action": "accept", "generation": 1}, revision=revision, key="reuse", nonce=NONCE_A
+    )
+    assert status == 409 and refusal["code"] == "ownership-conflict"
+    assert store.list_all_events(conn, work_id=work_id)["events"] == before
+    fresh = post(conn, work_id, {"action": "accept", "generation": 1}, revision=revision, key="fresh", nonce=NONCE_B)
+    assert fresh["generation"] == 2
+    assert (
+        post(conn, work_id, {"action": "accept", "generation": 0}, revision=1, key="accept", nonce=NONCE_A) == original
+    )
+    assert event_count(conn, work_id) == revision + 1
+    assert (
+        request(
+            conn,
+            work_id,
+            {"action": "release", "generation": 2},
+            revision=revision + 1,
+            key="old-holder",
+            nonce=NONCE_A,
+        )[1]["code"]
+        == "holder-mismatch"
+    )
+
+
+def make_terminal(conn, work_id, terminal):
+    if terminal == "canceled":
+        states, version = ["canceled"], 1
+    else:
+        store.patch_item(conn, work_id, {"acceptance": ["example acceptance"]}, expected_version=1, actor_id="admin")
+        states, version = ["ready", "claimed", "running", "verifying", "completed"], 2
+        if terminal == "archived":
+            states.append("archived")
+    for state in states:
+        store.transition(conn, work_id, to_status=state, expected_version=version, actor_id="admin")
+        version += 1
+
+
+def test_relative_references_and_ordinary_prose_remain_supported(ledger):
+    conn, work_id, _ = ledger
+    offer = {**OFFER, "exclusions": ["leave docs/reference.md for later review"]}
+    post(conn, work_id, offer, admin=True, key="offer")
+    post(conn, work_id, {"action": "accept", "generation": 0}, revision=1, key="accept", nonce=NONCE_A)
+    body = {
+        **CHECKPOINT,
+        "next_action": {"kind": "blocked", "resume_condition": "review src/module.py when checks complete"},
+    }
+    result = post(conn, work_id, body, revision=2, key="checkpoint", nonce=NONCE_A)
+    assert result["next_action"] == body["next_action"] and result["exclusions"] == offer["exclusions"]
+
+
+def test_accept_vs_withdraw_serializes_to_one_complete_result(ledger):
+    conn, work_id, path = ledger
+    offered = post(conn, work_id, OFFER, admin=True, key="offer")
+    barrier = threading.Barrier(2)
+    results, errors = {}, []
+
+    def contend(action):
+        db = fleet_hub.open_db(path)
+        try:
+            barrier.wait(timeout=5)
+            body = {"action": action, **({"generation": 0} if action == "accept" else {})}
+            results[action] = request(
+                db,
+                work_id,
+                body,
+                admin=action == "withdraw",
+                revision=1,
+                key=action,
+                nonce=NONCE_A if action == "accept" else None,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            db.close()
+
+    threads = [threading.Thread(target=contend, args=(action,)) for action in ("accept", "withdraw")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert not errors and all(not thread.is_alive() for thread in threads)
+    assert sorted(status for status, _ in results.values()) == [200, 409]
+    winner = next(action for action, (status, _) in results.items() if status == 200)
+    loser = "withdraw" if winner == "accept" else "accept"
+    assert results[loser][1]["code"] == "version-conflict"
+    final = request(conn, work_id, method="GET")[1]["ownership"]
+    assert final == results[winner][1]["ownership"]
+    assert final["state"] == ("owned" if winner == "accept" else "unowned")
+    assert final["revision"] == 2 and event_count(conn, work_id) == 2
+    assert offered["state"] == "offered" and offered["revision"] == 1

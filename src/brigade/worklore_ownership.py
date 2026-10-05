@@ -20,6 +20,7 @@ from .worklore_validate import WorkloreValidationError, safe_text
 
 ITEM_MAX_OWNERSHIP_EVENTS = 200
 ITEM_MAX_OWNERSHIP_TOTAL = 201
+OWNERSHIP_EVENT_MAX_BYTES = 65536
 OFFER_MAX_PRIOR_EVENTS = 197
 ACTION_MAX = 128
 IDEMPOTENCY_KEY_MAX = 128
@@ -67,6 +68,10 @@ _FIELDS = {
 _NODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 _NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+# A slash within a relative reference is permitted. Absolute references at a
+# text boundary (including quotes, parentheses, and assignments) are not.
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w./-])(?:/|[A-Za-z]:[\\/]|\\\\)")
 _EVENT_PREDICATE = "event_type IN (" + ",".join("?" for _ in EVENT_TYPES) + ")"
 
 
@@ -95,6 +100,8 @@ def _integer(raw: object, *, minimum: int = 0, maximum: int = COUNTER_MAX) -> in
 
 def _text(raw: object, field: str, maximum: int, *, minimum: int = 1) -> str:
     text = safe_text(raw, field, max_len=maximum, min_len=minimum)
+    if _ABSOLUTE_PATH_RE.search(text):
+        raise _invalid("ownership metadata must not contain absolute paths", code="private-data")
     if "\u2028" in text or "\u2029" in text:
         raise _invalid("ownership text must be a single line")
     if minimum and not text.strip():
@@ -129,10 +136,10 @@ def _source_revision(raw: object) -> str:
     return text
 
 
-def _path(raw: object) -> str:
-    text = _text(raw, "write_scope", SCOPE_PATH_MAX)
+def _path(raw: object, field: str = "write_scope", maximum: int = SCOPE_PATH_MAX) -> str:
+    text = _text(raw, field, maximum)
     if any(char in text for char in "\\:*?[]") or any(part in {"", ".", ".."} for part in text.split("/")):
-        raise _invalid("write_scope must contain canonical relative paths")
+        raise _invalid("ownership path must be canonical and relative")
     return text
 
 
@@ -158,7 +165,9 @@ def _parse(raw: object) -> dict[str, Any]:
             "source_ref": _reference(budget["source_ref"]),
         }
     if action == "checkpoint":
-        body["repo_identity"] = _text(body["repo_identity"], "repo_identity", REPO_IDENTITY_MAX)
+        body["repo_identity"] = _path(body["repo_identity"], "repo_identity", REPO_IDENTITY_MAX)
+        if not _REPO_RE.fullmatch(body["repo_identity"]):
+            raise _invalid("repository identity must be a canonical relative identifier")
         body["write_scope"] = [_path(value) for value in _array(body["write_scope"], SCOPE_MAX_ITEMS)]
         if len(set(body["write_scope"])) != len(body["write_scope"]):
             raise _invalid("write_scope must contain distinct paths")
@@ -201,6 +210,23 @@ def nonce_hash(raw: object) -> str:
     if len(decoded) != NONCE_BYTES or base64.urlsafe_b64encode(decoded).decode().rstrip("=") != raw:
         raise _invalid("holder header is invalid")
     return hashlib.sha256(decoded).hexdigest()
+
+
+def _reject_nonce_echo(raw: object, key: object, nonce: str) -> None:
+    """Reject the presented capability and its standard base64/hex spellings."""
+    decoded = base64.urlsafe_b64decode(nonce + "=")
+    standard = base64.b64encode(decoded).decode()
+    secrets = {nonce, standard, standard.rstrip("="), decoded.hex(), decoded.hex().upper()}
+    pending = [raw, key]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, str) and any(secret in value for secret in secrets):
+            raise _invalid("ownership metadata must not contain holder secret", code="private-data")
+        if isinstance(value, Mapping):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
 
 
 def _initial() -> dict[str, Any]:
@@ -332,14 +358,18 @@ def ownership_action(
     holder_nonce: object = None,
 ) -> dict[str, Any]:
     """Serialize validation, historical replay authority, CAS, and event insertion."""
+    supplied_digest = nonce_hash(holder_nonce) if holder_nonce is not None else None
+    if isinstance(holder_nonce, str):
+        _reject_nonce_echo(raw, idempotency_key, holder_nonce)
     expected_revision = _integer(expected_revision)
     if idempotency_key is None or idempotency_key == "":
         raise _invalid("Idempotency-Key is required", code="idempotency-key-required")
     key = _text(idempotency_key, "idempotency_key", IDEMPOTENCY_KEY_MAX)
     body = _parse(raw)
     action = body["action"]
-    digest = nonce_hash(holder_nonce) if action not in {"offer", "withdraw"} else None
+    digest = (supplied_digest or nonce_hash(holder_nonce)) if action not in {"offer", "withdraw"} else None
     actor_id = "admin" if is_admin else _node(actor_id)
+    actor_type = "admin" if is_admin else "node"
     # Include principal type, not merely a node/key pair that could collide with admin.
     event_id = "own-" + hashlib.sha256(f"{actor_type}\0{actor_id}\0{key}".encode()).hexdigest()[:32]
     fingerprint = hashlib.sha256(
@@ -413,11 +443,27 @@ def ownership_action(
             raise store.WorkloreConflict(
                 "ownership event capacity exhausted; successor item required", code="ownership-capacity-exhausted"
             )
-        result = _transition(current, body, actor_id=actor_id, actor_type=actor_type, digest=digest)
+        if action == "accept":
+            accepted = conn.execute(
+                "SELECT detail_json FROM work_events WHERE work_id=? AND event_type='ownership-accepted' ORDER BY seq LIMIT ?",
+                (work_id, ITEM_MAX_OWNERSHIP_TOTAL),
+            ).fetchall()
+            if any(
+                hmac.compare_digest(json.loads(row[0])["ownership"]["holder_hash"], digest or "") for row in accepted
+            ):
+                raise store.WorkloreConflict(
+                    "new acceptance requires a fresh holder nonce; ownership unchanged", code="ownership-conflict"
+                )
+        result = _transition(
+            current, body, actor_id=actor_id, actor_type="operator" if action == "offer" else actor_type, digest=digest
+        )
         result["last_seq"] = conn.execute(f"SELECT {store._EVENT_SEQ_SQL}").fetchone()[0]
         result["updated_at"] = store._utc_now()
         authority = {key: current[key] for key in ("generation", "owner_node", "offered_to", "holder_hash")}
         detail = {"action": action, "fingerprint": fingerprint, "authority": authority, "ownership": result}
+        serialized = json.dumps(detail)
+        if len(serialized.encode("utf-8")) > OWNERSHIP_EVENT_MAX_BYTES:
+            raise _invalid("ownership event exceeds serialized byte bound; ownership unchanged")
         placeholders = ",".join(["?"] * len(store._EVENT_COLUMNS) + [store._EVENT_SEQ_SQL])
         conn.execute(
             f"INSERT INTO work_events ({','.join(store._EVENT_INSERT_COLUMNS)}) VALUES ({placeholders})",
@@ -431,7 +477,7 @@ def ownership_action(
                 actor_id,
                 None if is_admin else actor_id,
                 None,
-                json.dumps(detail),
+                serialized,
                 result["updated_at"],
                 result["updated_at"],
             ),

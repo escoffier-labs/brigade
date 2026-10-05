@@ -43,7 +43,9 @@ Accept increments the generation. Release, withdrawal, and new offers retain
 that counter. A handoff copies the grant, exclusions, and attempt-budget metadata
 on the server. The previous holder may release while the handoff is pending.
 Checkpoint requires owned state. Accepting the handoff fences the previous
-generation, including a handoff between processes on the same node.
+generation and nonce, including a handoff on the same node. An offer targets a
+node principal, not a particular process. Any process with that node's token can
+race to accept the initial offer or handoff and supply its own fresh nonce.
 
 Completed, canceled, and archived items permit release and withdrawal. They
 refuse new offers, accepts, checkpoints, and handoffs. The protocol never changes
@@ -59,6 +61,18 @@ it with `worklore_client.new_ownership_nonce()` and retain it privately. It is
 never returned by the server or automatically persisted by the client. Keep it
 out of URLs, JSON bodies, logs, receipts, and shared history.
 
+Every new acceptance requires a nonce whose hash has never been accepted for
+that work item, including after release and reoffer. An authorized historical
+accept replay still uses its original nonce and returns its original snapshot.
+
+The Hub rejects any body string or key, or idempotency key, containing the
+presented canonical nonce, its standard base64 encoding (padded or unpadded), or
+its lowercase or uppercase hex encoding. This includes embedded occurrences
+and offer metadata when the holder header is supplied. The check runs before
+fingerprinting, replay lookup, or storage. It returns a fixed `private-data`
+error and writes no event. It does not detect arbitrary deliberate re-encodings.
+An optional holder header on offer or withdrawal must also be canonical.
+
 The Hub persists only the nonce SHA256 digest. Holder comparisons use
 constant-time comparison. Current projections omit the holder hash and request
 fingerprint. Globally readable events include hashes and bounded metadata under
@@ -66,7 +80,11 @@ the existing fleet read policy. They contain no raw nonce or private result body
 
 Each transaction uses `BEGIN IMMEDIATE` for replay lookup, ownership CAS, state
 validation, capacity checking, and event insertion. Event identity includes the
-authenticated actor type, actor ID, and idempotency key. A retry must use the same
+stable authenticated principal class (`admin` or enrolled `node`), actor ID, and
+idempotency key. Holder events always use the node identity, even after promotion
+or removal of operator privileges. Offers and withdrawals require current
+operator or admin privilege on every request, including replay.
+A retry must use the same
 body, nonce, generation, expected revision, and key. The request fingerprint
 contains the nonce hash in place of the secret.
 
@@ -110,7 +128,7 @@ line separators, private home paths, and credential-shaped values.
 | Action and idempotency key | 128 characters each |
 | Node identity | 128 characters, existing safe node syntax. `admin` and `unknown` reserved |
 | Ownership revision and generation | Integer 0 through 9,999,999,999. Booleans refused |
-| Repository identity | 255 characters |
+| Repository identity | 255 characters, canonical relative identifier with slash-separated segments using letters, digits, period, `_`, or hyphen |
 | Write scope | Up to 32 distinct canonical relative paths, 256 characters each |
 | Exclusions | Up to 32 nonblank single-line strings, 256 characters each |
 | Authorization and budget source references | 128 characters, existing evidence-reference syntax |
@@ -120,10 +138,24 @@ line separators, private home paths, and credential-shaped values.
 | Evidence ref | 128 characters, letters, digits, period, `_`, or hyphen |
 | Source revision | Exactly 40 lowercase hexadecimal characters |
 | Holder header | Exactly 43 base64url characters encoding 32 bytes |
+| Serialized event detail | 65,536 UTF-8 bytes, including JSON escaping and copied metadata |
 
 Paths cannot have absolute, drive, UNC, traversal, dot, empty, backslash, or
 wildcard segments. Paths declare scope only. This slice has no filesystem or
-symlink enforcement. `next_action` is exactly `{kind, resume_condition}`, with
+symlink enforcement. All ownership metadata strings reject absolute POSIX
+references at text boundaries and Windows drive or UNC references, including
+references embedded in exclusions and resume conditions. Relative references
+such as `src/module.py` and ordinary single-line prose remain supported.
+These rules apply to new ownership input, without changing legacy item validators
+or historical reads.
+
+The byte ceiling supplements character limits and applies before insertion.
+Escaped non-ASCII text can exceed it while satisfying individual field bounds.
+An oversized event returns `field-bound` and writes nothing. A 100-item ownership
+history page stays below the client's existing 8 MiB response cap. Release and
+withdrawal clear metadata and remain small safety exits.
+
+`next_action` is exactly `{kind, resume_condition}`, with
 kind `implement`, `verify`, `await-review`, `await-checks`, `await-merge`, or
 `blocked`. It is advisory. Evidence kind is `receipt`, `github-pr`,
 `github-check-run`, or `worklore-event`.
