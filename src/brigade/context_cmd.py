@@ -868,3 +868,41 @@ def health(target: Path) -> dict[str, Any]:
         "issue_count": len(issues),
         "top_issue": issues[0] if issues else None,
     }
+
+
+def preview(*, json_output: bool = False, **settings: Any) -> int:
+    """Print body-free fresh-disk accounting without exposing input errors."""
+    from .context_preview import preview as inspect_preview
+
+    try:
+        for key in ("project_doc_max_bytes", "global_max_bytes"):
+            if settings.get(key) is not None:
+                settings[key] = int(settings[key])
+        for key in ("fallback_filenames", "root_markers"):
+            if settings.get(key) is not None:
+                value = json.loads(settings[key])
+                if not isinstance(value, list) or not all(isinstance(name, str) for name in value):
+                    raise ValueError
+                settings[key] = value
+    except (ValueError, TypeError, OverflowError):
+        if json_output:
+            print(json.dumps({"error": "invalid_preview_settings", "actual_session_observed": False}))
+        else:
+            print("error: invalid_preview_settings", file=sys.stderr)
+        return 2
+    result = inspect_preview(**settings)
+    if json_output:
+        print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=True))
+    else:
+        print(f"Codex fresh-disk preview: {result['status']}; actual_session_observed=false")
+        for row in result["files"]:
+            label = json.dumps(row["scope"] + "/" + row["path"], ensure_ascii=True)
+            print(
+                f"{label}: size={row['size_bytes']} selected={row['cumulative_selected_bytes']} "
+                f"raw={row['consumed_raw_bytes']} rendered={row['rendered_utf8_bytes']} "
+                f"{row['contribution']} advisory={row['brigade_advisory_budget_bytes']}"
+            )
+        print("totals: " + json.dumps(result["totals"], sort_keys=True))
+        print("settings: " + json.dumps(result["settings"], sort_keys=True, ensure_ascii=True))
+        print("limitations: " + ", ".join(result["limitations"]))
+    return 0 if result["status"] == "complete" else 2

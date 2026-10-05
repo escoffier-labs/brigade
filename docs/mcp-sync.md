@@ -98,6 +98,89 @@ are present. A user-scoped Cursor projection drops a GraphTrail `--db` argument
 when that database resolves inside the source repository, so the global client
 does not pin every workspace to one repository.
 
+## Field projection fidelity
+
+`plan`, `sync`, and `doctor` include a `fidelity` report in JSON and render its
+non-preserved fields in text. Version 1 reports source-level output semantics.
+Runtime health still requires an explicit `verify` invocation.
+
+The report contains:
+
+- `summary`: counts of `preserved`, `transformed`, `unsupported`, and
+  `intentionally_omitted` field rows, plus the number of blocking rows.
+- `targets`: each selected harness with state `ok`, `partial`, `blocked`, or
+  `unevaluated`, and its blocking count.
+- `servers`: harness, server, project/user scope, `evaluated`, `faithful`, optional
+  OpenCode layout, and field rows. Each field has a class-level name, status,
+  stable reason, and `blocking`. Conversion rows may name destination fields and
+  units. `faithful` is false when an evaluated projection has unsupported fields.
+- `excluded`: catalog entries disabled by canonical membership or routed away
+  from a selected harness. These rows respect `--name` and do not add actions or
+  change existing action counts.
+
+Codex and OpenCode, including their user scopes, have full field contracts.
+Other adapters report `evaluated: false` and `faithful: null`. Known security
+losses still block those destinations. Report rows omit credential values,
+header names, environment variable names, commands, and URLs. Server and harness
+identities remain command metadata.
+
+For example, a Codex HTTP server with canonical `timeout: 7` can commit
+successfully with exit 0 while reporting this field:
+
+```json
+{
+  "field": "timeout",
+  "status": "unsupported",
+  "reason": "remote_timeout_unsupported",
+  "blocking": false,
+  "destination": "timeout",
+  "units": "seconds"
+}
+```
+
+That server has `faithful: false` and its target is `partial`. Transaction
+`projection.terminal_state: committed` describes the write outcome separately.
+Codex stdio reports emitted timeout seconds without asserting native runtime
+support. OpenCode converts canonical seconds to milliseconds: a flat timeout or
+nested catalog/execution timeouts. Native startup is retained where the layout
+supports it. OpenCode's remote shape collapses HTTP/SSE, so SSE projects with
+`sse_distinction_unsupported`, a nonblocking warning.
+
+Canonical `enabled` controls membership. OpenCode native enabled/disabled
+controls activation and follows the destination layout's precedence. Targets
+are routing metadata and description stays in the catalog. These intentional
+omissions can accompany a faithful projection. Generic headers shadowed by
+explicit or retained native auth are reported with `native_auth_precedence`.
+
+Explicit canonical HTTP auth on stdio, OpenCode OAuth settings discarded by
+another adapter, and explicit disabled activation without a destination
+equivalent are blocking losses. This includes `oauth: false`, which explicitly
+disables OAuth auto detection and must not be silently discarded. Plan and sync
+return exit 2 and refuse all transaction mutations. `--force` and `--adopt` do not bypass them. Live remote
+auth removed during a switch to stdio remains intentional transport cleanup
+when the canonical stdio entry contains no HTTP auth. Existing native-auth
+collisions retain exit 1 behavior: the conflicted destination is skipped while
+safe siblings may commit. Doctor reports `native_auth_collision` as a warning
+so `operator sync-mcp` can preserve that partial-write behavior. The fidelity
+row remains blocking and the target remains `blocked`. Other blocking losses
+remain doctor errors.
+
+The pre-write report survives transaction refusal, rollback, and unfinished
+recovery output. `doctor` assesses the default project targets, ignores foreign
+ownership conflicts, and creates no native files. Malformed active native
+configs fail diagnosis while other targets are still assessed. Ordinary JSON
+adapters continue accepting blank or whitespace-only configs. Cursor and Kimi
+user adapters retain their strict blank-file refusals and actionable diagnostics.
+Malformed nonblank JSON now refuses the entire transaction. VS Code input entries
+must have string IDs. Malformed IDs report `native_config_malformed` before the
+input collector runs, including when the canonical catalog is empty. All selected
+invalid target plans block the transaction, including targets held behind the global
+stdio acknowledgment. Blocking rows other than `native_auth_collision` make
+doctor return exit 1. Nonblocking unsupported fields produce warnings and
+leave its exit status at 0. Use the existing `plan`/`sync --user-scope` options to
+inspect user targets. Hermes YAML retains its existing bounded parser semantics
+and remains unevaluated for field fidelity.
+
 ## User-scoped stdio servers multiply processes
 
 A stdio MCP server is not a shared daemon. Every active client session starts

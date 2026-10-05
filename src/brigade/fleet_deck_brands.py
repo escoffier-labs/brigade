@@ -23,7 +23,7 @@ class Brand:
 
     label: str
     svg: str  # "" means: render the neutral "??" monogram instead.
-    accent: str
+    accent: str  # Palette colors are lowercase six-digit #hex values.
 
 
 _CLAUDE_SVG = (
@@ -71,7 +71,7 @@ _OPENAI_SVG = (
 
 _GEMINI_SVG = (
     '<svg viewBox="0 0 296 298" fill="none"><mask id="gemini__a" width="296" height="298" x="0" y="0" mas'
-    'kUnits="userSpaceOnUse" style="mask-type:alpha" ><path fill="#3186FF" d="M141.201 4.886c2.282-6.17 1'
+    'kUnits="userSpaceOnUse" ><path fill="#3186FF" d="M141.201 4.886c2.282-6.17 1'
     "1.042-6.071 13.184.148l5.985 17.37a184.004 184.004 0 0 0 111.257 113.049l19.304 6.997c6.143 2.227 6."
     "156 10.91.02 13.155l-19.35 7.082a184.001 184.001 0 0 0-109.495 109.385l-7.573 20.629c-2.241 6.105-10"
     ".869 6.121-13.133.025l-7.908-21.296a184 184 0 0 0-109.02-108.658l-19.698-7.239c-6.102-2.243-6.118-10"
@@ -156,7 +156,7 @@ _T3_SVG = (
     ' font-weight="800" font-family="inherit">T3</text></svg>'
 )
 
-_BRANDS: dict[str, Brand] = {
+BRANDS: dict[str, Brand] = {
     # Harness keys.
     "claude": Brand("Claude", _CLAUDE_SVG, "#8a5a2b"),
     "codex": Brand("Codex", _OPENAI_SVG, "#2f6f4f"),
@@ -184,7 +184,7 @@ def normalize_key(value: str) -> str:
 
 def lookup_brand(key: str) -> Brand:
     """Brand for a normalized key; unknown keys get the neutral monogram."""
-    return _BRANDS.get(normalize_key(key), UNKNOWN_BRAND)
+    return BRANDS.get(normalize_key(key), UNKNOWN_BRAND)
 
 
 def harness_brand(harness: str) -> Brand:
@@ -195,6 +195,6 @@ def harness_brand(harness: str) -> Brand:
 def provider_brand(provider: str) -> Brand:
     """Brand for a model provider; unknown providers are grey."""
     key = normalize_key(provider)
-    if key not in _BRANDS and key.endswith("-cloud"):
+    if key not in BRANDS and key.endswith("-cloud"):
         key = key[: -len("-cloud")]
-    return _BRANDS.get(key, UNKNOWN_BRAND)
+    return BRANDS.get(key, UNKNOWN_BRAND)

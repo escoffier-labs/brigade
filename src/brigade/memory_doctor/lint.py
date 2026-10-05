@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from brigade.card_identity import IdentityIndex, card_identity
 from brigade.memory_doctor.parsing import extract_wiki_links
 from brigade.memory_doctor.paths import PathConfig
 
@@ -26,8 +27,25 @@ def _card_paths(memory_dir: Path) -> list[Path]:
     return paths
 
 
-def _existing_card_slugs(memory_dir: Path) -> set[str]:
-    return {p.stem.lower() for p in _card_paths(memory_dir)}
+def _wiki_key(value: str) -> str:
+    return value.lower().removesuffix(".md").removeprefix("cards/")
+
+
+def _card_index(memory_dir: Path, paths: list[Path]) -> IdentityIndex[Path]:
+    # Match canonical search/projection frontmatter semantics. Import lazily
+    # because the memory command family also uses memory-doctor modules.
+    from brigade.memory_cmd import _parse_frontmatter
+
+    index: IdentityIndex[Path] = IdentityIndex()
+    for path in paths:
+        frontmatter, _ = _parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
+        identity = card_identity(frontmatter, path.relative_to(memory_dir.parent).as_posix())
+        index.claim_identity(identity, path)
+        # Wiki links historically ignore case, cards/ and .md. Claim every
+        # normalized key too, so normalization cannot conceal a collision.
+        for key in (identity.card_id, *identity.aliases):
+            index.claim(_wiki_key(key), path)
+    return index
 
 
 def _levenshtein(a: str, b: str) -> int:
@@ -58,16 +76,15 @@ def suggest_closest(needle: str, pool: list[str], max_distance: int = 3) -> str 
 
 
 def scan_dead_links(memory_dir: Path) -> list[DeadLink]:
-    slugs = _existing_card_slugs(memory_dir)
-    pool = sorted(slugs)
+    paths = _card_paths(memory_dir)
+    index = _card_index(memory_dir, paths)
+    pool = sorted({p.stem.lower() for p in paths if index.resolve(p.stem.lower()) is not None})
     out: list[DeadLink] = []
-    for p in _card_paths(memory_dir):
+    for p in paths:
         text = p.read_text(encoding="utf-8", errors="replace")
         for raw_link in extract_wiki_links(text):
-            slug = raw_link.lower().removesuffix(".md")
-            # Accept wiki links that include a cards/ prefix.
-            slug = slug.removeprefix("cards/")
-            if slug in slugs:
+            slug = _wiki_key(raw_link)
+            if index.resolve(slug) is not None:
                 continue
             suggestion = suggest_closest(slug, pool)
             out.append(DeadLink(source=p, link=raw_link, suggestion=suggestion))

@@ -11,6 +11,7 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import parse_qs, urlsplit
 
 from . import toml_compat
+from . import worklore_ownership as ownership
 from . import worklore_store as store
 from .fleet_client import FLEET_CONFIG_REL_PATH, brigade_home
 from .worklore_validate import WorkloreValidationError
@@ -52,6 +53,12 @@ _STATUS_BY_CODE = {
     "link-conflict": 409,
     "hub-unavailable": 503,
     "internal-error": 500,
+    "ownership-conflict": 409,
+    "stale-generation": 409,
+    "holder-mismatch": 403,
+    "idempotency-conflict": 409,
+    "idempotency-key-required": 400,
+    "ownership-capacity-exhausted": 409,
 }
 
 _STORE_ERRORS = (
@@ -223,6 +230,25 @@ def _item_route(
     tail: list[str],
     query: Mapping[str, str],
 ) -> tuple[int, dict[str, Any]]:
+    if tail == ["ownership"] and method in {"GET", "POST"}:
+        if query:
+            raise WorkloreValidationError("unknown ownership query field", code="unknown-field")
+        if method == "GET":
+            return 200, {"ownership": ownership.get_ownership(conn, work_id)}
+        return 200, {
+            "ownership": ownership.ownership_action(
+                conn,
+                work_id,
+                request.body,
+                expected_revision=_if_match(request),
+                idempotency_key=_idempotency_key(request),
+                actor_id=_actor_id(request),
+                actor_type=_actor_type(request),
+                is_admin=request.is_admin,
+                is_operator=_is_operator(request),
+                holder_nonce=_header(request, "X-Worklore-Holder"),
+            )
+        }
     if not tail and method == "GET":
         _validate_query(query, {"links_limit", "links_cursor"})
         item = store.get_item(conn, work_id)

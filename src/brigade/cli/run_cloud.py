@@ -1364,6 +1364,8 @@ def _print_scout_feed_result(result: dict) -> None:
         f"terminal_retry_candidates={result['terminal_retry_candidates']}",
         f"retry_exhausted={result['retry_exhausted']}",
     ]
+    if "listing" in result:
+        parts.append(f"listing={result['listing']}")
     print("grokbot scout-feed: " + " ".join(parts))
     handle = result.get("handle")
     if handle is not None:

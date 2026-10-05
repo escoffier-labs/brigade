@@ -399,7 +399,7 @@ def render(
         f'<p class="header-meta">{_esc(fleet_command_deck._stamp(now))}</p></header>'
     )
     parts.append(
-        '<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> '
+        '<nav class="deck-nav" aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> '
         '<a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> '
         '<a href="/view/machines">machines board</a></nav>'
     )
@@ -558,11 +558,17 @@ def _validate(view: RosterView, submission: Submission) -> tuple[str | None, dic
             continue
         if seat not in known:
             return f"default {consumer} names unknown seat {seat}", target
-        if not target[seat]:
-            return f"default {consumer} names seat {seat}, which is disabled or retired in this save", target
         row = known[seat]
-        bound = row.brigade_cli if consumer == "brigade-run" else row.t3_instance_id
-        if not bound:
+        error = fleet_hub_model_roster._default_eligibility_error(
+            consumer,
+            enabled=target[seat],
+            retired=row.retired,
+            brigade_cli=row.brigade_cli,
+            t3_instance_id=row.t3_instance_id,
+        )
+        if error in {"seat-disabled", "retired-model"}:
+            return f"default {consumer} names seat {seat}, which is disabled or retired in this save", target
+        if error is not None:
             return f"default {consumer} names seat {seat}, which has no {consumer} binding", target
     raw = {role: seat for role, seat in submission.roles.items() if seat}
     if submission.notes:

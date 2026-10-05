@@ -721,6 +721,39 @@ def test_legacy_mutations_are_blocked_through_every_entrypoint(conn):
     assert fleet_hub_policy.current_policy(conn)["document"]["defaults"]["roles"]["impl"] == SEAT_ALPHA
 
 
+@pytest.mark.parametrize("consumer", ["brigade-run", "t3-fleet"])
+def test_active_authority_rejects_consumer_default_without_mutation(conn, consumer):
+    _seed_legacy(conn)
+    _set_seat(conn, seat=SEAT_BETA, provider=PROVIDER_B, model=MODEL_B, enabled=True)
+    _set_default(conn, "brigade-run", SEAT_ALPHA)
+    preview = _preview(conn, annotations=_annotate(SEAT_ALPHA, SEAT_BETA))
+    _activate(conn, preview)
+    defaults = conn.execute(
+        "SELECT consumer, seat, updated_at FROM model_consumer_defaults ORDER BY consumer"
+    ).fetchall()
+    roster_revision = _roster_revision(conn)
+    policy_revision = _policy_revision(conn)
+    before = _dump(conn)
+    status, payload = fleet_hub_model_roster.handle_model_policy(
+        conn,
+        {
+            "action": "set-default",
+            "expected_revision": roster_revision,
+            "consumer": consumer,
+            "seat": SEAT_BETA,
+        },
+    )
+    assert status == 409
+    assert payload["error"] == "authority_owned"
+    assert (
+        conn.execute("SELECT consumer, seat, updated_at FROM model_consumer_defaults ORDER BY consumer").fetchall()
+        == defaults
+    )
+    assert _roster_revision(conn) == roster_revision
+    assert _policy_revision(conn) == policy_revision
+    assert _dump(conn) == before
+
+
 def test_admission_and_leases_cannot_use_removed_disabled_or_drifted_seats(conn):
     _seed_legacy(conn)
     preview = _preview(conn, annotations=_annotate(SEAT_ALPHA, SEAT_BETA))
