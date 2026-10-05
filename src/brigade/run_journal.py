@@ -36,6 +36,10 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows does not provide flock.
     fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX does not provide msvcrt.
+    msvcrt = None  # type: ignore[assignment,attr-defined]
 import hashlib
 import json
 import os
@@ -152,32 +156,50 @@ def _append_critical_section(journal_path: Path | None = None) -> Iterator[None]
         try:
             with _APPEND_LOCK:
                 lock_fd: int | None = None
+                lock_acquired = False
                 primary: BaseException | None = None
                 try:
-                    if resolved_journal is not None and fcntl is not None:
+                    if resolved_journal is not None:
+                        if fcntl is None and msvcrt is None:
+                            raise RunJournalError(_bound("interprocess journal locking unavailable"))
                         lock_path = _journal_lock_path(resolved_journal)
                         lock_fd = _open_nofollow(lock_path, os.O_RDWR | os.O_CREAT, _FILE_MODE)
                         _chmod_fd_or_path(lock_fd, lock_path, _FILE_MODE)
-                        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                        if fcntl is not None:
+                            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                        elif msvcrt is not None:
+                            # LK_LOCK has bounded retries. Byte zero may be beyond
+                            # EOF, so the private sibling lock file can stay empty.
+                            os.lseek(lock_fd, 0, os.SEEK_SET)
+                            msvcrt.locking(lock_fd, msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
+                        lock_acquired = True
                     if resolved_journal is not None:
                         _APPEND_TLS.journal_path = resolved_journal
-                    try:
-                        yield
-                    except BaseException as exc:
-                        primary = exc
-                        raise
+                    yield
+                except BaseException as exc:
+                    primary = exc
+                    raise
                 finally:
                     if resolved_journal is not None:
                         _APPEND_TLS.journal_path = None
                     if lock_fd is not None:
                         try:
-                            if fcntl is not None:
-                                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                            if lock_acquired:
+                                if fcntl is not None:
+                                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                                elif msvcrt is not None:
+                                    os.lseek(lock_fd, 0, os.SEEK_SET)
+                                    msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
                         except OSError as exc:
                             if primary is None:
+                                primary = exc
                                 raise RunJournalError(_bound("journal lock release failed")) from exc
                         finally:
-                            os.close(lock_fd)
+                            try:
+                                os.close(lock_fd)
+                            except OSError as exc:
+                                if primary is None:
+                                    raise RunJournalError(_bound("journal lock close failed")) from exc
         finally:
             if not _HAS_PTHREAD_SIGMASK:
                 _APPEND_TLS.in_append = False

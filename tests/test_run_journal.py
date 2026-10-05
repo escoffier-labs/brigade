@@ -1917,6 +1917,191 @@ print(json.dumps({
 
 # -- Issue #651: cross-process journal serialization -------------------------
 
+_WINDOWS_MUTATION_CHILD = r"""
+import os
+import sys
+import time
+from contextlib import nullcontext
+from pathlib import Path
+from types import SimpleNamespace
+
+from brigade import run_dirfd, run_journal
+
+journal, barrier = map(Path, sys.argv[1:3])
+name = sys.argv[3]
+if os.name == "posix":
+    # Exercise the Windows branch with real interprocess byte-region locks.
+    # This is emulation, not native msvcrt or NT-handle evidence.
+    import fcntl
+    def locking(fd, mode, length):
+        operation = fcntl.LOCK_UN if mode == 0 else fcntl.LOCK_EX
+        fcntl.lockf(fd, operation, length, os.lseek(fd, 0, os.SEEK_CUR), os.SEEK_SET)
+    run_journal.msvcrt = SimpleNamespace(LK_LOCK=1, LK_UNLCK=0, locking=locking)
+run_journal.fcntl = None
+
+def wait_for(path):
+    deadline = time.monotonic() + 20
+    while not path.exists():
+        if time.monotonic() > deadline:
+            raise RuntimeError("barrier timed out: " + path.name)
+        time.sleep(0.01)
+
+binding = run_dirfd.bound_run_dir(journal.parent.parent) if name == "bound" else nullcontext()
+with binding:
+    (barrier / (name + ".attempting")).write_text("attempting")
+    with run_journal.journal_mutation(journal):
+        report = run_journal.read_journal(journal)
+        assert not report.chain_errors
+        tail = report.events[-1].sequence
+        (barrier / (name + ".entered")).write_text(str(tail))
+        if name == "bound":
+            assert run_dirfd.active_binding_for(journal) is not None
+            wait_for(barrier / "release")
+        else:
+            assert run_dirfd.active_binding_for(journal) is None
+        event = run_journal.append_event(
+            journal,
+            run_id="20260727-153045-a1b2c3d4",
+            event_type="run.planning.started",
+            payload={"detail": name},
+            idempotency_key=name,
+            expected_previous_sequence=tail,
+            recorded_at="2026-07-27T15:30:46.000000Z",
+        )
+        (barrier / (name + ".appended")).write_text(str(event.sequence))
+"""
+
+
+def test_windows_journal_lock_excludes_unbound_mutation_during_bound_tail_window(tmp_path):
+    """Bound and unbound producers share the same interprocess lock.
+
+    POSIX explicitly emulates msvcrt with real fcntl byte-region locks.
+    Windows uses actual msvcrt and the bound run directory's NT handles.
+    """
+    journal_path = _journal_path(_run_dir(tmp_path))
+    _append_first_event(journal_path)
+    barrier = tmp_path / "barrier"
+    barrier.mkdir()
+    script = tmp_path / "windows_mutation_child.py"
+    script.write_text(_WINDOWS_MUTATION_CHILD)
+    children = []
+    try:
+        children.append(_spawn_barrier_child(script, str(journal_path), str(barrier), "bound"))
+        _wait_for_files([barrier / "bound.entered"], 15, "bound tail window")
+        children.append(_spawn_barrier_child(script, str(journal_path), str(barrier), "unbound"))
+        _wait_for_files([barrier / "unbound.attempting"], 15, "unbound mutation attempt")
+        deadline = time.monotonic() + 0.75
+        while time.monotonic() < deadline and not (barrier / "unbound.entered").exists():
+            time.sleep(0.01)
+        assert not (barrier / "unbound.entered").exists(), "unbound mutation entered the held bound tail window"
+        (barrier / "release").write_text("release")
+        for child in children:
+            stdout, stderr = child.communicate(timeout=15)
+            assert child.returncode == 0, f"child exited {child.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    finally:
+        (barrier / "release").write_text("release")
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=5)
+
+    assert (barrier / "bound.entered").read_text() == "1"
+    assert (barrier / "unbound.entered").read_text() == "2"
+    assert (barrier / "bound.appended").read_text() == "2"
+    assert (barrier / "unbound.appended").read_text() == "3"
+    report = run_journal.read_journal(journal_path)
+    assert report.chain_errors == []
+    assert [event.sequence for event in report.events] == [1, 2, 3]
+    for previous, current in zip(report.events, report.events[1:], strict=False):
+        assert current.previous_digest == previous.event_digest
+
+
+def test_windows_journal_lock_requires_interprocess_backend(tmp_path, monkeypatch):
+    journal_path = _journal_path(_run_dir(tmp_path))
+    _append_first_event(journal_path)
+    original = journal_path.read_bytes()
+    monkeypatch.setattr(run_journal, "fcntl", None)
+    monkeypatch.setattr(run_journal, "msvcrt", None, raising=False)
+    with pytest.raises(run_journal.RunJournalError, match="interprocess journal locking unavailable"):
+        with run_journal.journal_mutation(journal_path):
+            pytest.fail("mutation entered without an interprocess backend")
+    assert journal_path.read_bytes() == original
+
+
+def test_windows_journal_lock_allows_authorized_mutation_reentry(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    journal_path = _journal_path(_run_dir(tmp_path))
+    _append_first_event(journal_path)
+    modes = []
+
+    def locking(fd, mode, length):
+        modes.append(mode)
+
+    monkeypatch.setattr(run_journal, "fcntl", None)
+    monkeypatch.setattr(run_journal, "msvcrt", SimpleNamespace(LK_LOCK=1, LK_UNLCK=0, locking=locking), raising=False)
+    with run_journal.journal_mutation(journal_path):
+        with run_journal.journal_mutation(journal_path):
+            _append_second_event(journal_path)
+    assert modes == [1, 0], "authorized reentry must retain the outer context's lock"
+    report = run_journal.read_journal(journal_path)
+    assert report.chain_errors == []
+    assert [event.sequence for event in report.events] == [1, 2]
+
+
+@pytest.mark.parametrize("failure", ["acquire", "mutation", "unlock", "close"])
+def test_windows_journal_lock_cleanup_preserves_primary_error(tmp_path, monkeypatch, failure):
+    from types import SimpleNamespace
+
+    journal_path = _journal_path(_run_dir(tmp_path))
+    _append_first_event(journal_path)
+    acquired = []
+    released = []
+    closed = []
+    real_close = os.close
+    primary = OSError("primary failure")
+
+    def locking(fd, mode, length):
+        assert os.lseek(fd, 0, os.SEEK_CUR) == 0
+        assert length == 1
+        if mode == 1:
+            acquired.append(fd)
+            if failure == "acquire":
+                raise primary
+        else:
+            released.append(fd)
+            if failure in {"mutation", "unlock"}:
+                raise OSError("unlock failure")
+
+    def close(fd):
+        closed.append(fd)
+        real_close(fd)
+        raise OSError("close failure")
+
+    monkeypatch.setattr(run_journal, "fcntl", None)
+    monkeypatch.setattr(run_journal, "msvcrt", SimpleNamespace(LK_LOCK=1, LK_UNLCK=0, locking=locking), raising=False)
+    monkeypatch.setattr(os, "close", close)
+    expected = OSError if failure in {"acquire", "mutation"} else run_journal.RunJournalError
+    message = (
+        "primary failure"
+        if failure in {"acquire", "mutation"}
+        else f"journal lock {('release' if failure == 'unlock' else 'close')} failed"
+    )
+    with pytest.raises(expected, match=message) as caught:
+        with run_journal.journal_mutation(journal_path):
+            if failure == "mutation":
+                raise primary
+            # Unlock must seek back to the locked byte even if the position moved.
+            os.lseek(acquired[0], 4, os.SEEK_SET)
+    if failure in {"acquire", "mutation"}:
+        assert caught.value is primary
+    assert len(acquired) == 1
+    assert released == ([] if failure == "acquire" else acquired)
+    assert closed == acquired
+    with pytest.raises(OSError):
+        os.fstat(acquired[0])
+
+
 _POSIX_FCNTL_LOCK_ONLY = pytest.mark.skipif(
     os.name != "posix",
     reason="the cross-process journal mutation lock is an fcntl.flock sibling file",
