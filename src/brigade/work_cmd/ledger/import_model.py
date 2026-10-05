@@ -15,6 +15,7 @@ import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence, cast
 from uuid import uuid4
@@ -206,7 +207,7 @@ def _import_inbox_for_archive(
             return
         inbox_provenance._validate_import_inbox_descriptor(descriptor)
         before = os.fstat(descriptor)
-        raw_lines: list[bytes] = []
+        raw_buffer = BytesIO()
         imports: list[dict[str, Any]] = []
         record_limit = 4 * 1024 * 1024
         with os.fdopen(os.dup(descriptor), "rb") as handle:
@@ -215,7 +216,7 @@ def _import_inbox_for_archive(
                 line_number += 1
                 if len(line) > record_limit:
                     raise OSError(f"import inbox record {line_number} exceeds {record_limit} byte archive limit")
-                raw_lines.append(line)
+                raw_buffer.write(line)
                 if not line.strip():
                     continue
                 try:
@@ -225,8 +226,10 @@ def _import_inbox_for_archive(
                 if not isinstance(item, dict):
                     raise OSError(f"import inbox record {line_number} is not a JSON object")
                 imports.append(item)
-        raw = b"".join(raw_lines)
-        del raw_lines
+        # BytesIO releases the growing buffer as one immutable snapshot without
+        # retaining all input lines alongside a joined copy of the whole inbox.
+        raw = raw_buffer.getvalue()
+        raw_buffer.close()
 
         def check_generation() -> None:
             after = os.fstat(descriptor)
@@ -256,7 +259,7 @@ def _import_inbox_for_archive(
             os.close(descriptor)
             descriptor = -1
             inbox_provenance._write_import_inbox_bytes_at(
-                parent, name, rendered, previous_raw=raw, previous_exists=True
+                parent, name, rendered, previous_raw=raw, previous_exists=True, expected_generation=before
             )
 
         check_generation()

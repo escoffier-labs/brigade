@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Inbox archiving rejects generation changes at publisher reopen, preserves pending records on disk-full publication failures, and restores the original inbox when replacement is interrupted after rename. Archive reads avoid retaining a second full raw snapshot, and Windows recovery tests retain their data checks without requiring POSIX permission bits. (#1581)
+
 - Dashboard enrollment now uses five-minute single-use codes and independently revocable 30-day read-only browser sessions. Bearer query URLs and old HMAC cookies are refused. Browser cookies no longer edit roster/policy pages or access JSON APIs. `fleet enroll` and `fleet sessions --dashboard` support labeled devices, listing and revocation. (#1153)
 
 - Grok Bot scout feeds select issues with fewer failed attempts before retrying lower issue numbers. Hub previews report `listing=none` when queue state has not been fetched. (#1351)
