@@ -13,7 +13,7 @@ import sys
 import tempfile
 import time
 from concurrent.futures import FIRST_COMPLETED, CancelledError, Future, ThreadPoolExecutor, wait
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Callable, Sequence
 
@@ -298,7 +298,7 @@ def run_file(
     try:
         with log.open("wb") as stream:
             process = launch_process(
-                python=python.resolve(),
+                python=python.absolute(),
                 args=argv[1:],
                 cwd=repo.resolve(),
                 env=_child_environment(),
@@ -324,7 +324,7 @@ def run_file(
                 finally:
                     process.close()
     except LaunchClosed:
-        return _deadline_failure(name, output_dir, unstarted=True)
+        return _deadline_failure(name, output_dir, unstarted=True, cause=tracker.closing_cause or AGGREGATE_DEADLINE)
     except CleanupError as exc:
         if returncode is not None and returncode not in REASONS and _status(returncode) == "failed":
             return FileResult(
@@ -364,25 +364,29 @@ def _launch_failure(name: str, output_dir: Path, error: Exception) -> FileResult
     )
 
 
-def _deadline_failure(name: str, output_dir: Path, *, unstarted: bool = False) -> FileResult:
+def _deadline_failure(
+    name: str, output_dir: Path, *, unstarted: bool = False, cause: int = AGGREGATE_DEADLINE
+) -> FileResult:
     log = output_dir / "logs" / f"{name}.log"
     return FileResult(
         name,
-        "unstarted" if unstarted else "deadline-exceeded",
+        "unstarted" if unstarted else REASONS[cause],
         None,
         0.0,
         log.relative_to(output_dir).as_posix(),
-        "driver aggregate deadline exceeded",
+        "driver aggregate deadline exceeded" if cause == AGGREGATE_DEADLINE else "driver abort",
     )
 
 
-def result_from_future(future: Future[FileResult], name: str, output_dir: Path) -> FileResult:
+def result_from_future(
+    future: Future[FileResult], name: str, output_dir: Path, *, cause: int = AGGREGATE_DEADLINE
+) -> FileResult:
     if future.cancelled():
-        return _launch_failure(name, output_dir, RuntimeError("worker cancelled"))
+        return _deadline_failure(name, output_dir, unstarted=True, cause=cause)
     try:
         return future.result()
     except CancelledError:
-        return _launch_failure(name, output_dir, RuntimeError("worker cancelled"))
+        return _deadline_failure(name, output_dir, unstarted=True, cause=cause)
 
 
 def run_files(
@@ -411,7 +415,9 @@ def run_files(
 
     def runner(name: str) -> FileResult:
         if tracker.is_closing() or clock() >= deadline:
-            return _deadline_failure(name, output_dir, unstarted=True)
+            return _deadline_failure(
+                name, output_dir, unstarted=True, cause=tracker.closing_cause or AGGREGATE_DEADLINE
+            )
         return run_file(
             name,
             repo=repo,
@@ -443,7 +449,7 @@ def run_files(
     active: dict[Future[FileResult], str] = {}
     executor = ThreadPoolExecutor(max_workers=workers)
     expired = False
-    cleanup_required = False
+    driver_error: BaseException | None = None
     try:
         while parallel_pending or serial_pending or active:
             # Drain the isolated phase completely before submitting parallel work.
@@ -468,47 +474,82 @@ def run_files(
                 expired = True
                 break
             for future in done:
-                name = active.pop(future)
-                record(result_from_future(future, name, output_dir))
+                name = active[future]
+                result = result_from_future(future, name, output_dir)
+                active.pop(future)
+                record(result)
                 if results[-1].status == "cleanup-unconfirmed" or results[-1].cleanup_error is not None:
                     raise CleanupUnconfirmed("cleanup unconfirmed; retaining temporary target")
-    except BaseException:
-        cleanup_required = True
-        raise
+    except BaseException as exc:
+        driver_error = exc
     finally:
-        if expired or cleanup_required:
+        cleanup_error: BaseException | None = None
+        if expired or driver_error is not None:
+            cause = AGGREGATE_DEADLINE if expired else DRIVER_ABORT
             for future in active:
                 future.cancel()
             cleanup_deadline = time.monotonic() + CLEANUP_TIMEOUT_SECONDS
-            cleanup_error = None
             try:
-                tracker.kill_all(
-                    cause=AGGREGATE_DEADLINE if expired else DRIVER_ABORT,
-                    deadline=cleanup_deadline,
-                )
-            except CleanupError as exc:
+                tracker.kill_all(cause=cause, deadline=cleanup_deadline)
+            except BaseException as exc:
                 cleanup_error = exc
+                if isinstance(exc, KeyboardInterrupt):
+                    driver_error = driver_error or exc
             for future in active:
                 if not future.cancelled():
                     try:
                         future.result(timeout=max(0.0, cleanup_deadline - time.monotonic()))
-                    except Exception:  # noqa: BLE001 - inspect actual completion below.
-                        pass
-            if expired:
-                for future, name in active.items():
-                    if future.done():
-                        record(result_from_future(future, name, output_dir))
-                    else:
-                        record(_deadline_failure(name, output_dir))
-                for name in [*parallel_pending, *serial_pending]:
-                    record(_deadline_failure(name, output_dir, unstarted=True))
-            executor.shutdown(wait=False, cancel_futures=True)
+                    except BaseException as exc:
+                        # A user interrupt during cleanup keeps its interrupt status.
+                        if isinstance(exc, KeyboardInterrupt):
+                            driver_error = driver_error or exc
+            for future, name in active.items():
+                if future.done():
+                    try:
+                        results.append(result_from_future(future, name, output_dir, cause=cause))
+                    except BaseException as exc:
+                        driver_error = driver_error or exc
+                        results.append(_deadline_failure(name, output_dir, cause=cause))
+                else:
+                    row = _deadline_failure(name, output_dir, cause=cause)
+                    results.append(replace(row, cleanup_error="worker unfinished after cleanup deadline"))
+            accounted = {row.name for row in results}
+            results.extend(
+                _deadline_failure(name, output_dir, unstarted=True, cause=cause)
+                for name in files
+                if name not in accounted
+            )
             if cleanup_error or any(not future.done() for future in active):
-                raise CleanupUnconfirmed(
+                # Preserve the triggering exception, including KeyboardInterrupt.
+                driver_error = driver_error or CleanupUnconfirmed(
                     f"cleanup unconfirmed; retained temporary target: {temp_root}"
-                ) from cleanup_error
-        executor.shutdown(wait=False, cancel_futures=expired or cleanup_required)
-    return sorted(results, key=lambda result: result.name)
+                )
+                if cleanup_error is not None:
+                    active_names = set(active.values())
+                    results[:] = [
+                        replace(row, cleanup_error=f"driver cleanup failed: {cleanup_error}")
+                        if row.name in active_names
+                        else row
+                        for row in results
+                    ]
+        try:
+            executor.shutdown(wait=False, cancel_futures=expired or driver_error is not None)
+        except BaseException as exc:
+            driver_error = driver_error or exc
+
+    snapshot = sorted(results, key=lambda result: result.name)
+    # Real results publish incrementally above. Terminal rows publish as one batch,
+    # after executor cleanup, and an abort never retries a failed progress callback.
+    if expired and driver_error is None and on_result is not None:
+        try:
+            on_result(snapshot)
+        except BaseException as exc:
+            driver_error = exc
+    if driver_error is not None:
+        driver_error.windows_pytest_results = snapshot
+        driver_error.windows_pytest_deadline_exceeded = expired
+        raise driver_error
+    return snapshot
 
 
 def regressions(results: list[FileResult], allowlist: set[str]) -> list[FileResult]:
@@ -680,7 +721,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             else "incomplete"
         )
     except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - persist partial coverage on driver failures.
-        results = results or partial_results
+        results = getattr(exc, "windows_pytest_results", results or partial_results)
+        aggregate_deadline_exceeded = getattr(exc, "windows_pytest_deadline_exceeded", aggregate_deadline_exceeded)
         driver_error = str(exc) or type(exc).__name__
         status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "error"
 

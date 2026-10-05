@@ -360,7 +360,7 @@ jobs:
         run: git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }} || exit /b 1
       - name: Run per-file pytest ratchet
         timeout-minutes: 55
-        run: python scripts/windows_pytest.py --record "%RUNNER_TEMP%\windows-pytest-results\summary.json" --job-started-at "%WINDOWS_PYTEST_JOB_STARTED_AT%" --job-limit 3600 --startup-reserve 120 --finalize-reserve 300 --job-timeout 3300 --base-ref ${{ github.event.pull_request.base.sha }} --serial test_runs_serve.py --serial test_aboyeur.py
+        run: python scripts/windows_pytest.py --record "%RUNNER_TEMP%\windows-pytest-results\summary.json" --job-started-at "%WINDOWS_PYTEST_JOB_STARTED_AT%" --job-limit 3600 --startup-reserve 120 --finalize-reserve 300 --job-timeout 3300 --base-ref ${{ github.event.pull_request.base.sha }} --serial test_runs_serve.py
       - name: Upload per-file pytest results
         if: ${{ always() }}
         uses: actions/upload-artifact@v7

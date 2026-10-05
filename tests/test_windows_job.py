@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import ctypes as C
 import json
 import os
@@ -9,7 +10,7 @@ import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
@@ -149,13 +150,13 @@ class FakeAPI:
         return self.record("GetExitCodeProcess")
 
 
-def launch(tmp_path, tracker, args=None, python=None):
+def launch(tmp_path, tracker, args=None, python=None, *, env=None):
     with (tmp_path / "log").open("ab") as log:
         return job.launch_process(
-            python=python or Path(sys.executable).resolve(),
+            python=python or Path(sys.executable).absolute(),
             args=args or [],
             cwd=tmp_path,
-            env={"z": "last", "A": "first"},
+            env=dict(os.environ) if env is None else env,
             log=log,
             tracker=tracker,
         )
@@ -181,10 +182,10 @@ def test_windows_width_layout_and_every_kernel_signature():
 def test_atomic_launch_minimal_inheritance_buffers_and_single_ownership(tmp_path):
     api = FakeAPI()
     tracker = job.ProcessTracker(api)
-    process = launch(tmp_path, tracker, ["-c", 'print("hello space")', "😀"])
+    process = launch(tmp_path, tracker, ["-c", 'print("hello space")', "😀"], env={"z": "last", "A": "first"})
     assert (
         api.launches[0][1]
-        == subprocess.list2cmdline([str(Path(sys.executable).resolve()), "-c", 'print("hello space")', "😀"]) + "\0"
+        == subprocess.list2cmdline([str(Path(sys.executable).absolute()), "-c", 'print("hello space")', "😀"]) + "\0"
     )
     assert api.launches[0][2] == "A=first\0z=last\0\0"
     names = [event[0] for event in api.events]
@@ -330,7 +331,7 @@ def test_first_termination_cause_is_immutable_with_natural_exit_preserved(tmp_pa
     assert sum(event[0] == "TerminateJobObject" for event in api.events) == 1
 
 
-def test_launch_shutdown_linearizes_and_temporary_handles_never_overlap(tmp_path):
+def test_launch_shutdown_waits_for_held_lifecycle_lock(tmp_path):
     api = FakeAPI()
     tracker = job.ProcessTracker(api)
     reached = threading.Event()
@@ -390,7 +391,7 @@ def native(tmp_path):
     handles = []
 
     def start(code, *, python=None, selected_tracker=None):
-        process = launch(tmp_path, selected_tracker or tracker, ["-c", code], python)
+        process = launch(tmp_path, selected_tracker or tracker, ["-c", code], python, env=dict(os.environ))
         processes.append(process)
         return process
 
@@ -775,11 +776,11 @@ class TestNativeContainment:
 
     def test_breakaway_is_denied(self, native):
         marker = native.path / "breakaway"
-        code = (
-            "import subprocess,sys,pathlib; "
-            "exec(\"try:\\n subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)'],creationflags=0x1000000)"
-            "\\nexcept OSError as e:\\n pathlib.Path(" + repr(str(marker)) + ').write_text(str(e.winerror))")'
+        inner = (
+            "try:\n subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)'],creationflags=0x1000000)\n"
+            f"except OSError as e:\n pathlib.Path({str(marker)!r}).write_text(str(e.winerror))"
         )
+        code = f"import subprocess,sys,pathlib; exec({inner!r})"
         process = native.start(code)
         assert read_marker(marker) == "5"
         assert process.wait(10) == 0
@@ -823,7 +824,7 @@ class TestNativeContainment:
             launcher.join(10)
             stopper.join(10)
             assert returned.is_set() and not launcher.is_alive() and not stopper.is_alive() and not errors
-            assert processes[0].wait(0) == job.AGGREGATE_DEADLINE
+            assert processes[0].wait(10) == job.AGGREGATE_DEADLINE
         finally:
             release.set()
             launcher.join(10)
@@ -832,7 +833,7 @@ class TestNativeContainment:
             tracker.kill_all(cause=job.DRIVER_ABORT)
 
     @pytest.mark.parametrize("first", [job.FILE_TIMEOUT, job.AGGREGATE_DEADLINE, job.DRIVER_ABORT])
-    def test_synchronized_competing_causes_and_natural_failure(self, native, first):
+    def test_ordered_first_cause_is_immutable_and_natural_failure_survives(self, native, first):
         process = native.start("import time; time.sleep(30)")
         barrier = threading.Barrier(4)
         first_done = threading.Event()
@@ -904,7 +905,7 @@ class TestNativeContainment:
             release.touch()
             competing.join(10)
 
-    def test_concurrent_launch_temporary_handle_isolation(self, native):
+    def test_concurrent_launches_exclude_unlisted_inheritable_handles(self, native):
         import msvcrt
 
         barrier = threading.Barrier(3)
@@ -1025,3 +1026,33 @@ class TestNativeContainment:
         with pytest.raises(PermissionError, match="busy record"):
             driver.write_record(record, results=[], status="complete")
         assert record.read_bytes() == previous
+
+
+def test_actual_breakaway_program_compiles_nested_windows_paths():
+    class CapturedProgram(Exception):
+        pass
+
+    captured = []
+
+    def capture(code):
+        captured.append(code)
+        raise CapturedProgram
+
+    native = SimpleNamespace(path=PureWindowsPath(r"C:\Users\fake-user\probe"), start=capture)
+    with pytest.raises(CapturedProgram):
+        TestNativeContainment().test_breakaway_is_denied(native)
+
+    def compile_program(source):
+        compile(source, "<generated-native-probe>", "exec")
+        tree = ast.parse(source)
+        nested = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "exec":
+                nested.append(ast.literal_eval(node.args[0]))
+            if isinstance(node, ast.List):
+                for left, right in zip(node.elts, node.elts[1:], strict=False):
+                    if isinstance(left, ast.Constant) and left.value == "-c":
+                        nested.append(ast.literal_eval(right))
+        return 1 + sum(compile_program(program) for program in nested)
+
+    assert compile_program(captured[0]) == 3

@@ -342,7 +342,9 @@ def test_ci_workflow_runs_per_file_windows_pytest_and_uploads_results():
     assert "--job-limit 3600 --startup-reserve 120 --finalize-reserve 300" in driver
     assert "--job-timeout 3300" in driver
     assert "--base-ref ${{ github.event.pull_request.base.sha }}" in driver
-    assert "--serial test_runs_serve.py --serial test_aboyeur.py" in driver
+    assert driver.count("--serial ") == 1
+    assert "--serial test_runs_serve.py" in driver
+    assert "--serial test_aboyeur.py" not in driver
     artifact = _workflow_step_section(text, "windows-pytest", "Upload per-file pytest results")
     assert "if: ${{ always() }}" in artifact
     assert "uses: actions/upload-artifact@v7" in artifact

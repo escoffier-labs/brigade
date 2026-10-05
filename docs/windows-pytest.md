@@ -17,8 +17,10 @@ coverage. These rows cannot be forgiven by the allowlist and do not enter the pr
 regression count. Any incomplete coverage makes the driver exit nonzero.
 Setup errors and interruptions also exit nonzero, including when no file
 measurements exist. A natural result from a finished worker is preserved
-when the aggregate deadline expires. A natural test failure followed by a
-cleanup error keeps its failure status and exit code. Its `cleanup_error` field
+when the aggregate deadline expires or the driver aborts. Abort cleanup also
+records unfinished workers and files that never started. The original driver
+error remains visible when cleanup reports another error. A natural test failure
+followed by a cleanup error keeps its failure status and exit code. Its `cleanup_error` field
 also makes it an infrastructure error, even when the failure is allowlisted.
 The envelope separately flags aggregate budget exhaustion, which exits
 nonzero even if every worker has already returned a measured result.
@@ -67,16 +69,16 @@ is 900 seconds and the default parallel worker count is six.
 
 ## Isolation phase
 
-CI explicitly selects `test_runs_serve.py` and `test_aboyeur.py` with repeated
-`--serial` arguments. The driver validates portable names, discovery
-membership, and duplicates before launching any child. Nested names such as
+CI explicitly selects only `test_runs_serve.py` with `--serial`.
+`test_aboyeur.py` runs in the parallel phase. The driver validates portable
+names, discovery membership, and duplicates before launching any child. Nested names such as
 `nested/test_example.py` are supported.
 
 Selected files run first, one at a time, with no parallel workers active.
 The bounded parallel phase starts after the isolated phase has drained.
 If the budget expires during either phase, remaining files are incomplete.
 This scheduling guarantees isolation from other file workers. It has not
-been shown to fix flakiness or improve duration for these two files.
+been shown to fix flakiness or improve duration for the selected file.
 
 ## Record format
 
@@ -102,8 +104,12 @@ alone cannot prove completion, and an unknown expected count cannot prove
 zero tests complete. v1 records do not establish coverage completeness.
 
 An initial `running` snapshot is written before launching children, followed
-by incremental snapshots and a final status. Each write uses a same-directory
-temporary file, flush, fsync, and atomic replacement. Windows permission
+by incremental snapshots for measured results and a final status. Terminal
+synthetic rows are collected as a batch before publication, avoiding a separate
+record write for every unstarted file. After a progress writer fails, abort
+cleanup collects results without retrying that callback. The final writer
+receives the collected rows and the original error. Each write uses a
+same-directory temporary file, flush, fsync, and atomic replacement. Windows permission
 errors during replacement receive four attempts with short bounded delays.
 Failed replacement preserves the previous valid JSON and removes the
 temporary file. Abrupt driver death leaves the last `running` snapshot.
@@ -138,6 +144,8 @@ for any job. Job emptiness, root waits, and worker finalization share one
 15-second cleanup deadline. Every job closes once, even after query or
 termination failures. Unconfirmed emptiness, failed kernel operations, or
 unfinished workers are infrastructure errors and retain the temporary target.
+Cleanup uncertainty aborts the whole sweep. The driver launches no further
+files while process ownership or cleanup is uncertain.
 The coordinator finalizes its record after bounded cleanup. Workers do not
 publish records, so late worker completion cannot replace the final snapshot.
 

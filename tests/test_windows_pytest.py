@@ -563,14 +563,14 @@ def test_process_tracker_prevents_a_launch_after_closing(tmp_path):
         )
 
 
-def test_cancelled_worker_future_records_a_launch_failure(tmp_path):
+def test_cancelled_worker_future_records_unstarted_coverage(tmp_path):
     future = Future()
     assert future.cancel()
 
     result = windows_pytest.result_from_future(future, "test_cancelled.py", tmp_path / "output")
 
     assert result.name == "test_cancelled.py"
-    assert result.status == "launch-failure"
+    assert result.status == "unstarted"
 
 
 def test_run_files_aborts_active_workers_when_progress_recording_fails(tmp_path, monkeypatch):
@@ -1048,6 +1048,9 @@ def test_cleanup_timeout_retains_temp_and_records_partial_evidence(tmp_path, mon
         assert root.exists()
         payload = json.loads(record.read_text())
         assert payload["completed_count"] == 0
+        assert payload["accounted_count"] == payload["expected_count"] == 1
+        assert payload["results"][0]["status"] == "deadline-exceeded"
+        assert payload["retained_temp_root"] == str(root)
         assert payload["status"] == "error"
         assert "cleanup unconfirmed" in payload["driver_error"]
         before = record.read_bytes()
@@ -1213,3 +1216,268 @@ def test_main_deadline_expiry_preserves_measurement_but_cannot_succeed(tmp_path,
     assert payload["aggregate_deadline_exceeded"] is True
     assert payload["status"] == "incomplete"
     assert code == 1
+
+
+@pytest.mark.parametrize("abort", ["record", "cleanup", "interrupt"])
+def test_main_abort_drains_natural_failure_and_accounts_pending(tmp_path, monkeypatch, abort):
+    started = threading.Event()
+    release = threading.Event()
+    real_wait = windows_pytest.wait
+    real_write = windows_pytest.write_record
+    root = tmp_path / "outside"
+    root.mkdir()
+    files = ["test_trigger.py", "test_natural.py", "test_pending.py"]
+    launches, progress, causes = [], [], []
+    failure = OSError("original record failure")
+
+    def worker(name, **kwargs):
+        launches.append(name)
+        if name == "test_trigger.py":
+            assert started.wait(2)
+            return _result(name, "cleanup-unconfirmed" if abort == "cleanup" else "passed")
+        started.set()
+        assert release.wait(2)
+        return _result(name, "failed")
+
+    def wait_for_trigger(active, **kwargs):
+        assert started.wait(2)
+        trigger = next(future for future, name in active.items() if name == "test_trigger.py")
+        real_wait([trigger], timeout=2)
+        assert trigger.done()
+        if abort == "interrupt":
+            raise KeyboardInterrupt("original interrupt")
+        return {trigger}, set(active).difference({trigger})
+
+    def cleanup(self, **kwargs):
+        causes.append(kwargs["cause"])
+        release.set()
+        if abort == "record":
+            raise windows_job.CleanupError("secondary cleanup failure")
+
+    def write(path, **kwargs):
+        if kwargs.get("status", "running") == "running" and kwargs["results"]:
+            progress.append(kwargs["results"])
+            if abort == "record":
+                raise failure
+        real_write(path, **kwargs)
+
+    monkeypatch.setattr(windows_pytest, "is_windows", lambda: True)
+    monkeypatch.setattr(windows_pytest, "install_console_handler", lambda: None)
+    monkeypatch.setattr(windows_pytest, "discover_files", lambda repo: files)
+    monkeypatch.setattr(windows_pytest, "make_temp_root", lambda repo: root)
+    monkeypatch.setattr(windows_pytest, "run_file", worker)
+    monkeypatch.setattr(windows_pytest, "wait", wait_for_trigger)
+    monkeypatch.setattr(windows_pytest.ProcessTracker, "kill_all", cleanup)
+    monkeypatch.setattr(windows_pytest, "write_record", write)
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text('{"known_failures": [], "known_timeouts": []}')
+    record = tmp_path / "record.json"
+    try:
+        code = windows_pytest.main(
+            ["--repo", str(tmp_path), "--allowlist", str(allowlist), "--record", str(record), "--workers", "2"]
+        )
+    finally:
+        release.set()
+    payload = json.loads(record.read_text())
+    assert code == 2
+    assert payload["accounted_count"] == payload["expected_count"] == 3
+    rows = {row["name"]: row for row in payload["results"]}
+    assert rows["test_natural.py"]["status"] == "failed"
+    assert rows["test_natural.py"]["returncode"] == 1
+    assert rows["test_pending.py"]["status"] == "unstarted"
+    assert "abort" in rows["test_pending.py"]["diagnostic"]
+    assert set(launches) == {"test_trigger.py", "test_natural.py"}
+    assert causes == [windows_job.DRIVER_ABORT]
+    assert payload["completed_count"] == (1 if abort == "cleanup" else 2)
+    assert payload["status"] == ("interrupted" if abort == "interrupt" else "error")
+    assert (
+        payload["driver_error"]
+        == {
+            "record": "original record failure",
+            "cleanup": str(windows_pytest.CleanupUnconfirmed("cleanup unconfirmed; retaining temporary target")),
+            "interrupt": "original interrupt",
+        }[abort]
+    )
+    if abort == "record":
+        assert len(progress) == 1
+        assert "secondary cleanup failure" in rows["test_natural.py"]["cleanup_error"]
+    assert payload["retained_temp_root"] == str(root)
+
+
+@pytest.mark.parametrize("queued", [False, True], ids=["unscheduled", "queued-cancelled"])
+def test_deadline_batches_hundreds_of_synthetic_rows(tmp_path, monkeypatch, queued):
+    files = [f"test_{index}.py" for index in range(485)]
+    submitted, launches, snapshots, shutdowns = [], [], [], []
+    now = 100.0
+    real_run_files = windows_pytest.run_files
+    real_write = windows_pytest.write_record
+    root = tmp_path / "outside"
+    root.mkdir()
+
+    class QueuedExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def submit(self, function, name):
+            # Keep real futures pending; no worker or child process may execute.
+            future = Future()
+            submitted.append(future)
+            return future
+
+        def shutdown(self, **kwargs):
+            assert all(future.cancelled() for future in submitted)
+            assert not snapshots
+            shutdowns.append(True)
+
+    def deadline_wait(active, **kwargs):
+        nonlocal now
+        now = 101.0
+        return set(), set(active)
+
+    def run_with_clock(**kwargs):
+        nonlocal now
+        assert kwargs["deadline"] == 101.0
+        if not queued:
+            now = 101.0
+        return real_run_files(**kwargs, clock=lambda: now)
+
+    def write(path, **kwargs):
+        if kwargs.get("status", "running") == "running" and kwargs["results"]:
+            assert shutdowns == [True]
+            snapshots.append(list(kwargs["results"]))
+        real_write(path, **kwargs)
+
+    monkeypatch.setattr(windows_pytest.time, "monotonic", lambda: now)
+    monkeypatch.setattr(windows_pytest, "is_windows", lambda: True)
+    monkeypatch.setattr(windows_pytest, "install_console_handler", lambda: None)
+    monkeypatch.setattr(windows_pytest, "discover_files", lambda repo: files)
+    monkeypatch.setattr(windows_pytest, "make_temp_root", lambda repo: root)
+    monkeypatch.setattr(windows_pytest, "ThreadPoolExecutor", QueuedExecutor)
+    monkeypatch.setattr(windows_pytest, "wait", deadline_wait)
+    monkeypatch.setattr(windows_pytest, "run_file", lambda *args, **kwargs: launches.append(args))
+    monkeypatch.setattr(windows_pytest, "run_files", run_with_clock)
+    monkeypatch.setattr(windows_pytest, "write_record", write)
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text('{"known_failures": [], "known_timeouts": []}')
+    record = tmp_path / "record.json"
+
+    code = windows_pytest.main(
+        [
+            "--repo",
+            str(tmp_path),
+            "--allowlist",
+            str(allowlist),
+            "--record",
+            str(record),
+            "--workers",
+            "6",
+            "--job-timeout",
+            "1",
+        ]
+    )
+
+    payload = json.loads(record.read_text())
+    assert not launches
+    assert len(submitted) == (6 if queued else 0)
+    assert shutdowns == [True]
+    assert len(snapshots) == 1 and len(snapshots[0]) == 485
+    assert code == 1
+    assert payload["expected_files"] == files
+    assert payload["accounted_count"] == payload["expected_count"] == 485
+    assert payload["completed_count"] == 0
+    assert payload["status"] == "incomplete"
+    assert payload["aggregate_deadline_exceeded"] is True
+    assert "driver_error" not in payload
+    assert "retained_temp_root" not in payload
+    assert not root.exists()
+    assert {row["name"] for row in payload["results"]} == set(files)
+    assert all(row["status"] == "unstarted" for row in payload["results"])
+    assert all(row["diagnostic"] == "driver aggregate deadline exceeded" for row in payload["results"])
+
+
+def test_run_file_preserves_symlinked_interpreter_identity(tmp_path, monkeypatch):
+    interpreter = tmp_path / "venv" / "python"
+    interpreter.parent.mkdir()
+    base = tmp_path / "base-python"
+    base.touch()
+    try:
+        interpreter.symlink_to(base)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    captured = []
+
+    class Process(FakeProcess):
+        def wait(self, timeout):
+            return 0
+
+    def launch(**kwargs):
+        captured.append(kwargs["python"])
+        return Process()
+
+    monkeypatch.setattr(windows_pytest, "launch_process", launch)
+    result = windows_pytest.run_file(
+        "test_identity.py",
+        repo=tmp_path,
+        python=interpreter,
+        output_dir=tmp_path / "out",
+        temp_root=tmp_path,
+        timeout_seconds=10,
+    )
+    assert result.status == "passed"
+    assert captured == [interpreter.absolute()]
+    assert captured[0] != base
+
+
+def test_submit_failure_retains_original_error_and_accounts_unsubmitted_file(tmp_path, monkeypatch):
+    failure = RuntimeError("executor refused submission")
+    shutdown = []
+
+    class FailedExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def submit(self, function, name):
+            raise failure
+
+        def shutdown(self, **kwargs):
+            shutdown.append(True)
+
+    monkeypatch.setattr(windows_pytest, "ThreadPoolExecutor", FailedExecutor)
+    with pytest.raises(RuntimeError) as caught:
+        windows_pytest.run_files(
+            files=["test_submit.py", "test_pending.py"],
+            serial=set(),
+            repo=tmp_path,
+            python=Path("python.exe"),
+            output_dir=tmp_path,
+            temp_root=tmp_path,
+            workers=1,
+            timeout_seconds=10,
+            deadline=time.monotonic() + 1,
+        )
+    assert caught.value is failure
+    assert shutdown == [True]
+    rows = caught.value.windows_pytest_results
+    assert {row.name for row in rows} == {"test_submit.py", "test_pending.py"}
+    assert all(row.status == "unstarted" and row.diagnostic == "driver abort" for row in rows)
+
+
+def test_keyboard_interrupt_during_deadline_cleanup_remains_interrupted(tmp_path, monkeypatch):
+    failure = KeyboardInterrupt("cleanup interrupt")
+    monkeypatch.setattr(
+        windows_pytest.ProcessTracker, "kill_all", lambda self, **kwargs: (_ for _ in ()).throw(failure)
+    )
+    with pytest.raises(KeyboardInterrupt) as caught:
+        windows_pytest.run_files(
+            files=["test_pending.py"],
+            serial=set(),
+            repo=tmp_path,
+            python=Path("python.exe"),
+            output_dir=tmp_path,
+            temp_root=tmp_path,
+            workers=1,
+            timeout_seconds=10,
+            deadline=time.monotonic() - 1,
+        )
+    assert caught.value is failure
+    assert caught.value.windows_pytest_results[0].status == "unstarted"
