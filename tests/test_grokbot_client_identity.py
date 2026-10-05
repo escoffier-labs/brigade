@@ -126,6 +126,56 @@ def test_config_identity_mismatch_refuses_read_and_overwrite(tmp_path):
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize("winner", ["identical", "different", "directory", "malformed", "invalid-utf8"])
+def test_named_setup_atomic_publication_race(tmp_path, monkeypatch, winner):
+    publish = grokbot_ops._write_text_nofollow_atomic
+    publications = []
+    winning_bytes = []
+
+    def competing_publish(path, data, **kwargs):
+        publications.append(path)
+        assert kwargs["replace"] is False
+        if winner == "directory":
+            path.mkdir(parents=True)
+        else:
+            if winner == "different":
+                payload = json.loads(data)
+                payload["bind"] = "127.0.0.1:9876"
+                winning_data = json.dumps(payload)
+            elif winner == "malformed":
+                winning_data = "{"
+            else:
+                winning_data = data
+            publish(path, winning_data, **kwargs)
+            if winner == "invalid-utf8":
+                path.write_bytes(b"\xff")
+            winning_bytes.append(path.read_bytes())
+        publish(path, data, **kwargs)
+
+    monkeypatch.setattr(grokbot_ops, "_write_text_nofollow_atomic", competing_publish)
+    assert _setup(tmp_path, ROLE, ["--client-id", "alpha"]) == (0 if winner == "identical" else 2)
+    path = grokbot_ops.config_path(tmp_path, ROLE, "alpha")
+    assert publications == [path]
+    if winner == "directory":
+        assert path.is_dir()
+    else:
+        assert path.read_bytes() == winning_bytes[0]
+    if winner == "identical":
+        assert grokbot_ops.load_config(tmp_path, ROLE, "alpha")["client_id"] == "alpha"
+    assert not list(path.parent.glob(".*.tmp"))
+
+
+def test_named_setup_does_not_recover_other_publication_errors(tmp_path, monkeypatch):
+    publish = grokbot_ops._write_text_nofollow_atomic
+
+    def failed_publish(path, data, **kwargs):
+        publish(path, data, **kwargs)
+        raise PermissionError("publication refused")
+
+    monkeypatch.setattr(grokbot_ops, "_write_text_nofollow_atomic", failed_publish)
+    assert _setup(tmp_path, ROLE, ["--client-id", "alpha"]) == 2
+
+
 def test_distinct_clients_cannot_use_each_others_local_leases(tmp_path):
     clients = {
         name: grokbot_mcp.GrokbotAdapter(replace(_adapter(tmp_path).config, client_id=name))
@@ -201,6 +251,47 @@ def test_canary_refuses_same_role_different_client(tmp_path, monkeypatch):
     monkeypatch.setattr(grokbot_ops, "_anonymous_health_status", lambda *a: 401)
     monkeypatch.setattr(grokbot_ops, "_tools_list", lambda *a: [{"name": name} for name in grokbot_mcp.WORKER_TOOLS])
     assert grokbot_ops.canary(tmp_path, ROLE, client_id="alpha")["reason"] == "identity"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        (None, None),
+        ("role", "repository-scout"),
+        ("role", None),
+        ("client_id", "beta"),
+        ("client_id", None),
+        ("bot_id", "grokbot-implementation-worker-beta"),
+        ("bot_id", None),
+    ],
+)
+def test_named_doctor_endpoint_requires_matching_identity(tmp_path, monkeypatch, field, value):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", "not-a-real-token")
+    assert _setup(tmp_path, ROLE, ["--client-id", "alpha"]) == 0
+    health = {
+        "ok": True,
+        "service": "grokbot-mcp",
+        "role": ROLE,
+        "client_id": "alpha",
+        "bot_id": "grokbot-implementation-worker-alpha",
+    }
+    if field is not None:
+        if value is None:
+            del health[field]
+        else:
+            health[field] = value
+    monkeypatch.setattr(grokbot_ops, "_request_json", lambda *a, **k: health)
+    monkeypatch.setattr(grokbot_mcp, "load_hub_token", lambda **k: None)
+    checks = grokbot_ops.doctor(tmp_path, ROLE, client_id="alpha")
+    assert {check["check"]: check["status"] for check in checks}["endpoint"] == ("ok" if field is None else "fail")
+
+
+def test_legacy_doctor_endpoint_does_not_require_identity(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", "not-a-real-token")
+    assert _setup(tmp_path, ROLE) == 0
+    monkeypatch.setattr(grokbot_ops, "_request_json", lambda *a, **k: {"ok": True, "service": "grokbot-mcp"})
+    checks = grokbot_ops.doctor(tmp_path, ROLE)
+    assert {check["check"]: check["status"] for check in checks}["endpoint"] == "ok"
 
 
 @pytest.mark.parametrize("command", ["doctor", "canary", "install-service"])

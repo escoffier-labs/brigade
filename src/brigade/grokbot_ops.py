@@ -136,9 +136,19 @@ def save_config(
                 if existing != payload:
                     raise grokbot_mcp.ConfigurationError("invalid")
                 return payload
-        _write_text_nofollow_atomic(
-            path, json.dumps(payload, indent=2, sort_keys=True) + "\n", mode=0o600, replace=client_id is None
-        )
+        try:
+            _write_text_nofollow_atomic(
+                path, json.dumps(payload, indent=2, sort_keys=True) + "\n", mode=0o600, replace=client_id is None
+            )
+        except FileExistsError as exc:
+            if client_id is None:
+                raise
+            try:
+                existing = json.loads(_read_regular_text(path))
+            except (UnicodeDecodeError, json.JSONDecodeError) as read_exc:
+                raise grokbot_mcp.ConfigurationError("invalid") from read_exc
+            if existing != payload:
+                raise grokbot_mcp.ConfigurationError("invalid") from exc
     except OSError as exc:
         raise grokbot_mcp.ConfigurationError("invalid") from exc
     return payload
@@ -646,7 +656,17 @@ def _connect_host(host: str) -> str:
 
 def _health_check(config: dict[str, Any], bearer: str, timeout: int) -> bool:
     payload = _request_json(f"{_base_url(config)}/health", bearer, timeout, method="GET")
-    return payload is not None and payload.get("ok") is True and payload.get("service") == "grokbot-mcp"
+    if payload is None or payload.get("ok") is not True or payload.get("service") != "grokbot-mcp":
+        return False
+    client_id = config.get("client_id")
+    if client_id is not None:
+        instance = config["instance"]
+        return (
+            payload.get("role") == instance
+            and payload.get("client_id") == client_id
+            and payload.get("bot_id") == f"grokbot-{grokbot_mcp.deployment_name(instance, client_id)}"
+        )
+    return True
 
 
 def _anonymous_health_status(url: str, timeout: int) -> int | None:
