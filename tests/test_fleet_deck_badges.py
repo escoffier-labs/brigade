@@ -1,11 +1,14 @@
 """Deck harness/model badges and the worker-run seat backfill."""
 
+import re
 import sqlite3
 from datetime import datetime, timezone
+from xml.etree import ElementTree
 
 import pytest
 
 from brigade import fleet_command_deck as deck
+from brigade import fleet_deck_brands as brands
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NOW = datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc)
@@ -127,7 +130,9 @@ def test_badge_html_embeds_svg_and_escapes_title() -> None:
     assert "<svg" in html and "viewBox" in html
     assert "<script" not in html
     assert 'title="claude"' in html and 'aria-label="Claude"' in html
-    assert 'class="badge"' in html
+    badge = ElementTree.fromstring(html)
+    assert "badge" in badge.attrib["class"].split()
+    assert all("style" not in element.attrib for element in badge.iter())
 
 
 def test_hostile_brand_names_are_escaped() -> None:
@@ -138,7 +143,18 @@ def test_hostile_brand_names_are_escaped() -> None:
         assert "<script>" not in html
         assert "&lt;script&gt;" in html
         assert "??" in html
-        assert 'class="badge"' in html
+        badge = ElementTree.fromstring(html)
+        assert "badge" in badge.attrib["class"].split()
+        assert all("style" not in element.attrib for element in badge.iter())
+
+
+def test_brand_table_palette_and_svg_are_csp_compliant() -> None:
+    for brand in [*brands.BRANDS.values(), brands.UNKNOWN_BRAND]:
+        assert re.fullmatch(r"#[0-9a-f]{6}", brand.accent), brand.label
+        if brand.svg:
+            svg = ElementTree.fromstring(brand.svg)
+            assert all("style" not in element.attrib for element in svg.iter()), brand.label
+            assert all(element.tag not in ("style", "script") for element in svg.iter()), brand.label
 
 
 def test_worker_run_seat_backfilled_from_dispatch_event(conn: sqlite3.Connection) -> None:
@@ -239,8 +255,8 @@ def test_card_snapshot() -> None:
         '<header class="tile-head"><p class="repo-name">repo</p>'
         '<div class="tile-side"><p class="state">running</p>'
         '<p class="tile-badges">'
-        '<span class="badge" style="background:#2b6cb0" title="opencode" aria-label="OpenCode">' + oc.svg + "</span>"
-        '<span class="badge" style="background:#2b6cb0" title="opencode" aria-label="OpenCode">' + oc.svg + "</span>"
+        '<span class="badge badge-color-2b6cb0" title="opencode" aria-label="OpenCode">' + oc.svg + "</span>"
+        '<span class="badge badge-color-2b6cb0" title="opencode" aria-label="OpenCode">' + oc.svg + "</span>"
         "</p>"
         '<p class="tile-model">opencode/muse-spark-1.3-contributor-free</p>'
         "</div></header>"

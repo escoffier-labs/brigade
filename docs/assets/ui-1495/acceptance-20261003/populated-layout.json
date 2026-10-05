@@ -1,0 +1,112 @@
+{
+  "schema": "brigade.ui_manual_browser_evidence.v1",
+  "method": "T3 preview_evaluate of tracked executable JS, real renderers, nonce CSP, synthetic ephemeral fixture",
+  "viewport": {
+    "width": 320,
+    "height": 900
+  },
+  "results": {
+    "machines": {
+      "pass": {
+        "documentWidth": 305,
+        "failures": [],
+        "status": "PASS",
+        "tables": [
+          {
+            "clientWidth": 247,
+            "id": "node-synthetic-no",
+            "rows": 2,
+            "scrollWidth": 327,
+            "scrolled": 64,
+            "tableWidth": 327.3125
+          },
+          {
+            "clientWidth": 247,
+            "id": "node-synthetic-no",
+            "rows": 2,
+            "scrollWidth": 327,
+            "scrolled": 64,
+            "tableWidth": 327.328125
+          }
+        ],
+        "view": "machines",
+        "viewport": 320
+      },
+      "negative": {
+        "error": "Error: fleet board layout FAIL: {\"status\":\"FAIL\",\"view\":\"machines\",\"viewport\":320,\"documentWidth\":356,\"tables\":[{\"id\":\"node-synthetic-no\",\"rows\":2,\"wrapper\":null},{\"id\":\"node-synthetic-no\",\"rows\":2,\"wrapper\":null}],\"failures\":[\"document overflows: 356 > 320\",\"node-synthetic-no: missing own scroll wrapper\",\"node-synthetic-no: missing own scroll wrapper\"]}",
+        "negativeControl": true
+      },
+      "reload": {
+        "documentWidth": 305,
+        "failures": [],
+        "status": "PASS",
+        "tables": [
+          {
+            "clientWidth": 247,
+            "id": "node-synthetic-no",
+            "rows": 2,
+            "scrollWidth": 327,
+            "scrolled": 64,
+            "tableWidth": 327.3125
+          },
+          {
+            "clientWidth": 247,
+            "id": "node-synthetic-no",
+            "rows": 2,
+            "scrollWidth": 327,
+            "scrolled": 64,
+            "tableWidth": 327.328125
+          }
+        ],
+        "view": "machines",
+        "viewport": 320
+      }
+    },
+    "repos": {
+      "pass": {
+        "documentWidth": 305,
+        "failures": [],
+        "status": "PASS",
+        "tables": [
+          {
+            "clientWidth": 281,
+            "id": "repo-board",
+            "rows": 2,
+            "scrollWidth": 405,
+            "scrolled": 64,
+            "tableWidth": 405.1875
+          }
+        ],
+        "view": "repos",
+        "viewport": 320
+      },
+      "negative": {
+        "error": "Error: fleet board layout FAIL: {\"status\":\"FAIL\",\"view\":\"repos\",\"viewport\":320,\"documentWidth\":417,\"tables\":[{\"id\":\"repo-board\",\"rows\":2,\"wrapper\":null}],\"failures\":[\"document overflows: 417 > 320\",\"repo-board: missing own scroll wrapper\"]}",
+        "negativeControl": true
+      },
+      "reload": {
+        "documentWidth": 305,
+        "failures": [],
+        "status": "PASS",
+        "tables": [
+          {
+            "clientWidth": 281,
+            "id": "repo-board",
+            "rows": 2,
+            "scrollWidth": 405,
+            "scrolled": 64,
+            "tableWidth": 405.1875
+          }
+        ],
+        "view": "repos",
+        "viewport": 320
+      }
+    }
+  },
+  "source_sha256": {
+    "tests/test_ui_theme_integration.py": "30a90f9323d86ee56a1269c291f5756bf4f23ad3ef8a4f36445ce0dba5f6b709",
+    "tests/ui/fleet_board_layout.js": "3822bc7679917a379fb422ab9a9ddbbf9ee4f46565dbc98367c70f24d3d5614a",
+    "src/brigade/fleet_dashboard.py": "80e19349db9862a0e4373816442279be72c9c31bc2e68dc41159553d7474e448",
+    "src/brigade/ui_theme.py": "5c5189eb32d4b1582bbb9b27c9b7d07ed366ef3213decd03eeaea0ba1b63b7d9"
+  }
+}
