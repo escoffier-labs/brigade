@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Offline Claude evidence normalizers validate supplied cloud session identities, managed-review severity counts and exact-head coverage, and confirmed Actions run attempts. These pure Python boundaries preserve unknown and stale evidence without provider calls or runtime dependencies. CLI adoption, imports and Hub readouts remain follow-up work. (#1600, #1601, #1602)
 - Worklore records explicit operator offers, fenced node ownership, metadata checkpoints, handoffs, release, and withdrawal without changing item status or enforcing filesystem conflicts. (#1595)
 - `brigade context preview` reports scoped Codex 0.160.0 instruction selection and cumulative byte accounting from supplied settings, with explicit unknown boundaries and separate advisory limits. (#1564)
 - Worklore Python clients can read and resume bounded item or filtered global event history pages using the Hub's existing cursors and authorization. (#1595)
