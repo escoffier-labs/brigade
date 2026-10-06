@@ -571,12 +571,21 @@ def _model_lease_op(
     if status in (401, 403):
         return ModelLeaseDecision(False, "auth-failed", lease, fence)
     key = "acquired" if action == "acquire" else "released"
-    return ModelLeaseDecision(
-        status == 200 and isinstance(payload, dict) and payload.get(key) is True,
-        "ok" if status == 200 and isinstance(payload, dict) and payload.get(key) is True else "refused",
-        lease,
-        fence,
-    )
+    if status == 200 and isinstance(payload, dict) and payload.get(key) is True:
+        return ModelLeaseDecision(True, "ok", lease, fence)
+    reason = "refused"
+    if action == "acquire" and status in (200, 409):
+        if not isinstance(payload, dict) or payload.get(key) is not False:
+            reason = "malformed-response"
+        else:
+            # Never forward remote text. These codes belong only to model seats.
+            code = payload.get("reason_code")
+            if isinstance(code, str) and code in {"seat-disabled", "seat-capacity-exhausted"}:
+                reason = code
+            elif code is None and payload.get("error") == "model policy capacity is exhausted":
+                # Compatibility with hubs predating explicit model-seat codes.
+                reason = "seat-capacity-exhausted"
+    return ModelLeaseDecision(False, reason, lease, fence)
 
 
 def acquire_model_lease(
