@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Inbox archiving rejects generation changes at publisher reopen, preserves pending records on disk-full publication failures, and restores the original inbox when replacement is interrupted after rename. Archive reads avoid retaining a second full raw snapshot, and Windows recovery tests retain their data checks without requiring POSIX permission bits. (#1581)
+- Roster and policy forms preserve retired role assignments and admission defaults during unrelated edits and repeated previews. Operators can clear or replace them, while retired seats remain unavailable as new choices. (#1580)
+- Fleet model lists and roster-page seat tables and selectors exclude retired seats, while separate retirement history and signed admission identities remain available. Retired seats can be disabled safely, and re-enabling stays blocked without deleting run or audit records. (#1571)
 - Bound Windows journal sibling locks request read/write data rights without DELETE, so CRT producers can open the same empty lock file in either order. Required native acceptance now exercises both two-process orders.
 
 - Windows journal mutations serialize bound reapers and unbound controllers on the same sibling file lock, preventing concurrent appends from forking the sequence and digest chain. Lock acquisition fails closed when serialization is unavailable. (#1591)
