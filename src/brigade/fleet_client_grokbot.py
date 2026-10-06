@@ -126,7 +126,12 @@ def status(job_id: str, **fields: Any) -> GrokbotHubDecision:
     return _op("status", job_id=job_id, **fields)
 
 
-def whoami(**fields: Any) -> GrokbotHubDecision:
+def whoami(*, include_node_id: bool = False, **fields: Any) -> GrokbotHubDecision:
+    """Request authenticated node metadata only when explicitly opted in."""
+    if type(include_node_id) is not bool:
+        return GrokbotHubDecision(False, "invalid-request")
+    if include_node_id:
+        fields["include_node_id"] = True
     return _op("whoami", **fields)
 
 
@@ -252,11 +257,13 @@ def _op(action: str, *, timeout: float = GROKBOT_TIMEOUT_SECONDS, **fields: Any)
     if action == "status" and status == 200 and job is not None:
         return GrokbotHubDecision(True, "ok", job=job)
     if action == "whoami" and status == 200 and isinstance(payload.get("actor_kind"), str):
-        return GrokbotHubDecision(
-            True,
-            "ok",
-            job={"actor_kind": payload.get("actor_kind"), "role": payload.get("role")},
-        )
+        identity = {"actor_kind": payload.get("actor_kind"), "role": payload.get("role")}
+        if fields.get("include_node_id") is True:
+            node_id = payload.get("node_id")
+            if not isinstance(node_id, str) or not node_id:
+                return GrokbotHubDecision(False, "refused")
+            identity["node_id"] = node_id
+        return GrokbotHubDecision(True, "ok", job=identity)
     if status == 200 and payload.get(ok_key) is True:
         return GrokbotHubDecision(True, "ok", job=job, jobs=jobs, idempotent=bool(payload.get("idempotent")))
     if status == 200 and action == "expire" and payload.get(ok_key) is False and job is not None:

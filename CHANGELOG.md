@@ -7,10 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Grok Bot role listeners accept optional `--client-id` across setup, serve, doctor, canary, and service rendering. Same-role clients use separate validated config paths, service names, and local lease identities. Hub-backed clients must match their credential-authenticated node ID. Legacy role-only configurations and tool inventories remain unchanged.
+
 ### Fixed
 
 - Roster and policy forms preserve retired role assignments and admission defaults during unrelated edits and repeated previews. Operators can clear or replace them, while retired seats remain unavailable as new choices. (#1580)
 - Fleet model lists and roster-page seat tables and selectors exclude retired seats, while separate retirement history and signed admission identities remain available. Retired seats can be disabled safely, and re-enabling stays blocked without deleting run or audit records. (#1571)
+- Windows journal mutations serialize bound reapers and unbound controllers on the same sibling file lock, preventing concurrent appends from forking the sequence and digest chain. Lock acquisition fails closed when serialization is unavailable. (#1591)
+- Windows journal writes preserve binary LF framing, and recovery preserves complete legacy CRLF records while quarantining the exact partial suffix. Bound recovery uses directory handles and supports nonexclusive creation and append. (#1565)
+- Journal append results and exported event dictionaries detach nested payloads from caller-owned data so later mutations cannot change the accepted event copy. (#1565)
+- Journal, lifecycle, and control retries synchronize the existing event before acknowledging it again. Fresh appends also synchronize the events directory, and control retries preserve the original event without repeating transport. (#1565)
 - Dashboard enrollment now uses five-minute single-use codes and independently revocable 30-day read-only browser sessions. Bearer query URLs and old HMAC cookies are refused. Browser cookies no longer edit roster/policy pages or access JSON APIs. `fleet enroll` and `fleet sessions --dashboard` support labeled devices, listing and revocation. (#1153)
 
 - Grok Bot scout feeds select issues with fewer failed attempts before retrying lower issue numbers. Hub previews report `listing=none` when queue state has not been fetched. (#1351)
