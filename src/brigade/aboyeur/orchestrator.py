@@ -617,7 +617,8 @@ def run(
                     agents.model_policy_model(agent.cli or "", agent.model),
                 )
                 if not decision.granted:
-                    yield f"fleet model policy denied seat {agent.name!r}: {decision.reason}"
+                    provider = agents.model_policy_provider(agent.cli or "")
+                    yield f"fleet model policy denied seat {agent.name!r} (provider {provider!r}): {decision.reason}"
                     return
                 yield None
         except fleet_session_bootstrap.PreflightDenial as exc:
