@@ -17,12 +17,16 @@ remains the canonical memory authority.
 1. Add CLI tests for GET-only transport, recognized projections, independent
    revisions/observations, absent metadata, malformed replies, and safe refusals.
    Run them through Brigade and observe the missing command fail.
-2. Add a standalone CLI module and minimal registration in `fleet.py`. Read the
+2. Add a standalone CLI module and minimal registration in `fleet.py`. Extract
+   the existing Worklore parser block into `fleet_work.py`, passing the original
+   dispatch handlers explicitly to preserve flags, defaults and monkeypatch
+   seams while leaving room under the unchanged module-size ceiling. Read the
    item first, then ownership, using existing client settings and authentication.
    Select bounded known fields, validate recognized values, and omit unrelated
    item bodies, links, events, credentials, holder hashes/nonces and unknown fields.
 3. Regenerate the command inventory, add release notes, then run the focused
-   gate through Brigade with CLI help, inventory and module-size tests. Commit
+   gate through Brigade with CLI help, inventory, module-size and existing
+   Worklore CLI/parser tests. Commit
    the candidate for accountable root integration and review.
 
 Output retains item version, ownership revision/generation, checkpoint source
