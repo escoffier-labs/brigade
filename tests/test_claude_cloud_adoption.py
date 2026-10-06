@@ -71,6 +71,22 @@ def test_legacy_registration_cannot_duplicate_bound_session(tmp_path):
     assert cloud_tracker.registry_path(tmp_path).read_bytes() == before
 
 
+@pytest.mark.parametrize("provider", ["codex-cloud", "cursor-cloud", "jules"])
+def test_unbound_adoption_preserves_legacy_branch_label(tmp_path, provider):
+    entry = cloud_tracker.adopt(tmp_path, provider=provider, branch="fixture/branch", session_id="session_fixture")
+    assert entry["label"] == "fixture/branch"
+
+
+@pytest.mark.parametrize("complete,exists", [(False, False), (True, False), (False, True)])
+def test_branch_absence_requires_complete_repository_scope(tmp_path, complete, exists):
+    cloud_tracker.adopt(tmp_path, provider="claude-cloud", session_id="cse_fixture", repo=REPO, branch="feature/fix")
+    row = cloud_tracker.status_payload(
+        tmp_path,
+        github={"repo": REPO, "branches_complete": complete, "branches": ["feature/fix"] if exists else [], "prs": []},
+    )["entries"][0]
+    assert row["evidence"]["github"]["branch_exists"] is (True if exists else False if complete else None)
+
+
 @pytest.mark.parametrize("observed_repo", [REPO, "fixture-owner/other", None])
 @pytest.mark.parametrize("branch", ["feature/fix", "claude/fixture"])
 def test_observer_retains_explicit_refs_and_scopes_branch_evidence(tmp_path, monkeypatch, observed_repo, branch):

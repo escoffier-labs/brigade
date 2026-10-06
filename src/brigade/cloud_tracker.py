@@ -406,9 +406,11 @@ def adopt(
     source = "adopt-task" if task_id and not branch else "adopt-branch" if branch and not task_id else "adopt-task"
     if task_id and branch:
         source = "adopt-task"
-    default_identity = task_id or session_id
-    if provider == "claude-cloud" and repo is not None and default_identity is not None:
-        default_identity = normalize_claude_cloud_identity(default_identity).session_id
+    default_identity = task_id
+    if provider == "claude-cloud" and repo is not None:
+        supplied_identity = task_id or session_id
+        if supplied_identity is not None:
+            default_identity = normalize_claude_cloud_identity(supplied_identity).session_id
     resolved_label = (label or default_identity or branch or "adopted").strip()
     artifact = expected_artifact
     if artifact is None and branch:
@@ -583,6 +585,11 @@ def _classify_entry(
     )
     if not branch_scope_known:
         branch_exists = False
+    branch_observation_known = branch_scope_known and (
+        not (provider == "claude-cloud" and entry.get("repo"))
+        or branch_exists
+        or github.get("branches_complete") is True
+    )
     raw_expected = entry.get("expected_artifact")
     expected = raw_expected if isinstance(raw_expected, dict) else {}
     expects_branch = expected.get("kind") in {"branch", "draft-pr"}
@@ -596,7 +603,7 @@ def _classify_entry(
         },
         "github": {
             "branch": branch,
-            "branch_exists": branch_exists if branch_scope_known else None,
+            "branch_exists": branch_exists if branch_observation_known else None,
             "prs": prs,
         },
     }
@@ -1438,6 +1445,7 @@ def observe_github(target: Path) -> dict[str, Any]:
     explicit_branches = {entry.get("branch") for entry in explicit if isinstance(entry.get("branch"), str)}
     explicit_prs = {entry.get("pr_url") for entry in explicit if isinstance(entry.get("pr_url"), str)}
     branches: list[dict[str, str]] = []
+    branches_complete = False
     code, stdout, _ = _run_text(
         ["gh", "api", "repos/{owner}/{repo}/branches?per_page=100"],
         cwd=target,
@@ -1448,7 +1456,10 @@ def observe_github(target: Path) -> dict[str, Any]:
         except json.JSONDecodeError:
             data = []
         if isinstance(data, list):
-            for item in data:
+            branches_complete = len(data) < 100 and all(
+                isinstance(item, dict) and isinstance(item.get("name"), str) for item in data
+            )
+            for item in data[:100]:
                 if isinstance(item, dict) and isinstance(item.get("name"), str):
                     name = item["name"]
                     if name.startswith(CLOUD_BRANCH_PREFIXES) or name in explicit_branches:
@@ -1503,7 +1514,7 @@ def observe_github(target: Path) -> dict[str, Any]:
                             "headRefOid": item.get("headRefOid"),
                         }
                     )
-    return {"branches": branches, "prs": prs, "repo": repo}
+    return {"branches": branches, "prs": prs, "repo": repo, "branches_complete": branches_complete}
 
 
 def cursor_cloud_wired() -> bool:

@@ -103,6 +103,8 @@ names lack a cloud prefix. Branch evidence requires confirmed observation of
 the bound repository; unknown or different repository scope reports
 `branch_exists: null`. Observation remains limited to the existing first 100
 branch and PR results, so missing evidence outside that window stays unobserved.
+An omitted branch reports `false` only when the repository branch snapshot is
+complete; a failed, truncated or unproven snapshot reports `null` instead.
 
 Status exposes `lifecycle_counts.claude-cloud` with `active: null`, unknown row
 count, and `coverage: unavailable`. Classification counts count local rows, not
