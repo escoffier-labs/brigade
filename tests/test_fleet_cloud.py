@@ -764,7 +764,7 @@ def test_model_policy_limit_is_an_atomic_fenced_expiring_lease(conn, monkeypatch
     }
     assert fleet_hub.handle_model_policy(conn, first, caller_node=NODE_A) == (
         409,
-        {"acquired": False, "error": "model policy capacity is exhausted"},
+        {"acquired": False, "error": "model policy capacity is exhausted", "reason_code": "seat-capacity-exhausted"},
     )
     fleet_hub.set_model_policy(
         conn,
@@ -783,7 +783,7 @@ def test_model_policy_limit_is_an_atomic_fenced_expiring_lease(conn, monkeypatch
     second = dict(first, lease_id="model-b", holder="fence-b")
     assert fleet_hub.handle_model_policy(conn, second, caller_node=NODE_A) == (
         409,
-        {"acquired": False, "error": "model policy capacity is exhausted"},
+        {"acquired": False, "error": "model policy capacity is exhausted", "reason_code": "seat-capacity-exhausted"},
     )
     assert (
         fleet_hub.handle_model_policy(
