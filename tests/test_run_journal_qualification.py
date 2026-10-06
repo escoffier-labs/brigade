@@ -1,7 +1,7 @@
 """Cross-boundary qualification of journal acceptance, replay and projection."""
 
 from copy import deepcopy
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import errno
 import json
 import os
@@ -28,6 +28,132 @@ from brigade.work_cmd import nt_dirfd
 
 RUN_ID = "20260727-153045-a1b2c3d4"
 RECORDED_AT = "2026-07-27T15:30:45.123456Z"
+
+
+@pytest.fixture
+def recording_nt_lock(monkeypatch):
+    """Record real NtCreateFile arguments and model Win32 sharing, not locking."""
+    opened, requests, converted, closed = {}, [], [], []
+
+    def share_classes(access):
+        return (1 if access & 1 else 0) | (2 if access & 6 else 0) | (4 if access & 0x10000 else 0)
+
+    def admit(name, access, share):
+        requests.append((name, access, share))
+        print(f"{name}: access={access:#010x}, share={share:#x}")
+        for prior_access, prior_share in opened.values():
+            if share_classes(access) & ~prior_share or share_classes(prior_access) & ~share:
+                raise PermissionError(errno.EACCES, "bidirectional Windows share conflict")
+        opened[name] = (access, share)
+
+    def create(handle_ref, access, obj_ref, iosb, size, attributes, share, disposition, options, ea, ea_size):
+        assert obj_ref._obj.RootDirectory == 99
+        assert disposition == 3  # FILE_OPEN_IF, never truncate the sibling.
+        assert options == 0x00200060  # non-directory, synchronous, open reparse point itself.
+        assert attributes == 0x80
+        admit("bound", access, share)
+        handle_ref._obj.value = 123
+        return 0
+
+    def get_info(handle, info_ref):
+        info_ref._obj.dwFileAttributes = 0
+        return True
+
+    def close(handle):
+        closed.append(handle)
+        opened.pop("bound", None)
+
+    api = SimpleNamespace(
+        OBJECT_ATTRIBUTES=nt_dirfd._OBJECT_ATTRIBUTES,
+        IO_STATUS_BLOCK=nt_dirfd._IO_STATUS_BLOCK,
+        BY_HANDLE_FILE_INFORMATION=nt_dirfd._BY_HANDLE_FILE_INFORMATION,
+        make_unicode=nt_dirfd._make_unicode,
+        NtCreateFile=create,
+        GetFileInformationByHandle=get_info,
+        CloseHandle=close,
+    )
+    monkeypatch.setattr(nt_dirfd, "_require_api", lambda: api)
+    monkeypatch.setattr(nt_dirfd, "_handle_from_fd", lambda fd: 99)
+    real_convert = nt_dirfd._handle_to_fd
+    monkeypatch.setattr(nt_dirfd, "_handle_to_fd", lambda api, handle, flags: converted.append(flags) or 42)
+    monkeypatch.setattr(dirfd, "posix_available", lambda: False)
+    monkeypatch.setattr(dirfd, "nt_available", lambda: True)
+    monkeypatch.setattr(os, "O_BINARY", 0x8000, raising=False)
+
+    @contextmanager
+    def crt_peer():
+        # CRT O_RDWR requests read/write and shares read/write, without delete.
+        admit("crt", 3, 3)
+        try:
+            yield
+        finally:
+            opened.pop("crt")
+
+    return SimpleNamespace(
+        api=api, peer=crt_peer, requests=requests, converted=converted, closed=closed, real_convert=real_convert
+    )
+
+
+@pytest.mark.parametrize("first", ["bound", "unbound"])
+def test_nt_journal_lock_shares_with_crt_peer_in_both_open_orders(tmp_path, monkeypatch, recording_nt_lock, first):
+    """Pin the native open-time failure separately from byte-lock exclusion."""
+    recording = recording_nt_lock
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    bound = SimpleNamespace(
+        dir_fd=lambda *components: 7,
+        open_file=lambda components, name, flags, mode: dirfd.open_child_file(7, name, flags, mode),
+    )
+    monkeypatch.setattr(run_journal, "_bound_target", lambda path: (bound, ("events",), path.name))
+    monkeypatch.setattr(run_journal, "_chmod_fd_or_path", lambda *args: None)
+    monkeypatch.setattr(run_journal, "fcntl", None)
+    monkeypatch.setattr(run_journal, "msvcrt", SimpleNamespace(LK_LOCK=1, LK_UNLCK=0, locking=lambda *args: None))
+    monkeypatch.setattr(os, "lseek", lambda *args: 0)
+    monkeypatch.setattr(os, "close", lambda fd: recording.api.CloseHandle(123))
+    first_window = run_journal._append_critical_section(path) if first == "bound" else recording.peer()
+    second_window = recording.peer() if first == "bound" else run_journal._append_critical_section(path)
+    with first_window, second_window:
+        pass
+    request = next(request for request in recording.requests if request[0] == "bound")
+    assert request == ("bound", 0x00100083, 7)  # READ_DATA|WRITE_DATA|READ_ATTRIBUTES|SYNCHRONIZE, no DELETE.
+    assert recording.converted == [os.O_RDWR | os.O_BINARY]
+    assert recording.closed == [123]
+
+
+@pytest.mark.parametrize("failure", ["reparse", "directory", "conversion"])
+def test_nt_lock_open_rejects_invalid_handles_and_closes_once(monkeypatch, recording_nt_lock, failure):
+    recording = recording_nt_lock
+    if failure == "conversion":
+
+        def fail_convert(handle, flags):
+            raise OSError("descriptor conversion failed")
+
+        monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(open_osfhandle=fail_convert))
+        monkeypatch.setattr(nt_dirfd, "_handle_to_fd", recording.real_convert)
+    else:
+
+        def get_info(handle, info_ref):
+            info_ref._obj.dwFileAttributes = 0x400 if failure == "reparse" else 0x10
+            return True
+
+        monkeypatch.setattr(recording.api, "GetFileInformationByHandle", get_info)
+    with pytest.raises(OSError, match="reparse point|is a directory|descriptor conversion failed"):
+        dirfd.open_child_lock_file(7, "lifecycle.jsonl.lock")
+    assert recording.closed == [123]
+
+
+def test_bound_journal_lock_refuses_unavailable_dirfd_without_path_fallback(tmp_path, monkeypatch):
+    path = tmp_path / "events" / "lifecycle.jsonl.lock"
+    bound = SimpleNamespace(dir_fd=lambda *components: 7)
+    monkeypatch.setattr(run_journal, "_bound_target", lambda path: (bound, ("events",), path.name))
+    monkeypatch.setattr(dirfd, "posix_available", lambda: False)
+    monkeypatch.setattr(dirfd, "nt_available", lambda: False)
+
+    def forbidden_path_open(*args, **kwargs):
+        raise AssertionError("bound sibling lock fell back to a pathname")
+
+    monkeypatch.setattr(os, "open", forbidden_path_open)
+    with pytest.raises(OSError, match="descriptor-relative sibling lock operations are unavailable"):
+        run_journal._open_journal_lock(path)
 
 
 def _append(path, *, event_type="run.created", payload=None, key="create", previous=0):
