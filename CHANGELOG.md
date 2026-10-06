@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Add `fleet campaign preview` for bounded offline repository membership plans, explicit task/action bindings and prior-preview conflict checks. Supplied observations remain unverified, with unknown task states and no dispatch or completion claims.
+- `fleet work ownership show` reads bounded item and ownership metadata with separate revisions and observation times, explicit unknown liveness and unchecked conflicts, and sanitized refusals. It performs no ownership writes. (Refs #1595)
+
 - Command Deck links optional bounded observed-work groups with configured attribution, bounded stored references, snapshot freshness on home and detail pages, and unavailable record notices. Groups use existing dashboard authentication and leave generic Worklore visibility unchanged.
 
 - Command Deck adds a read-only Worklore task page with bounded cursor pagination, plain stored fields and reference summaries, explicit truncation, and existing dashboard authentication. (#1609)

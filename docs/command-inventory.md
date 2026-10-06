@@ -244,6 +244,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet work link`
 - `brigade fleet work list`
 - `brigade fleet work next`
+- `brigade fleet work ownership show`
 - `brigade fleet work patch`
 - `brigade fleet work show`
 - `brigade fleet work sync-brigade`
