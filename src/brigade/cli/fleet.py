@@ -89,6 +89,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     fleet_sub = p_fleet.add_subparsers(dest="fleet_command", metavar="<fleet-command>")
     fleet_sub.required = True
 
+    from .fleet_dot import register as register_dot
+
+    register_dot(fleet_sub)
+
     p_serve = fleet_sub.add_parser(
         "serve",
         help="Run the central fleet hub HTTP service on this host.",

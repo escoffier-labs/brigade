@@ -113,7 +113,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -552,6 +552,7 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # v13 -> v14: interactive session presence (#1261) and nullable event repo identity.
     from . import fleet_hub_sessions
 
+    # v23 -> v24: nullable versioned cloud context on existing session rows.
     fleet_hub_sessions.init_schema(conn)
     # v14 -> v15: versioned model roster, permanent retirements, admission audit.
     from . import fleet_hub_model_roster

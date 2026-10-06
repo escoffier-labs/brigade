@@ -96,11 +96,12 @@ class SessionSnapshot:
     repo_identity: str
     identity_scope: str
     repo_label: str
-    checkout_path: str
+    checkout_path: str | None
     branch: str | None
     dirty_paths: tuple[str, ...]
     dirty_truncated: bool
     ttl_seconds: int = DEFAULT_TTL_SECONDS
+    cloud_context: Mapping[str, object] | None = None
 
 
 _IDENTITY_CACHE: dict[str, tuple[RepositoryIdentity, int | None]] = {}
