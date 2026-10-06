@@ -9,6 +9,8 @@ import pytest
 
 from brigade import cli, fleet_client, node
 
+from tests._home import set_home
+
 NODE_ID = "00000000-0000-4000-8000-000000000001"
 LEGACY_TOML = f'node_id = "{NODE_ID}"\nhostname = "fixture-node"\nroles = ["worker"]\nplatform = "fixture-platform"\n'
 LEGACY_JSON = {
@@ -101,7 +103,7 @@ def test_default_init_keeps_url_unset_and_existing_identity_roles(tmp_path, monk
 def test_workspace_metadata_does_not_override_home_machine_authority(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     workspace = tmp_path / "workspace"
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
     monkeypatch.delenv("BRIGADE_HOME", raising=False)
     machine_path = write_node(home, 'center_url = "https://machine.example.invalid/"\n')
     workspace_path = write_node(workspace, 'center_url = "https://workspace.example.invalid/"\n')
