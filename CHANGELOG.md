@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Claude Actions snapshots can be collected through a bounded injected GET transport with offline defaults, independent per-attempt definition confirmations, quarantined identity conflicts, and separate current-head evidence. Live transport, discovery and FleetHub integration remain pending. (#1602)
+- `fleet work ownership show` reads bounded item and ownership metadata with separate revisions and observation times, explicit unknown liveness and unchecked conflicts, and sanitized refusals. It performs no ownership writes. (Refs #1595)
 
 - Command Deck links optional bounded observed-work groups with configured attribution, bounded stored references, snapshot freshness on home and detail pages, and unavailable record notices. Groups use existing dashboard authentication and leave generic Worklore visibility unchanged.
 
