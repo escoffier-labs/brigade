@@ -50,7 +50,8 @@ authority without admission.
 
 `normalize_claude_cloud_identity` returns a frozen `ClaudeCloudIdentity` with a
 case-sensitive `session_id` and derived `https://claude.ai/code/<id>` URL.
-Bare IDs and matching HTTPS URLs normalize equally. Query and fragment are removed.
+Bare IDs, matching HTTPS URLs and exact `claude.ai/code/<id>` inputs normalize
+equally. Query and fragment are removed.
 
 Brigade accepts `session_` or `cse_` followed by 1 to 128 ASCII letters, digits,
 `_`, or `-`. Entire inputs are limited to 4096 printable ASCII characters
@@ -61,6 +62,7 @@ whitespace, empty suffixes, and malformed values raise a fixed safe `ValueError`
 without echoing input. The normalizer performs no I/O and does not verify existence,
 account ownership, repository binding, lifecycle, or lease authority.
 
-This slice supplies identity normalization and documentation for #1600. CLI adoption,
-Hub/Worklore linkage, idempotency, repository conflicts, lease enforcement, and
-unknown/stale operator readouts remain separate integration work.
+The [local adoption commands](claude-cloud-adoption.md) bind explicit identities
+to repositories with replay and conflict checks in the existing local registry.
+Hub/Worklore linkage, cross-client idempotency, capacity-holder contracts, lease
+enforcement and FleetHub readouts remain separate integration work for #1600.
