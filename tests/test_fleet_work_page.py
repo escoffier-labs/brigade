@@ -515,6 +515,136 @@ def test_observed_projection_only_reads_configured_ids_and_honest_times(tmp_path
         conn.close()
 
 
+def _stored_group_references(conn, work_id):
+    references = [
+        ("github", "sample/project#1", "Stored source", "https://example.test/source"),
+        ("brigade", "sample-parent", "Stored parent", "https://example.test/parent"),
+        ("url", "https://example.test/evidence", "Stored evidence", "https://example.test/evidence"),
+        ("brigade", "unsafe-script", "Unsafe script", "javascript:alert(1)"),
+        ("brigade", "unsafe-api", "Bearer API", "https://example.test/work/items/x"),
+        ("brigade", "unsafe-token", "Token query", "https://example.test/view?token=synthetic"),
+        ("brigade", "unsafe-markup", "Unsafe markup", '<img src=x onerror="alert(1)">'),
+        ("brigade", "last-visible", "Last visible", None),
+        ("brigade", "omitted-reference", "Omitted reference", None),
+    ]
+    for index, (kind, key, label, url) in enumerate(references):
+        link = store.add_link(
+            conn, work_id, {"link_type": kind, "external_key": key, "display_ref": label}, actor_id="operator"
+        )
+        # Model legacy stored URLs and deterministic page order without relaxing validation.
+        conn.execute(
+            "UPDATE work_links SET url=?, synced_at=? WHERE link_id=?",
+            (url, f"2026-01-01T00:00:{index:02d}Z", link["link_id"]),
+        )
+        conn.commit()
+
+
+def test_observed_group_projects_real_stored_references_safely_and_with_a_bound(tmp_path, monkeypatch):
+    from brigade import fleet_work_page
+
+    conn = fleet_hub.init_db(tmp_path / "fleet.db")
+    try:
+        item = store.create_item(conn, {"title": "Linked observation", "kind": "fleet"}, actor_id="operator")
+        _stored_group_references(conn, item["work_id"])
+        single = store.create_item(conn, {"title": "One reference", "kind": "fleet"}, actor_id="operator")
+        store.add_link(
+            conn, single["work_id"], {"link_type": "brigade", "external_key": "sample-single"}, actor_id="operator"
+        )
+        archived = store.create_item(conn, {"title": "Archived", "kind": "fleet"}, actor_id="operator")
+        conn.execute("UPDATE work_items SET status='archived' WHERE work_id=?", (archived["work_id"],))
+        conn.commit()
+        group = _group_config(
+            tmp_path, [_group_raw(work_ids=[item["work_id"], single["work_id"], archived["work_id"], "wl-missing"])]
+        ).observed_work_groups[0]
+        before = list(conn.iterdump())
+        conn.execute("PRAGMA query_only=ON")
+        reads = []
+        list_links_page = store.list_links_page
+
+        def bounded_links(connection, work_id, *, limit, cursor=None):
+            reads.append((work_id, limit, cursor))
+            return list_links_page(connection, work_id, limit=limit, cursor=cursor)
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("group projection must not migrate or read all items/links")
+
+        monkeypatch.setattr(store, "list_links_page", bounded_links)
+        monkeypatch.setattr(store, "list_links", forbidden)
+        monkeypatch.setattr(store, "list_items", forbidden)
+        monkeypatch.setattr(store, "ensure_schema", forbidden)
+        page = fleet_work_page.load_observed_group(conn, group)
+        assert reads == [
+            (work_id, fleet_work_page.REFERENCE_LIMIT, None) for work_id in (item["work_id"], single["work_id"])
+        ]
+        assert len(page["items"][0]["links"]) == 8
+        assert page["items"][0]["links_truncated"] is True
+        assert len(page["items"][1]["links"]) == 1
+        assert page["items"][1]["links_truncated"] is False
+        body = fleet_work_page.render_observed_group(
+            page, nonce="test", now=datetime(2026, 1, 1, tzinfo=timezone.utc), stale_after_seconds=1800
+        )
+        for name in ("Stored source", "Stored parent", "Stored evidence", "Last visible"):
+            assert name in body
+        hrefs = [attrs.get("href") for tag, attrs in _Markup(body).tags if tag == "a"]
+        for path in ("source", "parent", "evidence"):
+            assert f"https://example.test/{path}" in hrefs
+        assert not any(href and ("token=" in href or "/work/" in href or "javascript:" in href) for href in hrefs)
+        assert "javascript:alert(1)" in body and "URL (plain text)" in body
+        assert html.escape('<img src=x onerror="alert(1)">') in body
+        assert not any(tag == "img" or "onerror" in attrs for tag, attrs in _Markup(body).tags)
+        assert "Omitted reference" not in body and "additional references omitted" in body
+        assert list(conn.iterdump()) == before and not conn.in_transaction
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    ("stamp", "freshness"),
+    [
+        (None, "unknown"),
+        ("2026-01-01T00:00:00Z", "stale"),
+        ("2026-01-01T00:11:00Z", "future"),
+        ("2026-01-01T01:09:00+01:00", "recent"),
+    ],
+)
+def test_observed_home_shows_snapshot_freshness_without_changing_active_slots(tmp_path, stamp, freshness):
+    from dataclasses import replace
+
+    from brigade import fleet_command_deck as deck
+
+    raw = _group_raw()
+    if stamp is not None:
+        raw["snapshot_observed_at"] = stamp
+    config = replace(_group_config(tmp_path, [raw]), stale_after_seconds=300)
+    now = datetime(2026, 1, 1, 0, 10, tzinfo=timezone.utc)
+    view = deck.build_view(
+        config,
+        live_runs=[
+            deck.LiveRun(
+                "sample-node", "run-1", "sample/project", "sample-seat", "codex", "run.started", "running", 1, 1
+            )
+        ],
+        claims=[],
+        enrolled_labels={"sample-node": "Sample station"},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=now,
+    )
+    body = deck.render_deck(view, nonce="test", now=now)
+    assert "5 configured observation records" in body and "Retained task observations" in body
+    assert f"Snapshot freshness: {freshness}" in body and "Stale after 300 seconds" in body
+    if stamp is None:
+        assert "unknown (no configured snapshot observation time)" in body
+    else:
+        assert config.observed_work_groups[0].snapshot_observed_at.isoformat() in body
+    assert "Recent observation metadata does not establish live activity" in body
+    assert "1/1 slots busy" in body
+    without_group = deck.render_deck(replace(view, observed_work_groups=()), nonce="test", now=now)
+    assert "1/1 slots busy" in without_group
+
+
 def test_observed_group_http_discovery_auth_and_read_only(tmp_path, monkeypatch):
     from brigade import fleet_work_page
 
@@ -524,6 +654,13 @@ def test_observed_group_http_discovery_auth_and_read_only(tmp_path, monkeypatch)
             store.create_item(conn, {"title": f"Observation {i}", "kind": "fleet"}, actor_id="operator")["work_id"]
             for i in range(5)
         ]
+        _stored_group_references(conn, ids[0])
+        store.add_link(
+            conn,
+            ids[1],
+            {"link_type": "brigade", "external_key": "sample-single", "display_ref": "Single reference"},
+            actor_id="operator",
+        )
         store.create_item(conn, {"title": "Other work", "kind": "fleet"}, actor_id="operator")
     finally:
         conn.close()
@@ -554,6 +691,10 @@ def test_observed_group_http_discovery_auth_and_read_only(tmp_path, monkeypatch)
             status, headers, body = _request(hub, route, headers=auth)
             assert status == 200 and body.count('class="work-item panel"') == 5
             assert "Other work" not in body and "5 configured observation records" in body
+            for name in ("Stored source", "Stored parent", "Stored evidence", "Single reference"):
+                assert name in body
+            assert 'href="https://example.test/evidence"' in body
+            assert "Omitted reference" not in body and "additional references omitted" in body
             assert "Content-Security-Policy" in headers and headers["Cache-Control"] == "no-store"
             assert f'href="{route}"' in _request(hub, "/deck", headers=auth)[2]
             assert _request(hub, route + "?cursor=bad", headers=auth)[0] == 400

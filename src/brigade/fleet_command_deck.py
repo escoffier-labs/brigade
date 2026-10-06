@@ -117,6 +117,15 @@ class ObservedWorkGroup:
     snapshot_observed_at: datetime | None = None
 
 
+def snapshot_freshness(snapshot: datetime | None, *, now: datetime, stale_after_seconds: int) -> tuple[str, str]:
+    """Return the explicit snapshot's stamp and freshness, independent of record updates."""
+    if snapshot is None:
+        return "unknown (no configured snapshot observation time)", "unknown"
+    age = (now - snapshot).total_seconds()
+    freshness = "future" if age < 0 else "stale" if age > stale_after_seconds else "recent"
+    return snapshot.isoformat(), freshness
+
+
 @dataclass(frozen=True)
 class DeckConfig:
     stations: Sequence[StationConfig] = ()
@@ -400,6 +409,7 @@ class DeckView:
     interactive_sessions: tuple[InteractiveSession, ...] = ()
     control_plane: ControlPlane | None = None
     observed_work_groups: tuple[ObservedWorkGroup, ...] = ()
+    stale_after_seconds: int = 1800
 
 
 def resolve_config_path(flag_value: str | Path | None, environ: Mapping[str, str]) -> Path | None:
@@ -1209,6 +1219,7 @@ def build_view(
         interactive_sessions=session_rows,
         control_plane=control_plane,
         observed_work_groups=config.observed_work_groups,
+        stale_after_seconds=config.stale_after_seconds,
     )
 
 
@@ -1680,27 +1691,34 @@ def render_deck(view: DeckView, *, nonce: str, now: datetime, worklore_enabled: 
         '<nav class="deck-nav" aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> <a href="/deck/work">work</a> <a href="/view/machines">machines board</a></nav>',
     ]
     if worklore_enabled and view.observed_work_groups:
-        cards = "".join(
-            '<article class="panel"><h3><a href="/deck/observed/'
-            + _esc(group.key)
-            + '">'
-            + _esc(group.label)
-            + "</a></h3><p>"
-            + str(len(group.work_ids))
-            + " configured observation records</p><p>Coverage: "
-            + _esc(group.coverage)
-            + "</p><p>Configured source: "
-            + _esc(group.source_ref)
-            + "<br>Configured proxy: "
-            + _esc(group.proxy_ref)
-            + "<br>Configured parent: "
-            + _esc(group.parent_ref)
-            + "</p></article>"
-            for group in view.observed_work_groups
-        )
+        cards = ""
+        for group in view.observed_work_groups:
+            stamp, freshness = snapshot_freshness(
+                group.snapshot_observed_at, now=now, stale_after_seconds=view.stale_after_seconds
+            )
+            cards += (
+                '<article class="panel"><h3><a href="/deck/observed/'
+                + _esc(group.key)
+                + '">'
+                + _esc(group.label)
+                + "</a></h3><p>"
+                + str(len(group.work_ids))
+                + " configured observation records</p><p>Coverage: "
+                + _esc(group.coverage)
+                + "</p><p>Configured source: "
+                + _esc(group.source_ref)
+                + "<br>Configured proxy: "
+                + _esc(group.proxy_ref)
+                + "<br>Configured parent: "
+                + _esc(group.parent_ref)
+                + "</p><p>Snapshot observation time (operator-configured metadata): "
+                + _esc(stamp)
+                + f"<br>Snapshot freshness: {freshness}. Stale after {view.stale_after_seconds} seconds.</p></article>"
+            )
         parts.append(
             '<section aria-label="Observed work groups"><h2>Observed work groups</h2>'
-            "<p>Retained task observations. Counts describe configured records.</p>" + cards + "</section>"
+            "<p>Retained task observations. Counts describe configured records. "
+            "Recent observation metadata does not establish live activity.</p>" + cards + "</section>"
         )
     if not view.stations:
         parts.append(

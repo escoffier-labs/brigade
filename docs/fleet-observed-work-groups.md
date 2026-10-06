@@ -46,8 +46,10 @@ Each group accepts one to 25 unique work IDs. IDs start with an ASCII letter or
 digit and contain only ASCII letters, digits, dots, `_` characters or hyphens, up to
 128 characters. A snapshot observation time, when supplied, must be a
 timezone-aware ISO timestamp of at most 64 characters. Omit it when the reviewed
-source metadata has no observation time. The page reports unknown, future, stale
-or recent snapshot freshness against the Deck's `stale_after_seconds` setting.
+source metadata has no observation time. Home cards and detail pages report
+unknown, future, stale or recent snapshot freshness against the Deck's
+`stale_after_seconds` setting. Both use the configured observation timestamp,
+never the request or server start time.
 Recent metadata does not establish live activity. Worklore `updated_at` describes
 a work-record update and does not supply snapshot freshness.
 
@@ -58,10 +60,14 @@ this page. Dashboard sessions still do not authorize the bearer-only Worklore
 API. When Worklore is disabled, group links disappear and group routes return
 404. Unknown groups return 404 after authorization.
 
-Reads fetch only the configured IDs through bounded item projections, with no
-schema migration or writes. Missing and archived records appear as unavailable
-references. Descriptions and reference summaries have the same preview bounds
-as the generic work page. Counts describe configured observation records, not
-active slots or runs. Groups do not change station or cloud capacity, leases,
-claims, lifecycle, attempts or memory. A five-record group does not narrow the
-broader Worklore data visible through `/deck/work`.
+Reads fetch only the configured IDs through item projections and one bounded
+`list_links_page` read per available, nonarchived record, with no schema migration
+or writes. At most eight stored references appear per task. A next cursor marks
+additional references as omitted without fetching them. Missing and archived
+records appear as unavailable references. Descriptions and reference summaries
+have the same preview bounds as the generic work page. Counts describe configured observation records, not
+active slots or runs. A group does not establish an enrolled node, connector,
+admission lane, account inventory or active cloud heartbeat. Groups do not change
+station or cloud capacity, leases, claims, lifecycle, attempts or memory.
+A five-record group does not narrow the broader Worklore data visible through
+`/deck/work`.

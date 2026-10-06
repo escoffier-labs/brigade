@@ -180,20 +180,18 @@ def load_observed_group(conn: sqlite3.Connection, group: deck.ObservedWorkGroup)
         if item.get("archived_at") or item.get("status") == "archived":
             unavailable.append((work_id, "archived"))
         else:
+            references = worklore_store.list_links_page(conn, work_id, limit=REFERENCE_LIMIT)
+            item["links"] = references["links"]
+            item["links_truncated"] = bool(references["next_cursor"])
             items.append(item)
     return {"group": group, "items": items, "unavailable": unavailable}
 
 
 def render_observed_group(page: Mapping[str, Any], *, nonce: str, now: datetime, stale_after_seconds: int) -> str:
     group = page["group"]
-    snapshot = group.snapshot_observed_at
-    if snapshot is None:
-        freshness = "unknown"
-        stamp = "unknown (no configured snapshot observation time)"
-    else:
-        age = (now - snapshot).total_seconds()
-        freshness = "future" if age < 0 else "stale" if age > stale_after_seconds else "recent"
-        stamp = snapshot.isoformat()
+    stamp, freshness = deck.snapshot_freshness(
+        group.snapshot_observed_at, now=now, stale_after_seconds=stale_after_seconds
+    )
     blocks = "".join(_item(item) for item in page["items"][:PAGE_SIZE])
     blocks += "".join(
         '<article class="panel"><h2>Unavailable work reference</h2><p>Work ID: '
@@ -221,13 +219,8 @@ def render_observed_group(page: Mapping[str, Any], *, nonce: str, now: datetime,
         + _text(stamp)
         + f"<br>Snapshot freshness: {freshness}. Stale after {stale_after_seconds} seconds.</p>"
         "<p>Recent observation metadata does not establish live activity. Configured references are plain "
-        "attribution, with no authenticated identity assertion. Work-record update time describes changes "
-        "to the stored task, not snapshot observation time.</p>"
-        "<p>This group does not establish an enrolled node, connector, admission lane, account inventory "
-        "or active cloud heartbeat. It does not change task lifecycle, attempts, stations, capacity, leases "
-        "or claims. The generic work page retains its broader Worklore exposure.</p>"
-        f"<p>Description previews are limited to {DESCRIPTION_LIMIT} characters, blockers to {BLOCKER_LIMIT}, "
-        f"other task text to {TEXT_LIMIT}, and references to {REFERENCE_LIMIT} per task. Truncation is marked.</p>"
+        "attribution. Work-record update time describes changes to the stored task and is separate from "
+        "snapshot observation time.</p><p>Task previews and stored references are bounded. Truncation is marked.</p>"
         "</section>" + blocks + "</main>"
     )
     return deck._document(body, nonce=nonce, now=now, title=group.label, refresh=False)
