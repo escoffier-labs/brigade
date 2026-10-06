@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import socket
@@ -3068,6 +3069,650 @@ def test_work_inbox_archive_preserves_pending_and_archives_closed(tmp_path, monk
     ]
     assert [item["text"] for item in archived] == ["Archive promoted", "Archive dismissed", "Archive superseded"]
     assert all(item["archived_at"] == "2026-05-30T12:00:00+00:00" for item in archived)
+
+
+def test_inbox_archive_recovers_inbox_above_snapshot_limit(tmp_path, monkeypatch, capsys):
+    from brigade.work_cmd import ledger
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    closed = [
+        {
+            "id": f"closed-{index}",
+            "status": "dismissed",
+            "updated_at": "2026-05-20T12:00:00+00:00",
+            "text": "x" * (64 * 1024),
+            "unknown_field": {"keep": True},
+        }
+        for index in range(70)
+    ]
+    kept = [
+        {"id": "pending", "status": "pending", "updated_at": "2026-05-20T12:00:00+00:00"},
+        {"id": "recent", "status": "dismissed", "updated_at": "2026-05-30T11:00:00+00:00"},
+        {"id": "unknown", "status": "future-status", "unknown_field": [1, 2]},
+    ]
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text("".join(json.dumps(item) + "\n" for item in [*closed, *kept]))
+    inbox.chmod(0o600)
+    assert inbox.stat().st_size > ledger._IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES
+    with pytest.raises(ledger.ImportInboxSnapshotLimitExceeded):
+        ledger._read_import_inbox_raw(tmp_path)
+
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["archived"] == len(closed)
+    assert payload["kept"] == len(kept)
+    assert work_cmd._read_imports(tmp_path) == kept
+    archived = [json.loads(line) for line in work_cmd.helpers._imports_archive_path(tmp_path).read_text().splitlines()]
+    assert [item["id"] for item in archived] == [item["id"] for item in closed]
+    assert all(item["unknown_field"] == {"keep": True} for item in archived)
+    if os.name != "nt":
+        assert inbox.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("payload_kind", ["unicode", "dense-array"])
+def test_inbox_archive_preserves_retained_record_bytes_across_publications(tmp_path, monkeypatch, capsys, payload_kind):
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    if payload_kind == "unicode":
+        value = b'"' + ("é" * 820_000).encode("utf-8") + b'"'
+    else:
+        value = b"[" + b"0," * 1_450_000 + b"0]"
+    # Duplicate logical IDs must still refer to distinct original records.
+    first = b' {"status":"pending", "id":"same", "unknown_field":{"keep":true}} \r\n'
+    final = b'{"id":"same","status":"pending","unknown_field":' + value + b"}"
+    assert len(final) < 4 * 1024 * 1024
+    assert len(json.dumps(json.loads(final)).encode("utf-8")) > 4 * 1024 * 1024
+    retained = first + final
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(first + b"\n" + final)
+    for index in range(2):
+        closed = (
+            b'{"id":"closed-'
+            + str(index).encode("ascii")
+            + b'","status":"dismissed","updated_at":"2026-05-20T12:00:00+00:00"}\n'
+        )
+        inbox.write_bytes(b"\n" + closed + inbox.read_bytes())
+        inbox.chmod(0o600)
+        assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert (payload["archived"], payload["kept"]) == (1, 2)
+        # A subsequent read must accept the preserved unterminated final row.
+        assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert (payload["archived"], payload["kept"]) == (0, 2)
+        assert inbox.read_bytes() == retained
+    archived = [json.loads(line) for line in work_cmd.helpers._imports_archive_path(tmp_path).read_bytes().splitlines()]
+    assert [item["id"] for item in archived] == ["closed-0", "closed-1"]
+
+
+@pytest.mark.parametrize("selection", ["copy", "reordered", "duplicate"])
+def test_inbox_archive_publication_requires_original_ordered_records(tmp_path, selection):
+    from brigade.work_cmd import ledger
+    from brigade.work_cmd.ledger import import_model
+
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    original = b'{"id":"same","status":"pending"}\n{"id":"same","status":"pending"}'
+    inbox.write_bytes(original)
+    inbox.chmod(0o600)
+    with ledger._canonical_inbox_write(tmp_path):
+        with import_model._import_inbox_for_archive(tmp_path) as (records, publish):
+            if selection == "copy":
+                kept = [dict(records[0])]
+            elif selection == "reordered":
+                kept = list(reversed(records))
+            else:
+                kept = [records[0], records[0]]
+            with pytest.raises(OSError, match="archive publication requires original inbox records in order"):
+                publish(kept)
+    assert inbox.read_bytes() == original
+
+
+def test_inbox_archive_reader_avoids_duplicate_full_raw_buffers(tmp_path):
+    import tracemalloc
+
+    from brigade.work_cmd import ledger
+    from brigade.work_cmd.ledger import import_model
+
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    # Valid padded records isolate raw snapshot overhead from parsed payloads.
+    row = b'{"id":"pending","status":"pending"}' + b" " * (64 * 1024) + b"\n"
+    with inbox.open("wb") as handle:
+        for _ in range(192):
+            handle.write(row)
+    size = inbox.stat().st_size
+    assert size > ledger._IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES
+    with ledger._canonical_inbox_write(tmp_path):
+        was_tracing = tracemalloc.is_tracing()
+        if not was_tracing:
+            tracemalloc.start()
+        try:
+            baseline, _ = tracemalloc.get_traced_memory()
+            tracemalloc.reset_peak()
+            with import_model._import_inbox_for_archive(tmp_path) as (records, _publish):
+                assert len(records) == 192
+                assert all(record == {"id": "pending", "status": "pending"} for record in records)
+                _, peak = tracemalloc.get_traced_memory()
+            # Allow buffer growth and bounded read chunks, but not two full
+            # raw snapshots alive together while the line buffers are joined.
+            assert peak - baseline < size * 3 // 2 + 2 * 1024 * 1024
+        finally:
+            if not was_tracing:
+                tracemalloc.stop()
+
+
+@pytest.mark.parametrize(
+    "bad_record",
+    [b"{broken}\n", b"\xff\n", b"[]\n", b"x" * (4 * 1024 * 1024 + 1)],
+    ids=["malformed-json", "invalid-utf8", "non-object", "oversized-record"],
+)
+def test_inbox_archive_rejects_invalid_record_without_data_loss(tmp_path, monkeypatch, capsys, bad_record):
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    original = b'{"id":"old","status":"promoted","updated_at":"2026-05-20T12:00:00+00:00"}\n' + bad_record
+    inbox.write_bytes(original)
+    archive = work_cmd.helpers._imports_archive_path(tmp_path)
+    archive.write_bytes(b'{"id":"already-archived"}\n')
+    archive_before = archive.read_bytes()
+
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+    captured = capsys.readouterr()
+    assert "error:" in captured.err
+    assert "Traceback" not in captured.err
+    assert len(captured.err) < 500
+    assert inbox.read_bytes() == original
+    assert archive.read_bytes() == archive_before
+
+
+@pytest.mark.parametrize("failure", ["unreadable", "archive-append", "publish-fsync"])
+def test_inbox_archive_failure_keeps_oversized_inbox(tmp_path, monkeypatch, capsys, failure):
+    from brigade.work_cmd import ledger
+    from brigade.work_cmd.ledger import authority_store
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    row = {"id": "old", "status": "dismissed", "updated_at": "2026-05-20T12:00:00+00:00", "text": "x" * (64 * 1024)}
+    original = ((json.dumps(row) + "\n") * 70 + '{"id":"pending","status":"pending"}\n').encode()
+    inbox.write_bytes(original)
+    assert len(original) > ledger._IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES
+    archive = work_cmd.helpers._imports_archive_path(tmp_path)
+    archive.write_bytes(b'{"id":"already-archived"}\n')
+    archive_before = archive.read_bytes()
+    fired = False
+    if failure == "unreadable":
+        real_open = authority_store._dirfd_open_file
+
+        def failing_open(parent, name, flags, mode=0o600):
+            if name == inbox.name:
+                raise PermissionError("synthetic unreadable inbox")
+            return real_open(parent, name, flags, mode)
+
+        monkeypatch.setattr(authority_store, "_dirfd_open_file", failing_open)
+    elif failure == "archive-append":
+
+        def failing_append(_target, _items):
+            raise OSError("synthetic archive append failure")
+
+        monkeypatch.setattr(ledger, "_append_archived_imports", failing_append)
+    else:
+        real_fsync = authority_store._dirfd_fsync
+
+        def failing_fsync(parent):
+            nonlocal fired
+            if not fired:
+                fired = True
+                raise OSError("synthetic publication fsync failure")
+            real_fsync(parent)
+
+        monkeypatch.setattr(authority_store, "_dirfd_fsync", failing_fsync)
+
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+    captured = capsys.readouterr()
+    assert "synthetic" in captured.err
+    assert "Traceback" not in captured.err
+    assert inbox.read_bytes() == original
+    if failure == "publish-fsync":
+        assert fired
+        assert len(archive.read_text().splitlines()) == 71
+    else:
+        assert archive.read_bytes() == archive_before
+
+
+@pytest.mark.parametrize("mutation", ["append", "replace", "in-place"])
+def test_inbox_archive_refuses_changed_generation_before_publication(tmp_path, monkeypatch, capsys, mutation):
+    from brigade.work_cmd import ledger
+    from brigade.work_cmd.ledger import inbox_provenance
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    original = b'{"id":"old","status":"promoted","updated_at":"2026-05-20T12:00:00+00:00"}\n'
+    incoming = b'{"id":"scanner-row","status":"pending"}\n'
+    inbox.write_bytes(original)
+    real_append = ledger._append_archived_imports
+    # Windows refuses to replace a file while the archive reader holds it open,
+    # so inject the replacement after the reader closes, before the publisher reopens.
+    replace_after_reader_closes = mutation == "replace" and os.name == "nt"
+
+    def replace_inbox():
+        replacement = inbox.with_suffix(".replacement")
+        replacement.write_bytes(incoming)
+        replacement.replace(inbox)
+
+    def append_then_mutate(target, items):
+        real_append(target, items)
+        if mutation == "append":
+            with inbox.open("ab") as handle:
+                handle.write(incoming)
+        elif mutation == "replace":
+            if not replace_after_reader_closes:
+                replace_inbox()
+        else:
+            before = inbox.stat()
+            inbox.write_bytes(original.replace(b"old", b"new"))
+            os.utime(inbox, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    monkeypatch.setattr(ledger, "_append_archived_imports", append_then_mutate)
+    if replace_after_reader_closes:
+        real_publish = inbox_provenance._write_import_inbox_bytes_at
+
+        def replace_then_publish(parent, name, data, **kwargs):
+            replace_inbox()
+            return real_publish(parent, name, data, **kwargs)
+
+        monkeypatch.setattr(inbox_provenance, "_write_import_inbox_bytes_at", replace_then_publish)
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+    assert "error:" in capsys.readouterr().err
+    expected = {"append": original + incoming, "replace": incoming, "in-place": original.replace(b"old", b"new")}
+    assert inbox.read_bytes() == expected[mutation]
+
+
+@pytest.mark.parametrize("mutation", ["replace", "in-place"])
+def test_inbox_archive_publisher_refuses_generation_changed_after_reader_closes(
+    tmp_path, monkeypatch, capsys, mutation
+):
+    from brigade.work_cmd.ledger import inbox_provenance
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    original = b'{"id":"old","status":"dismissed","updated_at":"2026-05-20T12:00:00+00:00"}\n'
+    inbox.write_bytes(original)
+    incoming = original.replace(b'"old","status":"dismissed"', b'"new","status":"pending"\x20\x20')
+    assert len(incoming) == len(original)
+    real_publish = inbox_provenance._write_import_inbox_bytes_at
+
+    def mutate_then_publish(parent, name, data, **kwargs):
+        # The archive reader has already validated and closed its descriptor.
+        if mutation == "replace":
+            replacement = inbox.with_suffix(".replacement")
+            replacement.write_bytes(incoming)
+            replacement.replace(inbox)
+        else:
+            before = inbox.stat()
+            inbox.write_bytes(incoming)
+            os.utime(inbox, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return real_publish(parent, name, data, **kwargs)
+
+    monkeypatch.setattr(inbox_provenance, "_write_import_inbox_bytes_at", mutate_then_publish)
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+    assert "changed before publication" in capsys.readouterr().err
+    assert inbox.read_bytes() == incoming
+    assert not [path.name for path in inbox.parent.iterdir() if path.name.endswith(".tmp")]
+
+
+@pytest.mark.parametrize("mutation", ["append-during-temp", "rewrite-during-temp", "append-after-destination-close"])
+def test_inbox_archive_publisher_refuses_generation_changed_during_temp_write(tmp_path, monkeypatch, capsys, mutation):
+    from brigade.work_cmd.ledger import authority_store, inbox_provenance
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    original = b'{"id":"old","status":"dismissed","updated_at":"2026-05-20T12:00:00+00:00"}\n'
+    inbox.write_bytes(original)
+    appended = b'{"id":"new-pending","status":"pending"}\n'
+    rewritten = original.replace(b'"old","status":"dismissed"', b'"new","status":"pending"\x20\x20')
+    assert len(rewritten) == len(original)
+    expected = original + appended if mutation.startswith("append") else rewritten
+    real_open = authority_store._dirfd_open_file
+    real_close = inbox_provenance._close_import_inbox_descriptor
+    closes = 0
+
+    def mutate():
+        if mutation.startswith("append"):
+            with inbox.open("ab") as stream:
+                stream.write(appended)
+        else:
+            before = inbox.stat()
+            with inbox.open("r+b") as stream:
+                stream.write(rewritten)
+            os.utime(inbox, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    def mutate_on_temp_create(parent, name, flags, mode=0o600):
+        # The publisher has verified its held destination; a writer lands
+        # while the temporary file is being created and written.
+        if flags & os.O_CREAT:
+            mutate()
+        return real_open(parent, name, flags, mode)
+
+    def mutate_after_destination_close(value):
+        nonlocal closes
+        result = real_close(value)
+        if value != -1:
+            closes += 1
+            if closes == 2:
+                mutate()
+        return result
+
+    if mutation == "append-after-destination-close":
+        monkeypatch.setattr(inbox_provenance, "_close_import_inbox_descriptor", mutate_after_destination_close)
+    else:
+        monkeypatch.setattr(authority_store, "_dirfd_open_file", mutate_on_temp_create)
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+    assert "changed before publication" in capsys.readouterr().err
+    assert inbox.read_bytes() == expected
+    assert not [path.name for path in inbox.parent.iterdir() if path.name.endswith(".tmp")]
+
+
+@pytest.mark.parametrize("failure", ["temp-create", "temp-create-and-rollback-write", "temp-fsync", "replace"])
+def test_inbox_archive_publication_failure_before_replace_keeps_original(tmp_path, monkeypatch, capsys, failure):
+    from brigade.work_cmd.ledger import authority_store, inbox_provenance
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    original = (
+        b'{"id":"old","status":"dismissed","updated_at":"2026-05-20T12:00:00+00:00"}\n'
+        b'{"id":"pending","status":"pending"}\n'
+    )
+    inbox.write_bytes(original)
+    real_publish = inbox_provenance._write_import_inbox_bytes_at
+    real_open = authority_store._dirfd_open_file
+    real_replace = authority_store._dirfd_replace
+    real_fsync = os.fsync
+    real_write = os.write
+    real_restore = inbox_provenance._restore_import_inbox_snapshot
+    restores = 0
+
+    def full_disk_open(parent, name, flags, mode=0o600):
+        if flags & os.O_CREAT:
+            raise OSError(errno.ENOSPC, "synthetic full disk")
+        return real_open(parent, name, flags, mode)
+
+    def full_disk_write(_fd, _data):
+        raise OSError(errno.ENOSPC, "synthetic full disk")
+
+    def full_disk_fsync(_fd):
+        raise OSError(errno.ENOSPC, "synthetic full disk")
+
+    def full_disk_replace(_parent, _source, _destination):
+        raise OSError(errno.ENOSPC, "synthetic full disk")
+
+    def counting_restore(*args, **kwargs):
+        nonlocal restores
+        restores += 1
+        return real_restore(*args, **kwargs)
+
+    def publish_on_full_disk(parent, name, data, **kwargs):
+        if failure.startswith("temp-create"):
+            monkeypatch.setattr(authority_store, "_dirfd_open_file", full_disk_open)
+        elif failure == "temp-fsync":
+            os.fsync = full_disk_fsync
+        else:
+            monkeypatch.setattr(authority_store, "_dirfd_replace", full_disk_replace)
+        if failure == "temp-create-and-rollback-write":
+            os.write = full_disk_write
+        try:
+            return real_publish(parent, name, data, **kwargs)
+        finally:
+            os.write = real_write
+            os.fsync = real_fsync
+            monkeypatch.setattr(authority_store, "_dirfd_open_file", real_open)
+            monkeypatch.setattr(authority_store, "_dirfd_replace", real_replace)
+
+    monkeypatch.setattr(inbox_provenance, "_write_import_inbox_bytes_at", publish_on_full_disk)
+    monkeypatch.setattr(inbox_provenance, "_restore_import_inbox_snapshot", counting_restore)
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+    assert "synthetic full disk" in capsys.readouterr().err
+    assert restores == 0
+    assert inbox.read_bytes() == original
+    assert not list(inbox.parent.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("mutation", ["append", "replace", "same-size-rewrite"])
+def test_inbox_archive_rollback_refuses_changed_publication(tmp_path, monkeypatch, capsys, mutation):
+    from brigade.work_cmd.ledger import authority_store
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    original = (
+        b'{"id":"old","status":"dismissed","updated_at":"2026-05-20T12:00:00+00:00"}\n'
+        b'{"id":"pending","status":"pending"}\n'
+    )
+    incoming = b'{"id":"new-pending","status":"pending"}\n'
+    inbox.write_bytes(original)
+    real_replace = authority_store._dirfd_replace
+    real_fsync = authority_store._dirfd_fsync
+    published_raw = None
+    changed_raw = None
+    failed = False
+
+    def replace_then_mutate(parent, source, destination):
+        nonlocal published_raw, changed_raw
+        real_replace(parent, source, destination)
+        if published_raw is None:
+            published_raw = inbox.read_bytes()
+            if mutation == "replace":
+                before = inbox.stat()
+                replacement = inbox.with_suffix(".replacement")
+                replacement.write_bytes(incoming)
+                replacement.replace(inbox)
+                assert (inbox.stat().st_dev, inbox.stat().st_ino) != (before.st_dev, before.st_ino)
+                changed_raw = inbox.read_bytes()
+
+    def mutate_then_fail_fsync(parent):
+        nonlocal changed_raw, failed
+        if published_raw is not None and not failed and mutation != "replace":
+            failed = True
+            if mutation == "append":
+                with inbox.open("ab") as stream:
+                    stream.write(incoming)
+            else:
+                before = inbox.stat()
+                rewritten = published_raw.replace(b"pending", b"waiting", 1)
+                assert rewritten != published_raw and len(rewritten) == len(published_raw)
+                inbox.write_bytes(rewritten)
+                os.utime(inbox, ns=(before.st_atime_ns, before.st_mtime_ns))
+                assert inbox.stat().st_mtime_ns == before.st_mtime_ns
+            changed_raw = inbox.read_bytes()
+            raise OSError("synthetic post-writer publication fsync failure")
+        return real_fsync(parent)
+
+    monkeypatch.setattr(authority_store, "_dirfd_replace", replace_then_mutate)
+    monkeypatch.setattr(authority_store, "_dirfd_fsync", mutate_then_fail_fsync)
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+    captured = capsys.readouterr()
+    assert published_raw == b'{"id":"pending","status":"pending"}\n'
+    assert changed_raw is not None and changed_raw != original
+    assert inbox.read_bytes() == changed_raw
+    if mutation == "append":
+        assert changed_raw == published_raw + incoming
+    elif mutation == "replace":
+        assert changed_raw == incoming
+        assert not failed
+    assert "changed after publication" in captured.err
+    assert "rollback refused" in captured.err
+    assert "Traceback" not in captured.err
+    archive = work_cmd.helpers._imports_archive_path(tmp_path)
+    assert [json.loads(line)["id"] for line in archive.read_bytes().splitlines()] == ["old"]
+    assert not [path.name for path in inbox.parent.iterdir() if path.name.endswith(".tmp")]
+
+
+def test_inbox_archive_rollback_allows_identical_publication_with_delayed_mtime(tmp_path, monkeypatch, capsys):
+    from brigade.work_cmd.ledger import authority_store
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    original = (
+        b'{"id":"old","status":"dismissed","updated_at":"2026-05-20T12:00:00+00:00"}\n'
+        b'{"id":"pending","status":"pending"}\n'
+    )
+    inbox.write_bytes(original)
+    real_replace = authority_store._dirfd_replace
+    real_fsync = authority_store._dirfd_fsync
+    published_raw = None
+    failed = False
+
+    def replace_with_delayed_mtime(parent, source, destination):
+        nonlocal published_raw
+        real_replace(parent, source, destination)
+        if published_raw is None:
+            published_raw = inbox.read_bytes()
+            before = inbox.stat()
+            os.utime(inbox, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
+            assert inbox.stat().st_mtime_ns != before.st_mtime_ns
+
+    def fail_parent_fsync(parent):
+        nonlocal failed
+        if published_raw is not None and not failed:
+            failed = True
+            raise OSError("synthetic delayed-mtime publication fsync failure")
+        return real_fsync(parent)
+
+    monkeypatch.setattr(authority_store, "_dirfd_replace", replace_with_delayed_mtime)
+    monkeypatch.setattr(authority_store, "_dirfd_fsync", fail_parent_fsync)
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+    assert "synthetic delayed-mtime publication fsync failure" in capsys.readouterr().err
+    assert failed
+    assert published_raw == b'{"id":"pending","status":"pending"}\n'
+    assert inbox.read_bytes() == original
+    assert not [path.name for path in inbox.parent.iterdir() if path.name.endswith(".tmp")]
+
+
+@pytest.mark.parametrize("failure", ["parent-fsync", "interrupt"])
+@pytest.mark.parametrize("rollback_failure", ["temp-create", "temp-replace"])
+def test_inbox_archive_failed_rollback_preserves_published_pending(
+    tmp_path, monkeypatch, capsys, failure, rollback_failure
+):
+    from brigade.work_cmd.ledger import authority_store
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    original = (
+        b'{"id":"old","status":"dismissed","updated_at":"2026-05-20T12:00:00+00:00"}\n'
+        b'{"id":"pending-one","status":"pending"}\n'
+        b'{"id":"pending-two","status":"pending"}\n'
+    )
+    inbox.write_bytes(original)
+    real_open = authority_store._dirfd_open_file
+    real_replace = authority_store._dirfd_replace
+    real_fsync = authority_store._dirfd_fsync
+    published = False
+    rollback_attempts = 0
+    failed_fsync = False
+
+    def full_disk_open(parent, name, flags, mode=0o600):
+        nonlocal rollback_attempts
+        if published and flags & os.O_CREAT and rollback_failure == "temp-create":
+            rollback_attempts += 1
+            raise OSError(errno.ENOSPC, "synthetic rollback full disk")
+        return real_open(parent, name, flags, mode)
+
+    def replace_then_fail(parent, source, destination):
+        nonlocal published, rollback_attempts
+        if published and rollback_failure == "temp-replace":
+            rollback_attempts += 1
+            raise OSError(errno.ENOSPC, "synthetic rollback full disk")
+        real_replace(parent, source, destination)
+        published = True
+        if failure == "interrupt":
+            raise KeyboardInterrupt
+
+    def fail_parent_fsync(parent):
+        nonlocal failed_fsync
+        if published and not failed_fsync and failure == "parent-fsync":
+            failed_fsync = True
+            raise OSError("synthetic publication fsync failure")
+        return real_fsync(parent)
+
+    def full_disk_write(_fd, _data):
+        raise OSError(errno.ENOSPC, "synthetic rollback full disk")
+
+    with monkeypatch.context() as publication:
+        publication.setattr(authority_store, "_dirfd_open_file", full_disk_open)
+        publication.setattr(authority_store, "_dirfd_replace", replace_then_fail)
+        publication.setattr(authority_store, "_dirfd_fsync", fail_parent_fsync)
+        publication.setattr(os, "write", full_disk_write)
+        assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+
+    assert "rollback could not restore" in capsys.readouterr().err
+    assert published
+    assert rollback_attempts == 3
+    assert [json.loads(line) for line in inbox.read_bytes().splitlines()] == [
+        {"id": "pending-one", "status": "pending"},
+        {"id": "pending-two", "status": "pending"},
+    ]
+    archive = work_cmd.helpers._imports_archive_path(tmp_path)
+    assert [json.loads(line)["id"] for line in archive.read_bytes().splitlines()] == ["old"]
+    assert not list(inbox.parent.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("stage", ["before", "after"])
+def test_inbox_archive_interrupted_replace_preserves_original(tmp_path, monkeypatch, stage):
+    from brigade.work_cmd.ledger import authority_store
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, tzinfo=timezone.utc))
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    original = (
+        b'{"id":"old","status":"dismissed","updated_at":"2026-05-20T12:00:00+00:00"}\n'
+        b'{"id":"pending","status":"pending"}\n'
+    )
+    inbox.write_bytes(original)
+    real_replace = authority_store._dirfd_replace
+    interrupted = False
+
+    def interrupt_replace(parent, source, destination):
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            if stage == "after":
+                real_replace(parent, source, destination)
+            raise KeyboardInterrupt
+        return real_replace(parent, source, destination)
+
+    monkeypatch.setattr(authority_store, "_dirfd_replace", interrupt_replace)
+    with pytest.raises(KeyboardInterrupt):
+        work_cmd.inbox_archive(target=tmp_path, json_output=True)
+    assert interrupted
+    assert inbox.read_bytes() == original
+    assert not list(inbox.parent.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("link", ["symlink", "hardlink"])
+def test_inbox_archive_rejects_linked_inbox_without_data_loss(tmp_path, capsys, link):
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.jsonl"
+    original = b'{"id":"old","status":"dismissed","updated_at":"2020-01-01T00:00:00+00:00"}\n'
+    outside.write_bytes(original)
+    if link == "symlink":
+        inbox.symlink_to(outside)
+    else:
+        os.link(outside, inbox)
+
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+    assert "error:" in capsys.readouterr().err
+    assert outside.read_bytes() == original
+    assert inbox.read_bytes() == original
+    assert not work_cmd.helpers._imports_archive_path(tmp_path).exists()
 
 
 def test_work_brief_and_doctor_include_security_health(tmp_path, monkeypatch, capsys):

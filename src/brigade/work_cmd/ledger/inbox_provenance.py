@@ -152,11 +152,85 @@ def _check_import_inbox_name_matches_stat(parent: int, name: str, expected: os.s
         raise OSError("import inbox name no longer matches its published descriptor")
 
 
+def _check_import_inbox_generation(descriptor: int, expected: os.stat_result, data: bytes) -> None:
+    """Ensure a held inbox descriptor is the captured generation with exactly ``data``."""
+    current = os.fstat(descriptor)
+    if (
+        current.st_dev,
+        current.st_ino,
+        current.st_mode,
+        current.st_nlink,
+        current.st_size,
+        current.st_mtime_ns,
+    ) != (
+        expected.st_dev,
+        expected.st_ino,
+        expected.st_mode,
+        expected.st_nlink,
+        expected.st_size,
+        expected.st_mtime_ns,
+    ) or current.st_size != len(data):
+        raise OSError("import inbox changed before publication")
+    view = memoryview(data)
+    offset = 0
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    while chunk := os.read(descriptor, 1024 * 1024):
+        if view[offset : offset + len(chunk)] != chunk:
+            raise OSError("import inbox changed before publication")
+        offset += len(chunk)
+    if offset != len(data):
+        raise OSError("import inbox changed before publication")
+
+
+def _check_import_inbox_name_matches_generation(parent: int, name: str, expected: os.stat_result) -> None:
+    """Ensure the inbox name still holds the captured generation after its descriptor closed."""
+    _check_import_inbox_name_matches_stat(parent, name, expected)
+    named = authority_store._dirfd_stat(parent, name)
+    if (named.st_size, named.st_mtime_ns) != (expected.st_size, expected.st_mtime_ns):
+        raise OSError("import inbox changed before publication")
+
+
 def _close_import_inbox_descriptor(value: int) -> int:
     """Close an inbox file descriptor, returning the closed sentinel."""
     if value != -1:
         os.close(value)
     return -1
+
+
+def _check_import_inbox_rollback_destination(parent: int, name: str, expected: os.stat_result, data: bytes) -> None:
+    """Guard generation-aware archive rollback with published identity and bytes.
+
+    Ordinary publication keeps its legacy snapshot restoration contract and
+    does not call this guard. This check detects observed destination changes;
+    it cannot exclude an outsider racing the check and rollback replacement.
+    """
+    descriptor = -1
+    try:
+        descriptor = authority_store._dirfd_open_file(
+            parent,
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        _validate_import_inbox_descriptor(descriptor)
+        current = os.fstat(descriptor)
+        if (current.st_dev, current.st_ino, current.st_mode, current.st_nlink) != (
+            expected.st_dev,
+            expected.st_ino,
+            expected.st_mode,
+            expected.st_nlink,
+        ):
+            raise OSError("import inbox no longer holds its published object")
+        _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
+        # NT may finalize the write mtime only when the temporary handle closes.
+        # Compare bytes and require stability during this read, rather than
+        # comparing against the temporary file's pre-close mtime.
+        _check_import_inbox_generation(descriptor, current, data)
+        _check_import_inbox_name_matches_generation(parent, name, current)
+    except OSError as exc:
+        raise OSError("import inbox changed after publication: rollback refused, current inbox preserved") from exc
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
 
 
 def _write_import_inbox_bytes_at(
@@ -166,10 +240,37 @@ def _write_import_inbox_bytes_at(
     *,
     previous_raw: bytes | None = None,
     previous_exists: bool | None = None,
+    expected_generation: os.stat_result | None = None,
 ) -> None:
-    """Atomically publish import bytes through the transaction's held parent."""
+    """Atomically publish import bytes through the transaction's held parent.
+
+    With ``expected_generation``, the destination must still be that file
+    holding exactly ``previous_raw``; otherwise publication fails before the
+    destination is touched. The held destination is checked again after the
+    temporary bytes are durable, and its name is checked against the captured
+    generation after the descriptor closes (NT cannot rename over an open
+    handle). Rollback runs only after this call replaced the destination, so
+    a failure before replacement leaves the current file, including any newer
+    concurrent bytes, in place. Only with ``expected_generation`` does rollback
+    reopen the destination and require the published object with exactly the
+    published bytes. Archive publication supplies this generation; ordinary
+    ``_write_imports`` and generic callers omit it and retain legacy snapshot
+    restoration, including restoration after temporary-source substitution.
+    Their rollback does not preserve all outsider post-publication writes.
+
+    These checks detect canonical writers and ordinary appends; they do not
+    exclude a writer that bypasses the canonical lock. A stat-only window
+    remains between the final name check and ``replace``, where a same-size
+    rewrite that also restores the mtime cannot be detected.
+    A lock-bypassing writer can also race the rollback check and replacement.
+    """
+    if expected_generation is not None and previous_raw is None:
+        raise ValueError("expected_generation requires previous_raw")
     existing = -1
     descriptor = -1
+    replaced = False
+    replace_started = False
+    expected: os.stat_result | None = None
     temporary_name = f".{name}.{uuid4().hex}.tmp"
     try:
         try:
@@ -183,6 +284,8 @@ def _write_import_inbox_bytes_at(
         else:
             _validate_import_inbox_descriptor(existing)
             _validate_import_inbox_name_matches_descriptor(parent, name, existing)
+            if expected_generation is not None and previous_raw is not None:
+                _check_import_inbox_generation(existing, expected_generation, previous_raw)
             if previous_raw is None:
                 chunks: list[bytes] = []
                 while chunk := os.read(existing, 1024 * 1024):
@@ -190,6 +293,8 @@ def _write_import_inbox_bytes_at(
                 previous_raw = b"".join(chunks)
             if previous_exists is None:
                 previous_exists = True
+        if expected_generation is not None and existing == -1:
+            raise OSError("import inbox changed before publication")
         if previous_exists is None:
             previous_exists = False
         if previous_raw is None:
@@ -208,22 +313,51 @@ def _write_import_inbox_bytes_at(
         _validate_import_inbox_descriptor(descriptor)
         os.fsync(descriptor)
         expected = os.fstat(descriptor)
+        if expected_generation is not None and previous_raw is not None:
+            # A writer may have landed while the temporary bytes were written.
+            _check_import_inbox_generation(existing, expected_generation, previous_raw)
         # The NT rename fails while any handle on the source or destination
         # is open: close both descriptors before replacing, keeping the POSIX
         # ordering (fsync before close, replace, fsync parent).
         descriptor = _close_import_inbox_descriptor(descriptor)
         existing = _close_import_inbox_descriptor(existing)
+        if expected_generation is not None:
+            # Closing the destination reopens a window; recheck that the name
+            # still holds the verified generation before replacing it.
+            _check_import_inbox_name_matches_generation(parent, name, expected_generation)
+        replace_started = True
         authority_store._dirfd_replace(parent, temporary_name, name)
+        replaced = True
         _check_import_inbox_name_matches_stat(parent, name, expected)
         authority_store._dirfd_fsync(parent)
     except BaseException:
         existing = _close_import_inbox_descriptor(existing)
         descriptor = _close_import_inbox_descriptor(descriptor)
-        try:
-            authority_store._dirfd_unlink(parent, temporary_name)
-        except FileNotFoundError:
-            pass
-        _restore_import_inbox_snapshot(parent, name, previous_raw or b"", bool(previous_exists))
+        if not replaced and replace_started and expected is not None:
+            # Rename may succeed before an interrupt is delivered. Only roll
+            # back if the destination now names the temporary file we wrote.
+            try:
+                _check_import_inbox_name_matches_stat(parent, name, expected)
+            except OSError:
+                pass
+            else:
+                replaced = True
+        if not replaced:
+            try:
+                authority_store._dirfd_unlink(parent, temporary_name)
+            except FileNotFoundError:
+                pass
+            raise
+        if expected_generation is not None:
+            assert expected is not None
+            _check_import_inbox_rollback_destination(parent, name, expected, data)
+        _restore_import_inbox_snapshot(
+            parent,
+            name,
+            previous_raw or b"",
+            bool(previous_exists),
+            allow_in_place=expected_generation is None,
+        )
         raise
     finally:
         if existing != -1:
@@ -285,8 +419,10 @@ def _snapshot_import_inbox(target: Path) -> tuple[int, str, bytes, bool]:
             os.close(descriptor)
 
 
-def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: bool) -> None:
-    """Restore an ordinary import transaction through its original parent."""
+def _restore_import_inbox_snapshot(
+    parent: int, name: str, data: bytes, exists: bool, *, allow_in_place: bool = True
+) -> None:
+    """Restore an import transaction, optionally requiring atomic replacement."""
     if not exists:
         try:
             authority_store._dirfd_unlink(parent, name)
@@ -331,6 +467,10 @@ def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: 
                     authority_store._dirfd_unlink(parent, temporary_name)
                 except FileNotFoundError:
                     pass
+    if not allow_in_place:
+        # Archive publication already retains every pending row. If atomic
+        # rollback fails, truncating that inbox risks losing those rows too.
+        raise OSError("import inbox rollback could not restore its retained snapshot; published inbox preserved")
     descriptor = -1
     try:
         descriptor = authority_store._dirfd_open_file(

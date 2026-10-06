@@ -17,6 +17,7 @@ from typing import Any
 from . import constants, helpers, inbox_lock, ledger as ledger_mod, config as config_mod
 from . import scanners as scanners_mod
 from . import sweeps as sweeps_mod
+from .ledger import import_model
 from ..card_identity import IdentityIndex, card_identity, valid_card_id
 
 
@@ -1081,8 +1082,10 @@ def inbox_archive(*, target: Path, json_output: bool = False) -> int:
     # Round 6 (M2): read and publish inside one canonical lock window so a
     # scanner commit landing before this writer excludes survives the archive.
     try:
-        with ledger_mod._canonical_inbox_write(target):
-            imports = [item for item in ledger_mod._read_imports(target) if isinstance(item, dict)]
+        with (
+            ledger_mod._canonical_inbox_write(target),
+            import_model._import_inbox_for_archive(target) as (imports, publish),
+        ):
             archived: list[dict[str, Any]] = []
             kept: list[dict[str, Any]] = []
             for item in imports:
@@ -1101,8 +1104,8 @@ def inbox_archive(*, target: Path, json_output: bool = False) -> int:
                     kept.append(item)
             if archived:
                 ledger_mod._append_archived_imports(target, archived)
-                ledger_mod._write_imports(target, kept)
-    except inbox_lock.InboxLockTimeout as exc:
+                publish(kept)
+    except (inbox_lock.InboxLockTimeout, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     payload = {
