@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from . import fleet_command_deck, fleet_hub_policy, fleet_policy
+from . import fleet_command_deck, fleet_hub_model_roster, fleet_hub_policy, fleet_policy
 from .fleet_hub import FleetHubConflict, FleetHubError
 from .fleet_policy_form import ACTIONS as ACTIONS
 from .fleet_policy_form import ADMISSION_ROLE as ADMISSION_ROLE
@@ -46,6 +46,7 @@ from .fleet_policy_form import SEAT_BOOL_FIELDS as SEAT_BOOL_FIELDS
 from .fleet_policy_form import SEAT_INT_FIELDS as SEAT_INT_FIELDS
 from .fleet_policy_form import SEAT_LIST_FIELDS as SEAT_LIST_FIELDS
 from .fleet_policy_form import SEAT_TEXT_FIELDS as SEAT_TEXT_FIELDS
+from .fleet_policy_form import KEEP_CURRENT as KEEP_CURRENT
 from .fleet_policy_form import DocumentError as DocumentError
 from .fleet_policy_form import FormError as FormError
 from .fleet_policy_form import Submission as Submission
@@ -499,6 +500,7 @@ class PolicyView:
     activation: Activation
     inventory: Inventory
     inventory_summary: Mapping[str, int]
+    retired_seats: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def _roles_for(resolution: Mapping[str, Any]) -> dict[str, Any]:
@@ -519,6 +521,11 @@ def load_view(
     snapshot = adapt_inventory(inventory) if inventory is not None else load_server_inventory(conn, document=document)
     report = fleet_policy.validate_inventory(document, _inventory_mapping(document, snapshot))
     inventory_rows = {row["seat"]: row for row in report["seats"]}
+    retired_rows = fleet_hub_model_roster.raw_retired_rows(conn)
+    retired_seats = {
+        scope: fleet_hub_model_roster.retired_policy_seats(document, retired_rows, consumer=scope or None)
+        for scope in ("", *document["consumers"])
+    }
 
     fleet_resolution = fleet_policy.resolve_policy(document, None, None)
     seats: list[SeatRow] = []
@@ -645,6 +652,7 @@ def load_view(
         activation=activation if activation is not None else UNKNOWN_ACTIVATION,
         inventory=snapshot,
         inventory_summary=dict(report["summary"]),
+        retired_seats=retired_seats,
     )
 
 
@@ -716,6 +724,32 @@ def identity_gate(
                 "suggestions": suggest_models(record["model"], available),
             }
         )
+    return errors
+
+
+def _retired_assignment_errors(
+    conn: sqlite3.Connection, current: Mapping[str, Any], proposed: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Keep historical leaves, but refuse a retired seat newly assigned to any role."""
+    retired_rows = fleet_hub_model_roster.raw_retired_rows(conn)
+    errors: list[dict[str, Any]] = []
+    scopes = [("defaults", "", current["defaults"], proposed["defaults"], None)]
+    for section, patch in (("consumers", "default_patches"), ("repositories", "patches")):
+        for name, record in proposed[section].items():
+            old = current[section].get(name, {}).get(patch, {})
+            scopes.append((section, name, old, record.get(patch, {}), name if section == "consumers" else None))
+    for section, name, before, after, consumer in scopes:
+        retired = fleet_hub_model_roster.retired_policy_seats(proposed, retired_rows, consumer=consumer)
+        old_roles = before.get("roles", {})
+        for role, seat in after.get("roles", {}).items():
+            if seat in retired and seat != old_roles.get(role):
+                errors.append(
+                    {
+                        "code": "retired-seat-assignment",
+                        "seat": seat,
+                        "detail": f"{section}.{name + '.' if name else ''}roles.{role}: seat {seat} is retired",
+                    }
+                )
     return errors
 
 
@@ -800,6 +834,7 @@ def plan_change(
     errors: list[Mapping[str, Any]] = list(preview["errors"])
     if preview["digest"] is not None:
         errors.extend(identity_gate(current["document"], document, inventory))
+        errors.extend(_retired_assignment_errors(conn, current["document"], document))
     return Plan(
         ok=not errors,
         document=document,
@@ -959,12 +994,30 @@ def _checkbox(name: str, checked: bool, *, editable: bool) -> str:
     )
 
 
-def _seat_options(name: str, current: object, seats: Sequence[SeatRow], *, editable: bool) -> str:
+def keep_option(stored: object) -> str:
+    """The stored retired seat, kept as-is. Its value is a marker, never the seat name."""
+    return f'<option value="{KEEP_CURRENT}" selected>{_esc(stored)} (retired, kept until changed)</option>'
+
+
+def _seat_options(
+    name: str,
+    current: object,
+    seats: Sequence[SeatRow],
+    *,
+    editable: bool,
+    stored: object = None,
+    retired_seats: Sequence[str] = (),
+) -> str:
+    """``current`` may be ``KEEP_CURRENT`` from a draft; ``stored`` names what it keeps."""
     disabled = "" if editable else " disabled"
     parts = [f'<select name="field.{_esc(name)}"{disabled}>']
     selected = "" if current else " selected"
     parts.append(f'<option value=""{selected}>(unset - no fallback)</option>')
+    if current == KEEP_CURRENT or current in retired_seats:
+        parts.append(keep_option(stored))
     for row in seats:
+        if row.name in retired_seats:
+            continue
         mark = " selected" if row.name == current else ""
         suffix = "" if row.enabled else " (disabled)"
         cost_txt = f" [{row.cost_class}]" if getattr(row, "cost_class", None) else ""
@@ -1206,12 +1259,21 @@ def _defaults_form(view: PolicyView, *, editable: bool, csrf: str, draft: Submis
     execution = view.document["defaults"].get("execution", {})
 
     def role_control(role: str) -> str:
-        current = values.get(f"role_{role}", roles.get(role) or "")
+        stored = roles.get(role) or ""
+        current = values.get(f"role_{role}", stored)
         label = ROLE_LABELS.get(role, role)
         seat_obj = next((s for s in view.seats if s.name == current), None)
         cost_txt = f" &middot; cost {_esc(seat_obj.cost_class)}" if seat_obj else ""
         hint = f"policy role key: {role}{cost_txt}"
-        return _labelled(label, _seat_options(f"role_{role}", current, view.seats, editable=editable), hint=hint)
+        control = _seat_options(
+            f"role_{role}",
+            current,
+            view.seats,
+            editable=editable,
+            stored=stored,
+            retired_seats=view.retired_seats.get("", ()),
+        )
+        return _labelled(label, control, hint=hint)
 
     role_cells = "".join(role_control(role) for role in POLICY_ROLES)
     training = values.get("data_allow_training", "yes" if data.get("allow_training") else "no")
@@ -1446,14 +1508,17 @@ def _consumer_section(view: PolicyView, *, editable: bool, csrf: str, draft: Sub
         if not editable:
             blocks.append(f'<details id="consumer-{_esc(row.name)}">{summary}{facts}</details>')
             continue
+        patch_roles = row.default_patches.get("roles", {}) or {}
         role_cells = "".join(
             _labelled(
                 f"{ROLE_LABELS.get(role, role)} patch",
                 _seat_options(
                     f"role_{role}",
-                    values.get(f"role_{role}", (row.default_patches.get("roles", {}) or {}).get(role) or ""),
+                    values.get(f"role_{role}", patch_roles.get(role) or ""),
                     view.seats,
                     editable=True,
+                    stored=patch_roles.get(role) or "",
+                    retired_seats=view.retired_seats.get(row.name, ()),
                 ),
                 hint="policy role key: " + role,
             )

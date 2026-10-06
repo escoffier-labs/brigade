@@ -1441,6 +1441,7 @@ def _dispatch_models_list(args: argparse.Namespace) -> int:
     cached = roster.get("source") == "lkg"
     raw_seats = roster.get("seats")
     seats = [dict(item) for item in raw_seats if isinstance(item, dict)] if isinstance(raw_seats, list) else []
+    retired = roster.get("retired_models") or []
     selected_seat = args.seat
     filtered: list[dict[str, object]] = []
     for seat in seats:
@@ -1450,6 +1451,11 @@ def _dispatch_models_list(args: argparse.Namespace) -> int:
         if selected_seat is not None and seat_name != selected_seat:
             continue
         launch_groups = fleet_model_roster.consumer_launch_groups(roster, consumer, seat_name)
+        if any(
+            fleet_model_roster.retired_reason(str(seat.get("provider") or ""), identity, retired)
+            for identity in fleet_model_roster.binding_launch_models(seat, launch_groups=launch_groups)
+        ):
+            continue
         binding = fleet_model_admission._binding_for(consumer, seat, launch_groups=launch_groups)
         binding_value = binding.get("instance_id") if isinstance(binding, dict) else None
         filtered.append(
@@ -1466,7 +1472,9 @@ def _dispatch_models_list(args: argparse.Namespace) -> int:
     if args.json:
         print(
             _json.dumps(
-                {"roster_revision": revision, "consumer": consumer, "seats": filtered}, indent=2, sort_keys=True
+                {"roster_revision": revision, "consumer": consumer, "seats": filtered, "retired_models": retired},
+                indent=2,
+                sort_keys=True,
             )
         )
         return 0
@@ -1493,6 +1501,13 @@ def _dispatch_models_list(args: argparse.Namespace) -> int:
         print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)))
     if not rows:
         print("(no matching roster entries)")
+    if retired:
+        print("\nRetired families (history)")
+        for item in retired:
+            identity = _safe_table_cell(f"{item['provider']}/{item['family']}")
+            kind = "permanent" if item.get("permanent") else "operator"
+            reason = _safe_table_cell(str(item.get("reason_code") or "-"))
+            print(f"{identity}  {kind}  {reason}")
     return 0
 
 
