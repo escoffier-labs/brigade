@@ -1,0 +1,764 @@
+"""Cross-boundary qualification of journal acceptance, replay and projection."""
+
+from copy import deepcopy
+from contextlib import nullcontext
+import errno
+import json
+import os
+import select
+import subprocess
+import sys
+import threading
+from types import SimpleNamespace
+
+import pytest
+
+from brigade import (
+    aboyeur,
+    dirfd,
+    run_checkpoint,
+    run_dirfd,
+    run_events,
+    run_journal,
+    run_lifecycle,
+    run_projector,
+    runguard,
+)
+from brigade.work_cmd import nt_dirfd
+
+RUN_ID = "20260727-153045-a1b2c3d4"
+RECORDED_AT = "2026-07-27T15:30:45.123456Z"
+
+
+def _append(path, *, event_type="run.created", payload=None, key="create", previous=0):
+    return run_journal.append_event(
+        path,
+        run_id=RUN_ID,
+        event_type=event_type,
+        payload={"status": "started"} if payload is None else payload,
+        idempotency_key=key,
+        expected_previous_sequence=previous,
+        recorded_at=RECORDED_AT,
+    )
+
+
+def _cancel_payload():
+    return {
+        "transport_capability": "interrupt",
+        "transport_result": "interrupted",
+        "active_remaining": 0,
+        "active_seats": [],
+        "outcomes": [{"seat": "coder", "transport_capability": "interrupt", "transport_result": "interrupted"}],
+    }
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["lock", "nesting", TypeError, RuntimeError, OSError],
+    ids=["lock", "nesting", "private-copy-error", "private-copy-runtime-error", "private-copy-os-error"],
+)
+def test_payload_copy_failure_is_typed_and_preserves_journal(tmp_path, failure):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    _append(path)
+    before = path.read_bytes()
+    private_marker = "PRIVATE_COPY_FAILURE_MARKER"
+
+    class Uncopyable:
+        def __deepcopy__(self, memo):
+            raise failure(private_marker + "x" * 600)
+
+    if failure == "lock":
+        value = threading.Lock()
+    elif failure == "nesting":
+        value = []
+        for _ in range(sys.getrecursionlimit()):
+            value = [value]
+    else:
+        value = Uncopyable()
+
+    with pytest.raises(run_events.CanonicalizationError) as excinfo:
+        _append(path, payload={"status": value}, key="invalid-copy", previous=1)
+    assert private_marker not in str(excinfo.value)
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+    assert path.read_bytes() == before
+    assert len(run_journal.read_journal_bounded(path).events) == 1
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
+def test_payload_copy_preserves_base_exception(tmp_path, error_type):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    _append(path)
+    before = path.read_bytes()
+
+    class InterruptedCopy:
+        def __deepcopy__(self, memo):
+            raise error_type("copy interrupted")
+
+    with pytest.raises(error_type, match="copy interrupted"):
+        _append(path, payload={"status": InterruptedCopy()}, key="interrupted-copy", previous=1)
+    assert path.read_bytes() == before
+
+
+def test_caller_nested_mutation_does_not_change_returned_accepted_event(tmp_path):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    payload = _cancel_payload()
+    event = _append(path, event_type="run_budget.cancelled", payload=payload)
+    accepted = deepcopy(event.to_dict())
+    before = path.read_bytes()
+
+    payload["outcomes"][0]["seat"] = "reviewer"
+    payload["active_seats"].append("reviewer")
+
+    assert event.to_dict() == accepted
+    assert run_events.validate_event(event.to_dict()) == []
+    assert path.read_bytes() == before
+    assert run_journal.read_journal_bounded(path).events[0].to_dict() == accepted
+
+
+def test_returned_nested_dictionary_cannot_mutate_event_or_replay(tmp_path):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    event = _append(path, event_type="run_budget.cancelled", payload=_cancel_payload())
+    accepted = deepcopy(event.to_dict())
+    exported = event.to_dict()
+    exported["payload"]["outcomes"][0]["seat"] = "reviewer"
+
+    assert event.to_dict() == accepted
+    replay = _append(path, event_type="run_budget.cancelled", payload=_cancel_payload())
+    assert replay.to_dict() == accepted
+    assert (
+        run_projector.project_run_snapshot({"status": "started"}, [event], journal_present=True).last_event_digest
+        == event.event_digest
+    )
+
+
+def test_caller_mutation_during_write_cannot_change_accepted_return(tmp_path, monkeypatch):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    payload = _cancel_payload()
+    original = deepcopy(payload)
+    real_write = os.write
+
+    def mutate_caller_after_write(fd, data):
+        written = real_write(fd, data)
+        payload["outcomes"][0]["seat"] = "reviewer"
+        return written
+
+    monkeypatch.setattr(os, "write", mutate_caller_after_write)
+    event = _append(path, event_type="run_budget.cancelled", payload=payload)
+    assert event.payload == original
+    assert run_events.validate_event(event.to_dict()) == []
+    assert run_journal.read_journal_bounded(path).events[0].to_dict() == event.to_dict()
+
+
+@pytest.mark.parametrize("source", ["append", "read", "lookup", "replay"])
+def test_mutable_returned_payload_cannot_rewrite_persisted_history(tmp_path, source):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    event = _append(path, event_type="run_budget.cancelled", payload=_cancel_payload())
+    accepted = deepcopy(event.to_dict())
+    before = path.read_bytes()
+    if source == "read":
+        event = run_journal.read_journal_bounded(path).events[0]
+    elif source == "lookup":
+        event = run_journal.lookup_idempotent_event(
+            path, event_type="run_budget.cancelled", payload=_cancel_payload(), idempotency_key="create"
+        )
+    elif source == "replay":
+        event = _append(path, event_type="run_budget.cancelled", payload=_cancel_payload())
+    assert event is not None
+    event.payload["outcomes"][0]["seat"] = "reviewer"
+
+    assert path.read_bytes() == before
+    assert run_journal.read_journal_bounded(path).events[0].to_dict() == accepted
+    with pytest.raises(run_projector.EventChainError):
+        run_projector.project_run_snapshot({"status": "started"}, [event], journal_present=True)
+
+
+_SAME_KEY_CHILD = r"""
+import json
+import sys
+from pathlib import Path
+from brigade import run_journal
+
+path = Path(sys.argv[1])
+detail = sys.argv[2]
+report = run_journal.read_journal_bounded(path)
+assert not report.chain_errors and report.partial_tail is None
+tail = report.events[-1].sequence if report.events else 0
+print(tail, flush=True)
+assert sys.stdin.readline().strip() == "go"
+try:
+    event = run_journal.append_event(
+        path, run_id=sys.argv[3], event_type="run.planning.started",
+        payload={"detail": detail}, idempotency_key="shared-request",
+        expected_previous_sequence=tail, recorded_at=sys.argv[4],
+    )
+    print(json.dumps({"event": event.to_dict()}), flush=True)
+except run_journal.IdempotencyConflict as exc:
+    print(json.dumps({"conflict": exc.existing_event_id}), flush=True)
+"""
+
+
+@pytest.mark.skipif(run_journal.fcntl is None, reason="cross-process locking requires POSIX flock")
+@pytest.mark.parametrize("conflicting", [False, True])
+def test_same_key_process_race_has_one_record_and_consistent_result(tmp_path, conflicting):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    run_journal.ensure_journal(path)
+    children = []
+    try:
+        for detail in ("alpha", "beta" if conflicting else "alpha"):
+            children.append(
+                subprocess.Popen(
+                    [sys.executable, "-c", _SAME_KEY_CHILD, str(path), detail, RUN_ID, RECORDED_AT],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+        # Both processes have read the identical head before either may append.
+        for child in children:
+            assert select.select([child.stdout], [], [], 15)[0], "child did not reach head barrier"
+            assert child.stdout.readline().strip() == "0"
+        for child in children:
+            child.stdin.write("go\n")
+            child.stdin.flush()
+        results = []
+        for child in children:
+            stdout, stderr = child.communicate(timeout=15)
+            assert child.returncode == 0, stderr
+            results.append(json.loads(stdout))
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=5)
+
+    report = run_journal.read_journal_bounded(path)
+    assert report.chain_errors == []
+    assert report.partial_tail is None
+    assert len(report.events) == 1
+    accepted = report.events[0]
+    assert accepted.sequence == 1 and accepted.previous_digest is None
+    assert all(result["event"] == accepted.to_dict() for result in results if "event" in result)
+    if conflicting:
+        assert sum("conflict" in result for result in results) == 1
+        assert next(result["conflict"] for result in results if "conflict" in result) == accepted.event_id
+    else:
+        assert results == [{"event": accepted.to_dict()}] * 2
+    before = path.read_bytes()
+    replay = _append(path, event_type=accepted.event_type, payload=accepted.payload, key="shared-request", previous=0)
+    assert replay.to_dict() == accepted.to_dict()
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["pathname", "bound-directory"])
+def test_crlf_recovery_preserves_complete_bytes_and_quarantines_exact_suffix(tmp_path, monkeypatch, bound):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    first = _append(path)
+    complete = path.read_bytes().rstrip(b"\r\n") + b"\r\n"
+    partial = b'{"incomplete":\r'
+    path.write_bytes(complete + partial)
+
+    binding = run_dirfd.bound_run_dir(tmp_path) if bound else nullcontext()
+    with binding, monkeypatch.context() as patch:
+        if os.name == "posix":
+            # Model CRT translation on real descriptors, not on recovery itself.
+            # The fixture fits in one journal read, so CRLF cannot straddle chunks.
+            binary_flag = 1 << 30
+            real_open, real_read, real_write, real_close = os.open, os.read, os.write, os.close
+            text_fds = set()
+
+            def crt_open(opened_path, flags, mode=0o777, *, dir_fd=None):
+                fd = real_open(opened_path, flags & ~binary_flag, mode, dir_fd=dir_fd)
+                text_fds.discard(fd)
+                if not flags & binary_flag:
+                    text_fds.add(fd)
+                return fd
+
+            def crt_read(fd, size):
+                data = real_read(fd, size)
+                return data.replace(b"\r\n", b"\n") if fd in text_fds else data
+
+            def crt_write(fd, data):
+                physical = data.replace(b"\n", b"\r\n") if fd in text_fds else data
+                written = real_write(fd, physical)
+                return len(data) if written == len(physical) else written
+
+            def crt_close(fd):
+                try:
+                    return real_close(fd)
+                finally:
+                    text_fds.discard(fd)
+
+            patch.setattr(os, "O_BINARY", binary_flag, raising=False)
+            patch.setattr(os, "open", crt_open)
+            patch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {crt_open})
+            patch.setattr(os, "read", crt_read)
+            patch.setattr(os, "write", crt_write)
+            patch.setattr(os, "close", crt_close)
+
+        report = run_journal.read_journal_bounded(path)
+        assert report.events == [first] and report.chain_errors == []
+        assert report.partial_tail == partial
+        recovery = run_journal.recover_partial_tail(path, tmp_path / "quarantine")
+        assert recovery.partial_bytes == partial
+        assert recovery.quarantine_path.read_bytes() == partial
+        assert path.read_bytes() == complete
+
+        second = _append(
+            path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1
+        )
+        appended = path.read_bytes()[len(complete) :]
+        assert appended.endswith(b"\n") and b"\r" not in appended
+        assert path.read_bytes() == complete + appended
+        report = run_journal.read_journal_bounded(path)
+        assert report.events == [first, second] and report.chain_errors == [] and report.partial_tail is None
+
+
+def test_nt_bound_recovery_then_append_preserves_accepted_bytes(tmp_path, monkeypatch):
+    """Use real NT calls on Windows, translating only the OS boundary on POSIX."""
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    first = _append(path)
+    complete = path.read_bytes()
+    partial = b'{"incomplete":'
+    path.write_bytes(complete + partial)
+
+    if sys.platform != "win32":
+        import fcntl
+        import stat
+
+        monkeypatch.setattr(nt_dirfd, "_require_api", lambda: SimpleNamespace(CloseHandle=os.close))
+
+        def create(api, parent, name, *, access, disposition, options, attributes):
+            nt_dirfd.validate_component(name)
+            flags = dirfd.file_flags(os.O_RDONLY)
+            if access & 1 and access & (2 | 4):
+                flags |= os.O_RDWR
+            elif access & (2 | 4):
+                flags |= os.O_WRONLY
+            if disposition == 2:  # FILE_CREATE
+                flags |= os.O_CREAT | os.O_EXCL
+            elif disposition == 3:  # FILE_OPEN_IF
+                flags |= os.O_CREAT
+            else:
+                assert disposition == 1  # FILE_OPEN
+            return os.open(name, flags, 0o600, dir_fd=parent)
+
+        def reject_reparse(api, handle, *, expected_directory):
+            assert not expected_directory
+            assert stat.S_ISREG(os.fstat(handle).st_mode)
+
+        def convert(api, handle, flags):
+            current = fcntl.fcntl(handle, fcntl.F_GETFL)
+            fcntl.fcntl(handle, fcntl.F_SETFL, current | (flags & os.O_APPEND))
+            return handle
+
+        monkeypatch.setattr(nt_dirfd, "_nt_create", create)
+        monkeypatch.setattr(nt_dirfd, "_reject_reparse", reject_reparse)
+        monkeypatch.setattr(nt_dirfd, "_handle_to_fd", convert)
+        monkeypatch.setattr(dirfd, "open_child_file", nt_dirfd.open_file)
+
+    with run_dirfd.bound_run_dir(tmp_path) as bound:
+        assert bound is not None
+        recovery = run_journal.recover_partial_tail(path, tmp_path / "quarantine")
+        assert recovery.partial_bytes == partial
+        assert recovery.quarantine_path.read_bytes() == partial
+        assert path.read_bytes() == complete
+        second = _append(
+            path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1
+        )
+        assert path.read_bytes().startswith(complete)
+        report = run_journal.read_journal_bounded(path)
+        assert report.events == [first, second] and report.chain_errors == [] and report.partial_tail is None
+
+
+def test_bound_recovery_directory_handles_without_posix_flag(tmp_path, monkeypatch):
+    """Recovery owns its directory fd, while the binding keeps its cached fd."""
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    first = _append(path)
+    complete = path.read_bytes()
+    partial = b'{"incomplete":'
+    quarantine = tmp_path / "quarantine"
+    quarantine.mkdir(mode=0o700)
+
+    if sys.platform != "win32":
+        import stat
+
+        # Model the missing POSIX flag and NT's file-only open contract.
+        monkeypatch.setattr(run_journal, "_O_DIRECTORY", 1 << 29)
+        monkeypatch.setattr(run_journal, "_HAS_O_DIRECTORY", False)
+        real_open_file = dirfd.open_child_file
+
+        def file_only_open(parent, name, flags, mode=0o600):
+            fd = real_open_file(parent, name, flags, mode)
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                os.close(fd)
+                raise IsADirectoryError("path component is a directory")
+            return fd
+
+        monkeypatch.setattr(dirfd, "open_child_file", file_only_open)
+
+    with run_dirfd.bound_run_dir(tmp_path) as bound:
+        assert bound is not None
+        parent_fd = bound.dir_fd()
+        bound.dir_fd("events")
+        cached_fd = bound.dir_fd("quarantine")
+        held_identity = os.fstat(cached_fd)
+        opened = []
+        real_open_directory = dirfd.open_child_directory
+
+        def track_directory(parent, name):
+            fd = real_open_directory(parent, name)
+            opened.append(fd)
+            return fd
+
+        monkeypatch.setattr(dirfd, "open_child_directory", track_directory)
+        # Repeat after callers close their temporary descriptors. The held
+        # parent and cached quarantine handle must remain usable both times.
+        for _ in range(2):
+            path.write_bytes(complete + partial)
+            recovery = run_journal.recover_partial_tail(path, quarantine)
+            assert recovery.partial_bytes == partial
+            assert recovery.quarantine_path.read_bytes() == partial
+            assert path.read_bytes() == complete
+            os.fstat(parent_fd)
+            current = os.fstat(cached_fd)
+            assert (current.st_dev, current.st_ino) == (held_identity.st_dev, held_identity.st_ino)
+            assert opened
+            for fd in opened:
+                with pytest.raises(OSError):
+                    os.fstat(fd)
+            opened.clear()
+
+        second = _append(
+            path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1
+        )
+        assert path.read_bytes().startswith(complete)
+        report = run_journal.read_journal_bounded(path)
+        assert report.events == [first, second] and report.chain_errors == [] and report.partial_tail is None
+
+
+def test_short_write_recovery_then_retry_accepts_exactly_once(tmp_path, monkeypatch):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    first = _append(path)
+    before = path.read_bytes()
+    projection = run_projector.project_run_snapshot({"status": "started"}, [first], journal_present=True)
+    real_write = os.write
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "write", lambda fd, data: real_write(fd, data[: len(data) // 2]))
+        with pytest.raises(run_journal.PartialWriteError):
+            _append(path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1)
+
+    interrupted = path.read_bytes()
+    report = run_journal.read_journal_bounded(path)
+    assert report.chain_errors == []
+    assert report.events == [first]
+    assert report.partial_tail == interrupted[len(before) :]
+    assert (
+        run_projector.project_run_snapshot({"status": "started"}, report.events, journal_present=True).to_bytes()
+        == projection.to_bytes()
+    )
+    with pytest.raises(run_journal.PartialTailError):
+        _append(path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1)
+    assert path.read_bytes() == interrupted
+
+    recovery = run_journal.recover_partial_tail(path, tmp_path / "quarantine")
+    assert recovery.quarantine_path.read_bytes() == report.partial_tail
+    assert path.read_bytes() == before
+    second = _append(path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1)
+    accepted = path.read_bytes()
+    assert (
+        _append(path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1)
+        == second
+    )
+    assert path.read_bytes() == accepted
+    assert second.sequence == 2 and second.previous_digest == first.event_digest
+    rebuilt = run_projector.project_run_snapshot(
+        projection.snapshot, run_journal.read_journal_bounded(path).events, journal_present=True
+    )
+    assert rebuilt.status == "planning" and rebuilt.last_sequence == 2
+
+
+@pytest.mark.parametrize("failure", ["short_write", "file_fsync", "directory_fsync"])
+def test_failed_quarantine_durability_preserves_partial_journal(tmp_path, monkeypatch, failure):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    first = _append(path)
+    before = path.read_bytes() + b'{"incomplete":'
+    path.write_bytes(before)
+    quarantine = tmp_path / "quarantine"
+
+    def fail_fsync(fd):
+        raise OSError(errno.EIO, "injected quarantine fsync failure")
+
+    def fail_directory_fsync(directory):
+        raise run_journal.RunJournalError("injected quarantine directory fsync failure")
+
+    real_write = os.write
+    with monkeypatch.context() as patch:
+        if failure == "short_write":
+            patch.setattr(os, "write", lambda fd, data: real_write(fd, data[: len(data) // 2]))
+            error = run_journal.PartialWriteError
+        elif failure == "file_fsync":
+            patch.setattr(os, "fsync", fail_fsync)
+            error = OSError
+        else:
+            patch.setattr(run_journal, "_fsync_directory", fail_directory_fsync)
+            error = run_journal.RunJournalError
+        with pytest.raises(error):
+            run_journal.recover_partial_tail(path, quarantine)
+    assert path.read_bytes() == before
+    report = run_journal.read_journal_bounded(path)
+    assert report.events == [first] and report.partial_tail == b'{"incomplete":'
+    recovery = run_journal.recover_partial_tail(path, quarantine)
+    assert recovery.quarantine_path.read_bytes() == report.partial_tail
+    assert path.read_bytes() == before[: -len(report.partial_tail)]
+
+
+def test_derived_drift_rebuilds_but_invalid_authority_fails_closed(tmp_path):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    _append(path)
+    _append(path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1)
+    authoritative = path.read_bytes()
+    report = run_journal.read_journal_bounded(path)
+    base = {"status": "started", "failure": {"detail": None}}
+    expected = run_projector.project_run_snapshot(base, report.events, journal_present=True)
+    drifted = {
+        **base,
+        "status": "failed",
+        "projector_version": -1,
+        "journal_present": False,
+        "journal_last_sequence": 999,
+        "journal_last_event_digest": "0" * 64,
+    }
+    rebuilt = run_projector.project_run_snapshot(drifted, report.events, journal_present=True)
+    assert rebuilt.to_bytes() == expected.to_bytes()
+    assert path.read_bytes() == authoritative
+
+    corrupted = authoritative.replace(b'"detail":"planning"', b'"detail":"tampered"')
+    assert corrupted != authoritative
+    path.write_bytes(corrupted)
+    rejected = run_journal.read_journal_bounded(path)
+    assert rejected.chain_errors
+    assert [event.sequence for event in rejected.events] == [1]
+    with pytest.raises(run_journal.ChainIntegrityError):
+        _append(path, event_type="run.completed", payload={"status": "completed"}, key="complete", previous=2)
+    with pytest.raises(run_journal.ChainIntegrityError):
+        run_journal.lookup_idempotent_event(
+            path, event_type="run.created", payload={"status": "started"}, idempotency_key="create"
+        )
+    with pytest.raises(run_projector.EventChainError):
+        run_projector.project_run_snapshot(
+            base, [json.loads(line) for line in corrupted.splitlines()], journal_present=True
+        )
+    assert path.read_bytes() == corrupted
+
+
+def test_prewrite_error_leaves_journal_and_projection_unchanged(tmp_path, monkeypatch):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    first = _append(path)
+    before = path.read_bytes()
+    projection = run_projector.project_run_snapshot({"status": "started"}, [first], journal_present=True)
+
+    def fail_write(fd, data):
+        raise OSError(errno.EIO, "injected journal write failure")
+
+    monkeypatch.setattr(os, "write", fail_write)
+    with pytest.raises(OSError, match="injected journal write failure"):
+        _append(path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1)
+    assert path.read_bytes() == before
+    report = run_journal.read_journal_bounded(path)
+    assert report.events == [first] and report.chain_errors == [] and report.partial_tail is None
+    assert (
+        run_projector.project_run_snapshot({"status": "started"}, report.events, journal_present=True).to_bytes()
+        == projection.to_bytes()
+    )
+
+
+def test_failed_fsync_leaves_snapshot_unchanged_but_complete_journal_line_visible(tmp_path, monkeypatch):
+    """Qualification limit: a failed fsync is not proof that no bytes persisted."""
+    repo = tmp_path / "repo"
+    run_dir = repo / ".brigade" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    snapshot_path = run_dir / "run.json"
+    payload = {
+        "schema": "brigade.run.v1",
+        "status": "started",
+        "lock_workspace": str(repo),
+        "lifecycle_journal_requested": True,
+    }
+    with runguard.run_lock(repo, run_dir=run_dir):
+        aboyeur._write_json(snapshot_path, payload)
+    path = run_dir / "events" / "lifecycle.jsonl"
+    before_snapshot = snapshot_path.read_bytes()
+    before_journal = path.read_bytes()
+    real_fsync = os.fsync
+    journal_inode = path.stat()
+
+    def fail_journal_fsync(fd):
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) == (journal_inode.st_dev, journal_inode.st_ino):
+            raise OSError(errno.EIO, "injected journal fsync failure")
+        return real_fsync(fd)
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "fsync", fail_journal_fsync)
+            with pytest.raises(run_lifecycle.LifecycleJournalError):
+                aboyeur._write_json(snapshot_path, {**payload, "status": "planning"})
+
+    assert snapshot_path.read_bytes() == before_snapshot
+    # This is the confirmed gap in the stronger failed-append invariant.
+    # No successful return occurred, yet the complete checkpoint line is
+    # visible to readers. Its persistence across power loss is unknown.
+    assert path.read_bytes() != before_journal
+    report = run_journal.read_journal_bounded(path)
+    assert report.chain_errors == [] and report.partial_tail is None
+    assert len(report.events) == len(before_journal.splitlines()) + 1
+
+
+@pytest.mark.parametrize("failure", ["file", "directory"])
+def test_fsync_error_retry_requires_new_sync_without_second_append(tmp_path, monkeypatch, failure):
+    """Visible bytes need a fresh acknowledgment barrier, without rollback."""
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    _append(path)
+    before = path.read_bytes()
+
+    def fail_sync(*args):
+        raise OSError(errno.EIO, "injected journal sync failure")
+
+    with monkeypatch.context() as patch:
+        if failure == "file":
+            patch.setattr(os, "fsync", fail_sync)
+            error = OSError
+        else:
+            patch.setattr(run_journal, "_fsync_directory", fail_sync)
+            error = (OSError, run_journal.RunJournalError)
+        with pytest.raises(error):
+            _append(path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1)
+
+        uncertain = path.read_bytes()
+        assert uncertain != before
+        report = run_journal.read_journal_bounded(path)
+        assert report.chain_errors == [] and report.partial_tail is None
+        assert len(report.events) == 2
+        for _ in range(2):
+            with pytest.raises(run_journal.RunJournalError):
+                _append(path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1)
+            assert path.read_bytes() == uncertain
+
+    syncs = []
+    real_fsync = os.fsync
+
+    def track_sync(fd):
+        info = os.fstat(fd)
+        syncs.append("file" if info.st_ino == path.stat().st_ino else "directory")
+        return real_fsync(fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fsync", track_sync)
+        replay = _append(
+            path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1
+        )
+    assert syncs == (["file", "directory"] if os.name == "posix" else ["file"])
+    assert replay.to_dict() == report.events[-1].to_dict()
+    assert path.read_bytes() == uncertain
+
+
+def test_creation_directory_sync_failure_cannot_be_bypassed_by_new_append(tmp_path, monkeypatch):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+
+    def fail_directory(directory):
+        raise run_journal.RunJournalError("injected creation directory sync failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(run_journal, "_fsync_directory", fail_directory)
+        with pytest.raises(run_journal.RunJournalError):
+            _append(path)
+        assert path.read_bytes() == b""
+        with pytest.raises(run_journal.RunJournalError):
+            _append(path)
+        visible = run_journal.read_journal_bounded(path).events
+        assert len(visible) == 1
+    before = path.read_bytes()
+    assert _append(path) == visible[0]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("api", ["generic", "status", "checkpoint"])
+def test_owner_replay_sync_failure_is_bounded_and_recovery_keeps_original_event(tmp_path, monkeypatch, api):
+    repo = tmp_path / "repo"
+    run_dir = repo / ".brigade" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    snapshot = {"status": "started", "lock_workspace": str(repo), "lifecycle_journal_requested": True}
+    snapshot_path = run_dir / "run.json"
+    snapshot_path.write_text(json.dumps(snapshot))
+    path = run_dir / "events" / "lifecycle.jsonl"
+
+    def record():
+        if api == "generic":
+            return run_lifecycle.record_lifecycle_event(
+                run_dir,
+                event_type="approval.requested",
+                payload={"approval_id": "approval-1", "source": "daily", "contract_fingerprint": "contract-1"},
+                idempotency_key="approval:requested:stable",
+                workspace=repo,
+            )
+        if api == "status":
+            return run_lifecycle.record_lifecycle_transition(
+                run_dir,
+                status="planning",
+                workspace=repo,
+                incoming_snapshot={"detail": "changed refresh detail"},
+            )
+        return run_checkpoint.write_checkpoint(
+            run_dir,
+            json.dumps(snapshot).encode(),
+            workspace=repo,
+            paired_event_type="run.planning.started",
+        )
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=repo)
+        original = record()
+        assert original is not None
+        if api == "status":
+            snapshot_path.write_text(json.dumps({**snapshot, "status": "planning"}))
+        before = path.read_bytes()
+        journal_inode = path.stat()
+        real_fsync = os.fsync
+
+        def fail_journal_sync(fd):
+            info = os.fstat(fd)
+            if (info.st_dev, info.st_ino) == (journal_inode.st_dev, journal_inode.st_ino):
+                raise OSError(errno.EIO, "injected owner replay fsync failure")
+            return real_fsync(fd)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "fsync", fail_journal_sync)
+            with pytest.raises(run_lifecycle.LifecycleJournalError):
+                record()
+        assert path.read_bytes() == before
+        assert record().to_dict() == original.to_dict()
+        assert path.read_bytes() == before
+
+
+def test_read_only_lookup_and_journal_read_do_not_sync(tmp_path, monkeypatch):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    original = _append(path)
+    before = path.read_bytes()
+
+    def forbidden_sync(*args):
+        raise AssertionError("read-only API attempted sync")
+
+    monkeypatch.setattr(os, "fsync", forbidden_sync)
+    monkeypatch.setattr(run_journal, "_fsync_directory", forbidden_sync)
+    assert (
+        run_journal.lookup_idempotent_event(
+            path,
+            event_type="run.created",
+            payload={"status": "started"},
+            idempotency_key="create",
+        )
+        == original
+    )
+    assert run_journal.read_journal_bounded(path).events == [original]
+    assert path.read_bytes() == before

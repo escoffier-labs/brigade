@@ -329,15 +329,26 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         help="Environment variable name containing the Obsidian upstream key.",
     )
 
+    def add_client_id(command: argparse.ArgumentParser) -> None:
+        command.add_argument(
+            "--client-id",
+            default=None,
+            help="Optional lowercase deployment identifier (1-64 characters); must match the hub credential node ID.",
+        )
+
+    add_client_id(p_grokbot_serve)
+
     def add_instance(command: argparse.ArgumentParser) -> None:
         command.add_argument("--target", type=Path, default=Path("."))
         command.add_argument(
             "--instance", required=True, choices=("operator", "repository-scout", "implementation-worker")
         )
         command.add_argument("--json", action="store_true")
+        add_client_id(command)
 
     p_setup = grokbot_sub.add_parser("setup", help="Write non-secret role-scoped listener configuration.")
     add_target(p_setup)
+    add_client_id(p_setup)
     p_setup.add_argument("--instance", required=True, choices=("operator", "repository-scout", "implementation-worker"))
     p_setup.add_argument("--bind", default="127.0.0.1:8766", help="Listener host:port. Defaults to loopback.")
     p_setup.add_argument("--allow-host", action="append", default=[], help="Explicit allowed Host value.")
@@ -1099,6 +1110,8 @@ def _dispatch_grokbot(args, target: Path) -> int:
 
         try:
             if getattr(args, "pack", None):
+                if args.client_id is not None:
+                    raise grokbot_mcp.ConfigurationError("invalid")
                 from .. import grokbot_cerebro
 
                 if args.pack != "obsidian-operator" and (
@@ -1172,6 +1185,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                 config = grokbot_mcp.build_listener_config(
                     target=target,
                     instance=args.instance,
+                    client_id=args.client_id,
                     bind=args.bind or "127.0.0.1:8766",
                     allowed_hosts=args.allow_host,
                     allowed_origins=args.allow_origin,
@@ -1710,18 +1724,19 @@ def _dispatch_grokbot_ops(args, target: Path) -> int:
                 bearer_env=args.bearer_env,
                 bearer_file=args.bearer_file,
                 hub_token_file=args.hub_token_file,
+                client_id=args.client_id,
             )
             print(f"grokbot config saved: role={instance}")
             return 0
 
         if command == "doctor":
-            checks = grokbot_ops.doctor(target, instance)
+            checks = grokbot_ops.doctor(target, instance, client_id=args.client_id)
             for check in checks:
                 print(f"{check['check']}: {check['status']}")
             return _doctor_exit_code(checks)
 
         if command == "canary":
-            result = grokbot_ops.canary(target, instance)
+            result = grokbot_ops.canary(target, instance, client_id=args.client_id)
             if args.json:
                 print(json.dumps(result, indent=2, sort_keys=True))
             else:
@@ -1731,7 +1746,7 @@ def _dispatch_grokbot_ops(args, target: Path) -> int:
             return 0 if result["ok"] else 1
 
         if command == "install-service":
-            config = grokbot_ops.load_config(target, instance)
+            config = grokbot_ops.load_config(target, instance, args.client_id)
             if args.out is None:
                 sys.stdout.write(grokbot_ops.render_unit(config, python=sys.executable, exec_root=target))
                 return 0

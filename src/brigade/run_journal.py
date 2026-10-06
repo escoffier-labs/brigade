@@ -8,7 +8,7 @@ and enforces contiguous sequence, previous-digest chaining, and idempotency by
 key + request digest (same key + same digest returns the existing event; same
 key + different digest raises a typed conflict without appending). Tail state
 is derived fail-closed: every complete line must be a validated envelope whose
-raw bytes exactly equal its canonical form, continuing a gap-free,
+bytes, excluding LF or CRLF framing, exactly equal its canonical form, continuing a gap-free,
 duplicate-free, digest-linked sequence; any deviation raises a bounded typed
 error and no state is derived from it. Run-artifact permissions are private:
 the ``events`` and quarantine directories are 0o700 and journal/quarantine
@@ -36,26 +36,33 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows does not provide flock.
     fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX does not provide msvcrt.
+    msvcrt = None  # type: ignore[assignment,attr-defined]
 import hashlib
 import json
 import os
 import signal
 import stat
 import threading
+from copy import deepcopy
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from brigade import run_dirfd, run_events
+from brigade import dirfd, run_dirfd, run_events
 from brigade.run_events import CanonicalizationError, canonical_bytes
 
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+# Preserve directory intent on hosts without the POSIX flag. The synthetic
+# bit is consumed internally and never passed to an OS file-open primitive.
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0) or (1 << 29)
 _HAS_O_NOFOLLOW = _O_NOFOLLOW != 0
-_HAS_O_DIRECTORY = _O_DIRECTORY != 0
+_HAS_O_DIRECTORY = bool(getattr(os, "O_DIRECTORY", 0))
 _HAS_FCHMOD = hasattr(os, "fchmod") and os.name == "posix"
 # O_NOFOLLOW rejects symlinked targets so a pre-placed symlink cannot redirect
 # journal writes or quarantine captures outside the private run-artifact tree.
@@ -149,32 +156,50 @@ def _append_critical_section(journal_path: Path | None = None) -> Iterator[None]
         try:
             with _APPEND_LOCK:
                 lock_fd: int | None = None
+                lock_acquired = False
                 primary: BaseException | None = None
                 try:
-                    if resolved_journal is not None and fcntl is not None:
+                    if resolved_journal is not None:
+                        if fcntl is None and msvcrt is None:
+                            raise RunJournalError(_bound("interprocess journal locking unavailable"))
                         lock_path = _journal_lock_path(resolved_journal)
                         lock_fd = _open_nofollow(lock_path, os.O_RDWR | os.O_CREAT, _FILE_MODE)
                         _chmod_fd_or_path(lock_fd, lock_path, _FILE_MODE)
-                        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                        if fcntl is not None:
+                            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                        elif msvcrt is not None:
+                            # LK_LOCK has bounded retries. Byte zero may be beyond
+                            # EOF, so the private sibling lock file can stay empty.
+                            os.lseek(lock_fd, 0, os.SEEK_SET)
+                            msvcrt.locking(lock_fd, msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
+                        lock_acquired = True
                     if resolved_journal is not None:
                         _APPEND_TLS.journal_path = resolved_journal
-                    try:
-                        yield
-                    except BaseException as exc:
-                        primary = exc
-                        raise
+                    yield
+                except BaseException as exc:
+                    primary = exc
+                    raise
                 finally:
                     if resolved_journal is not None:
                         _APPEND_TLS.journal_path = None
                     if lock_fd is not None:
                         try:
-                            if fcntl is not None:
-                                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                            if lock_acquired:
+                                if fcntl is not None:
+                                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                                elif msvcrt is not None:
+                                    os.lseek(lock_fd, 0, os.SEEK_SET)
+                                    msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
                         except OSError as exc:
                             if primary is None:
+                                primary = exc
                                 raise RunJournalError(_bound("journal lock release failed")) from exc
                         finally:
-                            os.close(lock_fd)
+                            try:
+                                os.close(lock_fd)
+                            except OSError as exc:
+                                if primary is None:
+                                    raise RunJournalError(_bound("journal lock close failed")) from exc
         finally:
             if not _HAS_PTHREAD_SIGMASK:
                 _APPEND_TLS.in_append = False
@@ -274,7 +299,7 @@ class RunEvent:
             "request_digest": self.request_digest,
             "previous_digest": self.previous_digest,
             "event_digest": self.event_digest,
-            "payload": dict(self.payload),
+            "payload": deepcopy(self.payload),
         }
 
 
@@ -361,25 +386,18 @@ def _open_bound(
     """Open a bound path descriptor-relative through the held run handles."""
     bound, components, name = target
     wants_directory = bool(flags & _O_DIRECTORY)
-    open_flags = flags
-    if wants_directory and not _HAS_O_DIRECTORY:
-        open_flags &= ~_O_DIRECTORY
     try:
-        fd = bound.open_file(components, name, open_flags, mode)
+        if wants_directory:
+            # The caller closes this fresh descriptor. Never return a cached
+            # bound.dir_fd here, since its lifetime belongs to the binding.
+            parent = bound.dir_fd(*components)
+            return dirfd.open_child_directory(parent, name)
+        return bound.open_file(components, name, flags, mode)
     except OSError as exc:
         refusal = _symlink_refusal(path, exc, wants_directory=wants_directory)
         if refusal is not None:
             raise refusal from exc
         raise
-    if not wants_directory or _HAS_O_DIRECTORY:
-        return fd
-    try:
-        if not stat.S_ISDIR(os.fstat(fd).st_mode):
-            raise RunJournalError(_bound(f"path is not a directory: {path.name}"))
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
 
 
 def bound_lstat(path: Path) -> os.stat_result | None:
@@ -548,7 +566,7 @@ def _fsync_directory(path: Path) -> None:
     """
     if not _supports_directory_fsync():
         return
-    dir_flags = os.O_RDONLY | _O_DIRECTORY if _HAS_O_DIRECTORY else os.O_RDONLY
+    dir_flags = os.O_RDONLY | _O_DIRECTORY
     try:
         fd = _open_nofollow(path, dir_flags)
     except RunJournalError:
@@ -590,6 +608,8 @@ def _open_nofollow(path: Path, flags: int, mode: int = 0o666) -> int:
     swapped after bind can only reach the original bound inode, or the open
     fails closed. There is no pathname fallback for a bound path.
     """
+    # CRT text translation would invalidate byte offsets and verbatim writes.
+    flags |= getattr(os, "O_BINARY", 0)
     target = _bound_target(path)
     if target is not None:
         return _open_bound(target, path, flags, mode)
@@ -774,14 +794,17 @@ def _object_pairs_no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _parse_canonical_line(line: bytes) -> dict[str, Any]:
     """Parse one journal line, failing closed on any deviation.
 
-    The line must be a validated run_event.v1 envelope whose raw bytes exactly
-    equal its canonical form. Raises ChainIntegrityError with a bounded
+    The line must be a validated run_event.v1 envelope whose bytes, excluding
+    a CRLF terminator's CR, exactly equal its canonical form.
+    Raises ChainIntegrityError with a bounded
     diagnostic on: invalid UTF-8 or JSON, duplicate JSON keys, non-object JSON,
     uncanonicalizable values (floats, booleans, oversized integers), byte-level
     differences from canonical form (whitespace, key order, ASCII escapes), or
     failed envelope validation (bad fields, recomputed-digest or event_id
     mismatch).
     """
+    if line.endswith(b"\r"):
+        line = line[:-1]
     try:
         text = line.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -910,7 +933,7 @@ def _envelope_to_event(env: dict[str, Any]) -> RunEvent:
             request_digest=env["request_digest"],
             previous_digest=env["previous_digest"],
             event_digest=env["event_digest"],
-            payload=dict(env["payload"]),
+            payload=deepcopy(env["payload"]),
         )
     except (KeyError, TypeError) as exc:
         raise ChainIntegrityError(_bound(f"envelope fields are malformed: {exc}")) from exc
@@ -962,6 +985,30 @@ def lookup_idempotent_event(
         )
 
 
+def _sync_existing_journal(journal_path: Path) -> None:
+    """Acknowledge visible history with a fresh sync barrier, without appending."""
+    try:
+        fd = _open_nofollow(journal_path, os.O_WRONLY | os.O_APPEND)
+    except OSError as exc:
+        raise RunJournalError(_bound("journal replay fsync failed")) from exc
+    primary: RunJournalError | None = None
+    try:
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise RunJournalError(_bound("journal replay path is not a regular file"))
+            os.fsync(fd)
+            _fsync_directory(journal_path.parent)
+        except OSError as exc:
+            raise RunJournalError(_bound("journal replay fsync failed")) from exc
+    except RunJournalError as exc:
+        primary = exc
+        raise
+    finally:
+        close_error = _close_guarded(fd, primary)
+        if primary is None and close_error is not None:
+            raise close_error
+
+
 def append_event(
     journal_path: Path,
     *,
@@ -975,7 +1022,8 @@ def append_event(
     """Append one event to the journal under the slice-1 contract.
 
     Idempotency: same key + same request digest returns the existing event with
-    no write; same key + different digest raises IdempotencyConflict with no
+    no write after a fresh file and directory sync barrier; same key + different
+    digest raises IdempotencyConflict with no
     write. Concurrency: ``expected_previous_sequence`` must equal the current
     tail sequence (0 for an empty journal) else StaleSequenceError, no write.
     The write is a single bounded ``os.write`` to an ``O_APPEND`` descriptor
@@ -983,6 +1031,12 @@ def append_event(
     """
     journal_path = Path(journal_path)
     ensure_journal(journal_path)
+    # Structured payloads must stay stable through digesting, durable write,
+    # fleet reporting and construction of the returned accepted event.
+    try:
+        payload = deepcopy(payload)
+    except Exception as exc:
+        raise CanonicalizationError("payload cannot be copied for canonicalization") from exc
 
     if recorded_at is None:
         from datetime import datetime, timezone
@@ -1003,6 +1057,7 @@ def append_event(
             request_digest=rd,
         )
         if existing is not None:
+            _sync_existing_journal(journal_path)
             return existing
 
         if expected_previous_sequence != last_sequence:
@@ -1040,6 +1095,7 @@ def append_event(
             if written != len(line):
                 raise PartialWriteError(_bound(f"partial write: wrote {written} of {len(line)} bytes"))
             os.fsync(fd)
+            _fsync_directory(journal_path.parent)
         finally:
             os.close(fd)
 

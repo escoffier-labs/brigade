@@ -34,6 +34,8 @@ MAX_REQUEST_BYTES = 80_000
 DEFAULT_LEASE_SECONDS = 900
 MIN_LEASE_SECONDS = grokbot_job_validation.LEASE_SECONDS_MIN
 MAX_LEASE_SECONDS = grokbot_job_validation.LEASE_SECONDS_MAX
+# Fits native UUID node IDs and leaves room for the role prefix inside opaque-ID128.
+MAX_CLIENT_ID_LENGTH = 64
 LEASE_SECONDS_ENV = "BRIGADE_GROKBOT_LEASE_SECONDS"
 MAX_LISTED_JOBS = 100
 MAX_LIST_LIMIT = 100
@@ -111,8 +113,10 @@ class ListenerConfig:
     bearer: str
     hub_token: str | None = None
     lease_seconds: int = DEFAULT_LEASE_SECONDS
+    client_id: str | None = None
 
     def validate(self) -> None:
+        validate_client_id(self.client_id)
         if self.instance not in INSTANCES or not self.target.is_dir():
             raise ConfigurationError("invalid")
         if not _within_lease_bound(self.lease_seconds):
@@ -132,7 +136,24 @@ class ListenerConfig:
     @property
     def bot_id(self) -> str:
         """The identity is deployment-fixed and never taken from tool input."""
-        return f"grokbot-{self.instance}"
+        return f"grokbot-{deployment_name(self.instance, self.client_id)}"
+
+
+def validate_client_id(client_id: object) -> None:
+    """Accept a bounded lowercase identifier, never a path or caller actor override."""
+    if client_id is not None and (
+        not isinstance(client_id, str)
+        or len(client_id) > MAX_CLIENT_ID_LENGTH
+        or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", client_id) is None
+    ):
+        raise ConfigurationError("invalid")
+
+
+def deployment_name(instance: str, client_id: str | None = None) -> str:
+    if instance not in INSTANCES:
+        raise ConfigurationError("invalid")
+    validate_client_id(client_id)
+    return instance if client_id is None else f"{instance}-{client_id}"
 
 
 def tools_for_instance(instance: str) -> frozenset[str]:
@@ -314,13 +335,20 @@ class GrokbotAdapter:
         if not self.config.hub_token:
             raise ConfigurationError("invalid")
         with fleet_client_grokbot.listener_identity(self.config.hub_token):
-            decision = fleet_client_grokbot.whoami()
+            if self.config.client_id is not None:
+                decision = fleet_client_grokbot.whoami(include_node_id=True)
+            else:
+                decision = fleet_client_grokbot.whoami()
         job = decision.job if decision.granted else None
         kind = job.get("actor_kind") if isinstance(job, dict) else None
         role = job.get("role") if isinstance(job, dict) else None
         if kind != self.config.instance:
             raise ConfigurationError("invalid")
         if self.config.instance != "operator" and role not in (None, self.config.instance):
+            raise ConfigurationError("invalid")
+        if self.config.client_id is not None and (
+            not isinstance(job, dict) or job.get("node_id") != self.config.client_id
+        ):
             raise ConfigurationError("invalid")
         self._hub_actor_verified = True
 
@@ -339,7 +367,10 @@ class GrokbotAdapter:
         return hmac.compare_digest(bearer, self.config.bearer)
 
     def health_payload(self) -> dict[str, object]:
-        return {"ok": True, "service": "grokbot-mcp", "role": self.config.instance}
+        payload: dict[str, object] = {"ok": True, "service": "grokbot-mcp", "role": self.config.instance}
+        if self.config.client_id is not None:
+            payload.update(client_id=self.config.client_id, bot_id=self.config.bot_id)
+        return payload
 
     def call_tool(self, name: str, arguments: object) -> dict[str, Any]:
         """Execute one exposed tool with fixed authority and safe failures."""
@@ -361,6 +392,21 @@ class GrokbotAdapter:
         except (ValueError, OSError):
             journal_tool_call(name, arguments, "refused", None)
             raise AdapterError() from None
+        if self.config.client_id is not None and name in {
+            "grokbot_queue_claim",
+            "grokbot_queue_renew",
+            "grokbot_queue_start",
+            "grokbot_queue_complete",
+            "grokbot_queue_fail",
+            "grokbot_queue_ack_cancel",
+        }:
+            # Hub attribution comes from the authenticated mutation's projection.
+            actor = (
+                result.get("claimant_node") if grokbot_jobs.hub_authority(self.config.target) else self.config.bot_id
+            )
+            if not isinstance(actor, str):
+                raise AdapterError()
+            result = {**result, "bot_id": actor}
         journal_tool_call(name, arguments, "ok", None)
         return result
 
@@ -826,7 +872,9 @@ def build_listener_config(
     bearer_file: Path | None,
     bearer_env: str | None,
     lease_seconds: int | None = None,
+    client_id: str | None = None,
 ) -> ListenerConfig:
+    validate_client_id(client_id)
     host, port = parse_bind(bind)
     config = ListenerConfig(
         target=target.expanduser().resolve(),
@@ -838,6 +886,7 @@ def build_listener_config(
         bearer=load_bearer(bearer_file=bearer_file, bearer_env=bearer_env),
         hub_token=load_hub_token(instance=instance),
         lease_seconds=lease_seconds if lease_seconds is not None else load_lease_seconds(instance=instance),
+        client_id=client_id,
     )
     config.validate()
     return config
