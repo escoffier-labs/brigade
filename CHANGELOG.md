@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Command Deck adds a read-only Worklore task page with bounded cursor pagination, plain stored fields and reference summaries, explicit truncation, and existing dashboard authentication. (#1609)
+
 - `fleet dot report` validates bounded metadata offline by default and publishes explicitly reported cloud presence only with node authentication. Holder reports append fenced Worklore ownership events without changing task fields or lifecycle. Session cloud context adds schema 24 while preserving local snapshots. (#1606)
 
 - Grok Bot role listeners accept optional `--client-id` across setup, serve, doctor, canary, and service rendering. Same-role clients use separate validated config paths, service names, and local lease identities. Hub-backed clients must match their credential-authenticated node ID. Legacy role-only configurations and tool inventories remain unchanged.

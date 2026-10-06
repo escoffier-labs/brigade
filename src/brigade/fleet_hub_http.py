@@ -31,6 +31,8 @@ from . import fleet_hub_status
 from . import fleet_model_inventory
 from . import fleet_policy_page
 from . import fleet_repo_policy_page
+from . import fleet_work_page
+from .worklore_validate import WorkloreValidationError
 from .fleet_hub import (
     DASHBOARD_COOKIE,
     DASHBOARD_COOKIE_MAX_AGE,
@@ -822,6 +824,39 @@ def make_handler(
             )
             self._send_html(status, page, nonce=nonce)
 
+        def _serve_work(self, query: str) -> None:
+            plain = "text/plain; charset=utf-8"
+            if not worklore_http.enabled():
+                self._send_html(404, "Not found.\n", content_type=plain)
+                return
+            authorized, _editable = self._roster_auth()
+            if not authorized:
+                self._send_html(
+                    401,
+                    "Unauthorized: use brigade fleet enroll for read-only dashboard access.\n",
+                    content_type=plain,
+                )
+                return
+            try:
+                cursor = fleet_work_page.parse_query(query)
+            except ValueError:
+                self._send_html(400, "Invalid Worklore page query.\n", content_type=plain)
+                return
+            try:
+                conn = open_db(Path(db_path))
+                try:
+                    page = fleet_work_page.load_page(conn, cursor=cursor)
+                finally:
+                    conn.close()
+            except (ValueError, WorkloreValidationError):
+                self._send_html(400, "Invalid Worklore page cursor.\n", content_type=plain)
+                return
+            except (FleetHubError, sqlite3.Error):
+                self._send_html(500, "Worklore task store unavailable.\n", content_type=plain)
+                return
+            nonce = secrets.token_urlsafe(16)
+            self._send_html(200, fleet_work_page.render(page, nonce=nonce, now=datetime.now(timezone.utc)), nonce=nonce)
+
         def _serve_roster(self, query: str) -> None:
             plain = "text/plain; charset=utf-8"
             params = parse_qs(query, keep_blank_values=False)
@@ -1126,6 +1161,9 @@ def make_handler(
                 return
             if path == "/deck/policy":
                 self._serve_policy_page(query)
+                return
+            if path == "/deck/work":
+                self._serve_work(query)
                 return
             if path == "/" or path in ("/deck", "/deck/repos") or path.startswith("/deck/"):
                 self._serve_deck(path, query)

@@ -1534,6 +1534,9 @@ _STYLE = (
 .tile-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; margin: 10px 0 0; color: var(--muted); font-size: 12px; }
 .tile-facts dt { color: var(--muted); }
 .tile-facts dd { min-width: 0; margin: 0; }
+.work-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.work-item h2, .work-item li { overflow-wrap: anywhere; }
+.work-item h3 { margin-top: 16px; }
 .claim, .collision { margin: 10px 0 0; font-size: 12px; }
 .collision { color: var(--signal); font-weight: 800; }
 .dashboard-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 16px; margin-top: 16px; }
@@ -1600,7 +1603,7 @@ def render_deck(view: DeckView, *, nonce: str, now: datetime) -> str:
         '<header class="masthead"><div><p class="eyebrow">Fleet operations</p><h1>Command Deck</h1>',
         f'<p class="verdict">{_esc(verdict)}</p></div><p class="header-meta">'
         f"{total_busy}/{total_capacity} slots busy<br>{_esc(_stamp(now))}</p></header>",
-        '<nav class="deck-nav" aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> <a href="/view/machines">machines board</a></nav>',
+        '<nav class="deck-nav" aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> <a href="/deck/work">work</a> <a href="/view/machines">machines board</a></nav>',
     ]
     if not view.stations:
         parts.append(
