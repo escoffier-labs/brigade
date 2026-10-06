@@ -284,7 +284,7 @@ Assert both response and authoritative row/fence after each interleaving.
 | --- | --- |
 | Original POST delayed beyond timeout/cancel | Cancel free `k` to `k+1`, then deliver original acquire expecting `k`. It is stale, no row exists, fence stays `k+1`. |
 | Unseen cancellation versus competing attempt | Delay unseen `A` and competing `B` after both inspect free `k`, using different holders and request IDs. Cancel `A` to `k+1`. Both pending acquires are stale without row or fence mutation. `B` must inspect `k+1` and create a fresh attempt to acquire tenure `k+2`, which survives replayed cancel `A`. If `B` commits at `k+1` before cancel `A`, its different origin remains untouched. |
-| Unknown outcome after acquire commit | Commit `A` at `k+1`, drop response, cancel `A`. Row is removed, fence becomes `k+2`. Late reply cannot admit work. |
+| Unknown outcome after acquire commit | Commit `A` at `k+1`, drop response, then cancel `A` both while live and after exact tenure expiry without retirement. In both cases the matching row is removed, fence becomes `k+2` once, and replay does not advance it again. Late reply cannot admit work. |
 | Unknown outcome after cancel commit | Drop cancel response, replay cancel and original POST. No extra fence advance and no resurrection. |
 | Same-holder retry/reacquire | Exact live retry returns identical tenure without TTL extension. Different attempt or changed arguments fails. Fresh acquire after ending tenure survives old cancel/renew/release. |
 | Simultaneous conductors | Two connections inspect `k`, race CAS, and yield one tenure only. Include same-holder/different-attempt collision. |
