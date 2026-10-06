@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Node identities accept optional offline `center_url` metadata without changing default initialization or machine authority. Invalid values suppress links and preserve identity. A bounded URL validator and escaped `Open Center` renderer provide a preparatory boundary. Reporting, Hub persistence, and card wiring remain open. (#1495)
+
 - `fleet dot report` validates bounded metadata offline by default and publishes explicitly reported cloud presence only with node authentication. Holder reports append fenced Worklore ownership events without changing task fields or lifecycle. Session cloud context adds schema 24 while preserving local snapshots. (#1606)
 
 - Grok Bot role listeners accept optional `--client-id` across setup, serve, doctor, canary, and service rendering. Same-role clients use separate validated config paths, service names, and local lease identities. Hub-backed clients must match their credential-authenticated node ID. Legacy role-only configurations and tool inventories remain unchanged.

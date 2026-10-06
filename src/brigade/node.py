@@ -10,12 +10,13 @@ from __future__ import annotations
 import json
 import socket
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 from . import localio, toml_compat as tomllib
+from .fleet_center_links import CenterURLStatus, center_url_status, validate_center_url
 
 NODE_REL_PATH = Path(".brigade") / "node.toml"
 SHORT_ID_LEN = 8
@@ -31,19 +32,30 @@ class NodeIdentity:
     hostname: str
     roles: tuple[str, ...]
     platform: str
+    center_url: str | None = None
+    center_url_status: CenterURLStatus = field(init=False, default="unset")
+
+    def __post_init__(self) -> None:
+        # Optional metadata must never make an otherwise valid identity unavailable.
+        object.__setattr__(self, "center_url_status", center_url_status(self.center_url))
+        object.__setattr__(self, "center_url", validate_center_url(self.center_url))
 
     @property
     def short_id(self) -> str:
         return short_node_id(self.node_id)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "node_id": self.node_id,
             "hostname": self.hostname,
             "roles": list(self.roles),
             "platform": self.platform,
             "short_id": self.short_id,
         }
+        if self.center_url_status != "unset":
+            payload["center_url"] = self.center_url
+            payload["center_url_status"] = self.center_url_status
+        return payload
 
 
 def node_path(target: Path) -> Path:
@@ -107,6 +119,7 @@ def _parse_identity(payload: dict[str, Any]) -> NodeIdentity:
         hostname=hostname.strip(),
         roles=_parse_roles(payload.get("roles")),
         platform=platform.strip(),
+        center_url=payload.get("center_url"),
     )
 
 
@@ -197,4 +210,8 @@ def run(*, target: Path, json_output: bool = False) -> int:
     print(f"hostname: {identity.hostname}")
     print(f"platform: {identity.platform}")
     print(f"roles: {', '.join(identity.roles) if identity.roles else '(none)'}")
+    if identity.center_url_status == "configured":
+        print(f"center_url: {identity.center_url} (configured; unverified)")
+    elif identity.center_url_status == "invalid":
+        print("center_url: (invalid; link suppressed)")
     return 0
