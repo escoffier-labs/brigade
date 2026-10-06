@@ -155,6 +155,55 @@ def test_reruns_preserve_attempts_dedupe_and_require_independent_confirmation():
     assert {(r["run_id"], r["run_attempt"]) for r in result["runs"]} == {(11, 1), (11, 2)}
 
 
+@pytest.mark.parametrize(
+    "field,boolean,integer",
+    [
+        ("pull_requests", {"number": True}, {"number": 1}),
+        ("jobs", {"metadata": {"enabled": False}}, {"metadata": {"enabled": 0}}),
+    ],
+)
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("cross_page", [False, True])
+def test_nested_boolean_and_integer_duplicates_quarantine_the_entire_identity(
+    field, boolean, integer, reverse, cross_page
+):
+    rows = [run(**{field: [boolean]}), run(**{field: [integer]})]
+    if reverse:
+        rows.reverse()
+    if cross_page:
+        transport = FixtureGet(rows[:1], total=2, overrides={(RUNS, 2): {"total_count": 2, "workflow_runs": rows[1:]}})
+        limits = api().Limits(per_page=1, max_pages=2)
+    else:
+        transport = FixtureGet(rows, total=1)
+        limits = api().Limits()
+    result = collect(transport, confirmations=confirmations((11, 1)), limits=limits)
+    assert result["runs"] == []
+    assert result["current_head_identities"] == []
+    assert result["quarantined"] == [
+        {
+            "run_id": 11,
+            "run_attempt": 1,
+            "reason": "conflicting-identity",
+            "applicability": "unknown",
+            "observed_at": OBSERVED,
+        }
+    ]
+    assert result["duplicate_objects"] == 1
+    assert not result["complete"] and "conflicting-identity" in result["incomplete_reasons"]
+    assert [path for path, _, _ in transport.calls] == [WORKFLOW, RUNS] + ([RUNS] if cross_page else [])
+
+
+def test_identical_duplicate_with_reordered_nested_keys_remains_deduplicated():
+    row = run(pull_requests=[{"number": 1, "head": {"sha": HEAD, "ref": "topic"}}])
+    reordered = json.loads(json.dumps(row, sort_keys=True))
+    result = collect(FixtureGet([row, reordered], total=1), confirmations=confirmations((11, 1)))
+    assert len(result["runs"]) == 1
+    assert result["current_head_identities"] == [f"github-actions:{REPOSITORY}:11:1"]
+    assert result["duplicate_objects"] == 1
+    assert result["quarantined"] == []
+    assert result["complete"] and result["incomplete_reasons"] == []
+
+
 def test_delayed_stale_head_and_conflicting_identity_cannot_restore_current_coverage():
     result = collect(
         FixtureGet([run(), run(12, head_sha=OLD)]),

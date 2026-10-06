@@ -384,7 +384,8 @@ def collect_actions(
             quarantine(row, "run-identity-mismatch")
         elif identity in rows:
             duplicates += 1
-            if rows[identity] != row:
+            # JSON preserves boolean/integer distinctions that Python equality loses.
+            if json.dumps(rows[identity], sort_keys=True) != json.dumps(row, sort_keys=True):
                 conflicts.add(identity)
                 reader.reason("conflicting-identity", source)
         else:
