@@ -224,11 +224,16 @@ def _dedupe(rows: list[dict[str, Any]], source: dict[str, Any]) -> list[dict[str
     return list(seen.values())
 
 
+def _utc_time(value: str) -> datetime:
+    """Read normalized UTC timestamps on every supported Python version."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def _time(value: object, observed: str, source: dict[str, Any]) -> str | None:
     parsed = _timestamp(value)
     if value is not None and parsed is None:
         _reason(source, "malformed-timestamp")
-    if parsed is not None and datetime.fromisoformat(parsed) > datetime.fromisoformat(observed):
+    if parsed is not None and _utc_time(parsed) > _utc_time(observed):
         _reason(source, "future-timestamp")
         return None
     return parsed
@@ -336,7 +341,7 @@ def collect_managed_review(
         if (
             record["started_at"] is not None
             and record["completed_at"] is not None
-            and datetime.fromisoformat(record["completed_at"]) < datetime.fromisoformat(record["started_at"])
+            and _utc_time(record["completed_at"]) < _utc_time(record["started_at"])
         ):
             _reason(source, "contradictory-timestamps")
         bad_time = any(row.get(key) is not None and record[key] is None for key in ("started_at", "completed_at"))
@@ -378,7 +383,7 @@ def collect_managed_review(
             if c["reviewed_head"] == record["reviewed_head"]
             and c["started_at"] is not None
             and record["started_at"] is not None
-            and datetime.fromisoformat(c["started_at"]) > datetime.fromisoformat(record["started_at"])
+            and _utc_time(c["started_at"]) > _utc_time(record["started_at"])
         ]
         peers = [c for c in checks if c["reviewed_head"] == record["reviewed_head"]]
         if record["started_at"] is not None and all(c["started_at"] is not None for c in peers):
@@ -388,8 +393,8 @@ def collect_managed_review(
         if newer:
             record["current_findings_known"] = False
             record["current_zero_findings"] = False
-            earliest = min(datetime.fromisoformat(c["started_at"]) for c in newer)
-            candidates = [c for c in newer if datetime.fromisoformat(c["started_at"]) == earliest]
+            earliest = min(_utc_time(c["started_at"]) for c in newer)
+            candidates = [c for c in newer if _utc_time(c["started_at"]) == earliest]
             if len(candidates) == 1:
                 record["superseded_by"] = candidates[0]["check_id"]
     for record in checks:

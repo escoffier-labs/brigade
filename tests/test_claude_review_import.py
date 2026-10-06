@@ -144,6 +144,44 @@ def test_reruns_duplicates_and_late_old_completion_preserve_coverage():
     assert result["sources"][0]["duplicate_objects"] == 1
 
 
+def test_collector_utc_comparisons_work_with_python310_isoformat(monkeypatch):
+    native_parse = api().datetime.fromisoformat
+
+    class Python310Datetime:
+        @staticmethod
+        def fromisoformat(value):
+            if value.endswith("Z"):
+                raise ValueError("Python 3.10 does not accept a Z suffix")
+            return native_parse(value)
+
+    monkeypatch.setattr(api(), "datetime", Python310Datetime)
+    earlier = check(10, completed_at="2026-01-02T23:00:00Z")
+    newer = check(11, started_at="2026-01-02T00:00:00Z", status="in_progress", completed_at=None)
+    result = collect(
+        FixtureGet(
+            {
+                (CHECKS, 1): {"total_count": 2, "check_runs": [earlier, newer]},
+                (REVIEWS, 1): [
+                    {"id": 60, "state": "COMMENTED", "commit_id": OLD, "submitted_at": "2026-01-02T00:00:00Z"}
+                ],
+                (COMMENTS, 1): [
+                    {
+                        "id": 40,
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "updated_at": "2026-01-04T00:00:00Z",
+                    }
+                ],
+            }
+        )
+    )
+    assert result["checks"][0]["superseded_by"] == 11
+    assert result["checks"][1]["started_at"] == "2026-01-02T00:00:00Z"
+    assert result["reviews"][0]["submitted_at"] == "2026-01-02T00:00:00Z"
+    assert result["comments"][0]["created_at"] == "2026-01-01T00:00:00Z"
+    assert result["comments"][0]["updated_at"] is None
+    assert "issue-comments:future-timestamp" in result["incomplete_reasons"]
+
+
 def test_annotation_ordinals_and_duplicate_representations_remain_ambiguous():
     inline = {
         "id": 50,
