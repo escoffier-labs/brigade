@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Managed Claude review timestamp comparisons accept normalized UTC timestamps on Python 3.10, retaining stale, superseded and future-timestamp uncertainty. (#1601)
 - Claude cloud register/adopt accepts explicit session and repository bindings with local replay/conflict checks. Unsupported provider lifecycle remains unknown separately from GitHub artifact landing, local continuation and lease evidence. (#1600)
+- Local worker preflight preserves bounded model-seat denial reasons for disabled seats and exhausted capacity, and identifies the selected provider. Unknown remote errors remain generic, with admission and fenced lease behavior unchanged. (#1573)
 - Roster and policy forms preserve retired role assignments and admission defaults during unrelated edits and repeated previews. Operators can clear or replace them, while retired seats remain unavailable as new choices. (#1580)
 - Fleet model lists and roster-page seat tables and selectors exclude retired seats, while separate retirement history and signed admission identities remain available. Retired seats can be disabled safely, and re-enabling stays blocked without deleting run or audit records. (#1571)
 - Bound Windows journal sibling locks request read/write data rights without DELETE, so CRT producers can open the same empty lock file in either order. Required native acceptance now exercises both two-process orders.

@@ -1501,7 +1501,15 @@ def _handle_lease(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None
             or not bool(policy["enabled"])
         ):
             conn.commit()
-            return 409, {"acquired": False, "error": "model policy denied lease"}
+            denial: dict[str, Any] = {"acquired": False, "error": "model policy denied lease"}
+            if (
+                policy is not None
+                and str(policy["provider"]) == request["provider"]
+                and request["model"] == canonical_model
+                and not bool(policy["enabled"])
+            ):
+                denial["reason_code"] = "seat-disabled"
+            return 409, denial
         if launch_model and launch_model not in allowed_models and launch_model != canonical_model:
             conn.commit()
             return 409, {"acquired": False, "error": "model policy denied lease"}
@@ -1570,7 +1578,11 @@ def _handle_lease(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None
             ).fetchone()[0]
         if limit is not None and int(used) >= int(limit):
             conn.commit()
-            return 409, {"acquired": False, "error": "model policy capacity is exhausted"}
+            return 409, {
+                "acquired": False,
+                "error": "model policy capacity is exhausted",
+                "reason_code": "seat-capacity-exhausted",
+            }
         seat_record = {}
         if _authority_active(conn):
             from . import fleet_hub_policy as _policy
