@@ -146,21 +146,30 @@ owner read after commit.
 
 ### Unknown-outcome cancellation
 
-Proposed `cancel_acquire(expected_generation, holder)` must also carry the full
-attempt `A`, including `request_id`. It uses the originating authenticated node,
-not a holder-only operator shortcut. After epoch validation, without retiring
-unrelated expiry:
+Proposed `cancel_acquire(A)` requires the full immutable origin: epoch, target,
+expected generation, authenticated node, holder, and request ID. The authenticated
+caller must equal `A.authenticated_node`. Validate that identity and the full
+origin before any mutation. After epoch validation, without retiring unrelated
+expiry:
 
 1. If the target is free at exactly `g=A.expected`, increment once and commit a
-   free tombstone. The delayed original CAS can no longer succeed.
+   free tombstone. The delayed original CAS and every other in-flight acquire
+   based on that generation become stale, even with a different holder or
+   request ID. Those clients must inspect again and create fresh attempts.
 2. If the v2 row is exactly tenure `A.expected+1` with matching full origin
    `A` and holder, delete it and increment once. This covers an acquire committed
    before its response was lost.
 3. If neither case applies to an otherwise valid state, acknowledge
    `cancel-resolved` without mutation. Newer tenures, legacy rows, and
    different-holder or different-attempt rows remain untouched, even if expired.
-   A future
-   expected generation (`A.expected > g`) is invalid, not cleanup success.
+   A future expected generation (`A.expected > g`) is invalid, not cleanup success.
+
+Case 1 provides generation-scoped invalidation. The Hub has no record of unseen
+requests, so it cannot selectively invalidate only `A`. Exact unseen-attempt
+isolation would require a separate durable attempt-registration design, which
+this proposal does not provide. Case 2 remains exact and selective to the
+committed matching tenure. Neither case cancels an already committed unrelated
+or newer tenure.
 
 A live row at `g=A.expected` also remains untouched: it blocks the original
 acquire now, and ending it must advance the fence before acquire can succeed.
@@ -216,6 +225,18 @@ still create an unprotected legacy orphan. Its fence advancement protects stale
 v2 requests only. It does not fix the original legacy race or extend v2 cleanup
 to legacy attempts.
 
+Legacy requests carry no generation, so shared fence advancement does not make
+legacy-to-legacy mutations tenure-specific. A delayed renew can extend a later
+live legacy row with the same target, node, and holder. A delayed holder release
+can delete a later row with those same identities. Force release without
+`acquired_at` can delete whichever legacy row holds the target when it executes.
+Node release still requires matching owner node and inspected `acquired_at`.
+It can affect a later legacy row only if those legacy conditions also match,
+including a reused timestamp. These matching conditions remain the legacy
+boundary. The proposed shared fence protects v2 expected-generation requests,
+and tag refusals protect v2 rows, but neither solves these legacy exposures or
+late-acquire orphans.
+
 ## Retention, restore, and capability decisions
 
 Keep per-target fences/tombstones indefinitely within an epoch, including free
@@ -262,6 +283,7 @@ Assert both response and authoritative row/fence after each interleaving.
 | Fixture | Required evidence |
 | --- | --- |
 | Original POST delayed beyond timeout/cancel | Cancel free `k` to `k+1`, then deliver original acquire expecting `k`. It is stale, no row exists, fence stays `k+1`. |
+| Unseen cancellation versus competing attempt | Delay unseen `A` and competing `B` after both inspect free `k`, using different holders and request IDs. Cancel `A` to `k+1`. Both pending acquires are stale without row or fence mutation. `B` must inspect `k+1` and create a fresh attempt to acquire tenure `k+2`, which survives replayed cancel `A`. If `B` commits at `k+1` before cancel `A`, its different origin remains untouched. |
 | Unknown outcome after acquire commit | Commit `A` at `k+1`, drop response, cancel `A`. Row is removed, fence becomes `k+2`. Late reply cannot admit work. |
 | Unknown outcome after cancel commit | Drop cancel response, replay cancel and original POST. No extra fence advance and no resurrection. |
 | Same-holder retry/reacquire | Exact live retry returns identical tenure without TTL extension. Different attempt or changed arguments fails. Fresh acquire after ending tenure survives old cancel/renew/release. |
@@ -271,7 +293,8 @@ Assert both response and authoritative row/fence after each interleaving.
 | Stale node/force recovery | Every v2 scope with stale holder or tenure leaves the newer row/fence unchanged, including expired unretired rows. Missing exact credentials refuses recovery. |
 | Legacy/v2 collision and refusal | Both acquire orders, legacy supersede, holder/node/force delete, matching secret, and expired unretired v2 row obey tag refusal. |
 | Legacy fence advancement | New tenure, missing/positive release, supersede, and expiry advance fences. Replay delayed legacy acquire: orphan remains possible, stale v2 CAS fails. |
-| Cancellation provenance | Cancel a different holder/attempt or a newer same-holder row without mutation, including expired unretired rows. Future expected generation is invalid. All replay orders remain idempotent. |
+| Legacy delayed mutation limits | Delay renew and holder release from an ended legacy tenure, then create a later live legacy row with the same target/node/holder. Renew can extend it without changing its generation, and holder release can delete it and advance the fence. Separately replay force release without `acquired_at` against a later legacy row: it can delete that row and advance the fence. Node release refuses a changed inspected timestamp but can delete a later same-node row if the timestamp is reused. Assert these remaining exposures and that stale v2 CAS fails after fence advancement. |
+| Cancellation provenance | Refuse an authenticated caller differing from `A.authenticated_node` or an incomplete origin without mutation. Cancel `A` against a different committed holder/attempt or a newer same-holder row without mutation, including expired unretired rows. Future expected generation is invalid. All replay orders remain idempotent. |
 | Crash/commit failure | Rollback leaves row and fence together. Failure after commit is resolved by exact retry/cancel, never speculative reacquisition. |
 | Retention and restore epochs | Long-delayed requests after retirement fail. Restore of old state refuses until verified new epoch. Old epoch and generation exhaustion produce zero mutations. |
 | Old Hub and malformed capability | Fake legacy-only server returns 404, missing/malformed/unsupported capability, or misleading 0.28.0/schema metadata. Observe zero claim POSTs, zero claim writes, and refused admission. |
@@ -279,8 +302,8 @@ Assert both response and authoritative row/fence after each interleaving.
 Future acceptance requires this matrix, malformed-field/authentication checks,
 sanitized protocol/epoch/generation listing, and proof that every legacy writer
 and expiry path uses the shared fence transaction. Demonstrate unknown-outcome
-cleanup independently of any fixed network-delay window. Verify no downgrade,
-same-holder ABA, cross-version deletion, or post-commit response substitution.
+cleanup independently of any fixed network-delay window. Verify no v2 downgrade,
+v2 same-holder ABA, cross-version deletion, or post-commit response substitution.
 Implementation gates and independent current-diff review remain required.
 Production acceptance also requires the operator's epoch/restore contract and
 rollout decision. None of this acceptance is completed here, including native
@@ -296,7 +319,7 @@ Windows behavior.
    in `tests/test_fleet_claims.py`. If `fleet_hub_claims.py` has been extracted by
    then, rebase ownership onto that module instead of duplicating authority.
 3. After the Hub contract, the client owner covers `fleet_client.py`,
-   `fleet_claim_lifecycle.py`, exact attempt cleanup and fail-closed admission,
+   `fleet_claim_lifecycle.py`, cancellation by `A` and fail-closed admission,
    with `tests/test_fleet_client_hardening.py` and relevant claim tests. CLI/run
    ownership covers `cli/fleet.py`, `cli/run.py`, generation display and exact
    recovery, with `tests/test_fleet_claim_release.py` and display fixtures.
