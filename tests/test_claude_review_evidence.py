@@ -89,6 +89,7 @@ def test_documented_marker_counts(text, counts):
         "é" * 40000 + ZERO,
         "\ud800" + ZERO,
     ],
+    ids=lambda text: f"{type(text).__name__}-{len(text) if isinstance(text, str) else 'non-text'}",
 )
 def test_unknown_output_never_becomes_zero(text):
     parsed = parse_severity_marker(text)
