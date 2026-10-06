@@ -29,7 +29,7 @@ class ClaudeCloudIdentity:
 
 
 def normalize_claude_cloud_identity(value: str) -> ClaudeCloudIdentity:
-    """Accept a documented ID prefix or an exact-authority HTTPS session URL.
+    """Accept a documented ID prefix, HTTPS URL, or literal scheme-less URL.
 
     Suffixes contain 1..128 ASCII letters, digits, underscores or hyphens.
     Inputs contain at most 4096 printable ASCII characters without whitespace.
@@ -47,6 +47,9 @@ def normalize_claude_cloud_identity(value: str) -> ClaudeCloudIdentity:
 
     if _SESSION_ID.fullmatch(value):
         return ClaudeCloudIdentity(session_id=value)
+
+    if value.startswith("claude.ai/code/"):
+        value = "https://" + value
 
     try:
         parsed = urlsplit(value)

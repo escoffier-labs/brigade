@@ -13,6 +13,7 @@ def test_bare_id_and_url_normalize_to_one_immutable_identity(session_id):
     assert identity.session_id == session_id
     assert identity.url == f"https://claude.ai/code/{session_id}"
     assert identity == normalize_claude_cloud_identity(identity.url)
+    assert identity == normalize_claude_cloud_identity(f"claude.ai/code/{session_id}")
     assert identity == normalize_claude_cloud_identity(identity.url + "?from=cli&m=0#fixture")
     assert identity == normalize_claude_cloud_identity(identity.url + "#fixture?from=cli")
     with pytest.raises(FrozenInstanceError):
@@ -45,7 +46,6 @@ def test_accepts_validator_suffix_boundaries(prefix, suffix):
         "session_fixture#fragment",
         "http://claude.ai/code/cse_fixture",
         "ftp://claude.ai/code/cse_fixture",
-        "claude.ai/code/cse_fixture",
         "//claude.ai/code/cse_fixture",
         "https://claude.ai.example/code/cse_fixture",
         "https://example.invalid/code/cse_fixture",

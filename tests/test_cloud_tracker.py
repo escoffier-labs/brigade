@@ -1136,7 +1136,8 @@ def test_local_claude_session_cannot_make_claude_cloud_registry_row_active(monke
     )
     row = next(r for r in payload["entries"] if r["task_id"] == "sess-claude-1")
     assert row["provider_state"] is None
-    assert row["classification"] == "pending"
+    assert row["classification"] == "needs-investigation"
+    assert row["provider_lifecycle"]["state"] == "unknown"
 
 
 def test_status_payload_does_not_leak_claude_cwd_or_prompt_text(monkeypatch, tmp_path: Path, capsys):
