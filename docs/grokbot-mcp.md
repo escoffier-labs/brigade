@@ -12,6 +12,44 @@ The package contains the adapter source, but it does not turn the Brigade CLI in
 
 ## Role setup and checks
 
+### Multiple clients in one role
+
+Role listeners accept optional `--client-id` on `setup`, `serve`, `doctor`,
+`canary`, and `install-service`. Use 1 to 64 lowercase ASCII letters or digits,
+with single hyphens between nonempty groups, such as `alpha` or `beta`.
+Whitespace, separators, dots, uppercase letters, and path traversal are refused.
+The option applies to queue roles, not connector packs.
+Lowercase UUID node IDs fit this bound. Even with the longest role prefix,
+the resulting local lease identity stays below the queue's 128-character limit.
+
+For `implementation-worker --client-id alpha`, setup writes
+`.brigade/grokbot/implementation-worker-alpha.json`, unit rendering uses
+`brigade-grokbot-implementation-worker-alpha.service`, and local queue leases
+belong to `grokbot-implementation-worker-alpha`. A `beta` client gets separate
+config and unit files and cannot use alpha's leases. Use separate listener
+ports and bearer references for each process. Rendered units carry `--client-id`
+back into `serve`. Every diagnostic command must select the same identifier.
+Namespaced setup is idempotent for identical settings and refuses replacement
+with different settings. Config contents must match their selected role and
+client. Unit replacement still requires the existing `--force` policy.
+
+Hub-backed deployments must use an identifier equal to the node ID authenticated
+by their enrolled listener credential. Named listeners request the read-only hub
+`whoami` option `include_node_id: true` to obtain that node ID. The option accepts
+only a boolean and only on `whoami`. Default requests and responses retain their
+legacy shape. A missing or mismatched ID refuses the listener, including
+against an older hub that cannot return it. Distinct clients therefore need
+distinct enrolled node credentials with the existing role and queue policy.
+The hub continues to derive attribution and authority from credentials, never
+from tool arguments. Opted-in lifecycle responses include `bot_id`, using the
+local lease identity or the hub's authenticated `claimant_node`. Health includes
+`client_id` and `bot_id`. Canary refuses a same-role endpoint for another client.
+
+Omitting the option preserves the existing role-only config paths, service
+names, listener identity, health payload, and tool inventories. Existing configs
+without `client_id` remain valid. This option does not change actor enrollment,
+permissions, enqueue authority, endpoint binding, or shared queue storage.
+
 Run these commands from the local Brigade target. Each example uses a distinct loopback port and a separate protected token file. Create each token file through your secret-management process with permissions limited to the service account. The `setup` command stores only the file reference, never the bearer value.
 
 The `install-service` commands below render a systemd unit to standard output. They do not write a unit because they omit `--out`. Review the rendered unit before installing it through the host's normal service-management process. `canary` makes bounded authenticated requests to the running listener and checks anonymous rejection plus the exact role tool inventory. The Obsidian Operator canary also calls non-mutating `obsidian_capabilities` and requires a valid Phase 1 projection (`phase` remains `phase1`). A live matching private adapter can register private CAS tools against Local REST v2 `addMcpTool` because the checked-in plugin bundles pinned Zod 3.25.76 and passes a real `{path, expected_sha256, replacement_utf8}` shape; capabilities still stay Phase 1 until that live fingerprint is observed. It does not mutate the queue and does not cut over live services.

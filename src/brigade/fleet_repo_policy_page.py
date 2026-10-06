@@ -376,7 +376,7 @@ def render(
         '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
         "<h1>Command Deck &middot; Repos</h1></div>"
         f'<p class="header-meta">{_esc(fleet_command_deck._stamp(now))}</p></header>'
-        '<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> '
+        '<nav class="deck-nav" aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> '
         '<a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> '
         '<a href="/view/machines">machines board</a></nav>'
         '<section class="panel" aria-labelledby="repo-policy"><header>'

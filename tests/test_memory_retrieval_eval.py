@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_memory_proposal_capabilities import SAFE_DIRECTORY_CAPABILITY
+
 from brigade.memory_retrieval_eval import DEFAULT_FIXTURE_ROOT, run_eval
 from brigade.memory_retrieval_eval import __main__ as eval_main
 from brigade.memory_retrieval_eval.adapters import grep_adapter, tokenize
@@ -544,3 +546,78 @@ def test_quality_missing_projection_rows_are_unavailable_without_wish_vocab(tmp_
     assert report["projection_drift"]["available"] is False
     assert "projection_items" not in str(report)
     assert report["scope_leakage"]["available"] is False
+
+
+@pytest.mark.skipif(not SAFE_DIRECTORY_CAPABILITY, reason="safe directory descriptors unavailable")
+@pytest.mark.parametrize("workflow", ["accepted", "rejected", "stale", "contradictory", "cross-scope"])
+def test_reviewed_proposal_actual_current_retrieval(tmp_path, workflow):
+    from brigade import memory_proposals as api
+    from brigade.card_identity import IdentityIndex, card_identity
+    from brigade.memory_cmd import _parse_frontmatter
+    from brigade.memory_retrieval_eval.adapters import current_adapter
+    from brigade.memory_retrieval_eval.corpus import QuerySpec
+    from tests.test_memory_proposals import CURRENT_ID, LOSER, OLD_ID, SURVIVOR, pair_target
+
+    issue = pair_target(tmp_path, opposite=workflow in ("accepted", "contradictory"))
+    search = current_adapter(tmp_path)
+    before = search("juniper maple cedar", 10)
+    raw_before = {p: (tmp_path / p).read_bytes() for p in (SURVIVOR, LOSER, "MEMORY.md")}
+    if workflow == "cross-scope":
+        path = tmp_path / LOSER
+        path.write_text(path.read_text().replace("---\n", "---\nscope: another-task\n", 1))
+        raw_before[LOSER] = path.read_bytes()
+    if workflow in ("cross-scope", "contradictory"):
+        with pytest.raises(api.ProposalError):
+            api.create_payload(
+                target=tmp_path,
+                issue_id=issue,
+                survivor=SURVIVOR,
+                relation="merge",
+                reason="Inspect both source revisions.",
+            )
+    else:
+        proposal = api.create_payload(
+            target=tmp_path,
+            issue_id=issue,
+            survivor=SURVIVOR,
+            relation="supersede",
+            reason="Keep current cache assertion.",
+        )
+        if workflow == "rejected":
+            api.reject_payload(
+                target=tmp_path,
+                proposal_id=proposal["id"],
+                digest=proposal["digest"],
+                reason="Reject the proposed replacement.",
+            )
+        else:
+            api.review_payload(
+                target=tmp_path,
+                proposal_id=proposal["id"],
+                digest=proposal["digest"],
+                reason="Accept exact replacement.",
+            )
+        if workflow == "stale":
+            path = tmp_path / SURVIVOR
+            path.write_bytes(raw_before[SURVIVOR] + b"\nMetadata-free later source edit.\n")
+            raw_before[SURVIVOR] = path.read_bytes()
+        if workflow == "accepted":
+            assert (
+                api.apply_payload(target=tmp_path, proposal_id=proposal["id"], digest=proposal["digest"])["status"]
+                == "committed"
+            )
+            cards = load_cards(tmp_path)
+            assert [card.card_id for card in cards] == [CURRENT_ID]
+            assert search("cedar assertion", 10)[0][0] == CURRENT_ID
+            assert search("juniper", 10) == []
+            assert validate_gold(cards, [QuerySpec("old-id", "cedar", (OLD_ID, LOSER, "previous"), "exact")]) == []
+            frontmatter, _ = _parse_frontmatter((tmp_path / SURVIVOR).read_text())
+            index = IdentityIndex()
+            index.claim_identity(card_identity(frontmatter, SURVIVOR), SURVIVOR)
+            assert all(index.resolve(key) == SURVIVOR for key in (OLD_ID, LOSER, "previous"))
+            assert (tmp_path / "MEMORY.md").read_text() == f"[Previous]({SURVIVOR}#details)\n"
+            return
+        with pytest.raises(api.ProposalError):
+            api.apply_payload(target=tmp_path, proposal_id=proposal["id"], digest=proposal["digest"])
+    assert search("juniper maple cedar", 10) == before
+    assert {p: (tmp_path / p).read_bytes() for p in raw_before} == raw_before

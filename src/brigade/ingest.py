@@ -24,6 +24,7 @@ from .card_fingerprint import (
     ensure_fingerprint_frontmatter,
     find_card_match,
     index_cards,
+    read_text_nofollow,
     reinforce_existing_card,
 )
 from .handoff_content import normalize_suggested_card_content
@@ -33,6 +34,9 @@ from .untrusted import scan_untrusted
 SECTION_RE = re.compile(r"^##\s+(?P<name>.+?)\s*$", re.MULTILINE)
 SAFE_CARD_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.md$")
 SAFE_RULE_PATH_RE = re.compile(r"^rules/[A-Za-z0-9._-]+\.md$")
+_IDENTITY_MIGRATION_FIELDS = frozenset(
+    {"aliases", "merged_from", "supersedes", "memory_proposal", "memory_proposal_sources"}
+)
 SAFE_SPECIAL_TARGETS = {
     "TOOLS.md",
     "USER.md",
@@ -300,6 +304,8 @@ def decide(
     promote_cards: bool,
     route_documents: bool,
 ) -> Outcome:
+    if "memory proposal notification" in sections:
+        return Outcome("inboxed", reason="memory proposal notification requires explicit digest-bound review/apply")
     action = sections.get("recommended memory action", "").strip().lower()
 
     stray = [s for s in sections if s not in KNOWN_SECTIONS]
@@ -319,6 +325,29 @@ def decide(
             return Outcome("inboxed", reason=fence_error)
         if not content.lstrip().startswith("---"):
             return Outcome("inboxed", reason="card content missing YAML frontmatter")
+        reserved = _identity_migration_fields(content.lstrip())
+        if reserved:
+            return Outcome(
+                "inboxed",
+                reason=f"identity migration metadata requires review: {', '.join(reserved)}",
+            )
+        dest = target / "memory" / "cards" / card
+        # Both actions can replace the named path. Do not let an ordinary
+        # handoff discard reviewed migration keys, even under create-card.
+        if any(path.is_symlink() for path in (target, target / "memory", dest.parent, dest)):
+            return Outcome("inboxed", reason="card destination is symlinked; requires review")
+        if dest.exists():
+            if not dest.is_file():
+                return Outcome("inboxed", reason="card destination is not a regular file; requires review")
+            try:
+                governed = _identity_migration_fields(read_text_nofollow(dest))
+            except OSError:
+                return Outcome("inboxed", reason="cannot safely inspect card destination; requires review")
+            if governed:
+                return Outcome(
+                    "inboxed",
+                    reason=f"governed card identity migration requires review: {', '.join(governed)}",
+                )
         sig = scan_untrusted(content)
         if sig.flagged:
             return Outcome(
@@ -331,7 +360,7 @@ def decide(
             match_outcome = _decide_create_card_match(content, target=target)
             if match_outcome is not None:
                 return match_outcome
-        return Outcome("promoted", dest=target / "memory" / "cards" / card)
+        return Outcome("promoted", dest=dest)
 
     if action == "no-card" and route_documents:
         document = sections.get("target document", "").strip()
@@ -418,6 +447,91 @@ class Action:
     summary: str
 
 
+def _publish_promoted_card(dest: Path, target: Path, sections: Dict[str, str], *, dry_run: bool) -> None:
+    from contextlib import nullcontext
+    import os
+    import stat
+
+    from .card_fingerprint import write_text_nofollow_atomic
+    from .card_identity import valid_card_id
+    from .inbox_lock import held_file_lock
+
+    def parent_fence(path: Path) -> None:
+        if any(parent.is_symlink() for parent in (path.parent, *path.parents)):
+            raise OSError("publication parent is symlinked")
+
+    def inspect(path: Path) -> str | None:
+        parent_fence(path)
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise OSError("publication must be a single-link regular file")
+        text = read_text_nofollow(path)
+        if _identity_migration_fields(text):
+            raise OSError("governed destination requires review")
+        return text
+
+    lock_path = target / ".brigade/memory/proposals/proposal.lock"
+    if not dry_run:
+        parent_fence(lock_path)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # The shared helper has the established Windows fallback. Ordinary ingest
+    # does not require proposal IO's stricter directory-descriptor capability.
+    with nullcontext() if dry_run else held_file_lock(lock_path, deadline_seconds=1):
+        raw = inspect(dest)
+        content = ensure_fingerprint_frontmatter(sections.get("suggested card content", "").strip() + "\n")
+        existing, _ = _frontmatter(raw or "")
+        existing_id = valid_card_id(existing.get("id")) or valid_card_id(existing.get("card_id"))
+        content = ensure_card_id_frontmatter(content, preserve_id=existing_id)
+        if dry_run:
+            return
+        parent_fence(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        def probe(path: Path) -> int | None:
+            # The no-follow writer invokes this both before staging and at the
+            # final publish boundary. A new governed revision is never replaced.
+            if inspect(path) != raw:
+                raise OSError("publication revision changed")
+            try:
+                return path.lstat().st_mode
+            except FileNotFoundError:
+                return None
+
+        descriptor_mode = os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")
+        descriptor_base = next((base for base in (Path("/proc/self/fd"), Path("/dev/fd")) if base.is_dir()), None)
+        if descriptor_mode and descriptor_base is not None:
+            from .memory_proposal_io import directory
+
+            with directory(dest.parent) as parent:
+                bound = descriptor_base / str(parent) / dest.name
+                # Check the real parent again before using the held descriptor.
+                with directory(dest.parent) as current:
+                    a, b = os.fstat(parent), os.fstat(current)
+                    if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+                        raise OSError("publication parent changed")
+
+                # /proc/self/fd is an intentional descriptor link, so its
+                # parent check is supplied by the held directory above.
+                def descriptor_probe(path: Path) -> int | None:
+                    probe(dest)
+                    try:
+                        metadata = path.lstat()
+                    except FileNotFoundError:
+                        return None
+                    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                        raise OSError("publication leaf changed")
+                    if read_text_nofollow(path) != raw:
+                        raise OSError("publication revision changed")
+                    return metadata.st_mode
+
+                write_text_nofollow_atomic(bound, content, lstat_probe=descriptor_probe)
+        else:
+            write_text_nofollow_atomic(dest, content, lstat_probe=probe)
+
+
 def _execute(
     outcome: Outcome,
     handoff_path: Path,
@@ -427,29 +541,31 @@ def _execute(
     processed_dir: Path,
     dry_run: bool,
 ) -> Action:
+    from .inbox_lock import InboxLockTimeout
+
     name = handoff_path.name
 
     if outcome.kind == "promoted":
-        dest = outcome.dest  # type: ignore[assignment]
+        dest = outcome.dest
         assert dest is not None
-        content = sections.get("suggested card content", "").strip() + "\n"
-        content = ensure_fingerprint_frontmatter(content)
-        if dest.exists():
-            from .card_fingerprint import read_text_nofollow
-            from .card_identity import valid_card_id
-
-            existing, _ = _frontmatter(read_text_nofollow(dest))
-            existing_id = valid_card_id(existing.get("id")) or valid_card_id(existing.get("card_id"))
-            if existing_id is not None:
-                content = ensure_card_id_frontmatter(content, preserve_id=existing_id)
-        else:
-            content = ensure_card_id_frontmatter(content)
-        if not content.endswith("\n"):
-            content += "\n"
+        try:
+            _publish_promoted_card(dest, target, sections, dry_run=dry_run)
+        except InboxLockTimeout:
+            return Action("skipped", f"skip → {name} (card publication busy; retry handoff later)")
+        except (OSError, ValueError):
+            # A reviewed migration may have arrived after decide(). Route the
+            # original handoff for review without replacing that revision.
+            return _execute(
+                Outcome("inboxed", reason="card publication changed or became governed; requires review"),
+                handoff_path,
+                target,
+                sections,
+                inbox_dir,
+                processed_dir,
+                dry_run,
+            )
         summary = f"promote → {dest.relative_to(target)}  ({name})"
         if not dry_run:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(content, encoding="utf-8")
             _archive(handoff_path, processed_dir)
         return Action("promoted", summary)
 
@@ -514,6 +630,13 @@ def _frontmatter(text: str) -> tuple[dict[str, str], bool]:
             key, value = line.split(":", 1)
             fields[key.strip()] = value.strip().strip("'\"")
     return {}, False
+
+
+def _identity_migration_fields(text: str) -> list[str]:
+    fields, _ = _frontmatter(text)
+    # Quoted YAML keys carry the same authority, including empty values.
+    keys = {key.strip("'\"") for key in fields}
+    return sorted(keys & _IDENTITY_MIGRATION_FIELDS)
 
 
 def _evidence_pointer(handoff_path: Path, *, sections: Dict[str, str], target: Path) -> str:

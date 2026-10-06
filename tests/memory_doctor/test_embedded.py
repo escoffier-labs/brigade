@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from brigade.memory_doctor.lint import run as lint_run, scan_dead_links
 from brigade.memory_doctor.paths import PathConfig
 from brigade.memory_doctor.status import collect_status
@@ -46,6 +48,34 @@ def test_lint_finds_dead_wiki_link(tmp_path: Path):
     findings = scan_dead_links(mem)
     assert len(findings) == 1
     assert findings[0].link == "beta"
+
+
+@pytest.mark.parametrize("layout", ["", "cards"])
+def test_lint_resolves_migrated_aliases_but_not_colliding_keys(tmp_path: Path, layout):
+    mem = tmp_path / "memory"
+    cards = mem / layout
+    cards.mkdir(parents=True)
+    old_id = "card-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    (cards / "survivor.md").write_text(
+        "---\nid: card-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n"
+        f"aliases: ['removed', 'memory/cards/removed.md', '{old_id}']\n---\nSurvivor.\n"
+    )
+    (cards / "references.md").write_text(
+        f"See [[removed]], [[cards/removed.md]], [[memory/cards/removed.md]], [[{old_id}]], [[SURVIVOR.md]].\n"
+    )
+    assert scan_dead_links(mem) == []
+
+    (cards / "third.md").write_text(
+        "---\nid: card-cccccccc-cccc-4ccc-8ccc-cccccccccccc\naliases: ['REMOVED']\n---\nThird.\n"
+    )
+    assert {finding.link for finding in scan_dead_links(mem)} == {"removed", "removed.md"}
+
+
+def test_lint_does_not_resolve_aliases_without_stable_identity(tmp_path: Path):
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    (mem / "legacy.md").write_text("---\nid: legacy\naliases: ['removed']\n---\nSee [[removed]].\n")
+    assert [finding.link for finding in scan_dead_links(mem)] == ["removed"]
 
 
 def test_lint_exit_codes(tmp_path: Path, capsys):
