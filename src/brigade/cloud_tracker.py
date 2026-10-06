@@ -1454,7 +1454,7 @@ def observe_github(target: Path) -> dict[str, Any]:
         try:
             data = json.loads(stdout)
         except json.JSONDecodeError:
-            data = []
+            data = None
         if isinstance(data, list):
             branches_complete = len(data) < 100 and all(
                 isinstance(item, dict) and isinstance(item.get("name"), str) for item in data

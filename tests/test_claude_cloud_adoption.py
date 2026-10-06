@@ -87,6 +87,24 @@ def test_branch_absence_requires_complete_repository_scope(tmp_path, complete, e
     assert row["evidence"]["github"]["branch_exists"] is (True if exists else False if complete else None)
 
 
+@pytest.mark.parametrize("body", ["{broken", "{}", "[{}]", json.dumps([{"name": f"feature/{i}"} for i in range(100)])])
+def test_observer_never_marks_malformed_or_truncated_branch_read_complete(tmp_path, monkeypatch, body):
+    cloud_tracker.adopt(tmp_path, provider="claude-cloud", session_id="cse_fixture", repo=REPO, branch="feature/fix")
+
+    def read(argv, **kwargs):
+        if argv[:3] == ["gh", "repo", "view"]:
+            return (0, json.dumps({"nameWithOwner": REPO}), "")
+        if argv[:2] == ["gh", "api"]:
+            return (0, body, "")
+        return (0, "[]" if argv[0] == "gh" else "", "")
+
+    monkeypatch.setattr(cloud_tracker, "_run_text", read)
+    snapshot = OBSERVE_GITHUB(tmp_path)
+    assert snapshot["branches_complete"] is False
+    row = cloud_tracker.status_payload(tmp_path, github=snapshot)["entries"][0]
+    assert row["evidence"]["github"]["branch_exists"] is None
+
+
 @pytest.mark.parametrize("observed_repo", [REPO, "fixture-owner/other", None])
 @pytest.mark.parametrize("branch", ["feature/fix", "claude/fixture"])
 def test_observer_retains_explicit_refs_and_scopes_branch_evidence(tmp_path, monkeypatch, observed_repo, branch):
