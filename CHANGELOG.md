@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bound Windows journal sibling locks request read/write data rights without DELETE, so CRT producers can open the same empty lock file in either order. Required native acceptance now exercises both two-process orders.
+
 - Windows journal mutations serialize bound reapers and unbound controllers on the same sibling file lock, preventing concurrent appends from forking the sequence and digest chain. Lock acquisition fails closed when serialization is unavailable. (#1591)
 - Windows journal writes preserve binary LF framing, and recovery preserves complete legacy CRLF records while quarantining the exact partial suffix. Bound recovery uses directory handles and supports nonexclusive creation and append. (#1565)
 - Journal append results and exported event dictionaries detach nested payloads from caller-owned data so later mutations cannot change the accepted event copy. (#1565)

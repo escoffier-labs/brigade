@@ -163,7 +163,7 @@ def _append_critical_section(journal_path: Path | None = None) -> Iterator[None]
                         if fcntl is None and msvcrt is None:
                             raise RunJournalError(_bound("interprocess journal locking unavailable"))
                         lock_path = _journal_lock_path(resolved_journal)
-                        lock_fd = _open_nofollow(lock_path, os.O_RDWR | os.O_CREAT, _FILE_MODE)
+                        lock_fd = _open_journal_lock(lock_path)
                         _chmod_fd_or_path(lock_fd, lock_path, _FILE_MODE)
                         if fcntl is not None:
                             fcntl.flock(lock_fd, fcntl.LOCK_EX)
@@ -592,6 +592,21 @@ def _fsync_directory(path: Path) -> None:
         close_err = _close_guarded(fd, primary)
         if close_err is not None and primary is None:
             raise close_err
+
+
+def _open_journal_lock(path: Path) -> int:
+    """Keep bound locks descriptor-relative with rights compatible with CRT peers."""
+    target = _bound_target(path)
+    if target is None:
+        return _open_nofollow(path, os.O_RDWR | os.O_CREAT, _FILE_MODE)
+    bound, components, name = target
+    try:
+        return dirfd.open_child_lock_file(bound.dir_fd(*components), name, _FILE_MODE)
+    except OSError as exc:
+        refusal = _symlink_refusal(path, exc, wants_directory=False)
+        if refusal is not None:
+            raise refusal from exc
+        raise
 
 
 def _open_nofollow(path: Path, flags: int, mode: int = 0o666) -> int:
