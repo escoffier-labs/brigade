@@ -86,7 +86,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     p_register.add_argument(
         "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
     )
-    p_register.add_argument("--task-id", required=True)
+    p_register.add_argument("--task-id", default=None)
     p_register.add_argument("--label", required=True)
     p_register.add_argument("--prompt-hash", default=None, help="sha256:... of the prompt; never store prompt text.")
     p_register.add_argument("--session-id", default=None)
@@ -110,6 +110,10 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     p_adopt.add_argument("--prompt-hash", default=None)
     p_adopt.add_argument("--session-id", default=None)
     p_adopt.add_argument("--json", action="store_true")
+    for command_parser in (p_register, p_adopt):
+        command_parser.add_argument("--repo", default=None, help="Explicit Claude GitHub owner/repo binding.")
+        command_parser.add_argument("--commit", default=None, help="Claude immutable full Git commit SHA.")
+        command_parser.add_argument("--pr", default=None, help="Claude PR number or canonical GitHub PR URL.")
 
     p_sweep = cloud_sub.add_parser(
         "sweep",
@@ -563,6 +567,9 @@ def dispatch(args) -> int:
         return _dispatch_approve(args, target)
 
     if command == "register":
+        if not args.task_id and not (args.provider == "claude-cloud" and args.repo and args.session_id):
+            print("error: register requires --task-id (or Claude --session-id and --repo)", file=sys.stderr)
+            return 2
         try:
             entry = cloud_tracker.register(
                 target,
@@ -571,6 +578,9 @@ def dispatch(args) -> int:
                 label=args.label,
                 prompt_hash=args.prompt_hash,
                 session_id=args.session_id,
+                repo=args.repo,
+                commit=args.commit,
+                pr=args.pr,
                 branch=args.branch,
                 expected_artifact=(
                     {"kind": "branch", "pattern": args.branch or "codex/*"}
@@ -578,7 +588,7 @@ def dispatch(args) -> int:
                     else {"kind": "diff"}
                 ),
             )
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         if args.json:
@@ -597,8 +607,11 @@ def dispatch(args) -> int:
                 label=args.label,
                 prompt_hash=args.prompt_hash,
                 session_id=args.session_id,
+                repo=args.repo,
+                commit=args.commit,
+                pr=args.pr,
             )
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         if args.json:
