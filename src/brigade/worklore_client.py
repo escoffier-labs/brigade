@@ -58,6 +58,7 @@ __all__ = [
     "load_fleet_settings",
     "patch_item",
     "record_attempt",
+    "report_ownership",
     "transition",
 ]
 
@@ -266,6 +267,28 @@ def ownership_action(
         _item_path(work_id, "ownership"),
         token=_token(admin=False),
         body=body,
+        if_match=if_match,
+        idempotency_key=idempotency_key,
+        holder_nonce=holder_nonce,
+    )
+
+
+def report_ownership(
+    work_id: str,
+    report: Mapping[str, Any],
+    *,
+    generation: object,
+    if_match: object,
+    idempotency_key: str,
+    holder_nonce: str,
+) -> dict[str, Any]:
+    """Append a bounded holder report through the existing ownership protocol.
+
+    This grants no operator authority and patches no work-item fields.
+    """
+    return ownership_action(
+        work_id,
+        {"action": "report", "generation": generation, "report": dict(report)},
         if_match=if_match,
         idempotency_key=idempotency_key,
         holder_nonce=holder_nonce,

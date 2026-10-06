@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `fleet dot report` validates bounded metadata offline by default and publishes explicitly reported cloud presence only with node authentication. Holder reports append fenced Worklore ownership events without changing task fields or lifecycle. Session cloud context adds schema 24 while preserving local snapshots. (#1606)
+
 - Grok Bot role listeners accept optional `--client-id` across setup, serve, doctor, canary, and service rendering. Same-role clients use separate validated config paths, service names, and local lease identities. Hub-backed clients must match their credential-authenticated node ID. Legacy role-only configurations and tool inventories remain unchanged.
 
 ### Fixed
@@ -43,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Offline Claude evidence normalizers validate supplied cloud session identities, managed-review severity counts and exact-head coverage, and confirmed Actions run attempts. A bounded injected-GET review collector preserves incomplete pagination and unverified attribution. Passive diagnostics inspect supplied workflow definitions and independent metadata. Hub, Worklore and FleetHub integration remains open. (#1600, #1601, #1602)
+- Document a proposed opt-in fleet claim generation protocol with generation-scoped invalidation of unseen acquires, selective cancellation of matching committed tenures, shared fences, and pending restore and rollout decisions. No protocol support ships with this design, and legacy orphan and delayed-mutation exposures remain. (#1189)
 - Worklore records explicit operator offers, fenced node ownership, metadata checkpoints, handoffs, release, and withdrawal without changing item status or enforcing filesystem conflicts. (#1595)
 - `brigade context preview` reports scoped Codex 0.160.0 instruction selection and cumulative byte accounting from supplied settings, with explicit unknown boundaries and separate advisory limits. (#1564)
 - Worklore Python clients can read and resume bounded item or filtered global event history pages using the Hub's existing cursors and authorization. (#1595)

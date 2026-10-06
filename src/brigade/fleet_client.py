@@ -1409,6 +1409,8 @@ def _session_request_body(snapshot: SessionSnapshot, *, action: str, node_id: st
         body["node_id"] = node_id
     if action == "end":
         return body
+    if snapshot.cloud_context is not None:
+        body["cloud_context"] = dict(snapshot.cloud_context)
     body.update(
         {
             "identity_scope": snapshot.identity_scope,
@@ -1439,11 +1441,21 @@ def _classify_session_write_error(exc: BaseException) -> str:
 def _post_session(snapshot: SessionSnapshot, *, action: str, hub_url: str | None) -> SessionWriteResult:
     """POST /sessions. Never spools; ordinary failures return a bounded reason."""
     try:
-        config = load_fleet_config()
+        if snapshot.cloud_context is not None:
+            settings = load_fleet_settings()
+            if not settings["node_token"]:
+                return SessionWriteResult(ok=False, reason="node_auth_required")
+            config = {"hub_url": settings["hub_url"], "token": settings["node_token"]}
+        else:
+            config = load_fleet_config()
         hub = hub_url or config["hub_url"]
         if not hub:
             return SessionWriteResult(ok=False, reason="hub_unconfigured")
-        node_id, identity_reason = _session_admin_write_node_id()
+        if snapshot.cloud_context is not None:
+            _require_encrypted_or_loopback_hub(hub)
+        node_id, identity_reason = (
+            (None, None) if snapshot.cloud_context is not None else _session_admin_write_node_id()
+        )
         if identity_reason is not None:
             return SessionWriteResult(ok=False, reason=identity_reason)
         request = urllib.request.Request(

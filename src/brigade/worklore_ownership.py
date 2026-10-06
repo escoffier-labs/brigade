@@ -46,6 +46,7 @@ EVENT_TYPES = {
     "withdraw": "ownership-offer-withdrawn",
     "accept": "ownership-accepted",
     "checkpoint": "ownership-checkpoint",
+    "report": "ownership-reported",
     "handoff": "ownership-handoff-offered",
     "release": "ownership-released",
 }
@@ -62,6 +63,7 @@ _FIELDS = {
         "next_action",
         "evidence_refs",
     },
+    "report": {"action", "generation", "report"},
     "handoff": {"action", "generation", "target_node"},
     "release": {"action", "generation"},
 }
@@ -164,6 +166,13 @@ def _parse(raw: object) -> dict[str, Any]:
             "cap": _integer(budget["cap"], minimum=1, maximum=BUDGET_CAP_MAX),
             "source_ref": _reference(budget["source_ref"]),
         }
+    if action == "report":
+        from .fleet_dot import DotReportError, validate_ownership_report
+
+        try:
+            body["report"] = validate_ownership_report(body["report"])
+        except DotReportError:
+            raise _invalid("invalid bounded ownership report") from None
     if action == "checkpoint":
         body["repo_identity"] = _path(body["repo_identity"], "repo_identity", REPO_IDENTITY_MAX)
         if not _REPO_RE.fullmatch(body["repo_identity"]):
@@ -246,6 +255,7 @@ def _initial() -> dict[str, Any]:
         "source_revision": None,
         "next_action": None,
         "evidence_refs": [],
+        "last_report": None,
         "last_seq": None,
         "updated_at": None,
         "liveness": "unknown",
@@ -310,6 +320,7 @@ def _transition(
         "withdraw": {"offered"},
         "accept": {"offered", "handoff-pending"},
         "checkpoint": {"owned"},
+        "report": {"owned"},
         "handoff": {"owned"},
         "release": {"owned", "handoff-pending"},
     }
@@ -335,6 +346,9 @@ def _transition(
         )
     elif action == "handoff":
         result.update(state="handoff-pending", offered_to=body["target_node"])
+    elif action == "report":
+        incoming = body["report"]
+        result["last_report"] = dict(incoming) | {"reporter_node": actor_id}
     elif action == "checkpoint":
         result.update({key: value for key, value in body.items() if key not in {"action", "generation"}})
     else:
@@ -342,6 +356,42 @@ def _transition(
         result["generation"] = snapshot["generation"]
     result["revision"] = snapshot["revision"] + 1
     return result
+
+
+def _validate_report_history(
+    conn: sqlite3.Connection, work_id: str, incoming: Mapping[str, Any], *, reporter_node: str
+) -> None:
+    """Fence each reporter/session against its latest bounded immutable report.
+
+    The caller holds the ownership write transaction. Checking only last_report
+    would let an interleaved report for another session hide stale provenance.
+    """
+    rows = conn.execute(
+        "SELECT detail_json FROM work_events WHERE work_id=? AND event_type='ownership-reported' "
+        "AND node_id=? ORDER BY seq DESC LIMIT ?",
+        (work_id, reporter_node, ITEM_MAX_OWNERSHIP_TOTAL),
+    )
+    for row in rows:
+        prior = json.loads(row[0])["ownership"]["last_report"]
+        if prior["session_id"] != incoming["session_id"]:
+            continue
+        linkage = (
+            "version",
+            "provider",
+            "agent_label",
+            "parent_session_id",
+            "repo_identity",
+            "source",
+            "source_scope",
+            "coverage",
+        )
+        if (
+            incoming["sequence"] <= prior["sequence"]
+            or incoming["observed_at"] < prior["observed_at"]
+            or any(prior.get(k) != incoming.get(k) for k in linkage)
+        ):
+            raise store.WorkloreConflict("report observation conflicts; ownership unchanged", code="ownership-conflict")
+        return
 
 
 def ownership_action(
@@ -454,6 +504,8 @@ def ownership_action(
                 raise store.WorkloreConflict(
                     "new acceptance requires a fresh holder nonce; ownership unchanged", code="ownership-conflict"
                 )
+        if action == "report":
+            _validate_report_history(conn, work_id, body["report"], reporter_node=actor_id)
         result = _transition(
             current, body, actor_id=actor_id, actor_type="operator" if action == "offer" else actor_type, digest=digest
         )
