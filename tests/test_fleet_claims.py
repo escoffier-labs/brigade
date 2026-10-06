@@ -1556,6 +1556,28 @@ class TestDispatchWiring:
         assert receipt["failure"]["kind"] == "fleet-claim-lost"
         assert "fleet claim on ws was lost" in receipt["failure"]["detail"]
 
+    def test_lease_expired_callback_records_fleet_claim_lost(self, workspace, monkeypatch):
+        from brigade import aboyeur
+
+        ws, roster_path = workspace
+        callbacks = []
+
+        @contextlib.contextmanager
+        def claim(*a, **kw):
+            callbacks.append(kw["on_claim_lost"])
+            yield fleet_client.ClaimDecision(True, "ok")
+
+        def run(*a, **kw):
+            callbacks[0]("lease-expired")
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(fleet_client, "repo_claim", claim)
+        monkeypatch.setattr(aboyeur, "run", run)
+        assert self._run(ws, roster_path) == 2
+        receipt = json.loads((next((ws / ".brigade" / "runs").iterdir()) / "run.json").read_text())
+        assert receipt["failure"]["kind"] == "fleet-claim-lost"
+        assert "lease-expired" in receipt["failure"]["detail"]
+
     def test_claim_loss_kind_survives_heartbeat_receipt_failure(self, hub, workspace, monkeypatch):
         """The terminal receipt is classified and recorded on the main thread
         (#1157 round 2): a heartbeat-thread receipt-write failure (swallowed
@@ -2049,6 +2071,134 @@ class TestExitOrphanReleaseHardening:
         monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
         monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
 
+    @pytest.mark.parametrize("admission", ["admitted", "abort", "continue"])
+    @pytest.mark.parametrize("commit_at", [1, 2])
+    def test_initial_retry_uncertainty_survives_positive_release(self, hub, monkeypatch, admission, commit_at):
+        """A positive DELETE cannot fence an earlier acquire still in flight."""
+        self._hub_env(hub, monkeypatch)
+        real_post = fleet_client._post_claim_blocking
+        real_deadline = fleet_client._run_with_deadline
+        real_release = fleet_client.release_claim
+        started = threading.Event()
+        allow_commit = threading.Event()
+        committed = threading.Event()
+        workers = []
+        requests = []
+        releases = []
+        sleeps = []
+        scheduled = []
+        now = [100.0]
+        deadline_calls = [0]
+
+        def post(hub_url, tok, body, *, timeout):
+            if body["action"] == "acquire":
+                requests.append((body["holder"], body["node_id"], body.get("conductor")))
+                if len(requests) == 1:
+                    started.set()
+                    assert allow_commit.wait(10)
+                    result = real_post(hub_url, tok, body, timeout=timeout)
+                    committed.set()
+                    return result
+                result = real_post(hub_url, tok, body, timeout=timeout)
+                if admission != "admitted":
+                    now[0] = 160.0  # Retry response lands at its request-start deadline.
+                return result
+            return real_post(hub_url, tok, body, timeout=timeout)
+
+        def deadline(fn, *, timeout):
+            deadline_calls[0] += 1
+            if deadline_calls[0] == 1:
+                worker = threading.Thread(target=fn, daemon=True)
+                workers.append(worker)
+                worker.start()
+                assert started.wait(10)
+                raise TimeoutError("parked initial acquire")
+            return real_deadline(fn, timeout=timeout)
+
+        def release(target, **kw):
+            releases.append((kw["holder"], kw["node_id"], kw["conductor"]))
+            outcome = real_release(target, **kw)
+            if len(releases) == 1:
+                assert outcome.granted and outcome.reason == "ok", "retry row was not deleted immediately"
+            if commit_at == 2 and len(releases) == 2:
+                # A second positive acknowledgement still cannot discharge
+                # uncertainty about the parked request. No row exists yet.
+                assert not committed.is_set()
+                assert outcome.reason == "missing"
+                return fleet_client.ClaimDecision(True, "ok")
+            return outcome
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            assert len(releases) == len(sleeps), "cleanup released before spacing its retry"
+            if len(sleeps) == commit_at:
+                allow_commit.set()
+                assert committed.wait(10)
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+        monkeypatch.setattr(fleet_client, "_run_with_deadline", deadline)
+        monkeypatch.setattr(fleet_client, "release_claim", release)
+        monkeypatch.setattr(fleet_client, "time", types.SimpleNamespace(monotonic=lambda: now[0], sleep=sleep))
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 1000)
+        monkeypatch.setattr(fleet_client, "_schedule_orphan_release", lambda *a, **kw: scheduled.append(kw))
+        try:
+            if admission == "abort":
+                with pytest.raises(fleet_client.FleetClaimExpiredError, match="lease-expired"):
+                    with fleet_client.repo_claim("repo-a", ttl_seconds=60, conductor="test-conductor"):
+                        pytest.fail("expired retry admitted guarded work")
+            else:
+                with fleet_client.repo_claim(
+                    "repo-a", ttl_seconds=60, conductor="test-conductor", claim_loss_policy="continue"
+                ) as decision:
+                    if admission == "admitted":
+                        assert decision.granted
+                        assert releases == [] and sleeps == [] and not allow_commit.is_set()
+                    else:
+                        assert not decision.granted and decision.reason == "lease-expired"
+            assert sleeps == [fleet_client.CLAIM_TIMEOUT_SECONDS] * 2, "initial uncertainty lost its cleanup window"
+            assert committed.is_set(), "bounded cleanup never allowed the abandoned request to land"
+            assert len(releases) == 3
+            assert requests == [requests[0]] * 2
+            assert releases == [requests[0]] * 3
+            assert fleet_client.fetch_claims(include_all=True) == [], "late initial row survived fenced cleanup"
+            assert scheduled == [], "resolved inline cleanup scheduled a live daemon"
+        finally:
+            allow_commit.set()
+            for worker in workers:
+                worker.join(10)
+
+    @pytest.mark.parametrize("initial_missing", [False, True])
+    def test_unambiguous_admission_keeps_single_exit_release(self, hub, monkeypatch, initial_missing):
+        self._hub_env(hub, monkeypatch)
+        real_acquire = fleet_client.acquire_claim
+        real_release = fleet_client.release_claim
+        attempts = []
+        releases = []
+        scheduled = []
+        sleeps = []
+
+        def acquire(target, **kw):
+            attempts.append(kw["holder"])
+            if initial_missing and len(attempts) == 1:
+                return fleet_client.ClaimDecision(False, "missing")
+            return real_acquire(target, **kw)
+
+        def release(target, **kw):
+            releases.append(kw["holder"])
+            return real_release(target, **kw)
+
+        monkeypatch.setattr(fleet_client, "acquire_claim", acquire)
+        monkeypatch.setattr(fleet_client, "release_claim", release)
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 1000)
+        monkeypatch.setattr(fleet_client, "time", types.SimpleNamespace(monotonic=time.monotonic, sleep=sleeps.append))
+        monkeypatch.setattr(fleet_client, "_schedule_orphan_release", lambda *a, **kw: scheduled.append(kw))
+        with fleet_client.repo_claim("repo-a", ttl_seconds=60) as decision:
+            assert decision.granted
+            assert releases == [] and scheduled == []
+        assert releases == [attempts[0]]
+        assert sleeps == [] and scheduled == []
+        assert fleet_client.fetch_claims(include_all=True) == []
+
     def test_orphan_release_attempts_immediately_before_backing_off(self, hub, monkeypatch):
         self._hub_env(hub, monkeypatch)
         monkeypatch.setattr(fleet_client, "ORPHAN_RELEASE_RETRY_SECONDS", 3600.0)
@@ -2431,3 +2581,863 @@ class TestInteractiveSessions:
         assert conn.in_transaction
         conn.rollback()
         assert sessions.list_sessions(conn, include_all=True) == []
+
+
+@pytest.fixture()
+def lease_clock(monkeypatch):
+    """Inject only the fleet clock and wake its Conditions at exact boundaries."""
+    now = [100.0]
+    conditions = []
+
+    class Condition(threading.Condition):
+        def __init__(self):
+            super().__init__()
+            conditions.append(self)
+
+    shim = types.SimpleNamespace(**{name: getattr(threading, name) for name in dir(threading)})
+    shim.Condition = Condition
+    monkeypatch.setattr(fleet_client, "threading", shim)
+    monkeypatch.setattr(fleet_client, "time", types.SimpleNamespace(monotonic=lambda: now[0], sleep=time.sleep))
+
+    def advance(value):
+        now[0] = value
+        for condition in conditions:
+            with condition:
+                condition.notify_all()
+
+    return advance
+
+
+class TestConfirmedLeaseDeadline:
+    @pytest.fixture(autouse=True)
+    def machine(self, monkeypatch):
+        monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid"})
+        monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path: NODE_A)
+        self.renew_interval = fleet_client._claim_renew_interval
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0)
+        self.releases = []
+        self.interrupts = []
+        monkeypatch.setattr(fleet_client._thread, "interrupt_main", lambda: self.interrupts.append(1))
+        monkeypatch.setattr(
+            fleet_client,
+            "release_claim",
+            lambda target, **kw: self.releases.append(kw["holder"]) or fleet_client.ClaimDecision(True, "ok"),
+        )
+        monkeypatch.setattr(fleet_client, "acquire_claim", lambda *a, **kw: fleet_client.ClaimDecision(True, "ok"))
+
+    def test_stopped_off_main_owner_retains_cooperative_warning(self, caplog):
+        stop = threading.Event()
+        stop.set()
+        cancel = threading.Event()
+        seen = []
+        dispatched = []
+        with caplog.at_level("WARNING", logger="brigade.fleet"):
+            fleet_client._abort_claim_owner(
+                "repo-a",
+                "held",
+                owner_thread=threading.Thread(),
+                cancel_event=cancel,
+                on_claim_lost=seen.append,
+                stop_event=stop,
+                _interrupt_dispatcher=lambda: dispatched.append(1),
+            )
+        assert cancel.is_set() and seen == ["held"]
+        assert any("cancel_event" in record.message for record in caplog.records)
+        assert self.interrupts == [] and dispatched == []
+
+    def test_committed_loss_notification_survives_shutdown(self, monkeypatch, lease_clock):
+        committed = threading.Event()
+        publish = threading.Event()
+        finished = threading.Event()
+        seen = []
+        real_publish = fleet_client._ConfirmedClaimLease._publish
+        real_join = threading.Thread.join
+
+        def parked_publication(lease, reason):
+            if reason is not None:
+                committed.set()
+                assert publish.wait(10)
+            try:
+                real_publish(lease, reason)
+            finally:
+                if reason is not None:
+                    finished.set()
+
+        def join(thread, timeout=None):
+            if thread.name != "brigade-fleet-claim-renew":
+                real_join(thread, timeout)
+
+        monkeypatch.setattr(fleet_client._ConfirmedClaimLease, "_publish", parked_publication)
+        monkeypatch.setattr(fleet_client, "renew_claim", lambda *a, **kw: fleet_client.ClaimDecision(False, "held"))
+        monkeypatch.setattr(threading.Thread, "join", join)
+        try:
+            with fleet_client.repo_claim("repo-a", ttl_seconds=1, on_claim_lost=seen.append) as decision:
+                assert committed.wait(10)
+                assert decision.cancel_event.is_set()
+            # Loss won the authority lock. Shutdown must retain its callback,
+            # while suppressing the delayed interrupt into subsequent work.
+            publish.set()
+            assert finished.wait(10)
+            assert seen == ["held"]
+            assert self.interrupts == []
+        finally:
+            publish.set()
+
+    @pytest.mark.parametrize("blocking_callback", [False, True])
+    def test_rejected_renew_publication_is_drained_after_cleanup(self, monkeypatch, lease_clock, blocking_callback):
+        renew_started = threading.Event()
+        finish_renew = threading.Event()
+        heartbeat_finished = threading.Event()
+        shutdown = threading.Event()
+        exit_released = threading.Event()
+        deliver = threading.Event()
+        finish_callback = threading.Event()
+        published = threading.Event()
+        owner_finished = threading.Event()
+        seen = []
+        at_exit = []
+        errors = []
+        real_publish = fleet_client._ConfirmedClaimLease._publish
+        real_confirm = fleet_client._ConfirmedClaimLease.confirm
+        real_stop = fleet_client._ConfirmedClaimLease.stop
+
+        def renew(*a, **kw):
+            renew_started.set()
+            assert finish_renew.wait(10)
+            return fleet_client.ClaimDecision(True, "ok")
+
+        def confirm(lease, *a, **kw):
+            try:
+                return real_confirm(lease, *a, **kw)
+            finally:
+                heartbeat_finished.set()
+
+        def stop(lease):
+            real_stop(lease)
+            shutdown.set()
+
+        def publish(lease, reason):
+            if reason is None:
+                return real_publish(lease, reason)
+            try:
+                assert deliver.wait(10)
+                real_publish(lease, reason)
+            finally:
+                published.set()
+
+        def release(*a, **kw):
+            self.releases.append(kw["holder"])
+            if shutdown.is_set():
+                exit_released.set()
+            return fleet_client.ClaimDecision(True, "ok")
+
+        def callback(reason):
+            seen.append(reason)
+            if blocking_callback:
+                assert finish_callback.wait(10)
+
+        def owner():
+            try:
+                with fleet_client.repo_claim("repo-a", ttl_seconds=1, on_claim_lost=callback) as decision:
+                    assert heartbeat_finished.wait(10)
+                    assert decision.cancel_event.is_set()
+                at_exit.append(list(seen))
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                owner_finished.set()
+
+        monkeypatch.setattr(fleet_client, "renew_claim", renew)
+        monkeypatch.setattr(fleet_client, "release_claim", release)
+        monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 0)
+        monkeypatch.setattr(fleet_client._ConfirmedClaimLease, "confirm", confirm)
+        monkeypatch.setattr(fleet_client._ConfirmedClaimLease, "stop", stop)
+        monkeypatch.setattr(fleet_client._ConfirmedClaimLease, "_publish", publish)
+        # Keep expiry ownership on the delayed successful renew. The watcher
+        # is already drained when the owner reaches publication shutdown.
+        monkeypatch.setattr(fleet_client._ConfirmedClaimLease, "watch", lambda lease: shutdown.wait(10))
+        worker = threading.Thread(target=owner)
+        # Exercise the main-owner interrupt route through the fleet-only shim.
+        monkeypatch.setattr(fleet_client.threading, "main_thread", lambda: worker)
+        worker.start()
+        try:
+            assert renew_started.wait(10)
+            lease_clock(101)
+            finish_renew.set()
+            assert exit_released.wait(10)
+            assert heartbeat_finished.is_set() and shutdown.is_set()
+            # Before the fix the owner returns with an empty callback record.
+            # Give that path time to finish before allowing daemon delivery.
+            owner_finished.wait(0.2)
+            deliver.set()
+            assert owner_finished.wait(3), "shutdown waited indefinitely for the callback"
+            assert errors == []
+            assert at_exit == [["lease-expired"]]
+            assert len(self.releases) == 2 and len(set(self.releases)) == 1
+            assert self.interrupts == []
+            if blocking_callback:
+                assert not finish_callback.is_set() and not published.is_set()
+        finally:
+            finish_renew.set()
+            deliver.set()
+            finish_callback.set()
+            worker.join(10)
+            assert published.wait(10)
+        assert seen == ["lease-expired"] and self.interrupts == []
+
+    @pytest.mark.parametrize("watchdog_start_fails", [False, True])
+    def test_rejected_renew_publisher_start_failure_retains_notification(
+        self, monkeypatch, lease_clock, watchdog_start_fails
+    ):
+        renew_started = threading.Event()
+        finish_renew = threading.Event()
+        shutdown = threading.Event()
+        heartbeat_finished = threading.Event()
+        seen = []
+        errors = []
+        cleaned_at_callback = []
+        real_start = threading.Thread.start
+        real_confirm = fleet_client._ConfirmedClaimLease.confirm
+        real_stop = fleet_client._ConfirmedClaimLease.stop
+
+        def start(thread):
+            if thread.name == "brigade-fleet-claim-loss" or (
+                watchdog_start_fails and thread.name == "brigade-fleet-claim-abort"
+            ):
+                raise RuntimeError("controlled publisher start failure")
+            real_start(thread)
+
+        def renew(*a, **kw):
+            renew_started.set()
+            assert finish_renew.wait(10)
+            return fleet_client.ClaimDecision(True, "ok")
+
+        def confirm(lease, *a, **kw):
+            try:
+                return real_confirm(lease, *a, **kw)
+            except RuntimeError as exc:
+                errors.append(str(exc))
+                return False
+            finally:
+                heartbeat_finished.set()
+
+        def stop(lease):
+            real_stop(lease)
+            shutdown.set()
+
+        def callback(reason):
+            seen.append(reason)
+            cleaned_at_callback.append(list(self.releases))
+
+        monkeypatch.setattr(threading.Thread, "start", start)
+        monkeypatch.setattr(fleet_client, "renew_claim", renew)
+        monkeypatch.setattr(fleet_client._ConfirmedClaimLease, "confirm", confirm)
+        monkeypatch.setattr(fleet_client._ConfirmedClaimLease, "stop", stop)
+        monkeypatch.setattr(fleet_client._ConfirmedClaimLease, "watch", lambda lease: shutdown.wait(10))
+        with fleet_client.repo_claim("repo-a", ttl_seconds=1, on_claim_lost=callback) as decision:
+            try:
+                assert renew_started.wait(10)
+                lease_clock(101)
+                finish_renew.set()
+                assert heartbeat_finished.wait(10)
+                assert decision.cancel_event.is_set()
+                assert len(self.releases) == 1, "publisher failure skipped fenced cleanup"
+                assert seen == ["lease-expired"], "publisher failure discarded committed notification"
+                assert cleaned_at_callback == [self.releases]
+                assert errors == []
+                assert self.interrupts == [1]
+            finally:
+                finish_renew.set()
+        assert len(self.releases) == 2 and len(set(self.releases)) == 1
+        assert self.interrupts == [1]
+
+    def test_rejected_renew_notifies_and_aborts_while_release_is_blocked(self, monkeypatch, lease_clock):
+        renew_started = threading.Event()
+        finish_renew = threading.Event()
+        watcher_started = threading.Event()
+        finish_watcher = threading.Event()
+        release_started = threading.Event()
+        finish_release = threading.Event()
+        cleaned = threading.Event()
+        callback_started = threading.Event()
+        finish_callback = threading.Event()
+        callback_finished = threading.Event()
+        interrupted = threading.Event()
+        holders = []
+        seen = []
+        real_watch = fleet_client._ConfirmedClaimLease.watch
+
+        def watch(lease):
+            watcher_started.set()
+            assert finish_watcher.wait(10)
+            real_watch(lease)
+
+        def renew(*a, **kw):
+            holders.append(kw["holder"])
+            renew_started.set()
+            assert finish_renew.wait(10)
+            return fleet_client.ClaimDecision(True, "ok")
+
+        def release(*a, **kw):
+            self.releases.append(kw["holder"])
+            if len(self.releases) == 1:
+                release_started.set()
+                assert finish_release.wait(10)
+                cleaned.set()
+            return fleet_client.ClaimDecision(True, "ok")
+
+        def callback(reason):
+            seen.append(reason)
+            callback_started.set()
+            assert finish_callback.wait(10)
+            callback_finished.set()
+
+        def interrupt():
+            self.interrupts.append(1)
+            interrupted.set()
+
+        monkeypatch.setattr(fleet_client._ConfirmedClaimLease, "watch", watch)
+        monkeypatch.setattr(fleet_client, "renew_claim", renew)
+        monkeypatch.setattr(fleet_client, "release_claim", release)
+        monkeypatch.setattr(fleet_client, "CLAIM_LOST_CALLBACK_GRACE_SECONDS", 0)
+        monkeypatch.setattr(fleet_client._thread, "interrupt_main", interrupt)
+        with fleet_client.repo_claim("repo-a", ttl_seconds=1, on_claim_lost=callback) as decision:
+            try:
+                assert renew_started.wait(10) and watcher_started.wait(10)
+                lease_clock(101)
+                finish_renew.set()
+                assert release_started.wait(10)
+                assert decision.cancel_event.is_set()
+                assert callback_started.wait(2), "rejected cleanup delayed committed loss notification"
+                assert interrupted.wait(2), "rejected cleanup delayed the abort grace watchdog"
+                assert not finish_release.is_set() and not cleaned.is_set()
+                # Cleanup must still complete while the arbitrary callback is live.
+                finish_release.set()
+                assert cleaned.wait(10)
+                assert self.releases == holders
+                assert seen == ["lease-expired"] and self.interrupts == [1]
+                assert not finish_callback.is_set()
+                finish_callback.set()
+                assert callback_finished.wait(10)
+                finish_watcher.set()
+            finally:
+                finish_renew.set()
+                finish_release.set()
+                finish_callback.set()
+                finish_watcher.set()
+        assert seen == ["lease-expired"] and self.interrupts == [1]
+
+    @pytest.mark.parametrize("shutdown_first", [False, True])
+    def test_auth_failure_callback_survives_only_committed_termination(self, monkeypatch, lease_clock, shutdown_first):
+        terminating = threading.Event()
+        finish_termination = threading.Event()
+        finished = threading.Event()
+        admitted = []
+        seen = []
+        lost = []
+        real_terminate = fleet_client._ConfirmedClaimLease.terminate
+        real_join = threading.Thread.join
+        heartbeat = []
+
+        def terminate(lease, reason, **kw):
+            heartbeat.append(threading.current_thread())
+            try:
+                if shutdown_first:
+                    terminating.set()
+                    assert finish_termination.wait(10)
+                accepted = real_terminate(lease, reason, **kw)
+                admitted.append(accepted)
+                if not shutdown_first:
+                    terminating.set()
+                    assert finish_termination.wait(10)
+                return accepted
+            finally:
+                finished.set()
+
+        def join(thread, timeout=None):
+            if thread.name != "brigade-fleet-claim-renew":
+                real_join(thread, timeout)
+
+        monkeypatch.setattr(fleet_client._ConfirmedClaimLease, "terminate", terminate)
+        monkeypatch.setattr(threading.Thread, "join", join)
+        monkeypatch.setattr(
+            fleet_client,
+            "renew_claim",
+            lambda *a, **kw: fleet_client.ClaimDecision(False, "auth-failed", detail="revoked"),
+        )
+        try:
+            with fleet_client.repo_claim(
+                "repo-a", ttl_seconds=1, on_credential_failure=seen.append, on_claim_lost=lost.append
+            ) as decision:
+                assert terminating.wait(10)
+                assert not decision.cancel_event.is_set()
+            finish_termination.set()
+            assert finished.wait(10)
+            real_join(heartbeat[0], 10)
+            assert not heartbeat[0].is_alive()
+            assert admitted == [not shutdown_first]
+            assert seen == ([] if shutdown_first else ["revoked"])
+            assert lost == [] and self.interrupts == []
+        finally:
+            finish_termination.set()
+            if heartbeat:
+                real_join(heartbeat[0], 10)
+
+    def test_shutdown_before_loss_admits_no_notification(self, lease_clock):
+        cancel = threading.Event()
+        seen = []
+        lease = fleet_client._ConfirmedClaimLease(100, 1, cancel_event=cancel, abort=True, on_loss=seen.append)
+        lease.stop()
+        lease_clock(101)
+        lease.watch()
+        assert not lease.active()
+        assert not lease.confirm(100.5)
+        assert not lease.terminate("held", notify=True)
+        assert not cancel.is_set()
+        assert seen == [] and self.interrupts == []
+
+    @pytest.mark.parametrize("stop_before_dispatch", [True, False])
+    def test_interrupt_dispatch_serializes_with_shutdown(self, monkeypatch, lease_clock, stop_before_dispatch):
+        armed = threading.Event()
+        snapshotted = threading.Event()
+        dispatch = threading.Event()
+        finished = threading.Event()
+        seen = []
+        real_init = fleet_client._ConfirmedClaimLease.__init__
+        real_join = threading.Thread.join
+        real_publish = fleet_client._ConfirmedClaimLease._publish
+
+        class SnapshotStopEvent(threading.Event):
+            def is_set(self):
+                stopped = super().is_set()
+                if armed.is_set() and not stopped:
+                    # Park AFTER the outer stop check has read false, BEFORE
+                    # final dispatch, reproducing the stale interrupt window.
+                    armed.clear()
+                    snapshotted.set()
+                    assert dispatch.wait(10)
+                return stopped
+
+        def init(lease, *a, **kw):
+            real_init(lease, *a, **kw)
+            lease.stopped = SnapshotStopEvent()
+
+        def callback(reason):
+            seen.append(reason)
+            armed.set()
+
+        def publish(lease, reason):
+            try:
+                real_publish(lease, reason)
+            finally:
+                if reason is not None:
+                    finished.set()
+
+        def join(thread, timeout=None):
+            if thread.name != "brigade-fleet-claim-renew":
+                real_join(thread, timeout)
+
+        monkeypatch.setattr(fleet_client._ConfirmedClaimLease, "__init__", init)
+        monkeypatch.setattr(fleet_client._ConfirmedClaimLease, "_publish", publish)
+        monkeypatch.setattr(fleet_client, "renew_claim", lambda *a, **kw: fleet_client.ClaimDecision(False, "held"))
+        monkeypatch.setattr(threading.Thread, "join", join)
+        try:
+            with fleet_client.repo_claim("repo-a", ttl_seconds=1, on_claim_lost=callback) as decision:
+                assert snapshotted.wait(10)
+                assert decision.cancel_event.is_set()
+                if not stop_before_dispatch:
+                    dispatch.set()
+                    assert finished.wait(10)
+                    assert self.interrupts == [1]
+            dispatch.set()
+            assert finished.wait(10)
+            assert seen == ["held"]
+            assert self.interrupts == ([] if stop_before_dispatch else [1])
+        finally:
+            dispatch.set()
+
+    @pytest.mark.parametrize("watcher_first", [True, False])
+    @pytest.mark.parametrize("release_unavailable", [True, False])
+    def test_rejected_renew_cleans_before_blocked_callback(
+        self, monkeypatch, lease_clock, watcher_first, release_unavailable
+    ):
+        renew_started = threading.Event()
+        finish_renew = threading.Event()
+        watcher_started = threading.Event()
+        finish_watcher = threading.Event()
+        callback_started = threading.Event()
+        finish_callback = threading.Event()
+        cleaned = threading.Event()
+        scheduled = []
+        holders = []
+        seen = []
+        real_watch = fleet_client._ConfirmedClaimLease.watch
+
+        def watch(lease):
+            watcher_started.set()
+            if not watcher_first:
+                assert finish_watcher.wait(10)
+            real_watch(lease)
+
+        def renew(*a, **kw):
+            holders.append(kw["holder"])
+            renew_started.set()
+            assert finish_renew.wait(10)
+            return fleet_client.ClaimDecision(True, "ok")
+
+        def callback(reason):
+            seen.append(reason)
+            callback_started.set()
+            assert finish_callback.wait(10)
+
+        def release(*a, **kw):
+            self.releases.append(kw["holder"])
+            cleaned.set()
+            return fleet_client.ClaimDecision(
+                not release_unavailable, "hub-unavailable" if release_unavailable else "ok"
+            )
+
+        monkeypatch.setattr(fleet_client._ConfirmedClaimLease, "watch", watch)
+        monkeypatch.setattr(fleet_client, "renew_claim", renew)
+        monkeypatch.setattr(fleet_client, "release_claim", release)
+        monkeypatch.setattr(fleet_client, "_schedule_orphan_release", lambda *a, **kw: scheduled.append(kw["holder"]))
+        try:
+            with fleet_client.repo_claim("repo-a", ttl_seconds=1, on_claim_lost=callback) as decision:
+                assert renew_started.wait(10) and watcher_started.wait(10)
+                lease_clock(101)
+                if watcher_first:
+                    assert callback_started.wait(10)
+                finish_renew.set()
+                assert callback_started.wait(10)
+                # Assert cleanup while guarded work AND its arbitrary callback
+                # remain live. Context-exit release cannot satisfy this check.
+                assert cleaned.wait(2), "late successful renew leaked until context exit"
+                assert self.releases == holders
+                if release_unavailable:
+                    thread_sync.wait_for_predicate(
+                        lambda: scheduled == holders, description="rejected renew orphan cleanup"
+                    )
+                else:
+                    assert scheduled == []
+                assert decision.cancel_event.is_set()
+                assert seen == ["lease-expired"]
+                assert not finish_callback.is_set()
+                finish_callback.set()
+                finish_watcher.set()
+            assert seen == ["lease-expired"]
+        finally:
+            finish_renew.set()
+            finish_callback.set()
+            finish_watcher.set()
+
+    def test_initial_unavailable_then_missing_tracks_late_orphan(self, monkeypatch):
+        allow_commit = threading.Event()
+        committed = threading.Event()
+        cleaned = threading.Event()
+        cleanup_started = threading.Event()
+        attempts = []
+        row = []
+        workers = []
+
+        def acquire(*a, **kw):
+            attempts.append(kw["holder"])
+            if len(attempts) == 1:
+
+                def late_commit():
+                    assert allow_commit.wait(10)
+                    row.append(kw["holder"])
+                    committed.set()
+
+                worker = threading.Thread(target=late_commit, daemon=True)
+                workers.append(worker)
+                worker.start()
+                return fleet_client.ClaimDecision(False, "hub-unavailable")
+            return fleet_client.ClaimDecision(False, "missing")
+
+        def release(*a, **kw):
+            self.releases.append(kw["holder"])
+            cleanup_started.set()
+            if not committed.is_set():
+                return fleet_client.ClaimDecision(False, "missing")
+            assert row == [kw["holder"]], "cleanup must fence the abandoned request's holder"
+            row.clear()
+            cleaned.set()
+            return fleet_client.ClaimDecision(True, "ok")
+
+        monkeypatch.setattr(fleet_client, "acquire_claim", acquire)
+        monkeypatch.setattr(fleet_client, "release_claim", release)
+        try:
+            with fleet_client.repo_claim("repo-a", ttl_seconds=60) as decision:
+                assert not decision.granted and decision.reason == "missing"
+                assert attempts == [attempts[0], attempts[0]]
+                assert cleanup_started.wait(2), "ambiguous initial request lost its orphan cleanup"
+                allow_commit.set()
+                assert committed.wait(10) and cleaned.wait(10)
+                assert row == []
+                assert set(self.releases) == {attempts[0]}
+            assert self.interrupts == []
+        finally:
+            allow_commit.set()
+            for worker in workers:
+                worker.join(10)
+
+    @pytest.mark.parametrize("policy", ["abort", "continue"])
+    def test_delayed_initial_grant_refuses_admission(self, monkeypatch, lease_clock, policy):
+        ttls = []
+
+        def acquire(*a, **kw):
+            ttls.append(kw["ttl_seconds"])
+            lease_clock(101)
+            return fleet_client.ClaimDecision(True, "ok")
+
+        monkeypatch.setattr(fleet_client, "acquire_claim", acquire)
+        if policy == "abort":
+            with pytest.raises(fleet_client.FleetClaimHeldError, match="lease-expired") as exc:
+                with fleet_client.repo_claim("repo-a", ttl_seconds=1, claim_loss_policy=policy):
+                    pytest.fail("expired initial grant admitted guarded work")
+            assert type(exc.value).__name__ == "FleetClaimExpiredError"
+        else:
+            with fleet_client.repo_claim("repo-a", ttl_seconds=1, claim_loss_policy=policy) as decision:
+                assert not decision.granted
+                assert decision.reason == "lease-expired"
+        assert ttls == [1]
+        assert len(self.releases) == 1
+        assert self.interrupts == []
+
+    def test_late_grant_loses_even_before_watcher_runs(self, lease_clock):
+        seen = []
+        cancel = threading.Event()
+        lease = fleet_client._ConfirmedClaimLease(100, 1, cancel_event=cancel, abort=True, on_loss=seen.append)
+        lease_clock(101)
+        assert not lease.confirm(100.5)
+        assert cancel.is_set()
+        assert seen == ["lease-expired"]
+        lease_clock(100.6)
+        assert not lease.confirm(100.6), "LOST must remain sticky"
+        assert seen == ["lease-expired"]
+
+    @pytest.mark.parametrize("result", ["hub-unavailable", "held", "ok", "reacquire"])
+    def test_inflight_request_cannot_outlive_confirmed_deadline(self, monkeypatch, lease_clock, result):
+        started = threading.Event()
+        finish = threading.Event()
+        finished = threading.Event()
+        notified = threading.Event()
+        seen = []
+        requests = []
+
+        def blocked(*a, **kw):
+            requests.append(kw["holder"])
+            started.set()
+            assert finish.wait(10)
+            finished.set()
+            return fleet_client.ClaimDecision(result in ("ok", "reacquire"), result)
+
+        def lost(reason):
+            seen.append(reason)
+            notified.set()
+
+        if result == "reacquire":
+            acquires = [0]
+
+            def acquire(*a, **kw):
+                acquires[0] += 1
+                return fleet_client.ClaimDecision(True, "ok") if acquires[0] == 1 else blocked(*a, **kw)
+
+            monkeypatch.setattr(fleet_client, "acquire_claim", acquire)
+            monkeypatch.setattr(
+                fleet_client, "renew_claim", lambda *a, **kw: fleet_client.ClaimDecision(False, "missing")
+            )
+        else:
+            monkeypatch.setattr(fleet_client, "renew_claim", blocked)
+        try:
+            with fleet_client.repo_claim("repo-a", ttl_seconds=1, on_claim_lost=lost) as decision:
+                assert started.wait(10)
+                # Independent event reporting remains usable while claim traffic stalls.
+                monkeypatch.setattr(fleet_client, "report_external_event", lambda **kw: True)
+                assert fleet_client.report_external_event(target="repo-a", state="running")
+                lease_clock(101)
+                assert decision.cancel_event.wait(10)
+                assert notified.wait(10)
+                assert seen == ["lease-expired"]
+                finish.set()
+                assert finished.wait(10)
+                thread_sync.wait_for_predicate(
+                    lambda: self.interrupts == [1], description="claim-loss interrupt dispatched before shutdown"
+                )
+            assert requests == [self.releases[-1]]
+            assert seen == ["lease-expired"]
+            assert len(self.interrupts) == 1
+            if result == "reacquire":
+                assert len(self.releases) >= 2, "late grant needs fenced cleanup"
+        finally:
+            finish.set()
+
+    def test_on_time_response_extends_from_request_start(self, monkeypatch, lease_clock):
+        started = threading.Event()
+        second = threading.Event()
+        finish = threading.Event()
+        notified = threading.Event()
+        seen = []
+        calls = [0]
+
+        def lost(reason):
+            seen.append(reason)
+            notified.set()
+
+        def renew(*a, **kw):
+            calls[0] += 1
+            if calls[0] == 1:
+                lease_clock(100.4)
+                started.set()
+                assert finish.wait(10)
+                lease_clock(100.8)
+                return fleet_client.ClaimDecision(True, "ok")
+            second.set()
+            assert finish.wait(10)
+            return fleet_client.ClaimDecision(False, "hub-unavailable")
+
+        # First request starts at 100.4, response at 100.8: deadline must be 101.4.
+        def acquire(*a, **kw):
+            lease_clock(100.4)
+            return fleet_client.ClaimDecision(True, "ok")
+
+        monkeypatch.setattr(fleet_client, "acquire_claim", acquire)
+        monkeypatch.setattr(fleet_client, "renew_claim", renew)
+        with fleet_client.repo_claim("repo-a", ttl_seconds=1, on_claim_lost=lost) as decision:
+            assert started.wait(10)
+            finish.set()
+            assert second.wait(10)
+            lease_clock(101)
+            assert not decision.cancel_event.is_set()
+            lease_clock(101.4)
+            assert decision.cancel_event.wait(10)
+            assert notified.wait(10)
+        assert seen == ["lease-expired"]
+
+    def test_continue_expiry_stops_requests_without_cancel(self, monkeypatch, lease_clock, caplog):
+        started = threading.Event()
+        finish = threading.Event()
+        calls = []
+        seen = []
+
+        def renew(*a, **kw):
+            calls.append(1)
+            started.set()
+            assert finish.wait(10)
+            return fleet_client.ClaimDecision(False, "hub-unavailable")
+
+        monkeypatch.setattr(fleet_client, "renew_claim", renew)
+        try:
+            with fleet_client.repo_claim(
+                "repo-a", ttl_seconds=1, claim_loss_policy="continue", on_claim_lost=seen.append
+            ) as decision:
+                assert started.wait(10)
+                lease_clock(101)
+                thread_sync.wait_for_predicate(
+                    lambda: any("lease-expired" in r.message for r in caplog.records),
+                    description="continue expiry logged",
+                )
+                assert not decision.cancel_event.is_set()
+                finish.set()
+            assert calls == [1]
+            assert seen == [] and self.interrupts == []
+            assert sum("lease-expired" in r.message for r in caplog.records) == 1
+        finally:
+            finish.set()
+
+    def test_ttl_one_cancels_before_callback_grace_finishes(self, monkeypatch, lease_clock):
+        callback_started = threading.Event()
+        finish_callback = threading.Event()
+        renew_started = threading.Event()
+        finish_renew = threading.Event()
+
+        def callback(reason):
+            assert reason == "lease-expired"
+            callback_started.set()
+            assert finish_callback.wait(10)
+
+        def renew(*a, **kw):
+            renew_started.set()
+            assert finish_renew.wait(10)
+            return fleet_client.ClaimDecision(False, "hub-unavailable")
+
+        monkeypatch.setattr(fleet_client, "renew_claim", renew)
+        try:
+            with fleet_client.repo_claim("repo-a", ttl_seconds=1, on_claim_lost=callback) as decision:
+                assert renew_started.wait(10)
+                lease_clock(101)
+                assert callback_started.wait(10)
+                assert decision.cancel_event.is_set()
+                assert not finish_callback.is_set()
+                assert self.interrupts == []
+                finish_callback.set()
+                finish_renew.set()
+        finally:
+            finish_callback.set()
+            finish_renew.set()
+
+    @pytest.mark.parametrize("reason", ["auth-failed", "invalid"])
+    def test_terminal_failure_disarms_expiry_watcher(self, monkeypatch, lease_clock, reason):
+        auth = []
+        lost = []
+        terminal = threading.Event()
+        real_thread = threading.Thread
+
+        def thread(*, target, name, daemon):
+            def run():
+                try:
+                    target()
+                finally:
+                    if name == "brigade-fleet-claim-renew":
+                        terminal.set()
+
+            return real_thread(target=run, name=name, daemon=daemon)
+
+        monkeypatch.setattr(fleet_client.threading, "Thread", thread)
+        monkeypatch.setattr(fleet_client, "renew_claim", lambda *a, **kw: fleet_client.ClaimDecision(False, reason))
+        with fleet_client.repo_claim(
+            "repo-a", ttl_seconds=1, on_credential_failure=auth.append, on_claim_lost=lost.append
+        ) as decision:
+            assert terminal.wait(10)
+            lease_clock(101)
+            assert not decision.cancel_event.is_set()
+        assert len(auth) == (1 if reason == "auth-failed" else 0)
+        assert lost == [] and self.interrupts == []
+
+    def test_ttl_one_has_renewal_opportunity(self):
+        assert 0 < self.renew_interval(1) < 1
+
+    def test_shutdown_ignores_inflight_reacquire_and_cleans_late_grant(self, monkeypatch, lease_clock):
+        started = threading.Event()
+        finish = threading.Event()
+        done = threading.Event()
+        acquired = [0]
+        seen = []
+        real_join = threading.Thread.join
+
+        def acquire(*a, **kw):
+            acquired[0] += 1
+            if acquired[0] > 1:
+                started.set()
+                assert finish.wait(10)
+                done.set()
+            return fleet_client.ClaimDecision(True, "ok")
+
+        def join(thread, timeout=None):
+            if thread.name != "brigade-fleet-claim-renew":
+                real_join(thread, timeout)
+
+        monkeypatch.setattr(fleet_client, "acquire_claim", acquire)
+        monkeypatch.setattr(fleet_client, "renew_claim", lambda *a, **kw: fleet_client.ClaimDecision(False, "missing"))
+        monkeypatch.setattr(threading.Thread, "join", join)
+        try:
+            with fleet_client.repo_claim("repo-a", ttl_seconds=1, on_claim_lost=seen.append):
+                assert started.wait(10)
+            lease_clock(101)
+            finish.set()
+            assert done.wait(10)
+            thread_sync.wait_for_predicate(lambda: len(self.releases) == 2, description="late reacquire fenced cleanup")
+            assert len(set(self.releases)) == 1
+            assert seen == [] and self.interrupts == []
+        finally:
+            finish.set()
