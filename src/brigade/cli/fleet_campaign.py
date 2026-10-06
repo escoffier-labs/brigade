@@ -72,7 +72,7 @@ def _dispatch(args: argparse.Namespace) -> int:
     except campaign.PreviewError as exc:
         print(json.dumps({"kind": campaign.PREVIEW_KIND, "read_only": True, "error": str(exc)}))
         return 2
-    except (OSError, ValueError, TypeError, RecursionError):
+    except (OSError, ValueError, TypeError, IndexError, RecursionError):
         # Existing config parser errors may contain paths or private text.
         print(json.dumps({"kind": campaign.PREVIEW_KIND, "read_only": True, "error": "input_refused"}))
         return 2

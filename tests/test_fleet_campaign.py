@@ -77,6 +77,23 @@ def test_cli_offline_selection_and_no_effects(tmp_path, capsys, monkeypatch):
     assert before == {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
 
 
+def test_empty_health_command_refuses_without_effects_or_private_echo(tmp_path, capsys):
+    path = fixture(tmp_path)
+    config = tmp_path / ".brigade/repos.toml"
+    config.write_text('[[repo]]\nid="repo-a"\npath="private-repo"\n[[repo.health_command]]\nargv=[]\n')
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    assert invoke(tmp_path, path) == 2
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {
+        "kind": "fleet-campaign-preview",
+        "read_only": True,
+        "error": "input_refused",
+    }
+    assert "private" not in output.out + output.err
+    assert str(tmp_path) not in output.out + output.err
+    assert before == {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+
 @pytest.mark.parametrize("ids", ["missing", "repo-b"])
 def test_missing_or_disabled_ids_refuse(tmp_path, capsys, ids):
     path = fixture(tmp_path, [binding("repo-b")], disabled=True)
