@@ -357,6 +357,32 @@ def open_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
         raise
 
 
+def open_lock_file(parent: int, name: str) -> int:
+    """Open an empty sibling for byte locking, compatible with CRT O_RDWR peers.
+
+    Publication rights include DELETE, which conflicts with CRT opens that
+    omit delete sharing. Locks need read/write data access, without rename or
+    deletion rights; preserve the held parent and reject reparse points.
+    """
+    api = _require_api()
+    handle = _nt_create(
+        api,
+        parent,
+        name,
+        access=_FILE_READ_DATA | _FILE_WRITE_DATA | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
+        disposition=_FILE_OPEN_IF,
+        options=_FILE_NON_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
+        attributes=_FILE_ATTRIBUTE_NORMAL,
+    )
+    try:
+        _reject_reparse(api, handle, expected_directory=False)
+    except BaseException:
+        api.CloseHandle(handle)
+        raise
+    # Conversion owns cleanup on failure and transfers ownership on success.
+    return _handle_to_fd(api, handle, os.O_RDWR | getattr(os, "O_BINARY", 0))
+
+
 def replace_children(parent: int, source: str, destination: str, *, replace: bool = True) -> None:
     """Rename ``source`` to ``destination`` relative to the held parent handle."""
     api = _require_api()
