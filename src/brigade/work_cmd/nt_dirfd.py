@@ -45,6 +45,7 @@ _FILE_APPEND_DATA = 0x0004
 
 _FILE_OPEN = 0x00000001
 _FILE_CREATE = 0x00000002
+_FILE_OPEN_IF = 0x00000003
 _FILE_DIRECTORY_FILE = 0x00000001
 _FILE_NON_DIRECTORY_FILE = 0x00000040
 _FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
@@ -325,10 +326,16 @@ def open_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
     if create and exclusive:
         disposition = _FILE_CREATE
     elif create:
-        raise OSError("non-exclusive create is not used by import inbox publication")
+        disposition = _FILE_OPEN_IF
     else:
         disposition = _FILE_OPEN
     access = _FILE_WRITE_ACCESS if write else _FILE_READ_ACCESS
+    if write and flags & os.O_APPEND:
+        # FILE_APPEND_DATA without FILE_WRITE_DATA makes local kernel writes
+        # append regardless of the CRT's seek position.
+        access &= ~_FILE_WRITE_DATA
+        if flags & os.O_RDWR:
+            access |= _FILE_READ_DATA
     handle = _nt_create(
         api,
         parent,
@@ -341,6 +348,7 @@ def open_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
     fd_flags = os.O_WRONLY if write and not (flags & os.O_RDWR) else os.O_RDONLY
     if flags & os.O_RDWR:
         fd_flags = os.O_RDWR
+    fd_flags |= flags & os.O_APPEND
     try:
         _reject_reparse(api, handle, expected_directory=False)
         return _handle_to_fd(api, handle, fd_flags)
