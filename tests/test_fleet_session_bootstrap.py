@@ -309,7 +309,7 @@ def test_run_agent_appends_and_acks_before_spawn(tmp_path, monkeypatch):
         repo_identity=REPO,
         context_hash=CONTEXT_HASH,
     )
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c + ".exe")
 
     def _run(argv, **kwargs):
         order.append(("run", argv, kwargs.get("stdin")))
@@ -349,7 +349,7 @@ def test_ack_failure_skips_run_agent_spawn(tmp_path, monkeypatch):
         context_hash=CONTEXT_HASH,
     )
     spawned = []
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c + ".exe")
     monkeypatch.setattr(
         agents.proc, "run", lambda *args, **kwargs: spawned.append(True) or agents.proc.Result(0, "x", "")
     )
@@ -416,7 +416,7 @@ def test_enrolled_lease_denial_reports_trusted_identity_before_provider_launch(
         return 409, {"acquired": False, "reason_code": reason, "error": private, "provider": private, "seat": private}
 
     monkeypatch.setattr(cloud, "_post_model_policy_blocking", post)
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/fake/" + command)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/fake/" + command + ".exe")
 
     def forbidden(*args, **kwargs):
         pytest.fail("refused enrolled lease must not launch a provider or consult cloud admission")
