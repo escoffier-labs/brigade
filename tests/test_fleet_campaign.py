@@ -94,6 +94,26 @@ def test_empty_health_command_refuses_without_effects_or_private_echo(tmp_path, 
     assert before == {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
 
 
+def test_path_resolution_failure_refuses_without_private_echo(tmp_path, capsys, monkeypatch):
+    path = fixture(tmp_path)
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+    def refuse_resolution(self, *args, **kwargs):
+        raise RuntimeError("Symlink loop from private-repo")
+
+    monkeypatch.setattr(Path, "resolve", refuse_resolution)
+    assert invoke(tmp_path, path) == 2
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {
+        "kind": "fleet-campaign-preview",
+        "read_only": True,
+        "error": "input_refused",
+    }
+    assert "private" not in output.out + output.err
+    assert str(tmp_path) not in output.out + output.err
+    assert before == {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+
 @pytest.mark.parametrize("ids", ["missing", "repo-b"])
 def test_missing_or_disabled_ids_refuse(tmp_path, capsys, ids):
     path = fixture(tmp_path, [binding("repo-b")], disabled=True)
