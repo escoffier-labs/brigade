@@ -41,6 +41,22 @@ def test_status_counts_cards_subdir(tmp_path: Path):
     assert s.cards == 1
 
 
+def test_status_pending_ignores_template_and_dotfiles(tmp_path: Path):
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    (mem / "MEMORY.md").write_text("# Index\n")
+    hand = tmp_path / "handoffs"
+    hand.mkdir()
+    (hand / "TEMPLATE.md").write_text("template\n")
+    (hand / ".draft.md").write_text("hidden\n")
+    s = collect_status(_cfg(mem, hand))
+    assert s.pending_handoffs == 0
+    assert s.oldest_pending_age_days is None
+    (hand / "2026-10-05-1200-real.md").write_text("handoff\n")
+    s = collect_status(_cfg(mem, hand))
+    assert s.pending_handoffs == 1
+
+
 def test_lint_finds_dead_wiki_link(tmp_path: Path):
     mem = tmp_path / "memory"
     mem.mkdir()
