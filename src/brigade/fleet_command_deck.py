@@ -104,6 +104,20 @@ def default_cloud_config() -> CloudConfig:
 
 
 @dataclass(frozen=True)
+class ObservedWorkGroup:
+    """Operator-configured retained observations, independent of fleet admission."""
+
+    key: str
+    label: str
+    coverage: str
+    source_ref: str
+    proxy_ref: str
+    parent_ref: str
+    work_ids: tuple[str, ...]
+    snapshot_observed_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class DeckConfig:
     stations: Sequence[StationConfig] = ()
     stale_after_seconds: int = 1800
@@ -111,6 +125,7 @@ class DeckConfig:
     outcome_window: int = 20
     failed_lookback_seconds: int = 86400
     cloud: CloudConfig = field(default_factory=default_cloud_config)
+    observed_work_groups: tuple[ObservedWorkGroup, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -384,6 +399,7 @@ class DeckView:
     cloud_workers: tuple[CloudWorker, ...] = ()
     interactive_sessions: tuple[InteractiveSession, ...] = ()
     control_plane: ControlPlane | None = None
+    observed_work_groups: tuple[ObservedWorkGroup, ...] = ()
 
 
 def resolve_config_path(flag_value: str | Path | None, environ: Mapping[str, str]) -> Path | None:
@@ -408,7 +424,64 @@ def load_config(path: Path) -> DeckConfig:
         outcome_window=_bounded_int(raw, "outcome_window", 20, 1, 100),
         failed_lookback_seconds=_bounded_int(raw, "failed_lookback_seconds", 86400, 1, 2_592_000),
         cloud=_cloud_config(raw.get("cloud")),
+        observed_work_groups=_observed_work_groups(raw.get("observed_work_groups", [])),
     )
+
+
+def _observed_work_groups(raw: object) -> tuple[ObservedWorkGroup, ...]:
+    error = "invalid observed work groups"
+    if not isinstance(raw, list) or len(raw) > 8:
+        raise DeckConfigError(error)
+    groups = []
+    keys: set[str] = set()
+    required = {"key", "label", "coverage", "source_ref", "proxy_ref", "parent_ref", "work_ids"}
+    for item in raw:
+        if (
+            not isinstance(item, dict)
+            or not required <= item.keys()
+            or item.keys() - required - {"snapshot_observed_at"}
+        ):
+            raise DeckConfigError(error)
+        for name in required - {"work_ids"}:
+            value = item[name]
+            limit = 64 if name in {"key", "label"} else 256
+            if not isinstance(value, str) or not value.strip() or len(value) > limit or _CONTROL_RE.search(value):
+                raise DeckConfigError(error)
+        key = item["key"]
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", key) or key in keys:
+            raise DeckConfigError(error)
+        keys.add(key)
+        ids = item["work_ids"]
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 25:
+            raise DeckConfigError(error)
+        if any(not isinstance(value, str) or not CLAIM_ID_RE.fullmatch(value) for value in ids):
+            raise DeckConfigError(error)
+        if len(set(ids)) != len(ids):
+            raise DeckConfigError(error)
+        snapshot = None
+        if "snapshot_observed_at" in item:
+            value = item["snapshot_observed_at"]
+            if not isinstance(value, str) or not 1 <= len(value) <= 64 or _CONTROL_RE.search(value):
+                raise DeckConfigError(error)
+            try:
+                snapshot = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                raise DeckConfigError(error) from None
+            if snapshot.tzinfo is None or snapshot.utcoffset() is None:
+                raise DeckConfigError(error)
+        groups.append(
+            ObservedWorkGroup(
+                key=key,
+                label=item["label"],
+                coverage=item["coverage"],
+                source_ref=item["source_ref"],
+                proxy_ref=item["proxy_ref"],
+                parent_ref=item["parent_ref"],
+                work_ids=tuple(ids),
+                snapshot_observed_at=snapshot,
+            )
+        )
+    return tuple(groups)
 
 
 def _station(raw: object) -> StationConfig:
@@ -1135,6 +1208,7 @@ def build_view(
         cloud_workers=tuple(cloud_workers[:CLOUD_PROVIDER_LIMIT]),
         interactive_sessions=session_rows,
         control_plane=control_plane,
+        observed_work_groups=config.observed_work_groups,
     )
 
 
@@ -1594,7 +1668,7 @@ def _empty_rail_text(view: DeckView) -> str:
     )
 
 
-def render_deck(view: DeckView, *, nonce: str, now: datetime) -> str:
+def render_deck(view: DeckView, *, nonce: str, now: datetime, worklore_enabled: bool = True) -> str:
     total_capacity = sum(station.station.capacity for station in view.stations)
     total_busy = sum(station.busy for station in view.stations)
     verdict = deck_verdict(view)
@@ -1605,6 +1679,29 @@ def render_deck(view: DeckView, *, nonce: str, now: datetime) -> str:
         f"{total_busy}/{total_capacity} slots busy<br>{_esc(_stamp(now))}</p></header>",
         '<nav class="deck-nav" aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> <a href="/deck/work">work</a> <a href="/view/machines">machines board</a></nav>',
     ]
+    if worklore_enabled and view.observed_work_groups:
+        cards = "".join(
+            '<article class="panel"><h3><a href="/deck/observed/'
+            + _esc(group.key)
+            + '">'
+            + _esc(group.label)
+            + "</a></h3><p>"
+            + str(len(group.work_ids))
+            + " configured observation records</p><p>Coverage: "
+            + _esc(group.coverage)
+            + "</p><p>Configured source: "
+            + _esc(group.source_ref)
+            + "<br>Configured proxy: "
+            + _esc(group.proxy_ref)
+            + "<br>Configured parent: "
+            + _esc(group.parent_ref)
+            + "</p></article>"
+            for group in view.observed_work_groups
+        )
+        parts.append(
+            '<section aria-label="Observed work groups"><h2>Observed work groups</h2>'
+            "<p>Retained task observations. Counts describe configured records.</p>" + cards + "</section>"
+        )
     if not view.stations:
         parts.append(
             '<section class="panel"><p class="empty">No stations configured. Start the hub with --deck-config to add them.</p></section>'

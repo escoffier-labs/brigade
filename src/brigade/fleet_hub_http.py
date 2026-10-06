@@ -774,7 +774,9 @@ def make_handler(
                     now=now,
                 )
             else:
-                page = fleet_command_deck.render_deck(view, nonce=nonce, now=now)
+                page = fleet_command_deck.render_deck(
+                    view, nonce=nonce, now=now, worklore_enabled=worklore_http.enabled()
+                )
             self._send_html(200, page, nonce=nonce)
 
         def _roster_auth(self) -> tuple[bool, bool]:
@@ -823,6 +825,41 @@ def make_handler(
                 policy_csrf=fleet_policy_page.csrf_value(token) if editable else "",
             )
             self._send_html(status, page, nonce=nonce)
+
+        def _serve_observed_work(self, path: str, query: str) -> None:
+            plain = "text/plain; charset=utf-8"
+            if not worklore_http.enabled():
+                self._send_html(404, "Not found.\n", content_type=plain)
+                return
+            authorized, _editable = self._roster_auth()
+            if not authorized:
+                self._send_html(
+                    401, "Unauthorized: use brigade fleet enroll for read-only dashboard access.\n", content_type=plain
+                )
+                return
+            key = path.removeprefix("/deck/observed/")
+            group = next((group for group in frozen_deck.observed_work_groups if group.key == key), None)
+            if group is None:
+                self._send_html(404, "Not found.\n", content_type=plain)
+                return
+            if query:
+                self._send_html(400, "Invalid observed work page query.\n", content_type=plain)
+                return
+            try:
+                conn = open_db(Path(db_path))
+                try:
+                    conn.execute("PRAGMA query_only=ON")
+                    page = fleet_work_page.load_observed_group(conn, group)
+                finally:
+                    conn.close()
+            except (FleetHubError, sqlite3.Error):
+                self._send_html(500, "Worklore task store unavailable.\n", content_type=plain)
+                return
+            nonce = secrets.token_urlsafe(16)
+            body = fleet_work_page.render_observed_group(
+                page, nonce=nonce, now=datetime.now(timezone.utc), stale_after_seconds=frozen_deck.stale_after_seconds
+            )
+            self._send_html(200, body, nonce=nonce)
 
         def _serve_work(self, query: str) -> None:
             plain = "text/plain; charset=utf-8"
@@ -1161,6 +1198,9 @@ def make_handler(
                 return
             if path == "/deck/policy":
                 self._serve_policy_page(query)
+                return
+            if path.startswith("/deck/observed/"):
+                self._serve_observed_work(path, query)
                 return
             if path == "/deck/work":
                 self._serve_work(query)

@@ -56,8 +56,16 @@ def _reference_url(value: object) -> str | None:
         return None
     # Stored references can outlive their importer. Never offer the hub's
     # bearer-only Worklore API as a browser destination.
-    if url and (urlsplit(url).path == "/work" or urlsplit(url).path.startswith("/work/")):
-        return None
+    if url:
+        parsed = urlsplit(url)
+        if parsed.path == "/work" or parsed.path.startswith("/work/"):
+            return None
+        try:
+            params = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=32)
+        except ValueError:
+            return None
+        if "token" in params:
+            return None
     return url
 
 
@@ -105,7 +113,7 @@ def _item(item: Mapping[str, Any]) -> str:
         ("Stored status", "status", TEXT_LIMIT),
         ("Execution mode", "execution_mode", TEXT_LIMIT),
         ("Version", "version", TEXT_LIMIT),
-        ("Updated at", "updated_at", TEXT_LIMIT),
+        ("Updated at (work-record update time)", "updated_at", TEXT_LIMIT),
         ("Work ID", "work_id", TEXT_LIMIT),
     )
     facts = "".join(
@@ -157,3 +165,69 @@ def render(page: Mapping[str, Any], *, nonce: str, now: datetime) -> str:
         + "</main>"
     )
     return deck._document(body, nonce=nonce, now=now, title="Worklore", refresh=False)
+
+
+def load_observed_group(conn: sqlite3.Connection, group: deck.ObservedWorkGroup) -> dict[str, Any]:
+    """Read only configured IDs through the store's bounded item projection."""
+    items = []
+    unavailable = []
+    for work_id in group.work_ids:
+        try:
+            item = worklore_store.get_item(conn, work_id)
+        except worklore_store.WorkloreNotFound:
+            unavailable.append((work_id, "missing"))
+            continue
+        if item.get("archived_at") or item.get("status") == "archived":
+            unavailable.append((work_id, "archived"))
+        else:
+            items.append(item)
+    return {"group": group, "items": items, "unavailable": unavailable}
+
+
+def render_observed_group(page: Mapping[str, Any], *, nonce: str, now: datetime, stale_after_seconds: int) -> str:
+    group = page["group"]
+    snapshot = group.snapshot_observed_at
+    if snapshot is None:
+        freshness = "unknown"
+        stamp = "unknown (no configured snapshot observation time)"
+    else:
+        age = (now - snapshot).total_seconds()
+        freshness = "future" if age < 0 else "stale" if age > stale_after_seconds else "recent"
+        stamp = snapshot.isoformat()
+    blocks = "".join(_item(item) for item in page["items"][:PAGE_SIZE])
+    blocks += "".join(
+        '<article class="panel"><h2>Unavailable work reference</h2><p>Work ID: '
+        + _text(work_id)
+        + "</p><p>Record unavailable: "
+        + _text(reason)
+        + "</p></article>"
+        for work_id, reason in page["unavailable"][:PAGE_SIZE]
+    )
+    body = (
+        '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Observed work</p><h1>'
+        + _text(group.label)
+        + "</h1></div></header>"
+        '<nav class="deck-nav" aria-label="Command Deck"><a href="/deck">deck</a>'
+        '<a href="/deck/work">work</a></nav><section class="panel"><h2>Retained task observations</h2>'
+        + f"<p>{len(group.work_ids)} configured observation records</p><p>Coverage: "
+        + _text(group.coverage)
+        + "</p><p>Configured source: "
+        + _text(group.source_ref)
+        + "<br>Configured proxy: "
+        + _text(group.proxy_ref)
+        + "<br>Configured parent: "
+        + _text(group.parent_ref)
+        + "</p><p>Snapshot observation time (operator-configured metadata): "
+        + _text(stamp)
+        + f"<br>Snapshot freshness: {freshness}. Stale after {stale_after_seconds} seconds.</p>"
+        "<p>Recent observation metadata does not establish live activity. Configured references are plain "
+        "attribution, with no authenticated identity assertion. Work-record update time describes changes "
+        "to the stored task, not snapshot observation time.</p>"
+        "<p>This group does not establish an enrolled node, connector, admission lane, account inventory "
+        "or active cloud heartbeat. It does not change task lifecycle, attempts, stations, capacity, leases "
+        "or claims. The generic work page retains its broader Worklore exposure.</p>"
+        f"<p>Description previews are limited to {DESCRIPTION_LIMIT} characters, blockers to {BLOCKER_LIMIT}, "
+        f"other task text to {TEXT_LIMIT}, and references to {REFERENCE_LIMIT} per task. Truncation is marked.</p>"
+        "</section>" + blocks + "</main>"
+    )
+    return deck._document(body, nonce=nonce, now=now, title=group.label, refresh=False)
