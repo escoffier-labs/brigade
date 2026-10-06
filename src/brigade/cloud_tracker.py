@@ -9,10 +9,12 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, ContextManager
 from uuid import uuid4
 
 from . import localio
+from .claude_cloud_identity import normalize_claude_cloud_identity
+from .inbox_lock import held_file_lock
 
 REGISTRY_SCHEMA = "brigade.run.cloud.registry.v1"
 STATUS_SCHEMA = "brigade.run.cloud.status.v1"
@@ -190,6 +192,116 @@ def _new_id() -> str:
     return f"cloud-{uuid4().hex[:12]}"
 
 
+def registry_lock(target: Path) -> ContextManager[None]:
+    """Serialize local registry read/modify/write with the existing lock primitive."""
+    return held_file_lock(registry_path(target).with_suffix(".lock"), deadline_seconds=5)
+
+
+def _claude_repository(value: str) -> str:
+    slug = value.removeprefix("https://github.com/").removesuffix("/")
+    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9_.-]{1,100}", slug):
+        raise ValueError("Invalid Claude repository binding")
+    owner, name = slug.split("/")
+    if "--" in owner or name in {".", ".."} or name.lower().endswith(".git"):
+        raise ValueError("Invalid Claude repository binding")
+    return slug.lower()
+
+
+def _claude_binding(
+    *,
+    task_id: str | None,
+    session_id: str | None,
+    repo: str,
+    branch: str | None,
+    commit: str | None,
+    pr: str | None,
+) -> dict[str, Any]:
+    identity_input = session_id if session_id is not None else task_id
+    if identity_input is None:
+        raise ValueError("Explicit Claude adoption requires a session identity")
+    identity = normalize_claude_cloud_identity(identity_input)
+    if task_id is not None and normalize_claude_cloud_identity(task_id) != identity:
+        raise ValueError("Claude session identity conflict")
+    repository = _claude_repository(repo)
+    if branch is not None and (
+        not branch
+        or len(branch) > 255
+        or branch.startswith(("-", "/"))
+        or branch.endswith(("/", "."))
+        or any(not 33 <= ord(char) <= 126 or char in "~^:?*[\\" for char in branch)
+        or any(token in branch for token in ("..", "@{", "//"))
+        or branch == "@"
+        or any(part.startswith(".") or part.endswith(".lock") for part in branch.split("/"))
+    ):
+        raise ValueError("Invalid Claude branch reference")
+    if commit is not None and not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", commit):
+        raise ValueError("Invalid Claude immutable commit reference")
+    pr_url = None
+    if pr is not None:
+        number = pr
+        if pr.startswith("https://github.com/"):
+            match = re.fullmatch(r"https://github.com/([^/]+/[^/]+)/pull/([1-9][0-9]{0,18})", pr)
+            if match is None or _claude_repository(match[1]) != repository:
+                raise ValueError("Invalid Claude PR reference")
+            number = match[2]
+        if not re.fullmatch(r"[1-9][0-9]{0,18}", number) or int(number) > (1 << 63) - 1:
+            raise ValueError("Invalid Claude PR reference")
+        pr_url = f"https://github.com/{repository}/pull/{number}"
+    return {
+        "task_id": identity.session_id,
+        "session_id": identity.session_id,
+        "session_url": identity.url,
+        "repo": repository,
+        "branch": branch,
+        "commit": commit.lower() if commit else None,
+        "pr_url": pr_url,
+    }
+
+
+def _claude_session_ids(entry: dict[str, Any]) -> set[str]:
+    identities = set()
+    for key in ("task_id", "session_id"):
+        value = entry.get(key)
+        if not isinstance(value, str):
+            continue
+        try:
+            identities.add(normalize_claude_cloud_identity(value).session_id)
+        except ValueError:
+            continue
+    return identities
+
+
+def _register_claude_binding(registry: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+    matches = [
+        existing
+        for existing in registry["entries"]
+        if existing.get("provider") == "claude-cloud" and entry["session_id"] in _claude_session_ids(existing)
+    ]
+    if len(matches) > 1:
+        raise ValueError("Claude repository binding conflict")
+    for existing in registry["entries"]:
+        if existing.get("provider") != "claude-cloud":
+            continue
+        sessions = _claude_session_ids(existing)
+        if entry["session_id"] not in sessions:
+            continue
+        if len(sessions) != 1:
+            raise ValueError("Claude session identity conflict")
+        if existing.get("repo") != entry["repo"]:
+            # Unbound legacy rows cannot establish a repository either.
+            raise ValueError("Claude repository binding conflict")
+        for key in ("branch", "commit", "pr_url"):
+            supplied = entry.get(key)
+            if supplied is not None and existing.get(key) not in (None, supplied):
+                raise ValueError("Claude reference conflict")
+        for key in ("branch", "commit", "pr_url"):
+            if entry.get(key) is not None:
+                existing[key] = entry[key]
+        return existing
+    registry["entries"].append(entry)
+    return entry
+
+
 def register(
     target: Path,
     *,
@@ -204,14 +316,32 @@ def register(
     source: str = "dispatch",
     environment_audit: dict[str, str] | None = None,
     lease_holder: str | None = None,
+    repo: str | None = None,
+    commit: str | None = None,
+    pr: str | None = None,
 ) -> dict[str, Any]:
     if provider not in TRACKER_PROVIDERS:
         raise ValueError("provider must be one of: codex-cloud, cursor-cloud, grokbot-cloud, claude-cloud, jules")
     if not label.strip():
         raise ValueError("label must not be empty")
+    binding = None
+    if any(value is not None for value in (repo, commit, pr)):
+        if provider != "claude-cloud" or repo is None:
+            raise ValueError("Explicit Claude references require --provider claude-cloud and --repo")
+        if lease_holder is not None:
+            raise ValueError("Claude adoption cannot grant holder authority")
+        binding = _claude_binding(
+            task_id=task_id,
+            session_id=session_id,
+            repo=repo,
+            branch=branch,
+            commit=commit,
+            pr=pr,
+        )
+        task_id = binding["task_id"]
+        source = "adopt-session"
     if source == "dispatch" and not task_id:
         raise ValueError("dispatch registration requires task_id")
-    registry = load_registry(target)
     entry = {
         "id": _new_id(),
         "provider": provider,
@@ -222,7 +352,7 @@ def register(
         "expected_artifact": expected_artifact or {"kind": "diff"},
         "branch": branch,
         "dispatched_at": dispatched_at or _now_iso(),
-        "adopted_at": None,
+        "adopted_at": _now_iso() if source.startswith("adopt-") else None,
         "source": source,
     }
     if environment_audit:
@@ -232,8 +362,28 @@ def register(
                 entry[key] = value
     if isinstance(lease_holder, str) and lease_holder:
         entry["lease_holder"] = lease_holder
-    registry["entries"].append(entry)
-    save_registry(target, registry)
+    if binding is not None:
+        entry.update(binding)
+        digest = hashlib.sha256(f"claude-cloud\0{entry['session_id']}".encode()).hexdigest()[:24]
+        entry["id"] = f"cloud-{digest}"
+    with registry_lock(target):
+        registry = load_registry(target)
+        if binding is not None:
+            entry = _register_claude_binding(registry, entry)
+        else:
+            if provider == "claude-cloud":
+                sessions = _claude_session_ids(entry)
+                if len(sessions) > 1:
+                    raise ValueError("Claude session identity conflict")
+                if any(
+                    existing.get("provider") == "claude-cloud"
+                    and existing.get("repo") is not None
+                    and sessions.intersection(_claude_session_ids(existing))
+                    for existing in registry["entries"]
+                ):
+                    raise ValueError("Claude repository binding conflict")
+            registry["entries"].append(entry)
+        save_registry(target, registry)
     return entry
 
 
@@ -247,13 +397,21 @@ def adopt(
     prompt_hash: str | None = None,
     session_id: str | None = None,
     expected_artifact: dict[str, Any] | None = None,
+    repo: str | None = None,
+    commit: str | None = None,
+    pr: str | None = None,
 ) -> dict[str, Any]:
-    if not task_id and not branch:
+    if not task_id and not branch and not (repo is not None and session_id is not None):
         raise ValueError("adopt requires --task-id and/or --branch")
     source = "adopt-task" if task_id and not branch else "adopt-branch" if branch and not task_id else "adopt-task"
     if task_id and branch:
         source = "adopt-task"
-    resolved_label = (label or task_id or branch or "adopted").strip()
+    default_identity = task_id
+    if provider == "claude-cloud" and repo is not None:
+        supplied_identity = task_id or session_id
+        if supplied_identity is not None:
+            default_identity = normalize_claude_cloud_identity(supplied_identity).session_id
+    resolved_label = (label or default_identity or branch or "adopted").strip()
     artifact = expected_artifact
     if artifact is None and branch:
         artifact = {"kind": "branch", "pattern": branch}
@@ -267,15 +425,10 @@ def adopt(
         expected_artifact=artifact,
         branch=branch,
         source=source,
+        repo=repo,
+        commit=commit,
+        pr=pr,
     )
-    # Stamp adopted_at without storing prompt text.
-    registry = load_registry(target)
-    for item in registry["entries"]:
-        if item.get("id") == entry["id"]:
-            item["adopted_at"] = _now_iso()
-            entry = item
-            break
-    save_registry(target, registry)
     return entry
 
 
@@ -404,11 +557,39 @@ def _classify_entry(
     if isinstance(provider_info, dict):
         provider_state = _normalize_provider_state(provider_info.get("state"))
         ready_at = _parse_time(provider_info.get("ready_at"))
+    if provider == "claude-cloud":
+        provider_state = None
+        ready_at = None
     branches = _branch_names(github)
     prs = _prs_for_branch(github, branch)
+    if provider == "claude-cloud" and entry.get("repo"):
+        prefix = f"https://github.com/{entry['repo']}/pull/"
+        candidates = github.get("prs")
+        if not isinstance(candidates, list):
+            candidates = []
+        if entry.get("pr_url"):
+            # Only an exact canonical PR URL binds, including without a branch.
+            prs = [pr for pr in candidates if isinstance(pr, dict) and pr.get("url") == entry["pr_url"]]
+        else:
+            prs = [
+                pr
+                for pr in prs
+                if isinstance(pr.get("url"), str)
+                and re.fullmatch(re.escape(prefix) + r"[1-9][0-9]{0,18}", pr["url"], re.IGNORECASE)
+            ]
     merged = any(str(pr.get("state", "")).upper() == "MERGED" for pr in prs)
     open_pr = any(str(pr.get("state", "")).upper() == "OPEN" for pr in prs)
     branch_exists = bool(branch and branch in branches)
+    branch_scope_known = not (provider == "claude-cloud" and entry.get("repo")) or (
+        github.get("repo") == entry.get("repo")
+    )
+    if not branch_scope_known:
+        branch_exists = False
+    branch_observation_known = branch_scope_known and (
+        not (provider == "claude-cloud" and entry.get("repo"))
+        or branch_exists
+        or github.get("branches_complete") is True
+    )
     raw_expected = entry.get("expected_artifact")
     expected = raw_expected if isinstance(raw_expected, dict) else {}
     expects_branch = expected.get("kind") in {"branch", "draft-pr"}
@@ -422,7 +603,7 @@ def _classify_entry(
         },
         "github": {
             "branch": branch,
-            "branch_exists": branch_exists,
+            "branch_exists": branch_exists if branch_observation_known else None,
             "prs": prs,
         },
     }
@@ -472,6 +653,9 @@ def _classify_entry(
     else:
         classification = "pending"
 
+    if provider == "claude-cloud":
+        classification = "needs-investigation"
+
     row = {
         "id": entry.get("id"),
         "provider": provider,
@@ -487,10 +671,33 @@ def _classify_entry(
         "evidence": evidence,
         "pr": prs[0] if prs else None,
     }
+    if provider == "claude-cloud":
+        row["provider_lifecycle"] = _claude_lifecycle(entry, now=now, stale_hours=stale_ready_hours)
+        row["artifact_state"] = "landed" if merged else "unobserved"
+        evidence["provider"].update(row["provider_lifecycle"])
+        evidence["provider"]["wired"] = False
+        for key in ("repo", "commit", "pr_url", "session_url", "local_continuation", "lease_evidence"):
+            if key in entry:
+                row[key] = entry[key]
     session_url = _jules_session_url(provider_info if isinstance(provider_info, dict) else None)
     if session_url:
         row["url"] = session_url
     return row
+
+
+def _claude_lifecycle(entry: dict[str, Any], *, now: datetime, stale_hours: int) -> dict[str, Any]:
+    previous = entry.get("provider_lifecycle")
+    confirmed = _parse_time(previous.get("last_confirmed_at")) if isinstance(previous, dict) else None
+    age = _hours_since(confirmed, now)
+    return {
+        "state": "unknown",
+        "source": "unsupported-provider-status",
+        "reason": "status-unavailable",
+        "observed_at": _now_iso(now),
+        "last_confirmed_at": _now_iso(confirmed) if confirmed else None,
+        "freshness": "unobserved" if age is None else "stale" if age >= stale_hours else "unknown",
+        "age_hours": age,
+    }
 
 
 def _orphan_branch_rows(
@@ -542,6 +749,10 @@ def _orphan_branch_rows(
                 "observed_at": _now_iso(now),
             }
         )
+    for row in rows:
+        if row["provider"] == "claude-cloud":
+            row["provider_lifecycle"] = _claude_lifecycle({}, now=now, stale_hours=DEFAULT_STALE_READY_HOURS)
+            row["artifact_state"] = "unobserved"
     return rows
 
 
@@ -740,7 +951,7 @@ def status_payload(
         "claude-cloud": {
             "wired": False,
             "authority": "disabled-by-policy",
-            "detail": "local/background sessions are not cloud discovery; claude cloud remains untracked/disabled until a structured bindable provider surface exists",
+            "detail": "explicit local adoption supported; provider status unavailable; automatic launch disabled",
         },
         "jules": {
             "wired": jules_wired,
@@ -768,7 +979,9 @@ def status_payload(
                 }
             )
             if provider == "claude-cloud":
-                source["detail"] = "disabled-by-policy"
+                source["detail"] = (
+                    "explicit local adoption supported; provider status unavailable; automatic launch disabled"
+                )
             elif observation.reason is not None:
                 source["detail"] = observation.reason
             elif "detail" in source:
@@ -781,6 +994,13 @@ def status_payload(
         "stale_ready_hours": stale_ready_hours,
         "sources": sources,
         "entries": entries,
+        "lifecycle_counts": {
+            "claude-cloud": {
+                "active": None,
+                "unknown": sum(1 for row in entries if row.get("provider") == "claude-cloud"),
+                "coverage": "unavailable",
+            },
+        },
         "counts": {
             classification: sum(1 for row in entries if row.get("classification") == classification)
             for classification in CLASSIFICATIONS
@@ -1027,74 +1247,77 @@ def compact_registry(
     if policy["max_age_hours"] < 1:
         raise ValueError("max_age_hours must be >= 1")
 
-    registry = load_registry(target)
-    payload = (
-        status
-        if isinstance(status, dict)
-        else status_payload(
-            target,
-            now=observed,
-            provider_tasks=provider_tasks,
-            github=github,
-            cursor_wired=cursor_wired,
+    with registry_lock(target):
+        registry = load_registry(target)
+        payload = (
+            status
+            if isinstance(status, dict)
+            else status_payload(
+                target,
+                now=observed,
+                provider_tasks=provider_tasks,
+                github=github,
+                cursor_wired=cursor_wired,
+            )
         )
-    )
-    rows_by_id = {
-        row.get("id"): row for row in payload.get("entries", []) if isinstance(row, dict) and row.get("id") is not None
-    }
+        rows_by_id = {
+            row.get("id"): row
+            for row in payload.get("entries", [])
+            if isinstance(row, dict) and row.get("id") is not None
+        }
 
-    preserved: list[dict[str, Any]] = []
-    eligible: list[tuple[datetime, str, dict[str, Any]]] = []
-    for entry in registry["entries"]:
-        if not isinstance(entry, dict):
-            continue
-        entry_id = entry.get("id")
-        row = rows_by_id.get(entry_id, {})
-        if not isinstance(row, dict) or not row or _row_is_preserved(row):
-            preserved.append(entry)
-            continue
-        dispatched = _parse_time(entry.get("dispatched_at"))
-        if dispatched is None:
-            preserved.append(entry)
-            continue
-        eligible.append((dispatched, str(entry_id or ""), entry))
+        preserved: list[dict[str, Any]] = []
+        eligible: list[tuple[datetime, str, dict[str, Any]]] = []
+        for entry in registry["entries"]:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = entry.get("id")
+            row = rows_by_id.get(entry_id, {})
+            if not isinstance(row, dict) or not row or _row_is_preserved(row):
+                preserved.append(entry)
+                continue
+            dispatched = _parse_time(entry.get("dispatched_at"))
+            if dispatched is None:
+                preserved.append(entry)
+                continue
+            eligible.append((dispatched, str(entry_id or ""), entry))
 
-    eligible.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    kept_terminal: list[dict[str, Any]] = []
-    dropped: list[dict[str, Any]] = []
-    for dispatched, _entry_id, entry in eligible:
-        age = _hours_since(dispatched, observed)
-        over_age = age is not None and age >= policy["max_age_hours"]
-        over_count = len(kept_terminal) >= policy["keep_terminal"]
-        if over_age or over_count:
-            dropped.append(entry)
-        else:
-            kept_terminal.append(entry)
+        eligible.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        kept_terminal: list[dict[str, Any]] = []
+        dropped: list[dict[str, Any]] = []
+        for dispatched, _entry_id, entry in eligible:
+            age = _hours_since(dispatched, observed)
+            over_age = age is not None and age >= policy["max_age_hours"]
+            over_count = len(kept_terminal) >= policy["keep_terminal"]
+            if over_age or over_count:
+                dropped.append(entry)
+            else:
+                kept_terminal.append(entry)
 
-    kept_ids = {item.get("id") for item in (*preserved, *kept_terminal)}
-    registry["entries"] = [
-        entry for entry in registry["entries"] if isinstance(entry, dict) and entry.get("id") in kept_ids
-    ]
-    registry["retention"] = {**policy, "compacted_at": _now_iso(observed)}
-    save_registry(target, registry)
+        kept_ids = {item.get("id") for item in (*preserved, *kept_terminal)}
+        registry["entries"] = [
+            entry for entry in registry["entries"] if isinstance(entry, dict) and entry.get("id") in kept_ids
+        ]
+        registry["retention"] = {**policy, "compacted_at": _now_iso(observed)}
+        save_registry(target, registry)
 
-    maintenance_id = f"{observed.strftime('%Y%m%d-%H%M%S')}-cloud-compact-{uuid4().hex[:6]}"
-    report = {
-        "schema": MAINTENANCE_SCHEMA,
-        "maintenance_id": maintenance_id,
-        "action": "compact",
-        "target": str(target.expanduser().resolve()),
-        "observed_at": _now_iso(observed),
-        "policy": policy,
-        "kept": len(registry["entries"]),
-        "dropped_ids": [entry.get("id") for entry in dropped],
-        "counts": {"kept": len(registry["entries"]), "dropped": len(dropped)},
-        "atomic": True,
-    }
-    receipt_dir = _root(target) / "maintenance" / maintenance_id
-    receipt_dir.mkdir(parents=True, exist_ok=True)
-    localio.write_json(receipt_dir / "compact.json", report)
-    return report
+        maintenance_id = f"{observed.strftime('%Y%m%d-%H%M%S')}-cloud-compact-{uuid4().hex[:6]}"
+        report = {
+            "schema": MAINTENANCE_SCHEMA,
+            "maintenance_id": maintenance_id,
+            "action": "compact",
+            "target": str(target.expanduser().resolve()),
+            "observed_at": _now_iso(observed),
+            "policy": policy,
+            "kept": len(registry["entries"]),
+            "dropped_ids": [entry.get("id") for entry in dropped],
+            "counts": {"kept": len(registry["entries"]), "dropped": len(dropped)},
+            "atomic": True,
+        }
+        receipt_dir = _root(target) / "maintenance" / maintenance_id
+        receipt_dir.mkdir(parents=True, exist_ok=True)
+        localio.write_json(receipt_dir / "compact.json", report)
+        return report
 
 
 def _run_text(command: list[str], *, cwd: Path | None = None, timeout: float = 30.0) -> tuple[int, str, str]:
@@ -1205,7 +1428,24 @@ def observe_codex_cloud_tasks(target: Path) -> dict[str, Any]:
 
 def observe_github(target: Path) -> dict[str, Any]:
     """Ground truth for cloud-shaped branches and PRs via gh."""
+    repo = None
+    code, stdout, _ = _run_text(["gh", "repo", "view", "--json", "nameWithOwner"], cwd=target)
+    if code == 0:
+        try:
+            candidate = json.loads(stdout)
+            if isinstance(candidate, dict) and isinstance(candidate.get("nameWithOwner"), str):
+                repo = _claude_repository(candidate["nameWithOwner"])
+        except (ValueError, TypeError, KeyError):
+            pass
+    explicit = [
+        entry
+        for entry in load_registry(target)["entries"]
+        if entry.get("provider") == "claude-cloud" and entry.get("repo") == repo and repo is not None
+    ]
+    explicit_branches = {entry.get("branch") for entry in explicit if isinstance(entry.get("branch"), str)}
+    explicit_prs = {entry.get("pr_url") for entry in explicit if isinstance(entry.get("pr_url"), str)}
     branches: list[dict[str, str]] = []
+    branches_complete = False
     code, stdout, _ = _run_text(
         ["gh", "api", "repos/{owner}/{repo}/branches?per_page=100"],
         cwd=target,
@@ -1214,20 +1454,24 @@ def observe_github(target: Path) -> dict[str, Any]:
         try:
             data = json.loads(stdout)
         except json.JSONDecodeError:
-            data = []
+            data = None
         if isinstance(data, list):
-            for item in data:
+            branches_complete = len(data) < 100 and all(
+                isinstance(item, dict) and isinstance(item.get("name"), str) for item in data
+            )
+            for item in data[:100]:
                 if isinstance(item, dict) and isinstance(item.get("name"), str):
                     name = item["name"]
-                    if name.startswith(CLOUD_BRANCH_PREFIXES):
+                    if name.startswith(CLOUD_BRANCH_PREFIXES) or name in explicit_branches:
                         branches.append({"name": name})
-    # Also accept local refs when gh is unavailable so adopt/sweep still works offline in tests.
-    if not branches:
+    # Preserve legacy offline discovery without treating local refs as current
+    # remote existence evidence for explicitly repository-bound sessions.
+    if not branches and not branches_complete:
         code, stdout, _ = _run_text(["git", "branch", "-a", "--format=%(refname:short)"], cwd=target)
         if code == 0:
             for line in stdout.splitlines():
                 name = line.strip().removeprefix("origin/")
-                if name.startswith(CLOUD_BRANCH_PREFIXES):
+                if name.startswith(CLOUD_BRANCH_PREFIXES) and name not in explicit_branches:
                     branches.append({"name": name})
 
     prs: list[dict[str, Any]] = []
@@ -1255,7 +1499,12 @@ def observe_github(target: Path) -> dict[str, Any]:
                 if not isinstance(item, dict):
                     continue
                 head = item.get("headRefName")
-                if isinstance(head, str) and head.startswith(CLOUD_BRANCH_PREFIXES):
+                url = item.get("url")
+                if isinstance(head, str) and (
+                    head.startswith(CLOUD_BRANCH_PREFIXES)
+                    or head in explicit_branches
+                    or (isinstance(url, str) and url in explicit_prs)
+                ):
                     prs.append(
                         {
                             "head": head,
@@ -1266,7 +1515,7 @@ def observe_github(target: Path) -> dict[str, Any]:
                             "headRefOid": item.get("headRefOid"),
                         }
                     )
-    return {"branches": branches, "prs": prs}
+    return {"branches": branches, "prs": prs, "repo": repo, "branches_complete": branches_complete}
 
 
 def cursor_cloud_wired() -> bool:
@@ -1585,7 +1834,9 @@ def center_activity_records(
                 "label": str(row.get("provider") or "cloud"),
                 "task_label": str(row.get("label") or row.get("branch") or "Cloud task"),
                 "model": None,
-                "state": state_map.get(classification, "unknown"),
+                "state": "unknown"
+                if row.get("provider") == "claude-cloud"
+                else state_map.get(classification, "unknown"),
                 "classification": classification,
                 "started_at": started,
                 "last_updated_at": payload.get("observed_at"),
@@ -1607,6 +1858,19 @@ def center_activity_records(
                 },
             }
         )
+        if row.get("provider") == "claude-cloud":
+            for key in (
+                "provider_lifecycle",
+                "artifact_state",
+                "repo",
+                "commit",
+                "pr_url",
+                "session_url",
+                "local_continuation",
+                "lease_evidence",
+            ):
+                if key in row:
+                    records[-1][key] = row[key]
     return records
 
 
@@ -1644,7 +1908,8 @@ def health(
 def set_stale_ready_hours(target: Path, hours: int) -> dict[str, Any]:
     if hours < 1:
         raise ValueError("stale_ready_hours must be >= 1")
-    registry = load_registry(target)
-    registry["stale_ready_hours"] = int(hours)
-    save_registry(target, registry)
-    return registry
+    with registry_lock(target):
+        registry = load_registry(target)
+        registry["stale_ready_hours"] = int(hours)
+        save_registry(target, registry)
+        return registry
