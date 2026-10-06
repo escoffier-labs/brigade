@@ -51,7 +51,8 @@ def _index_stats(memory_dir: Path) -> tuple[int, int]:
 def _handoff_counts(handoffs_dir: Path) -> tuple[int, int, float | None]:
     if not handoffs_dir.is_dir():
         return 0, 0, None
-    pending = [p for p in handoffs_dir.glob("*.md")]
+    # Mirror handoff_cmd's IGNORED_HANDOFF_NAMES without importing its heavier module.
+    pending = [p for p in handoffs_dir.glob("*.md") if not p.name.startswith(".") and p.name != "TEMPLATE.md"]
     processed = list((handoffs_dir / "processed").glob("*.md")) if (handoffs_dir / "processed").is_dir() else []
     oldest_age: float | None = None
     if pending:
