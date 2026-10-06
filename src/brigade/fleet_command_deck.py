@@ -1688,7 +1688,9 @@ def render_deck(view: DeckView, *, nonce: str, now: datetime, worklore_enabled: 
         '<header class="masthead"><div><p class="eyebrow">Fleet operations</p><h1>Command Deck</h1>',
         f'<p class="verdict">{_esc(verdict)}</p></div><p class="header-meta">'
         f"{total_busy}/{total_capacity} slots busy<br>{_esc(_stamp(now))}</p></header>",
-        '<nav class="deck-nav" aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> <a href="/deck/work">work</a> <a href="/view/machines">machines board</a></nav>',
+        '<nav class="deck-nav" aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> '
+        + ('<a href="/deck/work">work</a> ' if worklore_enabled else "")
+        + '<a href="/view/machines">machines board</a></nav>',
     ]
     if worklore_enabled and view.observed_work_groups:
         cards = ""
