@@ -506,7 +506,9 @@ def authorize_launch(ctx: LaunchContext, *, cli_ref: str, model: str) -> None:
         consumer=ctx.consumer,
     )
     if not lease.granted:
-        raise PreflightDenial("lease-denied", lease.reason)
+        # Keep the allowlisted reason and both trusted labels inside agent detail limits.
+        diagnostic = f"model lease denied: {lease.reason} (provider {ctx.provider[:64]!r}, seat {seat[:64]!r})"
+        raise PreflightDenial("lease-denied", diagnostic[:200])
     ctx.lease_id = lease.lease_id
     ctx.lease_holder = lease.holder
     _ = cli_ref
