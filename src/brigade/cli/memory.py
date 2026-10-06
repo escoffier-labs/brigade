@@ -14,6 +14,22 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_memory = sub.add_parser("memory", help="Inspect local memory maintenance workflows.")
     memory_sub = p_memory.add_subparsers(dest="memory_command", metavar="<memory-command>")
     memory_sub.required = True
+    proposal = memory_sub.add_parser("proposal", help="Preview, review and apply bounded memory pair edits.")
+    commands = proposal.add_subparsers(dest="memory_proposal_command", required=True)
+    for name in ("create", "show", "review", "reject", "apply"):
+        command = commands.add_parser(name, help=f"{name.capitalize()} an exact reviewed memory proposal.")
+        command.add_argument("--target", "-t", type=Path, default=Path("."))
+        command.add_argument("--json", action="store_true")
+        if name == "create":
+            command.add_argument("--issue", required=True)
+            command.add_argument("--survivor", required=True)
+            command.add_argument("--relation", choices=("merge", "supersede"), required=True)
+        else:
+            command.add_argument("proposal_id")
+        if name in ("create", "review", "reject"):
+            command.add_argument("--reason", required=True)
+        if name in ("review", "reject", "apply"):
+            command.add_argument("--digest", required=True)
     p_memory_care = memory_sub.add_parser("care", help="Scan local memory cards for refresh risk.")
     memory_care_sub = p_memory_care.add_subparsers(dest="memory_care_command", metavar="<memory-care-command>")
     memory_care_sub.required = True
@@ -333,6 +349,31 @@ def dispatch(args) -> int:
     from .. import memory_cmd
     from .. import memory_operations
 
+    if args.memory_command == "proposal":
+        from .. import memory_proposals
+        import json
+
+        name = args.memory_proposal_command
+        values = {"target": args.target}
+        if name == "create":
+            values.update(issue_id=args.issue, survivor=args.survivor, relation=args.relation, reason=args.reason)
+        else:
+            values["proposal_id"] = args.proposal_id
+            if name in ("review", "reject", "apply"):
+                values["digest"] = args.digest
+            if name in ("review", "reject"):
+                values["reason"] = args.reason
+        try:
+            payload = getattr(memory_proposals, f"{name}_payload")(**values)
+        except memory_proposals.ProposalError as exc:
+            if args.json:
+                print(json.dumps({"status": "refused", "error": str(exc)}, sort_keys=True))
+            else:
+                print(f"error: {exc}", file=sys.stderr)
+            return exc.exit_code
+        # The human preview retains every exact before/after text and hash too.
+        print(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
+        return 0 if payload.get("status") not in ("restored", "recovery-required") else 1
     if args.memory_command == "topology":
         return memory_operations.topology(target=args.target, json_output=args.json)
     if args.memory_command == "inventory":

@@ -13,6 +13,11 @@ _CARD_ID_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Migration keys are opaque lookup strings, never paths to open. Keep their
+# authority and indexing cost bounded even for hand-edited canonical metadata.
+_MAX_EXPLICIT_ALIASES = 64
+_MAX_ALIAS_LENGTH = 1024
+
 T = TypeVar("T")
 
 
@@ -49,11 +54,27 @@ def card_identity(frontmatter: dict[str, Any], relative_path: str) -> CardIdenti
     explicit = valid_card_id(frontmatter.get("id")) or valid_card_id(frontmatter.get("card_id"))
     aliases = _legacy_aliases(frontmatter, relative_path)
     if explicit is not None:
+        aliases = list(dict.fromkeys([*aliases, *_explicit_aliases(frontmatter.get("aliases"))]))
         return CardIdentity(
             card_id=explicit, aliases=tuple(alias for alias in aliases if alias != explicit), explicit=True
         )
     legacy = _legacy_primary(frontmatter) or PurePosixPath(relative_path).stem
     return CardIdentity(card_id=legacy, aliases=tuple(alias for alias in aliases if alias != legacy), explicit=False)
+
+
+def _explicit_aliases(value: object) -> list[str]:
+    """Accept a bounded, flat string list; malformed lists grant no aliases."""
+    if not isinstance(value, list) or len(value) > _MAX_EXPLICIT_ALIASES:
+        return []
+    aliases: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or len(item) > _MAX_ALIAS_LENGTH:
+            return []
+        alias = item.strip()
+        if not alias or any(ord(char) < 32 or ord(char) == 127 for char in alias):
+            return []
+        aliases.append(valid_card_id(alias) or alias)
+    return list(dict.fromkeys(aliases))
 
 
 def _legacy_aliases(frontmatter: dict[str, Any], relative_path: str) -> list[str]:

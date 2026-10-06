@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import secrets
@@ -39,6 +40,9 @@ __all__ = [
     "create_item",
     "delete_link",
     "get_item",
+    "get_ownership",
+    "ownership_action",
+    "new_ownership_nonce",
     "import_batch",
     "link_execution",
     "list_item_links_all",
@@ -166,12 +170,11 @@ def _request(
     query: Mapping[str, str] | None = None,
     timeout: float = REQUEST_TIMEOUT_SECONDS,
     idempotency_key: str | None = None,
+    holder_nonce: str | None = None,
 ) -> dict[str, Any]:
     url = _hub_url() + path
     if query:
-        filtered = {key: value for key, value in query.items() if value}
-        if filtered:
-            url = f"{url}?{urllib.parse.urlencode(filtered)}"
+        url = f"{url}?{urllib.parse.urlencode(query)}"
     headers = {"Authorization": f"Bearer {token}"}
     data = None
     if body is not None:
@@ -181,6 +184,16 @@ def _request(
         headers["If-Match"] = str(if_match)
     if idempotency_key is not None and str(idempotency_key) != "":
         headers["Idempotency-Key"] = str(idempotency_key)
+    if holder_nonce is not None:
+        # Only this fixed capability header is accepted, never arbitrary headers.
+        from .worklore_ownership import nonce_hash
+        from .worklore_validate import WorkloreValidationError
+
+        try:
+            nonce_hash(holder_nonce)
+        except WorkloreValidationError:
+            raise FleetClientError("invalid ownership holder nonce") from None
+        headers["X-Worklore-Holder"] = holder_nonce
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with _hub_open(request, timeout=timeout) as response:
@@ -227,6 +240,36 @@ def get_item(
     if links_cursor:
         query["links_cursor"] = links_cursor
     return _request("GET", _item_path(work_id), token=_token(), query=query or None)
+
+
+def new_ownership_nonce() -> str:
+    """Create a capability for the caller to retain privately, without persistence."""
+    return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii").rstrip("=")
+
+
+def get_ownership(work_id: str) -> dict[str, Any]:
+    """Read metadata using the same authentication preference as item reads."""
+    return _request("GET", _item_path(work_id, "ownership"), token=_token())
+
+
+def ownership_action(
+    work_id: str,
+    body: Mapping[str, Any],
+    *,
+    if_match: object,
+    idempotency_key: str,
+    holder_nonce: str | None = None,
+) -> dict[str, Any]:
+    """Submit an explicit node-authenticated ownership action with header-only nonce."""
+    return _request(
+        "POST",
+        _item_path(work_id, "ownership"),
+        token=_token(admin=False),
+        body=body,
+        if_match=if_match,
+        idempotency_key=idempotency_key,
+        holder_nonce=holder_nonce,
+    )
 
 
 def list_items(
@@ -313,12 +356,34 @@ def list_item_links_all(
     raise WorkloreListingError(f"fleet hub work failed: link listing exceeded {max_pages} pages")
 
 
-def list_events(work_id: str) -> dict[str, Any]:
-    return _request("GET", _item_path(work_id, "events"), token=_token())
+def list_events(work_id: str, *, limit: int | None = None, cursor: str | None = None) -> dict[str, Any]:
+    """Return one item history page in insertion order, with the hub's next cursor."""
+    query: dict[str, str] = {}
+    if limit is not None:
+        query["limit"] = str(limit)
+    if cursor is not None:
+        query["cursor"] = cursor
+    return _request("GET", _item_path(work_id, "events"), token=_token(), query=query or None)
 
 
-def list_all_events() -> dict[str, Any]:
-    return _request("GET", "/work/events", token=_token())
+def list_all_events(
+    *,
+    work_id: str | None = None,
+    event_type: str | None = None,
+    limit: int | None = None,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """Return one filtered global history page, newest first, with the hub's next cursor."""
+    query: dict[str, str] = {}
+    if work_id is not None:
+        query["work_id"] = work_id
+    if event_type is not None:
+        query["event_type"] = event_type
+    if limit is not None:
+        query["limit"] = str(limit)
+    if cursor is not None:
+        query["cursor"] = cursor
+    return _request("GET", "/work/events", token=_token(), query=query or None)
 
 
 def burn_queue(*, limit: int | None = None, cursor: str | None = None) -> dict[str, Any]:

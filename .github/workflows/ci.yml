@@ -51,7 +51,7 @@ jobs:
         working-directory: engines/code-graph
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
           toolchain: 1.85.0
       - uses: Swatinem/rust-cache@v2
@@ -70,7 +70,7 @@ jobs:
         working-directory: engines/code-graph
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -112,7 +112,7 @@ jobs:
         working-directory: engines/code-graph
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
@@ -131,7 +131,7 @@ jobs:
         working-directory: engines/code-graph
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
@@ -663,7 +663,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
@@ -694,3 +694,17 @@ jobs:
         shell: powershell
         run: |
           & "${{ github.workspace }}\scripts\windows-native-acceptance.ps1" -InstallMode source -RepoRoot "${{ github.workspace }}" -EngineBinDir "${{ github.workspace }}\engine-bin"
+      - name: Native two-process journal lock regressions
+        shell: pwsh
+        run: |
+          foreach ($key in @("CURSOR_API_KEY", "CURSOR_CLOUD_API_KEY", "BG_AGENT_API_KEY", "JULES_API_KEY")) {
+            Remove-Item "Env:$key" -ErrorAction SilentlyContinue
+          }
+          $venv = Join-Path $env:RUNNER_TEMP "journal-lock-venv"
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw "journal lock venv creation failed" }
+          $python = Join-Path $venv "Scripts/python.exe"
+          & $python -m pip install -e ".[dev]"
+          if ($LASTEXITCODE -ne 0) { throw "journal lock dev install failed" }
+          & $python -m pytest -q tests/test_run_journal.py::test_windows_journal_lock_excludes_unbound_mutation_during_bound_tail_window
+          if ($LASTEXITCODE -ne 0) { throw "native journal lock regressions failed" }

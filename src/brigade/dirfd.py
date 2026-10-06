@@ -225,6 +225,16 @@ def open_child_file(parent: int, name: str, flags: int, mode: int = 0o600) -> in
     raise unavailable("import inbox operations")
 
 
+def open_child_lock_file(parent: int, name: str, mode: int = 0o600) -> int:
+    """Open a sibling lock under a held parent with no-follow and minimal rights."""
+    validate_component(name)
+    if posix_available():
+        return _posix_open_child_file(parent, name, file_flags(os.O_RDWR | os.O_CREAT), mode)
+    if nt_available():
+        return _nt_dirfd().open_lock_file(parent, name)
+    raise unavailable("sibling lock operations")
+
+
 def replace_children(parent: int, source: str, destination: str) -> None:
     validate_component(source)
     validate_component(destination)

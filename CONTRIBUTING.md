@@ -10,11 +10,11 @@ External contributions are welcome. This section is the short path; [Pull reques
 2. **Claim it.** Comment on the issue that you are working on it. The maintainer holds off internal lanes for **48 hours** so your branch is not steamrolled.
 3. **Install and verify locally.** Clone with Python 3.10+, then follow [Local dev](#local-dev): use a virtual environment (required on PEP 668-managed Python and on Windows), install dev dependencies, and run the verification path that matches your change (content-guard scan for docs-only; `./scripts/verify` for code).
 4. **Open a pull request.** Required CI checks run automatically on the branch. You do not need to dispatch all required checks yourself.
-5. **Review turnaround.** Target an initial review within a few business days once required checks are green. Merge still waits on the formal review and gate rules in [Pull requests](#pull-requests).
+5. **Review turnaround.** Target an initial review within a few business days once required checks are green. Merge waits on the applicable review and gate rules in [Pull requests](#pull-requests), plus any explicit maintainer hold.
 
 ## Pull requests
 
-`main` is branch-protected. A dispatched session cannot supply the review artifact required by its own pull request. GitHub enforces required checks and conversation resolution; formal review is maintainer merge policy (branch protection does not currently require approving reviews).
+`main` is branch-protected. A dispatched session cannot supply the review artifact required by its own pull request. GitHub enforces the configured required checks, conversation resolution, and review requirements. Follow the current branch protection and any explicit maintainer review requirements; this document does not authorize bypassing them.
 
 **GitHub-enforced gates** on `main`:
 
@@ -27,11 +27,11 @@ External contributions are welcome. This section is the short path; [Pull reques
 - No review conversation is left unresolved. Branch protection enforces this.
 - Keep the branch current with `main` before merge when practical (branch protection does not require strict status checks, so GitHub does not block merge solely for being behind `main`).
 
-A formal `APPROVED` review is not required. Branch protection sets zero required approvals, and the maintainer merges on green checks and resolved conversations.
+Satisfy the applicable branch's current approval requirements and any explicit maintainer hold before merging. Verify that any review relied on covers the current head; a green bot check alone does not establish approval.
 
 The pull request author cannot approve their own pull request. `gh pr review --approve` fails with "Can not approve your own pull request" when the author and reviewer share one GitHub identity, so a self-approval gate would be unsatisfiable for single-maintainer work.
 
-CodeRabbit is the current external review identity and runs automatically. Treat its findings as advice: address the ones that hold, resolve the threads either way, and record why a finding was skipped. A stale `CHANGES_REQUESTED` review blocks the merge button even after the finding is fixed; dismiss it with `gh pr review --dismiss` rather than pushing an empty commit to chase a fresh approval.
+Follow the effective repository/app configuration when requesting CodeRabbit review. The current shared configuration uses the `coderabbit-review` label and disables automatic and automatic incremental review. Fix actionable findings and reply with fix and test evidence, or explain justified disagreement; resolve only addressed threads. For an obsolete change request, seek re-review or an explicitly authorized maintainer dismissal through a supported GitHub route. A skipped, absent, or rate-limited review is not approval, and a passing "Review rate limited" check can coexist with a stale approval.
 
 Inspect the gate before attempting a merge:
 
@@ -42,7 +42,9 @@ gh pr view <number> --json reviewDecision,mergeStateStatus
 
 `reviewDecision` reports `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or `APPROVED`. `mergeStateStatus` reports states such as `CLEAN`, `BLOCKED`, and `BEHIND`. Neither field exposes unresolved review conversations; GitHub still blocks merge when any remain.
 
-Dispatched sessions should open the pull request, run local verification, and push commits. Automatic review runs on push; `@coderabbitai full review` requests another pass when a change deserves one. Do not block a merge waiting on a bot review that adds nothing.
+For an authored or explicitly assigned PR within an authorized task, the accountable session retains ownership through implementation, applicable local verification, current-head required CI, review replies, fixes, re-review, and merge verification. A draft or opened PR is an intermediate state. Dispatched workers return the PR and evidence to that accountable session; explicit holds and required human approvals remain binding. Merge only when authorized and all applicable gates are met. External contributors without merge access hand the verified PR to a maintainer and remain available for review fixes.
+
+After applying the required repository label, use `@coderabbitai review` for an incremental pass or `@coderabbitai full review` for a pass over all eligible files when warranted. Verify the actual reviewed head. If a required review is unavailable, follow an approved alternative or report the exact blocker without bypassing the gate. Do not enable paid review credits or add-ons to obtain a review.
 
 ## Changelog
 
