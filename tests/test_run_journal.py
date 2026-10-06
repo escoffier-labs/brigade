@@ -11,6 +11,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from copy import deepcopy
@@ -1929,6 +1930,7 @@ from brigade import run_dirfd, run_journal
 
 journal, barrier = map(Path, sys.argv[1:3])
 name = sys.argv[3]
+first = sys.argv[4]
 if os.name == "posix":
     # Exercise the Windows branch with real interprocess byte-region locks.
     # This is emulation, not native msvcrt or NT-handle evidence.
@@ -1954,11 +1956,9 @@ with binding:
         assert not report.chain_errors
         tail = report.events[-1].sequence
         (barrier / (name + ".entered")).write_text(str(tail))
-        if name == "bound":
-            assert run_dirfd.active_binding_for(journal) is not None
+        assert (run_dirfd.active_binding_for(journal) is not None) == (name == "bound")
+        if name == first:
             wait_for(barrier / "release")
-        else:
-            assert run_dirfd.active_binding_for(journal) is None
         event = run_journal.append_event(
             journal,
             run_id="20260727-153045-a1b2c3d4",
@@ -1972,12 +1972,26 @@ with binding:
 """
 
 
-def test_windows_journal_lock_excludes_unbound_mutation_during_bound_tail_window(tmp_path):
+@pytest.mark.parametrize(
+    "first",
+    ["bound", "unbound"],
+    ids=[
+        f"{first}-first-{'native-windows' if os.name == 'nt' else 'posix-emulation'}" for first in ("bound", "unbound")
+    ],
+)
+def test_windows_journal_lock_excludes_unbound_mutation_during_bound_tail_window(first):
     """Bound and unbound producers share the same interprocess lock.
 
     POSIX explicitly emulates msvcrt with real fcntl byte-region locks.
     Windows uses actual msvcrt and the bound run directory's NT handles.
     """
+    # The isolated HOME fixture owns this short root, including on Windows.
+    with tempfile.TemporaryDirectory(prefix="jl-", dir=Path.home()) as root:
+        _assert_windows_journal_lock_exclusion(Path(root), first)
+
+
+def _assert_windows_journal_lock_exclusion(tmp_path, first):
+    second = "unbound" if first == "bound" else "bound"
     journal_path = _journal_path(_run_dir(tmp_path))
     _append_first_event(journal_path)
     barrier = tmp_path / "barrier"
@@ -1986,14 +2000,15 @@ def test_windows_journal_lock_excludes_unbound_mutation_during_bound_tail_window
     script.write_text(_WINDOWS_MUTATION_CHILD)
     children = []
     try:
-        children.append(_spawn_barrier_child(script, str(journal_path), str(barrier), "bound"))
-        _wait_for_files([barrier / "bound.entered"], 15, "bound tail window")
-        children.append(_spawn_barrier_child(script, str(journal_path), str(barrier), "unbound"))
-        _wait_for_files([barrier / "unbound.attempting"], 15, "unbound mutation attempt")
+        children.append(_spawn_barrier_child(script, str(journal_path), str(barrier), first, first))
+        _wait_for_files([barrier / f"{first}.entered"], 15, f"{first} tail window")
+        assert run_journal._journal_lock_path(journal_path).stat().st_size == 0
+        children.append(_spawn_barrier_child(script, str(journal_path), str(barrier), second, first))
+        _wait_for_files([barrier / f"{second}.attempting"], 15, f"{second} mutation attempt")
         deadline = time.monotonic() + 0.75
-        while time.monotonic() < deadline and not (barrier / "unbound.entered").exists():
+        while time.monotonic() < deadline and not (barrier / f"{second}.entered").exists():
             time.sleep(0.01)
-        assert not (barrier / "unbound.entered").exists(), "unbound mutation entered the held bound tail window"
+        assert not (barrier / f"{second}.entered").exists(), f"{second} mutation entered the held {first} tail window"
         (barrier / "release").write_text("release")
         for child in children:
             stdout, stderr = child.communicate(timeout=15)
@@ -2005,10 +2020,11 @@ def test_windows_journal_lock_excludes_unbound_mutation_during_bound_tail_window
                 child.kill()
             child.communicate(timeout=5)
 
-    assert (barrier / "bound.entered").read_text() == "1"
-    assert (barrier / "unbound.entered").read_text() == "2"
-    assert (barrier / "bound.appended").read_text() == "2"
-    assert (barrier / "unbound.appended").read_text() == "3"
+    assert (barrier / f"{first}.entered").read_text() == "1"
+    assert (barrier / f"{second}.entered").read_text() == "2"
+    assert (barrier / f"{first}.appended").read_text() == "2"
+    assert (barrier / f"{second}.appended").read_text() == "3"
+    assert run_journal._journal_lock_path(journal_path).stat().st_size == 0
     report = run_journal.read_journal(journal_path)
     assert report.chain_errors == []
     assert [event.sequence for event in report.events] == [1, 2, 3]
