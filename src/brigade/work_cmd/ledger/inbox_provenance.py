@@ -197,6 +197,42 @@ def _close_import_inbox_descriptor(value: int) -> int:
     return -1
 
 
+def _check_import_inbox_rollback_destination(parent: int, name: str, expected: os.stat_result, data: bytes) -> None:
+    """Guard generation-aware archive rollback with published identity and bytes.
+
+    Ordinary publication keeps its legacy snapshot restoration contract and
+    does not call this guard. This check detects observed destination changes;
+    it cannot exclude an outsider racing the check and rollback replacement.
+    """
+    descriptor = -1
+    try:
+        descriptor = authority_store._dirfd_open_file(
+            parent,
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        _validate_import_inbox_descriptor(descriptor)
+        current = os.fstat(descriptor)
+        if (current.st_dev, current.st_ino, current.st_mode, current.st_nlink) != (
+            expected.st_dev,
+            expected.st_ino,
+            expected.st_mode,
+            expected.st_nlink,
+        ):
+            raise OSError("import inbox no longer holds its published object")
+        _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
+        # NT may finalize the write mtime only when the temporary handle closes.
+        # Compare bytes and require stability during this read, rather than
+        # comparing against the temporary file's pre-close mtime.
+        _check_import_inbox_generation(descriptor, current, data)
+        _check_import_inbox_name_matches_generation(parent, name, current)
+    except OSError as exc:
+        raise OSError("import inbox changed after publication: rollback refused, current inbox preserved") from exc
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+
+
 def _write_import_inbox_bytes_at(
     parent: int,
     name: str,
@@ -215,12 +251,18 @@ def _write_import_inbox_bytes_at(
     generation after the descriptor closes (NT cannot rename over an open
     handle). Rollback runs only after this call replaced the destination, so
     a failure before replacement leaves the current file, including any newer
-    concurrent bytes, in place.
+    concurrent bytes, in place. Only with ``expected_generation`` does rollback
+    reopen the destination and require the published object with exactly the
+    published bytes. Archive publication supplies this generation; ordinary
+    ``_write_imports`` and generic callers omit it and retain legacy snapshot
+    restoration, including restoration after temporary-source substitution.
+    Their rollback does not preserve all outsider post-publication writes.
 
     These checks detect canonical writers and ordinary appends; they do not
     exclude a writer that bypasses the canonical lock. A stat-only window
     remains between the final name check and ``replace``, where a same-size
     rewrite that also restores the mtime cannot be detected.
+    A lock-bypassing writer can also race the rollback check and replacement.
     """
     if expected_generation is not None and previous_raw is None:
         raise ValueError("expected_generation requires previous_raw")
@@ -306,6 +348,9 @@ def _write_import_inbox_bytes_at(
             except FileNotFoundError:
                 pass
             raise
+        if expected_generation is not None:
+            assert expected is not None
+            _check_import_inbox_rollback_destination(parent, name, expected, data)
         _restore_import_inbox_snapshot(
             parent,
             name,
