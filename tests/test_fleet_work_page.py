@@ -274,6 +274,29 @@ def test_http_cursor_pagination_and_no_database_mutation(tmp_path, monkeypatch):
             conn.close()
 
 
+def test_empty_query_bypasses_legacy_strict_parser_and_nonempty_queries_delegate(monkeypatch):
+    from brigade import fleet_work_page
+
+    parse_qs = fleet_work_page.parse_qs
+    calls = []
+
+    def legacy_parse_qs(query, **kwargs):
+        calls.append(query)
+        if query == "" and kwargs.get("strict_parsing"):
+            raise ValueError("bad query field: ''")
+        return parse_qs(query, **kwargs)
+
+    monkeypatch.setattr(fleet_work_page, "parse_qs", legacy_parse_qs)
+    assert fleet_work_page.parse_query("") is None
+    assert calls == []
+    assert fleet_work_page.parse_query("cursor=opaque%2B%2F%3D") == "opaque+/="
+    invalid = (" ", "&", "cursor", "cursor=a&cursor=b", "unknown=x", "token=not-a-credential")
+    for query in invalid:
+        with pytest.raises(ValueError):
+            fleet_work_page.parse_query(query)
+    assert calls == ["cursor=opaque%2B%2F%3D", *invalid]
+
+
 def test_next_cursor_link_is_percent_encoded_and_attribute_safe():
     cursor = 'opaque+/=&"<>'
     body = _render({"items": [], "next_cursor": cursor})

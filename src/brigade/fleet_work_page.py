@@ -22,6 +22,9 @@ BLOCKER_LIMIT = 500
 
 def parse_query(query: str) -> str | None:
     """Accept only one bounded cursor; never reflect invalid query contents."""
+    # Python 3.10's strict parser treats an empty query as a malformed field.
+    if query == "":
+        return None
     params = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=1)
     if set(params) - {"cursor"}:
         raise ValueError("invalid work page query")
