@@ -149,6 +149,8 @@ def test_exact_supplied_reusable_and_composite_definitions(kind):
     root = definition()
     root.body["jobs"] = {"delegate": {"uses": ref}} if kind == "workflow" else {"delegate": {"steps": [{"uses": ref}]}}
     child_body = definition(inputs={"claude_code_oauth_token": "${{ inputs.token }}"}).body
+    if kind == "workflow":
+        child_body["on"] = "workflow_call"
     if kind == "composite":
         child_body = {"runs": {"using": "composite", "steps": child_body["jobs"]["arbitrary"]["steps"]}}
     child = Definition(provenance(target_path, OTHER, "example/shared"), child_body, kind=kind)
@@ -189,6 +191,18 @@ def test_reusable_workflow_references_require_direct_workflows_yaml_path(path, e
     child = Definition(
         provenance(path, OTHER if external else SHA, "example/shared" if external else REPO), definition().body
     )
+    result = report([root, child], complete=True)
+    assert facts(result, "workflow-discovery")[0]["state"] == "unknown"
+    assert result["partial"] is True
+
+
+@pytest.mark.parametrize("triggers", [None, "issue_comment", {"issue_comment": {}}, "${{ inputs.trigger }}"])
+def test_external_reusable_definition_must_declare_workflow_call(triggers):
+    root = definition()
+    root.body["jobs"] = {"delegate": {"uses": f"example/shared/.github/workflows/shared.yml@{OTHER}"}}
+    child_body = definition().body
+    child_body["on"] = triggers
+    child = Definition(provenance(".github/workflows/shared.yml", OTHER, "example/shared"), child_body)
     result = report([root, child], complete=True)
     assert facts(result, "workflow-discovery")[0]["state"] == "unknown"
     assert result["partial"] is True

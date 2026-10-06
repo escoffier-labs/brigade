@@ -1464,13 +1464,14 @@ def observe_github(target: Path) -> dict[str, Any]:
                     name = item["name"]
                     if name.startswith(CLOUD_BRANCH_PREFIXES) or name in explicit_branches:
                         branches.append({"name": name})
-    # Also accept local refs when gh is unavailable so adopt/sweep still works offline in tests.
-    if not branches:
+    # Preserve legacy offline discovery without treating local refs as current
+    # remote existence evidence for explicitly repository-bound sessions.
+    if not branches and not branches_complete:
         code, stdout, _ = _run_text(["git", "branch", "-a", "--format=%(refname:short)"], cwd=target)
         if code == 0:
             for line in stdout.splitlines():
                 name = line.strip().removeprefix("origin/")
-                if name.startswith(CLOUD_BRANCH_PREFIXES) or name in explicit_branches:
+                if name.startswith(CLOUD_BRANCH_PREFIXES) and name not in explicit_branches:
                     branches.append({"name": name})
 
     prs: list[dict[str, Any]] = []

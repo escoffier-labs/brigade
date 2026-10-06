@@ -105,6 +105,27 @@ def test_observer_never_marks_malformed_or_truncated_branch_read_complete(tmp_pa
     assert row["evidence"]["github"]["branch_exists"] is None
 
 
+@pytest.mark.parametrize("branch", ["feature/fix", "claude/fixture"])
+@pytest.mark.parametrize("remote_available", [True, False])
+def test_local_refs_do_not_establish_remote_existence_for_bound_sessions(
+    tmp_path, monkeypatch, branch, remote_available
+):
+    cloud_tracker.adopt(tmp_path, provider="claude-cloud", session_id="cse_fixture", repo=REPO, branch=branch)
+
+    def read(argv, **kwargs):
+        if argv[:3] == ["gh", "repo", "view"]:
+            return (0, json.dumps({"nameWithOwner": REPO}), "")
+        if argv[:2] == ["gh", "api"]:
+            return (0, "[]", "") if remote_available else (1, "", "")
+        if argv[0] == "git":
+            return (0, branch + "\norigin/" + branch + "\n", "")
+        return (0, "[]", "")
+
+    monkeypatch.setattr(cloud_tracker, "_run_text", read)
+    row = cloud_tracker.status_payload(tmp_path, github=OBSERVE_GITHUB(tmp_path))["entries"][0]
+    assert row["evidence"]["github"]["branch_exists"] is (False if remote_available else None)
+
+
 @pytest.mark.parametrize("observed_repo", [REPO, "fixture-owner/other", None])
 @pytest.mark.parametrize("branch", ["feature/fix", "claude/fixture"])
 def test_observer_retains_explicit_refs_and_scopes_branch_evidence(tmp_path, monkeypatch, observed_repo, branch):

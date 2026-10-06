@@ -333,6 +333,12 @@ def collect_managed_review(
         record["identity_key"] = normalized.identity_key
         record["started_at"] = _time(row.get("started_at"), observed, source)
         record["completed_at"] = _time(row.get("completed_at"), observed, source)
+        if (
+            record["started_at"] is not None
+            and record["completed_at"] is not None
+            and datetime.fromisoformat(record["completed_at"]) < datetime.fromisoformat(record["started_at"])
+        ):
+            _reason(source, "contradictory-timestamps")
         bad_time = any(row.get(key) is not None and record[key] is None for key in ("started_at", "completed_at"))
         record["current_findings_known"] = normalized.current_findings_known and not bad_time
         record["current_zero_findings"] = normalized.current_zero_findings and not bad_time

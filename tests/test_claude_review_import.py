@@ -409,6 +409,29 @@ def test_missing_or_malformed_round_order_cannot_claim_current_zero(changes):
     assert result["checks"][0]["supersession_disposition"] == "unknown"
 
 
+def test_completion_before_start_cannot_claim_current_zero():
+    zero = {"text": '<!-- bughunter-severity: {"normal": 0, "nit": 0, "pre_existing": 0} -->'}
+    result = collect(
+        FixtureGet(
+            {
+                (CHECKS, 1): {
+                    "total_count": 1,
+                    "check_runs": [
+                        check(
+                            started_at="2026-01-02T00:00:00Z",
+                            completed_at="2026-01-01T00:00:00Z",
+                            output=zero,
+                        )
+                    ],
+                }
+            }
+        )
+    )
+    assert result["checks"][0]["current_zero_findings"] is False
+    assert result["checks"][0]["current_findings_known"] is False
+    assert "check-runs:contradictory-timestamps" in result["incomplete_reasons"]
+
+
 @pytest.mark.parametrize("field", ["max_pages", "max_requests", "max_objects", "max_bytes", "per_page"])
 @pytest.mark.parametrize("value", [True, 0, -1, 2**63])
 def test_limit_configuration_is_bounded_before_any_get(field, value):

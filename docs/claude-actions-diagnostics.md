@@ -76,7 +76,8 @@ be established.
 
 Local reusable references such as `./.github/workflows/shared.yml` use the
 calling definition's repository and exact revision. Reusable workflow paths must
-point directly to a `.yml` or `.yaml` file under `.github/workflows`. Local composite references
+point directly to a `.yml` or `.yaml` file under `.github/workflows`, and the
+supplied child must declare `workflow_call`. Local composite references
 such as `./actions/shared` require a supplied `action.yml` or `action.yaml` at
 that same revision. External reusable and composite references require a full
 SHA in `uses` and an independently supplied matching definition. External tags

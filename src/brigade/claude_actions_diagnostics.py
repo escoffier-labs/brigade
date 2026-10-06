@@ -351,6 +351,15 @@ class _Discovery:
             self.partial = True
             self.facts.append(_fact("definition-reference", "unknown", item.provenance))
             return
+        if reusable:
+            triggers = child.body.get("on") if isinstance(child.body, Mapping) else None
+            declared_call = triggers == "workflow_call" or (
+                isinstance(triggers, (Mapping, list)) and len(triggers) <= 40 and "workflow_call" in triggers
+            )
+            if not declared_call:
+                self.partial = True
+                self.facts.append(_fact("definition-reference", "unknown", item.provenance))
+                return
         self.visit(child, depth + 1, stack)
 
     def steps(self, value: object, item: Definition, depth: int, stack: frozenset[Scope]) -> None:
