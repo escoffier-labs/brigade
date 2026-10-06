@@ -1,4 +1,4 @@
-"""Fleet Hub authority for interactive session presence (schema version 14)."""
+"""Fleet Hub authority for interactive session presence (schema version 24)."""
 
 from __future__ import annotations
 
@@ -61,19 +61,23 @@ _UPSERT_FIELDS = frozenset(
         "dirty_truncated",
         "ttl_seconds",
         "node_id",
+        "cloud_context",
     }
 )
 _END_FIELDS = frozenset({"action", "harness", "session_id", "repo_identity", "node_id"})
 _SESSION_COLUMNS = (
     "node_id, harness, session_id, repo_identity, identity_scope, repo_label, "
     "checkout_path, branch, dirty_paths_json, dirty_truncated, state, started_at, "
-    "heartbeat_at, ended_at, ttl_seconds, expires_at"
+    "heartbeat_at, ended_at, ttl_seconds, expires_at, cloud_context_json"
 )
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Create the interactive_sessions table (v13 -> v14 additive migration)."""
+    """Create the v14 table and add the nullable v24 cloud context column."""
     conn.execute(SCHEMA)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(interactive_sessions)")}
+    if "cloud_context_json" not in columns:
+        conn.execute("ALTER TABLE interactive_sessions ADD COLUMN cloud_context_json TEXT")
 
 
 def handle_session(
@@ -121,7 +125,7 @@ def list_sessions(
         "LIMIT ?",
         (int(include_all), now, limit),
     ).fetchall()
-    return [_session_payload(row) for row in rows]
+    return [_session_payload(row, now=now) for row in rows]
 
 
 def _validate_session_request(raw: object, *, caller_node: str | None) -> dict[str, Any]:
@@ -144,18 +148,38 @@ def _validate_session_request(raw: object, *, caller_node: str | None) -> dict[s
         node_id = caller_node
         if fleet_hub.CLAIM_ID_PATTERN.match(node_id) is None:
             raise FleetHubError("session field 'node_id' is not a valid node identity")
+    cloud = None
+    if "cloud_context" in raw:
+        from .fleet_dot import DotReportError, validate_cloud_context
+
+        if caller_node is None:
+            raise FleetHubError("cloud presence requires node authentication")
+        try:
+            cloud = validate_cloud_context(raw["cloud_context"])
+        except DotReportError as exc:
+            raise FleetHubError(str(exc)) from None
     request: dict[str, Any] = {
         "action": action,
         "node_id": node_id,
         "harness": _opaque_id(raw.get("harness"), "harness"),
         "session_id": _opaque_id(raw.get("session_id"), "session_id"),
-        "repo_identity": _repo_identity(raw.get("repo_identity")),
+        "repo_identity": ""
+        if cloud is not None and raw.get("repo_identity") == ""
+        else _repo_identity(raw.get("repo_identity")),
     }
     if action == "end":
         return request
     request["identity_scope"] = _identity_scope(raw.get("identity_scope"))
-    request["repo_label"] = _required_text(raw.get("repo_label"), "repo_label", limit=256)
-    request["checkout_path"] = _required_text(raw.get("checkout_path"), "checkout_path", limit=1024)
+    request["repo_label"] = (
+        ""
+        if cloud is not None and raw.get("repo_label") == ""
+        else _required_text(raw.get("repo_label"), "repo_label", limit=256)
+    )
+    request["checkout_path"] = (
+        None
+        if cloud is not None and raw.get("checkout_path") is None
+        else _required_text(raw.get("checkout_path"), "checkout_path", limit=1024)
+    )
     request["branch"] = _optional_text(raw.get("branch"), "branch", limit=256)
     request["dirty_paths"] = _dirty_paths(raw.get("dirty_paths"))
     truncated = raw.get("dirty_truncated")
@@ -168,6 +192,33 @@ def _validate_session_request(raw: object, *, caller_node: str | None) -> dict[s
             f"session field 'ttl_seconds' must be an integer from {MIN_TTL_SECONDS} to {MAX_TTL_SECONDS}"
         )
     request["ttl_seconds"] = ttl
+    request["cloud_context"] = cloud
+    if cloud is not None:
+        from .fleet_dot import DotReportError, parse_report
+
+        metadata = {k: v for k, v in cloud.items() if k != "provider"}
+        metadata["session_id"] = request["session_id"]
+        if request["repo_identity"]:
+            metadata["repo_identity"] = request["repo_identity"]
+        # Ownership revision/generation are required by the adapter, not stored in
+        # presence. Validation here concerns linkage and privacy only.
+        if "work_id" in metadata:
+            metadata["ownership_revision"] = 0
+            metadata["generation"] = 1
+        try:
+            expected = parse_report(metadata).snapshot
+        except DotReportError as exc:
+            raise FleetHubError(str(exc)) from None
+        if (
+            request["harness"] != "dot"
+            or request["checkout_path"] is not None
+            or request["branch"] is not None
+            or request["dirty_paths"]
+            or request["dirty_truncated"]
+            or request["identity_scope"] != expected.identity_scope
+            or request["repo_label"] != expected.repo_label
+        ):
+            raise FleetHubError("cloud presence must not contain local checkout state")
     return request
 
 
@@ -248,13 +299,58 @@ def _upsert_session(
     now: float,
     now_iso: str,
 ) -> dict[str, object]:
+    cloud = request.get("cloud_context")
+    # Cloud identity is scoped to the authenticated reporter, irrespective of
+    # the legacy composite key's repository dimension. Changing repository
+    # must not manufacture another row with different immutable linkage.
+    rows = conn.execute(
+        f"SELECT {_SESSION_COLUMNS} FROM interactive_sessions WHERE node_id=? AND harness=? AND session_id=?",
+        (request["node_id"], request["harness"], request["session_id"]),
+    ).fetchall()
+    expires_at = now + request["ttl_seconds"]
+    cloud_json = json.dumps(cloud, sort_keys=True) if cloud is not None else None
+    for row in rows:
+        prior = json.loads(row[16]) if row[16] is not None else None
+        if prior is None and cloud is None:
+            continue
+        if prior is None or cloud is None:
+            raise FleetHubError("session cloud linkage cannot change")
+        linkage = (
+            "version",
+            "provider",
+            "agent_label",
+            "parent_session_id",
+            "work_id",
+            "source",
+            "source_scope",
+            "coverage",
+        )
+        if row[3] != request["repo_identity"] or any(prior.get(k) != cloud.get(k) for k in linkage):
+            raise FleetHubError("session cloud linkage cannot change")
+        if cloud["sequence"] < prior["sequence"]:
+            raise FleetHubError("cloud report sequence is stale")
+        if cloud["sequence"] == prior["sequence"]:
+            if prior != cloud or row[14] != request["ttl_seconds"]:
+                raise FleetHubError("cloud report sequence conflicts")
+            # A replay does not extend TTL, restart presence or repatch work.
+            return _session_payload(row)
+        if cloud["observed_at"] < prior["observed_at"]:
+            raise FleetHubError("cloud observation is stale")
+    if cloud is not None:
+        _validate_parent_chain(conn, request)
+        from datetime import datetime
+
+        observed = datetime.fromisoformat(cloud["observed_at"]).timestamp()
+        if observed > now + 60:
+            raise FleetHubError("cloud observation is in the future")
+        expires_at = min(now, observed) + request["ttl_seconds"]
     dirty_json = json.dumps(request["dirty_paths"], ensure_ascii=False)
     conn.execute(
         "INSERT INTO interactive_sessions ("
         "node_id, harness, session_id, repo_identity, identity_scope, repo_label, "
         "checkout_path, branch, dirty_paths_json, dirty_truncated, state, started_at, "
-        "heartbeat_at, ended_at, ttl_seconds, expires_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL, ?, ?) "
+        "heartbeat_at, ended_at, ttl_seconds, expires_at, cloud_context_json"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL, ?, ?, ?) "
         "ON CONFLICT(node_id, harness, session_id, repo_identity) DO UPDATE SET "
         "identity_scope = excluded.identity_scope, "
         "repo_label = excluded.repo_label, "
@@ -269,7 +365,8 @@ def _upsert_session(
         "heartbeat_at = excluded.heartbeat_at, "
         "ended_at = NULL, "
         "ttl_seconds = excluded.ttl_seconds, "
-        "expires_at = excluded.expires_at",
+        "expires_at = excluded.expires_at, "
+        "cloud_context_json = excluded.cloud_context_json",
         (
             request["node_id"],
             request["harness"],
@@ -277,14 +374,15 @@ def _upsert_session(
             request["repo_identity"],
             request["identity_scope"],
             request["repo_label"],
-            request["checkout_path"],
+            request["checkout_path"] or "",
             request["branch"],
             dirty_json,
             int(request["dirty_truncated"]),
             now_iso,
             now_iso,
             request["ttl_seconds"],
-            now + request["ttl_seconds"],
+            expires_at,
+            cloud_json,
             now,
         ),
     )
@@ -300,7 +398,39 @@ def _upsert_session(
     return payload
 
 
+def _validate_parent_chain(conn: sqlite3.Connection, request: dict[str, Any]) -> None:
+    """Check reporter-scoped parent links inside the upsert transaction.
+
+    Unresolved references are allowed. When a referenced row arrives later its
+    chain is checked again, so A->B followed by B->A cannot become a cycle.
+    """
+    parent = request["cloud_context"].get("parent_session_id")
+    seen = {request["session_id"]}
+    for _ in range(64):
+        if parent is None:
+            return
+        if parent in seen:
+            raise FleetHubError("cloud parent cycle refused")
+        seen.add(parent)
+        rows = conn.execute(
+            "SELECT cloud_context_json FROM interactive_sessions WHERE node_id=? AND harness=? AND session_id=? LIMIT 2",
+            (request["node_id"], request["harness"], parent),
+        ).fetchall()
+        if not rows or rows[0][0] is None:
+            return
+        if len(rows) != 1:
+            raise FleetHubError("cloud parent reference is ambiguous")
+        parent = json.loads(rows[0][0]).get("parent_session_id")
+    if parent is not None:
+        raise FleetHubError("cloud parent traversal exceeds bound")
+
+
 def _end_session(conn: sqlite3.Connection, request: dict[str, Any], *, now_iso: str) -> dict[str, object] | None:
+    row = _fetch_session(
+        conn, request["node_id"], request["harness"], request["session_id"], request["repo_identity"], required=False
+    )
+    if row is not None and "cloud_context" in row:
+        raise FleetHubError("cloud provider lifecycle is unobserved; end is unsupported")
     conn.execute(
         "UPDATE interactive_sessions SET state = 'ended', "
         "ended_at = COALESCE(ended_at, ?), heartbeat_at = ? "
@@ -345,14 +475,14 @@ def _fetch_session(
     return _session_payload(row)
 
 
-def _session_payload(row: tuple[Any, ...]) -> dict[str, object]:
+def _session_payload(row: tuple[Any, ...], *, now: float | None = None) -> dict[str, object]:
     try:
         dirty_paths = json.loads(row[8])
     except json.JSONDecodeError:
         dirty_paths = []
     if not isinstance(dirty_paths, list):
         dirty_paths = []
-    return {
+    payload: dict[str, object] = {
         "node_id": row[0],
         "harness": row[1],
         "session_id": row[2],
@@ -370,3 +500,13 @@ def _session_payload(row: tuple[Any, ...]) -> dict[str, object]:
         "ttl_seconds": row[14],
         "expires_at": row[15],
     }
+
+    if row[16] is not None:
+        payload["cloud_context"] = json.loads(row[16])
+        payload["checkout_path"] = None
+        payload["repo_identity"] = row[3] or None
+        payload["provider_lifecycle"] = "unobserved"
+        payload["inventory_coverage"] = "explicitly-reported-sessions"
+        current = fleet_hub._now_epoch() if now is None else now
+        payload["presence_state"] = "active" if row[10] == "active" and row[15] > current else "stale"
+    return payload

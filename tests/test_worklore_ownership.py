@@ -1032,3 +1032,139 @@ def test_accept_vs_withdraw_serializes_to_one_complete_result(ledger):
     assert final["state"] == ("owned" if winner == "accept" else "unowned")
     assert final["revision"] == 2 and event_count(conn, work_id) == 2
     assert offered["state"] == "offered" and offered["revision"] == 1
+
+
+def dot_report(**updates):
+    return {
+        "version": 1,
+        "provider": "dot",
+        "session_id": "session-a",
+        "agent_label": "worker-a",
+        "source": "cloud_threads",
+        "source_scope": "caller-created-tasks",
+        "coverage": "explicitly-reported-sessions",
+        "observed_at": "2026-01-01T00:00:00Z",
+        "sequence": 1,
+        "progress": "Checking fixture",
+        "result": "Checks reported complete",
+        "evidence_refs": ["receipt-a"],
+        **updates,
+    }
+
+
+def test_holder_report_is_fenced_immutable_and_does_not_change_work(ledger):
+    conn, work_id, _ = ledger
+    accepted = owned(conn, work_id)
+    item_before = store.get_item(conn, work_id)
+    body = {"action": "report", "generation": 1, "report": dot_report()}
+    reported = post(conn, work_id, body, revision=2, key="report-a", nonce=NONCE_A)
+    assert reported["revision"] == 3
+    assert reported["last_report"]["progress"] == "Checking fixture"
+    assert reported["last_report"]["evidence_verification"] == "reported-unverified"
+    for field in (
+        "write_scope",
+        "source_revision",
+        "next_action",
+        "state",
+        "generation",
+        "exclusions",
+        "attempt_budget",
+        "evidence_refs",
+    ):
+        assert reported[field] == accepted[field]
+    assert store.get_item(conn, work_id) == item_before
+    assert post(conn, work_id, body, revision=2, key="report-a", nonce=NONCE_A) == reported
+    assert event_count(conn, work_id) == 3
+    assert conn.execute("SELECT COUNT(*) FROM work_events WHERE event_type='ownership-reported'").fetchone()[0] == 1
+    for kwargs in (
+        {"node": "node-b", "nonce": NONCE_A},
+        {"nonce": None},
+        {"nonce": NONCE_B},
+        {"admin": True, "nonce": NONCE_A},
+    ):
+        assert request(conn, work_id, body, revision=3, key="refused", **kwargs)[0] in {400, 403}
+    status, refusal = request(
+        conn, work_id, {**body, "report": dot_report(progress="Different")}, revision=2, key="report-a", nonce=NONCE_A
+    )
+    assert status == 409 and refusal["code"] == "idempotency-conflict"
+    assert event_count(conn, work_id) == 3
+
+
+def test_holder_report_refuses_unknown_fields_and_stale_observations(ledger):
+    conn, work_id, _ = ledger
+    owned(conn, work_id)
+    body = {"action": "report", "generation": 1, "report": dot_report()}
+    for metadata in (
+        dot_report(transcript="not accepted"),
+        dot_report(coverage="account-wide"),
+        dot_report(progress=NONCE_A),
+        dot_report(progress="x" * 401),
+    ):
+        status, _ = request(conn, work_id, {**body, "report": metadata}, revision=2, key="invalid", nonce=NONCE_A)
+        assert status == 400
+    post(conn, work_id, body, revision=2, key="report-a", nonce=NONCE_A)
+    for metadata in (
+        dot_report(sequence=0),
+        dot_report(sequence=1, progress="Changed"),
+        dot_report(sequence=2, observed_at="2025-01-01T00:00:00Z"),
+    ):
+        status, refusal = request(conn, work_id, {**body, "report": metadata}, revision=3, key="stale", nonce=NONCE_A)
+        assert status == 409 and refusal["code"] == "ownership-conflict"
+    assert event_count(conn, work_id) == 3
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"sequence": 9},
+        {"sequence": 11, "agent_label": "other-agent"},
+        {"sequence": 11, "parent_session_id": "other-parent"},
+        {"sequence": 11, "source_scope": "authorized-visible-threads"},
+        {"sequence": 11, "source": "explicit-metadata", "source_scope": "explicit-session"},
+        {"sequence": 11, "repo_identity": "github.com/example/project"},
+    ],
+)
+@pytest.mark.parametrize("direct", [False, True])
+def test_interleaved_reports_keep_per_reporter_session_history_fenced(ledger, changed, direct):
+    from brigade import worklore_ownership
+
+    conn, work_id, _ = ledger
+    owned(conn, work_id)
+    post(
+        conn,
+        work_id,
+        {"action": "report", "generation": 1, "report": dot_report(sequence=10)},
+        revision=2,
+        key="a-10",
+        nonce=NONCE_A,
+    )
+    post(
+        conn,
+        work_id,
+        {"action": "report", "generation": 1, "report": dot_report(session_id="session-b", sequence=1)},
+        revision=3,
+        key="b-1",
+        nonce=NONCE_A,
+    )
+    before = store.list_all_events(conn, work_id=work_id)["events"]
+    body = {"action": "report", "generation": 1, "report": dot_report(**changed)}
+    if direct:
+        with pytest.raises(store.WorkloreConflict) as refusal:
+            worklore_ownership.ownership_action(
+                conn,
+                work_id,
+                body,
+                expected_revision=4,
+                idempotency_key="a-again",
+                actor_id="node-a",
+                actor_type="node",
+                holder_nonce=NONCE_A,
+            )
+        assert refusal.value.code == "ownership-conflict"
+    else:
+        status, refusal = request(conn, work_id, body, revision=4, key="a-again", nonce=NONCE_A)
+        assert status == 409 and refusal["code"] == "ownership-conflict"
+    assert store.list_all_events(conn, work_id=work_id)["events"] == before
+    current = request(conn, work_id, method="GET")[1]["ownership"]
+    assert current["last_report"]["session_id"] == "session-b"
+    assert current["last_report"]["reporter_node"] == "node-a"
