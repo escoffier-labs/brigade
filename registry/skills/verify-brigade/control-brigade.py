@@ -44,6 +44,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -968,21 +969,37 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         if not entry.is_relative_to(root / "targets"):
             skipped.append({"path": str(entry), "reason": "outside the state root"})
             continue
-        # A recorded target swapped for a symlink is not the directory this
-        # helper created: `rmtree` would no-op on it (or, without
-        # `ignore_errors`, follow it), so report a skip instead of a phantom
-        # removal and leave it recorded.
-        if entry.is_symlink():
-            skipped.append({"path": str(entry), "reason": "skipped-symlink"})
-            continue
-        if not entry.exists():
+        # Inspect the recorded path without following a replacement symlink.
+        # Only FileNotFoundError proves it is absent; other errors retain it.
+        try:
+            mode = entry.lstat().st_mode
+        except FileNotFoundError:
             skipped.append({"path": str(entry), "reason": "already gone"})
             reclaimed.add(str(entry))
+            continue
+        except OSError:
+            skipped.append({"path": str(entry), "reason": "removal-not-confirmed"})
+            continue
+        if stat.S_ISLNK(mode):
+            skipped.append({"path": str(entry), "reason": "skipped-symlink"})
+            continue
+        if not stat.S_ISDIR(mode):
+            skipped.append({"path": str(entry), "reason": "skipped-not-directory"})
             continue
         if args.dry_run:
             removed.append(str(entry))
             continue
         shutil.rmtree(entry, ignore_errors=True)
+        try:
+            entry.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            skipped.append({"path": str(entry), "reason": "removal-not-confirmed"})
+            continue
+        else:
+            skipped.append({"path": str(entry), "reason": "removal-not-confirmed"})
+            continue
         removed.append(str(entry))
         reclaimed.add(str(entry))
 

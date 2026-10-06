@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import shlex
 import shutil
 import stat
@@ -590,7 +591,8 @@ def test_explicit_evidence_root_symlink_is_refused(tmp_path):
     assert list(hideout.iterdir()) == [], "a refused evidence root must not be written through"
 
 
-def test_cleanup_skips_a_target_that_became_a_symlink(tmp_path):
+@pytest.mark.parametrize("dangling", [False, True])
+def test_cleanup_skips_a_target_that_became_a_symlink(tmp_path, dangling):
     """A recorded target swapped for a symlink is skipped, not reported removed."""
     root = tmp_path / "state"
     targets = root / "targets"
@@ -599,7 +601,7 @@ def test_cleanup_skips_a_target_that_became_a_symlink(tmp_path):
     hideout.mkdir()
     (hideout / "keep.txt").write_text("still here\n", encoding="utf-8")
     swapped = targets / "swapped"
-    swapped.symlink_to(hideout, target_is_directory=True)
+    swapped.symlink_to(hideout / "missing" if dangling else hideout, target_is_directory=True)
     (root / "state.json").write_text(
         json.dumps({"schema": "verify-brigade.state.v1", "created_targets": [str(swapped)]}) + "\n",
         encoding="utf-8",
@@ -619,3 +621,102 @@ def test_cleanup_skips_a_target_that_became_a_symlink(tmp_path):
     assert (hideout / "keep.txt").is_file(), "cleanup must not remove what the symlink points at"
     state = json.loads((root / "state.json").read_text(encoding="utf-8"))
     assert state["created_targets"] == [str(swapped)], "a skipped target stays recorded"
+
+
+def test_cleanup_retains_a_target_replaced_by_a_file_until_recovery(tmp_path):
+    root = tmp_path / "state"
+    target = root / "targets" / "replaced"
+    target.mkdir(parents=True)
+    state_path = root / "state.json"
+    state_path.write_text(json.dumps({"schema": "verify-brigade.state.v1", "created_targets": [str(target)]}))
+    target.rmdir()
+    target.write_text("replacement must survive\n", encoding="utf-8")
+
+    code, payload = control("cleanup", root=root)
+    assert code == 0, payload
+    assert payload["removed"] == [], payload
+    assert payload["skipped"] == [{"path": str(target), "reason": "skipped-not-directory"}], payload
+    assert target.read_text(encoding="utf-8") == "replacement must survive\n"
+    assert json.loads(state_path.read_text())["created_targets"] == [str(target)]
+
+    code, preview = control("cleanup", "--dry-run", root=root)
+    assert code == 0, preview
+    assert preview["would_remove"] == [], preview
+    assert preview["skipped"] == payload["skipped"]
+    assert target.read_text(encoding="utf-8") == "replacement must survive\n"
+    assert json.loads(state_path.read_text())["created_targets"] == [str(target)]
+
+    target.unlink()
+    target.mkdir()
+    code, recovered = control("cleanup", root=root)
+    assert code == 0, recovered
+    assert recovered["removed"] == [str(target)]
+    assert recovered["skipped"] == []
+    assert not target.exists()
+    assert json.loads(state_path.read_text())["created_targets"] == []
+
+
+@pytest.mark.parametrize("replacement", ["directory", "dangling-symlink", "unverifiable-parent"])
+def test_cleanup_retains_a_target_when_removal_is_not_confirmed(tmp_path, monkeypatch, capsys, replacement):
+    root = tmp_path / "state"
+    target = root / "targets" / "obstructed"
+    target.mkdir(parents=True)
+    state_path = root / "state.json"
+    state_path.write_text(json.dumps({"schema": "verify-brigade.state.v1", "created_targets": [str(target)]}))
+
+    def failed_removal(path, **kwargs):
+        if replacement == "dangling-symlink":
+            path.rmdir()
+            path.symlink_to(tmp_path / "missing", target_is_directory=True)
+        elif replacement == "unverifiable-parent":
+            path.rmdir()
+            path.parent.rmdir()
+            path.parent.write_text("replacement parent\n", encoding="utf-8")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(shutil, "rmtree", failed_removal)
+        patch.setattr(sys, "argv", [str(CONTROL), "--root", str(root), "cleanup"])
+        with pytest.raises(SystemExit) as exited:
+            runpy.run_path(str(CONTROL), run_name="__main__")
+        assert exited.value.code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["removed"] == [], payload
+    assert payload["skipped"] == [{"path": str(target), "reason": "removal-not-confirmed"}], payload
+    assert json.loads(state_path.read_text())["created_targets"] == [str(target)]
+    if replacement == "dangling-symlink":
+        assert target.is_symlink()
+        target.unlink()
+        target.mkdir()
+    elif replacement == "unverifiable-parent":
+        assert target.parent.read_text(encoding="utf-8") == "replacement parent\n"
+        target.parent.unlink()
+        target.mkdir(parents=True)
+    else:
+        assert target.is_dir()
+
+    code, recovered = control("cleanup", root=root)
+    assert code == 0, recovered
+    assert recovered["removed"] == [str(target)]
+    assert not target.exists()
+    assert json.loads(state_path.read_text())["created_targets"] == []
+
+
+def test_cleanup_reclaims_an_already_absent_target(tmp_path):
+    root = tmp_path / "state"
+    target = root / "targets" / "absent"
+    target.mkdir(parents=True)
+    state_path = root / "state.json"
+    state_path.write_text(json.dumps({"schema": "verify-brigade.state.v1", "created_targets": [str(target)]}))
+    target.rmdir()
+
+    code, preview = control("cleanup", "--dry-run", root=root)
+    assert code == 0, preview
+    assert preview["would_remove"] == []
+    assert preview["skipped"] == [{"path": str(target), "reason": "already gone"}]
+    assert json.loads(state_path.read_text())["created_targets"] == [str(target)]
+
+    code, payload = control("cleanup", root=root)
+    assert code == 0, payload
+    assert payload["removed"] == []
+    assert payload["skipped"] == preview["skipped"]
+    assert json.loads(state_path.read_text())["created_targets"] == []
