@@ -365,6 +365,91 @@ def test_ack_failure_skips_run_agent_spawn(tmp_path, monkeypatch):
     assert spawned == []
 
 
+@pytest.mark.parametrize("reason", ["seat-disabled", "seat-capacity-exhausted"])
+@pytest.mark.parametrize("provider,seat", [("openai", "seat-alpha"), ("p" * 256, "s" * 128)])
+def test_enrolled_lease_denial_reports_trusted_identity_before_provider_launch(
+    tmp_path, monkeypatch, reason, provider, seat
+):
+    private = "private-response-must-not-appear\nBearer fake-secret"
+    selected = {**_prepared()["selected"], "seat": seat, "provider": provider}
+    monkeypatch.setattr(
+        fleet_session_bootstrap.fleet_client_policy,
+        "prepare_session",
+        lambda **kwargs: _prepared(selected=selected),
+    )
+    order = []
+    monkeypatch.setattr(
+        fleet_session_bootstrap.fleet_client_policy,
+        "acknowledge_session",
+        lambda **kwargs: order.append("ack") or _ack_body("session-denied"),
+    )
+    ctx = fleet_session_bootstrap.prepare_session_launch(
+        consumer="brigade-run",
+        provider=provider,
+        model="model-hyphen-slug",
+        instance_id="codex",
+        repo=REPO,
+        origin="local",
+        session_id="session-denied",
+        cwd=tmp_path,
+        snapshot=_enrolled_snapshot(),
+    )
+    admissions = []
+
+    def admit(**kwargs):
+        order.append("admit")
+        admissions.append(kwargs)
+        return fleet_model_admission.ModelAdmissionDecision(True, 0, "admitted", {"error": private})
+
+    monkeypatch.setattr(fleet_model_admission, "admit_model", admit)
+    cloud = fleet_session_bootstrap.fleet_client_cloud
+    monkeypatch.setattr(
+        cloud, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid", "token": "fake-node-token"}
+    )
+    monkeypatch.setattr(cloud, "resolve_node_id", lambda: "11111111-1111-4111-8111-111111111111")
+    monkeypatch.setattr(cloud, "_run_with_deadline", lambda fn, **kwargs: fn())
+    requests = []
+
+    def post(hub, token, body, **kwargs):
+        order.append("acquire")
+        requests.append(body)
+        return 409, {"acquired": False, "reason_code": reason, "error": private, "provider": private, "seat": private}
+
+    monkeypatch.setattr(cloud, "_post_model_policy_blocking", post)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/fake/" + command)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("refused enrolled lease must not launch a provider or consult cloud admission")
+
+    monkeypatch.setattr(agents.proc, "run", forbidden)
+    monkeypatch.setattr(fleet_client, "admit_cloud", forbidden)
+    with fleet_session_bootstrap.scoped_context(ctx):
+        result = agents.run_agent("codex", "do work", model="model-hyphen-slug", cwd=tmp_path)
+
+    assert result.ok is False
+    assert result.failure_phase == "preflight"
+    assert result.failure_kind == "lease-denied"
+    assert reason in result.detail
+    assert f"provider {provider[:64]!r}" in result.detail
+    assert f"seat {seat[:64]!r}" in result.detail
+    assert len(result.detail) <= 200
+    assert order == ["ack", "admit", "acquire"]
+    assert len(admissions) == 1 and admissions[0]["phase"] == "launch"
+    assert admissions[0]["allow_lkg"] is False
+    assert len(requests) == 1
+    assert requests[0]["action"] == "acquire"
+    assert requests[0]["provider"] == provider and requests[0]["seat"] == seat
+    assert requests[0]["policy_context_hash"] == CONTEXT_HASH
+    assert ctx.applied is True and ctx.started is False
+    assert ctx.lease_id is None and ctx.lease_holder is None
+    assert private.splitlines()[0] not in result.detail
+    assert "fake-secret" not in result.detail
+    assert requests[0]["holder"] not in result.detail
+    assert "fake-node-token" not in result.detail
+    assert ctx.receipt_path is not None
+    assert private.splitlines()[0] not in ctx.receipt_path.read_text()
+
+
 def test_codex_appserver_acks_before_run_turn(tmp_path, monkeypatch):
     order = []
     ctx = fleet_session_bootstrap.LaunchContext(
