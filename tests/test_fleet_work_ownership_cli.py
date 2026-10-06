@@ -3,6 +3,7 @@
 import copy
 import io
 import json
+import urllib.error
 from contextlib import contextmanager
 from datetime import datetime
 from urllib.parse import urlsplit
@@ -200,3 +201,48 @@ def test_human_show_states_scope_and_uncertainty(hub, capsys):
     ):
         assert expected in output.out
     assert output.err == ""
+
+
+@pytest.mark.parametrize("stage", [0, 1], ids=["item", "ownership"])
+@pytest.mark.parametrize("http_error", [False, True], ids=["success-body", "refusal-body"])
+@pytest.mark.parametrize("shape", ["huge-integer", "deep-nesting"])
+def test_raw_json_limits_produce_fixed_refusals(hub, monkeypatch, capsys, stage, http_error, shape):
+    replies, requests = hub
+    bodies = [json.dumps(reply).encode() for reply in replies]
+    if shape == "huge-integer":
+        counter = b'"version": 7' if stage == 0 else b'"revision": 12'
+        body = bodies[stage].replace(counter, counter.split(b":")[0] + b": " + b"9" * 5000)
+        body = body[:-1] + b', "error": "PRIVATE-UNEXPECTED"}'
+    else:
+        body = b'{"error": "PRIVATE-UNEXPECTED", "unexpected": ' + b"[" * 30000 + b"0" + b"]" * 30000 + b"}"
+    assert len(body) < worklore_client.MAX_ERROR_RESPONSE_BYTES
+
+    @contextmanager
+    def raw_open(request, **kwargs):
+        index = len(requests)
+        requests.append(request)
+        if index == stage:
+            if http_error:
+                raise urllib.error.HTTPError(request.full_url, 503, "PRIVATE-UNEXPECTED", {}, io.BytesIO(body))
+            yield io.BytesIO(body)
+        else:
+            yield io.BytesIO(bodies[index])
+
+    monkeypatch.setattr(worklore_client, "_hub_open", raw_open)
+    assert cli.main(["fleet", "work", "ownership", "show", WORK_ID, "--json"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    invalid = {"code": "invalid-response", "state": "unavailable", "error": "Invalid ownership read response."}
+    if http_error and shape == "huge-integer":
+        # Interpreters that parse the giant integer use the client's existing
+        # HTTP refusal path. Parser exceptions must use invalid-response.
+        assert json.loads(output.err) in (
+            invalid,
+            {"code": "read-failed", "state": "unavailable", "error": "Ownership read is unavailable."},
+        )
+    else:
+        # Success counters are bounded even when the interpreter parses them.
+        assert json.loads(output.err) == invalid
+    assert "PRIVATE-UNEXPECTED" not in output.err
+    assert len(requests) == stage + 1
+    assert all(request.get_method() == "GET" and request.data is None for request in requests)

@@ -187,6 +187,8 @@ def _show(args: argparse.Namespace) -> int:
         item_observed = datetime.now(timezone.utc).isoformat()
         ownership_reply = worklore_client.get_ownership(work_id)
         ownership_observed = datetime.now(timezone.utc).isoformat()
+    except (ValueError, RecursionError):
+        return _refuse(args, "invalid-response")
     except worklore_client.FleetClientError as exc:
         # The existing client can carry an untrusted refusal body. Never echo it.
         code = getattr(exc, "code", None)
