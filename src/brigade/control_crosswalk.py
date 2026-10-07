@@ -1100,7 +1100,7 @@ def _evaluate_verify_archive_index_exists(ctx: _Context) -> _Discovery:
 def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
     """EC-12: evidence package manifests staged under ``.brigade/evidence-packages/``.
 
-    `brigade evidence package --out` accepts any path, so discovery covers two
+    `brigade receipts export package --out` accepts any path, so discovery covers two
     bounded staging locations: ``.brigade/evidence-packages/manifest.json``
     (the root itself was the output) and ``<package>/manifest.json`` one level
     down.  Deeper nesting is not discovered.  Without the strict package
@@ -1501,8 +1501,12 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "maps to `not_applicable`. Every other outcome maps to `untested`. Rows also carry `validation_level` and "
     "`evidence_outcome`, and text output shows `[state | level/outcome]`.",
     "",
-    "Migration from `brigade.evidence_controls.v1`: existing keys are unchanged, and `readiness_contract`, "
-    "`assessment_period` and `evidence_readiness` are added. `evidenced_passed` is stricter. Claims checked only "
+    "Migration from `brigade.evidence_controls.v1`: existing key names remain, but NIST `control_id` values "
+    "use spaces instead of hyphens and reviewed rows are remapped or removed. `crosswalk_version` is 2; "
+    "the template schema remains `brigade.control_crosswalk.v1`. New root keys are `relationship_semantics`, "
+    "`integrity_boundary`, `unmapped_evidence_properties`, `readiness_contract`, `assessment_period` and "
+    "`evidence_readiness`. Mapping rows add `validation_level`, `evidence_outcome` and provenance fields. "
+    "`evidenced_passed` is stricter. Claims checked only "
     "for presence or structure (EC-01, EC-03, EC-07, EC-09, EC-10, EC-11 and EC-12) now report `untested` with "
     "`structure_observed` until a dedicated verifier is wired. An EC-01 receipt with an empty command list or "
     "commands that do not match `planned_commands` is no longer a pass, and legacy receipts without "
