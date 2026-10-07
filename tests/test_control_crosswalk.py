@@ -823,6 +823,8 @@ def _ec02_target(tmp_path: Path) -> Path:
 def test_signed_ok_without_rederived_subject_is_rejected(tmp_path, monkeypatch):
     from brigade import attestation
 
+    monkeypatch.setattr(control_crosswalk, "_ssh_keygen_available", lambda: True)
+
     target = _ec02_target(tmp_path)
     _stub_attestation(monkeypatch, attestation.AttestationVerifyResult(status=attestation.STATUS_SIGNED_OK))
     readiness = _assess(target, "EC-02")
@@ -835,6 +837,8 @@ def test_signed_ok_without_rederived_subject_is_rejected(tmp_path, monkeypatch):
 def test_untrusted_key_fails_authorization_independently(tmp_path, monkeypatch):
     from brigade import attestation
 
+    monkeypatch.setattr(control_crosswalk, "_ssh_keygen_available", lambda: True)
+
     target = _ec02_target(tmp_path)
     _stub_attestation(monkeypatch, attestation.AttestationVerifyResult(status=attestation.STATUS_UNTRUSTED_KEY))
     readiness = _assess(target, "EC-02")
@@ -844,6 +848,8 @@ def test_untrusted_key_fails_authorization_independently(tmp_path, monkeypatch):
 
 def test_signed_ok_rederived_validates_and_verifier_exception_is_unavailable(tmp_path, monkeypatch):
     from brigade import attestation
+
+    monkeypatch.setattr(control_crosswalk, "_ssh_keygen_available", lambda: True)
 
     target = _ec02_target(tmp_path)
     _stub_attestation(
@@ -1074,6 +1080,8 @@ def test_rendered_doc_documents_state_contract_and_migration():
 
 def test_ec02_attestation_copied_from_another_run_dir_is_rejected(tmp_path, monkeypatch):
     from brigade import attestation
+
+    monkeypatch.setattr(control_crosswalk, "_ssh_keygen_available", lambda: True)
 
     target = _ws(tmp_path)
     run_dir = _verify_dir(target, "run-b")
@@ -1766,3 +1774,34 @@ def test_ec08_git_probe_failure_is_unavailable_not_not_applicable(tmp_path, monk
     assert readiness["outcome"] == "unavailable"
     assert readiness["reason"] == "verifier_error"
     assert readiness["legacy_state"] == "untested"
+
+
+@pytest.mark.parametrize("claim_id", ["EC-04", "EC-05", "EC-06"])
+@pytest.mark.parametrize("run_id", [None, RUN])
+def test_run_discovery_root_file_is_unavailable(tmp_path, claim_id, run_id):
+    target = _ws(tmp_path)
+    root = target / ".brigade" / "runs"
+    root.parent.mkdir(parents=True, exist_ok=True)
+    root.write_text("not a directory")
+    readiness = _assess(target, claim_id, run_id)
+    assert readiness["outcome"] == "unavailable"
+    assert readiness["reason"] == "discovery_unreadable"
+
+
+@pytest.mark.parametrize("claim_id", ["EC-04", "EC-05", "EC-06"])
+@pytest.mark.parametrize("run_id", [None, RUN])
+def test_run_discovery_root_stat_error_is_unavailable(tmp_path, monkeypatch, claim_id, run_id):
+    target = _ws(tmp_path)
+    root = target / ".brigade" / "runs"
+    root.mkdir(parents=True)
+    original_lstat = Path.lstat
+
+    def unreadable(path):
+        if path == root:
+            raise PermissionError("fixture denies run discovery metadata")
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", unreadable)
+    readiness = _assess(target, claim_id, run_id)
+    assert readiness["outcome"] == "unavailable"
+    assert readiness["reason"] == "discovery_unreadable"
