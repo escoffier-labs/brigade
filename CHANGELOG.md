@@ -12,7 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Command Deck links optional bounded observed-work groups with configured attribution, bounded stored references, snapshot freshness on home and detail pages, and unavailable record notices. Groups use existing dashboard authentication and leave generic Worklore visibility unchanged.
 
+- Node identities accept optional offline `center_url` metadata without changing default initialization or machine authority. Invalid values suppress links and preserve identity. A bounded URL validator and escaped `Open Center` renderer provide a preparatory boundary. Reporting, Hub persistence, and card wiring remain open. (#1495)
+
 - Command Deck adds a read-only Worklore task page with bounded cursor pagination, plain stored fields and reference summaries, explicit truncation, and existing dashboard authentication. (#1609)
+
+- Claude Actions snapshots can be collected through a bounded injected GET transport with offline defaults, independent per-attempt definition confirmations, quarantined identity conflicts, and separate current-head evidence. Live transport, discovery and FleetHub integration remain pending. (#1602)
 
 - `fleet dot report` validates bounded metadata offline by default and publishes explicitly reported cloud presence only with node authentication. Holder reports append fenced Worklore ownership events without changing task fields or lifecycle. Session cloud context adds schema 24 while preserving local snapshots. (#1606)
 
