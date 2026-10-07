@@ -7,7 +7,11 @@ from pathlib import Path
 import json
 import os
 
+import shutil
+
 import pytest
+
+from brigade import proc
 
 from brigade import cli
 from brigade import dirfd
@@ -3091,3 +3095,210 @@ def test_doctor_lineage_rejects_path_valued_parent_run_id(tmp_path: Path, monkey
     evil_root = evil.resolve()
     assert all(evil_root not in path.parents and path != evil_root for path in journal_reads)
     assert all(runs_root.resolve() in path.parents or path == runs_root.resolve() for path in journal_reads)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_grok_version_probe(monkeypatch):
+    # Keep the doctor suite independent of optional binaries on the host.
+    real_which = shutil.which
+
+    def fake_which(command, *args, **kwargs):
+        return None if command == "grok" else real_which(command, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+
+
+def _fake_grok_probe(monkeypatch, result):
+    monkeypatch.setattr(shutil, "which", lambda command, *args, **kwargs: "/fake/grok" if command == "grok" else None)
+    calls = []
+    real_run = proc.run
+
+    def fake_run(args, *, timeout=30.0, **kwargs):
+        if args[0] != "grok":
+            return real_run(args, timeout=timeout, **kwargs)
+        assert args == ["grok", "--version"]
+        assert 0 < timeout <= 2.0
+        assert kwargs == {"supervise_group": True}
+        calls.append((args, timeout))
+        return result
+
+    monkeypatch.setattr(proc, "run", fake_run)
+    return calls
+
+
+def test_check_grok_cli_missing(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda command: None)
+    monkeypatch.setattr(proc, "run", lambda *args, **kwargs: pytest.fail("missing Grok must not be executed"))
+    results = doctor_mod._check_grok_cli()
+    assert len(results) == 1
+    assert results[0][0] == doctor_mod.MANUAL
+    assert "not installed" in results[0][2]
+
+
+@pytest.mark.parametrize(
+    "output,version",
+    [
+        ("grok 1.0.46 (2765) [stable]\n", "1.0.46"),
+        ("grok 1.0.46 (2765805b9442) [stable]\r\n", "1.0.46"),
+        ("grok 1.1.0\n", "1.1.0"),
+        ("grok 2.0.0\n", "2.0.0"),
+    ],
+)
+def test_check_grok_cli_compatible(monkeypatch, output, version):
+    calls = _fake_grok_probe(monkeypatch, proc.Result(0, output, "provider-output-sentinel"))
+    results = doctor_mod._check_grok_cli()
+    assert len(results) == 1
+    assert results[0][0] == doctor_mod.OK
+    assert version in results[0][2]
+    assert "reviewed 1.0.13" in results[0][2]
+    assert output.strip() != results[0][2]
+    assert "2765" not in results[0][2]
+    assert "provider-output-sentinel" not in results[0][2]
+    assert len(calls) == 1
+
+
+def test_check_grok_cli_exactly_floor(monkeypatch):
+    _fake_grok_probe(monkeypatch, proc.Result(0, "grok 1.0.13\n", ""))
+    results = doctor_mod._check_grok_cli()
+    assert results[0][0] == doctor_mod.OK
+    assert "1.0.13" in results[0][2]
+
+
+@pytest.mark.parametrize("version", ["0.99.99", "1.0.9", "1.0.12"])
+def test_check_grok_cli_older(monkeypatch, version):
+    _fake_grok_probe(monkeypatch, proc.Result(0, f"grok {version}\n", ""))
+    results = doctor_mod._check_grok_cli()
+    assert results[0][0] == doctor_mod.FAIL
+    assert "below the reviewed 1.0.13 floor" in results[0][2]
+
+
+def test_check_grok_cli_timeout_execution_error(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda command: "/fake/grok")
+    calls = []
+
+    def fail_run(args, *, timeout, **kwargs):
+        assert args == ["grok", "--version"]
+        assert timeout <= 2.0
+        assert kwargs == {"supervise_group": True}
+        calls.append(args)
+        raise TimeoutError("provider-output-sentinel")
+
+    monkeypatch.setattr(proc, "run", fail_run)
+    results = doctor_mod._check_grok_cli()
+    assert results[0][0] == doctor_mod.WARN
+    assert "uncertainty" in results[0][2]
+    assert "provider-output-sentinel" not in results[0][2]
+    assert calls == [["grok", "--version"]]
+
+
+@pytest.mark.parametrize("exit_code", [1, 124])
+def test_check_grok_cli_nonzero_exit(monkeypatch, exit_code):
+    _fake_grok_probe(monkeypatch, proc.Result(exit_code, "grok 1.0.46\n", "provider-output-sentinel"))
+    results = doctor_mod._check_grok_cli()
+    assert results[0][0] == doctor_mod.WARN
+    assert "nonzero exit" in results[0][2]
+    assert "provider-output-sentinel" not in results[0][2]
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "hello world\n",
+        "grok 1.0.13-rc.1\n",
+        "grok 1.0.46+build.1\n",
+        "grok 1.0.46 (2765) [beta]\n",
+        "grok 1.0.46 unexpected-provider-text\n",
+        "grok 1.0.46\nunexpected-provider-text\n",
+        "grok 01.0.46\n",
+        "grok 1.0.٤٦\n",
+        "grok 1.0." + "9" * 5000,
+        "grok 1.0.46\x1b[31m",
+    ],
+)
+def test_check_grok_cli_unrecognized_output(monkeypatch, output):
+    _fake_grok_probe(monkeypatch, proc.Result(0, output, "provider-output-sentinel"))
+    results = doctor_mod._check_grok_cli()
+    assert results[0][0] == doctor_mod.WARN
+    assert "uncertainty" in results[0][2]
+    assert "unexpected-provider-text" not in results[0][2]
+    assert "provider-output-sentinel" not in results[0][2]
+    assert len(results[0][2]) < 256
+
+
+@pytest.mark.parametrize(
+    "flag", ["stdout_decode_error", "output_limit_exceeded", "stream_limit_exceeded", "incomplete_process_group"]
+)
+def test_check_grok_cli_incomplete_output_is_uncertain(monkeypatch, flag):
+    result = proc.Result(0, "grok 1.0.46\n", "")
+    setattr(result, flag, "invalid bytes" if flag == "stdout_decode_error" else True)
+    _fake_grok_probe(monkeypatch, result)
+    assert doctor_mod._check_grok_cli()[0][0] == doctor_mod.WARN
+
+
+@pytest.mark.parametrize("version,expected_status", [("1.0.46", "OK"), ("1.0.9", "FAIL"), (None, "MANUAL")])
+def test_doctor_grok_cli_check_operator_visibility_and_boundary(
+    tmp_target: Path, monkeypatch, capsys, version, expected_status
+):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude", "grok"], owner="grok", includes=[]),
+    )
+    capsys.readouterr()
+    calls = []
+    if version is None:
+        monkeypatch.setattr(shutil, "which", lambda command, *args, **kwargs: None)
+        real_run = proc.run
+
+        def no_grok_run(args, **kwargs):
+            if args[0] == "grok":
+                pytest.fail("missing Grok must not be executed")
+            return real_run(args, **kwargs)
+
+        monkeypatch.setattr(proc, "run", no_grok_run)
+    else:
+        calls = _fake_grok_probe(
+            monkeypatch, proc.Result(0, f"grok {version} (2765) [stable]\n", "provider-output-sentinel")
+        )
+
+    default_rc = doctor_mod.run(target=tmp_target, harness="grok", json_output=True)
+    default = json.loads(capsys.readouterr().out)
+    assert default_rc == 0
+    assert calls == []
+    assert not any(check["name"] == "grok: CLI JSON-envelope version" for check in default["checks"])
+
+    operator_rc = doctor_mod.run(target=tmp_target, harness="grok", json_output=True, operator=True)
+    output = capsys.readouterr().out
+    operator = json.loads(output)
+    checks = [check for check in operator["checks"] if check["name"] == "grok: CLI JSON-envelope version"]
+    assert len(checks) == 1
+    assert checks[0]["scope"] == "operator"
+    assert checks[0]["status"] == expected_status
+    assert operator_rc == (0 if operator["summary"]["failed"] == 0 else 1)
+    assert "2765" not in output
+    assert "provider-output-sentinel" not in output
+    assert len(calls) == (0 if version is None else 1)
+
+
+def test_grok_operator_version_does_not_change_status(tmp_target: Path, monkeypatch, capsys):
+    from brigade import status as status_mod
+
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude", "grok"], owner="grok", includes=[]),
+    )
+    capsys.readouterr()
+    core = next(station for station in status_mod.all_stations() if station.name == "core")
+    monkeypatch.setattr(status_mod, "all_stations", lambda: [core])
+    monkeypatch.setattr(status_mod.update_notify, "available_update", lambda: None)
+
+    old_calls = _fake_grok_probe(monkeypatch, proc.Result(0, "grok 1.0.9\n", ""))
+    assert status_mod.run(tmp_target, json_output=True) == 0
+    old_payload = json.loads(capsys.readouterr().out)
+    assert old_calls == []
+    assert old_payload["stations"][0]["fail"] == 0
+
+    compatible_calls = _fake_grok_probe(monkeypatch, proc.Result(0, "grok 1.0.46\n", ""))
+    assert status_mod.run(tmp_target, json_output=True) == 0
+    compatible_payload = json.loads(capsys.readouterr().out)
+    assert compatible_calls == []
+    assert compatible_payload == old_payload

@@ -991,6 +991,8 @@ def run(
 ) -> int:
     ctx = build_context(target, harness)
     checks = _gather_checks(ctx)
+    if operator and "grok" in ctx.harnesses:
+        checks.extend(_operator_check(status, name, detail) for status, name, detail in _check_grok_cli())
     if full:
         checks = _replace_recovery_check_with_full(checks, ctx.target)
     if not operator:
@@ -1625,6 +1627,49 @@ def _check_publish_gate(target: Path) -> List[CheckResult]:
             )
         )
     return results
+
+
+def _check_grok_cli() -> List[CheckResult]:
+    """Passively check the reviewed JSON-envelope CLI floor, not model access."""
+    from . import proc
+
+    name = "grok: CLI JSON-envelope version"
+    if shutil.which("grok") is None:
+        return [(MANUAL, name, "not installed; grok harness is optional")]
+
+    try:
+        result = proc.run(["grok", "--version"], timeout=2.0, supervise_group=True)
+    except Exception:  # A failed optional host probe must not expose arbitrary exception text.
+        return [(WARN, name, "uncertainty: execution failure")]
+    if result.code != 0:
+        return [(WARN, name, "uncertainty: nonzero exit")]
+    if (
+        result.decode_failed
+        or result.output_limit_exceeded
+        or result.stream_limit_exceeded
+        or result.incomplete_process_group
+    ):
+        return [(WARN, name, "uncertainty: incomplete or undecodable version output")]
+    if len(result.stdout) > 256:
+        return [(WARN, name, "uncertainty: unrecognized output")]
+
+    # Accept the observed stable CLI format; prereleases and other suffixes
+    # cannot establish the reviewed capability. Never echo the probe's output.
+    match = re.fullmatch(
+        r"grok[ \t]+(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+        r"(?:[ \t]+\([0-9a-f]{4,40}\))?(?:[ \t]+\[stable\])?",
+        result.stdout.strip(),
+        flags=re.ASCII | re.IGNORECASE,
+    )
+    if match is None:
+        return [(WARN, name, "uncertainty: unrecognized output")]
+    version = tuple(int(part) for part in match.groups())
+    observed = ".".join(str(part) for part in version)
+    if version < (1, 0, 13):
+        return [
+            (FAIL, name, f"grok {observed} is below the reviewed 1.0.13 floor for JSON-envelope output; update the CLI")
+        ]
+    return [(OK, name, f"grok {observed} meets the reviewed 1.0.13 floor for JSON-envelope output")]
 
 
 def _check_openclaw() -> List[CheckResult]:
