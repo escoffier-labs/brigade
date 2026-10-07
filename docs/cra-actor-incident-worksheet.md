@@ -29,7 +29,8 @@ exploited vulnerability; and severe incident having an impact on product
 security. Record AI role definitions separately if relevant. These fields
 remain open until reviewed; the questions below are not substitute definitions.
 
-The sources above supply these planning anchors:
+Commission guidance supplies these planning anchors; the vulnerability
+final-report measure trigger was also cross-checked as noted above:
 
 | Actor / trigger | Reporting start or deadline |
 | --- | --- |
@@ -182,8 +183,8 @@ There are no official references or submission receipts.
   final report due **2027-03-01T16:00:00Z**, 14 days later.
 - Remaining questions: exact actor/legal criteria, affected downstream releases,
   actual corrective or mitigating measure availability and reporting channel.
-  Example Legal Team owns the actor decision. These conditional dates are planning deadlines, not
-  submissions. Filing: **none (drill)**.
+  Example Legal Team owns the actor decision. These conditional dates are
+  planning deadlines, not submissions. Filing: **none (drill)**.
 
 ### DRILL 3: severe incident, manufacturer established
 
