@@ -1676,6 +1676,7 @@ def _approval_journal(run_dir: Path, *, broken: bool) -> None:
     from brigade import run_journal
 
     nonce = "cd" * 16
+    _write_json(run_dir / "run.json", {"run_id": run_dir.name, "tree_fingerprint": "f" * 40})
     journal = run_dir / "events" / "lifecycle.jsonl"
     journal.parent.mkdir(parents=True, exist_ok=True)
     run_journal.append_event(
@@ -1722,3 +1723,24 @@ def test_ec05_known_journal_failure_survives_missing_ssh_keygen(tmp_path, monkey
     readiness = _assess(target, "EC-05", "run-2")
     assert readiness["outcome"] == "unavailable"
     assert readiness["reason"] == "verifier_tool_unavailable"
+
+
+@pytest.mark.parametrize("run_record", [None, "{broken", "[]"])
+def test_ec05_invalid_run_record_survives_missing_ssh_keygen(tmp_path, monkeypatch, run_record):
+    from brigade import approval
+
+    target = _ws(tmp_path)
+    run_dir = target / ".brigade" / "runs" / "invalid-record"
+    _approval_journal(run_dir, broken=False)
+    run_json = run_dir / "run.json"
+    if run_record is None:
+        run_json.unlink(missing_ok=True)
+    else:
+        run_json.write_text(run_record)
+    assert approval.verify_run_approval(target, run_dir).status == "APPROVAL-INVALID"
+    monkeypatch.setattr(control_crosswalk, "_ssh_keygen_available", lambda: False)
+
+    readiness = _assess(target, "EC-05", "invalid-record")
+    assert readiness["outcome"] == "rejected"
+    assert readiness["legacy_state"] == "evidenced_failed"
+    assert readiness["dimensions"]["integrity"] == {"status": "failed", "reason": "approval_invalid"}

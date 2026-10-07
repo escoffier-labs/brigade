@@ -304,7 +304,7 @@ def _assess_verify_receipt(
 ) -> control_readiness.ArtifactObservation:
     """EC-01 structure of one verify receipt.
 
-    The receipt is unsigned and its stored digest is not rederived here (the
+    The stored digest and optional local HMAC are not verified here (the
     integrity adapter is #1618), so integrity is ``not_checked`` and even a
     well-formed successful receipt stops at ``structure_observed``.
     """
@@ -657,7 +657,7 @@ def _approval_prerequisite_failure(run_dir: Path) -> tuple[str, str] | None:
 
     Uses the bounded journal reader and the approval event shape that
     ``approval.verify_run_approval`` checks before any signature: journal
-    chain, run binding of every event, and the latest approval event's nonce,
+    chain, run binding of every event, readable run metadata, and the latest approval event's nonce,
     attestation path and decodable statement.
     """
     try:
@@ -678,6 +678,8 @@ def _approval_prerequisite_failure(run_dir: Path) -> tuple[str, str] | None:
     event = approval._latest_approval_event(report.events)
     if event is None:
         return None
+    if _read_json_object(run_dir / "run.json") is None:
+        return "integrity", "approval_invalid"
     nonce = event.payload.get("nonce")
     if not isinstance(nonce, str) or not approval._HEX32_RE.fullmatch(nonce):
         return "integrity", "approval_invalid"
@@ -1469,7 +1471,7 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "matching its directory, and one `completed` command with exit code 0 per planned check whose `command` "
     "display string equals the planned entry at the same position. A different, missing or reordered command is "
     "`incomplete` with `planned_commands_mismatch`. An empty intended check list never shows that a test ran. The "
-    "receipt is unsigned and its stored digest is not rederived before #1618, so `integrity` is a required "
+    "stored receipt digest and optional local HMAC are not verified before #1618, so `integrity` is a required "
     "dimension reported `not_checked` with `verifier_not_wired`, and even a well-formed successful receipt stops "
     "at `structure_observed` (`untested`). A reused receipt (`reused_from`) copies the commands of an earlier run; "
     "it is recorded, reused evidence, not a new execution under the new receipt id. EC-02 pins re-derivation to "
@@ -1482,7 +1484,7 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "trust and that the statement names the run directory. It does not independently check that the request "
     "preceded worker dispatch. EC-05 reads the latest approval event in the lifecycle journal. Without "
     "`ssh-keygen`, a failure that needs no signature check (a broken or partial journal chain, an event naming "
-    "another run, or an invalid approval event nonce, path or statement) stays `rejected`; only otherwise is "
+    "another run, missing or invalid run metadata, or an invalid approval event nonce, path or statement) stays `rejected`; only otherwise is "
     "the claim `unavailable`. A trusted key is a key-trust result; organizational identity and authority remain "
     "the adopting organization's evidence.",
     "",
@@ -1490,6 +1492,12 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "`unknown` and `entry_missing`; it is never reported as a digest comparison failure. A symlinked run "
     "directory or `run.json` is refused as `invalid` with `symlink_refused`. A recomputed digest that differs "
     "from the trailer is `rejected` with `trailer_digest_mismatch`.",
+    "",
+    "Scope: workspace-wide assessments include historical failures and incomplete evidence. Use `--run-id` "
+    "for current-run EC-01, EC-02, EC-04, EC-05 and EC-06 evidence. EC-09 consumes operator-saved guard JSON "
+    "stdout at `.brigade/work/guard/audit.json`; the producer does not write that file or a timestamp. EC-10 "
+    "and EC-11 period filtering uses the latest recorded timestamp for the ledger, without per-record "
+    "timestamp validation. Their structural observations cannot validate.",
     "",
     "Freshness: only the Python API accepts an explicit assessment period; the CLI has no period option. Without "
     "one, freshness is `not_applicable` with `period_not_supplied`. It is never reported as fresh. With a period, "
@@ -1602,7 +1610,7 @@ def render_doc() -> str:
             lines.append("")
             lines.append(
                 "| Claim | Property | Disposition | Supersedes | Artifact contract | Responsible actor "
-                "| Applicability | Rationale | Verification limit | Source |"
+                "| Applicability | Rationale | Verification limit | Rejected control source |"
             )
             lines.append(
                 "|-------|----------|-------------|------------|-------------------|-------------------"
