@@ -1086,7 +1086,7 @@
       "relationship": "supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Log content protection for outcome records.",
+      "rationale": "Outcome records are logged; storage protection belongs to the adopting organization.",
       "source_locator": "https://www.iso.org/standard/27001"
     },
     {
