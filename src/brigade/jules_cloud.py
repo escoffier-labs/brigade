@@ -35,6 +35,14 @@ MAX_PAGE_SIZE = 100
 MAX_PAGES_LIMIT = 20
 MAX_ITEMS_LIMIT = 1000
 MAX_RESPONSE_BYTES = 64 * 1024
+# Partial-response selectors (the API's documented ``fields`` parameter) for
+# session reads. Full sessions carry prompts, PR descriptions, and patches that
+# exceed MAX_RESPONSE_BYTES before sanitization can drop them, so the provider
+# must project to metadata first. Outputs keep one leaf per kind so changeSet-
+# only sessions still count toward ``has_outputs``. There is no unprojected
+# fallback: a provider that ignores the selector still hits the size cap.
+SESSION_FIELDS = "id,name,state,createTime,updateTime,url,outputs(pullRequest(url),changeSet(source))"
+SESSION_LIST_FIELDS = f"sessions({SESSION_FIELDS}),nextPageToken"
 
 # The only automation mode this adapter will ever send.
 AUTO_CREATE_PR = "AUTO_CREATE_PR"
@@ -476,6 +484,7 @@ def _paginated_list(
     page_size: int = DEFAULT_PAGE_SIZE,
     max_pages: int = DEFAULT_MAX_PAGES,
     max_items: int = DEFAULT_MAX_ITEMS,
+    fields: str | None = None,
 ) -> list[dict[str, Any]]:
     """Bounded paginated GET returning sanitized rows only."""
     _check_paging(page_size, max_pages, max_items)
@@ -487,6 +496,8 @@ def _paginated_list(
         query = {"pageSize": str(page_size)}
         if cursor:
             query["pageToken"] = cursor
+        if fields:
+            query["fields"] = fields
         url = f"{root}/{endpoint}?{urllib.parse.urlencode(query)}"
         payload = _call(opener, _build_request(url, api_key), deadline=deadline)
         raw_items = payload.get(list_key)
@@ -613,6 +624,7 @@ def list_sessions(
         page_size=page_size,
         max_pages=max_pages,
         max_items=max_items,
+        fields=SESSION_LIST_FIELDS,
     )
 
 
@@ -627,7 +639,7 @@ def get_session(
     """GET /sessions/{id}, returning the sanitized session row."""
     token = _validate_session_id(session_id)
     root = _normalize_base_url(base_url)
-    url = f"{root}/sessions/{_quote_segment(token)}"
+    url = f"{root}/sessions/{_quote_segment(token)}?{urllib.parse.urlencode({'fields': SESSION_FIELDS})}"
     payload = _call(opener or _default_opener, _build_request(url, api_key), deadline=deadline)
     session = sanitize_session(payload)
     if session is None:
