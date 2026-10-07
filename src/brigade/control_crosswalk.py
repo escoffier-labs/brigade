@@ -854,12 +854,13 @@ def _git(ctx: _Context, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _is_git_repo(target: Path) -> bool:
-    """Return True when target is inside a Git repository."""
+def _is_git_repo(target: Path) -> bool | None:
+    """True for a repository, False for a reported non-repository, None for a probe error."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--git-dir"],
             cwd=str(target),
+            env={**os.environ, "LC_ALL": "C"},
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -867,9 +868,13 @@ def _is_git_repo(target: Path) -> bool:
             timeout=10,
             check=False,
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True
+        if result.returncode == 128 and result.stderr.startswith("fatal: not a git repository"):
+            return False
+        return None
     except (OSError, subprocess.TimeoutExpired):
-        return False
+        return None
 
 
 def _evaluate_commit_trailer_receipts(ctx: _Context) -> _Discovery:
@@ -886,8 +891,14 @@ def _evaluate_commit_trailer_receipts(ctx: _Context) -> _Discovery:
         _claim_wide(obs, ctx)
         out.observations.append(obs)
         return out
-    if not _is_git_repo(ctx.target):
+    repo_status = _is_git_repo(ctx.target)
+    if repo_status is False:
         out.not_applicable_reason = "not_git_repository"
+        return out
+    if repo_status is None:
+        obs = _verifier_unavailable("git-history", "verifier_error")
+        _claim_wide(obs, ctx)
+        out.observations.append(obs)
         return out
     try:
         result = _git(ctx, "log", f"-{_TRAILER_WINDOW}", "--format=%H")
@@ -1488,7 +1499,8 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "the claim `unavailable`. A trusted key is a key-trust result; organizational identity and authority remain "
     "the adopting organization's evidence.",
     "",
-    "Commit trailers (EC-08): a trailer whose local `run.json` is missing is `incomplete` with integrity "
+    "Commit trailers (EC-08): a failed Git repository probe is `unavailable` (`verifier_error`); "
+    "only a confirmed non-repository is `not_applicable`. A trailer whose local `run.json` is missing is `incomplete` with integrity "
     "`unknown` and `entry_missing`; it is never reported as a digest comparison failure. A symlinked run "
     "directory or `run.json` is refused as `invalid` with `symlink_refused`. A recomputed digest that differs "
     "from the trailer is `rejected` with `trailer_digest_mismatch`.",

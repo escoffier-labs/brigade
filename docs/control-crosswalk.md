@@ -124,7 +124,7 @@ Note: Rows cite the final NIST AI 100-1 Core tables (Section 5, Tables 1 to 4). 
   - Supersedes: `GOVERN 1.2`
   - Edition: NIST AI 100-1, AI RMF 1.0 (January 2023), final
   - Primary locator: https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.1, Table 1, GOVERN 2.1
-  - Artifact contract: agent-request/v1 envelope from brigade run --requester-key, verified with brigade receipts verify-attestation.
+  - Artifact contract: agent-request/v1 envelope from brigade run --requester-key, verified by the request-specific adapter in brigade evidence controls. The standalone Test Result verifier CLI does not accept this request predicate.
   - Responsible actor: Adopting organization, which assigns AI risk roles and binds requester keys to them.
   - Applicability: Roles, responsibilities and lines of communication for mapping, measuring and managing AI risk are documented, and requester identities are bound to those roles.
   - Support rationale: A signed request can corroborate which documented identity requested a change. It does not integrate trustworthiness characteristics into policy, which is GOVERN 1.2.
@@ -157,7 +157,7 @@ Note: Rows cite the final NIST AI 100-1 Core tables (Section 5, Tables 1 to 4). 
   - Responsible actor: Adopting organization change-management owner.
   - Applicability: The organization has an actual change-management or post-deployment procedure that requires commits to resolve to receipts.
   - Support rationale: Trailers that resolve to a matching receipt digest can corroborate traceability under that change procedure. They do not supersede, disengage or deactivate AI systems, which is MANAGE 2.4.
-  - Verification limit: State inspects the 20 most recent commits for a matching local receipt digest. A Brigade artifact does not establish that an organizational control or process operated.
+  - Verification limit: State requires every Brigade-trailered commit among the 20 most recent to resolve to a matching local receipt digest. A Brigade artifact does not establish that an organizational control or process operated. A Git probe error is unavailable; only a confirmed non-repository is not applicable.
 
 - `MANAGE 4.3` / EC-06: corrected-mismatch
   - Supersedes: `MEASURE 2.1`
@@ -347,7 +347,7 @@ Verify receipts (EC-01): `running` is nonterminal (`status_not_terminal`). `canc
 
 Signed requests and approvals (EC-04, EC-05): EC-04 discovers the producer path `.brigade/runs/<run>/requests/<nonce>.json` written by `agent_request.record_request`, plus the legacy `agent-request.json` and `request.json` names, with a bounded `requests/` scan. It checks signature, key trust and that the statement names the run directory. It does not independently check that the request preceded worker dispatch. EC-05 reads the latest approval event in the lifecycle journal. Without `ssh-keygen`, a failure that needs no signature check (a broken or partial journal chain, an event naming another run, missing or invalid run metadata, or an invalid approval event nonce, path or statement) stays `rejected`; only otherwise is the claim `unavailable`. A trusted key is a key-trust result; organizational identity and authority remain the adopting organization's evidence.
 
-Commit trailers (EC-08): a trailer whose local `run.json` is missing is `incomplete` with integrity `unknown` and `entry_missing`; it is never reported as a digest comparison failure. A symlinked run directory or `run.json` is refused as `invalid` with `symlink_refused`. A recomputed digest that differs from the trailer is `rejected` with `trailer_digest_mismatch`.
+Commit trailers (EC-08): a failed Git repository probe is `unavailable` (`verifier_error`); only a confirmed non-repository is `not_applicable`. A trailer whose local `run.json` is missing is `incomplete` with integrity `unknown` and `entry_missing`; it is never reported as a digest comparison failure. A symlinked run directory or `run.json` is refused as `invalid` with `symlink_refused`. A recomputed digest that differs from the trailer is `rejected` with `trailer_digest_mismatch`.
 
 Scope: workspace-wide assessments include historical failures and incomplete evidence. Use `--run-id` for current-run EC-01, EC-02, EC-04, EC-05 and EC-06 evidence. EC-09 consumes operator-saved guard JSON stdout at `.brigade/work/guard/audit.json`; the producer does not write that file or a timestamp. EC-10 and EC-11 period filtering uses the latest recorded timestamp for the ledger, without per-record timestamp validation. Their structural observations cannot validate.
 

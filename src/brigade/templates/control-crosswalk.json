@@ -32,7 +32,7 @@
       "title": "Change request signed before dispatch",
       "artifact_family": "agent-request/v1",
       "producer_command": "brigade run --requester-key",
-      "verifier_command": "brigade receipts verify-attestation",
+      "verifier_command": "brigade evidence controls",
       "state_rule": "agent-request-signed"
     },
     {
@@ -40,7 +40,7 @@
       "title": "Human approval bound to the final tree with segregation of duties",
       "artifact_family": "human-approval/v2",
       "producer_command": "brigade run approve",
-      "verifier_command": "brigade receipts verify-attestation --strict-approvals",
+      "verifier_command": "brigade receipts verify --strict-approvals",
       "state_rule": "human-approval-allow-with-sod"
     },
     {
@@ -273,7 +273,7 @@
       "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.1, Table 1, GOVERN 2.1",
       "disposition": "corrected-mismatch",
       "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
-      "artifact_contract": "agent-request/v1 envelope from brigade run --requester-key, verified with brigade receipts verify-attestation.",
+      "artifact_contract": "agent-request/v1 envelope from brigade run --requester-key, verified by the request-specific adapter in brigade evidence controls. The standalone Test Result verifier CLI does not accept this request predicate.",
       "responsible_actor": "Adopting organization, which assigns AI risk roles and binds requester keys to them.",
       "verification_limit": "Verification proves possession of the requester key, not that the role assignment is documented or understood. A Brigade artifact does not establish that an organizational control or process operated.",
       "superseded_control_id": "GOVERN 1.2"
@@ -354,7 +354,7 @@
       "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
       "artifact_contract": "Brigade-Run and Brigade-Receipt commit trailers from brigade receipts trailer, resolved with brigade receipts verify --commit.",
       "responsible_actor": "Adopting organization change-management owner.",
-      "verification_limit": "State inspects the 20 most recent commits for a matching local receipt digest. A Brigade artifact does not establish that an organizational control or process operated.",
+      "verification_limit": "State requires every Brigade-trailered commit among the 20 most recent to resolve to a matching local receipt digest. A Brigade artifact does not establish that an organizational control or process operated. A Git probe error is unavailable; only a confirmed non-repository is not applicable.",
       "superseded_control_id": "MANAGE 2.4"
     },
     {
