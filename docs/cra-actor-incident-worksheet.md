@@ -17,6 +17,11 @@ The law is [Regulation (EU) 2024/2847](https://eur-lex.europa.eu/legal-content/E
 Exact statutory definitions were not independently verified for this worksheet;
 the accountable legal review below must record them.
 
+The vulnerability final-report measure trigger was cross-checked against
+Article 14(2)(c) in the [Council's legislative text, PE-CONS 100/23](https://data.consilium.europa.eu/doc/document/PE-100-2023-INIT/en/pdf),
+dated 2024-09-25 and retrieved on 2026-10-07 UTC. This legislative version does
+not replace review of the current published law for a real event.
+
 Accountable legal review must record the applicable provisions, exact text,
 interpretation, reviewer, date, and source version for: product with digital
 elements; manufacturer; distributor; open-source software steward; actively
@@ -24,14 +29,14 @@ exploited vulnerability; and severe incident having an impact on product
 security. Record AI role definitions separately if relevant. These fields
 remain open until reviewed; the questions below are not substitute definitions.
 
-Verified Commission guidance supplies these planning anchors:
+The sources above supply these planning anchors:
 
 | Actor / trigger | Reporting start or deadline |
 | --- | --- |
 | Manufacturer, Article 14 | Reporting obligations apply from 2026-09-11 |
 | Qualifying OSS steward, Article 24(3) | Reporting obligations apply from 2027-12-11; review that actor's scope separately |
 | Reportable exploited vulnerability or severe incident | Early warning within 24 hours and notification within 72 hours of awareness |
-| Exploited vulnerability final report | Within 14 days after a corrective measure is available |
+| Exploited vulnerability final report | Within 14 days after a corrective or mitigating measure is available |
 | Severe incident final report | Within one calendar month after notification |
 
 These are outer deadlines, not permission to delay. Confirm actor-specific
@@ -101,11 +106,13 @@ Record each item with evidence references and an accountable owner/date:
 - Decision: actor and trigger decisions separately, reviewer authority,
   escalation time, unresolved questions and next review. Unresolved actor status
   calls for immediate escalation when reliable exploitation is observed.
-- Response: containment, corrective measures, availability timestamp and source,
-  affected-user communications, owners, status, references and follow-up actions.
+- Response: containment, corrective or mitigating measures, availability
+  timestamp and source, affected-user communications, owners, status, references
+  and follow-up actions.
 - Clocks: applicable start date, awareness basis, scheduled 24/72-hour deadlines,
-  corrective-measure or notification anchor for the final deadline, calculation,
-  legal confirmation and any provisional assumptions.
+  availability of a corrective or mitigating measure, or notification time, as
+  the final-deadline anchor, calculation, legal confirmation and any provisional
+  assumptions.
 
 ## 3. Actual filing state and evidence
 
@@ -170,12 +177,12 @@ There are no official references or submission receipts.
   to Example Organizational Owner and Legal Team; contain affected deployments
   and prepare drafts without waiting for actor resolution.
 - Conditional manufacturer schedule: early warning **2027-02-11T10:00:00Z**;
-  notification **2027-02-13T10:00:00Z**. If the corrective measure becomes
-  available **2027-02-15T16:00:00Z** (`D2-C`, hypothetical release record),
+  notification **2027-02-13T10:00:00Z**. If a corrective or mitigating measure
+  becomes available **2027-02-15T16:00:00Z** (`D2-C`, hypothetical release record),
   final report due **2027-03-01T16:00:00Z**, 14 days later.
 - Remaining questions: exact actor/legal criteria, affected downstream releases,
-  actual corrective availability and reporting channel. Example Legal Team owns
-  the actor decision. These conditional dates are planning deadlines, not
+  actual corrective or mitigating measure availability and reporting channel.
+  Example Legal Team owns the actor decision. These conditional dates are planning deadlines, not
   submissions. Filing: **none (drill)**.
 
 ### DRILL 3: severe incident, manufacturer established
