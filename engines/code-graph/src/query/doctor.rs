@@ -16,6 +16,7 @@ pub struct DoctorReport {
     pub db_path: String,
     pub tool_version: String,
     pub schema: SchemaStatus,
+    pub resolver: ResolverStatus,
     pub last_sync: LastSync,
     pub branch: BranchStatus,
     pub pending: PendingChanges,
@@ -38,6 +39,13 @@ pub struct SchemaStatus {
     pub stored: Option<u32>,
     pub current: u32,
     pub needs_migration: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResolverStatus {
+    pub stored: Option<String>,
+    pub current: &'static str,
+    pub stale: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,9 +78,14 @@ pub fn doctor(conn: &Connection, repo_root: &Path, db_path: &Path) -> Result<Doc
     let (pending, ignored) = pending_changes(conn, &repo_root)?;
     let needs_migration = stored_schema != Some(SCHEMA_VERSION);
     let branch = branch_status(conn, &repo_root)?;
+    let resolver = ResolverStatus {
+        stored: meta::read(conn, "resolver_version")?,
+        current: crate::store::RESOLVER_VERSION,
+        stale: meta::resolver_is_stale(conn)?,
+    };
     let verdict = if needs_migration {
         "NEEDS-MIGRATION"
-    } else if pending.is_empty() && !branch.drifted {
+    } else if pending.is_empty() && !branch.drifted && !resolver.stale {
         "FRESH"
     } else {
         "STALE"
@@ -87,6 +100,7 @@ pub fn doctor(conn: &Connection, repo_root: &Path, db_path: &Path) -> Result<Doc
             current: SCHEMA_VERSION,
             needs_migration,
         },
+        resolver,
         last_sync: LastSync {
             synced_at,
             age_seconds,
@@ -120,6 +134,11 @@ pub fn missing_db_report(repo_root: &Path, db_path: &Path) -> DoctorReport {
             stored: None,
             current: SCHEMA_VERSION,
             needs_migration: true,
+        },
+        resolver: ResolverStatus {
+            stored: None,
+            current: crate::store::RESOLVER_VERSION,
+            stale: true,
         },
         last_sync: LastSync {
             synced_at: None,

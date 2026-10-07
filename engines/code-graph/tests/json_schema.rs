@@ -50,3 +50,40 @@ fn sync_records_provenance_in_meta() {
     );
     assert!(meta::read(&conn, "synced_at").unwrap().is_some());
 }
+
+#[test]
+fn doctor_exposes_stale_resolver_markers_and_sync_repairs_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let db = root.join("g.db");
+    fs::write(root.join("main.py"), "def run():\n    pass\n").unwrap();
+    let conn = open_db(&db).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, root).unwrap();
+    for key in ["resolver_version", "resolver_synced_at"] {
+        for value in [None, Some("obsolete")] {
+            conn.execute("DELETE FROM meta WHERE key = ?1", [key])
+                .unwrap();
+            if let Some(value) = value {
+                meta::upsert(&conn, key, value).unwrap();
+            }
+            let report = graphtrail::query::doctor(&conn, root, &db).unwrap();
+            assert_eq!(report.verdict, "STALE", "{key}={value:?}");
+            assert_eq!(report.exit_code(), 1);
+            let json = serde_json::to_value(&report).unwrap();
+            assert_eq!(json["resolver"]["stale"], true);
+            assert!(json["resolver"]["current"].is_string());
+            assert_eq!(
+                json["resolver"]["stored"],
+                serde_json::to_value(meta::read(&conn, "resolver_version").unwrap()).unwrap()
+            );
+            sync_repo(&conn, root).unwrap();
+            let fresh = graphtrail::query::doctor(&conn, root, &db).unwrap();
+            assert_eq!(fresh.verdict, "FRESH");
+            assert_eq!(fresh.exit_code(), 0);
+            let json = serde_json::to_value(fresh).unwrap();
+            assert_eq!(json["resolver"]["stale"], false);
+            assert_eq!(json["resolver"]["stored"], json["resolver"]["current"]);
+        }
+    }
+}

@@ -97,7 +97,7 @@ main --calls@19 hops=1--> serve  (src/bin/graphtrail-mcp.rs -> src/mcp.rs)
 
 Python, TypeScript/JavaScript, Astro, Rust, and Go. One SQLite file per repo. CLI for humans and scripts. `graphtrail-mcp` serves agents, opens query connections with `SQLITE_OPEN_READ_ONLY`, and supports multiple repositories through `repo` and `db` arguments. No hooks, no daemon, no network in the default build.
 
-When the sync root is inside a git repository, `sync` follows `.gitignore` and `.git/info/exclude`, while still indexing hidden paths such as `.github` if they are not ignored. `doctor` exits 0 for `FRESH`, 1 for `STALE`, or 2 for `NEEDS-MIGRATION` or a missing database.
+When the sync root is inside a git repository, `sync` follows `.gitignore` and `.git/info/exclude`, while still indexing hidden paths such as `.github` if they are not ignored. Doctor JSON includes `resolver: {stored, current, stale}`: stored and current resolver versions are strings (stored can be null), and stale is a boolean. Missing or mismatched resolver versions or sync provenance yield `STALE`. Sync rebuilds derived edges without reparsing unchanged files. `doctor` exits 0 for `FRESH`, 1 for `STALE`, or 2 for `NEEDS-MIGRATION` or a missing database.
 
 ## MCP server
 
@@ -130,7 +130,7 @@ The server exposes fourteen tools. This list is verified against the live `tools
 | `impact` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Combined callers and callees of a symbol (the blast radius of a change), with `hops` on each edge. |
 | `context` | `task` (`limit` optional, default 12) | A context pack: matching entry points plus their caller/callee neighborhood and related files. |
 | `stats` | none | Counts of files, symbols, edges, imports, schema version, sync metadata, and per-language file counts. |
-| `doctor` | none | Freshness contract for the graph: schema status, last sync age, branch drift, pending file changes, ignored entries, and `FRESH`/`STALE`/`NEEDS-MIGRATION` verdict. |
+| `doctor` | none | Freshness contract for the graph: schema status, resolver status, last sync age, branch drift, pending file changes, ignored entries, and `FRESH`/`STALE`/`NEEDS-MIGRATION` verdict. |
 | `file_neighbors` | `path` | Files connected to an indexed file by incoming or outgoing call edges. |
 | `dead_code` | none (`limit` optional, default 100) | Callables with no incoming call edges. A candidate list, not proof: dynamic dispatch, exports, and entry points are invisible to call edges. |
 | `cycles` | none | File-level dependency cycles from cross-file call edges, grouped into strongly connected components. |

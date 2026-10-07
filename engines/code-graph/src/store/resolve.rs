@@ -7,6 +7,9 @@ use rusqlite::{Connection, params};
 
 use crate::model::{CallKind, Import, PendingCall};
 
+/// Bump when resolution rules change; persisted edges must be rebuilt on sync.
+pub(crate) const RESOLVER_VERSION: &str = "2";
+
 #[derive(Clone)]
 pub(super) struct SymbolCandidate {
     pub(super) id: String,
@@ -83,11 +86,15 @@ pub(super) fn rebuild_edges(tx: &Connection) -> Result<()> {
             ])?;
         }
     }
+    super::meta::upsert(tx, "resolver_version", RESOLVER_VERSION)?;
     Ok(())
 }
 
-/// Map symbol name -> candidates, used to resolve call targets.
-pub(super) fn load_name_index(conn: &Connection) -> Result<HashMap<String, Vec<SymbolCandidate>>> {
+/// Partition candidates once, avoiding per-call filtering and cloning of homonyms.
+pub(crate) type NameIndex = HashMap<&'static str, HashMap<String, Vec<SymbolCandidate>>>;
+
+/// Map language family and symbol name to candidates.
+pub(super) fn load_name_index(conn: &Connection) -> Result<NameIndex> {
     let mut stmt = conn.prepare("SELECT name, id, file_path, container FROM symbols")?;
     let rows = stmt.query_map([], |row| {
         Ok((
@@ -99,12 +106,18 @@ pub(super) fn load_name_index(conn: &Connection) -> Result<HashMap<String, Vec<S
             },
         ))
     })?;
-    let mut map: HashMap<String, Vec<SymbolCandidate>> = HashMap::new();
+    let mut map: NameIndex = HashMap::new();
     for row in rows {
         let (name, candidate) = row?;
-        map.entry(name).or_default().push(candidate);
+        if let Some(family) = language_family(&candidate.file_path) {
+            map.entry(family)
+                .or_default()
+                .entry(name)
+                .or_default()
+                .push(candidate);
+        }
     }
-    for candidates in map.values_mut() {
+    for candidates in map.values_mut().flat_map(|names| names.values_mut()) {
         candidates.sort_by(|left, right| {
             left.file_path
                 .cmp(&right.file_path)
@@ -131,14 +144,45 @@ pub(super) fn load_symbol_id_index(conn: &Connection) -> Result<HashMap<String, 
     Ok(map)
 }
 
-pub(super) fn load_file_index(conn: &Connection) -> Result<HashSet<String>> {
+pub(crate) struct FileIndex {
+    files: HashSet<String>,
+    python_roots: HashMap<String, Vec<String>>,
+}
+
+pub(super) fn load_file_index(conn: &Connection) -> Result<FileIndex> {
     let mut stmt = conn.prepare("SELECT path FROM files")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     let mut files = HashSet::new();
     for row in rows {
         files.insert(row?);
     }
-    Ok(files)
+    let mut python_roots: HashMap<String, Vec<String>> = HashMap::new();
+    for file in &files {
+        let Some(package_dir) = file.strip_suffix("/__init__.py") else {
+            continue;
+        };
+        let Some((root, package)) = package_dir.rsplit_once('/') else {
+            continue;
+        };
+        // A directory that is itself a package is not a source root.
+        if !matches!(root.rsplit('/').next(), Some("src" | "lib" | "python"))
+            || files.contains(&format!("{root}/__init__.py"))
+        {
+            continue;
+        }
+        python_roots
+            .entry(package.to_string())
+            .or_default()
+            .push(root.to_string());
+    }
+    for roots in python_roots.values_mut() {
+        roots.sort();
+        roots.dedup();
+    }
+    Ok(FileIndex {
+        files,
+        python_roots,
+    })
 }
 
 pub(super) fn load_import_index(conn: &Connection) -> Result<HashMap<String, Vec<Import>>> {
@@ -240,18 +284,20 @@ impl ResolutionPath {
             }
             ResolutionPath::SameFileBare => "a bare call matched a symbol in the calling file",
             ResolutionPath::NameUnique => {
-                "exactly one indexed symbol carries this name, in another file"
+                "exactly one indexed symbol in the caller's language family carries this name, in another file"
             }
             ResolutionPath::ImportFallback => {
                 "an import matched but its module could not be pinned to indexed files"
             }
             ResolutionPath::NameAmbiguous => {
-                "several indexed symbols carry this name; all candidates kept"
+                "several indexed symbols in the caller's language family carry this name; candidates kept up to the cap"
             }
             ResolutionPath::UnresolvedExternal => {
                 "an import matched but points outside the index (stdlib or third party); no edge"
             }
-            ResolutionPath::NoCandidates => "no indexed symbol carries this name; no edge",
+            ResolutionPath::NoCandidates => {
+                "no indexed symbol in the caller's language family carries this name; no edge"
+            }
             ResolutionPath::UnresolvedQualified => {
                 "qualified call with no import match and no same-file container match; no edge"
             }
@@ -275,10 +321,10 @@ impl ResolvedCall {
 
 fn resolve_call(
     call: &PendingCall,
-    name_index: &HashMap<String, Vec<SymbolCandidate>>,
+    name_index: &NameIndex,
     import_index: &HashMap<String, Vec<Import>>,
     source_index: &HashMap<String, SymbolCandidate>,
-    file_index: &HashSet<String>,
+    file_index: &FileIndex,
 ) -> Vec<ScoredTarget> {
     let resolved = resolve_call_explained(call, name_index, import_index, source_index, file_index);
     let Some(confidence) = resolved.path.confidence() else {
@@ -296,10 +342,10 @@ fn resolve_call(
 
 pub(crate) fn resolve_call_explained(
     call: &PendingCall,
-    name_index: &HashMap<String, Vec<SymbolCandidate>>,
+    name_index: &NameIndex,
     import_index: &HashMap<String, Vec<Import>>,
     source_index: &HashMap<String, SymbolCandidate>,
-    file_index: &HashSet<String>,
+    file_index: &FileIndex,
 ) -> ResolvedCall {
     let import_resolution = resolve_imported_call(call, name_index, import_index, file_index);
     let use_name_fallback = match import_resolution {
@@ -319,7 +365,10 @@ pub(crate) fn resolve_call_explained(
         ImportResolution::NoImport => false,
     };
 
-    let Some(candidates) = name_index.get(&call.target_name) else {
+    let Some(candidates) = language_family(&call.source_file)
+        .and_then(|family| name_index.get(family))
+        .and_then(|names| names.get(&call.target_name))
+    else {
         return ResolvedCall {
             path: ResolutionPath::NoCandidates,
             targets: Vec::new(),
@@ -362,6 +411,16 @@ pub(crate) fn resolve_call_explained(
     ResolvedCall {
         path,
         targets: candidates.iter().take(8).cloned().collect(),
+    }
+}
+
+fn language_family(path: &str) -> Option<&'static str> {
+    match path.rsplit_once('.')?.1 {
+        "py" => Some("python"),
+        "js" | "jsx" | "ts" | "tsx" | "astro" => Some("js/ts"),
+        "rs" => Some("rust"),
+        "go" => Some("go"),
+        _ => None,
     }
 }
 
@@ -408,9 +467,9 @@ fn resolve_same_file_call(
 
 fn resolve_imported_call(
     call: &PendingCall,
-    name_index: &HashMap<String, Vec<SymbolCandidate>>,
+    name_index: &NameIndex,
     import_index: &HashMap<String, Vec<Import>>,
-    file_index: &HashSet<String>,
+    file_index: &FileIndex,
 ) -> ImportResolution {
     let Some(imports) = import_index.get(&call.source_file) else {
         return ImportResolution::NoImport;
@@ -427,11 +486,15 @@ fn resolve_imported_call(
     } else {
         call.target_name.as_str()
     };
-    let Some(candidates) = name_index.get(target_name) else {
-        let module_targets = module_targets(&call.source_file, matched_import, call.kind);
+    let Some(candidates) = language_family(&call.source_file)
+        .and_then(|family| name_index.get(family))
+        .and_then(|names| names.get(target_name))
+    else {
+        let module_targets =
+            module_targets(&call.source_file, matched_import, call.kind, file_index);
         return unresolved_import_resolution(call, &module_targets, file_index);
     };
-    let module_targets = module_targets(&call.source_file, matched_import, call.kind);
+    let module_targets = module_targets(&call.source_file, matched_import, call.kind, file_index);
     let targets: Vec<SymbolCandidate> = candidates
         .iter()
         .filter(|candidate| module_targets.matches(&candidate.file_path))
@@ -448,7 +511,7 @@ fn resolve_imported_call(
 fn unresolved_import_resolution(
     call: &PendingCall,
     module_targets: &ModuleTargets,
-    file_index: &HashSet<String>,
+    file_index: &FileIndex,
 ) -> ImportResolution {
     if call.kind == CallKind::Bare || module_targets.is_external(file_index) {
         ImportResolution::Unresolved
@@ -479,6 +542,7 @@ fn import_matches_qualifier(import: &Import, qualifier: &str) -> bool {
 
 #[derive(Default)]
 struct ModuleTargets {
+    family: Option<&'static str>,
     files: Vec<String>,
     dirs: Vec<String>,
     relative: bool,
@@ -486,15 +550,26 @@ struct ModuleTargets {
 
 impl ModuleTargets {
     fn matches(&self, file_path: &str) -> bool {
+        if self.family.is_none() || language_family(file_path) != self.family {
+            return false;
+        }
         self.files.iter().any(|file| file == file_path)
-            || self.dirs.iter().any(|dir| file_path.starts_with(dir))
+            || self.dirs.iter().any(|dir| {
+                file_path.strip_prefix(dir).is_some_and(|rest| {
+                    // Go packages comprise files directly in the directory.
+                    self.family != Some("go") || !rest.contains('/')
+                })
+            })
     }
 
-    fn has_indexed_match(&self, file_index: &HashSet<String>) -> bool {
-        file_index.iter().any(|file| self.matches(file))
+    fn has_indexed_match(&self, file_index: &FileIndex) -> bool {
+        self.files
+            .iter()
+            .any(|file| file_index.files.contains(file) && self.matches(file))
+            || (!self.dirs.is_empty() && file_index.files.iter().any(|file| self.matches(file)))
     }
 
-    fn is_external(&self, file_index: &HashSet<String>) -> bool {
+    fn is_external(&self, file_index: &FileIndex) -> bool {
         !self.relative && !self.has_indexed_match(file_index)
     }
 
@@ -506,12 +581,56 @@ impl ModuleTargets {
     }
 }
 
-fn module_targets(source_file: &str, import: &Import, call_kind: CallKind) -> ModuleTargets {
-    let mut targets = ModuleTargets::default();
+fn module_targets(
+    source_file: &str,
+    import: &Import,
+    call_kind: CallKind,
+    file_index: &FileIndex,
+) -> ModuleTargets {
+    let mut targets = ModuleTargets {
+        family: language_family(source_file),
+        ..ModuleTargets::default()
+    };
     if source_file.ends_with(".py") {
         targets.relative = import.module.starts_with('.');
         if let Some(prefix) = python_module_prefix(source_file, import, call_kind) {
             push_module_variants(&mut targets.files, &prefix, &["py"]);
+            // Prefer the repository-root module for flat layouts. Only look under
+            // inferred source roots when that module has no indexed file.
+            if !targets.relative && !targets.has_indexed_match(file_index) {
+                let package = import.module.split('.').next().unwrap_or("");
+                if let Some(roots) = file_index.python_roots.get(package) {
+                    let mut deepest = None;
+                    let mut selected = Vec::new();
+                    let mut tied = false;
+                    for root in roots {
+                        let parent = root.rsplit_once('/').map_or("", |(parent, _)| parent);
+                        if !parent.is_empty()
+                            && !source_file
+                                .strip_prefix(parent)
+                                .is_some_and(|rest| rest.starts_with('/'))
+                        {
+                            continue;
+                        }
+                        let mut files = Vec::new();
+                        push_module_variants(&mut files, &format!("{root}/{prefix}"), &["py"]);
+                        if !files.iter().any(|file| file_index.files.contains(file)) {
+                            continue;
+                        }
+                        let depth = parent.split('/').filter(|part| !part.is_empty()).count();
+                        if deepest.is_none_or(|previous| depth > previous) {
+                            deepest = Some(depth);
+                            selected = files;
+                            tied = false;
+                        } else if deepest == Some(depth) {
+                            tied = true;
+                        }
+                    }
+                    if !tied {
+                        targets.files.extend(selected);
+                    }
+                }
+            }
         }
     } else if source_file.ends_with(".go") {
         push_go_module_targets(&mut targets, &import.module);
