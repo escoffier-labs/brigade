@@ -68,3 +68,5 @@ The key file must be mode `0600` (parent directory `0700`). Brigade will not wri
 ## Disclosure
 
 We aim to ship a fix within 14 days of confirming a valid report. A coordinated disclosure timeline can be negotiated for issues that need longer.
+
+Use the local [CRA actor and incident worksheet](docs/cra-actor-incident-worksheet.md) to record applicability questions, incident decisions, reporting deadlines, and actual filing evidence. Its CRA reporting deadlines are separate from the acknowledgement and fix targets above.
