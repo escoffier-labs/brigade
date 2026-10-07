@@ -1744,3 +1744,25 @@ def test_ec05_invalid_run_record_survives_missing_ssh_keygen(tmp_path, monkeypat
     assert readiness["outcome"] == "rejected"
     assert readiness["legacy_state"] == "evidenced_failed"
     assert readiness["dimensions"]["integrity"] == {"status": "failed", "reason": "approval_invalid"}
+
+
+@pytest.mark.parametrize("git_error", ["dubious", "corrupt", "timeout", "oserror"])
+def test_ec08_git_probe_failure_is_unavailable_not_not_applicable(tmp_path, monkeypatch, git_error):
+    import subprocess
+
+    target = _ws(tmp_path)
+    monkeypatch.setattr(control_crosswalk.shutil, "which", lambda name: "synthetic-git")
+
+    def failed_probe(*args, **kwargs):
+        if git_error == "timeout":
+            raise subprocess.TimeoutExpired("git", 10)
+        if git_error == "oserror":
+            raise OSError("synthetic unavailable tool")
+        detail = "fatal: detected dubious ownership" if git_error == "dubious" else "fatal: corrupted repository"
+        return subprocess.CompletedProcess(args[0], 128, stdout="", stderr=detail)
+
+    monkeypatch.setattr(control_crosswalk.subprocess, "run", failed_probe)
+    readiness = _assess(target, "EC-08")
+    assert readiness["outcome"] == "unavailable"
+    assert readiness["reason"] == "verifier_error"
+    assert readiness["legacy_state"] == "untested"
