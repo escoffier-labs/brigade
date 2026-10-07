@@ -286,7 +286,14 @@ def _wait(case, *names):
 
 
 def _read(case, name):
-    return json.loads((case[0] / name).read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 1
+    while True:
+        try:
+            return json.loads((case[0] / name).read_text(encoding="utf-8"))
+        except PermissionError as exc:
+            if os.name != "nt" or exc.errno != 13 or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
 
 
 def _history(path, count):
