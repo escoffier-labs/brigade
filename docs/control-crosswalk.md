@@ -185,7 +185,7 @@ Note: Rows cite the final NIST AI 100-1 Core tables (Section 5, Tables 1 to 4). 
   - Responsible actor: Adopting organization AI risk owner; Brigade only produces the artifact.
   - Applicability: The organization has selected measurement approaches and metrics for AI risks enumerated in MAP, prioritized the most significant risks, and documented risks it will not or cannot measure.
   - Support rationale: Outcome records can corroborate that selected measurements were recorded. They do not select approaches or metrics, and MEASURE 1.1 sets no numerical threshold.
-  - Verification limit: The evaluator checks bounded JSONL records for schema_version and kind, not what they measure. A supplied period uses the latest recorded timestamp for the ledger, without validating each record timestamp. A Brigade artifact does not establish that an organizational control or process operated.
+  - Verification limit: The evaluator checks bounded JSONL records for integer schema_version, not what they measure. A supplied period uses the latest recorded timestamp for the ledger, without validating each record timestamp. A Brigade artifact does not establish that an organizational control or process operated.
 
 - `MEASURE 2.1` / EC-01: conditional-support
   - Edition: NIST AI 100-1, AI RMF 1.0 (January 2023), final

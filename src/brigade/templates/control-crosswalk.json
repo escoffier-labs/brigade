@@ -402,7 +402,7 @@
       "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
       "artifact_contract": "brigade.outcome_record ledger from brigade outcome record.",
       "responsible_actor": "Adopting organization AI risk owner; Brigade only produces the artifact.",
-      "verification_limit": "The evaluator checks bounded JSONL records for schema_version and kind, not what they measure. A supplied period uses the latest recorded timestamp for the ledger, without validating each record timestamp. A Brigade artifact does not establish that an organizational control or process operated."
+      "verification_limit": "The evaluator checks bounded JSONL records for integer schema_version, not what they measure. A supplied period uses the latest recorded timestamp for the ledger, without validating each record timestamp. A Brigade artifact does not establish that an organizational control or process operated."
     },
     {
       "claim_id": "EC-10",
