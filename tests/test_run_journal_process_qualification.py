@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -20,7 +21,7 @@ from brigade import run_events, run_journal, run_projector
 BACKEND = "native-windows" if os.name == "nt" else "posix-msvcrt-emulation"
 
 # Written only into the short, isolated temporary root. No inherited provider
-# environment, pipe polling, signal-specific termination, or production seam.
+# environment, pipe polling, platform-specific kill calls, or production seam.
 _CHILD = r"""
 import errno
 import json
@@ -67,6 +68,38 @@ def wait_for(filename):
         if time.monotonic() >= deadline:
             raise TimeoutError("child barrier: " + filename)
         time.sleep(0.01)
+
+if options.get("pause_tail") or options.get("contender"):
+    real_read_tail = run_journal._read_tail_state
+    def tracked_read_tail(path):
+        if options.get("contender"):
+            mark("tail-entered", "tail-read-entered")
+            assert (root / options["tail_release"]).exists(), "contender read tail before writer release"
+            assert (root / (name + ".lock-acquired")).exists(), "contender read tail before lock acquisition"
+        state = real_read_tail(path)
+        sequence, digest, index, partial, journal_bytes = state
+        mark("tail", {
+            "sequence": sequence, "digest": digest, "keys": sorted(index),
+            "partial": partial.hex() if partial is not None else None, "bytes": journal_bytes,
+        })
+        if options.get("pause_tail"):
+            # Pause after the real transaction read, not an external head read.
+            wait_for(options["tail_release"])
+        return state
+    run_journal._read_tail_state = tracked_read_tail
+
+if options.get("contender"):
+    # Retain the real native msvcrt callable (or explicit POSIX emulation).
+    real_locking = run_journal.msvcrt.locking
+    def tracked_locking(fd, operation, length):
+        acquiring = operation == run_journal.msvcrt.LK_LOCK
+        if acquiring:
+            mark("lock-attempt", "LK_LOCK")
+        result = real_locking(fd, operation, length)
+        if acquiring:
+            mark("lock-acquired", "lock-acquired")
+        return result
+    run_journal.msvcrt.locking = tracked_locking
 
 identity = journal.stat()
 def is_journal(fd):
@@ -162,6 +195,8 @@ else:
     mark("head", {"sequence": previous, "digest": head.event_digest if head else None})
     if "gate" in options:
         wait_for(options["gate"])
+    if options.get("contender"):
+        require_held_lock()
     try:
         result["event"] = append(options.get("previous", previous)).to_dict()
     except run_journal.IdempotencyConflict as exc:
@@ -271,21 +306,62 @@ def _history(path, count):
 def test_same_key_process_race_replays_or_conflicts_without_second_record(process_case, conflicting):
     root, path, _children = process_case
     children = [
-        _spawn(process_case, "alpha", key="shared", payload={"detail": "alpha"}, gate="go"),
+        _spawn(
+            process_case,
+            "alpha",
+            key="shared",
+            payload={"detail": "alpha"},
+            gate="alpha.go",
+            pause_tail=True,
+            tail_release="alpha.tail-release",
+        ),
         _spawn(
             process_case,
             "beta",
             key="shared",
             payload={"detail": "beta" if conflicting else "alpha"},
-            gate="go",
+            gate="beta.go",
+            contender=True,
+            tail_release="alpha.tail-release",
         ),
     ]
     _wait(process_case, "alpha.head", "beta.head")
     assert _read(process_case, "alpha.head") == _read(process_case, "beta.head") == {"sequence": 0, "digest": None}
-    root.joinpath("go").touch()
+    root.joinpath("alpha.go").touch()
+    _wait(process_case, "alpha.tail")
+    assert _read(process_case, "alpha.tail") == {
+        "sequence": 0,
+        "digest": None,
+        "keys": [],
+        "partial": None,
+        "bytes": 0,
+    }
+    assert children[0].poll() is None and path.read_bytes() == b""
+    # Only alpha can hold the lock here. Reading its tail before locking must
+    # fail beta's OS exclusion probe regardless of subsequent scheduling.
+    root.joinpath("beta.go").touch()
+    _wait(process_case, "beta.blocked", "beta.lock-attempt")
+    assert _read(process_case, "beta.blocked") == "byte-lock-held"
+    assert _read(process_case, "beta.lock-attempt") == "LK_LOCK"
+    assert all(child.poll() is None for child in children)
+    assert not root.joinpath("beta.lock-acquired").exists()
+    assert not root.joinpath("beta.tail-entered").exists()
+    assert not root.joinpath("beta.tail").exists()
+    assert path.read_bytes() == b""
+    root.joinpath("alpha.tail-release").touch()
     results = [_finish(child) for child in children]
     accepted = _history(path, 1)[0]
+    assert _read(process_case, "beta.lock-acquired") == "lock-acquired"
+    assert _read(process_case, "beta.tail-entered") == "tail-read-entered"
+    assert _read(process_case, "beta.tail") == {
+        "sequence": 1,
+        "digest": accepted.event_digest,
+        "keys": ["shared"],
+        "partial": None,
+        "bytes": len(path.read_bytes()),
+    }
     assert sum(len(result["writes"]) for result in results) == 1
+    assert len(results[0]["writes"]) == 1 and results[1]["writes"] == []
     events = [result["event"] for result in results if "event" in result]
     assert events == [accepted.to_dict()] * (1 if conflicting else 2)
     conflicts = [result for result in results if "error" in result]
@@ -336,17 +412,17 @@ def test_killed_writer_releases_os_lock_for_replay_or_partial_recovery(process_c
     writer = _spawn(process_case, "writer", mode=f"kill-{boundary}")
     _wait(process_case, "writer.boundary")
     assert writer.poll() is None
-    signal = _read(process_case, "writer.boundary")
-    written = bytes.fromhex(signal["written"])
-    line = bytes.fromhex(signal["line"])
+    boundary_info = _read(process_case, "writer.boundary")
+    written = bytes.fromhex(boundary_info["written"])
+    line = bytes.fromhex(boundary_info["line"])
     interrupted = path.read_bytes()
     assert interrupted == complete_prefix + written
     assert line.endswith(b"\n")
     if boundary == "complete":
-        assert signal["at"] == "before-file-fsync" and written == line
+        assert boundary_info["at"] == "before-file-fsync" and written == line
         visible = _history(path, 2)
     else:
-        assert signal["at"] == "partial-write" and written == line[: len(line) // 2]
+        assert boundary_info["at"] == "partial-write" and written == line[: len(line) // 2]
         assert written and not written.endswith(b"\n")
         report = run_journal.read_journal_bounded(path)
         assert report.chain_errors == [] and report.partial_tail == written
@@ -365,9 +441,15 @@ def test_killed_writer_releases_os_lock_for_replay_or_partial_recovery(process_c
     assert _read(process_case, "successor.blocked") == "byte-lock-held"
     assert not root.joinpath("successor.entered").exists()
     assert path.read_bytes() == interrupted
+    assert writer.poll() is None, "writer exited before deliberate termination"
     writer.kill()
-    writer.communicate(timeout=5)
-    assert writer.returncode is not None and writer.returncode != 0
+    stdout, stderr = writer.communicate(timeout=5)
+    diagnostics = f"writer exited {writer.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    assert "child barrier:" not in stdout + stderr and "TimeoutError" not in stdout + stderr, diagnostics
+    # Windows Popen.kill aliases terminate, which calls TerminateProcess(..., 1).
+    # Evaluate SIGKILL only on POSIX, where Popen reports the negative signal.
+    expected_returncode = 1 if os.name == "nt" else -signal.SIGKILL
+    assert writer.returncode == expected_returncode, diagnostics
     result = _finish(successor)
     assert _read(process_case, "successor.entered") == "lock-acquired"
     if boundary == "complete":

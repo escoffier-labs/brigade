@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Add a local CRA actor and incident worksheet separating applicability, incident triggers, reporting deadlines, and actual filing evidence, with three synthetic drills. (#1625)
-- Add coordinated journal process qualification for same-key replay/conflict, stale-head rejection, and termination at complete or partial write boundaries, with an inventory of durability limits. (#1565)
+- Add coordinated journal process qualification for locked same-key tail/index reads, replay/conflict, stale-head rejection, and deliberate termination at complete or partial write boundaries, with an inventory of durability limits. (#1565)
 - Add `fleet campaign preview` for bounded offline repository membership plans, explicit task/action bindings and prior-preview conflict checks. Supplied observations remain unverified, with unknown task states and no dispatch or completion claims.
 - `fleet work ownership show` reads bounded item and ownership metadata with separate revisions and observation times, explicit unknown liveness and unchecked conflicts, and sanitized refusals. It performs no ownership writes. (Refs #1595)
 
