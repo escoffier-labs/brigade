@@ -700,6 +700,12 @@ fn print_doctor_report(report: &crate::query::DoctorReport, json: bool) -> Resul
         report.schema.needs_migration
     );
     println!(
+        "resolver: stored={} current={} stale={}",
+        report.resolver.stored.as_deref().unwrap_or("missing"),
+        report.resolver.current,
+        report.resolver.stale
+    );
+    println!(
         "last_sync: synced_at={} age_seconds={}",
         report.last_sync.synced_at.as_deref().unwrap_or("missing"),
         report

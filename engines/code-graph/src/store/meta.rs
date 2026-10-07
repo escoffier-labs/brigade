@@ -30,6 +30,19 @@ pub fn read(conn: &Connection, key: &str) -> Result<Option<String>> {
 pub fn write_sync_meta(conn: &Connection) -> Result<()> {
     upsert(conn, "schema_version", &SCHEMA_VERSION.to_string())?;
     upsert(conn, "tool_version", env!("CARGO_PKG_VERSION"))?;
-    upsert(conn, "synced_at", &now_ts().to_string())?;
+    let synced_at = now_ts().to_string();
+    upsert(conn, "synced_at", &synced_at)?;
+    upsert(conn, "resolver_version", super::resolve::RESOLVER_VERSION)?;
+    upsert(conn, "resolver_synced_at", &synced_at)?;
     Ok(())
+}
+
+/// An older writer can retain the version marker while replacing derived edges.
+pub(crate) fn resolver_is_stale(conn: &Connection) -> Result<bool> {
+    let synced_at = read(conn, "synced_at")?;
+    Ok(
+        read(conn, "resolver_version")?.as_deref() != Some(super::resolve::RESOLVER_VERSION)
+            || synced_at.is_none()
+            || read(conn, "resolver_synced_at")? != synced_at,
+    )
 }

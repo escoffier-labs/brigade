@@ -8,7 +8,7 @@ use rusqlite::{Connection, params};
 use crate::model::{CallKind, Import, PendingCall};
 
 /// Bump when resolution rules change; persisted edges must be rebuilt on sync.
-pub(super) const RESOLVER_VERSION: &str = "1";
+pub(crate) const RESOLVER_VERSION: &str = "2";
 
 #[derive(Clone)]
 pub(super) struct SymbolCandidate {
@@ -90,8 +90,11 @@ pub(super) fn rebuild_edges(tx: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Map symbol name -> candidates, used to resolve call targets.
-pub(super) fn load_name_index(conn: &Connection) -> Result<HashMap<String, Vec<SymbolCandidate>>> {
+/// Partition candidates once, avoiding per-call filtering and cloning of homonyms.
+pub(crate) type NameIndex = HashMap<&'static str, HashMap<String, Vec<SymbolCandidate>>>;
+
+/// Map language family and symbol name to candidates.
+pub(super) fn load_name_index(conn: &Connection) -> Result<NameIndex> {
     let mut stmt = conn.prepare("SELECT name, id, file_path, container FROM symbols")?;
     let rows = stmt.query_map([], |row| {
         Ok((
@@ -103,12 +106,18 @@ pub(super) fn load_name_index(conn: &Connection) -> Result<HashMap<String, Vec<S
             },
         ))
     })?;
-    let mut map: HashMap<String, Vec<SymbolCandidate>> = HashMap::new();
+    let mut map: NameIndex = HashMap::new();
     for row in rows {
         let (name, candidate) = row?;
-        map.entry(name).or_default().push(candidate);
+        if let Some(family) = language_family(&candidate.file_path) {
+            map.entry(family)
+                .or_default()
+                .entry(name)
+                .or_default()
+                .push(candidate);
+        }
     }
-    for candidates in map.values_mut() {
+    for candidates in map.values_mut().flat_map(|names| names.values_mut()) {
         candidates.sort_by(|left, right| {
             left.file_path
                 .cmp(&right.file_path)
@@ -156,7 +165,9 @@ pub(super) fn load_file_index(conn: &Connection) -> Result<FileIndex> {
             continue;
         };
         // A directory that is itself a package is not a source root.
-        if files.contains(&format!("{root}/__init__.py")) {
+        if !matches!(root.rsplit('/').next(), Some("src" | "lib" | "python"))
+            || files.contains(&format!("{root}/__init__.py"))
+        {
             continue;
         }
         python_roots
@@ -310,7 +321,7 @@ impl ResolvedCall {
 
 fn resolve_call(
     call: &PendingCall,
-    name_index: &HashMap<String, Vec<SymbolCandidate>>,
+    name_index: &NameIndex,
     import_index: &HashMap<String, Vec<Import>>,
     source_index: &HashMap<String, SymbolCandidate>,
     file_index: &FileIndex,
@@ -331,7 +342,7 @@ fn resolve_call(
 
 pub(crate) fn resolve_call_explained(
     call: &PendingCall,
-    name_index: &HashMap<String, Vec<SymbolCandidate>>,
+    name_index: &NameIndex,
     import_index: &HashMap<String, Vec<Import>>,
     source_index: &HashMap<String, SymbolCandidate>,
     file_index: &FileIndex,
@@ -354,25 +365,15 @@ pub(crate) fn resolve_call_explained(
         ImportResolution::NoImport => false,
     };
 
-    let Some(candidates) = name_index.get(&call.target_name) else {
+    let Some(candidates) = language_family(&call.source_file)
+        .and_then(|family| name_index.get(family))
+        .and_then(|names| names.get(&call.target_name))
+    else {
         return ResolvedCall {
             path: ResolutionPath::NoCandidates,
             targets: Vec::new(),
         };
     };
-
-    let family = language_family(&call.source_file);
-    let candidates: Vec<SymbolCandidate> = candidates
-        .iter()
-        .filter(|candidate| family.is_some() && language_family(&candidate.file_path) == family)
-        .cloned()
-        .collect();
-    if candidates.is_empty() {
-        return ResolvedCall {
-            path: ResolutionPath::NoCandidates,
-            targets: Vec::new(),
-        };
-    }
 
     if use_name_fallback {
         return ResolvedCall {
@@ -381,8 +382,8 @@ pub(crate) fn resolve_call_explained(
         };
     }
 
-    if let Some(same_file) = resolve_same_file_call(call, &candidates, source_index)
-        .filter(|matches| !matches.is_empty())
+    if let Some(same_file) =
+        resolve_same_file_call(call, candidates, source_index).filter(|matches| !matches.is_empty())
     {
         let path = if call.kind == CallKind::Bare {
             ResolutionPath::SameFileBare
@@ -466,7 +467,7 @@ fn resolve_same_file_call(
 
 fn resolve_imported_call(
     call: &PendingCall,
-    name_index: &HashMap<String, Vec<SymbolCandidate>>,
+    name_index: &NameIndex,
     import_index: &HashMap<String, Vec<Import>>,
     file_index: &FileIndex,
 ) -> ImportResolution {
@@ -485,7 +486,10 @@ fn resolve_imported_call(
     } else {
         call.target_name.as_str()
     };
-    let Some(candidates) = name_index.get(target_name) else {
+    let Some(candidates) = language_family(&call.source_file)
+        .and_then(|family| name_index.get(family))
+        .and_then(|names| names.get(target_name))
+    else {
         let module_targets =
             module_targets(&call.source_file, matched_import, call.kind, file_index);
         return unresolved_import_resolution(call, &module_targets, file_index);
@@ -538,6 +542,7 @@ fn import_matches_qualifier(import: &Import, qualifier: &str) -> bool {
 
 #[derive(Default)]
 struct ModuleTargets {
+    family: Option<&'static str>,
     files: Vec<String>,
     dirs: Vec<String>,
     relative: bool,
@@ -545,18 +550,23 @@ struct ModuleTargets {
 
 impl ModuleTargets {
     fn matches(&self, file_path: &str) -> bool {
+        if self.family.is_none() || language_family(file_path) != self.family {
+            return false;
+        }
         self.files.iter().any(|file| file == file_path)
-            || self.dirs.iter().any(|dir| file_path.starts_with(dir))
+            || self.dirs.iter().any(|dir| {
+                file_path.strip_prefix(dir).is_some_and(|rest| {
+                    // Go packages comprise files directly in the directory.
+                    self.family != Some("go") || !rest.contains('/')
+                })
+            })
     }
 
     fn has_indexed_match(&self, file_index: &FileIndex) -> bool {
         self.files
             .iter()
-            .any(|file| file_index.files.contains(file))
-            || self
-                .dirs
-                .iter()
-                .any(|dir| file_index.files.iter().any(|file| file.starts_with(dir)))
+            .any(|file| file_index.files.contains(file) && self.matches(file))
+            || (!self.dirs.is_empty() && file_index.files.iter().any(|file| self.matches(file)))
     }
 
     fn is_external(&self, file_index: &FileIndex) -> bool {
@@ -577,7 +587,10 @@ fn module_targets(
     call_kind: CallKind,
     file_index: &FileIndex,
 ) -> ModuleTargets {
-    let mut targets = ModuleTargets::default();
+    let mut targets = ModuleTargets {
+        family: language_family(source_file),
+        ..ModuleTargets::default()
+    };
     if source_file.ends_with(".py") {
         targets.relative = import.module.starts_with('.');
         if let Some(prefix) = python_module_prefix(source_file, import, call_kind) {
@@ -587,12 +600,34 @@ fn module_targets(
             if !targets.relative && !targets.has_indexed_match(file_index) {
                 let package = import.module.split('.').next().unwrap_or("");
                 if let Some(roots) = file_index.python_roots.get(package) {
+                    let mut deepest = None;
+                    let mut selected = Vec::new();
+                    let mut tied = false;
                     for root in roots {
-                        push_module_variants(
-                            &mut targets.files,
-                            &format!("{root}/{prefix}"),
-                            &["py"],
-                        );
+                        let parent = root.rsplit_once('/').map_or("", |(parent, _)| parent);
+                        if !parent.is_empty()
+                            && !source_file
+                                .strip_prefix(parent)
+                                .is_some_and(|rest| rest.starts_with('/'))
+                        {
+                            continue;
+                        }
+                        let mut files = Vec::new();
+                        push_module_variants(&mut files, &format!("{root}/{prefix}"), &["py"]);
+                        if !files.iter().any(|file| file_index.files.contains(file)) {
+                            continue;
+                        }
+                        let depth = parent.split('/').filter(|part| !part.is_empty()).count();
+                        if deepest.is_none_or(|previous| depth > previous) {
+                            deepest = Some(depth);
+                            selected = files;
+                            tied = false;
+                        } else if deepest == Some(depth) {
+                            tied = true;
+                        }
+                    }
+                    if !tied {
+                        targets.files.extend(selected);
                     }
                 }
             }

@@ -721,14 +721,20 @@ fn python_layout_fixture(root: &std::path::Path, source_root: &str) -> rusqlite:
         &format!("{source_root}pkg/a.py"),
         "def foo():\n    return 1\n",
     );
+    // A nested source root serves callers under its parent, not the whole repo.
+    let tests = if source_root == "lib/python/" {
+        "lib/tests"
+    } else {
+        "tests"
+    };
     write_resolution_file(
         root,
-        "tests/test_bare.py",
+        &format!("{tests}/test_bare.py"),
         "from pkg.a import foo\n\ndef test_bare():\n    foo()\n",
     );
     write_resolution_file(
         root,
-        "tests/test_qualified.py",
+        &format!("{tests}/test_qualified.py"),
         "from pkg import a\n\ndef test_qualified():\n    a.foo()\n",
     );
     let conn = open_db(&root.join("g.db")).unwrap();
@@ -898,4 +904,266 @@ fn resolver_upgrade_rebuilds_existing_edges_without_reparsing() {
             "the upgrade must run only once"
         );
     }
+}
+
+fn resolution_db(root: &std::path::Path) -> rusqlite::Connection {
+    let conn = open_db(&root.join("g.db")).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, root).unwrap();
+    conn
+}
+
+fn assert_unresolved_call(conn: &rusqlite::Connection, source: &str, target: &str, path: &str) {
+    let rows = graphtrail::store::explain_calls(conn, source, target).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].resolution, path, "{rows:?}");
+    assert!(rows[0].targets.is_empty(), "{rows:?}");
+    let edges: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM edges e JOIN symbols s ON s.id = e.source WHERE s.name = ?1",
+            [source],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(edges, 0);
+}
+
+#[test]
+fn python_sibling_services_resolve_only_their_own_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for service in ["a", "b"] {
+        write_resolution_file(
+            root,
+            &format!("services/{service}/src/common/__init__.py"),
+            "",
+        );
+        write_resolution_file(
+            root,
+            &format!("services/{service}/src/common/api.py"),
+            "def work():\n    pass\n",
+        );
+        write_resolution_file(
+            root,
+            &format!("services/{service}/tests/test_api.py"),
+            &format!("from common.api import work\ndef test_{service}():\n    work()\n"),
+        );
+    }
+    let conn = resolution_db(root);
+    for service in ["a", "b"] {
+        let rows =
+            graphtrail::store::explain_calls(&conn, &format!("test_{service}"), "work").unwrap();
+        assert_eq!(rows[0].resolution, "import-strict");
+        assert_eq!(rows[0].targets.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].targets[0].file_path,
+            format!("services/{service}/src/common/api.py")
+        );
+        assert_eq!(rows[0].targets[0].confidence, 0.9);
+    }
+    let report =
+        graphtrail::query::affected(&conn, &["services/b/src/common/api.py".into()], 3).unwrap();
+    let files: Vec<_> = report
+        .affected_tests
+        .iter()
+        .map(|test| test.file_path.as_str())
+        .collect();
+    assert_eq!(files, ["services/b/tests/test_api.py"], "{report:?}");
+}
+
+#[test]
+fn python_fixture_copy_does_not_compete_with_src_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for prefix in ["src", "tests/fixtures/sample"] {
+        write_resolution_file(root, &format!("{prefix}/pkg/__init__.py"), "");
+        write_resolution_file(
+            root,
+            &format!("{prefix}/pkg/api.py"),
+            "def work():\n    pass\n",
+        );
+    }
+    write_resolution_file(
+        root,
+        "tests/test_api.py",
+        "from pkg.api import work\ndef test_api():\n    work()\n",
+    );
+    let conn = resolution_db(root);
+    let rows = graphtrail::store::explain_calls(&conn, "test_api", "work").unwrap();
+    assert_eq!(rows[0].resolution, "import-strict");
+    assert_eq!(rows[0].targets.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].targets[0].file_path, "src/pkg/api.py");
+}
+
+#[test]
+fn python_namespace_parent_does_not_shadow_stdlib() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(
+        root,
+        "src/acme/logging/__init__.py",
+        "def getLogger():\n    pass\n",
+    );
+    write_resolution_file(
+        root,
+        "src/app/main.py",
+        "import logging\ndef run():\n    logging.getLogger()\n",
+    );
+    let conn = resolution_db(root);
+    assert_unresolved_call(&conn, "run", "getLogger", "unresolved-external");
+}
+
+#[test]
+fn python_yaml_fixture_does_not_enable_name_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(root, "tests/fixtures/sample_project/yaml/__init__.py", "");
+    write_resolution_file(root, "src/app/compat.py", "def safe_load():\n    pass\n");
+    write_resolution_file(
+        root,
+        "src/app/main.py",
+        "import yaml\ndef run():\n    yaml.safe_load()\n",
+    );
+    let conn = resolution_db(root);
+    assert_unresolved_call(&conn, "run", "safe_load", "unresolved-external");
+}
+
+#[test]
+fn python_deepest_serving_root_wins() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for prefix in ["src", "services/a/src"] {
+        write_resolution_file(root, &format!("{prefix}/pkg/__init__.py"), "");
+        write_resolution_file(
+            root,
+            &format!("{prefix}/pkg/api.py"),
+            "def work():\n    pass\n",
+        );
+    }
+    write_resolution_file(
+        root,
+        "services/a/tests/test_api.py",
+        "from pkg.api import work\ndef test_api():\n    work()\n",
+    );
+    let conn = resolution_db(root);
+    let rows = graphtrail::store::explain_calls(&conn, "test_api", "work").unwrap();
+    assert_eq!(rows[0].targets.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].targets[0].file_path, "services/a/src/pkg/api.py");
+}
+
+#[test]
+fn python_tied_serving_roots_emit_no_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for prefix in ["src", "lib"] {
+        write_resolution_file(root, &format!("{prefix}/pkg/__init__.py"), "");
+        write_resolution_file(
+            root,
+            &format!("{prefix}/pkg/api.py"),
+            "def work():\n    pass\n",
+        );
+    }
+    write_resolution_file(
+        root,
+        "tests/test_api.py",
+        "from pkg.api import work\ndef test_api():\n    work()\n",
+    );
+    let conn = resolution_db(root);
+    assert_unresolved_call(&conn, "test_api", "work", "unresolved-external");
+}
+
+#[test]
+fn go_import_directory_matches_only_direct_go_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(
+        root,
+        "main.go",
+        "package main\nimport \"example.com/app/web\"\nfunc run() { web.Render() }\n",
+    );
+    write_resolution_file(root, "web/render.go", "package web\nfunc Render() {}\n");
+    write_resolution_file(root, "web/render.ts", "export function Render() {}\n");
+    write_resolution_file(
+        root,
+        "web/nested/render.go",
+        "package nested\nfunc Render() {}\n",
+    );
+    let conn = resolution_db(root);
+    let rows = graphtrail::store::explain_calls(&conn, "run", "Render").unwrap();
+    assert_eq!(rows[0].resolution, "import-strict");
+    assert_eq!(rows[0].targets.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].targets[0].file_path, "web/render.go");
+}
+
+#[test]
+fn go_external_import_with_ts_only_suffix_is_external() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(
+        root,
+        "main.go",
+        "package main\nimport \"example.com/app/web\"\nfunc run() { web.Render() }\n",
+    );
+    write_resolution_file(root, "web/tool.ts", "export function other() {}\n");
+    write_resolution_file(root, "compat.go", "package main\nfunc Render() {}\n");
+    let conn = resolution_db(root);
+    assert_unresolved_call(&conn, "run", "Render", "unresolved-external");
+}
+
+#[test]
+fn rust_import_directory_does_not_match_python() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(
+        root,
+        "src/lib.rs",
+        "use crate::util::parse;\nfn run() { parse(); }\n",
+    );
+    write_resolution_file(root, "src/util/parse.py", "def parse():\n    pass\n");
+    let conn = resolution_db(root);
+    assert_unresolved_call(&conn, "run", "parse", "unresolved-external");
+}
+
+#[test]
+fn python_import_fallback_does_not_match_typescript_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(
+        root,
+        "pkg/main.py",
+        "from . import helpers\ndef run():\n    helpers.lint()\n",
+    );
+    write_resolution_file(root, "pkg/helpers.py", "def other():\n    pass\n");
+    write_resolution_file(root, "tools.ts", "export function lint() {}\n");
+    let conn = resolution_db(root);
+    assert_unresolved_call(&conn, "run", "lint", "no-candidates");
+}
+
+#[test]
+fn older_writer_sync_provenance_forces_edge_rebuild_without_reparse() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(
+        root,
+        "main.py",
+        "def helper():\n    pass\ndef run():\n    helper()\n",
+    );
+    let conn = resolution_db(root);
+    conn.execute_batch("CREATE TRIGGER no_reparse BEFORE DELETE ON symbols BEGIN SELECT RAISE(ABORT, 'unexpected reparse'); END;
+        UPDATE edges SET confidence = 0.55;
+        UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'synced_at';").unwrap();
+    let summary = sync_repo(&conn, root).unwrap();
+    assert!(
+        !summary.unchanged,
+        "older writer changed edges without updating the resolver marker"
+    );
+    let confidence: f64 = conn
+        .query_row("SELECT confidence FROM edges", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(confidence, 0.8);
+    assert_eq!(
+        graphtrail::store::meta::read(&conn, "resolver_synced_at").unwrap(),
+        graphtrail::store::meta::read(&conn, "synced_at").unwrap()
+    );
+    assert!(sync_repo(&conn, root).unwrap().unchanged);
 }

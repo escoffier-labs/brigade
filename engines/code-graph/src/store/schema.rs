@@ -153,11 +153,9 @@ pub fn upgrade_for_sync(conn: &Connection) -> Result<SchemaUpgrade> {
         rewrite_symbol_ids_v7(conn)?;
         upgrade = upgrade.max(SchemaUpgrade::RebuildEdges);
     }
-    // Resolver changes affect derived edges only. Record the version inside
-    // rebuild_edges' transaction so failed rebuilds remain eligible next sync.
-    if super::meta::read(conn, "resolver_version")?.as_deref()
-        != Some(super::resolve::RESOLVER_VERSION)
-    {
+    // Resolver changes and older writers affect derived edges only. Sync writes
+    // version and timestamp provenance in the same transaction as the edges.
+    if super::meta::resolver_is_stale(conn)? {
         upgrade = upgrade.max(SchemaUpgrade::RebuildEdges);
     }
     Ok(upgrade)
