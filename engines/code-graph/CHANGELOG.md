@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Absolute Python imports resolve against source roots inferred from indexed package initializers, including `src/`, while repository-root modules keep precedence. Bare and module-qualified calls now contribute test-to-source edges in these layouts. Existing indexes rebuild derived edges on their next sync without reparsing unchanged files. (#1637)
+- Name-only call resolution considers only symbols in the caller's language family: Python, JS/TS/JSX/TSX/Astro, Rust, or Go. Cross-family names produce no edge, and `explain` reports `no-candidates` when no same-family symbol exists. (#1638)
+
 ### Added
 - `.astro` component files are indexed. Frontmatter and `<script>` blocks are extracted as TypeScript; PascalCase template tags that match frontmatter imports become call edges, including default imports that name the `.astro` module. Relative imports with an explicit `.astro` suffix resolve to that file. `affected` no longer reports indexed Astro layouts as missing.
 

@@ -707,3 +707,195 @@ def helper():
     assert_eq!(import_rows, 1);
     assert_eq!(edge_rows, 1);
 }
+
+fn write_resolution_file(root: &std::path::Path, path: &str, content: &str) {
+    let path = root.join(path);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, content).unwrap();
+}
+
+fn python_layout_fixture(root: &std::path::Path, source_root: &str) -> rusqlite::Connection {
+    write_resolution_file(root, &format!("{source_root}pkg/__init__.py"), "");
+    write_resolution_file(
+        root,
+        &format!("{source_root}pkg/a.py"),
+        "def foo():\n    return 1\n",
+    );
+    write_resolution_file(
+        root,
+        "tests/test_bare.py",
+        "from pkg.a import foo\n\ndef test_bare():\n    foo()\n",
+    );
+    write_resolution_file(
+        root,
+        "tests/test_qualified.py",
+        "from pkg import a\n\ndef test_qualified():\n    a.foo()\n",
+    );
+    let conn = open_db(&root.join("g.db")).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, root).unwrap();
+    conn
+}
+
+fn assert_python_layout_calls(conn: &rusqlite::Connection, target_file: &str) {
+    for source in ["test_bare", "test_qualified"] {
+        let rows = graphtrail::store::explain_calls(conn, source, "foo").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].resolution, "import-strict", "{rows:?}");
+        assert_eq!(rows[0].targets.len(), 1);
+        assert_eq!(rows[0].targets[0].file_path, target_file);
+        assert_eq!(rows[0].targets[0].confidence, 0.9);
+        let edge: (String, f64) = conn
+            .query_row(
+                "SELECT dst.file_path, e.confidence FROM edges e
+             JOIN symbols src ON src.id = e.source JOIN symbols dst ON dst.id = e.target
+             WHERE src.name = ?1",
+                [source],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(edge, (target_file.to_string(), 0.9));
+    }
+}
+
+#[test]
+fn python_absolute_imports_resolve_under_inferred_source_roots() {
+    for source_root in ["src/", "lib/python/"] {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = python_layout_fixture(dir.path(), source_root);
+        assert_python_layout_calls(&conn, &format!("{source_root}pkg/a.py"));
+    }
+}
+
+#[test]
+fn python_flat_layout_keeps_repo_root_precedence() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = python_layout_fixture(dir.path(), "");
+    // A second package with the same absolute module must not compete with the flat one.
+    write_resolution_file(dir.path(), "src/pkg/__init__.py", "");
+    write_resolution_file(dir.path(), "src/pkg/a.py", "def foo():\n    return 2\n");
+    sync_repo(&conn, dir.path()).unwrap();
+    assert_python_layout_calls(&conn, "pkg/a.py");
+}
+
+#[test]
+fn python_nested_packages_are_not_source_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(root, "src/app/__init__.py", "");
+    write_resolution_file(root, "src/app/cli/__init__.py", "");
+    write_resolution_file(root, "src/app/cli/x.py", "def run():\n    return 1\n");
+    // `cli` here is a third-party package; src/app is not on sys.path.
+    write_resolution_file(
+        root,
+        "tools/script.py",
+        "from cli.x import run\n\ndef main():\n    run()\n",
+    );
+    let conn = open_db(&root.join("g.db")).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, root).unwrap();
+    let rows = graphtrail::store::explain_calls(&conn, "main", "run").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].resolution, "unresolved-external", "{rows:?}");
+    assert!(rows[0].targets.is_empty());
+}
+
+#[test]
+fn affected_attributes_src_layout_test_callers() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = python_layout_fixture(dir.path(), "src/");
+    let report = graphtrail::query::affected(&conn, &["src/pkg/a.py".to_string()], 3).unwrap();
+    let files: Vec<_> = report
+        .affected_tests
+        .iter()
+        .map(|test| test.file_path.as_str())
+        .collect();
+    assert_eq!(
+        files,
+        ["tests/test_bare.py", "tests/test_qualified.py"],
+        "{report:?}"
+    );
+    assert!(report.affected_tests.iter().all(|test| test.min_hops == 1));
+}
+
+#[test]
+fn name_fallback_uses_only_the_callers_language_family() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(
+        root,
+        "caller.go",
+        "package main\nfunc caller() { dispatch(); helper() }\n",
+    );
+    write_resolution_file(
+        root,
+        "callee.py",
+        "def dispatch():\n    pass\ndef helper():\n    pass\n",
+    );
+    write_resolution_file(root, "callee.go", "package main\nfunc helper() {}\n");
+    let conn = open_db(&root.join("g.db")).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, root).unwrap();
+    let absent = graphtrail::store::explain_calls(&conn, "caller", "dispatch").unwrap();
+    assert_eq!(absent.len(), 1);
+    assert_eq!(absent[0].resolution, "no-candidates", "{absent:?}");
+    assert!(absent[0].targets.is_empty());
+    let unique = graphtrail::store::explain_calls(&conn, "caller", "helper").unwrap();
+    assert_eq!(unique[0].resolution, "unique-name", "{unique:?}");
+    assert_eq!(unique[0].targets.len(), 1);
+    assert_eq!(unique[0].targets[0].file_path, "callee.go");
+    assert_eq!(unique[0].targets[0].confidence, 0.7);
+    let edges: i64 = conn
+        .query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        edges, 1,
+        "the cross-family dispatch call must produce zero edges"
+    );
+}
+
+#[test]
+fn resolver_upgrade_rebuilds_existing_edges_without_reparsing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let conn = python_layout_fixture(root, "src/");
+    write_resolution_file(root, "caller.go", "package main\nfunc caller() { foo() }\n");
+    sync_repo(&conn, root).unwrap();
+    // Re-extraction writes these tables. Reject it even if timestamps would be identical.
+    conn.execute_batch("CREATE TRIGGER no_file_reparse BEFORE INSERT ON files BEGIN SELECT RAISE(ABORT, 'unexpected reparse'); END;
+        CREATE TRIGGER no_symbol_reparse BEFORE DELETE ON symbols BEGIN SELECT RAISE(ABORT, 'unexpected reparse'); END;").unwrap();
+    for old_version in [None, Some("obsolete")] {
+        conn.execute("DELETE FROM meta WHERE key = 'resolver_version'", [])
+            .unwrap();
+        if let Some(version) = old_version {
+            graphtrail::store::meta::upsert(&conn, "resolver_version", version).unwrap();
+        }
+        // Simulate old derived state: missing Python edges plus an erroneous Go -> Python edge.
+        conn.execute_batch(
+            "DELETE FROM edges;
+            INSERT INTO edges(source, target, kind, line, confidence)
+            SELECT src.id, dst.id, 'calls', 2, 0.7 FROM symbols src, symbols dst
+            WHERE src.name = 'caller' AND dst.name = 'foo';",
+        )
+        .unwrap();
+        let summary = sync_repo(&conn, root).unwrap();
+        assert!(
+            !summary.unchanged,
+            "an outdated resolver must rebuild edges"
+        );
+        assert_python_layout_calls(&conn, "src/pkg/a.py");
+        let edges: i64 = conn
+            .query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(edges, 2, "only the two Python imports should have edges");
+        assert!(
+            graphtrail::store::meta::read(&conn, "resolver_version")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            sync_repo(&conn, root).unwrap().unchanged,
+            "the upgrade must run only once"
+        );
+    }
+}
