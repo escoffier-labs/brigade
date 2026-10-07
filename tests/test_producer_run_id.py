@@ -214,6 +214,8 @@ def _init_git(tmp_path: Path) -> None:
 
 def test_verify_producer_stamps_and_omits_producer_run_id(tmp_path, monkeypatch, capsys):
     _init_git(tmp_path)
+    secret_canary = "sk-" + "producer-id-fixture-" + ("x" * 32)
+    monkeypatch.setenv("OPENAI_API_KEY", secret_canary)
     monkeypatch.delenv(receipt_schema.BRIGADE_RUN_ID_ENV, raising=False)
     assert (
         work_cmd.verify_run(
@@ -239,9 +241,10 @@ def test_verify_producer_stamps_and_omits_producer_run_id(tmp_path, monkeypatch,
     )
     stamped = json.loads(capsys.readouterr().out)
     assert stamped["producer_run_id"] == "orch-verify-1"
-    serialized = json.dumps(stamped)
-    assert "OPENAI_API_KEY" not in serialized
-    assert "sk-" not in serialized
+    for payload in (receipt, stamped):
+        serialized = json.dumps(payload)
+        assert "OPENAI_API_KEY" not in serialized
+        assert secret_canary not in serialized
 
 
 def test_review_producer_stamps_and_omits_producer_run_id(tmp_path, monkeypatch):
