@@ -530,14 +530,15 @@ def test_cli_run_cloud_status_json_contract(tmp_path: Path, capsys, monkeypatch)
         prompt_hash=_prompt_hash("x"),
         dispatched_at=_iso(NOW),
     )
+    observations = {
+        provider: cloud_tracker.ProviderObservation(False, False, None, {})
+        for provider in cloud_tracker.TRACKER_PROVIDERS
+    }
+    observations["codex-cloud"] = cloud_tracker.ProviderObservation(True, True, None, {"t-cli": {"state": "running"}})
     monkeypatch.setattr(
         cloud_tracker,
-        "observe_providers",
-        lambda target, **kwargs: (
-            {"t-cli": {"state": "running"}},
-            {"branches": [], "prs": []},
-            False,
-        ),
+        "observe_provider_details",
+        lambda target, **kwargs: (observations, {"branches": [], "prs": []}),
     )
     rc = cli.main(["run", "cloud", "status", "--target", str(tmp_path), "--json"])
     assert rc == 0
@@ -545,6 +546,56 @@ def test_cli_run_cloud_status_json_contract(tmp_path: Path, capsys, monkeypatch)
     assert payload["schema"] == cloud_tracker.STATUS_SCHEMA
     assert payload["entries"][0]["classification"] == "pending"
     assert payload["sources"]["cursor-cloud"]["wired"] is False
+
+
+@pytest.mark.parametrize("ambient_cursor_key", [False, True])
+@pytest.mark.parametrize("cursor_configured", [False, True])
+def test_current_observer_fixture_controls_cli_without_transport(
+    tmp_path, capsys, monkeypatch, ambient_cursor_key, cursor_configured
+):
+    for key in ("CURSOR_API_KEY", "CURSOR_CLOUD_API_KEY", "BG_AGENT_API_KEY", "JULES_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    if ambient_cursor_key:
+        monkeypatch.setenv("CURSOR_API_KEY", "synthetic-fixture-key")
+
+    transport_calls = []
+
+    def forbidden_transport(*args, **kwargs):
+        transport_calls.append("transport")
+        raise AssertionError("The fixture must not call a provider or forge transport")
+
+    monkeypatch.setattr(cloud_tracker, "observe_provider", forbidden_transport)
+    monkeypatch.setattr(cloud_tracker, "observe_github", forbidden_transport)
+    monkeypatch.setattr(cloud_tracker, "observe_providers", forbidden_transport)
+
+    observations = {
+        provider: cloud_tracker.ProviderObservation(False, False, None, {})
+        for provider in cloud_tracker.TRACKER_PROVIDERS
+    }
+    observations["codex-cloud"] = cloud_tracker.ProviderObservation(True, True, None, {"t-cli": {"state": "running"}})
+    observations["cursor-cloud"] = cloud_tracker.ProviderObservation(cursor_configured, cursor_configured, None, {})
+    monkeypatch.setattr(
+        cloud_tracker,
+        "observe_provider_details",
+        lambda target, **kwargs: (observations, {"branches": [], "prs": []}),
+    )
+    cloud_tracker.register(
+        tmp_path,
+        provider="codex-cloud",
+        task_id="t-cli",
+        label="fixture-proof",
+        prompt_hash="sha256:" + hashlib.sha256(b"synthetic prompt").hexdigest(),
+        dispatched_at="2026-01-01T00:00:00+00:00",
+    )
+    assert cli.main(["run", "cloud", "status", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == cloud_tracker.STATUS_SCHEMA
+    assert payload["entries"][0]["classification"] == "pending"
+    if cursor_configured:
+        assert payload["sources"]["cursor-cloud"]["wired"] is True
+    else:
+        assert payload["sources"]["cursor-cloud"]["wired"] is False
+    assert transport_calls == []
 
 
 def test_cli_cloud_status_includes_grokbot_without_private_envelope(tmp_path: Path, capsys, monkeypatch):
