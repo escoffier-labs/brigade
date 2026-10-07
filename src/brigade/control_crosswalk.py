@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from collections.abc import Callable
@@ -530,15 +531,44 @@ def _run_dirs(ctx: _Context) -> tuple[list[Path], _Discovery]:
     """
     root = ctx.target / ".brigade" / "runs"
     out = _Discovery()
+    try:
+        mode = root.lstat().st_mode
+    except FileNotFoundError:
+        return [], out
+    except OSError:
+        _record_discovery_error(out, ctx, root, "discovery_unreadable")
+        return [], out
+    if stat.S_ISLNK(mode):
+        _record_discovery_error(out, ctx, root, "symlink_refused")
+        return [], out
+    if not stat.S_ISDIR(mode):
+        _record_discovery_error(out, ctx, root, "discovery_unreadable")
+        return [], out
     if ctx.run_id is not None:
-        if root.is_symlink():
-            _record_discovery_error(out, ctx, root, "symlink_refused")
-            return [], out
         selected = root / ctx.run_id
-        return ([selected] if selected.is_dir() or selected.is_symlink() else []), out
-    children, out.truncated, error = _bounded_children(root)
+        try:
+            mode = selected.lstat().st_mode
+        except FileNotFoundError:
+            return [], out
+        except OSError:
+            _record_discovery_error(out, ctx, selected, "discovery_unreadable")
+            return [], out
+        return ([selected] if stat.S_ISDIR(mode) or stat.S_ISLNK(mode) else []), out
+    try:
+        children, out.truncated, error = _bounded_children(root)
+    except OSError:
+        children, error = [], "discovery_unreadable"
     _record_discovery_error(out, ctx, root, error)
-    return [child for child in children if child.is_dir() or child.is_symlink()], out
+    directories = []
+    for child in children:
+        try:
+            mode = child.lstat().st_mode
+        except OSError:
+            _record_discovery_error(out, ctx, child, "discovery_unreadable")
+            continue
+        if stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
+            directories.append(child)
+    return directories, out
 
 
 def _run_scope(obs: control_readiness.ArtifactObservation, ctx: _Context, run_dir: Path) -> None:
