@@ -71,7 +71,7 @@
       "id": "EC-09",
       "title": "Content-guard redaction verdict",
       "artifact_family": "brigade.guard.audit",
-      "producer_command": "brigade guard audit",
+      "producer_command": "brigade guard audit --json (operator saves output)",
       "verifier_command": "brigade guard audit --strict",
       "state_rule": "guard-audit-allow"
     },
@@ -213,7 +213,7 @@
       "relationship": "supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Verify receipts record per-command exit status as local files. Edits are detectable only against a digest held outside the receipt, such as an attestation or manifest.",
+      "rationale": "Receipts record command results. Digests and optional local HMACs support consistency checks. The index does not verify HMACs or establish independent custody or key-management effectiveness.",
       "source_locator": "https://www.iso.org/standard/42001"
     },
     {
@@ -229,7 +229,7 @@
       "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
       "artifact_contract": "brigade.work_verify_receipt from brigade work verify run: per-command argv and exit status.",
       "responsible_actor": "Adopting organization AI risk owner; Brigade only produces the artifact.",
-      "verification_limit": "State reflects receipt status and exit codes only. Brigade cannot judge whether the check measures a mapped risk. A Brigade artifact does not establish that an organizational control or process operated."
+      "verification_limit": "The evaluator checks receipt structure, ordered planned-command matching and run binding, but does not yet rederive the stored digest or verify an optional local HMAC. Brigade cannot judge whether the check measures a mapped risk. A Brigade artifact does not establish that an organizational control or process operated."
     },
     {
       "claim_id": "EC-01",
@@ -289,7 +289,7 @@
       "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.1, Table 1, GOVERN 2.1",
       "disposition": "conditional-support",
       "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
-      "artifact_contract": "human-approval/v2 events from brigade run approve, verified with brigade receipts verify-attestation --strict-approvals.",
+      "artifact_contract": "human-approval/v2 events from brigade run approve, verified with brigade receipts verify --strict-approvals.",
       "responsible_actor": "Adopting organization, which documents approver responsibilities and binds approver identities to them.",
       "verification_limit": "The SOD check compares identities recorded in Brigade artifacts only. It does not show that responsibilities are documented or clear to staff. A Brigade artifact does not establish that an organizational control or process operated."
     },
@@ -338,7 +338,7 @@
       "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
       "artifact_contract": "brigade.governance_inventory.v1 point-in-time inventory from brigade governance inventory.",
       "responsible_actor": "Adopting organization, which defines inventory scope and resources it by risk priority.",
-      "verification_limit": "State checks that a parseable inventory exists, not its completeness, freshness or resourcing. A Brigade artifact does not establish that an organizational control or process operated.",
+      "verification_limit": "The evaluator checks the supported inventory schema, not completeness or resourcing. Without an assessment period it makes no freshness determination. A Brigade artifact does not establish that an organizational control or process operated.",
       "superseded_control_id": "GOVERN 5.1"
     },
     {
@@ -368,7 +368,7 @@
       "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.3, Table 3, MEASURE 2.7",
       "disposition": "corrected-mismatch",
       "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
-      "artifact_contract": "brigade.guard.audit verdict from brigade guard audit.",
+      "artifact_contract": "Operator-saved JSON stdout from brigade guard audit --json at .brigade/work/guard/audit.json; this command does not create the staged file or record a producer timestamp.",
       "responsible_actor": "Adopting organization AI risk owner; Brigade only produces the artifact.",
       "verification_limit": "State reflects the summary blocked flag in .brigade/work/guard/audit.json only. Guard rules cover configured patterns, not all security risk. A Brigade artifact does not establish that an organizational control or process operated.",
       "superseded_control_id": "MAP 2.3"
@@ -384,7 +384,7 @@
       "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.3, Table 3, MEASURE 2.10",
       "disposition": "corrected-mismatch",
       "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
-      "artifact_contract": "brigade.guard.audit verdict from brigade guard audit.",
+      "artifact_contract": "Operator-saved JSON stdout from brigade guard audit --json at .brigade/work/guard/audit.json; this command does not create the staged file or record a producer timestamp.",
       "responsible_actor": "Adopting organization AI risk owner; Brigade only produces the artifact.",
       "verification_limit": "Pattern-based redaction does not establish that privacy risk is examined in full. A Brigade artifact does not establish that an organizational control or process operated.",
       "superseded_control_id": "MAP 2.3"
@@ -402,7 +402,7 @@
       "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
       "artifact_contract": "brigade.outcome_record ledger from brigade outcome record.",
       "responsible_actor": "Adopting organization AI risk owner; Brigade only produces the artifact.",
-      "verification_limit": "State checks that non-empty records exist, not what they measure. A Brigade artifact does not establish that an organizational control or process operated."
+      "verification_limit": "The evaluator checks bounded JSONL records for schema_version and kind, not what they measure. A supplied period uses the latest recorded timestamp for the ledger, without validating each record timestamp. A Brigade artifact does not establish that an organizational control or process operated."
     },
     {
       "claim_id": "EC-10",
@@ -1303,7 +1303,7 @@
       "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
       "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.1, Table 1, GOVERN 5.2",
       "rationale": "Packaging alone supplies no adjudicated feedback process. Map the constituent receipt and attestation evidence through EC-01 and EC-02 instead; EC-03 signature integrity is itself an unmapped evidence property.",
-      "verification_limit": "The evaluator recomputes the unsigned manifest entries digest only. A Brigade artifact does not establish that an organizational control or process operated."
+      "verification_limit": "The evaluator checks the manifest schema, recomputes its unsigned entries-list digest and checks safe, present regular entries. Entry contents and packaged source are not yet revalidated by this index layer. A Brigade artifact does not establish that an organizational control or process operated."
     }
   ]
 }
