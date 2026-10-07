@@ -260,7 +260,11 @@ def _session_has_outputs(raw: dict[str, Any]) -> bool:
 
 
 def _find_pr_url(raw: dict[str, Any]) -> str | None:
-    """Look for a GitHub PR URL in the shapes the alpha API has used."""
+    """Find the documented nested PR URL, with best-effort legacy fallbacks.
+
+    Session GET projections select only ``outputs[].pullRequest.url``. Direct
+    payload sanitization retains older URL shapes when they are present.
+    """
     candidates: list[Any] = [raw.get("pullRequestUrl")]
     pull_request = raw.get("pullRequest")
     if isinstance(pull_request, dict):
