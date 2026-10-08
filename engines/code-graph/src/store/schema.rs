@@ -67,6 +67,14 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             line INTEGER NOT NULL
         );
 
+        -- A module's literal export list (Python `__all__`) as a JSON array.
+        -- No row means the module declares none. Populated by extraction, so
+        -- an extractor fingerprint bump fills it for existing databases.
+        CREATE TABLE IF NOT EXISTS module_exports (
+            file_path TEXT PRIMARY KEY,
+            names TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS pending_calls (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_id TEXT NOT NULL,

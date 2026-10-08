@@ -31,6 +31,11 @@ pub trait LangSpec {
     fn module_scope_calls(&self) -> bool {
         false
     }
+    /// The module's literal export list (Python `__all__`), or `None` when it
+    /// declares none or builds it in a way extraction cannot read.
+    fn module_exports(&self, _root: TsNode<'_>, _source: &[u8]) -> Option<Vec<String>> {
+        None
+    }
 }
 
 /// Name and qualified name of the per-file pseudo-symbol that owns module-level calls.
@@ -117,6 +122,7 @@ pub fn extract_with<L: LangSpec>(
         symbols: symbol_state.symbols,
         imports,
         calls,
+        exports: spec.module_exports(tree.root_node(), ctx.source),
     })
 }
 
@@ -232,10 +238,12 @@ fn visit_children<L: LangSpec>(
     }
 }
 
-/// The per-file module pseudo-symbol. It spans the whole file and owns module-level calls.
+/// The per-file module pseudo-symbol that owns module-level calls.
 ///
-/// Its body hash covers only lines outside top-level symbols, so editing a
-/// function body does not also mark the module as changed.
+/// Its span is fixed at line 1 and its body hash covers only the non-blank
+/// lines outside top-level symbols. Editing or growing a function therefore
+/// leaves the module node unchanged in a graph diff, while editing a
+/// module-level statement changes it.
 fn module_symbol(ctx: &Ctx, id: &str, symbols: &[Symbol]) -> Symbol {
     let covered: Vec<(usize, usize)> = symbols
         .iter()
@@ -246,11 +254,12 @@ fn module_symbol(ctx: &Ctx, id: &str, symbols: &[Symbol]) -> Symbol {
         .lines
         .iter()
         .enumerate()
-        .filter(|(idx, _)| {
+        .filter(|(idx, line)| {
             let line_no = idx + 1;
-            !covered
-                .iter()
-                .any(|(start, end)| *start <= line_no && line_no <= *end)
+            !line.trim().is_empty()
+                && !covered
+                    .iter()
+                    .any(|(start, end)| *start <= line_no && line_no <= *end)
         })
         .map(|(_, line)| *line)
         .collect();
@@ -261,7 +270,7 @@ fn module_symbol(ctx: &Ctx, id: &str, symbols: &[Symbol]) -> Symbol {
         qualified_name: MODULE_SYMBOL_NAME.to_string(),
         file_path: ctx.path.to_string(),
         start_line: 1,
-        end_line: ctx.lines.len().max(1),
+        end_line: 1,
         signature: String::new(),
         container: None,
         content_hash: ctx.content_hash.to_string(),

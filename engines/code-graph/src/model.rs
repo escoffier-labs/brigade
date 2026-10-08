@@ -109,6 +109,8 @@ pub struct FileGraph {
     pub symbols: Vec<Symbol>,
     pub imports: Vec<Import>,
     pub calls: Vec<PendingCall>,
+    /// The module's literal export list (Python `__all__`), when it declares one.
+    pub exports: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]

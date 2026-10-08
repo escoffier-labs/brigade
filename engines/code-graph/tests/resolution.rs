@@ -1387,3 +1387,223 @@ fn python_module_level_calls_reach_callers_and_dead_code() {
     assert!(!names.contains(&"cli"), "{names:?}");
     assert!(!names.contains(&"<module>"), "{names:?}");
 }
+
+/// pkg/__init__.py binds `helper` twice: once through a four-hop star chain
+/// that ends at shared.py, and once through a direct import of shared.py.
+/// shared.py re-exports the real definition in impl.py.
+fn diamond_fixture(root: &std::path::Path, init: &str) -> rusqlite::Connection {
+    write_resolution_file(root, "pkg/__init__.py", init);
+    write_resolution_file(root, "pkg/s1.py", "from .s2 import *\n");
+    write_resolution_file(root, "pkg/s2.py", "from .s3 import *\n");
+    write_resolution_file(root, "pkg/s3.py", "from .shared import *\n");
+    write_resolution_file(root, "pkg/shared.py", "from .impl import helper\n");
+    write_resolution_file(root, "pkg/impl.py", "def helper():\n    return 1\n");
+    write_resolution_file(
+        root,
+        "use.py",
+        "from pkg import helper\n\ndef run():\n    return helper()\n",
+    );
+    resolution_db(root)
+}
+
+#[test]
+fn python_reexport_diamond_resolves_in_either_import_order() {
+    for init in [
+        "from .s1 import *\nfrom .shared import helper\n",
+        "from .shared import helper\nfrom .s1 import *\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = diamond_fixture(dir.path(), init);
+        assert_resolves_to(&conn, "run", "helper", "import-strict", "pkg/impl.py");
+    }
+}
+
+#[test]
+fn python_long_star_reexport_chain_resolves() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(root, "pkg/__init__.py", "from .m1 import *\n");
+    for hop in 1..8 {
+        write_resolution_file(
+            root,
+            &format!("pkg/m{hop}.py"),
+            &format!("from .m{} import *\n", hop + 1),
+        );
+    }
+    write_resolution_file(root, "pkg/m8.py", "def helper():\n    return 1\n");
+    write_resolution_file(
+        root,
+        "use.py",
+        "from pkg import helper\n\ndef run():\n    return helper()\n",
+    );
+    let conn = resolution_db(root);
+    assert_resolves_to(&conn, "run", "helper", "import-strict", "pkg/m8.py");
+}
+
+#[test]
+fn python_star_import_of_aliased_reexport_resolves() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(root, "core.py", "def original():\n    return 1\n");
+    write_resolution_file(root, "facade.py", "from core import original as exported\n");
+    write_resolution_file(
+        root,
+        "use.py",
+        "from facade import *\n\ndef run():\n    return exported()\n",
+    );
+    let conn = resolution_db(root);
+    let rows = graphtrail::store::explain_calls(&conn, "run", "exported").unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].resolution, "import-fallback", "{rows:?}");
+    assert_eq!(rows[0].targets.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].targets[0].file_path, "core.py");
+    assert_eq!(rows[0].targets[0].qualified_name, "original");
+    let edges: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM edges e JOIN symbols s ON s.id = e.source
+             JOIN symbols t ON t.id = e.target WHERE s.name = 'run' AND t.name = 'original'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(edges, 1);
+}
+
+#[test]
+fn python_star_reexport_respects_dunder_all_and_binding_order() {
+    for all in ["__all__ = ['other']\n", "__all__ = ('other',)\n"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_resolution_file(
+            root,
+            "pkg/__init__.py",
+            "from .a import *\nfrom .b import *\n",
+        );
+        write_resolution_file(root, "pkg/a.py", "def helper():\n    return 1\n");
+        // b defines `helper` but does not export it, so a's binding survives.
+        write_resolution_file(
+            root,
+            "pkg/b.py",
+            &format!("{all}\ndef helper():\n    return 2\n\ndef other():\n    return 3\n"),
+        );
+        write_resolution_file(
+            root,
+            "use.py",
+            "from pkg import helper\n\ndef run():\n    return helper()\n",
+        );
+        let conn = resolution_db(root);
+        assert_resolves_to(&conn, "run", "helper", "import-strict", "pkg/a.py");
+    }
+
+    // With only the restricted module, the package does not export `helper`.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(root, "pkg/__init__.py", "from .core import *\n");
+    write_resolution_file(
+        root,
+        "pkg/core.py",
+        "__all__ = ['other']\n\ndef helper():\n    return 1\n\ndef other():\n    return 2\n",
+    );
+    write_resolution_file(
+        root,
+        "use.py",
+        "from pkg import helper\n\ndef run():\n    return helper()\n",
+    );
+    let conn = resolution_db(root);
+    let rows = graphtrail::store::explain_calls(&conn, "run", "helper").unwrap();
+    assert_ne!(rows[0].resolution, "import-strict", "{rows:?}");
+}
+
+#[test]
+fn python_star_reexport_skips_private_names_unless_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(
+        root,
+        "pkg/__init__.py",
+        "from .a import *\nfrom .b import *\n",
+    );
+    write_resolution_file(
+        root,
+        "pkg/a.py",
+        "__all__ = ['_hidden']\n\ndef _hidden():\n    return 1\n",
+    );
+    write_resolution_file(root, "pkg/b.py", "def _hidden():\n    return 2\n");
+    write_resolution_file(
+        root,
+        "use.py",
+        "from pkg import _hidden\n\ndef run():\n    return _hidden()\n",
+    );
+    let conn = resolution_db(root);
+    assert_resolves_to(&conn, "run", "_hidden", "import-strict", "pkg/a.py");
+}
+
+#[test]
+fn python_module_export_requires_a_top_level_definition() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(root, "pkg/__init__.py", "from .core import *\n");
+    write_resolution_file(
+        root,
+        "pkg/core.py",
+        "class Box:\n    def helper(self):\n        return 1\n",
+    );
+    write_resolution_file(
+        root,
+        "use.py",
+        "from pkg import helper\n\ndef run():\n    return helper()\n",
+    );
+    let conn = resolution_db(root);
+    let rows = graphtrail::store::explain_calls(&conn, "run", "helper").unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_ne!(rows[0].resolution, "import-strict", "{rows:?}");
+    let strict: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM edges WHERE confidence = 0.9",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(strict, 0);
+}
+
+#[test]
+fn python_later_star_import_shadows_earlier_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(root, "a.py", "def helper():\n    return 1\n");
+    write_resolution_file(root, "b.py", "def helper():\n    return 2\n");
+    write_resolution_file(
+        root,
+        "use.py",
+        "from a import *\nfrom b import *\n\ndef run():\n    return helper()\n",
+    );
+    write_resolution_file(
+        root,
+        "pkg/__init__.py",
+        "from a import *\nfrom b import *\n",
+    );
+    write_resolution_file(
+        root,
+        "via_pkg.py",
+        "from pkg import helper\n\ndef go():\n    return helper()\n",
+    );
+    let conn = resolution_db(root);
+    assert_resolves_to(&conn, "run", "helper", "import-fallback", "b.py");
+    assert_resolves_to(&conn, "go", "helper", "import-strict", "b.py");
+}
+
+#[test]
+fn python_module_symbol_stays_out_of_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = reexport_fixture(dir.path(), "from .core import helper\n");
+    for query in ["core.py", "pkg/core.py", "main"] {
+        let rows = graphtrail::query::search_symbols(&conn, query, 20).unwrap();
+        assert!(
+            rows.iter().all(|row| row.qualified_name != "<module>"),
+            "{query}: {rows:?}"
+        );
+    }
+    let rows = graphtrail::query::search_symbols(&conn, "core.py", 20).unwrap();
+    assert!(rows.iter().any(|row| row.name == "main"), "{rows:?}");
+}

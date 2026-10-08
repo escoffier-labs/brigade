@@ -54,6 +54,50 @@ impl LangSpec for PythonSpec {
         true
     }
 
+    fn module_exports(&self, root: TsNode<'_>, source: &[u8]) -> Option<Vec<String>> {
+        let mut exports: Option<Vec<String>> = None;
+        let mut understood = 0;
+        let mut cursor = root.walk();
+        for statement in root.named_children(&mut cursor) {
+            let Some(assignment) = statement
+                .named_child(0)
+                .filter(|_| statement.kind() == "expression_statement")
+            else {
+                continue;
+            };
+            let extend = match assignment.kind() {
+                "assignment" => false,
+                "augmented_assignment" => true,
+                _ => continue,
+            };
+            let Some(left) = assignment.child_by_field_name("left") else {
+                continue;
+            };
+            if left.kind() != "identifier" || node_text(left, source) != DUNDER_ALL {
+                continue;
+            }
+            if extend
+                && assignment
+                    .child_by_field_name("operator")
+                    .is_none_or(|op| node_text(op, source) != "+=")
+            {
+                return None;
+            }
+            let names = literal_string_sequence(assignment.child_by_field_name("right")?, source)?;
+            match (&mut exports, extend) {
+                (Some(current), true) => current.extend(names),
+                (None, true) => return None,
+                (_, false) => exports = Some(names),
+            }
+            understood += 1;
+        }
+        // Any other mention (a nested assignment, `__all__.append(...)`) makes
+        // the list dynamic, so extraction claims no export list at all.
+        (count_identifier(root, source, DUNDER_ALL) == understood)
+            .then_some(exports)
+            .flatten()
+    }
+
     fn collect_import(&self, node: TsNode<'_>, source: &[u8], out: &mut Vec<Import>) {
         let line = node.start_position().row + 1;
         match node.kind() {
@@ -160,6 +204,44 @@ impl LangSpec for PythonSpec {
         }
         Some(target)
     }
+}
+
+const DUNDER_ALL: &str = "__all__";
+
+/// The strings of a list or tuple literal made only of plain string literals.
+fn literal_string_sequence(node: TsNode<'_>, source: &[u8]) -> Option<Vec<String>> {
+    if !matches!(node.kind(), "list" | "tuple") {
+        return None;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .map(|item| {
+            if item.kind() != "string" {
+                return None;
+            }
+            let mut parts = item.walk();
+            let mut text = String::new();
+            for part in item.named_children(&mut parts) {
+                match part.kind() {
+                    "string_start" | "string_end" => {}
+                    "string_content" => text.push_str(&node_text(part, source)),
+                    // Interpolations and escapes make the value non-literal.
+                    _ => return None,
+                }
+            }
+            Some(text)
+        })
+        .collect()
+}
+
+fn count_identifier(node: TsNode<'_>, source: &[u8], name: &str) -> usize {
+    if node.kind() == "identifier" {
+        return usize::from(node_text(node, source) == name);
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .map(|child| count_identifier(child, source, name))
+        .sum()
 }
 
 pub fn extract_python(path: &str, content: &str, content_hash: &str) -> Result<FileGraph> {
@@ -292,7 +374,8 @@ if __name__ == "__main__":
         assert_eq!(module.name, "<module>");
         assert_eq!(module.qualified_name, "<module>");
         assert_eq!(module.container, None);
-        assert_eq!((module.start_line, module.end_line), (1, 6));
+        // A fixed one-line span keeps the module node stable in graph diffs.
+        assert_eq!((module.start_line, module.end_line), (1, 1));
         let call = g
             .calls
             .iter()
@@ -377,6 +460,25 @@ class Box:
         assert_eq!(register.source_id, build.id);
         // Decorators never need the module pseudo-symbol.
         assert!(g.symbols.iter().all(|s| s.kind != "module"));
+    }
+
+    #[test]
+    fn python_literal_dunder_all_is_extracted() {
+        assert_eq!(graph("def f():\n    pass\n").exports, None);
+        assert_eq!(
+            graph("__all__ = ['a', \"b\"]\n__all__ += ('c',)\n").exports,
+            Some(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+        );
+        assert_eq!(graph("__all__ = []\n").exports, Some(Vec::new()));
+        for dynamic in [
+            "__all__ = names()\n",
+            "__all__ = ['a']\n__all__.append('b')\n",
+            "__all__ = ['a']\nif x:\n    __all__ = ['b']\n",
+            "__all__ = [f'{x}']\n",
+            "__all__ += ['a']\n",
+        ] {
+            assert_eq!(graph(dynamic).exports, None, "{dynamic}");
+        }
     }
 
     #[test]
