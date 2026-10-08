@@ -67,6 +67,7 @@ from . import orchestrator as _orchestrator_mod
 
 CODE_GRAPH_HEADING = "## Code graph context (GraphTrail, read-only)"
 CODE_GRAPH_LIMIT = 4000
+RELEVANCE_FLOOR_ENV = "BRIGADE_BRIEF_RELEVANCE_FLOOR"
 DRIFT_IMPACT_HEADING = "## Upstream drift impact (Upstream Drift + GraphTrail, read-only)"
 DRIFT_IMPACT_LIMIT = 4000
 BRIEF_BUDGET_BYTES = 6000
@@ -262,11 +263,13 @@ def code_graph_brief(cwd: Path | None, task: str) -> CodeGraphBrief:
     binary = _graphtrail_bin()
     if binary is None:
         return CodeGraphBrief(attached=False)
-    result = proc.run(
-        [binary, "--db", str(db_path), "context", task, "--markdown", "--limit", "8"],
-        timeout=10.0,
-        cwd=cwd,
-    )
+    base = [binary, "--db", str(db_path), "context", task]
+    floor = ["--relevance-floor"] if relevance_floor_enabled() else []
+    result = proc.run([*base, "--markdown", "--limit", "8", *floor], timeout=10.0, cwd=cwd)
+    if result.code != 0 and floor:
+        # An engine without the opt-in floor rejects the flag. Use its default pack.
+        floor = []
+        result = proc.run([*base, "--markdown", "--limit", "8"], timeout=10.0, cwd=cwd)
     if result.code != 0:
         return CodeGraphBrief(attached=False)
     body = result.stdout.strip()
@@ -274,29 +277,25 @@ def code_graph_brief(cwd: Path | None, task: str) -> CodeGraphBrief:
         return CodeGraphBrief(attached=False)
     text = _truncate_on_line_boundary(f"{CODE_GRAPH_HEADING}\n\n{body}\n")
     brief = CodeGraphBrief(attached=True, text=text, bytes=len(text.encode()))
-    if not _engine_applies_relevance_floor(body):
-        # Older engines: keep the markdown-only brief and its old receipt shape.
+    if not body.startswith("# Context Pack:"):
+        # Not a GraphTrail context pack: keep the markdown-only brief and its old receipt shape.
         return brief
-    return _with_structured_pack(brief, binary, db_path, task, cwd)
+    return _with_structured_pack(brief, [*base, "--json", "--limit", "8", *floor], cwd)
 
 
-def _engine_applies_relevance_floor(body: str) -> bool:
-    """Floored engines name their rule on the pack's summary line.
+def relevance_floor_enabled() -> bool:
+    """Operator opt-in for the GraphTrail relevance floor (brigade#1648).
 
-    The whole pack is searched because a multiline task pushes the summary
-    line down. A task line that only looks like the marker costs one extra
-    JSON call, which older engines answer without the new fields.
+    Off by default: on labeled issue titles the floor raised precision but lost
+    recall and answered some tasks with no context. Set
+    ``BRIGADE_BRIEF_RELEVANCE_FLOOR=1`` to pass ``--relevance-floor`` to the engine.
     """
-    return any(line.startswith("_schema v") and " - relevance floor " in line for line in body.splitlines())
+    return os.environ.get(RELEVANCE_FLOOR_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _with_structured_pack(brief: CodeGraphBrief, binary: str, db_path: Path, task: str, cwd: Path) -> CodeGraphBrief:
+def _with_structured_pack(brief: CodeGraphBrief, argv: list[str], cwd: Path) -> CodeGraphBrief:
     """Record the brief's entry points and files from the engine's JSON pack."""
-    result = proc.run(
-        [binary, "--db", str(db_path), "context", task, "--json", "--limit", "8"],
-        timeout=10.0,
-        cwd=cwd,
-    )
+    result = proc.run(argv, timeout=10.0, cwd=cwd)
     if result.code != 0:
         return brief
     try:
@@ -345,9 +344,7 @@ def _graph_section_lines(text: str) -> list[str]:
     something that looks like one.
     """
     lines = text.splitlines()
-    starts = [
-        index for index, line in enumerate(lines) if line.startswith("_schema v") and " - relevance floor " in line
-    ]
+    starts = [index for index, line in enumerate(lines) if line.startswith("_schema v") and " entry points - " in line]
     return lines[starts[-1] + 1 :] if starts else []
 
 
@@ -376,11 +373,12 @@ def code_graph_brief_record(code_graph: CodeGraphBrief | None) -> dict[str, obje
 
 
 def _entry_point_shown(symbol: dict[str, object], text: str) -> bool:
-    """True when the graph sections still list this entry point after truncation."""
+    """True when the graph sections still list this entry point, name and file, after truncation."""
     name = symbol.get("qualified_name")
-    if not isinstance(name, str):
+    path = symbol.get("file_path")
+    if not isinstance(name, str) or not isinstance(path, str):
         return False
-    return any(line.startswith(f"- `{name}` (") for line in _graph_section_lines(text))
+    return any(line.startswith(f"- `{name}` (") and f" - {path}:" in line for line in _graph_section_lines(text))
 
 
 def _upstream_drift_state_path() -> Path:

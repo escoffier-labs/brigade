@@ -56,13 +56,32 @@ def test_run_receipt_code_graph_brief_block_has_typed_fields():
     roster = Roster(orchestrator="chef", agents={"chef": Agent("chef", "codex", "plan")}, max_workers=1)
     structured = aboyeur.CodeGraphBrief(
         attached=True,
-        text="## Code graph context\n\n- `run` (function) - src/app.py:1-2\n",
+        text=(
+            "## Code graph context\n\n# Context Pack: t\n\n"
+            "_schema v7 - 1 entry points - 0 callers - 0 callees - 1 related files - relevance floor task-coverage-v2_\n\n"
+            "## Entry points\n\n- `run` (function) - src/app.py:1-2\n"
+        ),
         bytes=60,
         confident=True,
         floor_applied=True,
         symbols=({"id": "s1", "qualified_name": "run", "file_path": "src/app.py", "score": 3.5},),
         files=("src/app.py",),
     )
+    structured_block = artifacts._run_payload(
+        task="t",
+        cwd=None,
+        lock_workspace=None,
+        roster=roster,
+        dry_run=True,
+        read_only=False,
+        status="completed",
+        started_at=datetime(2026, 10, 8, tzinfo=timezone.utc),
+        code_graph=structured,
+        include_git=False,
+    )["code_graph_brief"]
+    # The audit must see a populated block, not one emptied by the shown filter.
+    assert len(structured_block["symbols"]) == 1
+    assert structured_block["files"] == ["src/app.py"]
     for brief in (structured, aboyeur.CodeGraphBrief(attached=True, text="graph", bytes=5), None):
         payload = artifacts._run_payload(
             task="t",

@@ -468,6 +468,15 @@ writes this smaller receipt:
 
 `drift_impact_brief` also includes `pending_count` (integer).
 
+`code_graph_brief` also includes these fields when the engine returned a JSON context pack for an attached brief. They describe only what the attached text still shows after truncation and budget arbitration.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `confident` | boolean | False when the opt-in relevance floor kept no entry point |
+| `floor_applied` | boolean | Whether the engine applied the relevance floor |
+| `symbols` | array of object | Entry points shaped `{id, qualified_name, file_path, score}` |
+| `files` | array of string | Repo-relative files the brief shows |
+
 **`brief_budget` object**
 
 | Field | Type | Notes |

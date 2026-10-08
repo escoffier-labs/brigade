@@ -166,21 +166,68 @@ def test_multiline_task_still_detects_a_floored_engine(tmp_path, monkeypatch):
     assert brief.symbols is not None and brief.symbols[0]["id"] == "sym-extract"
 
 
-def test_older_engine_without_floor_marker_keeps_the_markdown_path(tmp_path, monkeypatch):
+def test_unfloored_pack_still_records_brief_data(tmp_path, monkeypatch):
     _graph_db(tmp_path)
     calls: list = []
-    old_markdown = FLOORED_MARKDOWN.replace(" - relevance floor name-coverage-v1", "")
-    _fake_engine(monkeypatch, old_markdown, FLOORED_JSON, calls)
+    unfloored_markdown = FLOORED_MARKDOWN.replace(" - relevance floor name-coverage-v1", "")
+    unfloored_json = {key: value for key, value in FLOORED_JSON.items() if key != "relevance_floor"}
+    _fake_engine(monkeypatch, unfloored_markdown, unfloored_json, calls)
 
     brief = aboyeur.code_graph_brief(tmp_path, "fix extract_delta_files")
 
-    assert len(calls) == 1
-    assert "--markdown" in calls[0]
+    assert [call[5] for call in calls] == ["--markdown", "--json"]
+    assert all("--relevance-floor" not in call for call in calls)
     assert brief.attached is True
     assert brief.confident is True
     assert brief.floor_applied is False
-    assert brief.symbols is None
-    assert brief.files is None
+    assert brief.symbols is not None and brief.symbols[0]["id"] == "sym-extract"
+    assert briefs.shown_brief_files(brief) == ["src/brigade/aboyeur/prompts.py", "src/brigade/context_eval.py"]
+
+
+def test_relevance_floor_is_passed_only_when_the_operator_enables_it(tmp_path, monkeypatch):
+    _graph_db(tmp_path)
+    calls: list = []
+    monkeypatch.setenv("BRIGADE_BRIEF_RELEVANCE_FLOOR", "1")
+    _fake_engine(monkeypatch, FLOORED_MARKDOWN, FLOORED_JSON, calls)
+
+    brief = aboyeur.code_graph_brief(tmp_path, "fix extract_delta_files")
+
+    assert [call[5:] for call in calls] == [
+        ["--markdown", "--limit", "8", "--relevance-floor"],
+        ["--json", "--limit", "8", "--relevance-floor"],
+    ]
+    assert brief.floor_applied is True
+
+
+def test_relevance_floor_falls_back_when_the_engine_lacks_the_flag(tmp_path, monkeypatch):
+    _graph_db(tmp_path)
+    calls: list = []
+    monkeypatch.setenv("BRIGADE_BRIEF_RELEVANCE_FLOOR", "1")
+    monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
+    old_markdown = FLOORED_MARKDOWN.replace(" - relevance floor name-coverage-v1", "")
+    old_json = {key: value for key, value in FLOORED_JSON.items() if key not in {"confident", "relevance_floor"}}
+
+    def fake_run(args, **kw):
+        calls.append(list(args))
+        if "--relevance-floor" in args:
+            return proc.Result(code=2, stdout="", stderr="error: unexpected argument '--relevance-floor'")
+        if "--json" in args:
+            return proc.Result(code=0, stdout=json.dumps(old_json), stderr="")
+        return proc.Result(code=0, stdout=old_markdown, stderr="")
+
+    monkeypatch.setattr(aboyeur.proc, "run", fake_run)
+
+    brief = aboyeur.code_graph_brief(tmp_path, "fix extract_delta_files")
+
+    assert [("--relevance-floor" in call, call[5]) for call in calls] == [
+        (True, "--markdown"),
+        (False, "--markdown"),
+        (False, "--json"),
+    ]
+    assert brief.attached is True
+    assert brief.confident is True
+    assert brief.floor_applied is False
+    assert brief.symbols is not None
 
 
 def test_missing_confident_field_counts_as_confident(tmp_path, monkeypatch):
@@ -341,6 +388,38 @@ def test_files_in_entry_and_edge_lines_count_as_shown():
     )
 
     assert briefs.shown_brief_files(brief) == ["src/app.py", "src/cli.py", "src/lib.py"]
+
+
+def test_shown_symbols_match_on_file_as_well_as_name():
+    graph = "## Entry points\n\n- `register` (function) - src/brigade/cli/fleet_dot.py:10-20\n"
+    brief = aboyeur.CodeGraphBrief(
+        attached=True,
+        text=_shown("register fleet and dot commands", graph),
+        bytes=200,
+        symbols=(
+            {"id": "a", "qualified_name": "register", "file_path": "src/brigade/cli/fleet.py", "score": 2.0},
+            {"id": "b", "qualified_name": "register", "file_path": "src/brigade/cli/fleet_dot.py", "score": 1.0},
+        ),
+        files=("src/brigade/cli/fleet.py", "src/brigade/cli/fleet_dot.py"),
+    )
+
+    recorded = _payload(brief)["code_graph_brief"]
+
+    assert [symbol["id"] for symbol in recorded["symbols"]] == ["b"]
+    assert recorded["files"] == ["src/brigade/cli/fleet_dot.py"]
+
+
+def test_unfloored_summary_line_still_anchors_the_graph_sections():
+    text = (
+        "## Code graph context\n\n# Context Pack: fix src/a.py\n\n"
+        "_schema v7 - 1 entry points - 0 callers - 0 callees - 1 related files_\n\n"
+        "## Entry points\n\n- `run` (function) - src/b.py:1-2\n"
+    )
+    brief = aboyeur.CodeGraphBrief(
+        attached=True, text=text, bytes=len(text), symbols=(), files=("src/a.py", "src/b.py")
+    )
+
+    assert briefs.shown_brief_files(brief) == ["src/b.py"]
 
 
 def test_run_payload_keeps_the_old_shape_without_brief_data():
