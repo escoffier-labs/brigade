@@ -2125,3 +2125,28 @@ def test_trailer_receipt_metadata_refusal_is_unavailable(tmp_path, monkeypatch, 
     assert result["reason"] == "discovery_unreadable"
     assert result["legacy_state"] == "untested"
     assert result["population"]["validated"] == 0
+
+
+@pytest.mark.parametrize("run_id", [None, "run-a"])
+@pytest.mark.parametrize("linked_target", ["missing", "empty"])
+def test_trailer_symlinked_run_without_receipt_is_invalid(tmp_path, run_id, linked_target):
+    import subprocess
+
+    from brigade import causal_receipt
+
+    target = _ws(tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    receipt = {"run_id": "run-a", "status": "completed"}
+    run_dir = target / ".brigade" / "runs" / "run-a"
+    run_dir.parent.mkdir(parents=True, exist_ok=True)
+    destination = tmp_path / "linked-run"
+    if linked_target == "empty":
+        destination.mkdir()
+    run_dir.symlink_to(destination, target_is_directory=True)
+    _git_commit(
+        target, "fixture\n\nBrigade-Run: run-a\nBrigade-Receipt: sha256:" + causal_receipt.receipt_digest(receipt)
+    )
+    result = _assess(target, "EC-08", run_id)
+    assert result["outcome"] == "invalid"
+    assert result["reason"] == "symlink_refused"
+    assert result["population"]["validated"] == 0
