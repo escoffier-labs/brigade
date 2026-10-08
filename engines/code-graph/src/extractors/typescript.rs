@@ -73,6 +73,8 @@ impl LangSpec for TypeScriptSpec {
                         imported_name: None,
                         alias: None,
                         line,
+                        module_scope: true,
+                        conditional: false,
                     });
                 }
             }
@@ -107,6 +109,8 @@ impl LangSpec for TypeScriptSpec {
                             imported_name: None,
                             alias: None,
                             line,
+                            module_scope: true,
+                            conditional: false,
                         });
                         break;
                     }
@@ -166,6 +170,8 @@ fn collect_ts_import_bindings(
                 imported_name: Some(imported),
                 alias,
                 line,
+                module_scope: true,
+                conditional: false,
             });
         }
         "namespace_import" => {
@@ -178,6 +184,8 @@ fn collect_ts_import_bindings(
                         imported_name: None,
                         alias: Some(local),
                         line,
+                        module_scope: true,
+                        conditional: false,
                     });
                 }
             }
@@ -195,6 +203,8 @@ fn collect_ts_import_bindings(
                         imported_name: Some("default".to_string()),
                         alias: None,
                         line,
+                        module_scope: true,
+                        conditional: false,
                     });
                 }
             }

@@ -1,5 +1,10 @@
 # source_file	source	line	target_file	target
 go/caller.go	run	6	go/pkg/pkg.go	Func
+# #1647: decorator call, package re-export, module-level calls, star import.
+python/pkg/commands/entry.py	cli	9	python/pkg/commands/entry.py	tag
+python/pkg/commands/entry.py	cli	11	python/pkg/commands/handoff_cmd.py	lint
+python/pkg/commands/entry.py	<module>	15	python/pkg/commands/entry.py	cli
+python/pkg/commands/entry.py	<module>	16	python/pkg/commands/sub/sibling.py	func
 python/pkg/commands/sub/caller.py	run	6	python/pkg/commands/handoff_cmd.py	lint
 python/pkg/commands/sub/caller.py	run	7	python/pkg/commands/sub/sibling.py	func
 src/bin/graphtrail-mcp.rs	main	4	src/mcp.rs	serve
