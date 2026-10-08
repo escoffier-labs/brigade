@@ -5,6 +5,10 @@ use rusqlite::{Connection, params};
 
 use crate::model::SearchRow;
 
+mod floor;
+
+pub use floor::{FlooredSearch, NAME_COVERAGE_FLOOR, RELEVANCE_FLOOR_RULE, floored_search};
+
 pub fn search_symbols(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchRow>> {
     search_symbols_with_path(conn, query, None, limit)
 }

@@ -963,6 +963,8 @@ mod tests {
                 "cli.py".to_string(),
                 "lib.py".to_string(),
             ],
+            confident: true,
+            relevance_floor: None,
         }
     }
 

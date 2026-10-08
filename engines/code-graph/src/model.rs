@@ -195,6 +195,23 @@ pub struct ContextPack {
     pub callers: Vec<EdgeRow>,
     pub callees: Vec<EdgeRow>,
     pub related_files: Vec<String>,
+    /// False when no search hit cleared the relevance floor, so the pack is empty
+    /// on purpose instead of holding the best of a set of unrelated keyword hits.
+    pub confident: bool,
+    /// How search hits were filtered into entry points. Absent when the caller
+    /// supplied the entry points (for example a Code Search blend).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relevance_floor: Option<RelevanceFloor>,
+}
+
+/// The relevance floor applied to task search hits before they become entry points.
+#[derive(Debug, Clone, Serialize)]
+pub struct RelevanceFloor {
+    pub rule: String,
+    pub min_name_coverage: f64,
+    pub candidates: usize,
+    pub kept: usize,
+    pub dropped: usize,
 }
 
 /// A single node (symbol) in a graph diff. Compact by design so a diff stays

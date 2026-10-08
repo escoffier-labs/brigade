@@ -7,12 +7,17 @@ use rusqlite::Connection;
 
 use crate::model::{ContextPack, Direction, EdgeRow, SearchRow};
 use crate::query::graph::edges_for_symbol_id;
-use crate::query::search::search_symbols;
+use crate::query::search::{NAME_COVERAGE_FLOOR, floored_search};
 use crate::store::SCHEMA_VERSION;
 
+/// What a pack says when no search hit cleared the relevance floor.
+pub const NO_CONFIDENT_CONTEXT: &str = "No confident code context for this task.";
+
 pub fn build_context_pack(conn: &Connection, task: String, limit: usize) -> Result<ContextPack> {
-    let entry_points = search_symbols(conn, &task, limit)?;
-    build_context_pack_from_entry_points(conn, task, entry_points)
+    let floored = floored_search(conn, &task, limit, NAME_COVERAGE_FLOOR)?;
+    let mut pack = build_context_pack_from_entry_points(conn, task, floored.rows)?;
+    pack.relevance_floor = Some(floored.floor);
+    Ok(pack)
 }
 
 pub fn build_context_pack_from_entry_points(
@@ -34,6 +39,7 @@ pub fn build_context_pack_from_entry_points(
     }
     let mut related_files: Vec<String> = files.into_iter().collect();
     related_files.sort();
+    let confident = !entry_points.is_empty();
     Ok(ContextPack {
         schema_version: SCHEMA_VERSION,
         task,
@@ -41,6 +47,8 @@ pub fn build_context_pack_from_entry_points(
         callers,
         callees,
         related_files,
+        confident,
+        relevance_floor: None,
     })
 }
 
@@ -178,15 +186,10 @@ pub fn render_markdown(pack: &ContextPack) -> String {
     use std::fmt::Write;
     let mut md = String::new();
     let _ = writeln!(md, "# Context Pack: {}\n", pack.task);
-    let _ = writeln!(
-        md,
-        "_schema v{} - {} entry points - {} callers - {} callees - {} related files_\n",
-        pack.schema_version,
-        pack.entry_points.len(),
-        pack.callers.len(),
-        pack.callees.len(),
-        pack.related_files.len()
-    );
+    if !pack.confident {
+        return format!("{md}{}", no_confident_context_body(pack));
+    }
+    let _ = writeln!(md, "{}\n", summary_line(pack));
 
     let _ = writeln!(md, "## Entry points\n");
     if pack.entry_points.is_empty() {
@@ -258,17 +261,17 @@ pub fn render_markdown_budgeted(pack: &ContextPack, max_chars: usize) -> String 
     } else {
         task_title.to_string()
     };
+    if !pack.confident {
+        let text = format!(
+            "# Context Pack: {compact_task}\n\n{}",
+            no_confident_context_body(pack)
+        );
+        return budget_lines(text.lines().map(str::to_string), max_chars);
+    }
     let mut lines = vec![
         format!("# Context Pack: {compact_task}"),
         String::new(),
-        format!(
-            "_schema v{} - {} entry points - {} callers - {} callees - {} related files_",
-            pack.schema_version,
-            pack.entry_points.len(),
-            pack.callers.len(),
-            pack.callees.len(),
-            pack.related_files.len()
-        ),
+        summary_line(pack),
         String::new(),
         "## Entry points".to_string(),
         String::new(),
@@ -318,6 +321,10 @@ pub fn render_markdown_budgeted(pack: &ContextPack, max_chars: usize) -> String 
         }));
     }
 
+    budget_lines(lines.into_iter(), max_chars)
+}
+
+fn budget_lines(lines: impl Iterator<Item = String>, max_chars: usize) -> String {
     let mut output = String::new();
     let mut used_chars = 0usize;
     for line in lines {
@@ -330,6 +337,30 @@ pub fn render_markdown_budgeted(pack: &ContextPack, max_chars: usize) -> String 
         used_chars += candidate_chars;
     }
     output
+}
+
+fn summary_line(pack: &ContextPack) -> String {
+    let floor = match &pack.relevance_floor {
+        Some(floor) => format!(" - relevance floor {}", floor.rule),
+        None => String::new(),
+    };
+    format!(
+        "_schema v{} - {} entry points - {} callers - {} callees - {} related files{floor}_",
+        pack.schema_version,
+        pack.entry_points.len(),
+        pack.callers.len(),
+        pack.callees.len(),
+        pack.related_files.len()
+    )
+}
+
+fn no_confident_context_body(pack: &ContextPack) -> String {
+    format!(
+        "{}\n\n{NO_CONFIDENT_CONTEXT} No indexed symbol matched a code identifier, file path, \
+         or distinctive name in the task, so no entry points are listed. Search the repository \
+         directly if the change touches code.\n",
+        summary_line(pack)
+    )
 }
 
 pub(crate) fn symbol_location(row: &SearchRow) -> String {
@@ -359,6 +390,7 @@ fn line_range(start: usize, end: usize) -> String {
 mod tests {
     use super::*;
     use crate::model::{EdgeRow, SearchRow};
+    use crate::query::search::RELEVANCE_FLOOR_RULE;
     use crate::store::init_schema;
     use rusqlite::params;
 
@@ -407,6 +439,8 @@ mod tests {
                 "cli.py".to_string(),
                 "lib.py".to_string(),
             ],
+            confident: true,
+            relevance_floor: None,
         };
 
         let md = render_markdown(&pack);
@@ -666,6 +700,114 @@ mod tests {
         assert!(pack.related_files.contains(&"src/mentioned.rs".to_string()));
     }
 
+    fn docs_only_repo() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        for (id, name, path) in [
+            (
+                "pipx",
+                "_is_transient_pipx_install_error",
+                "scripts/accept.py",
+            ),
+            (
+                "brand",
+                "test_readme_header_matches_brand",
+                "tests/test_readme.py",
+            ),
+            ("caller", "install_cli", "scripts/accept.py"),
+        ] {
+            conn.execute(
+                "INSERT OR IGNORE INTO files(path, content_hash, size, modified_at, indexed_at, language)
+                 VALUES (?1, 'h', 1, 1, 1, 'python')",
+                params![path],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO symbols(id, kind, name, qualified_name, file_path, start_line, end_line, signature, content_hash)
+                 VALUES (?1, 'function', ?2, ?2, ?3, 1, 1, ?2, 'h')",
+                params![id, name, path],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO symbols_fts(symbol_id, name, qualified_name, signature, file_path)
+                 VALUES (?1, ?2, ?2, ?2, ?3)",
+                params![id, name, path],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO edges(source, target, kind, line) VALUES ('caller', 'pipx', 'calls', 3)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn context_pack_without_confident_hits_is_empty_and_says_so() {
+        let conn = docs_only_repo();
+        let pack = build_context_pack(
+            &conn,
+            "Update the README install section to mention pipx".to_string(),
+            8,
+        )
+        .unwrap();
+
+        assert!(!pack.confident);
+        assert!(pack.entry_points.is_empty());
+        assert!(pack.callers.is_empty());
+        assert!(pack.callees.is_empty());
+        assert!(pack.related_files.is_empty());
+        let floor = pack.relevance_floor.as_ref().expect("floor recorded");
+        assert!(floor.candidates >= 2);
+        assert_eq!(floor.kept, 0);
+
+        let value = serde_json::to_value(&pack).unwrap();
+        assert_eq!(value["confident"], serde_json::json!(false));
+        assert_eq!(value["relevance_floor"]["rule"], RELEVANCE_FLOOR_RULE);
+
+        for md in [
+            render_markdown(&pack),
+            render_markdown_budgeted(&pack, 4000),
+        ] {
+            assert!(md.contains(NO_CONFIDENT_CONTEXT), "{md}");
+            assert!(md.contains("relevance floor"), "{md}");
+            assert!(!md.contains("scripts/accept.py"), "{md}");
+            assert!(!md.contains("## Entry points"), "{md}");
+        }
+    }
+
+    #[test]
+    fn context_pack_with_a_named_symbol_is_confident_and_marks_the_floor() {
+        let conn = docs_only_repo();
+        let pack = build_context_pack(
+            &conn,
+            "retry _is_transient_pipx_install_error on 503".to_string(),
+            8,
+        )
+        .unwrap();
+
+        assert!(pack.confident);
+        assert_eq!(pack.entry_points[0].id, "pipx");
+        assert_eq!(pack.callers.len(), 1);
+        let md = render_markdown(&pack);
+        assert!(md.contains("relevance floor"), "{md}");
+        assert!(!md.contains(NO_CONFIDENT_CONTEXT), "{md}");
+        assert!(md.contains("## Entry points"), "{md}");
+    }
+
+    #[test]
+    fn caller_supplied_entry_points_carry_no_floor() {
+        let conn = docs_only_repo();
+        let pack = build_context_pack_from_entry_points(&conn, "anything".to_string(), Vec::new())
+            .unwrap();
+        assert!(!pack.confident);
+        assert!(pack.relevance_floor.is_none());
+        let value = serde_json::to_value(&pack).unwrap();
+        assert!(value.get("relevance_floor").is_none());
+        assert!(!render_markdown(&pack).contains("relevance floor"));
+    }
+
     #[test]
     fn budgeted_markdown_never_splits_lines_or_exceeds_budget() {
         let mut pack = ContextPack {
@@ -675,6 +817,8 @@ mod tests {
             callers: Vec::new(),
             callees: Vec::new(),
             related_files: (0..100).map(|i| format!("src/file-{i}.rs")).collect(),
+            confident: true,
+            relevance_floor: None,
         };
         pack.related_files.sort();
         let rendered = render_markdown_budgeted(&pack, 400);
@@ -692,6 +836,8 @@ mod tests {
             callers: Vec::new(),
             callees: Vec::new(),
             related_files: vec!["src/app.rs".to_string()],
+            confident: true,
+            relevance_floor: None,
         };
 
         let rendered = render_markdown_budgeted(&pack, 400);
