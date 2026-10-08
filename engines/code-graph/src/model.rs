@@ -181,6 +181,9 @@ impl PendingChanges {
 pub struct IgnoredSummary {
     pub hardcoded_floor: usize,
     pub gitignore: usize,
+    /// Directories below the root that hold their own `.git` (linked worktrees,
+    /// nested clones, submodule checkouts). Their contents are never indexed.
+    pub nested_repo: usize,
 }
 
 #[derive(Debug, Serialize)]

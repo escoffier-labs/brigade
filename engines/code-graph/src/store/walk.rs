@@ -52,32 +52,40 @@ pub fn list_indexable(root: &Path) -> Result<Vec<IndexablePath>> {
 
 pub(super) fn collect_sync_walk(root: &Path, count_ignored: bool) -> Result<SyncWalk> {
     let ignored = IgnoredSummary {
-        hardcoded_floor: 0,
         gitignore: if count_ignored {
             count_gitignored_entries(root)?
         } else {
             0
         },
+        ..IgnoredSummary::default()
     };
-    let hardcoded_floor = Arc::new(AtomicUsize::new(0));
-    let entries = collect_supported_entries(
-        root,
-        has_git_context(root),
-        count_ignored.then_some(hardcoded_floor.clone()),
-    )?;
+    let skipped = count_ignored.then(|| Arc::new(SkipCounters::default()));
+    let entries = collect_supported_entries(root, has_git_context(root), skipped.clone())?;
     Ok(SyncWalk {
         entries,
         ignored: IgnoredSummary {
-            hardcoded_floor: hardcoded_floor.load(Ordering::Relaxed),
+            hardcoded_floor: skipped
+                .as_ref()
+                .map_or(0, |c| c.hardcoded_floor.load(Ordering::Relaxed)),
+            nested_repo: skipped
+                .as_ref()
+                .map_or(0, |c| c.nested_repo.load(Ordering::Relaxed)),
             ..ignored
         },
     })
 }
 
+/// Tallies of entries pruned by the walk filter, reported by `doctor`.
+#[derive(Default)]
+struct SkipCounters {
+    hardcoded_floor: AtomicUsize,
+    nested_repo: AtomicUsize,
+}
+
 fn collect_supported_entries(
     root: &Path,
     use_gitignore: bool,
-    hardcoded_counter: Option<Arc<AtomicUsize>>,
+    skipped: Option<Arc<SkipCounters>>,
 ) -> Result<Vec<Entry>> {
     let mut entries: Vec<Entry> = Vec::new();
     let mut walker = WalkBuilder::new(root);
@@ -88,7 +96,7 @@ fn collect_supported_entries(
         .git_exclude(use_gitignore)
         .ignore(false)
         .parents(true)
-        .filter_entry(move |entry| keep_entry_counted(entry, hardcoded_counter.as_ref()));
+        .filter_entry(move |entry| keep_entry_counted(entry, skipped.as_ref()));
     for entry in walker.build() {
         let entry = entry?;
         if !entry
@@ -154,16 +162,33 @@ fn rel_path(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-fn keep_entry(entry: &DirEntry) -> bool {
-    !is_hardcoded_floor(entry)
+fn keep_entry_counted(entry: &DirEntry, skipped: Option<&Arc<SkipCounters>>) -> bool {
+    if is_hardcoded_floor(entry) {
+        if let Some(counters) = skipped {
+            counters.hardcoded_floor.fetch_add(1, Ordering::Relaxed);
+        }
+        return false;
+    }
+    if is_nested_repo(entry) {
+        if let Some(counters) = skipped {
+            counters.nested_repo.fetch_add(1, Ordering::Relaxed);
+        }
+        return false;
+    }
+    true
 }
 
-fn keep_entry_counted(entry: &DirEntry, hardcoded_counter: Option<&Arc<AtomicUsize>>) -> bool {
-    let keep = keep_entry(entry);
-    if let Some(counter) = hardcoded_counter.filter(|_| !keep) {
-        counter.fetch_add(1, Ordering::Relaxed);
-    }
-    keep
+/// A directory below the walk root that holds its own `.git` entry (a file for
+/// linked worktrees and submodules, a directory for nested clones) is a
+/// separate checkout. Indexing it would duplicate first-party code, so the walk
+/// stops at that boundary. The root (depth 0) is exempt, because it is often
+/// itself a linked worktree.
+fn is_nested_repo(entry: &DirEntry) -> bool {
+    entry.depth() > 0
+        && entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_dir())
+        && entry.path().join(".git").symlink_metadata().is_ok()
 }
 
 fn is_hardcoded_floor(entry: &DirEntry) -> bool {
