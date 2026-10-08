@@ -48,6 +48,8 @@ INSTANCES = frozenset({"operator", "repository-scout", "implementation-worker"})
 _FLEET_HOLDER_DOMAIN = b"brigade.grokbot.fleet-holder"
 _FLEET_SESSION_DOMAIN = b"brigade.grokbot.fleet-session"
 _FLEET_BEST_EFFORT = frozenset({"no-hub", "no-identity", "hub-unavailable"})
+# Queue answers that definitively say the caller no longer owns the lease.
+_LEASE_REFUSALS = frozenset({"lease-expired", "job-expired", "lease-conflict"})
 # Refusal for a claim that raced another call across an origin change (#1639).
 # It is an ordinary retryable refusal: the retry reads the stored key.
 CLAIM_TARGET_CHANGED = "claim target changed concurrently, retrying the same lease is safe"
@@ -491,11 +493,15 @@ class GrokbotAdapter:
                     worker_label=worker_label,
                     claim_target=claim_target,
                 )
-            except Exception:
-                # Only a first claim gives anything back, and only because its
-                # lease was never granted. A retry's key came from the lease's
-                # own row, so the claim it re-acquired is the original caller's.
-                if not is_retry:
+            except Exception as exc:
+                # A first claim always gives back what it took: its lease was
+                # never granted. A retry's key came from the lease's own row, so
+                # the claim it re-acquired is the original caller's. It gives it
+                # back only when the queue definitively says the caller no longer
+                # owns the lease, as holding it would block the repo until the
+                # hub TTL. An indeterminate failure (an OSError, a timeout) says
+                # nothing about ownership, so it releases nothing.
+                if not is_retry or _is_lease_refusal(exc):
                     self._release_hub_lease(job["job_id"], lease_id, "released")
                     if decision.granted:
                         self._fleet_release(job["job_id"], lease_id, holder, claim_target)
@@ -1335,6 +1341,11 @@ def fleet_holder(job_id: str, lease_id: str) -> str:
 def fleet_session(job_id: str, lease_id: str) -> str:
     """Opaque non-capability session label, domain-separated from the holder."""
     return hmac.new(_FLEET_SESSION_DOMAIN, _fleet_derivation_message(job_id, lease_id), hashlib.sha256).hexdigest()[:32]
+
+
+def _is_lease_refusal(exc: BaseException) -> bool:
+    """Whether the queue definitively said this caller does not own the lease."""
+    return isinstance(exc, grokbot_jobs.GrokbotJobError) and exc.reason in _LEASE_REFUSALS
 
 
 def _fleet_refused(decision: fleet_client.ClaimDecision) -> bool:

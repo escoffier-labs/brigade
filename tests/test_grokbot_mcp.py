@@ -2657,6 +2657,37 @@ def test_an_idempotent_retry_never_resolves_and_never_releases_the_live_claim(
     assert hub == {}
 
 
+@pytest.mark.parametrize(
+    ("refusal", "released"),
+    [
+        ("lease-expired", True),
+        ("job-expired", True),
+        ("lease-conflict", True),
+        # The queue answered, but the caller still owns the lease: keep the claim.
+        ("invalid-state", False),
+    ],
+)
+def test_a_retry_the_queue_definitively_refuses_gives_the_claim_back(tmp_path: Path, monkeypatch, refusal, released):
+    """The caller no longer owns the lease, so holding its hub claim only blocks the repo until the TTL."""
+    job_id = _enqueue_job(tmp_path, "job-a")
+    adapter = _adapter(tmp_path)
+    hub, calls, _resolutions = _stateful_hub(monkeypatch, {"key": "acme/repo"})
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    holder = grokbot_mcp.fleet_holder(job_id, "lease-a")
+    calls.clear()
+
+    def refuse(*args, **kwargs):
+        raise grokbot_jobs.GrokbotJobError(refusal)
+
+    monkeypatch.setattr(grokbot_jobs, "claim_execution_context", refuse)
+    with pytest.raises(grokbot_mcp.AdapterError):
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+
+    # The retry re-acquired the key, so it either gives that key back or leaves it owned.
+    assert [kind for kind, _target in calls if kind == "release"] == (["release"] if released else [])
+    assert hub == ({} if released else {"acme/repo": holder})
+
+
 @pytest.mark.parametrize("release_fails", [False, True], ids=["release-ok", "release-fails"])
 def test_a_race_across_an_origin_change_releases_only_the_acquired_key_and_refuses(
     tmp_path: Path, monkeypatch, release_fails
