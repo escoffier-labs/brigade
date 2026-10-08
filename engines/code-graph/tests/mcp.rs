@@ -331,7 +331,13 @@ fn tools_call_refresh_failure_still_answers_with_note() {
     let dir = synced_repo_with_graph_dir();
     let root = dir.path();
     let db = root.join(".graphtrail").join("graphtrail.db");
-    fs::write(root.join("bad.py"), [0xff, 0xfe, 0xfd]).unwrap();
+    // A held sync lock makes the refresh fail fast. (A non-UTF-8 file used to
+    // be the trigger, but sync now skips such files instead of failing.)
+    fs::write(
+        root.join(".graphtrail").join("graphtrail.db.lock"),
+        format!("{}\n", std::process::id()),
+    )
+    .unwrap();
 
     let resp = handle_request(
         &db,

@@ -244,6 +244,18 @@ pub fn run(cli: Cli) -> Result<()> {
                     db_path.display()
                 );
             }
+            if summary.skipped > 0 {
+                let reasons: Vec<String> = summary
+                    .skipped_by_reason
+                    .iter()
+                    .map(|(reason, count)| format!("{reason}={count}"))
+                    .collect();
+                println!(
+                    "skipped files={} {} (run doctor for paths)",
+                    summary.skipped,
+                    reasons.join(" ")
+                );
+            }
         }
         Command::Search {
             query,
@@ -459,6 +471,9 @@ pub fn run(cli: Cli) -> Result<()> {
                         file.imports.len(),
                         file.calls.len()
                     );
+                }
+                for file in &report.skipped {
+                    println!("{} skipped ({}): {}", file.path, file.reason, file.detail);
                 }
             }
         }
@@ -771,8 +786,35 @@ fn print_doctor_report(report: &crate::query::DoctorReport, json: bool) -> Resul
         report.ignored.nested_repo,
         report.ignored.minified
     );
+    let skipped_sample: Vec<String> = report
+        .skipped
+        .sample
+        .iter()
+        .map(|file| format!("{} ({})", file.path, file.reason))
+        .collect();
+    println!(
+        "skipped: count={}{}",
+        report.skipped.count,
+        sample_suffix(&skipped_sample)
+    );
+    println!(
+        "parse_errors: count={}{}",
+        report.parse_errors.count,
+        sample_suffix(&report.parse_errors.sample)
+    );
+    for warning in &report.warnings {
+        println!("warning: {warning}");
+    }
     println!("verdict: {}", report.verdict);
     Ok(())
+}
+
+fn sample_suffix(sample: &[String]) -> String {
+    if sample.is_empty() {
+        String::new()
+    } else {
+        format!(" sample={}", sample.join(", "))
+    }
 }
 
 fn render_context(pack: &ContextPack) -> String {

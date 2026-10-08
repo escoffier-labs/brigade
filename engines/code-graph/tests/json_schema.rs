@@ -140,3 +140,49 @@ fn doctor_exposes_stale_resolver_markers_and_sync_repairs_them() {
         }
     }
 }
+
+#[test]
+fn doctor_json_reports_skipped_files_parse_errors_and_warnings() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let db = root.join("g.db");
+    fs::write(root.join("main.py"), "def run():\n    pass\n").unwrap();
+    fs::write(root.join("broken.py"), "def broken(:\n    pass\n").unwrap();
+    fs::write(root.join("bad.py"), b"x = 1\n\xff\xfe bad\n").unwrap();
+    let conn = open_db(&db).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, root).unwrap();
+
+    let report = graphtrail::query::doctor(&conn, root, &db).unwrap();
+    let json = serde_json::to_value(&report).unwrap();
+
+    assert_eq!(json["verdict"], "FRESH");
+    assert_eq!(json["skipped"]["count"], 1);
+    assert_eq!(json["skipped"]["sample"][0]["path"], "bad.py");
+    assert_eq!(json["skipped"]["sample"][0]["reason"], "unreadable_utf8");
+    assert_eq!(json["parse_errors"]["count"], 1);
+    assert_eq!(json["parse_errors"]["sample"][0], "broken.py");
+    let warnings = json["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(warnings.iter().all(serde_json::Value::is_string));
+
+    let clean_dir = tempfile::tempdir().unwrap();
+    let clean_root = clean_dir.path();
+    let clean_db = clean_root.join("g.db");
+    fs::write(clean_root.join("main.py"), "def run():\n    pass\n").unwrap();
+    let clean = open_db(&clean_db).unwrap();
+    init_schema(&clean).unwrap();
+    sync_repo(&clean, clean_root).unwrap();
+    let json =
+        serde_json::to_value(graphtrail::query::doctor(&clean, clean_root, &clean_db).unwrap())
+            .unwrap();
+    assert_eq!(
+        json["skipped"],
+        serde_json::json!({"count": 0, "sample": []})
+    );
+    assert_eq!(
+        json["parse_errors"],
+        serde_json::json!({"count": 0, "sample": []})
+    );
+    assert_eq!(json["warnings"], serde_json::json!([]));
+}

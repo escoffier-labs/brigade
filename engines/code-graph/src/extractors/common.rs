@@ -98,6 +98,9 @@ pub fn extract_with<L: LangSpec>(
         .parse(content, None)
         .ok_or_else(|| anyhow!("tree-sitter returned no parse tree for {path}"))?;
 
+    // tree-sitter recovers from syntax errors; record that it had to so
+    // `doctor` can flag files whose edges may be incomplete.
+    let parse_errors = tree.root_node().has_error();
     let lines: Vec<&str> = content.lines().collect();
     let ctx = Ctx {
         path,
@@ -139,6 +142,7 @@ pub fn extract_with<L: LangSpec>(
         symbols: symbol_state.symbols,
         imports,
         calls,
+        parse_errors,
         exports: spec.module_exports(tree.root_node(), ctx.source),
         conditional_symbols: symbol_state.conditional,
     })

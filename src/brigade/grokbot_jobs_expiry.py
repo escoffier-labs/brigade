@@ -44,10 +44,14 @@ def _projection(record: dict[str, Any]) -> dict[str, Any]:
     return projection
 
 
-def _claim_result(record: dict[str, Any], *, include_context: bool) -> dict[str, Any]:
+def _claim_result(record: dict[str, Any], *, include_context: bool, with_claim_target: bool = False) -> dict[str, Any]:
     result = _projection(record)
     if include_context:
         result["execution_context"] = _execution_context(record)
+    if with_claim_target:
+        # Only for a caller that passed a claim_target and pops this before it
+        # answers anyone: the key stored by this same locked write (#1639).
+        result["claim_target"] = record.get("claim_target")
     return result
 
 

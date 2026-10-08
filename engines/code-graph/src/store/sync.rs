@@ -4,7 +4,7 @@
 //! policy, and edge resolution live in focused sibling modules. This façade
 //! preserves the public sync surface and the transaction order.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -21,7 +21,8 @@ use crate::store::repo_policy::{
     ensure_graphtrail_ignored, guard_unsafe_root, has_git_marker, write_branch_meta,
 };
 use crate::store::resolve::rebuild_edges;
-use crate::store::schema::SchemaUpgrade;
+use crate::store::schema::{SchemaUpgrade, clear_parse_census_pending};
+use crate::store::skipped::{clear_skipped, load_skipped, record_skipped, skipped_reason_counts};
 use crate::store::walk::{Entry, collect_sync_walk};
 
 #[derive(Debug, Default)]
@@ -34,6 +35,11 @@ pub struct SyncSummary {
     pub unchanged: bool,
     /// Files removed from the index because they no longer exist on disk.
     pub deleted: usize,
+    /// Files currently recorded as skipped (unreadable or unparseable),
+    /// including ones skipped by earlier syncs and left unchanged since.
+    pub skipped: usize,
+    /// `skipped` broken down by reason (`unreadable_utf8`, `io_error`, `parse_error`).
+    pub skipped_by_reason: BTreeMap<String, usize>,
 }
 
 /// Incremental sync (skips work when nothing changed).
@@ -52,6 +58,7 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
 
     let entries = collect_sync_walk(&root, false)?.entries;
     let db_files = load_db_files(conn)?;
+    let skipped = load_skipped(conn)?;
     if graph_dir_created && db_files.is_empty() && has_git_marker(&root) {
         ensure_graphtrail_ignored(&root)?;
     }
@@ -62,30 +69,34 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
         .filter(|path| !on_disk.contains(path.as_str()))
         .cloned()
         .collect();
+    let skipped_gone: Vec<&str> = skipped
+        .keys()
+        .filter(|path| !on_disk.contains(path.as_str()))
+        .map(String::as_str)
+        .collect();
 
     let files_to_index: Vec<&Entry> = if force_full_reindex {
         entries.iter().collect()
     } else {
-        stale_plan(&entries, &db_files)?.entries
+        stale_plan(&entries, &db_files, &skipped)?.entries
     };
 
     let changed =
         !deleted.is_empty() || !files_to_index.is_empty() || upgrade == SchemaUpgrade::RebuildEdges;
     if !changed {
         let tx = conn.unchecked_transaction()?;
+        for path in &skipped_gone {
+            clear_skipped(&tx, path)?;
+        }
+        if force_full_reindex {
+            // A full reindex with no entries has nothing to census.
+            clear_parse_census_pending(&tx)?;
+        }
         crate::store::meta::write_sync_meta(&tx)?;
         write_branch_meta(&tx, &root)?;
         tx.commit()?;
 
-        let counts = table_counts(conn)?;
-        return Ok(SyncSummary {
-            files: counts.0,
-            symbols: counts.1,
-            calls: counts.2,
-            imports: counts.3,
-            unchanged: true,
-            deleted: 0,
-        });
+        return summarize(conn, true, 0);
     }
 
     let tx = conn.unchecked_transaction()?;
@@ -98,26 +109,46 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
     for path in &purge {
         purge_file_graph(&tx, path)?;
     }
+    for path in &skipped_gone {
+        clear_skipped(&tx, path)?;
+    }
 
+    // A file that cannot be read or parsed is skipped and recorded (its old
+    // rows were purged above). Only database errors abort the transaction.
     let now = now_ts();
     for entry in files_to_index {
-        let graph = index_file(&root, &entry.path, entry.lang)?;
-        write_file_graph(&tx, &graph, now)?;
+        match index_file(&root, &entry.path, entry.lang) {
+            Ok(graph) => {
+                write_file_graph(&tx, &graph, now)?;
+                clear_skipped(&tx, &entry.rel)?;
+            }
+            Err(failure) => record_skipped(&tx, entry, &failure, now)?,
+        }
     }
 
     rebuild_edges(&tx)?;
+    if force_full_reindex {
+        clear_parse_census_pending(&tx)?;
+    }
     crate::store::meta::write_sync_meta(&tx)?;
     write_branch_meta(&tx, &root)?;
     tx.commit()?;
 
+    summarize(conn, false, deleted.len())
+}
+
+fn summarize(conn: &Connection, unchanged: bool, deleted: usize) -> Result<SyncSummary> {
     let counts = table_counts(conn)?;
+    let skipped_by_reason = skipped_reason_counts(conn)?;
     Ok(SyncSummary {
         files: counts.0,
         symbols: counts.1,
         calls: counts.2,
         imports: counts.3,
-        unchanged: false,
-        deleted: deleted.len(),
+        unchanged,
+        deleted,
+        skipped: skipped_by_reason.values().sum(),
+        skipped_by_reason,
     })
 }
 
@@ -125,6 +156,7 @@ pub fn pending_changes(conn: &Connection, root: &Path) -> Result<(PendingChanges
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let walk = collect_sync_walk(&root, true)?;
     let db_files = load_db_files(conn)?;
+    let skipped = load_skipped(conn)?;
     let on_disk: HashSet<&str> = walk
         .entries
         .iter()
@@ -138,11 +170,11 @@ pub fn pending_changes(conn: &Connection, root: &Path) -> Result<(PendingChanges
         ..PendingChanges::default()
     };
     for entry in &walk.entries {
-        match entry_freshness(entry, &db_files)? {
+        match entry_freshness(entry, &db_files, &skipped)? {
             EntryFreshness::New => pending.new_files += 1,
             EntryFreshness::Changed => pending.changed_files += 1,
             EntryFreshness::FingerprintStale => pending.fingerprint_stale += 1,
-            EntryFreshness::Fresh => {}
+            EntryFreshness::Fresh | EntryFreshness::Skipped => {}
         }
     }
     Ok((pending, walk.ignored))

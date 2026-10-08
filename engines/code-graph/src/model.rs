@@ -115,6 +115,8 @@ pub struct FileGraph {
     pub symbols: Vec<Symbol>,
     pub imports: Vec<Import>,
     pub calls: Vec<PendingCall>,
+    /// True when tree-sitter had to recover from syntax errors while parsing.
+    pub parse_errors: bool,
     /// The module's literal export list (Python `__all__`), when it declares one.
     pub exports: Option<Vec<String>>,
     /// Ids of top-level symbols defined under an `if`, `try`, `with`, loop, or

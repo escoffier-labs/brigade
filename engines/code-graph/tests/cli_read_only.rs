@@ -355,6 +355,62 @@ fn doctor_new_file_reports_stale_exit_1() {
 }
 
 #[test]
+fn sync_skips_non_utf8_file_and_reports_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("pkg")).unwrap();
+    fs::write(root.join("pkg/core.py"), "def helper():\n    return 1\n").unwrap();
+    let sync = |root: &Path| {
+        Command::new(graphtrail())
+            .current_dir(root)
+            .args(["sync", "."])
+            .output()
+            .unwrap()
+    };
+    assert!(sync(root).status.success());
+    fs::write(root.join("pkg/new.py"), "def newfn():\n    return 2\n").unwrap();
+    fs::write(root.join("pkg/bad.py"), b"x = 1\n\xff\xfe bad\n").unwrap();
+
+    let output = sync(root);
+
+    assert!(output.status.success(), "sync failed: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("skipped files=1 unreadable_utf8=1"),
+        "stdout: {stdout}"
+    );
+    let db = root.join(".graphtrail").join("graphtrail.db");
+    let doctor = Command::new(graphtrail())
+        .current_dir(root)
+        .args(["--db", &db.display().to_string(), "doctor", "--json"])
+        .output()
+        .unwrap();
+    assert!(doctor.status.success(), "doctor output: {doctor:?}");
+    let value: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert_eq!(value["verdict"], "FRESH");
+    assert_eq!(value["pending"]["new_files"], 0);
+    assert_eq!(value["skipped"]["count"], 1);
+    assert_eq!(value["skipped"]["sample"][0]["path"], "pkg/bad.py");
+    let search = Command::new(graphtrail())
+        .current_dir(root)
+        .args(["--db", &db.display().to_string(), "search", "newfn"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&search.stdout).contains("newfn"));
+
+    let text = Command::new(graphtrail())
+        .current_dir(root)
+        .args(["--db", &db.display().to_string(), "doctor"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        text.contains("skipped: count=1 sample=pkg/bad.py (unreadable_utf8)"),
+        "doctor text: {text}"
+    );
+}
+
+#[test]
 fn doctor_null_fingerprint_reports_stale_fingerprint() {
     let dir = tempfile::tempdir().unwrap();
     let db = build_db(dir.path());

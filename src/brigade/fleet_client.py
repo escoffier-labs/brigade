@@ -106,6 +106,7 @@ if TYPE_CHECKING:
     from .fleet_session_presence import SessionSnapshot
 
 from . import fleet_claim_lifecycle as _claim_lifecycle
+from . import fleet_claim_target as _claim_target
 from . import toml_compat as tomllib
 from .fleet_claim_lifecycle import _ConfirmedClaimLease as _ConfirmedClaimLease
 
@@ -1161,19 +1162,11 @@ class FleetClaimAuthError(FleetClaimHeldError):
 def resolve_claim_target(base_path: Path | None = None) -> str:
     """Stable cross-machine claim key for the repo at ``base_path``.
 
-    The owning workspace directory name — the same value the event reporter
-    uses for ``repo`` — so claims and status rows group on one key. Falls
-    back to the directory's own name when no workspace identity exists.
+    The owning workspace directory name when the repo has its own
+    ``.brigade/node.toml``, else derived from the git repo itself and never
+    the home identity directory (#1639). See ``fleet_claim_target``.
     """
-    start = Path(base_path) if base_path is not None else Path.cwd()
-    workspace = find_workspace_for_path(start)
-    if workspace is not None:
-        return workspace.name
-    try:
-        resolved = start.expanduser().resolve()
-    except OSError:
-        resolved = start.expanduser()
-    return resolved.name or "unknown"
+    return _claim_target.resolve(base_path)
 
 
 def _post_claim_blocking(hub_url: str, token: str, body: dict[str, Any], *, timeout: float) -> tuple[int, Any]:

@@ -2474,3 +2474,429 @@ def test_claim_advertises_the_optional_worker_label_argument():
     )
     assert grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": "grokbot-a", "worker_label": None})
     assert not grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": "grokbot-a", "worker_label": 2})
+
+
+def _record_fleet_calls(monkeypatch, resolve):
+    """Patch the fleet client so every claim call records the target it was given."""
+    seen: list[tuple[str, str]] = []
+
+    def record(kind: str, decision):
+        def call(target, **kwargs):
+            seen.append((kind, target))
+            return decision
+
+        return call
+
+    granted = fleet_client.ClaimDecision(granted=True, reason="ok", holder="h")
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", resolve)
+    monkeypatch.setattr(fleet_client, "acquire_claim", record("acquire", granted))
+    monkeypatch.setattr(fleet_client, "renew_claim", record("renew", granted))
+    monkeypatch.setattr(fleet_client, "release_claim", record("release", None))
+    monkeypatch.setattr(
+        fleet_client,
+        "report_external_event",
+        lambda **kwargs: seen.append(("event", kwargs["target"])),
+        raising=False,
+    )
+    return seen
+
+
+def _enqueue_job(tmp_path: Path, key: str) -> str:
+    return grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), key)["job_id"]
+
+
+def test_retrying_the_same_lease_keeps_its_stored_target(tmp_path: Path, monkeypatch):
+    """An idempotent claim retry must not re-resolve: failing the job must release the live claim."""
+    job_id = _enqueue_job(tmp_path, "job-a")
+    adapter = _adapter(tmp_path)
+    current = {"key": "acme/repo"}
+    seen = _record_fleet_calls(monkeypatch, lambda base_path=None: current["key"])
+
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    current["key"] = "acme/new-repo"
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    adapter.call_tool("grokbot_queue_fail", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert {target for _kind, target in seen} == {"acme/repo"}
+    assert [kind for kind, _target in seen].count("release") == 1
+
+
+def _stateful_hub(monkeypatch, current: dict[str, str]):
+    """A fleet hub that tracks which key each holder owns, plus the call log.
+
+    Returns ``(hub, calls, resolutions)``: ``hub`` maps claim key to holder, so a
+    test can tell a released claim from a live one, not just read a call list.
+    """
+    hub: dict[str, str] = {}
+    calls: list[tuple[str, str]] = []
+    resolutions: list[object] = []
+    granted = fleet_client.ClaimDecision(granted=True, reason="ok", holder="h")
+
+    def resolve(base_path=None):
+        resolutions.append(base_path)
+        return current["key"]
+
+    def acquire(target, **kwargs):
+        calls.append(("acquire", target))
+        hub[target] = kwargs["holder"]
+        return granted
+
+    def renew(target, **kwargs):
+        calls.append(("renew", target))
+        if hub.get(target) == kwargs["holder"]:
+            return granted
+        return fleet_client.ClaimDecision(granted=False, reason="missing", holder=kwargs["holder"])
+
+    def release(target, **kwargs):
+        calls.append(("release", target))
+        if hub.get(target) == kwargs["holder"]:
+            del hub[target]
+
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", resolve)
+    monkeypatch.setattr(fleet_client, "acquire_claim", acquire)
+    monkeypatch.setattr(fleet_client, "renew_claim", renew)
+    monkeypatch.setattr(fleet_client, "release_claim", release)
+    monkeypatch.setattr(
+        fleet_client, "report_external_event", lambda **kwargs: calls.append(("event", kwargs["target"])), raising=False
+    )
+    return hub, calls, resolutions
+
+
+def test_a_first_claim_stores_the_target_in_the_same_write_that_grants_the_lease(tmp_path: Path, monkeypatch):
+    job_id = _enqueue_job(tmp_path, "job-a")
+    adapter = _adapter(tmp_path)
+    hub, _calls, _resolutions = _stateful_hub(monkeypatch, {"key": "acme/repo"})
+    writes: list[dict[str, object]] = []
+    real_write = grokbot_jobs._write_json_file
+
+    def spy(directory, name, payload):
+        if payload.get("schema") == grokbot_jobs.JOB_SCHEMA:
+            writes.append(dict(payload))
+        return real_write(directory, name, payload)
+
+    monkeypatch.setattr(grokbot_jobs, "_write_json_file", spy)
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+
+    # One row write grants the lease and stores the key: there is no separate binding write.
+    assert len(writes) == 1 and writes[0]["state"] == "claimed" and writes[0]["claim_target"] == "acme/repo"
+    assert list(hub) == ["acme/repo"]
+
+
+def test_a_failed_claim_write_grants_no_lease_and_gives_the_hub_claim_back(tmp_path: Path, monkeypatch):
+    job_id = _enqueue_job(tmp_path, "job-a")
+    adapter = _adapter(tmp_path)
+    hub, calls, _resolutions = _stateful_hub(monkeypatch, {"key": "acme/repo"})
+
+    def failing_write(directory, name, payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(grokbot_jobs, "_write_json_file", failing_write)
+    with pytest.raises(grokbot_mcp.AdapterError):
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert calls == [("acquire", "acme/repo"), ("release", "acme/repo")]
+    assert hub == {}
+    # The row was never claimed, so nothing is stranded.
+    assert grokbot_jobs.status(tmp_path, job_id)["state"] == "queued"
+
+
+@pytest.mark.parametrize("io_fails_after_acquire", [False, True], ids=["healthy", "queue-io-fails-after-acquire"])
+def test_an_idempotent_retry_never_resolves_and_never_releases_the_live_claim(
+    tmp_path: Path, monkeypatch, io_fails_after_acquire
+):
+    job_id = _enqueue_job(tmp_path, "job-a")
+    adapter = _adapter(tmp_path)
+    current = {"key": "acme/repo"}
+    hub, calls, resolutions = _stateful_hub(monkeypatch, current)
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    holder = grokbot_mcp.fleet_holder(job_id, "lease-a")
+    assert hub == {"acme/repo": holder}
+    calls.clear()
+    resolutions.clear()
+
+    armed = {"on": False}
+    real_acquire, real_read, real_write = (
+        fleet_client.acquire_claim,
+        grokbot_jobs._read_json_file,
+        grokbot_jobs._write_json_file,
+    )
+
+    def acquire_then_arm(*args, **kwargs):
+        decision = real_acquire(*args, **kwargs)
+        armed["on"] = io_fails_after_acquire
+        return decision
+
+    def read(*args, **kwargs):
+        if armed["on"]:
+            raise OSError("transient read failure")
+        return real_read(*args, **kwargs)
+
+    def write(*args, **kwargs):
+        if armed["on"]:
+            raise OSError("transient write failure")
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_client, "acquire_claim", acquire_then_arm)
+    monkeypatch.setattr(grokbot_jobs, "_read_json_file", read)
+    monkeypatch.setattr(grokbot_jobs, "_write_json_file", write)
+
+    current["key"] = "acme/new-repo"
+    if io_fails_after_acquire:
+        # Every queue read and write after the hub acquire fails. The call errors,
+        # but the original caller's claim must stay owned and unreleased.
+        with pytest.raises(grokbot_mcp.AdapterError):
+            adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+        armed["on"] = False
+    else:
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert resolutions == []
+    assert [kind for kind, _target in calls if kind == "release"] == []
+    assert hub == {"acme/repo": holder}
+    adapter.call_tool("grokbot_queue_fail", {"job_id": job_id, "lease_id": "lease-a"})
+    assert hub == {}
+
+
+@pytest.mark.parametrize(
+    ("refusal", "released"),
+    [
+        ("lease-expired", True),
+        ("job-expired", True),
+        ("lease-conflict", True),
+        # The job already finished, so nobody owns the lease the retry re-acquired.
+        ("terminal-state", True),
+        # The queue answered, but the caller still owns the lease: keep the claim.
+        ("invalid-state", False),
+    ],
+)
+def test_a_retry_the_queue_definitively_refuses_gives_the_claim_back(tmp_path: Path, monkeypatch, refusal, released):
+    """The caller no longer owns the lease, so holding its hub claim only blocks the repo until the TTL."""
+    job_id = _enqueue_job(tmp_path, "job-a")
+    adapter = _adapter(tmp_path)
+    hub, calls, _resolutions = _stateful_hub(monkeypatch, {"key": "acme/repo"})
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    holder = grokbot_mcp.fleet_holder(job_id, "lease-a")
+    calls.clear()
+
+    def refuse(*args, **kwargs):
+        raise grokbot_jobs.GrokbotJobError(refusal)
+
+    monkeypatch.setattr(grokbot_jobs, "claim_execution_context", refuse)
+    with pytest.raises(grokbot_mcp.AdapterError):
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+
+    # The retry re-acquired the key, so it either gives that key back or leaves it owned.
+    assert [kind for kind, _target in calls if kind == "release"] == (["release"] if released else [])
+    assert hub == ({} if released else {"acme/repo": holder})
+
+
+def test_a_retry_after_the_job_failed_gives_back_the_reacquired_claim(tmp_path: Path, monkeypatch):
+    """A failed job keeps its stored target, so a late retry re-acquires the key; the terminal refusal must release it."""
+    job_id = _enqueue_job(tmp_path, "job-a")
+    adapter = _adapter(tmp_path)
+    hub, calls, _resolutions = _stateful_hub(monkeypatch, {"key": "acme/repo"})
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    adapter.call_tool("grokbot_queue_fail", {"job_id": job_id, "lease_id": "lease-a"})
+    assert hub == {}
+    calls.clear()
+
+    with pytest.raises(grokbot_mcp.AdapterError):
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert [kind for kind, _target in calls] == ["acquire", "release"]
+    assert hub == {}
+
+
+@pytest.mark.parametrize("release_fails", [False, True], ids=["release-ok", "release-fails"])
+def test_a_race_across_an_origin_change_releases_only_the_acquired_key_and_refuses(
+    tmp_path: Path, monkeypatch, release_fails
+):
+    """Two first claims raced: A won the row, this call acquired B.
+
+    It gives back B only. A failed release of B lapses by the hub TTL, the same
+    as a worker that crashed after acquiring, and is accepted.
+    """
+    job_id = _enqueue_job(tmp_path, "job-a")
+    adapter = _adapter(tmp_path)
+    current = {"key": "acme/repo"}
+    hub, calls, _resolutions = _stateful_hub(monkeypatch, current)
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    holder = grokbot_mcp.fleet_holder(job_id, "lease-a")
+    calls.clear()
+
+    # This call's pre-claim read missed the winner's row, so it resolves the new key.
+    current["key"] = "acme/new-repo"
+    real_lookup = grokbot_jobs.lease_claim_target
+    lookups = {"count": 0}
+
+    def stale_first_lookup(*args, **kwargs):
+        lookups["count"] += 1
+        return None if lookups["count"] == 1 else real_lookup(*args, **kwargs)
+
+    monkeypatch.setattr(grokbot_jobs, "lease_claim_target", stale_first_lookup)
+    if release_fails:
+        # The call is recorded, then the hub never hears of it.
+        def lost_release(target, **kwargs):
+            calls.append(("release", target))
+            raise TimeoutError("release failed")
+
+        monkeypatch.setattr(fleet_client, "release_claim", lost_release)
+
+    with pytest.raises(grokbot_mcp.AdapterError) as refusal:
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert calls == [("acquire", "acme/new-repo"), ("release", "acme/new-repo")]
+    # The winner's claim is untouched; the loser's lapses by TTL when its release is lost.
+    assert hub.get("acme/repo") == holder
+    assert ("acme/new-repo" in hub) is release_fails
+    assert refusal.value.public_error() == {
+        "error": {"code": "invalid_request", "message": grokbot_mcp.CLAIM_TARGET_CHANGED}
+    }
+    assert "retrying the same lease is safe" in grokbot_mcp.CLAIM_TARGET_CHANGED
+    assert "changed concurrently" in grokbot_mcp.CLAIM_TARGET_CHANGED
+    # The same code a hub refusal uses, so a client treats it as a retryable refusal.
+    assert refusal.value.public_error()["error"]["code"] == grokbot_mcp.AdapterError().public_error()["error"]["code"]
+    # The retry reads the stored key and is granted under it alone.
+    calls.clear()
+    granted = adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    assert granted["state"] == "claimed"
+    assert [(kind, target) for kind, target in calls if kind == "acquire"] == [("acquire", "acme/repo")]
+
+
+def test_a_new_lease_resolves_the_target_afresh(tmp_path: Path, monkeypatch):
+    first, second = _enqueue_job(tmp_path, "job-a"), _enqueue_job(tmp_path, "job-b")
+    adapter = _adapter(tmp_path)
+    current = {"key": "acme/repo"}
+    seen = _record_fleet_calls(monkeypatch, lambda base_path=None: current["key"])
+
+    adapter.call_tool("grokbot_queue_claim", {"job_id": first, "lease_id": "lease-a"})
+    current["key"] = "acme/new-repo"
+    # The live lease keeps its key while the next job's lease gets the new one.
+    adapter.call_tool("grokbot_queue_renew", {"job_id": first, "lease_id": "lease-a"})
+    adapter.call_tool("grokbot_queue_claim", {"job_id": second, "lease_id": "lease-b"})
+    adapter.call_tool("grokbot_queue_fail", {"job_id": first, "lease_id": "lease-a"})
+    adapter.call_tool("grokbot_queue_fail", {"job_id": second, "lease_id": "lease-b"})
+
+    assert [(kind, target) for kind, target in seen if kind in {"acquire", "release"}] == [
+        ("acquire", "acme/repo"),
+        ("acquire", "acme/new-repo"),
+        ("release", "acme/repo"),
+        ("release", "acme/new-repo"),
+    ]
+
+
+def test_a_lost_renew_response_does_not_move_the_release_to_another_key(tmp_path: Path, monkeypatch):
+    """The hub extends the claim, the response is lost, the clock passes the old expiry, origin changes.
+
+    Only a release on the original key frees the claim the hub still holds.
+    """
+    import time
+
+    job_id = _enqueue_job(tmp_path, "job-a")
+    adapter = _adapter(tmp_path)
+    current = {"key": "acme/repo"}
+    hub: dict[str, str] = {}  # claim key -> holder, as the hub sees it
+    granted = fleet_client.ClaimDecision(granted=True, reason="ok", holder="h")
+
+    def acquire(target, **kwargs):
+        hub[target] = kwargs["holder"]
+        return granted
+
+    def renew_with_lost_response(target, **kwargs):
+        if hub.get(target) == kwargs["holder"]:
+            raise TimeoutError("the hub extended the claim, the response was lost")
+        return fleet_client.ClaimDecision(granted=False, reason="missing", holder=kwargs["holder"])
+
+    def release(target, **kwargs):
+        if hub.get(target) == kwargs["holder"]:
+            del hub[target]
+
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda base_path=None: current["key"])
+    monkeypatch.setattr(fleet_client, "acquire_claim", acquire)
+    monkeypatch.setattr(fleet_client, "renew_claim", renew_with_lost_response)
+    monkeypatch.setattr(fleet_client, "release_claim", release)
+    monkeypatch.setattr(fleet_client, "report_external_event", lambda **kwargs: None, raising=False)
+
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    assert list(hub) == ["acme/repo"]
+
+    real_monotonic = time.monotonic
+    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + 10 * grokbot_mcp.DEFAULT_LEASE_SECONDS)
+    try:  # Whether the lost response refuses the renewal depends on a configured hub.
+        adapter.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": "lease-a"})
+    except grokbot_mcp.AdapterError:
+        pass
+    current["key"] = "acme/new-repo"
+    adapter.call_tool("grokbot_queue_fail", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert hub == {}
+
+
+def test_concurrent_renew_and_release_stay_on_one_key(tmp_path: Path, monkeypatch):
+    import threading
+
+    job_id = _enqueue_job(tmp_path, "job-a")
+    adapter = _adapter(tmp_path)
+    current = {"key": "acme/repo"}
+    seen = _record_fleet_calls(monkeypatch, lambda base_path=None: current["key"])
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    current["key"] = "acme/new-repo"
+    holder = grokbot_mcp.fleet_holder(job_id, "lease-a")
+    start = threading.Barrier(16)
+
+    def work(index: int) -> None:
+        start.wait()
+        if index % 2:
+            adapter._fleet_renew(job_id, "lease-a", holder, 900)
+        else:
+            adapter._fleet_release(job_id, "lease-a", holder)
+
+    threads = [threading.Thread(target=work, args=(index,)) for index in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert {target for kind, target in seen if kind in {"renew", "release"}} == {"acme/repo"}
+
+
+def test_a_restarted_listener_keeps_the_lease_target_and_never_re_resolves(tmp_path: Path, monkeypatch):
+    from brigade.fleet_claim_target import ClaimTargetError
+
+    job_id = _enqueue_job(tmp_path, "job-a")
+    current = {"key": "acme/repo"}
+    seen = _record_fleet_calls(monkeypatch, lambda base_path=None: current["key"])
+    _adapter(tmp_path).call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+
+    def unresolvable(base_path=None):
+        raise ClaimTargetError("resolver timed out")
+
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", unresolvable)
+    seen.clear()
+    restarted = _adapter(tmp_path)
+    restarted.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": "lease-a"})
+    restarted.call_tool("grokbot_queue_fail", {"job_id": job_id, "lease_id": "lease-a"})
+
+    # The calls must actually happen, each on the stored key, with no resolution.
+    assert seen == [
+        ("renew", "acme/repo"),
+        ("event", "acme/repo"),
+        ("release", "acme/repo"),
+        ("event", "acme/repo"),
+    ]
+
+
+def test_a_lease_row_from_before_the_migration_resolves_once_and_writes_back(tmp_path: Path, monkeypatch):
+    job_id = _enqueue_job(tmp_path, "job-a")
+    bot_id = _adapter(tmp_path).config.bot_id
+    grokbot_jobs.claim(tmp_path, job_id, bot_id, "lease-a", 900)
+    adapter = _adapter(tmp_path)
+    current = {"key": "acme/repo"}
+    seen = _record_fleet_calls(monkeypatch, lambda base_path=None: current["key"])
+
+    adapter.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": "lease-a"})
+    assert grokbot_jobs.lease_claim_target(tmp_path, job_id, bot_id, "lease-a") == "acme/repo"
+    current["key"] = "acme/new-repo"
+    adapter.call_tool("grokbot_queue_fail", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert {target for _kind, target in seen} == {"acme/repo"}

@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use serde::Serialize;
 
-use crate::extractors::{index_file, language_for};
+use crate::extractors::{IndexFailure, index_file, language_for};
 use crate::model::FileGraph;
 use crate::store::list_indexable;
 
@@ -19,7 +19,16 @@ use crate::store::list_indexable;
 pub struct EvaluateReport {
     pub root: String,
     pub files: Vec<EvaluatedFile>,
+    /// Files a sync would skip because they cannot be read or parsed.
+    pub skipped: Vec<SkippedEvaluation>,
     pub totals: EvaluateTotals,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkippedEvaluation {
+    pub path: String,
+    pub reason: String,
+    pub detail: String,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -28,6 +37,7 @@ pub struct EvaluateTotals {
     pub symbols: usize,
     pub imports: usize,
     pub calls: usize,
+    pub skipped: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -81,6 +91,15 @@ pub fn evaluate_path(target: &Path) -> Result<EvaluateReport> {
         .canonicalize()
         .unwrap_or_else(|_| target.to_path_buf());
     let mut files = Vec::new();
+    let mut skipped = Vec::new();
+    let mut record = |rel: String, result: Result<FileGraph, IndexFailure>| match result {
+        Ok(graph) => files.push(evaluated(graph)),
+        Err(failure) => skipped.push(SkippedEvaluation {
+            path: rel,
+            reason: failure.reason.as_str().to_string(),
+            detail: failure.detail,
+        }),
+    };
     if canonical.is_file() {
         let Some(lang) = language_for(&canonical) else {
             bail!(
@@ -89,23 +108,29 @@ pub fn evaluate_path(target: &Path) -> Result<EvaluateReport> {
             );
         };
         let root = canonical.parent().unwrap_or(Path::new("."));
-        files.push(evaluated(index_file(root, &canonical, lang)?));
+        let rel = canonical
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        record(rel, index_file(root, &canonical, lang));
     } else {
         crate::store::guard_unsafe_root(&canonical)?;
         for entry in list_indexable(&canonical)? {
-            files.push(evaluated(index_file(&canonical, &entry.path, entry.lang)?));
+            record(entry.rel, index_file(&canonical, &entry.path, entry.lang));
         }
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
+    skipped.sort_by(|a, b| a.path.cmp(&b.path));
     let totals = EvaluateTotals {
         files: files.len(),
         symbols: files.iter().map(|f| f.symbols.len()).sum(),
         imports: files.iter().map(|f| f.imports.len()).sum(),
         calls: files.iter().map(|f| f.calls.len()).sum(),
+        skipped: skipped.len(),
     };
     Ok(EvaluateReport {
         root: canonical.to_string_lossy().into_owned(),
         files,
+        skipped,
         totals,
     })
 }
@@ -202,6 +227,27 @@ mod tests {
 
         assert_eq!(report.totals.files, 1);
         assert_eq!(report.files[0].path, "a.py");
+        assert!(!dir.path().join(".graphtrail").exists());
+    }
+
+    #[test]
+    fn evaluate_skips_unreadable_files_and_reports_them() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.py"), "def a():\n    pass\n").unwrap();
+        fs::write(dir.path().join("bad.py"), b"x = 1\n\xff\xfe bad\n").unwrap();
+
+        let report = evaluate_path(dir.path()).unwrap();
+
+        assert_eq!(report.totals.files, 1);
+        assert_eq!(report.totals.skipped, 1);
+        assert_eq!(report.files[0].path, "a.py");
+        assert_eq!(report.skipped[0].path, "bad.py");
+        assert_eq!(report.skipped[0].reason, "unreadable_utf8");
+
+        let single = evaluate_path(&dir.path().join("bad.py")).unwrap();
+        assert_eq!(single.totals.files, 0);
+        assert_eq!(single.skipped[0].path, "bad.py");
+        assert_eq!(single.skipped[0].reason, "unreadable_utf8");
         assert!(!dir.path().join(".graphtrail").exists());
     }
 
