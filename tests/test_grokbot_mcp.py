@@ -2600,7 +2600,10 @@ def test_a_failed_claim_write_grants_no_lease_and_gives_the_hub_claim_back(tmp_p
     assert grokbot_jobs.status(tmp_path, job_id)["state"] == "queued"
 
 
-def test_an_idempotent_retry_never_resolves_and_never_releases_the_live_claim(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("io_fails_after_acquire", [False, True], ids=["healthy", "queue-io-fails-after-acquire"])
+def test_an_idempotent_retry_never_resolves_and_never_releases_the_live_claim(
+    tmp_path: Path, monkeypatch, io_fails_after_acquire
+):
     job_id = _enqueue_job(tmp_path, "job-a")
     adapter = _adapter(tmp_path)
     current = {"key": "acme/repo"}
@@ -2611,8 +2614,41 @@ def test_an_idempotent_retry_never_resolves_and_never_releases_the_live_claim(tm
     calls.clear()
     resolutions.clear()
 
+    armed = {"on": False}
+    real_acquire, real_read, real_write = (
+        fleet_client.acquire_claim,
+        grokbot_jobs._read_json_file,
+        grokbot_jobs._write_json_file,
+    )
+
+    def acquire_then_arm(*args, **kwargs):
+        decision = real_acquire(*args, **kwargs)
+        armed["on"] = io_fails_after_acquire
+        return decision
+
+    def read(*args, **kwargs):
+        if armed["on"]:
+            raise OSError("transient read failure")
+        return real_read(*args, **kwargs)
+
+    def write(*args, **kwargs):
+        if armed["on"]:
+            raise OSError("transient write failure")
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_client, "acquire_claim", acquire_then_arm)
+    monkeypatch.setattr(grokbot_jobs, "_read_json_file", read)
+    monkeypatch.setattr(grokbot_jobs, "_write_json_file", write)
+
     current["key"] = "acme/new-repo"
-    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    if io_fails_after_acquire:
+        # Every queue read and write after the hub acquire fails. The call errors,
+        # but the original caller's claim must stay owned and unreleased.
+        with pytest.raises(grokbot_mcp.AdapterError):
+            adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+        armed["on"] = False
+    else:
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
 
     assert resolutions == []
     assert [kind for kind, _target in calls if kind == "release"] == []

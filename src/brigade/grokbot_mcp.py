@@ -471,14 +471,17 @@ class GrokbotAdapter:
             cloud_decision = self._admit_hub_lease_decision(job, lease_id, lease_seconds)
             if _cloud_refused(cloud_decision):
                 raise AdapterError()
-            decision, claim_target = self._fleet_acquire(job["job_id"], lease_id, holder, session, lease_seconds)
+            decision, claim_target, is_retry = self._fleet_acquire(
+                job["job_id"], lease_id, holder, session, lease_seconds
+            )
             if _fleet_refused(decision):
                 if cloud_decision is not None and cloud_decision.granted:
                     self._release_hub_lease(job["job_id"], lease_id, "released")
                 raise AdapterError()
             try:
                 # The claim key is stored in the same row write that grants the
-                # lease, so a failed write grants nothing and strands no row.
+                # lease, so a failed write grants nothing and strands no row. The
+                # answer carries the stored key back; there is no second read.
                 result = grokbot_jobs.claim_execution_context(
                     self.config.target,
                     job["job_id"],
@@ -488,15 +491,17 @@ class GrokbotAdapter:
                     worker_label=worker_label,
                     claim_target=claim_target,
                 )
-                stored_target = grokbot_jobs.lease_claim_target(
-                    self.config.target, job["job_id"], self.config.bot_id, lease_id
-                )
             except Exception:
-                self._release_hub_lease(job["job_id"], lease_id, "released")
-                if decision.granted:
-                    self._fleet_release(job["job_id"], lease_id, holder, claim_target)
+                # Only a first claim gives anything back, and only because its
+                # lease was never granted. A retry's key came from the lease's
+                # own row, so the claim it re-acquired is the original caller's.
+                if not is_retry:
+                    self._release_hub_lease(job["job_id"], lease_id, "released")
+                    if decision.granted:
+                        self._fleet_release(job["job_id"], lease_id, holder, claim_target)
                 raise
-            if stored_target is not None and stored_target != claim_target:
+            stored_target = result.pop("claim_target", None)
+            if not is_retry and stored_target is not None and stored_target != claim_target:
                 # Only possible when two first claims of one lease raced across an
                 # origin change: the other call's row write won. Give back just the
                 # key this call acquired and refuse so the caller retries, which
@@ -532,7 +537,7 @@ class GrokbotAdapter:
             holder, session = fleet_holder(job_id, lease_id), fleet_session(job_id, lease_id)
             decision = self._fleet_renew(job_id, lease_id, holder, lease_seconds)
             if not decision.granted and decision.reason == "missing":
-                decision, _target = self._fleet_acquire(job_id, lease_id, holder, session, lease_seconds)
+                decision, _target, _from_row = self._fleet_acquire(job_id, lease_id, holder, session, lease_seconds)
             if _fleet_refused(decision):
                 raise AdapterError()
             try:
@@ -794,11 +799,6 @@ class GrokbotAdapter:
             return None
         return result if isinstance(result, fleet_client.CloudDecision) else None
 
-    def _resolve_lease_target(self, job_id: str, lease_id: str) -> str:
-        """The claim key a lease uses: the one stored on its row, else a fresh resolution."""
-        stored = grokbot_jobs.lease_claim_target(self.config.target, job_id, self.config.bot_id, lease_id)
-        return stored if stored is not None else fleet_client.resolve_claim_target(self.config.target)
-
     def _lease_target(self, job_id: str, lease_id: str) -> str:
         """The claim key of a lease that already exists (#1639).
 
@@ -821,10 +821,15 @@ class GrokbotAdapter:
 
     def _fleet_acquire(
         self, job_id: str, lease_id: str, holder: str, session: str, lease_seconds: int | None = None
-    ) -> tuple[fleet_client.ClaimDecision, str | None]:
-        """Acquire the lease's claim; also return the key it was taken under."""
+    ) -> tuple[fleet_client.ClaimDecision, str | None, bool]:
+        """Acquire the lease's claim.
+
+        Returns the decision, the key it was taken under, and whether that key
+        came from the lease's own row (a retry) rather than a fresh resolution.
+        """
         try:
-            target = self._resolve_lease_target(job_id, lease_id)
+            stored = grokbot_jobs.lease_claim_target(self.config.target, job_id, self.config.bot_id, lease_id)
+            target = stored if stored is not None else fleet_client.resolve_claim_target(self.config.target)
             decision = fleet_client.acquire_claim(
                 target,
                 holder=holder,
@@ -834,9 +839,9 @@ class GrokbotAdapter:
                 job=job_id,
                 session=session,
             )
-            return decision, target
+            return decision, target, stored is not None
         except Exception:
-            return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder), None
+            return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder), None, False
 
     def _fleet_renew(
         self, job_id: str, lease_id: str, holder: str, lease_seconds: int | None = None

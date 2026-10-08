@@ -2545,7 +2545,8 @@ def test_claim_stores_the_claim_target_in_the_same_write_that_grants_the_lease(t
     monkeypatch.setattr(grokbot_jobs, "_write_json_file", spy)
     claimed = grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, claim_target="acme/repo")
 
-    assert claimed["state"] == "claimed" and "claim_target" not in claimed
+    # The answer to a claim that carried a key reports the stored one (the caller strips it).
+    assert claimed["state"] == "claimed" and claimed["claim_target"] == "acme/repo"
     assert len(written) == 1
     assert written[0]["state"] == "claimed" and written[0]["claim_target"] == "acme/repo"
 
@@ -2578,3 +2579,20 @@ def test_an_invalid_claim_target_refuses_the_claim_before_writing(tmp_path: Path
         grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, claim_target=value)
 
     assert grokbot_jobs.status(tmp_path, job_id, now=NOW)["state"] == "queued"
+
+
+def test_a_claim_that_carries_a_target_answers_with_the_stored_one_from_the_same_write(tmp_path: Path):
+    """The caller compares against this value; it needs no second read of the row."""
+    job_id = _enqueue(tmp_path)
+
+    first = grokbot_jobs.claim_execution_context(
+        tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, claim_target="acme/repo"
+    )
+    retried = grokbot_jobs.claim_execution_context(
+        tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, claim_target="acme/other"
+    )
+    plain = grokbot_jobs.claim_execution_context(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)
+
+    assert first["claim_target"] == "acme/repo"
+    assert retried["claim_target"] == "acme/repo"
+    assert "claim_target" not in plain

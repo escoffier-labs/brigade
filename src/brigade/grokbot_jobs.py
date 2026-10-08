@@ -562,7 +562,9 @@ def _claim_job(
                     _commit_mutation(storage.jobs, record, timestamp)
                 elif stamp_target:
                     _write_json_file(storage.jobs, f"{job_id}.json", record)
-                return _claim_result(record, include_context=include_context)
+                return _claim_result(
+                    record, include_context=include_context, with_claim_target=claim_target is not None
+                )
             raise GrokbotJobError("lease-conflict")
         if record["state"] != "queued":
             _reject_nonqueued_claim(record)
@@ -588,7 +590,7 @@ def _claim_job(
             # from a claimed row or written without one (#1639).
             record["claim_target"] = claim_target
         _commit_mutation(storage.jobs, record, timestamp)
-        return _claim_result(record, include_context=include_context)
+        return _claim_result(record, include_context=include_context, with_claim_target=claim_target is not None)
 
 
 def renew(
