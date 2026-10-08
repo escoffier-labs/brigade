@@ -322,6 +322,7 @@ class GrokbotAdapter:
         config.validate()
         self.config = config
         self._hub_actor_verified = False
+        self._fleet_target_cache: str | None = None
 
     def ensure_hub_actor(self) -> None:
         """Fail closed when the listener's hub credential does not match this instance."""
@@ -776,7 +777,16 @@ class GrokbotAdapter:
         return result if isinstance(result, fleet_client.CloudDecision) else None
 
     def _fleet_target(self) -> str:
-        return fleet_client.resolve_claim_target(self.config.target)
+        """The claim key, resolved once and reused for the listener's life.
+
+        Acquire, renew, release and events must address the same row, so a
+        transient git failure on a later renewal can never move them to
+        another key (#1639). It also keeps the git subprocess off the
+        heartbeat path. A failed resolution raises and is not cached.
+        """
+        if self._fleet_target_cache is None:
+            self._fleet_target_cache = fleet_client.resolve_claim_target(self.config.target)
+        return self._fleet_target_cache
 
     def _fleet_acquire(
         self, job_id: str, holder: str, session: str, lease_seconds: int | None = None

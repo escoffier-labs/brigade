@@ -5,8 +5,11 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from brigade import fleet_client
 from brigade import node as node_mod
+from brigade.fleet_claim_target import ClaimTargetError
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 
@@ -138,3 +141,63 @@ def test_release_path_frees_a_claim_taken_under_the_run_path_resolver(tmp_path, 
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_hosts_other_than_github_keep_their_host_so_equal_paths_do_not_collide(tmp_path, monkeypatch):
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    gh = _make_repo(home / "repos", "gh", "https://github.com/acme/repo.git")
+    gl = _make_repo(home / "repos", "gl", "https://gitlab.com/acme/repo.git")
+    sub = _make_repo(home / "repos", "sub", "git@gitlab.com:group/subgroup/repo.git")
+    assert fleet_client.resolve_claim_target(gh) == "acme/repo"
+    assert fleet_client.resolve_claim_target(gl) == "gitlab.com/acme/repo"
+    assert fleet_client.resolve_claim_target(sub) == "gitlab.com/group/subgroup/repo"
+
+
+def _boom(exc):
+    def run(*args, **kwargs):
+        raise exc
+
+    return run
+
+
+@pytest.mark.parametrize("exc", [subprocess.TimeoutExpired(cmd=["git"], timeout=5), PermissionError("denied")])
+def test_transient_git_failure_raises_instead_of_changing_the_key(tmp_path, monkeypatch, exc):
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    repo = _make_repo(home / "repos", "worker", "https://github.com/acme/repo.git")
+    assert fleet_client.resolve_claim_target(repo) == "acme/repo"
+    monkeypatch.setattr("brigade.fleet_claim_target.subprocess.run", _boom(exc))
+    with pytest.raises(ClaimTargetError):
+        fleet_client.resolve_claim_target(repo)
+
+
+def test_transient_failure_reading_the_remote_raises_instead_of_using_the_directory_name(tmp_path, monkeypatch):
+    from brigade import fleet_session_presence
+
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    repo = _make_repo(home / "repos", "worker", "https://github.com/acme/repo.git")
+    monkeypatch.setattr(
+        fleet_session_presence,
+        "repository_identity",
+        lambda target: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd=["git"], timeout=5)),
+    )
+    with pytest.raises(ClaimTargetError):
+        fleet_client.resolve_claim_target(repo)
+
+
+def test_a_directory_that_is_not_a_git_repo_is_not_an_error(tmp_path, monkeypatch):
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    plain = home / "notes"
+    plain.mkdir()
+    assert fleet_client.resolve_claim_target(plain) == "notes"
+
+
+def test_release_path_reports_an_unresolvable_target_instead_of_a_traceback(tmp_path, monkeypatch, capsys):
+    from brigade import cli
+
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    repo = _make_repo(home / "repos", "worker", "https://github.com/acme/repo.git")
+    monkeypatch.setattr(
+        "brigade.fleet_claim_target.subprocess.run", _boom(subprocess.TimeoutExpired(cmd=["git"], timeout=5))
+    )
+    assert cli.main(["fleet", "claims", "--release", str(repo), "--path"]) == 1
+    assert "cannot determine the claim target" in capsys.readouterr().err

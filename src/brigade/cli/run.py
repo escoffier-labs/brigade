@@ -13,6 +13,8 @@ from pathlib import Path
 from subprocess import DEVNULL, STDOUT, Popen
 from typing import Any, Callable, Iterator, Mapping
 
+from ..fleet_claim_target import ClaimTargetError
+
 
 _DETACH_START_TIMEOUT_SECONDS = 30.0
 _DETACH_POLL_INTERVAL_SECONDS = 0.05
@@ -738,7 +740,13 @@ def dispatch(args) -> int:
             # (same node, same target, a token that died with it) is
             # superseded instead of locking this node out for the residual
             # TTL — a claim under any other lease is never touched.
-            claim_target = fleet_client.resolve_claim_target(run_cwd)
+            try:
+                claim_target = fleet_client.resolve_claim_target(run_cwd)
+            except ClaimTargetError:
+                # The escape hatch must work when git is the thing failing.
+                if not args.no_fleet_claim:
+                    raise
+                claim_target = run_cwd.name
             if args.no_fleet_claim:
                 _FLEET_LOG.warning(
                     "fleet claim skipped for %s (--no-fleet-claim); relying on the local run lock alone",
@@ -1027,7 +1035,7 @@ def dispatch(args) -> int:
         if worktree_cwd is not None and keep_worktree:
             print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
         return 2
-    except fleet_client.FleetClaimHeldError as exc:
+    except (fleet_client.FleetClaimHeldError, ClaimTargetError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except TimeoutError as exc:

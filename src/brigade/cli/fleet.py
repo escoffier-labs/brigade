@@ -850,6 +850,7 @@ def _release_claim(raw_target: str, *, as_path: bool, node_override: str | None,
     import json as _json
 
     from .. import fleet_client, runguard
+    from ..fleet_claim_target import ClaimTargetError
 
     workspace: Path | None = None
     if as_path:
@@ -875,7 +876,11 @@ def _release_claim(raw_target: str, *, as_path: bool, node_override: str | None,
             )
             return 1
         # The same resolver `brigade run` claims with, so release cannot diverge.
-        target = fleet_client.resolve_claim_target(workspace)
+        try:
+            target = fleet_client.resolve_claim_target(workspace)
+        except ClaimTargetError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         local_node = fleet_client.resolve_node_id(workspace)
     else:
         target = raw_target

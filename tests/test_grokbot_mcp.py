@@ -2474,3 +2474,47 @@ def test_claim_advertises_the_optional_worker_label_argument():
     )
     assert grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": "grokbot-a", "worker_label": None})
     assert not grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": "grokbot-a", "worker_label": 2})
+
+
+def test_fleet_target_is_resolved_once_and_reused_for_renew_release_and_events(tmp_path: Path, monkeypatch):
+    """A transient git failure after acquire must not move renew or release to another key."""
+    from brigade.fleet_claim_target import ClaimTargetError
+
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    resolutions: list[object] = []
+
+    def resolve(base_path=None):
+        resolutions.append(base_path)
+        if len(resolutions) > 1:
+            raise ClaimTargetError("git timed out")
+        return "acme/repo"
+
+    seen: list[tuple[str, str]] = []
+
+    def record(kind: str, decision):
+        def call(target, **kwargs):
+            seen.append((kind, target))
+            return decision
+
+        return call
+
+    granted = fleet_client.ClaimDecision(granted=True, reason="ok", holder="h")
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", resolve)
+    monkeypatch.setattr(fleet_client, "acquire_claim", record("acquire", granted))
+    monkeypatch.setattr(fleet_client, "renew_claim", record("renew", granted))
+    monkeypatch.setattr(fleet_client, "release_claim", record("release", None))
+    monkeypatch.setattr(
+        fleet_client,
+        "report_external_event",
+        lambda **kwargs: seen.append(("event", kwargs["target"])),
+        raising=False,
+    )
+
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    adapter.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": "lease-a"})
+    adapter.call_tool("grokbot_queue_fail", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert {target for _kind, target in seen} == {"acme/repo"}
+    assert {kind for kind, _target in seen} >= {"acquire", "renew", "release", "event"}
+    assert len(resolutions) == 1

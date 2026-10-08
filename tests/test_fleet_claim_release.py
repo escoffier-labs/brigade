@@ -1047,6 +1047,32 @@ class TestDispatchRecovery:
         skipped = [r.message for r in caplog.records if "--no-fleet-claim" in r.message]
         assert len(skipped) == 1 and "ws" in skipped[0]
 
+    def test_unresolvable_claim_target_fails_the_run_cleanly_without_dispatching(
+        self, hub, workspace, monkeypatch, capsys
+    ):
+        """A transient git failure while deriving the claim key must stop the
+        run with a clear error (#1639), not fall back to another key."""
+        from brigade import aboyeur
+        from brigade.fleet_claim_target import ClaimTargetError
+
+        url, token, _db = hub
+        _env(monkeypatch, url, token)
+        ws, roster_path = workspace
+
+        def unresolvable(base_path=None):
+            raise ClaimTargetError("cannot determine the claim target for x: git timed out")
+
+        monkeypatch.setattr(fleet_client, "resolve_claim_target", unresolvable)
+        dispatched = []
+        monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: dispatched.append(1) or 0)
+        assert self._run(ws, roster_path) == 2
+        err = capsys.readouterr().err
+        assert "cannot determine the claim target" in err and "Traceback" not in err
+        assert "unexpected run failure" not in err
+        assert dispatched == []
+        assert self._run(ws, roster_path, "--no-fleet-claim") == 0
+        assert dispatched == [1]
+
 
 class TestRunCredentialRefusal:
     """#1161 end to end: a heartbeat credential refusal while dispatch is
