@@ -16,7 +16,6 @@ import logging
 import os
 import re
 import stat
-import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -323,8 +322,6 @@ class GrokbotAdapter:
         config.validate()
         self.config = config
         self._hub_actor_verified = False
-        # holder -> (claim target, monotonic expiry of the lease's claim)
-        self._fleet_pins: dict[str, tuple[str, float]] = {}
 
     def ensure_hub_actor(self) -> None:
         """Fail closed when the listener's hub credential does not match this instance."""
@@ -471,7 +468,7 @@ class GrokbotAdapter:
             cloud_decision = self._admit_hub_lease_decision(job, lease_id, lease_seconds)
             if _cloud_refused(cloud_decision):
                 raise AdapterError()
-            decision = self._fleet_acquire(job["job_id"], holder, session, lease_seconds)
+            decision, claim_target = self._fleet_acquire(job["job_id"], lease_id, holder, session, lease_seconds)
             if _fleet_refused(decision):
                 if cloud_decision is not None and cloud_decision.granted:
                     self._release_hub_lease(job["job_id"], lease_id, "released")
@@ -488,10 +485,11 @@ class GrokbotAdapter:
             except Exception:
                 self._release_hub_lease(job["job_id"], lease_id, "released")
                 if decision.granted:
-                    self._fleet_release(holder)
+                    self._fleet_release(job["job_id"], lease_id, holder, claim_target)
                 raise
+            self._settle_claim_target(job["job_id"], lease_id, holder, session, lease_seconds, claim_target)
             self._bind_hub_lease(job["job_id"], lease_id)
-            self._fleet_event(job["job_id"], session, "external.claimed", holder)
+            self._fleet_event(job["job_id"], lease_id, session, "external.claimed")
             return self._granted_lease(name, result, lease_id, lease_seconds)
         if name == "grokbot_queue_renew":
             job = self._eligible_job(arguments, allowed={"job_id", "lease_id"})
@@ -514,9 +512,9 @@ class GrokbotAdapter:
                     lease_seconds,
                 )
             holder, session = fleet_holder(job_id, lease_id), fleet_session(job_id, lease_id)
-            decision = self._fleet_renew(holder, lease_seconds)
+            decision = self._fleet_renew(job_id, lease_id, holder, lease_seconds)
             if not decision.granted and decision.reason == "missing":
-                decision = self._fleet_acquire(job_id, holder, session, lease_seconds)
+                decision, _target = self._fleet_acquire(job_id, lease_id, holder, session, lease_seconds)
             if _fleet_refused(decision):
                 raise AdapterError()
             try:
@@ -525,10 +523,10 @@ class GrokbotAdapter:
                 )
             except Exception:
                 if decision.granted:
-                    self._fleet_release(holder)
+                    self._fleet_release(job_id, lease_id, holder)
                 raise
             self._renew_or_reconcile_hub_lease(result, lease_id)
-            self._fleet_event(job_id, session, "external.heartbeat", holder)
+            self._fleet_event(job_id, lease_id, session, "external.heartbeat")
             return self._granted_lease(name, result, None, lease_seconds)
         if name in {"grokbot_queue_start", "grokbot_queue_fail", "grokbot_queue_ack_cancel"}:
             job_id, lease_id = _job_id(arguments, {"job_id", "lease_id"}), _lease_id(arguments)
@@ -550,7 +548,7 @@ class GrokbotAdapter:
             if name.endswith("start"):
                 result = grokbot_jobs.transition(self.config.target, job_id, self.config.bot_id, lease_id, "running")
                 self._renew_or_reconcile_hub_lease(result, lease_id)
-                self._fleet_event(job_id, session, "external.running", holder)
+                self._fleet_event(job_id, lease_id, session, "external.running")
                 return result
             if name.endswith("fail"):
                 result = self._lease_call(
@@ -562,14 +560,13 @@ class GrokbotAdapter:
                     lease_id,
                     "failed",
                 )
-                # Event first: the release drops the lease's pinned claim key.
-                self._fleet_event(job_id, session, "external.failed", holder)
-                self._fleet_release(holder)
+                self._fleet_release(job_id, lease_id, holder)
+                self._fleet_event(job_id, lease_id, session, "external.failed")
                 self._release_hub_lease(job_id, lease_id, result["state"])
                 return result
             result = grokbot_jobs.acknowledge_cancel(self.config.target, job_id, self.config.bot_id, lease_id)
-            self._fleet_event(job_id, session, "external.canceled", holder)
-            self._fleet_release(holder)
+            self._fleet_release(job_id, lease_id, holder)
+            self._fleet_event(job_id, lease_id, session, "external.canceled")
             self._release_hub_lease(job_id, lease_id, result["state"])
             return result
         if name == "grokbot_queue_complete":
@@ -625,8 +622,8 @@ class GrokbotAdapter:
                     "completed",
                     artifact=artifact,
                 )
-            self._fleet_event(job_id, session, "external.completed", holder)
-            self._fleet_release(holder)
+            self._fleet_event(job_id, lease_id, session, "external.completed")
+            self._fleet_release(job_id, lease_id, holder)
             self._release_hub_lease(job_id, lease_id, result["state"])
             return result
         raise AdapterError()
@@ -779,81 +776,100 @@ class GrokbotAdapter:
             return None
         return result if isinstance(result, fleet_client.CloudDecision) else None
 
-    def _fleet_target(self, holder: str | None = None) -> str:
-        """The claim key for ``holder``'s active lease, else a fresh resolution.
+    def _resolve_lease_target(self, job_id: str, lease_id: str) -> str:
+        """The claim key a lease uses: the one stored on its row, else a fresh resolution."""
+        stored = grokbot_jobs.lease_claim_target(self.config.target, job_id, self.config.bot_id, lease_id)
+        return stored if stored is not None else fleet_client.resolve_claim_target(self.config.target)
 
-        A lease is pinned to the key it was acquired under, so a transient
-        failure or an origin change mid-lease can never move its renew,
-        release or events to another key (#1639). The pin also keeps the
-        resolver's subprocess off the heartbeat path. A failed resolution
-        raises and is never pinned.
+    def _lease_target(self, job_id: str, lease_id: str) -> str:
+        """The claim key of a lease that already exists (#1639).
+
+        It is stored on the lease's queue row, the one place every renew,
+        release and event reads, so a transient failure, an origin change or
+        a listener restart can never move them off the claim the lease
+        acquired under. A row from before the column existed resolves once
+        and is written back. A failed resolution raises and stores nothing.
         """
-        if holder is not None:
-            entry = self._fleet_pins.get(holder)
-            if entry is not None and entry[1] > time.monotonic():
-                return entry[0]
-        return fleet_client.resolve_claim_target(self.config.target)
+        stored = grokbot_jobs.lease_claim_target(self.config.target, job_id, self.config.bot_id, lease_id)
+        if stored is not None:
+            return stored
+        target = fleet_client.resolve_claim_target(self.config.target)
+        try:
+            return grokbot_jobs.bind_lease_claim_target(
+                self.config.target, job_id, self.config.bot_id, lease_id, target
+            )
+        except grokbot_jobs.GrokbotJobError:
+            return target
 
-    def _fleet_pin(self, holder: str, target: str, ttl_seconds: int) -> None:
-        """Pin ``holder``'s lease to ``target`` until its claim TTL runs out.
-
-        ``holder`` is the hash of the job and lease ids, so a retry of the
-        same lease finds its pin and a new lease does not. Entries past their
-        expiry belong to leases nobody released; they are swept here, so the
-        map holds only live leases and never evicts one.
-        """
-        now = time.monotonic()
-        for stale in [key for key, (_target, expires) in self._fleet_pins.items() if expires <= now]:
-            del self._fleet_pins[stale]
-        self._fleet_pins[holder] = (target, now + ttl_seconds)
+    def _acquire_under(
+        self, target: str, job_id: str, holder: str, session: str, lease_seconds: int | None
+    ) -> fleet_client.ClaimDecision:
+        return fleet_client.acquire_claim(
+            target,
+            holder=holder,
+            ttl_seconds=lease_seconds if lease_seconds is not None else self.config.lease_seconds,
+            harness="grokbot",
+            role=self.config.instance,
+            job=job_id,
+            session=session,
+        )
 
     def _fleet_acquire(
-        self, job_id: str, holder: str, session: str, lease_seconds: int | None = None
-    ) -> fleet_client.ClaimDecision:
-        ttl = lease_seconds if lease_seconds is not None else self.config.lease_seconds
+        self, job_id: str, lease_id: str, holder: str, session: str, lease_seconds: int | None = None
+    ) -> tuple[fleet_client.ClaimDecision, str | None]:
+        """Acquire the lease's claim; also return the key it was taken under."""
         try:
-            # An idempotent retry of a live lease reuses its pin. Only a new
-            # lease, or one released or past its expiry, resolves afresh.
-            target = self._fleet_target(holder)
-            decision = fleet_client.acquire_claim(
-                target,
-                holder=holder,
-                ttl_seconds=ttl,
-                harness="grokbot",
-                role=self.config.instance,
-                job=job_id,
-                session=session,
+            target = self._resolve_lease_target(job_id, lease_id)
+            return self._acquire_under(target, job_id, holder, session, lease_seconds), target
+        except Exception:
+            return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder), None
+
+    def _settle_claim_target(
+        self,
+        job_id: str,
+        lease_id: str,
+        holder: str,
+        session: str,
+        lease_seconds: int | None,
+        target: str | None,
+    ) -> None:
+        """Store the key a new lease acquired under on its row.
+
+        If a racing retry of the same lease stored another key first, the row
+        wins: the claim just taken moves to the stored key.
+        """
+        if target is None:
+            return
+        try:
+            stored = grokbot_jobs.bind_lease_claim_target(
+                self.config.target, job_id, self.config.bot_id, lease_id, target
             )
-        except Exception:
-            return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder)
-        if decision.granted:
-            self._fleet_pin(holder, target, ttl)
-        return decision
-
-    def _fleet_renew(self, holder: str, lease_seconds: int | None = None) -> fleet_client.ClaimDecision:
-        ttl = lease_seconds if lease_seconds is not None else self.config.lease_seconds
-        try:
-            target = self._fleet_target(holder)
-            decision = fleet_client.renew_claim(target, holder=holder, ttl_seconds=ttl)
-        except Exception:
-            return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder)
-        if decision.granted:
-            self._fleet_pin(holder, target, ttl)
-        return decision
-
-    def _fleet_release(self, holder: str) -> None:
-        """Release the lease's claim and drop its pin, so the next lease resolves again."""
-        try:
-            fleet_client.release_claim(self._fleet_target(holder), holder=holder)
+            if stored != target:
+                fleet_client.release_claim(target, holder=holder)
+                self._acquire_under(stored, job_id, holder, session, lease_seconds)
         except Exception:
             return
-        finally:
-            self._fleet_pins.pop(holder, None)
 
-    def _fleet_event(self, job_id: str, session: str, state: str, holder: str) -> None:
+    def _fleet_renew(
+        self, job_id: str, lease_id: str, holder: str, lease_seconds: int | None = None
+    ) -> fleet_client.ClaimDecision:
+        try:
+            ttl = lease_seconds if lease_seconds is not None else self.config.lease_seconds
+            return fleet_client.renew_claim(self._lease_target(job_id, lease_id), holder=holder, ttl_seconds=ttl)
+        except Exception:
+            return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder)
+
+    def _fleet_release(self, job_id: str, lease_id: str, holder: str, target: str | None = None) -> None:
+        try:
+            resolved = target if target is not None else self._lease_target(job_id, lease_id)
+            fleet_client.release_claim(resolved, holder=holder)
+        except Exception:
+            return
+
+    def _fleet_event(self, job_id: str, lease_id: str, session: str, state: str) -> None:
         try:
             fleet_client.report_external_event(
-                target=self._fleet_target(holder),
+                target=self._lease_target(job_id, lease_id),
                 harness="grokbot",
                 role=self.config.instance,
                 job=job_id,

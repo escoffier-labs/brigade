@@ -161,7 +161,7 @@ def test_transient_git_failure_raises_instead_of_changing_the_key(tmp_path, monk
 
 
 def _fail_remote_reads(monkeypatch, state: dict, outcome):
-    """Stub only the ``git config`` remote read; every other git call is real.
+    """Stub only the ``git ls-remote --get-url`` read; every other git call is real.
 
     ``outcome`` is a CompletedProcess to return or an exception to raise.
     Clearing ``state["fail"]`` lets the real git run again (recovery).
@@ -169,7 +169,7 @@ def _fail_remote_reads(monkeypatch, state: dict, outcome):
     real_run = subprocess.run
 
     def run(cmd, *args, **kwargs):
-        if state["fail"] and list(cmd[:2]) == ["git", "config"]:
+        if state["fail"] and list(cmd[:2]) == ["git", "ls-remote"]:
             if isinstance(outcome, BaseException):
                 raise outcome
             return outcome
@@ -203,6 +203,40 @@ def test_no_origin_remote_is_a_legitimate_fallback_to_the_toplevel_name(tmp_path
     home = _make_home(tmp_path, "homeA", monkeypatch)
     repo = _make_repo(home / "repos", "worker", None)
     assert fleet_client.resolve_claim_target(repo) == "worker"
+    # A remote that is not called origin does not count: git echoes the name back.
+    other = _make_repo(home / "repos", "other", None)
+    _git(other, "remote", "add", "upstream", "https://github.com/acme/upstream.git")
+    assert fleet_client.resolve_claim_target(other) == "other"
+
+
+def test_insteadof_aliases_are_applied_so_machines_agree_on_the_key(tmp_path, monkeypatch):
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    aliased = _make_repo(home / "repos", "aliased", "gh:acme/repo")
+    _git(aliased, "config", "url.https://github.com/.insteadOf", "gh:")
+    plain = _make_repo(home / "repos", "plain", "https://github.com/acme/repo.git")
+    assert fleet_client.resolve_claim_target(aliased) == "acme/repo"
+    assert fleet_client.resolve_claim_target(plain) == "acme/repo"
+    # Without the rewrite the alias is just another host, never the github repo.
+    bare = _make_repo(home / "repos", "bare", "gh:acme/repo")
+    assert fleet_client.resolve_claim_target(bare) != "acme/repo"
+
+
+def test_an_unparseable_origin_still_keys_on_the_remote_not_the_checkout_name(tmp_path, monkeypatch):
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    one = _make_repo(home / "repos", "one", "/srv/git/Shared-Repo.git")
+    two = _make_repo(home / "repos", "two", "/srv/git/Shared-Repo.git")
+    other = _make_repo(home / "repos", "three", "/srv/git/Other-Repo.git")
+    assert fleet_client.resolve_claim_target(one) == "/srv/git/Shared-Repo"
+    assert fleet_client.resolve_claim_target(two) == fleet_client.resolve_claim_target(one)
+    assert fleet_client.resolve_claim_target(other) == "/srv/git/Other-Repo"
+
+
+def test_remote_credentials_never_reach_the_key(tmp_path, monkeypatch):
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    repo = _make_repo(home / "repos", "worker", "https://user:s3cret-token@Example.COM/Group/Repo.git")
+    key = fleet_client.resolve_claim_target(repo)
+    assert key == "example.com/Group/Repo"
+    assert "s3cret" not in key and "user" not in key
 
 
 def test_missing_git_fails_closed_inside_a_checkout_but_not_outside_one(tmp_path, monkeypatch):

@@ -2454,3 +2454,79 @@ def test_cli_status_prints_worker_label_next_to_the_claimant(tmp_path: Path, mon
     assert (
         f"job {job_id} state=claimed claimant=implementation-worker worker_label=builder-2" in capsys.readouterr().out
     )
+
+
+def _job_file(tmp_path: Path, job_id: str) -> Path:
+    return tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{job_id}.json"
+
+
+def test_claim_target_is_stored_once_on_the_lease_row_and_never_projected(tmp_path: Path):
+    """#1639: the fleet claim key lives on the lease row, written by the first binder."""
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)
+    assert grokbot_jobs.lease_claim_target(tmp_path, job_id, "bot-a", "lease-a") is None
+
+    assert grokbot_jobs.bind_lease_claim_target(tmp_path, job_id, "bot-a", "lease-a", "acme/repo") == "acme/repo"
+    # First writer wins: a retry or a racing binder gets the stored value back.
+    assert grokbot_jobs.bind_lease_claim_target(tmp_path, job_id, "bot-a", "lease-a", "acme/other") == "acme/repo"
+    assert grokbot_jobs.lease_claim_target(tmp_path, job_id, "bot-a", "lease-a") == "acme/repo"
+
+    status = grokbot_jobs.status(tmp_path, job_id, now=NOW)
+    assert "claim_target" not in status
+    assert "acme/repo" not in json.dumps(status)
+    # The value survives a terminal transition, so a release after fail still finds it.
+    grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "failed", now=NOW)
+    assert grokbot_jobs.lease_claim_target(tmp_path, job_id, "bot-a", "lease-a") == "acme/repo"
+
+
+def test_claim_target_belongs_to_one_lease(tmp_path: Path):
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)
+    grokbot_jobs.bind_lease_claim_target(tmp_path, job_id, "bot-a", "lease-a", "acme/repo")
+
+    assert grokbot_jobs.lease_claim_target(tmp_path, job_id, "bot-a", "lease-b") is None
+    assert grokbot_jobs.lease_claim_target(tmp_path, job_id, "bot-b", "lease-a") is None
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^lease-conflict$"):
+        grokbot_jobs.bind_lease_claim_target(tmp_path, job_id, "bot-a", "lease-b", "acme/other")
+
+
+def test_claim_target_cannot_be_bound_before_a_claim(tmp_path: Path):
+    job_id = _enqueue(tmp_path)
+
+    assert grokbot_jobs.lease_claim_target(tmp_path, job_id, "bot-a", "lease-a") is None
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^lease-conflict$"):
+        grokbot_jobs.bind_lease_claim_target(tmp_path, job_id, "bot-a", "lease-a", "acme/repo")
+
+
+@pytest.mark.parametrize("value", ["", "x" * 513, "acme/repo\n", 5])
+def test_invalid_claim_target_is_refused_and_a_stored_one_is_validated(tmp_path: Path, value):
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)
+    with pytest.raises(grokbot_jobs.GrokbotJobError):
+        grokbot_jobs.bind_lease_claim_target(tmp_path, job_id, "bot-a", "lease-a", value)
+
+    path = _job_file(tmp_path, job_id)
+    raw = json.loads(path.read_text())
+    raw["claim_target"] = value
+    path.write_text(json.dumps(raw))
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^corrupt-storage$"):
+        grokbot_jobs.status(tmp_path, job_id, now=NOW)
+
+
+def test_claim_target_on_an_unclaimed_row_is_corrupt(tmp_path: Path):
+    job_id = _enqueue(tmp_path)
+    path = _job_file(tmp_path, job_id)
+    raw = json.loads(path.read_text())
+    raw["claim_target"] = "acme/repo"
+    path.write_text(json.dumps(raw))
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^corrupt-storage$"):
+        grokbot_jobs.status(tmp_path, job_id, now=NOW)
+
+
+def test_binding_a_claim_target_leaves_the_item_revision_alone(tmp_path: Path):
+    job_id = _enqueue(tmp_path)
+    claimed = grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)
+    grokbot_jobs.bind_lease_claim_target(tmp_path, job_id, "bot-a", "lease-a", "acme/repo")
+
+    assert grokbot_jobs.status(tmp_path, job_id, now=NOW)["item_revision"] == claimed["item_revision"]

@@ -8,7 +8,8 @@ otherwise share one claim, and the same repo on two machines would get two
 keys whenever the home names differ.
 
 Otherwise the key comes from the git repository: the normalized ``origin``
-remote, else the git toplevel name when no ``origin`` is configured. A
+remote (``insteadOf`` rewrites applied, never the checkout name while a
+remote exists), else the git toplevel name when no ``origin`` is configured. A
 github.com remote becomes ``owner/repo`` so it matches the ``owner/repo#N``
 issue-scoped claims. Any other host keeps its host
 (``gitlab.com/group/subgroup/repo``) so equal paths on different hosts never
@@ -27,6 +28,7 @@ the call that saw it.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -142,21 +144,40 @@ def _git_layout(cwd: Path) -> tuple[Path, bool] | None:
 
 
 def _origin_remote(toplevel: Path) -> str | None:
-    """The ``origin`` URL, or ``None`` when no ``origin`` remote is configured.
+    """The ``origin`` URL with ``insteadOf`` rewrites applied, or ``None`` without an origin.
 
-    ``git config --get`` exits 1 when the key is unset, which is the
-    legitimate fallback, and works on every git version (``remote get-url``
-    needs 2.7 and exits differently across versions). Any other nonzero exit
-    raises, unlike ``fleet_session_presence``, which maps every failure to
-    "no remote". The raw configured URL is used, so a per-user ``insteadOf``
-    rewrite cannot make two machines disagree on the key.
+    ``git ls-remote --get-url origin`` works on every git since 1.7.5, applies
+    the rewrites (so ``gh:acme/repo`` and the https URL it stands for are one
+    key on every machine), and exits 0 even when there is no such remote, in
+    which case it echoes the name back. Any nonzero exit raises, unlike
+    ``fleet_session_presence``, which maps every failure to "no remote".
     """
-    completed = _git(toplevel, "config", "--get", "remote.origin.url")
-    if completed.returncode == 0:
-        return completed.stdout.strip() or None
-    if completed.returncode == 1:
-        return None
-    raise _fail(toplevel, completed.stderr.strip() or f"exit {completed.returncode}")
+    completed = _git(toplevel, "ls-remote", "--get-url", "origin")
+    if completed.returncode != 0:
+        raise _fail(toplevel, completed.stderr.strip() or f"exit {completed.returncode}")
+    url = completed.stdout.strip()
+    return None if url in ("", "origin") else url
+
+
+def _normalized_remote(url: str, cwd: Path) -> str:
+    """A ``host/path`` identity for a URL the strict parser refuses.
+
+    Scheme, credentials and a trailing ``.git`` are dropped and the host is
+    lowercased, so the same configured remote gives the same key on every
+    machine. A remote that exists never falls back to the checkout name.
+    """
+    from .fleet_session_presence import validate_repo_identity
+
+    value = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://", "", url.strip())
+    authority, separator, rest = value.partition("/")
+    authority = authority.rsplit("@", 1)[-1].lower()
+    path = rest.strip("/")
+    if path.lower().endswith(".git"):
+        path = path[:-4].rstrip("/")
+    identity = f"{authority}/{path}" if separator else authority
+    if validate_repo_identity(identity) is None or not identity.strip("/"):
+        raise ClaimTargetError(f"cannot determine the claim target for {cwd}: the origin remote is not usable")
+    return identity
 
 
 def _remote_key(identity: str) -> str:
@@ -175,10 +196,9 @@ def git_claim_key(start: Path) -> str | None:
         return None
     toplevel, linked = layout
     remote = _origin_remote(toplevel)
-    identity = _parse_remote(remote) if remote else None
-    if identity is None:
+    if remote is None:
         return toplevel.name or None
-    key = _remote_key(identity)
+    key = _remote_key(_parse_remote(remote) or _normalized_remote(remote, cwd))
     return f"{key}@{toplevel.name}" if linked and toplevel.name else key
 
 
