@@ -1684,3 +1684,57 @@ fn python_module_symbol_stays_out_of_search() {
     let rows = graphtrail::query::search_symbols(&conn, "core.py", 20).unwrap();
     assert!(rows.iter().any(|row| row.name == "main"), "{rows:?}");
 }
+
+/// A star-import cycle (a -> b -> c -> a) that can supply two different
+/// definitions of `helper`: seed's through a, and b's own. Which one Python
+/// binds depends on runtime import order, so the resolver must not claim an
+/// import-strict edge. Transparent wrappers between the facade and the cycle
+/// must not change that.
+#[test]
+fn python_star_cycle_with_competing_definitions_is_not_import_strict() {
+    for wrappers in 0..3 {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_resolution_file(root, "seed.py", "def helper():\n    return 0\n");
+        write_resolution_file(root, "a.py", "from seed import *\nfrom b import *\n");
+        write_resolution_file(
+            root,
+            "b.py",
+            "def helper():\n    return 1\n\nfrom c import *\n",
+        );
+        write_resolution_file(root, "c.py", "from b import *\nfrom a import *\n");
+        // facade -> w0 -> w1 -> ... -> c
+        let mut previous = "c".to_string();
+        for wrapper in (0..wrappers).rev() {
+            let name = format!("w{wrapper}");
+            write_resolution_file(
+                root,
+                &format!("{name}.py"),
+                &format!("from {previous} import *\n"),
+            );
+            previous = name;
+        }
+        write_resolution_file(root, "facade.py", &format!("from {previous} import *\n"));
+        write_resolution_file(
+            root,
+            "use.py",
+            "from facade import helper\n\ndef run():\n    return helper()\n",
+        );
+        let conn = resolution_db(root);
+        let rows = graphtrail::store::explain_calls(&conn, "run", "helper").unwrap();
+        assert_eq!(rows.len(), 1, "wrappers={wrappers}: {rows:?}");
+        assert_ne!(
+            rows[0].resolution, "import-strict",
+            "wrappers={wrappers}: {rows:?}"
+        );
+        let strict: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges e JOIN symbols s ON s.id = e.source
+                 WHERE s.name = 'run' AND e.confidence = 0.9",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(strict, 0, "wrappers={wrappers}");
+    }
+}

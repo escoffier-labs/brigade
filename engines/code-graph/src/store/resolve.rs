@@ -15,7 +15,8 @@ use crate::model::{CallKind, Import, PendingCall};
 /// v3 follows Python re-exports and resolves names through `from x import *`.
 /// v4 solves Python module bindings as a fixpoint and ignores function- and
 /// class-local imports as module exports.
-pub(crate) const RESOLVER_VERSION: &str = "4";
+/// v5 treats star-import cycles that can bind more than one definition as ambiguous.
+pub(crate) const RESOLVER_VERSION: &str = "5";
 
 #[derive(Clone, PartialEq)]
 pub(super) struct SymbolCandidate {
@@ -581,7 +582,11 @@ fn resolve_imported_call(
             {
                 ImportResolution::NoImport
             }
-            Binding::Unbound | Binding::Missing => {
+            // The name comes through a star-import cycle that can supply more
+            // than one definition, so no import-strict claim is safe. The
+            // lower-confidence name fallback still applies.
+            Binding::Ambiguous if call.kind == CallKind::Bare => ImportResolution::NoImport,
+            Binding::Unbound | Binding::Missing | Binding::Ambiguous => {
                 unresolved_import_resolution(call, &module_targets, file_index)
             }
         };
@@ -619,6 +624,10 @@ enum Binding {
     Missing,
     /// The module neither defines nor imports the name.
     Unbound,
+    /// The binding depends on a star-import cycle that can supply more than
+    /// one definition, or on a cycle whose fixpoint did not converge. Python
+    /// would pick one by runtime import order, which static analysis cannot see.
+    Ambiguous,
 }
 
 /// A `(module file, name)` pair whose binding the resolver needs.
@@ -660,12 +669,13 @@ impl Statement {
 ///
 /// Bindings depend on other `(module, name)` bindings, and star imports make
 /// those dependencies cyclic. Instead of walking paths, which is exponential
-/// in a dense cycle, every unsolved pair reachable from a query is solved
-/// together as a fixpoint: all start `Unbound`, and a worklist re-evaluates a
-/// pair whenever a pair it reads changes. A pair only moves from `Unbound` to
-/// bound and its chosen statement only moves later in the file, so the
-/// iteration is polynomial in the number of pairs and statements. There is no
-/// hop limit. Solved pairs are memoized for the rest of the resolution pass.
+/// in a dense cycle, every unsolved pair reachable from a query is grouped
+/// into strongly connected components and solved in dependency order. An
+/// acyclic pair is evaluated once. A cycle is resolved only when it can bind
+/// at most one definition, because which of several definitions Python binds
+/// depends on runtime import order. Otherwise it is `Ambiguous`. The work is
+/// polynomial and there is no hop limit. Solved pairs are memoized for the
+/// rest of the resolution pass.
 struct PythonBindings<'a> {
     names: Option<&'a HashMap<String, Vec<SymbolCandidate>>>,
     import_index: &'a HashMap<String, Vec<Import>>,
@@ -767,13 +777,14 @@ impl PythonBindings<'_> {
 
     /// Solve every unsolved pair reachable from `roots` and memoize the results.
     fn solve(&self, roots: &[BindingKey]) {
-        let mut statements: HashMap<BindingKey, Vec<Statement>> = HashMap::new();
-        let mut discovered: Vec<BindingKey> = Vec::new();
+        let mut statements: Vec<Vec<Statement>> = Vec::new();
+        let mut keys: Vec<BindingKey> = Vec::new();
+        let mut index: HashMap<BindingKey, usize> = HashMap::new();
         {
             let memo = self.file_index.python_bindings.borrow();
             let mut pending: Vec<BindingKey> = roots.to_vec();
             while let Some(key) = pending.pop() {
-                if memo.contains_key(&key) || statements.contains_key(&key) {
+                if memo.contains_key(&key) || index.contains_key(&key) {
                     continue;
                 }
                 let key_statements = self.statements(&key.0, &key.1);
@@ -781,71 +792,236 @@ impl PythonBindings<'_> {
                     key_statements
                         .iter()
                         .flat_map(Statement::reads)
-                        .filter(|read| !memo.contains_key(*read) && !statements.contains_key(*read))
+                        .filter(|read| !memo.contains_key(*read) && !index.contains_key(*read))
                         .cloned(),
                 );
-                statements.insert(key.clone(), key_statements);
-                discovered.push(key);
+                index.insert(key.clone(), keys.len());
+                keys.push(key);
+                statements.push(key_statements);
             }
         }
-        if discovered.is_empty() {
+        if keys.is_empty() {
             return;
         }
 
-        let mut readers: HashMap<&BindingKey, Vec<&BindingKey>> = HashMap::new();
-        for key in &discovered {
-            for read in statements[key].iter().flat_map(Statement::reads) {
-                if statements.contains_key(read) {
-                    readers.entry(read).or_default().push(key);
-                }
-            }
-        }
-        let mut values: HashMap<&BindingKey, Binding> = discovered
+        // Edges from each pair to the unsolved pairs it reads.
+        let reads: Vec<Vec<usize>> = statements
             .iter()
-            .map(|key| (key, Binding::Unbound))
+            .map(|key_statements| {
+                let mut targets: Vec<usize> = key_statements
+                    .iter()
+                    .flat_map(Statement::reads)
+                    .filter_map(|read| index.get(read).copied())
+                    .collect();
+                targets.sort_unstable();
+                targets.dedup();
+                targets
+            })
             .collect();
-        // Leaves were discovered last, so evaluating in reverse settles them first.
-        let mut queue: VecDeque<&BindingKey> = discovered.iter().rev().collect();
-        let mut queued: HashSet<&BindingKey> = discovered.iter().collect();
-        let statement_count: usize = statements.values().map(Vec::len).sum();
-        // The fixpoint terminates on its own. This bound only guards against a
-        // reasoning error turning into a hang.
-        let mut budget = discovered
-            .len()
-            .saturating_mul(statement_count + 1)
-            .saturating_mul(4)
-            .max(1024);
+
+        let mut values: Vec<Option<Binding>> = vec![None; keys.len()];
         {
             let memo = self.file_index.python_bindings.borrow();
-            while let Some(key) = queue.pop_front() {
-                queued.remove(key);
-                if budget == 0 {
-                    break;
-                }
-                budget -= 1;
-                let value = evaluate(&statements[key], |read| {
-                    values
-                        .get(read)
-                        .or_else(|| memo.get(read))
-                        .cloned()
-                        .unwrap_or(Binding::Unbound)
-                });
-                if values[key] != value {
-                    values.insert(key, value);
-                    for reader in readers.get(key).into_iter().flatten() {
-                        if queued.insert(reader) {
-                            queue.push_back(reader);
-                        }
-                    }
+            // Components come out with everything they read already solved.
+            for component in strongly_connected_components(&reads) {
+                let cyclic = component.len() > 1 || reads[component[0]].contains(&component[0]);
+                let solved = if cyclic {
+                    solve_cycle(&component, &statements, &reads, &index, &values, &memo)
+                } else {
+                    let member = component[0];
+                    let value = evaluate(&statements[member], |read| {
+                        read_value(read, &index, &values, &memo)
+                    });
+                    vec![(member, value)]
+                };
+                for (member, value) in solved {
+                    values[member] = Some(value);
                 }
             }
         }
-        let solved: Vec<(BindingKey, Binding)> = values
+        let solved: Vec<(BindingKey, Binding)> = keys
             .into_iter()
-            .map(|(key, value)| (key.clone(), value))
+            .zip(values)
+            .map(|(key, value)| (key, value.unwrap_or(Binding::Ambiguous)))
             .collect();
         self.file_index.python_bindings.borrow_mut().extend(solved);
     }
+}
+
+/// The current value of a pair: solved in this pass, memoized earlier, or unbound.
+fn read_value(
+    read: &BindingKey,
+    index: &HashMap<BindingKey, usize>,
+    values: &[Option<Binding>],
+    memo: &HashMap<BindingKey, Binding>,
+) -> Binding {
+    match index.get(read) {
+        Some(&slot) => values[slot].clone().unwrap_or(Binding::Unbound),
+        None => memo.get(read).cloned().unwrap_or(Binding::Unbound),
+    }
+}
+
+/// Solve one strongly connected component of star and explicit imports.
+///
+/// Which definition a cycle binds depends on runtime import order. The
+/// component is resolved only when everything that can flow into it (its own
+/// top-level definitions plus the solved bindings it reads from outside)
+/// agrees on at most one definition. Then a worklist fixpoint settles which
+/// members bind it. Otherwise, or if the fixpoint does not converge within its
+/// polynomial budget, every member is `Ambiguous` and nothing unconverged is
+/// cached as solved.
+fn solve_cycle(
+    component: &[usize],
+    statements: &[Vec<Statement>],
+    reads: &[Vec<usize>],
+    index: &HashMap<BindingKey, usize>,
+    values: &[Option<Binding>],
+    memo: &HashMap<BindingKey, Binding>,
+) -> Vec<(usize, Binding)> {
+    let ambiguous = || {
+        component
+            .iter()
+            .map(|member| (*member, Binding::Ambiguous))
+            .collect()
+    };
+    let members: HashSet<usize> = component.iter().copied().collect();
+    let mut supplied: HashSet<&str> = HashSet::new();
+    for member in component {
+        for statement in &statements[*member] {
+            if let Statement::Definition(candidate) = statement {
+                supplied.insert(&candidate.id);
+            }
+            for read in statement.reads() {
+                if index.get(read).is_some_and(|slot| members.contains(slot)) {
+                    continue;
+                }
+                match index.get(read) {
+                    Some(&slot) => match &values[slot] {
+                        Some(Binding::Found(targets)) => {
+                            supplied.extend(targets.iter().map(|target| target.id.as_str()));
+                        }
+                        Some(Binding::Ambiguous) => return ambiguous(),
+                        _ => {}
+                    },
+                    None => match memo.get(read) {
+                        Some(Binding::Found(targets)) => {
+                            supplied.extend(targets.iter().map(|target| target.id.as_str()));
+                        }
+                        Some(Binding::Ambiguous) => return ambiguous(),
+                        _ => {}
+                    },
+                }
+            }
+        }
+    }
+    if supplied.len() > 1 {
+        return ambiguous();
+    }
+
+    // At most one definition can flow, so the worklist only settles which
+    // members bind it and which stay unbound or missing.
+    let mut current: HashMap<usize, Binding> = component
+        .iter()
+        .map(|member| (*member, Binding::Unbound))
+        .collect();
+    let mut readers: HashMap<usize, Vec<usize>> = HashMap::new();
+    for member in component {
+        for read in &reads[*member] {
+            if members.contains(read) {
+                readers.entry(*read).or_default().push(*member);
+            }
+        }
+    }
+    let mut queue: VecDeque<usize> = component.iter().copied().collect();
+    let mut queued: HashSet<usize> = members.clone();
+    let statement_count: usize = component
+        .iter()
+        .map(|member| statements[*member].len())
+        .sum();
+    let mut budget = component
+        .len()
+        .saturating_mul(statement_count + 1)
+        .saturating_mul(4);
+    while let Some(member) = queue.pop_front() {
+        queued.remove(&member);
+        if budget == 0 {
+            return ambiguous();
+        }
+        budget -= 1;
+        let value = evaluate(&statements[member], |read| match index.get(read) {
+            Some(slot) if members.contains(slot) => current[slot].clone(),
+            _ => read_value(read, index, values, memo),
+        });
+        if current[&member] != value {
+            current.insert(member, value);
+            for reader in readers.get(&member).into_iter().flatten() {
+                if queued.insert(*reader) {
+                    queue.push_back(*reader);
+                }
+            }
+        }
+    }
+    current.into_iter().collect()
+}
+
+/// Tarjan's strongly connected components, iterative so deep import chains
+/// cannot overflow the stack. Components are returned in reverse topological
+/// order: every component comes after all the components it reads.
+fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    const UNVISITED: usize = usize::MAX;
+    let count = edges.len();
+    let mut order = vec![UNVISITED; count];
+    let mut low = vec![0; count];
+    let mut on_stack = vec![false; count];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut components = Vec::new();
+    let mut next_order = 0;
+    for start in 0..count {
+        if order[start] != UNVISITED {
+            continue;
+        }
+        // Frames are (node, index of the next edge to follow).
+        let mut frames: Vec<(usize, usize)> = vec![(start, 0)];
+        order[start] = next_order;
+        low[start] = next_order;
+        next_order += 1;
+        stack.push(start);
+        on_stack[start] = true;
+        while let Some(frame) = frames.last_mut() {
+            let (node, edge) = *frame;
+            if let Some(&target) = edges[node].get(edge) {
+                frame.1 += 1;
+                if order[target] == UNVISITED {
+                    order[target] = next_order;
+                    low[target] = next_order;
+                    next_order += 1;
+                    stack.push(target);
+                    on_stack[target] = true;
+                    frames.push((target, 0));
+                } else if on_stack[target] {
+                    low[node] = low[node].min(order[target]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if low[node] == order[node] {
+                let mut component = Vec::new();
+                while let Some(member) = stack.pop() {
+                    on_stack[member] = false;
+                    component.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                component.sort_unstable();
+                components.push(component);
+            }
+        }
+    }
+    components
 }
 
 /// A module's binding from its statements, latest first, given the bindings it reads.
@@ -857,6 +1033,7 @@ fn evaluate(statements: &[Statement], read: impl Fn(&BindingKey) -> Binding) -> 
             Statement::Explicit(reads) => {
                 return match combine(reads, &read) {
                     Binding::Found(targets) => Binding::Found(targets),
+                    Binding::Ambiguous => Binding::Ambiguous,
                     Binding::Missing | Binding::Unbound => Binding::Missing,
                 };
             }
@@ -872,11 +1049,18 @@ fn evaluate(statements: &[Statement], read: impl Fn(&BindingKey) -> Binding) -> 
 
 /// Merge the bindings of one import's target files (normally a single file).
 fn combine(keys: &[BindingKey], read: impl Fn(&BindingKey) -> Binding) -> Binding {
-    let mut found = Vec::new();
+    let mut found: Vec<SymbolCandidate> = Vec::new();
     let mut missing = false;
     for key in keys {
         match read(key) {
-            Binding::Found(targets) => found.extend(targets),
+            Binding::Found(targets) => {
+                for target in targets {
+                    if !found.iter().any(|existing| existing.id == target.id) {
+                        found.push(target);
+                    }
+                }
+            }
+            Binding::Ambiguous => return Binding::Ambiguous,
             Binding::Missing => missing = true,
             Binding::Unbound => {}
         }
@@ -916,8 +1100,9 @@ fn resolve_star_imported_call(
     for import in stars {
         match bindings.star_import_binding(&call.source_file, import, &call.target_name) {
             Some(Binding::Found(targets)) => return Some(targets),
-            // A later star import binds the name to something unindexed.
-            Some(Binding::Missing) => return None,
+            // A later star import binds the name to something unindexed, or to
+            // a definition a cycle cannot pin down.
+            Some(Binding::Missing | Binding::Ambiguous) => return None,
             Some(Binding::Unbound) | None => {}
         }
     }
