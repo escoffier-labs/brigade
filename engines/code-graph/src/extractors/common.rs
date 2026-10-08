@@ -153,16 +153,18 @@ pub fn extract_with<L: LangSpec>(
 /// copy its whole line into `symbols` and `symbols_fts` once per symbol.
 pub const MAX_SIGNATURE_BYTES: usize = 256;
 
-/// Truncate `line` to [`MAX_SIGNATURE_BYTES`] on a char boundary and append `…`.
-fn cap_signature(line: &str) -> String {
+/// Truncate `line` so the stored signature, `…` marker included, fits in
+/// [`MAX_SIGNATURE_BYTES`]. The cut lands on a char boundary.
+pub(crate) fn cap_signature(line: &str) -> String {
     if line.len() <= MAX_SIGNATURE_BYTES {
         return line.to_string();
     }
-    let mut end = MAX_SIGNATURE_BYTES;
+    const MARKER: &str = "…";
+    let mut end = MAX_SIGNATURE_BYTES - MARKER.len();
     while !line.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}…", &line[..end])
+    format!("{}{MARKER}", &line[..end])
 }
 
 fn visit<L: LangSpec>(

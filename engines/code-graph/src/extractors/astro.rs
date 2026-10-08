@@ -4,7 +4,7 @@
 use anyhow::Result;
 use tree_sitter_typescript::LANGUAGE_TYPESCRIPT;
 
-use crate::extractors::common::{hex_hash, symbol_id};
+use crate::extractors::common::{cap_signature, hex_hash, symbol_id};
 use crate::extractors::typescript::extract_typescript_as;
 use crate::model::{CallKind, FileGraph, Import, PendingCall, Symbol};
 
@@ -169,7 +169,7 @@ fn ensure_component_symbol(
             file_path: path.to_string(),
             start_line: 1,
             end_line,
-            signature: format!("export default function {name}"),
+            signature: cap_signature(&format!("export default function {name}")),
             container: None,
             content_hash: content_hash.to_string(),
             body_hash: Some(hex_hash(content.as_bytes())),

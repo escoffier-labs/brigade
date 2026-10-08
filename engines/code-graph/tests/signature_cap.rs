@@ -10,7 +10,7 @@ use graphtrail::query::doctor::doctor;
 use graphtrail::store::{init_schema, open_db, sync_repo};
 use rusqlite::Connection;
 
-/// Longest stored signature body before the `…` marker.
+/// Longest stored signature, `…` marker included.
 const CAP: usize = 256;
 const MARKER: &str = "…";
 
@@ -33,20 +33,21 @@ fn one_line_signature_of_5kb_is_capped_with_a_marker() {
     assert_eq!(sigs.len(), 1);
     let sig = &sigs[0];
     assert!(sig.ends_with(MARKER), "capped signature keeps a marker");
-    assert!(sig.len() <= CAP + MARKER.len(), "len {}", sig.len());
+    assert!(sig.len() <= CAP, "len {}", sig.len());
     assert!(sig.starts_with("function wide(alpha: string, "));
 }
 
 #[test]
 fn cap_never_splits_a_multibyte_character() {
-    // "function f(" is 11 bytes. 244 ASCII bytes put a 3-byte character at
-    // bytes 255..258, so a naive cut at 256 would land inside it.
-    let source = format!("function f({}日本語, z) {{}}\n", "a".repeat(244));
+    // "function f(" is 11 bytes. 241 ASCII bytes put a 3-byte character at
+    // bytes 252..255, so a naive cut at the 253-byte body budget lands inside it.
+    let source = format!("function f({}日本語, z) {{}}\n", "a".repeat(241));
     let sigs = signatures(&source);
     let sig = &sigs[0];
     assert!(sig.ends_with(MARKER));
     let body = sig.strip_suffix(MARKER).unwrap();
-    assert_eq!(body.len(), 255, "cut backs off to the char boundary");
+    assert_eq!(body.len(), 252, "cut backs off to the char boundary");
+    assert!(sig.len() <= CAP);
     assert!(!body.contains('日'));
 }
 
@@ -205,6 +206,31 @@ fn one_embedded_long_line_does_not_drop_an_otherwise_ordinary_module() {
     sync_repo(&conn, root).unwrap();
     assert_eq!(indexed_paths(&conn), paths(["embedded.py"]));
     assert!(skipped_rows(&conn).is_empty());
+}
+
+#[test]
+fn astro_component_signature_respects_the_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let name = format!("C{}", "a".repeat(239));
+    write_file(
+        root.join(format!("{name}.astro")),
+        "---\nconst x = 1;\n---\n<div />\n",
+    );
+
+    let conn = open_graph(root);
+    sync_repo(&conn, root).unwrap();
+    let longest: i64 = conn
+        .query_row(
+            "SELECT MAX(LENGTH(CAST(signature AS BLOB))) FROM symbols",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        longest as usize <= CAP,
+        "longest stored signature is {longest} bytes"
+    );
 }
 
 fn minified_source() -> String {
