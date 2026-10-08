@@ -115,6 +115,7 @@ fn collect_single_rust_use(text: &str, line: usize, out: &mut Vec<Import>) {
         imported_name: Some(imported.to_string()),
         alias,
         line,
+        module_scope: true,
     });
 }
 

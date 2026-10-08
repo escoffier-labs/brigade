@@ -1423,21 +1423,98 @@ fn python_long_star_reexport_chain_resolves() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     write_resolution_file(root, "pkg/__init__.py", "from .m1 import *\n");
-    for hop in 1..8 {
-        write_resolution_file(
-            root,
-            &format!("pkg/m{hop}.py"),
-            &format!("from .m{} import *\n", hop + 1),
-        );
+    // Deeper than any recursion cap: 80 star hops, every fifth one an explicit import.
+    for hop in 1..80 {
+        let next = hop + 1;
+        let body = if hop % 5 == 0 {
+            format!("from .m{next} import helper\n")
+        } else {
+            format!("from .m{next} import *\n")
+        };
+        write_resolution_file(root, &format!("pkg/m{hop}.py"), &body);
     }
-    write_resolution_file(root, "pkg/m8.py", "def helper():\n    return 1\n");
+    write_resolution_file(root, "pkg/m80.py", "def helper():\n    return 1\n");
     write_resolution_file(
         root,
         "use.py",
         "from pkg import helper\n\ndef run():\n    return helper()\n",
     );
     let conn = resolution_db(root);
-    assert_resolves_to(&conn, "run", "helper", "import-strict", "pkg/m8.py");
+    assert_resolves_to(&conn, "run", "helper", "import-strict", "pkg/m80.py");
+}
+
+/// Every module star-imports every other one, so a lookup of a name nobody
+/// binds explores a dense cycle. Path enumeration is exponential in the
+/// module count. The fixpoint visits each (module, name) pair a bounded
+/// number of times, so this finishes in well under the time bound.
+#[test]
+fn python_dense_star_cycle_resolves_in_polynomial_time() {
+    const MODULES: usize = 14;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let star_all = |skip: Option<usize>| -> String {
+        (0..MODULES)
+            .filter(|module| Some(*module) != skip)
+            .map(|module| format!("from .m{module} import *\n"))
+            .collect()
+    };
+    write_resolution_file(root, "pkg/__init__.py", &star_all(None));
+    for module in 0..MODULES {
+        write_resolution_file(root, &format!("pkg/m{module}.py"), &star_all(Some(module)));
+    }
+    write_resolution_file(
+        root,
+        "pkg/m7.py",
+        &format!("{}def present():\n    return 1\n", star_all(Some(7))),
+    );
+    write_resolution_file(
+        root,
+        "use.py",
+        "from pkg import absent, present\n\ndef run():\n    absent()\n    present()\n",
+    );
+    let started = std::time::Instant::now();
+    let conn = resolution_db(root);
+    let rows = graphtrail::store::explain_calls(&conn, "run", "absent").unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].targets.is_empty(), "{rows:?}");
+    assert_resolves_to(&conn, "run", "present", "import-strict", "pkg/m7.py");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "dense star cycle took {elapsed:?}"
+    );
+}
+
+#[test]
+fn python_function_local_import_is_not_a_module_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(root, "a.py", "def helper():\n    return 1\n");
+    write_resolution_file(root, "b.py", "def helper():\n    return 2\n");
+    write_resolution_file(
+        root,
+        "facade.py",
+        "from a import helper\n\ndef unrelated():\n    from b import helper\n    return helper()\n\nclass Holder:\n    from b import helper\n",
+    );
+    write_resolution_file(
+        root,
+        "use.py",
+        "from facade import helper\n\ndef run():\n    return helper()\n",
+    );
+    // An import under a module-level `if` still binds at module scope.
+    write_resolution_file(
+        root,
+        "guarded.py",
+        "from a import helper\n\nif True:\n    from b import helper\n",
+    );
+    write_resolution_file(
+        root,
+        "use_guarded.py",
+        "from guarded import helper\n\ndef go():\n    return helper()\n",
+    );
+    let conn = resolution_db(root);
+    assert_resolves_to(&conn, "run", "helper", "import-strict", "a.py");
+    assert_resolves_to(&conn, "go", "helper", "import-strict", "b.py");
 }
 
 #[test]

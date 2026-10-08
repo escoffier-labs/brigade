@@ -103,15 +103,16 @@ pub(super) fn write_file_graph(
     }
     for import in &graph.imports {
         tx.execute(
-            "INSERT INTO imports(file_path, module, local_name, imported_name, alias, line)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO imports(file_path, module, local_name, imported_name, alias, line, module_scope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 graph.path,
                 import.module,
                 import.local_name,
                 import.imported_name,
                 import.alias,
-                import.line as i64
+                import.line as i64,
+                import.module_scope
             ],
         )?;
     }

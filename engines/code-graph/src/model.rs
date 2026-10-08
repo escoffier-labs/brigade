@@ -26,6 +26,9 @@ pub struct Import {
     pub imported_name: Option<String>,
     pub alias: Option<String>,
     pub line: usize,
+    /// Whether the import binds in the module namespace. Python imports inside
+    /// a function or class body do not, so they are not module exports.
+    pub module_scope: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

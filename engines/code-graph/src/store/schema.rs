@@ -64,7 +64,8 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             local_name TEXT,
             imported_name TEXT,
             alias TEXT,
-            line INTEGER NOT NULL
+            line INTEGER NOT NULL,
+            module_scope INTEGER NOT NULL DEFAULT 1
         );
 
         -- A module's literal export list (Python `__all__`) as a JSON array.
@@ -247,6 +248,14 @@ fn ensure_import_columns(conn: &Connection) -> Result<()> {
         if !columns.iter().any(|existing| existing == column) {
             conn.execute(&format!("ALTER TABLE imports ADD COLUMN {column} TEXT"), [])?;
         }
+    }
+    // Older rows default to module scope. The Python extractor fingerprint
+    // bump that introduced the column re-extracts the rows where it matters.
+    if !columns.iter().any(|existing| existing == "module_scope") {
+        conn.execute(
+            "ALTER TABLE imports ADD COLUMN module_scope INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
     }
     Ok(())
 }

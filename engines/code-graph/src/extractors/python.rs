@@ -9,7 +9,8 @@ use crate::model::{CallTarget, FileGraph, Import};
 /// Bump when Python extraction output can change for the same file content.
 /// v3: module-level calls belong to a `<module>` pseudo-symbol, decorated
 /// definitions span their decorators, and `from x import *` is recorded.
-pub const EXTRACTOR_FINGERPRINT: &str = "python-extractor-v3";
+/// v4: literal `__all__` lists, import scope, and a stable `<module>` span.
+pub const EXTRACTOR_FINGERPRINT: &str = "python-extractor-v4";
 
 /// `imported_name` of a `from x import *` row.
 pub const WILDCARD_IMPORT: &str = "*";
@@ -128,6 +129,7 @@ impl LangSpec for PythonSpec {
                             imported_name: None,
                             alias,
                             line,
+                            module_scope: true,
                         });
                     }
                 }
@@ -151,6 +153,7 @@ impl LangSpec for PythonSpec {
                                 imported_name: Some(WILDCARD_IMPORT.to_string()),
                                 alias: None,
                                 line,
+                                module_scope: true,
                             });
                             continue;
                         }
@@ -177,6 +180,7 @@ impl LangSpec for PythonSpec {
                             imported_name: Some(imported_name),
                             alias,
                             line,
+                            module_scope: true,
                         });
                     }
                 }
@@ -479,6 +483,22 @@ class Box:
         ] {
             assert_eq!(graph(dynamic).exports, None, "{dynamic}");
         }
+    }
+
+    #[test]
+    fn python_import_scope_is_recorded() {
+        let g = graph(
+            "import os\ntry:\n    from a import x\nexcept ImportError:\n    pass\n\ndef f():\n    from b import y\n\nclass C:\n    from c import z\n",
+        );
+        let scopes: Vec<(&str, bool)> = g
+            .imports
+            .iter()
+            .map(|import| (import.module.as_str(), import.module_scope))
+            .collect();
+        assert_eq!(
+            scopes,
+            [("os", true), ("a", true), ("b", false), ("c", false)]
+        );
     }
 
     #[test]

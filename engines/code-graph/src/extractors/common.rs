@@ -26,8 +26,11 @@ pub trait LangSpec {
     fn decorated_definition<'t>(&self, _node: TsNode<'t>) -> Option<TsNode<'t>> {
         None
     }
-    /// Whether calls outside every symbol belong to a per-file [`MODULE_SYMBOL_NAME`]
-    /// pseudo-symbol. When `false`, module-level calls are dropped.
+    /// Whether the language has a Python-like module scope. When `true`, calls
+    /// outside every symbol belong to a per-file [`MODULE_SYMBOL_NAME`]
+    /// pseudo-symbol, and imports inside a symbol are marked as not binding at
+    /// module scope. When `false`, module-level calls are dropped and every
+    /// import keeps `module_scope = true`.
     fn module_scope_calls(&self) -> bool {
         false
     }
@@ -135,7 +138,14 @@ fn visit<L: LangSpec>(
     imports: &mut Vec<Import>,
     calls: &mut Vec<PendingCall>,
 ) {
+    let first_new_import = imports.len();
     spec.collect_import(node, ctx.source, imports);
+    if ctx.module_id.is_some() && !stack.is_empty() {
+        // A function- or class-local import binds in that body, not the module.
+        for import in &mut imports[first_new_import..] {
+            import.module_scope = false;
+        }
+    }
 
     if let Some(target) = spec.call_target(node, ctx.source) {
         // Attribute the call to the innermost enclosing symbol. Module-level calls go to
