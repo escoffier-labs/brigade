@@ -87,8 +87,9 @@ NO_PLAN_FILE_RULE = (
 class CodeGraphBrief:
     """The GraphTrail brief, plus what it showed as data when the engine says so.
 
-    ``symbols`` and ``files`` come from the engine's ``--json`` pack and stay
-    None for engines without a relevance floor, where only the markdown exists.
+    ``symbols`` and ``files`` come from the engine's ``--json`` pack whenever
+    the brief is a context pack, floored or not. They stay None only when the
+    JSON call fails or an older engine returns no pack, so only markdown exists.
     ``confident`` is False when the engine found no code worth listing (#1648).
     """
 
