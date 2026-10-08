@@ -8,18 +8,20 @@ otherwise share one claim, and the same repo on two machines would get two
 keys whenever the home names differ.
 
 Otherwise the key comes from the git repository: the normalized ``origin``
-remote, else the git toplevel name. A github.com remote becomes
-``owner/repo`` so it matches the ``owner/repo#N`` issue-scoped claims. Any
-other host keeps its host (``gitlab.com/group/subgroup/repo``) so equal
-paths on different hosts never collide. A linked worktree adds
-``@<worktree name>`` so parallel workers on one repo are not serialized by
-a single claim, while the main checkout keeps the bare repo key that every
-machine agrees on.
+remote, else the git toplevel name when no ``origin`` is configured. A
+github.com remote becomes ``owner/repo`` so it matches the ``owner/repo#N``
+issue-scoped claims. Any other host keeps its host
+(``gitlab.com/group/subgroup/repo``) so equal paths on different hosts never
+collide. A linked worktree adds ``@<worktree name>`` so parallel workers on
+one repo are not serialized by a single claim, while the main checkout keeps
+the bare repo key that every machine agrees on.
 
-A directory that is not a git repo falls back to its own name. A transient
-git failure (timeout, I/O error, an unreadable repo) is not "not a repo":
-it raises ``ClaimTargetError`` instead of quietly producing a different key
-that would address the wrong claim mid-lease.
+A directory that is not a git repo falls back to its own name. Anything else
+that stops git from answering (a timeout, an I/O error, an unreadable remote,
+or no git binary inside a checkout) is not "not a repo": it raises
+``ClaimTargetError`` instead of quietly producing a different key that would
+address the wrong claim. Nothing here is cached, so a failure never outlives
+the call that saw it.
 """
 
 from __future__ import annotations
@@ -33,11 +35,20 @@ class ClaimTargetError(RuntimeError):
     """The claim key could not be determined right now. Never a fallback key."""
 
 
-def _git_layout(cwd: Path) -> tuple[Path, bool] | None:
-    """``(toplevel, is_linked_worktree)``, or ``None`` when not in a git repo."""
+def _fail(cwd: Path, detail: object) -> ClaimTargetError:
+    return ClaimTargetError(f"cannot determine the claim target for {cwd}: git failed ({detail})")
+
+
+def _inside_checkout(cwd: Path) -> bool:
+    """Whether a ``.git`` file or directory exists at or above ``cwd``."""
+    return any((candidate / ".git").exists() for candidate in (cwd, *cwd.parents))
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run git, turning every failure to run it into ``ClaimTargetError``."""
     try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel", "--git-dir", "--git-common-dir"],
+        return subprocess.run(
+            ["git", *args],
             shell=False,
             timeout=5,
             cwd=cwd,
@@ -48,24 +59,48 @@ def _git_layout(cwd: Path) -> tuple[Path, bool] | None:
             check=False,
             env={**os.environ, "LC_ALL": "C"},
         )
-    except FileNotFoundError:
-        return None  # no git binary: nothing to derive a repo key from, consistently
     except (subprocess.TimeoutExpired, OSError) as exc:
-        raise ClaimTargetError(f"cannot determine the claim target for {cwd}: git failed ({exc})") from exc
+        raise _fail(cwd, exc) from exc
+
+
+def _git_layout(cwd: Path) -> tuple[Path, bool] | None:
+    """``(toplevel, is_linked_worktree)``, or ``None`` when not in a git repo."""
+    try:
+        completed = _git(cwd, "rev-parse", "--show-toplevel", "--git-dir", "--git-common-dir")
+    except ClaimTargetError as exc:
+        # No git binary: only a directory with no checkout above it is safe to
+        # call "not a repo". Inside one, another machine would get the repo key.
+        if isinstance(exc.__cause__, FileNotFoundError) and not _inside_checkout(cwd):
+            return None
+        raise
     if completed.returncode != 0:
         if "not a git repository" in completed.stderr:
             return None
-        detail = completed.stderr.strip() or f"exit {completed.returncode}"
-        raise ClaimTargetError(f"cannot determine the claim target for {cwd}: git failed ({detail})")
+        raise _fail(cwd, completed.stderr.strip() or f"exit {completed.returncode}")
     lines = completed.stdout.splitlines()
     if len(lines) != 3:
-        raise ClaimTargetError(f"cannot determine the claim target for {cwd}: unexpected git output")
+        raise _fail(cwd, "unexpected output")
     toplevel, git_dir, common_dir = (Path(line) for line in lines)
     try:
         linked = (cwd / git_dir).resolve() != (cwd / common_dir).resolve()
     except OSError:
         linked = False
     return toplevel, linked
+
+
+def _origin_remote(toplevel: Path) -> str | None:
+    """The ``origin`` URL, or ``None`` when no ``origin`` remote is configured.
+
+    Unlike ``fleet_session_presence`` this tells "no such remote" (exit 2, a
+    legitimate fallback) apart from a failed read (any other nonzero exit),
+    which raises.
+    """
+    completed = _git(toplevel, "remote", "get-url", "origin")
+    if completed.returncode == 0:
+        return completed.stdout.strip() or None
+    if completed.returncode == 2 or "No such remote" in completed.stderr:
+        return None
+    raise _fail(toplevel, completed.stderr.strip() or f"exit {completed.returncode}")
 
 
 def _remote_key(identity: str) -> str:
@@ -76,20 +111,18 @@ def _remote_key(identity: str) -> str:
 
 def git_claim_key(start: Path) -> str | None:
     """Repo-derived claim key for ``start``, or ``None`` outside a git repo."""
-    from .fleet_session_presence import repository_identity
+    from .fleet_session_presence import _parse_remote
 
     cwd = start if start.is_dir() else start.parent
     layout = _git_layout(cwd)
     if layout is None:
         return None
     toplevel, linked = layout
-    try:
-        identity = repository_identity(toplevel)
-    except (subprocess.SubprocessError, OSError) as exc:
-        raise ClaimTargetError(f"cannot determine the claim target for {cwd}: git failed ({exc})") from exc
-    if identity.scope != "fleet":
+    remote = _origin_remote(toplevel)
+    identity = _parse_remote(remote) if remote else None
+    if identity is None:
         return toplevel.name or None
-    key = _remote_key(identity.value)
+    key = _remote_key(identity)
     return f"{key}@{toplevel.name}" if linked and toplevel.name else key
 
 

@@ -105,17 +105,6 @@ def test_directory_outside_git_uses_its_own_name_not_the_home_name(tmp_path, mon
     assert fleet_client.resolve_claim_target(plain) == "today"
 
 
-def test_git_failure_degrades_to_the_directory_name(tmp_path, monkeypatch):
-    home = _make_home(tmp_path, "homeA", monkeypatch)
-    repo = _make_repo(home / "repos", "scratch", "https://github.com/acme/scratch.git")
-
-    def boom(*args, **kwargs):
-        raise FileNotFoundError("git")
-
-    monkeypatch.setattr("brigade.fleet_claim_target.subprocess.run", boom)
-    assert fleet_client.resolve_claim_target(repo) == "scratch"
-
-
 def test_release_path_frees_a_claim_taken_under_the_run_path_resolver(tmp_path, monkeypatch, capsys):
     """Acquire and ``claims --release --path`` share one resolver (#1639)."""
     import threading
@@ -170,18 +159,70 @@ def test_transient_git_failure_raises_instead_of_changing_the_key(tmp_path, monk
         fleet_client.resolve_claim_target(repo)
 
 
-def test_transient_failure_reading_the_remote_raises_instead_of_using_the_directory_name(tmp_path, monkeypatch):
-    from brigade import fleet_session_presence
+def _fail_remote_reads(monkeypatch, state: dict, outcome):
+    """Stub only the ``git remote`` command; every other git call is real.
 
+    ``outcome`` is a CompletedProcess to return or an exception to raise.
+    Clearing ``state["fail"]`` lets the real git run again (recovery).
+    """
+    real_run = subprocess.run
+
+    def run(cmd, *args, **kwargs):
+        if state["fail"] and list(cmd[:2]) == ["git", "remote"]:
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr("brigade.fleet_claim_target.subprocess.run", run)
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        subprocess.CompletedProcess(["git"], 128, stdout="", stderr="fatal: unable to read config: I/O error"),
+        subprocess.TimeoutExpired(cmd=["git"], timeout=5),
+    ],
+    ids=["exit-128", "timeout"],
+)
+def test_failed_remote_read_raises_and_the_key_recovers_once_git_does(tmp_path, monkeypatch, outcome):
+    """A failed ``git remote`` read must never become the toplevel-name key, and
+    must not be remembered after git recovers."""
     home = _make_home(tmp_path, "homeA", monkeypatch)
     repo = _make_repo(home / "repos", "worker", "https://github.com/acme/repo.git")
-    monkeypatch.setattr(
-        fleet_session_presence,
-        "repository_identity",
-        lambda target: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd=["git"], timeout=5)),
-    )
+    state = {"fail": True}
+    _fail_remote_reads(monkeypatch, state, outcome)
     with pytest.raises(ClaimTargetError):
         fleet_client.resolve_claim_target(repo)
+    state["fail"] = False
+    assert fleet_client.resolve_claim_target(repo) == "acme/repo"
+
+
+def test_no_origin_remote_is_a_legitimate_fallback_to_the_toplevel_name(tmp_path, monkeypatch):
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    repo = _make_repo(home / "repos", "worker", None)
+    assert fleet_client.resolve_claim_target(repo) == "worker"
+
+
+def test_missing_git_fails_closed_inside_a_checkout_but_not_outside_one(tmp_path, monkeypatch):
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    repo = _make_repo(home / "repos", "worker", "https://github.com/acme/repo.git")
+    nested = repo / "pkg"
+    nested.mkdir()
+    plain = home / "notes"
+    plain.mkdir()
+
+    def inside_sandbox_checkout(cwd: Path) -> bool:
+        # Bound the walk to the sandbox: the host's own tmp dir may be a checkout.
+        return any((p / ".git").exists() for p in (cwd, *cwd.parents) if p.is_relative_to(tmp_path))
+
+    monkeypatch.setattr("brigade.fleet_claim_target._inside_checkout", inside_sandbox_checkout)
+    monkeypatch.setattr("brigade.fleet_claim_target.subprocess.run", _boom(FileNotFoundError("git")))
+    with pytest.raises(ClaimTargetError):
+        fleet_client.resolve_claim_target(repo)
+    with pytest.raises(ClaimTargetError):
+        fleet_client.resolve_claim_target(nested)
+    assert fleet_client.resolve_claim_target(plain) == "notes"
 
 
 def test_a_directory_that_is_not_a_git_repo_is_not_an_error(tmp_path, monkeypatch):

@@ -2476,20 +2476,8 @@ def test_claim_advertises_the_optional_worker_label_argument():
     assert not grokbot_mcp._valid_tool_arguments("grokbot_queue_claim", {"job_id": "grokbot-a", "worker_label": 2})
 
 
-def test_fleet_target_is_resolved_once_and_reused_for_renew_release_and_events(tmp_path: Path, monkeypatch):
-    """A transient git failure after acquire must not move renew or release to another key."""
-    from brigade.fleet_claim_target import ClaimTargetError
-
-    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
-    adapter = _adapter(tmp_path)
-    resolutions: list[object] = []
-
-    def resolve(base_path=None):
-        resolutions.append(base_path)
-        if len(resolutions) > 1:
-            raise ClaimTargetError("git timed out")
-        return "acme/repo"
-
+def _record_fleet_calls(monkeypatch, resolve):
+    """Patch the fleet client so every claim call records the target it was given."""
     seen: list[tuple[str, str]] = []
 
     def record(kind: str, decision):
@@ -2510,6 +2498,50 @@ def test_fleet_target_is_resolved_once_and_reused_for_renew_release_and_events(t
         lambda **kwargs: seen.append(("event", kwargs["target"])),
         raising=False,
     )
+    return seen
+
+
+def test_a_new_lease_resolves_the_target_again_after_the_old_one_was_released(tmp_path: Path, monkeypatch):
+    """The pin is per lease: when origin changes, the next acquisition gets the new key."""
+    adapter = _adapter(tmp_path)
+    current = {"key": "acme/repo"}
+    seen = _record_fleet_calls(monkeypatch, lambda base_path=None: current["key"])
+
+    assert adapter._fleet_acquire("job-1", "holder-1", "session-1").granted
+    current["key"] = "acme/new-repo"
+    # The active lease keeps the key it was acquired under.
+    assert adapter._fleet_renew("holder-1").granted
+    adapter._fleet_event("job-1", "session-1", "external.heartbeat", "holder-1")
+    adapter._fleet_release("holder-1")
+    assert [target for _kind, target in seen] == ["acme/repo"] * 4
+
+    seen.clear()
+    # After the release, neither a new lease nor a re-acquire of the same holder reuses the old key.
+    assert adapter._fleet_acquire("job-2", "holder-2", "session-2").granted
+    adapter._fleet_release("holder-2")
+    assert adapter._fleet_acquire("job-1", "holder-1", "session-1").granted
+    assert [(kind, target) for kind, target in seen] == [
+        ("acquire", "acme/new-repo"),
+        ("release", "acme/new-repo"),
+        ("acquire", "acme/new-repo"),
+    ]
+
+
+def test_fleet_target_is_pinned_per_lease_for_renew_release_and_events(tmp_path: Path, monkeypatch):
+    """A transient git failure after acquire must not move renew or release to another key."""
+    from brigade.fleet_claim_target import ClaimTargetError
+
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    resolutions: list[object] = []
+
+    def resolve(base_path=None):
+        resolutions.append(base_path)
+        if len(resolutions) > 1:
+            raise ClaimTargetError("git timed out")
+        return "acme/repo"
+
+    seen = _record_fleet_calls(monkeypatch, resolve)
 
     adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
     adapter.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": "lease-a"})

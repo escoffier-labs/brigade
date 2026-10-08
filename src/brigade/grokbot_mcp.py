@@ -32,6 +32,8 @@ MAX_REQUEST_BYTES = 80_000
 # The bound is the queue's own, so a listener can never hand out a lease the
 # queue or the hub would refuse.
 DEFAULT_LEASE_SECONDS = 900
+# Per-lease claim-key pins kept at once; older ones belong to expired leases.
+_MAX_FLEET_PINS = 128
 MIN_LEASE_SECONDS = grokbot_job_validation.LEASE_SECONDS_MIN
 MAX_LEASE_SECONDS = grokbot_job_validation.LEASE_SECONDS_MAX
 # Fits native UUID node IDs and leaves room for the role prefix inside opaque-ID128.
@@ -322,7 +324,7 @@ class GrokbotAdapter:
         config.validate()
         self.config = config
         self._hub_actor_verified = False
-        self._fleet_target_cache: str | None = None
+        self._fleet_pins: dict[str, str] = {}
 
     def ensure_hub_actor(self) -> None:
         """Fail closed when the listener's hub credential does not match this instance."""
@@ -489,7 +491,7 @@ class GrokbotAdapter:
                     self._fleet_release(holder)
                 raise
             self._bind_hub_lease(job["job_id"], lease_id)
-            self._fleet_event(job["job_id"], session, "external.claimed")
+            self._fleet_event(job["job_id"], session, "external.claimed", holder)
             return self._granted_lease(name, result, lease_id, lease_seconds)
         if name == "grokbot_queue_renew":
             job = self._eligible_job(arguments, allowed={"job_id", "lease_id"})
@@ -526,7 +528,7 @@ class GrokbotAdapter:
                     self._fleet_release(holder)
                 raise
             self._renew_or_reconcile_hub_lease(result, lease_id)
-            self._fleet_event(job_id, session, "external.heartbeat")
+            self._fleet_event(job_id, session, "external.heartbeat", holder)
             return self._granted_lease(name, result, None, lease_seconds)
         if name in {"grokbot_queue_start", "grokbot_queue_fail", "grokbot_queue_ack_cancel"}:
             job_id, lease_id = _job_id(arguments, {"job_id", "lease_id"}), _lease_id(arguments)
@@ -548,7 +550,7 @@ class GrokbotAdapter:
             if name.endswith("start"):
                 result = grokbot_jobs.transition(self.config.target, job_id, self.config.bot_id, lease_id, "running")
                 self._renew_or_reconcile_hub_lease(result, lease_id)
-                self._fleet_event(job_id, session, "external.running")
+                self._fleet_event(job_id, session, "external.running", holder)
                 return result
             if name.endswith("fail"):
                 result = self._lease_call(
@@ -560,13 +562,14 @@ class GrokbotAdapter:
                     lease_id,
                     "failed",
                 )
+                # Event first: the release drops the lease's pinned claim key.
+                self._fleet_event(job_id, session, "external.failed", holder)
                 self._fleet_release(holder)
-                self._fleet_event(job_id, session, "external.failed")
                 self._release_hub_lease(job_id, lease_id, result["state"])
                 return result
             result = grokbot_jobs.acknowledge_cancel(self.config.target, job_id, self.config.bot_id, lease_id)
+            self._fleet_event(job_id, session, "external.canceled", holder)
             self._fleet_release(holder)
-            self._fleet_event(job_id, session, "external.canceled")
             self._release_hub_lease(job_id, lease_id, result["state"])
             return result
         if name == "grokbot_queue_complete":
@@ -622,7 +625,7 @@ class GrokbotAdapter:
                     "completed",
                     artifact=artifact,
                 )
-            self._fleet_event(job_id, session, "external.completed")
+            self._fleet_event(job_id, session, "external.completed", holder)
             self._fleet_release(holder)
             self._release_hub_lease(job_id, lease_id, result["state"])
             return result
@@ -776,24 +779,34 @@ class GrokbotAdapter:
             return None
         return result if isinstance(result, fleet_client.CloudDecision) else None
 
-    def _fleet_target(self) -> str:
-        """The claim key, resolved once and reused for the listener's life.
+    def _fleet_target(self, holder: str | None = None) -> str:
+        """The claim key for ``holder``'s active lease, else a fresh resolution.
 
-        Acquire, renew, release and events must address the same row, so a
-        transient git failure on a later renewal can never move them to
-        another key (#1639). It also keeps the git subprocess off the
-        heartbeat path. A failed resolution raises and is not cached.
+        A lease is pinned to the key it was acquired under, so a transient
+        failure or an origin change mid-lease can never move its renew,
+        release or events to another key (#1639). The pin also keeps the
+        resolver's subprocess off the heartbeat path. A failed resolution
+        raises and is never pinned.
         """
-        if self._fleet_target_cache is None:
-            self._fleet_target_cache = fleet_client.resolve_claim_target(self.config.target)
-        return self._fleet_target_cache
+        pinned = self._fleet_pins.get(holder) if holder is not None else None
+        return pinned if pinned is not None else fleet_client.resolve_claim_target(self.config.target)
+
+    def _fleet_pin(self, holder: str, target: str) -> None:
+        self._fleet_pins.pop(holder, None)
+        self._fleet_pins[holder] = target
+        while len(self._fleet_pins) > _MAX_FLEET_PINS:
+            # Leases that expire without a release; a new lease has a new holder.
+            self._fleet_pins.pop(next(iter(self._fleet_pins)))
 
     def _fleet_acquire(
         self, job_id: str, holder: str, session: str, lease_seconds: int | None = None
     ) -> fleet_client.ClaimDecision:
         try:
-            return fleet_client.acquire_claim(
-                self._fleet_target(),
+            # Every acquisition resolves afresh, so a released or expired
+            # lease never carries an obsolete key into the next one.
+            target = fleet_client.resolve_claim_target(self.config.target)
+            decision = fleet_client.acquire_claim(
+                target,
                 holder=holder,
                 ttl_seconds=lease_seconds if lease_seconds is not None else self.config.lease_seconds,
                 harness="grokbot",
@@ -803,24 +816,34 @@ class GrokbotAdapter:
             )
         except Exception:
             return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder)
+        if decision.granted:
+            self._fleet_pin(holder, target)
+        return decision
 
     def _fleet_renew(self, holder: str, lease_seconds: int | None = None) -> fleet_client.ClaimDecision:
         try:
             ttl = lease_seconds if lease_seconds is not None else self.config.lease_seconds
-            return fleet_client.renew_claim(self._fleet_target(), holder=holder, ttl_seconds=ttl)
+            target = self._fleet_target(holder)
+            decision = fleet_client.renew_claim(target, holder=holder, ttl_seconds=ttl)
         except Exception:
             return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder)
+        if decision.granted:
+            self._fleet_pin(holder, target)
+        return decision
 
     def _fleet_release(self, holder: str) -> None:
+        """Release the lease's claim and drop its pin, so the next lease resolves again."""
         try:
-            fleet_client.release_claim(self._fleet_target(), holder=holder)
+            fleet_client.release_claim(self._fleet_target(holder), holder=holder)
         except Exception:
             return
+        finally:
+            self._fleet_pins.pop(holder, None)
 
-    def _fleet_event(self, job_id: str, session: str, state: str) -> None:
+    def _fleet_event(self, job_id: str, session: str, state: str, holder: str) -> None:
         try:
             fleet_client.report_external_event(
-                target=self._fleet_target(),
+                target=self._fleet_target(holder),
                 harness="grokbot",
                 role=self.config.instance,
                 job=job_id,
