@@ -281,8 +281,13 @@ def code_graph_brief(cwd: Path | None, task: str) -> CodeGraphBrief:
 
 
 def _engine_applies_relevance_floor(body: str) -> bool:
-    """Floored engines name their rule on the pack's summary line."""
-    return any(line.startswith("_schema v") and " - relevance floor " in line for line in body.splitlines()[:4])
+    """Floored engines name their rule on the pack's summary line.
+
+    The whole pack is searched because a multiline task pushes the summary
+    line down. A task line that only looks like the marker costs one extra
+    JSON call, which older engines answer without the new fields.
+    """
+    return any(line.startswith("_schema v") and " - relevance floor " in line for line in body.splitlines())
 
 
 def _with_structured_pack(brief: CodeGraphBrief, binary: str, db_path: Path, task: str, cwd: Path) -> CodeGraphBrief:
@@ -343,11 +348,17 @@ def code_graph_brief_record(code_graph: CodeGraphBrief | None) -> dict[str, obje
         {
             "confident": code_graph.confident,
             "floor_applied": code_graph.floor_applied,
-            "symbols": [dict(symbol) for symbol in code_graph.symbols],
+            "symbols": [dict(symbol) for symbol in code_graph.symbols if _entry_point_shown(symbol, code_graph.text)],
             "files": files,
         }
     )
     return record
+
+
+def _entry_point_shown(symbol: dict[str, object], text: str) -> bool:
+    """True when the attached text still lists this entry point after truncation."""
+    name = symbol.get("qualified_name")
+    return isinstance(name, str) and f"- `{name}` (" in text
 
 
 def _upstream_drift_state_path() -> Path:

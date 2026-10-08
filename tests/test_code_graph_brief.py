@@ -144,6 +144,20 @@ def test_no_confident_context_brief_is_attached_and_marked(tmp_path, monkeypatch
     assert brief.text.startswith(briefs.CODE_GRAPH_HEADING)
 
 
+def test_multiline_task_still_detects_a_floored_engine(tmp_path, monkeypatch):
+    _graph_db(tmp_path)
+    calls: list = []
+    task = "fix extract_delta_files\n\nreading the wrong keys\nand more\ndetail"
+    markdown = FLOORED_MARKDOWN.replace("# Context Pack: fix extract_delta_files", f"# Context Pack: {task}")
+    _fake_engine(monkeypatch, markdown, FLOORED_JSON, calls)
+
+    brief = aboyeur.code_graph_brief(tmp_path, task)
+
+    assert [call[5] for call in calls] == ["--markdown", "--json"]
+    assert brief.floor_applied is True
+    assert brief.symbols is not None and brief.symbols[0]["id"] == "sym-extract"
+
+
 def test_older_engine_without_floor_marker_keeps_the_markdown_path(tmp_path, monkeypatch):
     _graph_db(tmp_path)
     calls: list = []
@@ -252,6 +266,30 @@ def test_run_payload_records_only_files_the_brief_showed():
         "symbols": [{"id": "a", "qualified_name": "a", "file_path": "src/a.py", "score": 2.5}],
         "files": ["src/a.py"],
     }
+
+
+def test_run_payload_drops_symbols_the_attached_text_no_longer_shows():
+    brief = aboyeur.CodeGraphBrief(
+        attached=True,
+        text="## Code graph context\n\n# Context Pack: fix extract_delta_files\n",
+        bytes=93,
+        confident=True,
+        floor_applied=True,
+        symbols=(
+            {
+                "id": "sym-extract",
+                "qualified_name": "extract_delta_files",
+                "file_path": "src/brigade/context_eval.py",
+                "score": 1.0,
+            },
+        ),
+        files=("src/brigade/context_eval.py",),
+    )
+
+    recorded = _payload(brief)["code_graph_brief"]
+
+    assert recorded["symbols"] == []
+    assert recorded["files"] == []
 
 
 def test_run_payload_keeps_the_old_shape_without_brief_data():
