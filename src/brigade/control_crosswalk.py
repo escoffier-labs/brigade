@@ -210,6 +210,23 @@ def _record_discovery_error(out: _Discovery, ctx: _Context, root: Path, error: s
     out.observations.append(obs)
 
 
+def _discovery_path_present(ctx: _Context, out: _Discovery, path: Path, *, directory: bool = False) -> bool:
+    """Only a missing artifact is absent; denied metadata leaves population unknown."""
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return False
+    except OSError:
+        _record_discovery_error(out, ctx, path, "discovery_unreadable")
+        return False
+    if directory:
+        if stat.S_ISLNK(mode):
+            _record_discovery_error(out, ctx, path, "symlink_refused")
+            return False
+        return stat.S_ISDIR(mode)
+    return True
+
+
 def _adapter_observation(
     adapter: VerifierAdapter, ctx: _Context, artifact: Path, relpath: str
 ) -> control_readiness.ArtifactObservation:
@@ -277,7 +294,12 @@ def _verify_receipt_children(ctx: _Context, filename: str) -> tuple[list[tuple[P
     children, truncated, error = _bounded_children(root)
     out = _Discovery(truncated=truncated)
     _record_discovery_error(out, ctx, root, error)
-    found = [(child, child / filename) for child in children if os.path.lexists(child / filename)]
+    found = [
+        (child, child / filename)
+        for child in children
+        if _discovery_path_present(ctx, out, child, directory=True)
+        and _discovery_path_present(ctx, out, child / filename)
+    ]
     return found, out
 
 
@@ -594,7 +616,11 @@ def _agent_request_paths(ctx: _Context, run_dir: Path, out: _Discovery) -> list[
     ``agent-request.json`` and ``request.json`` are still discovered.  The
     ``requests/`` scan is bounded; past the cap the population is truncated.
     """
-    paths = [run_dir / name for name in ("agent-request.json", "request.json") if os.path.lexists(run_dir / name)]
+    paths = [
+        run_dir / name
+        for name in ("agent-request.json", "request.json")
+        if _discovery_path_present(ctx, out, run_dir / name)
+    ]
     if run_dir.is_symlink():
         return paths
     root = run_dir / "requests"
@@ -1215,12 +1241,12 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
     out = _Discovery(truncated=truncated)
     _record_discovery_error(out, ctx, root, error)
     adapter = _VERIFIER_ADAPTERS.get("evidence-package")
-    package_dirs = ([root] if error is None and os.path.lexists(root / "manifest.json") else []) + [
-        child for child in children if child.name != "manifest.json"
+    package_dirs = ([root] if error is None and _discovery_path_present(ctx, out, root / "manifest.json") else []) + [
+        child for child in children if _discovery_path_present(ctx, out, child, directory=True)
     ]
     for package_dir in package_dirs:
         path = package_dir / "manifest.json"
-        if not os.path.lexists(path):
+        if not _discovery_path_present(ctx, out, path):
             continue
         relpath = _relpath(ctx, path)
         manifest = None if (package_dir.is_symlink() or path.is_symlink()) else _read_json_object(path)
