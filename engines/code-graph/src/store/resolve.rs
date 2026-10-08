@@ -1,20 +1,31 @@
 //! Persisted call-edge rebuilding and cross-file target resolution.
 
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
+use crate::extractors::python::WILDCARD_IMPORT;
 use crate::model::{CallKind, Import, PendingCall};
 
 /// Bump when resolution rules change; persisted edges must be rebuilt on sync.
-pub(crate) const RESOLVER_VERSION: &str = "2";
+///
+/// v3 follows Python re-exports and resolves names through `from x import *`.
+/// v4 solves Python module bindings as a fixpoint and ignores function- and
+/// class-local imports as module exports.
+/// v5 treats star-import cycles that can bind more than one definition as ambiguous.
+/// v6 drops binding statements shadowed by a later unconditional binding.
+pub(crate) const RESOLVER_VERSION: &str = "6";
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(super) struct SymbolCandidate {
     pub(super) id: String,
     pub(super) file_path: String,
     pub(super) container: Option<String>,
+    /// First line of the symbol, which orders it against imports in its module.
+    pub(super) line: usize,
 }
 
 enum ImportResolution {
@@ -95,7 +106,8 @@ pub(crate) type NameIndex = HashMap<&'static str, HashMap<String, Vec<SymbolCand
 
 /// Map language family and symbol name to candidates.
 pub(super) fn load_name_index(conn: &Connection) -> Result<NameIndex> {
-    let mut stmt = conn.prepare("SELECT name, id, file_path, container FROM symbols")?;
+    let mut stmt =
+        conn.prepare("SELECT name, id, file_path, container, start_line FROM symbols")?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -103,6 +115,7 @@ pub(super) fn load_name_index(conn: &Connection) -> Result<NameIndex> {
                 id: row.get::<_, String>(1)?,
                 file_path: row.get::<_, String>(2)?,
                 container: row.get::<_, Option<String>>(3)?,
+                line: row.get::<_, i64>(4)?.max(0) as usize,
             },
         ))
     })?;
@@ -128,12 +141,13 @@ pub(super) fn load_name_index(conn: &Connection) -> Result<NameIndex> {
 }
 
 pub(super) fn load_symbol_id_index(conn: &Connection) -> Result<HashMap<String, SymbolCandidate>> {
-    let mut stmt = conn.prepare("SELECT id, file_path, container FROM symbols")?;
+    let mut stmt = conn.prepare("SELECT id, file_path, container, start_line FROM symbols")?;
     let rows = stmt.query_map([], |row| {
         Ok(SymbolCandidate {
             id: row.get::<_, String>(0)?,
             file_path: row.get::<_, String>(1)?,
             container: row.get::<_, Option<String>>(2)?,
+            line: row.get::<_, i64>(3)?.max(0) as usize,
         })
     })?;
     let mut map = HashMap::new();
@@ -147,6 +161,13 @@ pub(super) fn load_symbol_id_index(conn: &Connection) -> Result<HashMap<String, 
 pub(crate) struct FileIndex {
     files: HashSet<String>,
     python_roots: HashMap<String, Vec<String>>,
+    /// Literal Python `__all__` lists by file.
+    python_exports: HashMap<String, Vec<String>>,
+    /// Ids of Python top-level symbols defined under a conditional block.
+    python_conditional_symbols: HashSet<String>,
+    /// Complete Python binding lookups, shared by every call resolved against
+    /// this index so re-export walks are not repeated per call.
+    python_bindings: RefCell<HashMap<(String, String), Binding>>,
 }
 
 pub(super) fn load_file_index(conn: &Connection) -> Result<FileIndex> {
@@ -182,14 +203,69 @@ pub(super) fn load_file_index(conn: &Connection) -> Result<FileIndex> {
     Ok(FileIndex {
         files,
         python_roots,
+        python_exports: load_python_exports(conn)?,
+        python_conditional_symbols: load_conditional_symbols(conn)?,
+        python_bindings: RefCell::default(),
     })
 }
 
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [table],
+        |row| row.get(0),
+    )?)
+}
+
+/// Read the ids of conditionally defined symbols. An older database has none.
+fn load_conditional_symbols(conn: &Connection) -> Result<HashSet<String>> {
+    if !table_exists(conn, "conditional_symbols")? {
+        return Ok(HashSet::new());
+    }
+    let mut stmt = conn.prepare("SELECT symbol_id FROM conditional_symbols")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+}
+
+/// Read stored `__all__` lists. A database written before the table existed
+/// has none, which means "no declared export list" everywhere.
+fn load_python_exports(conn: &Connection) -> Result<HashMap<String, Vec<String>>> {
+    let mut exports = HashMap::new();
+    if !table_exists(conn, "module_exports")? {
+        return Ok(exports);
+    }
+    let mut stmt = conn.prepare("SELECT file_path, names FROM module_exports")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (file, names) = row?;
+        // An unreadable list is treated as undeclared rather than failing resolution.
+        if let Ok(names) = serde_json::from_str::<Vec<String>>(&names) {
+            exports.insert(file, names);
+        }
+    }
+    Ok(exports)
+}
+
 pub(super) fn load_import_index(conn: &Connection) -> Result<HashMap<String, Vec<Import>>> {
-    let mut stmt = conn.prepare(
-        "SELECT file_path, module, local_name, imported_name, alias, line FROM imports
-         ORDER BY file_path, line, module, local_name",
-    )?;
+    // A read-only database written before these columns existed has only
+    // unconditional module-scope rows.
+    let column_or = |column: &'static str, default: &'static str| -> Result<&'static str> {
+        Ok(
+            if super::schema::table_has_column(conn, "imports", column)? {
+                column
+            } else {
+                default
+            },
+        )
+    };
+    let module_scope = column_or("module_scope", "1")?;
+    let conditional = column_or("conditional", "0")?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT file_path, module, local_name, imported_name, alias, line, {module_scope}, {conditional}
+         FROM imports ORDER BY file_path, line, module, local_name"
+    ))?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -199,6 +275,8 @@ pub(super) fn load_import_index(conn: &Connection) -> Result<HashMap<String, Vec
                 imported_name: row.get::<_, Option<String>>(3)?,
                 alias: row.get::<_, Option<String>>(4)?,
                 line: row.get::<_, i64>(5)? as usize,
+                module_scope: row.get::<_, bool>(6)?,
+                conditional: row.get::<_, bool>(7)?,
             },
         ))
     })?;
@@ -233,7 +311,8 @@ pub(crate) enum ResolutionPath {
     SameFileBare,
     /// Cross-file bare call and exactly one symbol has this name.
     NameUnique,
-    /// Import matched but the module could not be pinned to indexed files.
+    /// Import matched but the module could not be pinned to indexed files, or a
+    /// bare Python call matched a name brought in by `from x import *`.
     ImportFallback,
     /// Cross-file bare call with several same-named candidates.
     NameAmbiguous,
@@ -287,7 +366,7 @@ impl ResolutionPath {
                 "exactly one indexed symbol in the caller's language family carries this name, in another file"
             }
             ResolutionPath::ImportFallback => {
-                "an import matched but its module could not be pinned to indexed files"
+                "an import matched but its module could not be pinned to indexed files, or the name came in through `from x import *`"
             }
             ResolutionPath::NameAmbiguous => {
                 "several indexed symbols in the caller's language family carry this name; candidates kept up to the cap"
@@ -365,10 +444,23 @@ pub(crate) fn resolve_call_explained(
         ImportResolution::NoImport => false,
     };
 
-    let Some(candidates) = language_family(&call.source_file)
+    let candidates = language_family(&call.source_file)
         .and_then(|family| name_index.get(family))
-        .and_then(|names| names.get(&call.target_name))
-    else {
+        .and_then(|names| names.get(&call.target_name));
+    // A star import can bind a name that no symbol carries, through an alias
+    // (`from core import original as exported`), so it is tried before giving up.
+    let star_targets = || {
+        (!use_name_fallback && call.kind == CallKind::Bare)
+            .then(|| resolve_star_imported_call(call, name_index, import_index, file_index))
+            .flatten()
+    };
+    let Some(candidates) = candidates else {
+        if let Some(targets) = star_targets() {
+            return ResolvedCall {
+                path: ResolutionPath::ImportFallback,
+                targets,
+            };
+        }
         return ResolvedCall {
             path: ResolutionPath::NoCandidates,
             targets: Vec::new(),
@@ -400,6 +492,13 @@ pub(crate) fn resolve_call_explained(
         return ResolvedCall {
             path: ResolutionPath::UnresolvedQualified,
             targets: Vec::new(),
+        };
+    }
+
+    if let Some(targets) = star_targets() {
+        return ResolvedCall {
+            path: ResolutionPath::ImportFallback,
+            targets,
         };
     }
 
@@ -486,17 +585,41 @@ fn resolve_imported_call(
     } else {
         call.target_name.as_str()
     };
-    let Some(candidates) = language_family(&call.source_file)
-        .and_then(|family| name_index.get(family))
-        .and_then(|names| names.get(target_name))
-    else {
-        let module_targets =
-            module_targets(&call.source_file, matched_import, call.kind, file_index);
-        return unresolved_import_resolution(call, &module_targets, file_index);
-    };
+    let names = language_family(&call.source_file).and_then(|family| name_index.get(family));
     let module_targets = module_targets(&call.source_file, matched_import, call.kind, file_index);
-    let targets: Vec<SymbolCandidate> = candidates
-        .iter()
+    if call.source_file.ends_with(".py") {
+        // Python modules export what they bind at top level, including names
+        // they only re-export, as a package `__init__.py` publishing a flat API does.
+        let files = module_targets.indexed_files(file_index);
+        let bindings = PythonBindings {
+            names,
+            import_index,
+            file_index,
+        };
+        return match bindings.in_files(&files, target_name) {
+            Binding::Found(targets) => ImportResolution::Resolved(targets),
+            // A package that neither defines nor imports the name says nothing
+            // about where it lives, so let the name fallback decide.
+            Binding::Unbound
+                if call.kind == CallKind::Bare
+                    && !files.is_empty()
+                    && files.iter().all(|file| is_python_package_init(file)) =>
+            {
+                ImportResolution::NoImport
+            }
+            // The name comes through a star-import cycle that can supply more
+            // than one definition, so no import-strict claim is safe. The
+            // lower-confidence name fallback still applies.
+            Binding::Ambiguous if call.kind == CallKind::Bare => ImportResolution::NoImport,
+            Binding::Unbound | Binding::Missing | Binding::Ambiguous => {
+                unresolved_import_resolution(call, &module_targets, file_index)
+            }
+        };
+    }
+    let targets: Vec<SymbolCandidate> = names
+        .and_then(|names| names.get(target_name))
+        .into_iter()
+        .flatten()
         .filter(|candidate| module_targets.matches(&candidate.file_path))
         .take(8)
         .cloned()
@@ -506,6 +629,585 @@ fn resolve_imported_call(
     } else {
         ImportResolution::Resolved(targets)
     }
+}
+
+fn is_python_package_init(file: &str) -> bool {
+    file == "__init__.py" || file.ends_with("/__init__.py")
+}
+
+fn is_wildcard_import(import: &Import) -> bool {
+    import.imported_name.as_deref() == Some(WILDCARD_IMPORT)
+}
+
+/// What a Python module binds at top level under one name.
+#[derive(Clone, PartialEq)]
+enum Binding {
+    /// The top-level definitions the binding resolves to.
+    Found(Vec<SymbolCandidate>),
+    /// The module binds the name, but not to an indexed definition: an import
+    /// chain that ends without one, leaves the index, loops, or names a module.
+    Missing,
+    /// The module neither defines nor imports the name.
+    Unbound,
+    /// The binding depends on a star-import cycle that can supply more than
+    /// one definition, or on a cycle whose fixpoint did not converge. Python
+    /// would pick one by runtime import order, which static analysis cannot see.
+    Ambiguous,
+}
+
+/// A `(module file, name)` pair whose binding the resolver needs.
+type BindingKey = (String, String);
+
+/// One module-scope statement that may bind a name, with the `(module, name)`
+/// pairs it reads already resolved.
+enum Statement {
+    /// A top-level `def` or `class`.
+    Definition(SymbolCandidate),
+    /// `import x as name` binds a module, not a callable.
+    ModuleImport,
+    /// `from x import y as name` always binds. It is `Missing` unless `y` is found.
+    Explicit(Vec<BindingKey>),
+    /// `from x import *` when `x` exports the name. `listed` is set when a
+    /// literal `__all__` names it, which binds the name even if nothing
+    /// indexed defines it.
+    Star {
+        reads: Vec<BindingKey>,
+        listed: bool,
+    },
+}
+
+/// A binding statement plus whether it sits under a block that may not run.
+struct Binder {
+    statement: Statement,
+    conditional: bool,
+}
+
+impl Binder {
+    fn reads(&self) -> &[BindingKey] {
+        self.statement.reads()
+    }
+}
+
+impl Statement {
+    fn reads(&self) -> &[BindingKey] {
+        match self {
+            Statement::Explicit(reads) | Statement::Star { reads, .. } => reads,
+            Statement::Definition(_) | Statement::ModuleImport => &[],
+        }
+    }
+}
+
+/// Python module namespaces, read from the stored definitions and imports.
+///
+/// A module's binding for a name is its last module-scope binding statement
+/// in line order: a top-level definition, `from x import name`, or a
+/// `from x import *` that exports the name. Imports inside a function or
+/// class body bind there, not in the module.
+///
+/// Bindings depend on other `(module, name)` bindings, and star imports make
+/// those dependencies cyclic. Instead of walking paths, which is exponential
+/// in a dense cycle, every unsolved pair reachable from a query is grouped
+/// into strongly connected components and solved in dependency order. An
+/// acyclic pair is evaluated once. A cycle is resolved only when it can bind
+/// at most one definition, because which of several definitions Python binds
+/// depends on runtime import order. Otherwise it is `Ambiguous`. The work is
+/// polynomial and there is no hop limit. Solved pairs are memoized for the
+/// rest of the resolution pass.
+struct PythonBindings<'a> {
+    names: Option<&'a HashMap<String, Vec<SymbolCandidate>>>,
+    import_index: &'a HashMap<String, Vec<Import>>,
+    file_index: &'a FileIndex,
+}
+
+impl PythonBindings<'_> {
+    /// The binding of `name` across the files one import names.
+    fn in_files(&self, files: &[String], name: &str) -> Binding {
+        let keys: Vec<BindingKey> = files
+            .iter()
+            .map(|file| (file.clone(), name.to_string()))
+            .collect();
+        self.solve(&keys);
+        let memo = self.file_index.python_bindings.borrow();
+        combine(&keys, |key| {
+            memo.get(key).cloned().unwrap_or(Binding::Unbound)
+        })
+    }
+
+    /// What `from x import *` in `file` binds under `name`, or `None` when the
+    /// star import cannot bind it.
+    fn star_import_binding(&self, file: &str, import: &Import, name: &str) -> Option<Binding> {
+        let Statement::Star { reads, listed } = self.star_statement(file, import, name)? else {
+            return None;
+        };
+        self.solve(&reads);
+        let memo = self.file_index.python_bindings.borrow();
+        match combine(&reads, |key| {
+            memo.get(key).cloned().unwrap_or(Binding::Unbound)
+        }) {
+            Binding::Unbound if listed => Some(Binding::Missing),
+            binding => Some(binding),
+        }
+    }
+
+    /// The module-scope statements of `file` that can still decide its binding
+    /// of `name`, latest first.
+    ///
+    /// Reading bottom up, the first statement that certainly binds the name
+    /// shadows everything above it: an unconditional definition, `import`, or
+    /// `from x import name`, or an unconditional star import whose `__all__`
+    /// lists the name. Statements under an `if`, `try`, `with`, loop, or
+    /// `match` may not run, so earlier statements stay. Shadowed statements add
+    /// no definitions and no dependencies, which keeps them out of cycles.
+    fn statements(&self, file: &str, name: &str) -> Vec<Binder> {
+        let mut statements: Vec<(usize, bool, Binder)> = self
+            .names
+            .and_then(|names| names.get(name))
+            .into_iter()
+            .flatten()
+            // Only top-level definitions are module attributes, so `Box.helper` is not one.
+            .filter(|candidate| candidate.file_path == file && candidate.container.is_none())
+            .map(|candidate| {
+                let conditional = self
+                    .file_index
+                    .python_conditional_symbols
+                    .contains(&candidate.id);
+                (
+                    candidate.line,
+                    !conditional,
+                    Binder {
+                        statement: Statement::Definition(candidate.clone()),
+                        conditional,
+                    },
+                )
+            })
+            .collect();
+        for import in self.import_index.get(file).into_iter().flatten() {
+            if !import.module_scope {
+                continue;
+            }
+            let statement = if is_wildcard_import(import) {
+                self.star_statement(file, import, name)
+            } else if import.local_name.as_deref() == Some(name) {
+                Some(match import.imported_name.as_deref() {
+                    Some(imported) => Statement::Explicit(self.reads(file, import, imported)),
+                    None => Statement::ModuleImport,
+                })
+            } else {
+                None
+            };
+            if let Some(statement) = statement {
+                let binds = match &statement {
+                    Statement::Star { listed, .. } => *listed,
+                    _ => true,
+                };
+                statements.push((
+                    import.line,
+                    binds && !import.conditional,
+                    Binder {
+                        statement,
+                        conditional: import.conditional,
+                    },
+                ));
+            }
+        }
+        // Python keeps the last binding, so read the module bottom up.
+        statements.sort_by_key(|(line, _, _)| Reverse(*line));
+        let shadowing = statements
+            .iter()
+            .position(|(_, certain, _)| *certain)
+            .map_or(statements.len(), |position| position + 1);
+        statements.truncate(shadowing);
+        statements
+            .into_iter()
+            .map(|(_, _, statement)| statement)
+            .collect()
+    }
+
+    /// A star import as a statement, or `None` when its module does not export
+    /// `name`: a literal `__all__` omits it, or it is private and there is no `__all__`.
+    fn star_statement(&self, file: &str, import: &Import, name: &str) -> Option<Statement> {
+        let reads = self.reads(file, import, name);
+        let declared: Vec<&Vec<String>> = reads
+            .iter()
+            .filter_map(|(module, _)| self.file_index.python_exports.get(module))
+            .collect();
+        let listed = declared
+            .iter()
+            .any(|names| names.iter().any(|listed| listed == name));
+        let exported = if declared.is_empty() {
+            !name.starts_with('_')
+        } else {
+            listed
+        };
+        exported.then_some(Statement::Star { reads, listed })
+    }
+
+    /// The `(module, name)` pairs an import of `name` from `import`'s module reads.
+    fn reads(&self, file: &str, import: &Import, name: &str) -> Vec<BindingKey> {
+        module_targets(file, import, CallKind::Bare, self.file_index)
+            .indexed_files(self.file_index)
+            .into_iter()
+            .map(|module| (module, name.to_string()))
+            .collect()
+    }
+
+    /// Solve every unsolved pair reachable from `roots` and memoize the results.
+    fn solve(&self, roots: &[BindingKey]) {
+        let mut statements: Vec<Vec<Binder>> = Vec::new();
+        let mut keys: Vec<BindingKey> = Vec::new();
+        let mut index: HashMap<BindingKey, usize> = HashMap::new();
+        {
+            let memo = self.file_index.python_bindings.borrow();
+            let mut pending: Vec<BindingKey> = roots.to_vec();
+            while let Some(key) = pending.pop() {
+                if memo.contains_key(&key) || index.contains_key(&key) {
+                    continue;
+                }
+                let key_statements = self.statements(&key.0, &key.1);
+                pending.extend(
+                    key_statements
+                        .iter()
+                        .flat_map(Binder::reads)
+                        .filter(|read| !memo.contains_key(*read) && !index.contains_key(*read))
+                        .cloned(),
+                );
+                index.insert(key.clone(), keys.len());
+                keys.push(key);
+                statements.push(key_statements);
+            }
+        }
+        if keys.is_empty() {
+            return;
+        }
+
+        // Edges from each pair to the unsolved pairs it reads.
+        let reads: Vec<Vec<usize>> = statements
+            .iter()
+            .map(|key_statements| {
+                let mut targets: Vec<usize> = key_statements
+                    .iter()
+                    .flat_map(Binder::reads)
+                    .filter_map(|read| index.get(read).copied())
+                    .collect();
+                targets.sort_unstable();
+                targets.dedup();
+                targets
+            })
+            .collect();
+
+        let mut values: Vec<Option<Binding>> = vec![None; keys.len()];
+        {
+            let memo = self.file_index.python_bindings.borrow();
+            // Components come out with everything they read already solved.
+            for component in strongly_connected_components(&reads) {
+                let cyclic = component.len() > 1 || reads[component[0]].contains(&component[0]);
+                let solved = if cyclic {
+                    solve_cycle(&component, &statements, &reads, &index, &values, &memo)
+                } else {
+                    let member = component[0];
+                    let value = evaluate(&statements[member], |read| {
+                        read_value(read, &index, &values, &memo)
+                    });
+                    vec![(member, value)]
+                };
+                for (member, value) in solved {
+                    values[member] = Some(value);
+                }
+            }
+        }
+        let solved: Vec<(BindingKey, Binding)> = keys
+            .into_iter()
+            .zip(values)
+            .map(|(key, value)| (key, value.unwrap_or(Binding::Ambiguous)))
+            .collect();
+        self.file_index.python_bindings.borrow_mut().extend(solved);
+    }
+}
+
+/// The current value of a pair: solved in this pass, memoized earlier, or unbound.
+fn read_value(
+    read: &BindingKey,
+    index: &HashMap<BindingKey, usize>,
+    values: &[Option<Binding>],
+    memo: &HashMap<BindingKey, Binding>,
+) -> Binding {
+    match index.get(read) {
+        Some(&slot) => values[slot].clone().unwrap_or(Binding::Unbound),
+        None => memo.get(read).cloned().unwrap_or(Binding::Unbound),
+    }
+}
+
+/// Solve one strongly connected component of star and explicit imports.
+///
+/// Which definition a cycle binds depends on runtime import order. The
+/// component is resolved only when everything that can flow into it (its own
+/// top-level definitions plus the solved bindings it reads from outside)
+/// agrees on at most one definition. Then a worklist fixpoint settles which
+/// members bind it. Otherwise, or if the fixpoint does not converge within its
+/// polynomial budget, every member is `Ambiguous` and nothing unconverged is
+/// cached as solved.
+fn solve_cycle(
+    component: &[usize],
+    statements: &[Vec<Binder>],
+    reads: &[Vec<usize>],
+    index: &HashMap<BindingKey, usize>,
+    values: &[Option<Binding>],
+    memo: &HashMap<BindingKey, Binding>,
+) -> Vec<(usize, Binding)> {
+    let ambiguous = || {
+        component
+            .iter()
+            .map(|member| (*member, Binding::Ambiguous))
+            .collect()
+    };
+    let members: HashSet<usize> = component.iter().copied().collect();
+    let mut supplied: HashSet<&str> = HashSet::new();
+    for member in component {
+        for statement in &statements[*member] {
+            if let Statement::Definition(candidate) = &statement.statement {
+                supplied.insert(&candidate.id);
+            }
+            for read in statement.reads() {
+                if index.get(read).is_some_and(|slot| members.contains(slot)) {
+                    continue;
+                }
+                match index.get(read) {
+                    Some(&slot) => match &values[slot] {
+                        Some(Binding::Found(targets)) => {
+                            supplied.extend(targets.iter().map(|target| target.id.as_str()));
+                        }
+                        Some(Binding::Ambiguous) => return ambiguous(),
+                        _ => {}
+                    },
+                    None => match memo.get(read) {
+                        Some(Binding::Found(targets)) => {
+                            supplied.extend(targets.iter().map(|target| target.id.as_str()));
+                        }
+                        Some(Binding::Ambiguous) => return ambiguous(),
+                        _ => {}
+                    },
+                }
+            }
+        }
+    }
+    if supplied.len() > 1 {
+        return ambiguous();
+    }
+
+    // At most one definition can flow, so the worklist only settles which
+    // members bind it and which stay unbound or missing.
+    let mut current: HashMap<usize, Binding> = component
+        .iter()
+        .map(|member| (*member, Binding::Unbound))
+        .collect();
+    let mut readers: HashMap<usize, Vec<usize>> = HashMap::new();
+    for member in component {
+        for read in &reads[*member] {
+            if members.contains(read) {
+                readers.entry(*read).or_default().push(*member);
+            }
+        }
+    }
+    let mut queue: VecDeque<usize> = component.iter().copied().collect();
+    let mut queued: HashSet<usize> = members.clone();
+    let statement_count: usize = component
+        .iter()
+        .map(|member| statements[*member].len())
+        .sum();
+    let mut budget = component
+        .len()
+        .saturating_mul(statement_count + 1)
+        .saturating_mul(4);
+    while let Some(member) = queue.pop_front() {
+        queued.remove(&member);
+        if budget == 0 {
+            return ambiguous();
+        }
+        budget -= 1;
+        let value = evaluate(&statements[member], |read| match index.get(read) {
+            Some(slot) if members.contains(slot) => current[slot].clone(),
+            _ => read_value(read, index, values, memo),
+        });
+        if current[&member] != value {
+            current.insert(member, value);
+            for reader in readers.get(&member).into_iter().flatten() {
+                if queued.insert(*reader) {
+                    queue.push_back(*reader);
+                }
+            }
+        }
+    }
+    current.into_iter().collect()
+}
+
+/// Tarjan's strongly connected components, iterative so deep import chains
+/// cannot overflow the stack. Components are returned in reverse topological
+/// order: every component comes after all the components it reads.
+fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    const UNVISITED: usize = usize::MAX;
+    let count = edges.len();
+    let mut order = vec![UNVISITED; count];
+    let mut low = vec![0; count];
+    let mut on_stack = vec![false; count];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut components = Vec::new();
+    let mut next_order = 0;
+    for start in 0..count {
+        if order[start] != UNVISITED {
+            continue;
+        }
+        // Frames are (node, index of the next edge to follow).
+        let mut frames: Vec<(usize, usize)> = vec![(start, 0)];
+        order[start] = next_order;
+        low[start] = next_order;
+        next_order += 1;
+        stack.push(start);
+        on_stack[start] = true;
+        while let Some(frame) = frames.last_mut() {
+            let (node, edge) = *frame;
+            if let Some(&target) = edges[node].get(edge) {
+                frame.1 += 1;
+                if order[target] == UNVISITED {
+                    order[target] = next_order;
+                    low[target] = next_order;
+                    next_order += 1;
+                    stack.push(target);
+                    on_stack[target] = true;
+                    frames.push((target, 0));
+                } else if on_stack[target] {
+                    low[node] = low[node].min(order[target]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if low[node] == order[node] {
+                let mut component = Vec::new();
+                while let Some(member) = stack.pop() {
+                    on_stack[member] = false;
+                    component.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                component.sort_unstable();
+                components.push(component);
+            }
+        }
+    }
+    components
+}
+
+/// A module's binding from its statements, latest first, given the bindings it reads.
+///
+/// The latest statement that binds the name wins. When it is conditional, an
+/// earlier statement may bind instead, so every candidate up to the first
+/// unconditional binding counts. If those candidates name more than one
+/// definition, the binding is `Ambiguous`.
+fn evaluate(statements: &[Binder], read: impl Fn(&BindingKey) -> Binding) -> Binding {
+    let mut chosen: Option<Binding> = None;
+    let mut definitions: Vec<String> = Vec::new();
+    for binder in statements {
+        let value = match &binder.statement {
+            Statement::Definition(candidate) => Binding::Found(vec![candidate.clone()]),
+            Statement::ModuleImport => Binding::Missing,
+            Statement::Explicit(reads) => match combine(reads, &read) {
+                Binding::Found(targets) => Binding::Found(targets),
+                Binding::Ambiguous => Binding::Ambiguous,
+                Binding::Missing | Binding::Unbound => Binding::Missing,
+            },
+            Statement::Star { reads, listed } => match combine(reads, &read) {
+                Binding::Unbound if !listed => continue,
+                Binding::Unbound => Binding::Missing,
+                binding => binding,
+            },
+        };
+        match &value {
+            Binding::Ambiguous => return Binding::Ambiguous,
+            Binding::Found(targets) => {
+                // One import can name several files. Only a different
+                // definition from another statement makes the binding ambiguous.
+                if !definitions.is_empty()
+                    && targets
+                        .iter()
+                        .any(|target| !definitions.contains(&target.id))
+                {
+                    return Binding::Ambiguous;
+                }
+                definitions.extend(targets.iter().map(|target| target.id.clone()));
+            }
+            Binding::Missing | Binding::Unbound => {}
+        }
+        chosen.get_or_insert(value);
+        if !binder.conditional {
+            break;
+        }
+    }
+    chosen.unwrap_or(Binding::Unbound)
+}
+
+/// Merge the bindings of one import's target files (normally a single file).
+fn combine(keys: &[BindingKey], read: impl Fn(&BindingKey) -> Binding) -> Binding {
+    let mut found: Vec<SymbolCandidate> = Vec::new();
+    let mut missing = false;
+    for key in keys {
+        match read(key) {
+            Binding::Found(targets) => {
+                for target in targets {
+                    if !found.iter().any(|existing| existing.id == target.id) {
+                        found.push(target);
+                    }
+                }
+            }
+            Binding::Ambiguous => return Binding::Ambiguous,
+            Binding::Missing => missing = true,
+            Binding::Unbound => {}
+        }
+    }
+    if !found.is_empty() {
+        found.truncate(8);
+        Binding::Found(found)
+    } else if missing {
+        Binding::Missing
+    } else {
+        Binding::Unbound
+    }
+}
+
+/// Resolve a bare Python call through the caller's `from x import *` imports.
+/// The last star import that binds the name wins, as at runtime.
+fn resolve_star_imported_call(
+    call: &PendingCall,
+    name_index: &NameIndex,
+    import_index: &HashMap<String, Vec<Import>>,
+    file_index: &FileIndex,
+) -> Option<Vec<SymbolCandidate>> {
+    if !call.source_file.ends_with(".py") {
+        return None;
+    }
+    let bindings = PythonBindings {
+        names: name_index.get("python"),
+        import_index,
+        file_index,
+    };
+    let mut stars: Vec<&Import> = import_index
+        .get(&call.source_file)?
+        .iter()
+        .filter(|import| is_wildcard_import(import))
+        .collect();
+    stars.sort_by_key(|import| Reverse(import.line));
+    for import in stars {
+        match bindings.star_import_binding(&call.source_file, import, &call.target_name) {
+            Some(Binding::Found(targets)) => return Some(targets),
+            // A later star import binds the name to something unindexed, or to
+            // a definition a cycle cannot pin down.
+            Some(Binding::Missing | Binding::Ambiguous) => return None,
+            Some(Binding::Unbound) | None => {}
+        }
+    }
+    None
 }
 
 fn unresolved_import_resolution(
@@ -525,13 +1227,17 @@ pub(super) fn matched_import_for<'i>(
     call: &PendingCall,
     imports: &'i [Import],
 ) -> Option<&'i Import> {
-    imports.iter().find(|import| match call.kind {
-        CallKind::Bare => import.local_name.as_deref() == Some(call.target_name.as_str()),
-        CallKind::Member | CallKind::Scoped => call
-            .qualifier
-            .as_deref()
-            .is_some_and(|qualifier| import_matches_qualifier(import, qualifier)),
-    })
+    // A star import binds no single name, so it never matches by name here.
+    imports
+        .iter()
+        .filter(|import| !is_wildcard_import(import))
+        .find(|import| match call.kind {
+            CallKind::Bare => import.local_name.as_deref() == Some(call.target_name.as_str()),
+            CallKind::Member | CallKind::Scoped => call
+                .qualifier
+                .as_deref()
+                .is_some_and(|qualifier| import_matches_qualifier(import, qualifier)),
+        })
 }
 
 fn import_matches_qualifier(import: &Import, qualifier: &str) -> bool {
@@ -567,6 +1273,15 @@ impl ModuleTargets {
             .iter()
             .any(|file| file_index.files.contains(file) && self.matches(file))
             || (!self.dirs.is_empty() && file_index.files.iter().any(|file| self.matches(file)))
+    }
+
+    /// Indexed files this target names exactly, in sorted order.
+    fn indexed_files(&self, file_index: &FileIndex) -> Vec<String> {
+        self.files
+            .iter()
+            .filter(|file| file_index.files.contains(*file) && self.matches(file))
+            .cloned()
+            .collect()
     }
 
     fn is_external(&self, file_index: &FileIndex) -> bool {

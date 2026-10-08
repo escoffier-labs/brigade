@@ -5,15 +5,15 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use crate::model::{ContextPack, Direction, EdgeRow, GraphDiff, SearchRow};
+use crate::model::{ContextPack, Direction, EdgeRow, GraphDiff, GraphQueryResult, SearchRow};
 #[cfg(feature = "codesearch")]
 use crate::query::build_context_pack_from_entry_points;
 use crate::query::{
     DEFAULT_AFFECTED_DEPTH, DEFAULT_IMPACT_DEPTH, ExportFormat, ExportScope, affected,
     build_context_pack,
     context::{edge_location, symbol_location},
-    cycles, dead_code, diff_graphs, doctor, export_graph, file_neighbors, graph_edges_with_depth,
-    impact_edges, missing_db_report, normalize_depth, personalize_context_pack, render_markdown,
+    cycles, dead_code, diff_graphs, doctor, export_graph, file_neighbors, graph_query,
+    impact_query, missing_db_report, normalize_depth, personalize_context_pack, render_markdown,
     render_markdown_budgeted, search_symbols_with_path, stats,
 };
 use crate::store::{
@@ -278,13 +278,8 @@ pub fn run(cli: Cli) -> Result<()> {
             json,
         } => {
             let conn = open_default_read_only(cli.db)?;
-            let edges = graph_edges_with_depth(
-                &conn,
-                &symbol,
-                Direction::Incoming,
-                normalize_depth(depth),
-            )?;
-            print_json_or_edges(json, &edges)?;
+            let result = graph_query(&conn, &symbol, Direction::Incoming, normalize_depth(depth))?;
+            print_graph_query(json, &result)?;
         }
         Command::Callees {
             symbol,
@@ -292,13 +287,8 @@ pub fn run(cli: Cli) -> Result<()> {
             json,
         } => {
             let conn = open_default_read_only(cli.db)?;
-            let edges = graph_edges_with_depth(
-                &conn,
-                &symbol,
-                Direction::Outgoing,
-                normalize_depth(depth),
-            )?;
-            print_json_or_edges(json, &edges)?;
+            let result = graph_query(&conn, &symbol, Direction::Outgoing, normalize_depth(depth))?;
+            print_graph_query(json, &result)?;
         }
         Command::Impact {
             symbol,
@@ -306,8 +296,8 @@ pub fn run(cli: Cli) -> Result<()> {
             json,
         } => {
             let conn = open_default_read_only(cli.db)?;
-            let edges = impact_edges(&conn, &symbol, normalize_depth(depth))?;
-            print_json_or_edges(json, &edges)?;
+            let result = impact_query(&conn, &symbol, normalize_depth(depth))?;
+            print_graph_query(json, &result)?;
         }
         Command::Context {
             task,
@@ -672,11 +662,59 @@ fn print_json_or_symbols(json: bool, rows: &[SearchRow]) -> Result<()> {
     Ok(())
 }
 
-fn print_json_or_edges(json: bool, rows: &[EdgeRow]) -> Result<()> {
+/// Graph verb output. JSON is the full [`GraphQueryResult`]. Text prints the
+/// edges, preceded by a resolution note when the seed was ambiguous or came
+/// from the fuzzy fallback. With no edges the note goes to stderr so an empty
+/// stdout still means "nothing found".
+fn print_graph_query(json: bool, result: &GraphQueryResult) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(rows)?);
+        println!("{}", serde_json::to_string_pretty(result)?);
         return Ok(());
     }
+    let note = graph_resolution_note(result);
+    if result.edges.is_empty() {
+        if let Some(note) = note {
+            eprint!("{note}");
+        }
+        return Ok(());
+    }
+    if let Some(note) = note {
+        print!("{note}");
+    }
+    print_edges(&result.edges);
+    Ok(())
+}
+
+fn graph_resolution_note(result: &GraphQueryResult) -> Option<String> {
+    let count = result.candidates.len();
+    let mut note = if result.resolution == "none" {
+        format!("resolution: none (no symbol matches {:?})\n", result.query)
+    } else if result.fuzzy {
+        format!(
+            "resolution: fuzzy (no exact symbol matches {:?}; edges merged from {count} prefix matches)\n",
+            result.query
+        )
+    } else if result.ambiguous {
+        format!(
+            "resolution: {} ambiguous ({count} symbols match {:?}; edges merged from all of them, narrow with path::name)\n",
+            result.resolution, result.query
+        )
+    } else {
+        return None;
+    };
+    if !result.candidates.is_empty() {
+        note.push_str("candidates:\n");
+        for candidate in &result.candidates {
+            note.push_str(&format!(
+                "  {} {} {}:{}\n",
+                candidate.kind, candidate.qualified_name, candidate.file_path, candidate.start_line
+            ));
+        }
+    }
+    Some(note)
+}
+
+fn print_edges(rows: &[EdgeRow]) {
     for row in rows {
         println!(
             "{} --{}@{} hops={}--> {}  ({} -> {})",
@@ -689,7 +727,6 @@ fn print_json_or_edges(json: bool, rows: &[EdgeRow]) -> Result<()> {
             row.target_file
         );
     }
-    Ok(())
 }
 
 fn print_doctor_report(report: &crate::query::DoctorReport, json: bool) -> Result<()> {

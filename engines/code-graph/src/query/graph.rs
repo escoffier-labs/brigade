@@ -5,8 +5,8 @@ use std::collections::{HashSet, VecDeque};
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
-use crate::model::{Direction, EdgeRow, FileNeighbor};
-use crate::query::search::search_symbols;
+use crate::model::{Direction, EdgeRow, FileNeighbor, GraphQueryResult};
+use crate::query::resolve::{SymbolResolution, resolve_graph_symbol};
 
 pub const DEFAULT_IMPACT_DEPTH: usize = 1;
 pub const MAX_IMPACT_DEPTH: usize = 5;
@@ -21,15 +21,61 @@ pub fn graph_edges(
     graph_edges_with_depth(conn, symbol_query, direction, DEFAULT_IMPACT_DEPTH)
 }
 
+/// Edges around the symbol(s) `symbol_query` resolves to. See
+/// [`resolve_graph_symbol`] for the exact-first resolution order.
 pub fn graph_edges_with_depth(
     conn: &Connection,
     symbol_query: &str,
     direction: Direction,
     depth: usize,
 ) -> Result<Vec<EdgeRow>> {
-    let symbols = search_symbols(conn, symbol_query, 20)?;
+    Ok(graph_query(conn, symbol_query, direction, depth)?.edges)
+}
+
+pub fn impact_edges(conn: &Connection, symbol_query: &str, depth: usize) -> Result<Vec<EdgeRow>> {
+    Ok(impact_query(conn, symbol_query, depth)?.edges)
+}
+
+/// `callers` / `callees` with the seed resolution reported alongside the edges.
+pub fn graph_query(
+    conn: &Connection,
+    symbol_query: &str,
+    direction: Direction,
+    depth: usize,
+) -> Result<GraphQueryResult> {
+    let resolution = resolve_graph_symbol(conn, symbol_query)?;
+    let edges = resolved_edges(conn, &resolution, symbol_query, direction, depth)?;
+    Ok(query_result(symbol_query, resolution, edges))
+}
+
+/// `impact`: callers then callees of one resolved seed, sorted by hops.
+pub fn impact_query(
+    conn: &Connection,
+    symbol_query: &str,
+    depth: usize,
+) -> Result<GraphQueryResult> {
+    let resolution = resolve_graph_symbol(conn, symbol_query)?;
+    let mut edges = resolved_edges(conn, &resolution, symbol_query, Direction::Incoming, depth)?;
+    edges.extend(resolved_edges(
+        conn,
+        &resolution,
+        symbol_query,
+        Direction::Outgoing,
+        depth,
+    )?);
+    sort_impact_edges(&mut edges);
+    Ok(query_result(symbol_query, resolution, edges))
+}
+
+fn resolved_edges(
+    conn: &Connection,
+    resolution: &SymbolResolution,
+    symbol_query: &str,
+    direction: Direction,
+    depth: usize,
+) -> Result<Vec<EdgeRow>> {
     let mut edges = Vec::new();
-    for symbol in symbols {
+    for symbol in &resolution.candidates {
         edges.extend(edges_for_symbol_id_with_depth(
             conn, &symbol.id, direction, depth,
         )?);
@@ -37,16 +83,20 @@ pub fn graph_edges_with_depth(
     cap_direction_edges(dedupe_edges(edges)?, direction, symbol_query)
 }
 
-pub fn impact_edges(conn: &Connection, symbol_query: &str, depth: usize) -> Result<Vec<EdgeRow>> {
-    let mut edges = graph_edges_with_depth(conn, symbol_query, Direction::Incoming, depth)?;
-    edges.extend(graph_edges_with_depth(
-        conn,
-        symbol_query,
-        Direction::Outgoing,
-        depth,
-    )?);
-    sort_impact_edges(&mut edges);
-    Ok(edges)
+fn query_result(
+    symbol_query: &str,
+    resolution: SymbolResolution,
+    edges: Vec<EdgeRow>,
+) -> GraphQueryResult {
+    GraphQueryResult {
+        query: symbol_query.to_string(),
+        resolution: resolution.method.as_str().to_string(),
+        fuzzy: resolution.is_fuzzy(),
+        ambiguous: resolution.is_ambiguous(),
+        selected: resolution.candidates.clone(),
+        candidates: resolution.candidates,
+        edges,
+    }
 }
 
 pub fn edges_for_symbol_id(

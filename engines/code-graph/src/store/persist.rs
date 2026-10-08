@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
-use crate::extractors::common::hex_hash;
+use crate::extractors::common::{MODULE_SYMBOL_KIND, MODULE_SYMBOL_NAME, hex_hash};
 use crate::extractors::{extractor_fingerprint_for, language_for};
 use crate::store::walk::Entry;
 
@@ -84,6 +84,11 @@ pub(super) fn write_file_graph(
                 symbol.body_hash,
             ],
         )?;
+        if is_module_pseudo_symbol(symbol) {
+            // Every file shares its name, and a file-path query would rank it
+            // first, so search and context seeding never see it.
+            continue;
+        }
         tx.execute(
             "INSERT INTO symbols_fts(symbol_id, name, qualified_name, signature, file_path)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -98,16 +103,30 @@ pub(super) fn write_file_graph(
     }
     for import in &graph.imports {
         tx.execute(
-            "INSERT INTO imports(file_path, module, local_name, imported_name, alias, line)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO imports(file_path, module, local_name, imported_name, alias, line, module_scope, conditional)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 graph.path,
                 import.module,
                 import.local_name,
                 import.imported_name,
                 import.alias,
-                import.line as i64
+                import.line as i64,
+                import.module_scope,
+                import.conditional
             ],
+        )?;
+    }
+    for symbol_id in &graph.conditional_symbols {
+        tx.execute(
+            "INSERT OR REPLACE INTO conditional_symbols(symbol_id, file_path) VALUES (?1, ?2)",
+            params![symbol_id, graph.path],
+        )?;
+    }
+    if let Some(names) = &graph.exports {
+        tx.execute(
+            "INSERT OR REPLACE INTO module_exports(file_path, names) VALUES (?1, ?2)",
+            params![graph.path, serde_json::to_string(names)?],
         )?;
     }
     for call in &graph.calls {
@@ -127,6 +146,10 @@ pub(super) fn write_file_graph(
     Ok(())
 }
 
+fn is_module_pseudo_symbol(symbol: &crate::model::Symbol) -> bool {
+    symbol.kind == MODULE_SYMBOL_KIND && symbol.name == MODULE_SYMBOL_NAME
+}
+
 pub(super) fn purge_file_graph(tx: &Connection, path: &str) -> Result<()> {
     tx.execute(
         "DELETE FROM symbols_fts WHERE file_path = ?1",
@@ -134,6 +157,14 @@ pub(super) fn purge_file_graph(tx: &Connection, path: &str) -> Result<()> {
     )?;
     tx.execute("DELETE FROM symbols WHERE file_path = ?1", params![path])?;
     tx.execute("DELETE FROM imports WHERE file_path = ?1", params![path])?;
+    tx.execute(
+        "DELETE FROM module_exports WHERE file_path = ?1",
+        params![path],
+    )?;
+    tx.execute(
+        "DELETE FROM conditional_symbols WHERE file_path = ?1",
+        params![path],
+    )?;
     tx.execute(
         "DELETE FROM pending_calls WHERE file_path = ?1",
         params![path],

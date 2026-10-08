@@ -431,3 +431,50 @@ def beta():
     assert!(old_to_new.changed_nodes.is_empty());
     assert!(new_to_old.changed_nodes.is_empty());
 }
+
+#[test]
+fn growing_a_function_body_does_not_change_the_module_node() {
+    let before = "\
+def main():
+    return 1
+
+if __name__ == \"__main__\":
+    main()
+";
+    let after = "\
+def main():
+    value = 1
+    value += 1
+    return value
+
+if __name__ == \"__main__\":
+    main()
+";
+    let before_dir = tempfile::tempdir().unwrap();
+    let after_dir = tempfile::tempdir().unwrap();
+    let before_conn = index(before_dir.path(), before);
+    let after_conn = index(after_dir.path(), after);
+
+    let diff = diff_graphs(&before_conn, &after_conn).unwrap();
+    let changed: Vec<&str> = diff
+        .changed_nodes
+        .iter()
+        .map(|node| node.qualified_name.as_str())
+        .collect();
+    assert_eq!(changed, ["main"], "{diff:?}");
+    assert!(diff.added_nodes.is_empty() && diff.removed_nodes.is_empty());
+
+    // A change to module-level statements does change the module node.
+    let module_dir = tempfile::tempdir().unwrap();
+    let module_conn = index(
+        module_dir.path(),
+        "def main():\n    return 1\n\nif __name__ == \"__main__\":\n    main()\n    main()\n",
+    );
+    let diff = diff_graphs(&before_conn, &module_conn).unwrap();
+    let changed: Vec<&str> = diff
+        .changed_nodes
+        .iter()
+        .map(|node| node.qualified_name.as_str())
+        .collect();
+    assert_eq!(changed, ["<module>"], "{diff:?}");
+}

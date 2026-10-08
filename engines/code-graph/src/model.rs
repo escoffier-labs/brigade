@@ -26,6 +26,12 @@ pub struct Import {
     pub imported_name: Option<String>,
     pub alias: Option<String>,
     pub line: usize,
+    /// Whether the import binds in the module namespace. Python imports inside
+    /// a function or class body do not, so they are not module exports.
+    pub module_scope: bool,
+    /// Whether a module-scope import sits under an `if`, `try`, `with`, loop,
+    /// or `match`, so it may not run. Always `false` for other imports.
+    pub conditional: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +115,11 @@ pub struct FileGraph {
     pub symbols: Vec<Symbol>,
     pub imports: Vec<Import>,
     pub calls: Vec<PendingCall>,
+    /// The module's literal export list (Python `__all__`), when it declares one.
+    pub exports: Option<Vec<String>>,
+    /// Ids of top-level symbols defined under an `if`, `try`, `with`, loop, or
+    /// `match`, so their definition may not run.
+    pub conditional_symbols: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,6 +150,37 @@ pub struct SearchRow {
     pub end_line: usize,
     pub signature: String,
     pub score: f64,
+}
+
+/// One symbol a graph query resolved its seed to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SymbolCandidate {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub file_path: String,
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
+/// JSON shape of `callers`, `callees` and `impact`: the edges plus how the
+/// query string was resolved to seed symbols.
+///
+/// `resolution` is one of `id`, `qualified_name`, `name_path`, `name`,
+/// `fuzzy` or `none`. `fuzzy` is true only for the prefix-search fallback.
+/// `ambiguous` is true when more than one symbol was selected; `candidates`
+/// lists every symbol the resolution step matched and `selected` the ones
+/// whose edges are in `edges`.
+#[derive(Debug, Serialize)]
+pub struct GraphQueryResult {
+    pub query: String,
+    pub resolution: String,
+    pub fuzzy: bool,
+    pub ambiguous: bool,
+    pub selected: Vec<SymbolCandidate>,
+    pub candidates: Vec<SymbolCandidate>,
+    pub edges: Vec<EdgeRow>,
 }
 
 #[derive(Debug, Serialize)]
