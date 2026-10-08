@@ -41,3 +41,13 @@ def test_read_only_pm2_probe_reports_command_not_found(tmp_path):
 
     assert result == {"ok": False, "stdout": "", "error": "command not found"}
     assert not marker.exists()
+
+
+@pytest.mark.allow_agent_cli
+def test_pm2_stays_absent_for_tests_allowed_to_launch_agent_clis(tmp_path):
+    fake, marker = _fake_pm2(tmp_path)
+
+    with pytest.raises(FileNotFoundError):
+        subprocess.run([str(fake), "jlist"], check=False)
+
+    assert not marker.exists()
