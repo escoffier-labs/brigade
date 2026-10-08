@@ -291,6 +291,9 @@ def _run_graphtrail_impact(target: Path, binary: str, db_path: Path, query: str)
             return None
         return {"related_files": _path_tokens(text_result.stdout), "symbol_ids": [query]}
     data = result.json()
+    if isinstance(data, dict) and isinstance(data.get("edges"), list) and "resolution" in data:
+        # Graph-verb object (#1646): the edge rows are the payload items.
+        return {"items": data["edges"]}
     if isinstance(data, dict):
         return data
     if isinstance(data, list):

@@ -291,3 +291,52 @@ def test_module_map_insights_name_package_not_largest_test_module():
     assert "brigade" in insights["most_connected"]["label"]
     assert "test" not in insights["most_connected"]["label"].lower()
     assert insights["isolated_count"] == 1
+
+
+def test_export_impact_section_reads_graph_query_object(monkeypatch, tmp_path):
+    """Engines since #1646 print `{resolution, ..., edges}` for graph verbs."""
+    _write_fake_db(tmp_path)
+    edge = {
+        "source": "caller_fn",
+        "target": "target_fn",
+        "kind": "calls",
+        "hops": 1,
+        "source_file": "src/a.py",
+        "target_file": "src/b.py",
+    }
+    search_rows = [{"qualified_name": "target_fn", "name": "target_fn", "file_path": "src/b.py", "kind": "function"}]
+
+    def graph_object(edges):
+        return json.dumps(
+            {
+                "query": "target_fn",
+                "resolution": "qualified_name",
+                "fuzzy": False,
+                "ambiguous": False,
+                "selected": [],
+                "candidates": [],
+                "edges": edges,
+            }
+        )
+
+    def fake_run(argv, **kwargs):
+        from brigade import proc
+
+        if "stats" in argv and "--json" in argv:
+            return proc.Result(0, "{}", "")
+        if "export" in argv:
+            return proc.Result(0, "", "")
+        if "search" in argv:
+            return proc.Result(0, json.dumps(search_rows), "")
+        if "impact" in argv or "callers" in argv:
+            return proc.Result(0, graph_object([edge]), "")
+        if "affected" in argv:
+            return proc.Result(0, "{}", "")
+        return proc.Result(1, "", "")
+
+    monkeypatch.setattr(code_export.proc, "run", fake_run)
+    monkeypatch.setattr(code_export.context_cmd, "_graphtrail_bin", lambda: "/bin/graphtrail")
+
+    payload = code_export.export_payload(tmp_path, symbol="target_fn")
+    assert payload["impact"]["edges"] == [edge]
+    assert payload["impact"]["callers"] == [edge]

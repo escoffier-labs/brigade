@@ -26,9 +26,9 @@ use crate::model::Direction;
 use crate::query::build_context_pack_from_entry_points;
 use crate::query::{
     DEFAULT_AFFECTED_DEPTH, DEFAULT_IMPACT_DEPTH, affected, build_context_pack, cycles, dead_code,
-    diff_graphs, doctor, file_neighbors, graph_edges_with_depth, impact_edges, limit_edges,
-    normalize_depth, personalize_context_pack, render_markdown, render_markdown_budgeted,
-    search_symbols_with_path, stats,
+    diff_graphs, doctor, file_neighbors, graph_query, impact_query, limit_edges, normalize_depth,
+    personalize_context_pack, render_markdown, render_markdown_budgeted, search_symbols_with_path,
+    stats,
 };
 use crate::store::{init_schema, open_db, open_read_only, sync_repo};
 
@@ -203,35 +203,16 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
             optional_str_arg(args, "path").as_deref(),
             usize_arg(args, "limit", 20),
         )?),
-        ToolId::Callers => to_pretty(&limit_edges(
-            graph_edges_with_depth(
-                &conn,
-                &str_arg(args, "symbol"),
-                Direction::Incoming,
-                normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH)),
-            )?,
-            optional_usize_arg(args, "limit"),
-        )),
-        ToolId::Callees => to_pretty(&limit_edges(
-            graph_edges_with_depth(
-                &conn,
-                &str_arg(args, "symbol"),
-                Direction::Outgoing,
-                normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH)),
-            )?,
-            optional_usize_arg(args, "limit"),
-        )),
-        ToolId::Impact => {
+        ToolId::Callers | ToolId::Callees | ToolId::Impact => {
             let symbol = str_arg(args, "symbol");
-            let edges = limit_edges(
-                impact_edges(
-                    &conn,
-                    &symbol,
-                    normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH)),
-                )?,
-                optional_usize_arg(args, "limit"),
-            );
-            to_pretty(&edges)
+            let depth = normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH));
+            let mut result = match spec.id {
+                ToolId::Callers => graph_query(&conn, &symbol, Direction::Incoming, depth)?,
+                ToolId::Callees => graph_query(&conn, &symbol, Direction::Outgoing, depth)?,
+                _ => impact_query(&conn, &symbol, depth)?,
+            };
+            result.edges = limit_edges(result.edges, optional_usize_arg(args, "limit"));
+            to_pretty(&result)
         }
         #[cfg(feature = "codesearch")]
         ToolId::SemanticSearch => {
@@ -410,7 +391,7 @@ fn build_tool_specs() -> Vec<ToolSpec> {
     let symbol_tool = |desc: &str| {
         with_location(
             with_refresh(json!({
-                "symbol": { "type": "string", "description": desc },
+                "symbol": { "type": "string", "description": format!("{desc} Resolved exactly first: symbol id, qualified name (Class.method), path::name, then bare name. Falls back to fuzzy prefix search only when nothing matches exactly. The result reports resolution, fuzzy, ambiguous, selected and candidates alongside edges.") },
                 "depth": { "type": "integer", "description": "Traversal depth, clamped to 1..5 (default 1)." },
                 "limit": { "type": "integer", "description": "Optional max edges returned; omit for all (up to the internal 500-per-direction cap). Truncated results append a marker row." }
             })),
