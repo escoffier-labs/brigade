@@ -139,6 +139,11 @@ def _stub_codex_cloud_inventory(monkeypatch, request):
 
 _AGENT_CLI_BINARIES = frozenset({"codex", "claude", "cursor-agent", "opencode", "gemini", "agy", "grok"})
 
+# Process managers that start a long-lived daemon on first use. With HOME pointed
+# at a per-session temp dir, every real ``pm2 jlist`` started a new PM2 God
+# daemon that outlived pytest and kept its temp dir open.
+_HOST_DAEMON_BINARIES = frozenset({"pm2"})
+
 
 @pytest.fixture(autouse=True)
 def _guard_agent_cli_spawns(monkeypatch, request):
@@ -146,10 +151,11 @@ def _guard_agent_cli_spawns(monkeypatch, request):
 
     Wraps ``subprocess.Popen`` and inspects ``argv[0]``'s basename. Tests that
     legitimately launch those binaries through fakes on PATH opt in with
-    ``@pytest.mark.allow_agent_cli``.
+    ``@pytest.mark.allow_agent_cli``. Host daemon binaries always behave as if
+    they are not installed, so callers take their command-not-found path.
     """
-    if request.node.get_closest_marker("allow_agent_cli"):
-        return
+    allow_agent_cli = request.node.get_closest_marker("allow_agent_cli") is not None
+    import errno
     import os
     import subprocess
 
@@ -168,7 +174,9 @@ def _guard_agent_cli_spawns(monkeypatch, request):
             name = os.path.basename(candidate)
             if name.lower().endswith(".exe"):
                 name = name[:-4]
-            if name in _AGENT_CLI_BINARIES:
+            if name in _HOST_DAEMON_BINARIES:
+                raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), candidate)
+            if name in _AGENT_CLI_BINARIES and not allow_agent_cli:
                 raise AssertionError(
                     f"test tried to launch agent CLI {name!r}; stub the call or mark with @pytest.mark.allow_agent_cli"
                 )
