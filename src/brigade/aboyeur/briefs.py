@@ -333,7 +333,27 @@ def shown_brief_files(code_graph: CodeGraphBrief | None) -> list[str] | None:
     """
     if code_graph is None or code_graph.files is None:
         return None
-    return [path for path in code_graph.files if path in code_graph.text]
+    lines = _graph_section_lines(code_graph.text)
+    return [path for path in code_graph.files if any(_line_shows_file(line, path) for line in lines)]
+
+
+def _graph_section_lines(text: str) -> list[str]:
+    """Lines after the engine's summary line, so the echoed task never counts.
+
+    The pack prints the task first and the summary line after it, so the last
+    summary line is always the engine's own, even when the task text contains
+    something that looks like one.
+    """
+    lines = text.splitlines()
+    starts = [
+        index for index, line in enumerate(lines) if line.startswith("_schema v") and " - relevance floor " in line
+    ]
+    return lines[starts[-1] + 1 :] if starts else []
+
+
+def _line_shows_file(line: str, path: str) -> bool:
+    """A file is shown by a related-file line, an entry or edge location, or an edge target."""
+    return line == f"- {path}" or f" - {path}:" in line or line.endswith(f" -> {path}")
 
 
 def code_graph_brief_record(code_graph: CodeGraphBrief | None) -> dict[str, object]:
@@ -356,9 +376,11 @@ def code_graph_brief_record(code_graph: CodeGraphBrief | None) -> dict[str, obje
 
 
 def _entry_point_shown(symbol: dict[str, object], text: str) -> bool:
-    """True when the attached text still lists this entry point after truncation."""
+    """True when the graph sections still list this entry point after truncation."""
     name = symbol.get("qualified_name")
-    return isinstance(name, str) and f"- `{name}` (" in text
+    if not isinstance(name, str):
+        return False
+    return any(line.startswith(f"- `{name}` (") for line in _graph_section_lines(text))
 
 
 def _upstream_drift_state_path() -> Path:

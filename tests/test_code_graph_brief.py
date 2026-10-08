@@ -64,6 +64,14 @@ _schema v7 - 0 entry points - 0 callers - 0 callees - 0 related files - relevanc
 No confident code context for this task. No indexed symbol matched a code identifier, file path, or distinctive name in the task, so no entry points are listed. Search the repository directly if the change touches code.
 """
 
+SUMMARY = "_schema v7 - 1 entry points - 0 callers - 0 callees - 1 related files - relevance floor task-coverage-v2_"
+
+
+def _shown(task: str, graph: str) -> str:
+    """Attached brief text in the engine's shape: heading, task, summary, graph sections."""
+    return f"## Code graph context\n\n# Context Pack: {task}\n\n{SUMMARY}\n\n{graph}"
+
+
 NO_CONTEXT_JSON = {
     "schema_version": 7,
     "task": "fix typo in CHANGELOG",
@@ -248,7 +256,7 @@ def _payload(code_graph):
 def test_run_payload_records_only_files_the_brief_showed():
     brief = aboyeur.CodeGraphBrief(
         attached=True,
-        text="## Code graph context\n\n- `a` (function) - src/a.py:1-2\n",
+        text=_shown("fix a", "## Entry points\n\n- `a` (function) - src/a.py:1-2\n"),
         bytes=60,
         confident=True,
         floor_applied=True,
@@ -292,6 +300,49 @@ def test_run_payload_drops_symbols_the_attached_text_no_longer_shows():
     assert recorded["files"] == []
 
 
+def test_task_text_naming_a_truncated_file_does_not_count_as_shown():
+    task = "fix extract_delta_files in src/brigade/context_eval.py"
+    brief = aboyeur.CodeGraphBrief(
+        attached=True,
+        text=_shown(task, "## Entry points\n\n\n[GraphTrail context truncated to 4000 chars.]\n"),
+        bytes=120,
+        confident=True,
+        floor_applied=True,
+        symbols=(
+            {
+                "id": "sym-extract",
+                "qualified_name": "extract_delta_files",
+                "file_path": "src/brigade/context_eval.py",
+                "score": 1.0,
+            },
+        ),
+        files=("src/brigade/context_eval.py",),
+    )
+
+    recorded = _payload(brief)["code_graph_brief"]
+
+    assert recorded["symbols"] == []
+    assert recorded["files"] == []
+    assert briefs.shown_brief_files(brief) == []
+
+
+def test_files_in_entry_and_edge_lines_count_as_shown():
+    graph = (
+        "## Entry points\n\n- `run` (function) - src/app.py:5-7\n\n"
+        "## Callers\n\n- `main` -> `run` - src/cli.py:12 -> src/app.py\n\n"
+        "## Callees\n\n- `run` -> `helper` - src/app.py:6 -> src/lib.py\n"
+    )
+    brief = aboyeur.CodeGraphBrief(
+        attached=True,
+        text=_shown("fix run", graph),
+        bytes=200,
+        symbols=({"id": "r", "qualified_name": "run", "file_path": "src/app.py", "score": 1.0},),
+        files=("src/app.py", "src/cli.py", "src/lib.py", "src/app.pyi"),
+    )
+
+    assert briefs.shown_brief_files(brief) == ["src/app.py", "src/cli.py", "src/lib.py"]
+
+
 def test_run_payload_keeps_the_old_shape_without_brief_data():
     brief = aboyeur.CodeGraphBrief(attached=True, text="## Code graph context\n\ngraph\n", bytes=30)
 
@@ -327,7 +378,7 @@ def test_context_eval_prefers_recorded_files_over_markdown(tmp_path):
     delta = {"ok": True, "sidecar_path": str(sidecar)}
     brief = aboyeur.CodeGraphBrief(
         attached=True,
-        text="## Code graph context\n\n- src/a.py\n- src/noise.py\n- tests/test_noise.py\n",
+        text=_shown("fix a", "## Related files\n\n- src/a.py\n- src/noise.py\n- tests/test_noise.py\n"),
         bytes=80,
         floor_applied=True,
         symbols=(),
