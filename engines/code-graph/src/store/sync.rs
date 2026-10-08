@@ -21,7 +21,7 @@ use crate::store::repo_policy::{
     ensure_graphtrail_ignored, guard_unsafe_root, has_git_marker, write_branch_meta,
 };
 use crate::store::resolve::rebuild_edges;
-use crate::store::schema::SchemaUpgrade;
+use crate::store::schema::{SchemaUpgrade, clear_parse_census_pending};
 use crate::store::skipped::{clear_skipped, load_skipped, record_skipped, skipped_reason_counts};
 use crate::store::walk::{Entry, collect_sync_walk};
 
@@ -88,6 +88,10 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
         for path in &skipped_gone {
             clear_skipped(&tx, path)?;
         }
+        if force_full_reindex {
+            // A full reindex with no entries has nothing to census.
+            clear_parse_census_pending(&tx)?;
+        }
         crate::store::meta::write_sync_meta(&tx)?;
         write_branch_meta(&tx, &root)?;
         tx.commit()?;
@@ -123,6 +127,9 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
     }
 
     rebuild_edges(&tx)?;
+    if force_full_reindex {
+        clear_parse_census_pending(&tx)?;
+    }
     crate::store::meta::write_sync_meta(&tx)?;
     write_branch_meta(&tx, &root)?;
     tx.commit()?;

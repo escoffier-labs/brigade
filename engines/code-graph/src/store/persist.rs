@@ -25,8 +25,8 @@ pub(super) struct StalePlan<'a> {
 
 pub(super) enum EntryFreshness {
     Fresh,
-    /// Not indexed because an earlier sync skipped it, and its stat has not
-    /// changed since. Retrying would fail the same way.
+    /// Not indexed because an earlier sync skipped it, and nothing that could
+    /// make a retry succeed has changed since.
     Skipped,
     New,
     Changed,
@@ -155,9 +155,7 @@ pub(super) fn entry_freshness(
 ) -> Result<EntryFreshness> {
     let Some(db_file) = db_files.get(&entry.rel) else {
         return Ok(match skipped.get(&entry.rel) {
-            Some(stat) if stat.size == entry.size && stat.mtime == entry.mtime => {
-                EntryFreshness::Skipped
-            }
+            Some(stat) if stat.still_skipped(entry) => EntryFreshness::Skipped,
             _ => EntryFreshness::New,
         });
     };

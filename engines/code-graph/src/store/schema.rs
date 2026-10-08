@@ -31,6 +31,17 @@ const SKIPPED_FILES_TABLE: &str = "
     );
 ";
 
+/// Meta key set when the v8 upgrade adds `files.parse_errors`. Its presence
+/// forces a full reindex until one commits.
+const PARSE_CENSUS_PENDING: &str = "parse_census_pending";
+
+/// Clear the v8 parse-census obligation. Call only inside the transaction
+/// that commits a full reindex.
+pub(crate) fn clear_parse_census_pending(tx: &Connection) -> Result<()> {
+    tx.execute("DELETE FROM meta WHERE key = ?1", [PARSE_CENSUS_PENDING])?;
+    Ok(())
+}
+
 pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -170,14 +181,23 @@ pub fn upgrade_for_sync(conn: &Connection) -> Result<SchemaUpgrade> {
     }
     // v8 records files sync could not index (skipped_files) and files that
     // tree-sitter parsed only by recovering from syntax errors
-    // (files.parse_errors). The column check is the signal. Existing rows were
-    // never checked for parse errors, so reindex once to take the census.
+    // (files.parse_errors). Existing rows were never checked for parse errors,
+    // so reindex once to take the census. The column commits before the
+    // reindex does, so the column cannot be the signal: a sync that fails in
+    // between would lose the obligation. A meta marker written with the column
+    // carries it instead, and sync clears it only in the transaction that
+    // commits a full reindex.
     conn.execute_batch(SKIPPED_FILES_TABLE)?;
     if !table_has_column(conn, "files", "parse_errors")? {
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "ALTER TABLE files ADD COLUMN parse_errors INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
+        super::meta::upsert(&tx, PARSE_CENSUS_PENDING, "1")?;
+        tx.commit()?;
+    }
+    if table_exists(conn, "meta")? && super::meta::read(conn, PARSE_CENSUS_PENDING)?.is_some() {
         upgrade = upgrade.max(SchemaUpgrade::FullReindex);
     }
     // Resolver changes and older writers affect derived edges only. Sync writes

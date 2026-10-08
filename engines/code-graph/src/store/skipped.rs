@@ -2,24 +2,58 @@
 //! errors.
 //!
 //! A skipped file keeps the size and mtime it had when it failed. Freshness
-//! checks treat it as current until either changes, so one permanently bad
-//! file neither forces a resync nor pins `doctor` to STALE. Read paths
+//! checks treat it as current until either changes (or, for an I/O failure,
+//! until it becomes readable), so one permanently bad file neither forces a
+//! resync nor pins `doctor` to STALE. Read paths
 //! tolerate databases written before schema v8, which lack this state.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::io::Read;
+use std::path::Path;
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
 use serde::Serialize;
 
-use crate::extractors::IndexFailure;
+use crate::extractors::{IndexFailure, SkipReason};
 use crate::store::schema::{table_exists, table_has_column};
 use crate::store::walk::Entry;
 
-/// The stat a skipped file had when sync last tried it.
+/// The stat a skipped file had when sync last tried it, and why it failed.
 pub(super) struct SkippedStat {
     pub(super) size: u64,
     pub(super) mtime: i64,
+    pub(super) reason: String,
+}
+
+impl SkippedStat {
+    /// Whether a skipped file still has to be skipped.
+    ///
+    /// Decode and parse failures depend only on content, so an unchanged size
+    /// and mtime mean retrying would fail the same way. An I/O failure can
+    /// clear without touching either (a chmod, say), so it is probed for
+    /// readability instead. Probing rather than always retrying keeps a file
+    /// that is still unreadable from turning every sync into a reindex and
+    /// edge rebuild, while a file that became readable shows up as new to both
+    /// sync and `doctor`.
+    pub(super) fn still_skipped(&self, entry: &Entry) -> bool {
+        if self.size != entry.size || self.mtime != entry.mtime {
+            return false;
+        }
+        if self.reason == SkipReason::IoError.as_str() {
+            return !is_readable(&entry.path);
+        }
+        true
+    }
+}
+
+/// The same reads `index_file` needs: metadata, then the first byte.
+fn is_readable(path: &Path) -> bool {
+    fs::metadata(path).is_ok()
+        && fs::File::open(path)
+            .and_then(|mut file| file.read(&mut [0u8; 1]))
+            .is_ok()
 }
 
 /// One recorded skipped file, as reported by `doctor`.
@@ -33,13 +67,14 @@ pub(super) fn load_skipped(conn: &Connection) -> Result<HashMap<String, SkippedS
     if !table_exists(conn, "skipped_files")? {
         return Ok(HashMap::new());
     }
-    let mut stmt = conn.prepare("SELECT path, size, modified_at FROM skipped_files")?;
+    let mut stmt = conn.prepare("SELECT path, size, modified_at, reason FROM skipped_files")?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
             SkippedStat {
                 size: row.get::<_, i64>(1)? as u64,
                 mtime: row.get::<_, i64>(2)?,
+                reason: row.get::<_, String>(3)?,
             },
         ))
     })?;

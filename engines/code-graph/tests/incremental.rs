@@ -850,6 +850,101 @@ fn sync_upgrades_v7_schema_with_skip_and_parse_error_tracking() {
 }
 
 #[test]
+fn failed_v8_upgrade_sync_keeps_the_parse_census_obligation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(
+        root.join("broken.py"),
+        "def good():\n    return 1\n\ndef broken(:\n    pass\n",
+    );
+    let conn = open_graph(root);
+    sync_repo(&conn, root).unwrap();
+
+    // Simulate a v7 database.
+    conn.execute("ALTER TABLE files DROP COLUMN parse_errors", [])
+        .unwrap();
+    conn.execute("DROP TABLE skipped_files", []).unwrap();
+    conn.execute(
+        "UPDATE meta SET value = '7' WHERE key = 'schema_version'",
+        [],
+    )
+    .unwrap();
+
+    // The first upgrade sync fails after the schema change, inside the
+    // reindex transaction.
+    conn.execute_batch(
+        "CREATE TRIGGER abort_upgrade BEFORE INSERT ON files
+         BEGIN SELECT RAISE(ABORT, 'simulated failure'); END;",
+    )
+    .unwrap();
+    assert!(sync_repo(&conn, root).is_err());
+    conn.execute("DROP TRIGGER abort_upgrade", []).unwrap();
+
+    let retry = sync_repo(&conn, root).unwrap();
+
+    assert!(
+        !retry.unchanged,
+        "the retry must still run the one-time reindex"
+    );
+    let report = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(report.verdict, "FRESH");
+    assert_eq!(report.parse_errors.count, 1);
+    assert_eq!(report.parse_errors.sample, vec!["broken.py".to_string()]);
+
+    let after = sync_repo(&conn, root).unwrap();
+    assert!(after.unchanged, "the census obligation clears once it runs");
+}
+
+#[cfg(unix)]
+#[test]
+fn io_error_skip_is_retried_once_the_file_is_readable_again() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("core.py"), "def helper():\n    return 1\n");
+    write_file(root.join("locked.py"), "def locked_fn():\n    return 2\n");
+    let locked = root.join("locked.py");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&locked).is_ok() {
+        // Running as root (or on a filesystem without permission checks):
+        // the failure cannot be reproduced.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+        return;
+    }
+    let conn = open_graph(root);
+
+    let first = sync_repo(&conn, root).unwrap();
+    assert_eq!(first.skipped, 1);
+    assert_eq!(
+        skipped_rows(&conn),
+        vec![("locked.py".to_string(), "io_error".to_string())]
+    );
+    let still_locked = sync_repo(&conn, root).unwrap();
+    assert!(
+        still_locked.unchanged,
+        "a file that still cannot be read must not churn every sync"
+    );
+    let report = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(report.verdict, "FRESH");
+
+    // chmod changes neither size nor mtime.
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+    let readable = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(readable.verdict, "STALE");
+    assert_eq!(readable.pending.new_files, 1);
+
+    let retried = sync_repo(&conn, root).unwrap();
+
+    assert!(!retried.unchanged);
+    assert_eq!(retried.skipped, 0);
+    assert_eq!(symbol_count(&conn, "locked_fn"), 1);
+    assert!(skipped_rows(&conn).is_empty());
+    let fresh = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(fresh.verdict, "FRESH");
+}
+
+#[test]
 fn database_errors_still_abort_sync() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
