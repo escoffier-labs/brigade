@@ -48,12 +48,35 @@ impl SkippedStat {
     }
 }
 
-/// The same reads `index_file` needs: metadata, then the first byte.
+/// Whether `path` is a regular file whose first byte can be read.
+///
+/// The path may have changed since the walk captured it, so the probe trusts
+/// nothing: a symlink or special file counts as unreadable, the open neither
+/// follows symlinks nor blocks (a FIFO would otherwise hang until a writer
+/// appears), and the opened descriptor must itself be a regular file.
 fn is_readable(path: &Path) -> bool {
-    fs::metadata(path).is_ok()
-        && fs::File::open(path)
-            .and_then(|mut file| file.read(&mut [0u8; 1]))
-            .is_ok()
+    let is_regular = |metadata: fs::Metadata| metadata.file_type().is_file();
+    if !fs::symlink_metadata(path).is_ok_and(is_regular) {
+        return false;
+    }
+    let Ok(mut file) = open_for_probe(path) else {
+        return false;
+    };
+    file.metadata().is_ok_and(is_regular) && file.read(&mut [0u8; 1]).is_ok()
+}
+
+#[cfg(unix)]
+fn open_for_probe(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_for_probe(path: &Path) -> std::io::Result<fs::File> {
+    fs::File::open(path)
 }
 
 /// One recorded skipped file, as reported by `doctor`.
@@ -154,4 +177,81 @@ pub fn parse_error_census(conn: &Connection, limit: usize) -> Result<(usize, Vec
         .query_map([limit as i64], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     Ok((count as usize, sample))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use crate::model::Lang;
+
+    /// An io_error skip whose walk entry was captured while `path` was a
+    /// regular file of `size` bytes, as if the path changed after the walk.
+    fn io_error_skip(path: PathBuf, size: u64) -> (SkippedStat, Entry) {
+        let stat = SkippedStat {
+            size,
+            mtime: 7,
+            reason: SkipReason::IoError.as_str().to_string(),
+        };
+        let entry = Entry {
+            rel: path.file_name().unwrap().to_string_lossy().into_owned(),
+            path,
+            lang: Lang::Python,
+            size,
+            mtime: 7,
+        };
+        (stat, entry)
+    }
+
+    #[test]
+    fn probe_refuses_a_fifo_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("swapped.py");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if !made.is_ok_and(|status| status.success()) {
+            return; // mkfifo unavailable: cannot reproduce.
+        }
+        let (stat, entry) = io_error_skip(fifo.clone(), 12);
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(stat.still_skipped(&entry));
+        });
+        let result = rx.recv_timeout(Duration::from_secs(5));
+        if result.is_err() {
+            // Release the blocked reader so the thread can exit.
+            let _ = fs::OpenOptions::new().write(true).open(&fifo);
+        }
+
+        assert_eq!(
+            result.ok(),
+            Some(true),
+            "a FIFO must count as still unreadable, promptly"
+        );
+    }
+
+    #[test]
+    fn probe_refuses_a_symlink_to_a_readable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.py");
+        fs::write(&target, "def ok():\n    pass\n").unwrap();
+        let link = dir.path().join("swapped.py");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (stat, entry) = io_error_skip(link, 12);
+
+        assert!(stat.still_skipped(&entry));
+    }
+
+    #[test]
+    fn probe_accepts_a_readable_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("restored.py");
+        fs::write(&file, "def ok():\n    pass\n").unwrap();
+        let (stat, entry) = io_error_skip(file, 12);
+
+        assert!(!stat.still_skipped(&entry));
+    }
 }

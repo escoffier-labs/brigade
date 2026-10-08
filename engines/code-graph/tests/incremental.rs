@@ -1076,6 +1076,63 @@ fn io_error_skip_is_retried_once_the_file_is_readable_again() {
     assert_eq!(fresh.verdict, "FRESH");
 }
 
+#[cfg(unix)]
+#[test]
+fn skipped_file_replaced_by_fifo_or_symlink_does_not_hang_doctor_or_sync() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::mpsc;
+
+    for replacement in ["fifo", "symlink"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        write_file(root.join("core.py"), "def helper():\n    return 1\n");
+        write_file(root.join("locked.py"), "def locked_fn():\n    return 2\n");
+        let locked = root.join("locked.py");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&locked).is_ok() {
+            return; // Running as root: the io_error skip cannot be reproduced.
+        }
+        let conn = open_graph(&root);
+        sync_repo(&conn, &root).unwrap();
+        assert_eq!(
+            skipped_rows(&conn),
+            vec![("locked.py".to_string(), "io_error".to_string())]
+        );
+        drop(conn);
+
+        fs::remove_file(&locked).unwrap();
+        if replacement == "fifo" {
+            let made = std::process::Command::new("mkfifo").arg(&locked).status();
+            if !made.is_ok_and(|status| status.success()) {
+                continue; // mkfifo unavailable.
+            }
+        } else {
+            std::os::unix::fs::symlink(root.join("core.py"), &locked).unwrap();
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let worker_root = root.clone();
+        std::thread::spawn(move || {
+            let conn = open_graph(&worker_root);
+            let report = doctor(&conn, &worker_root, &worker_root.join("g.db")).unwrap();
+            let summary = sync_repo(&conn, &worker_root).unwrap();
+            let _ = tx.send((report.verdict, summary.skipped, skipped_rows(&conn)));
+        });
+        let result = rx.recv_timeout(Duration::from_secs(10));
+        if result.is_err() && replacement == "fifo" {
+            let _ = fs::OpenOptions::new().write(true).open(&locked);
+        }
+        let (verdict, skipped, rows) =
+            result.unwrap_or_else(|_| panic!("doctor or sync hung on a {replacement}"));
+
+        // The walk indexes regular files only, so the replaced path leaves
+        // the graph and its skip entry clears.
+        assert_eq!(verdict, "FRESH", "{replacement}");
+        assert_eq!(skipped, 0, "{replacement}");
+        assert!(rows.is_empty(), "{replacement}");
+    }
+}
+
 #[test]
 fn database_errors_still_abort_sync() {
     let dir = tempfile::tempdir().unwrap();
