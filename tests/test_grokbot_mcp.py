@@ -2663,6 +2663,8 @@ def test_an_idempotent_retry_never_resolves_and_never_releases_the_live_claim(
         ("lease-expired", True),
         ("job-expired", True),
         ("lease-conflict", True),
+        # The job already finished, so nobody owns the lease the retry re-acquired.
+        ("terminal-state", True),
         # The queue answered, but the caller still owns the lease: keep the claim.
         ("invalid-state", False),
     ],
@@ -2686,6 +2688,23 @@ def test_a_retry_the_queue_definitively_refuses_gives_the_claim_back(tmp_path: P
     # The retry re-acquired the key, so it either gives that key back or leaves it owned.
     assert [kind for kind, _target in calls if kind == "release"] == (["release"] if released else [])
     assert hub == ({} if released else {"acme/repo": holder})
+
+
+def test_a_retry_after_the_job_failed_gives_back_the_reacquired_claim(tmp_path: Path, monkeypatch):
+    """A failed job keeps its stored target, so a late retry re-acquires the key; the terminal refusal must release it."""
+    job_id = _enqueue_job(tmp_path, "job-a")
+    adapter = _adapter(tmp_path)
+    hub, calls, _resolutions = _stateful_hub(monkeypatch, {"key": "acme/repo"})
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    adapter.call_tool("grokbot_queue_fail", {"job_id": job_id, "lease_id": "lease-a"})
+    assert hub == {}
+    calls.clear()
+
+    with pytest.raises(grokbot_mcp.AdapterError):
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert [kind for kind, _target in calls] == ["acquire", "release"]
+    assert hub == {}
 
 
 @pytest.mark.parametrize("release_fails", [False, True], ids=["release-ok", "release-fails"])

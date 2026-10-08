@@ -49,7 +49,9 @@ _FLEET_HOLDER_DOMAIN = b"brigade.grokbot.fleet-holder"
 _FLEET_SESSION_DOMAIN = b"brigade.grokbot.fleet-session"
 _FLEET_BEST_EFFORT = frozenset({"no-hub", "no-identity", "hub-unavailable"})
 # Queue answers that definitively say the caller no longer owns the lease.
-_LEASE_REFUSALS = frozenset({"lease-expired", "job-expired", "lease-conflict"})
+# ``terminal-state`` counts: a finished job keeps its stored target, so a late
+# retry re-acquires the key and must give it back.
+_LEASE_REFUSALS = frozenset({"lease-expired", "job-expired", "lease-conflict", "terminal-state"})
 # Refusal for a claim that raced another call across an origin change (#1639).
 # It is an ordinary retryable refusal: the retry reads the stored key.
 CLAIM_TARGET_CHANGED = "claim target changed concurrently, retrying the same lease is safe"
