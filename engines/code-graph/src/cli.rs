@@ -765,8 +765,11 @@ fn print_doctor_report(report: &crate::query::DoctorReport, json: bool) -> Resul
         report.pending.fingerprint_stale
     );
     println!(
-        "ignored: hardcoded_floor={} gitignore={} nested_repo={}",
-        report.ignored.hardcoded_floor, report.ignored.gitignore, report.ignored.nested_repo
+        "ignored: hardcoded_floor={} gitignore={} nested_repo={} minified={}",
+        report.ignored.hardcoded_floor,
+        report.ignored.gitignore,
+        report.ignored.nested_repo,
+        report.ignored.minified
     );
     println!("verdict: {}", report.verdict);
     Ok(())

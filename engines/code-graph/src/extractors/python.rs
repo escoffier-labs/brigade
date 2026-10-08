@@ -11,7 +11,8 @@ use crate::model::{CallTarget, FileGraph, Import};
 /// definitions span their decorators, and `from x import *` is recorded.
 /// v4: literal `__all__` lists, import scope, and a stable `<module>` span.
 /// v5: conditional module-scope imports and definitions are recorded.
-pub const EXTRACTOR_FINGERPRINT: &str = "python-extractor-v5";
+/// v6: stored signatures are capped at 256 bytes.
+pub const EXTRACTOR_FINGERPRINT: &str = "python-extractor-v6";
 
 /// `imported_name` of a `from x import *` row.
 pub const WILDCARD_IMPORT: &str = "*";

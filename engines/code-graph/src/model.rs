@@ -226,6 +226,8 @@ pub struct IgnoredSummary {
     /// Directories below the root that hold their own `.git` (linked worktrees,
     /// nested clones, submodule checkouts). Their contents are never indexed.
     pub nested_repo: usize,
+    /// Minified or generated sources skipped at index time (by name or by line length).
+    pub minified: usize,
 }
 
 #[derive(Debug, Serialize)]
