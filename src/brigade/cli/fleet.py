@@ -862,14 +862,20 @@ def _release_claim(raw_target: str, *, as_path: bool, node_override: str | None,
         except OSError:
             workspace = candidate
         # Never an ancestor walk: the directory must be the workspace itself.
+        # The per-user home identity is not a repo workspace (#1639).
         enclosing = fleet_client.find_workspace_for_path(workspace)
-        if enclosing is not None and enclosing != workspace:
+        if (
+            enclosing is not None
+            and enclosing != workspace
+            and enclosing != fleet_client.home_identity_target().resolve()
+        ):
             print(
                 f"error: {workspace} is inside the workspace {enclosing}; pass that workspace path instead",
                 file=sys.stderr,
             )
             return 1
-        target = workspace.name
+        # The same resolver `brigade run` claims with, so release cannot diverge.
+        target = fleet_client.resolve_claim_target(workspace)
         local_node = fleet_client.resolve_node_id(workspace)
     else:
         target = raw_target

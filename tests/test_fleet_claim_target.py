@@ -111,3 +111,30 @@ def test_git_failure_degrades_to_the_directory_name(tmp_path, monkeypatch):
 
     monkeypatch.setattr("brigade.fleet_claim_target.subprocess.run", boom)
     assert fleet_client.resolve_claim_target(repo) == "scratch"
+
+
+def test_release_path_frees_a_claim_taken_under_the_run_path_resolver(tmp_path, monkeypatch, capsys):
+    """Acquire and ``claims --release --path`` share one resolver (#1639)."""
+    import threading
+
+    from brigade import cli, fleet_hub
+
+    db = tmp_path / "hub" / "fleet.db"
+    server = fleet_hub.make_server("127.0.0.1", 0, db, "test-token-12345", allow_admin_writes=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", f"http://127.0.0.1:{server.server_address[1]}")
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "test-token-12345")
+        home = _make_home(tmp_path, "homeA", monkeypatch)
+        repo = _make_repo(home / "repos", "brigade", "https://github.com/escoffier-labs/brigade.git")
+        target = fleet_client.resolve_claim_target(repo)
+        assert target == "escoffier-labs/brigade"
+        assert fleet_client.acquire_claim(target).granted
+        assert [c["target"] for c in fleet_client.fetch_claims()] == [target]
+        assert cli.main(["fleet", "claims", "--release", str(repo), "--path", "--json"]) == 0
+        assert '"released": true' in capsys.readouterr().out
+        assert fleet_client.fetch_claims() == []
+    finally:
+        server.shutdown()
+        server.server_close()
