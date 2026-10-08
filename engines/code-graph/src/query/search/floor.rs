@@ -135,6 +135,9 @@ struct TaskTerms {
     identifiers: Vec<String>,
     /// Lowercase file references (`src/a.rs`, `context.rs`).
     paths: Vec<String>,
+    /// Every non-path token and identifier segment, lowercased with separators
+    /// removed, so `codegraphbrief` and `CODE_GRAPH_BRIEF` both name `CodeGraphBrief`.
+    compact: Vec<String>,
 }
 
 impl TaskTerms {
@@ -156,6 +159,12 @@ impl TaskTerms {
                     terms.distinctive.push(word);
                 }
             }
+            for segment in std::iter::once(token).chain(token.split(['.', ':'])) {
+                let key = compact(segment);
+                if !key.is_empty() && !terms.compact.contains(&key) {
+                    terms.compact.push(key);
+                }
+            }
             if is_code_identifier(token) {
                 terms.identifier_words.extend(name_tokens(token));
                 for segment in token.split(['.', ':']) {
@@ -167,6 +176,14 @@ impl TaskTerms {
         }
         terms
     }
+}
+
+/// Lowercase alphanumerics only: `Code_Graph-Brief` becomes `codegraphbrief`.
+fn compact(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn is_file_reference(token: &str) -> bool {
@@ -276,12 +293,15 @@ fn evidence(
 ) -> Option<Evidence> {
     let name = name_tokens(&row.name);
     let verbatim = terms.identifiers.contains(&row.name);
+    // A compound name spelled out in full, in any case and with or without
+    // separators, names the symbol. A one-word name stays a plain word.
     let exact = verbatim
         || (!name.is_empty()
             && terms
                 .identifiers
                 .iter()
-                .any(|ident| name_tokens(ident) == name));
+                .any(|ident| name_tokens(ident) == name))
+        || (name.len() >= 2 && terms.compact.contains(&compact(&row.name)));
     let (identifier_coverage, _) = coverage(&name, &terms.identifier_words);
     let identifier_covered =
         name.len() >= 2 && identifier_coverage > 0.0 && identifier_coverage >= min_name_coverage;
@@ -387,29 +407,20 @@ fn candidate_pool(
     let mut pool = search_symbols(conn, task, CANDIDATE_POOL)?;
     let mut seen: HashSet<String> = pool.iter().map(|row| row.id.clone()).collect();
     let mut extra = Vec::new();
-    let mut keys: Vec<String> = terms
-        .identifiers
-        .iter()
-        .map(|ident| name_tokens(ident).concat())
-        .collect();
-    keys.sort();
-    keys.dedup();
-    if !keys.is_empty() {
-        let mut stmt = conn.prepare(
+    // Exact-name lookups bypass keyword rank, one bounded query per chunk of keys.
+    for keys in terms.compact.chunks(256) {
+        let placeholders = vec!["?"; keys.len()].join(", ");
+        let sql = format!(
             "SELECT id, kind, name, qualified_name, file_path, start_line, end_line, signature, 0.0
              FROM symbols
-             WHERE replace(lower(name), '_', '') = ?1
+             WHERE replace(replace(replace(lower(name), '_', ''), '-', ''), '$', '') IN ({placeholders})
              ORDER BY file_path, start_line
-             LIMIT ?2",
-        )?;
-        for key in &keys {
-            let rows = stmt.query_map(
-                params![key, sqlite_limit(CANDIDATE_POOL)],
-                search_row_from_sql,
-            )?;
-            for row in rows {
-                extra.push(row?);
-            }
+             LIMIT {CANDIDATE_POOL}"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(keys.iter()), search_row_from_sql)?;
+        for row in rows {
+            extra.push(row?);
         }
     }
     if !mentioned.is_empty() {
@@ -565,6 +576,35 @@ mod tests {
         let conn = floor_fixture();
         let ids = floored_ids(&conn, "tighten the floor in src/query/context.rs");
         assert_eq!(ids, vec!["render".to_string()]);
+    }
+
+    #[test]
+    fn floor_finds_a_compound_name_typed_in_any_case_or_without_separators() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        index_symbols(
+            &conn,
+            &[
+                ("brief_type", "CodeGraphBrief", "src/briefs.py"),
+                ("brief_fn", "code_graph_brief", "src/briefs.py"),
+                ("drift_type", "DriftImpactBrief", "src/briefs.py"),
+                ("install_a", "install", "src/a.py"),
+                ("install_b", "install", "src/b.py"),
+            ],
+        );
+        for task in [
+            "codegraphbrief",
+            "CODEGRAPHBRIEF",
+            "fix the codegraphbrief truncation",
+            "rename CODE_GRAPH_BRIEF",
+        ] {
+            let mut ids = floored_ids(&conn, task);
+            ids.sort();
+            assert_eq!(ids, vec!["brief_fn", "brief_type"], "{task}");
+        }
+        // A one-word name stays a plain word: matching it exactly is not
+        // evidence that the task names that symbol.
+        assert!(floored_ids(&conn, "Update the README install section").is_empty());
     }
 
     #[test]
