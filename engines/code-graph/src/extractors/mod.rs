@@ -50,7 +50,8 @@ pub enum SkipReason {
     /// The extractor could not produce a parse tree for the file.
     ParseError,
     /// Minified or generated content: a line over [`MINIFIED_MAX_LINE_BYTES`]
-    /// or an average line over [`MINIFIED_MAX_AVG_LINE_BYTES`].
+    /// that holds most of the file, or an average line over
+    /// [`MINIFIED_MAX_AVG_LINE_BYTES`].
     Minified,
 }
 
@@ -67,7 +68,9 @@ impl SkipReason {
 
 /// Files at or below this size are never treated as minified.
 const MINIFIED_MIN_FILE_BYTES: usize = 5_000;
-/// A line longer than this marks a minified or generated file.
+/// A line longer than this marks a minified or generated file, but only when
+/// it also holds most of the file's bytes. One embedded data string in an
+/// otherwise ordinary module must not drop the module's definitions.
 const MINIFIED_MAX_LINE_BYTES: usize = 5_000;
 /// An average line longer than this marks a minified or generated file.
 const MINIFIED_MAX_AVG_LINE_BYTES: usize = 500;
@@ -87,7 +90,8 @@ fn looks_minified(bytes: &[u8]) -> bool {
     if bytes.last().is_some_and(|byte| *byte != b'\n') {
         lines += 1;
     }
-    longest > MINIFIED_MAX_LINE_BYTES || bytes.len() / lines.max(1) > MINIFIED_MAX_AVG_LINE_BYTES
+    let dominant_long_line = longest > MINIFIED_MAX_LINE_BYTES && longest * 2 > bytes.len();
+    dominant_long_line || bytes.len() / lines.max(1) > MINIFIED_MAX_AVG_LINE_BYTES
 }
 
 /// A per-file indexing failure. Sync and evaluate skip the file and record

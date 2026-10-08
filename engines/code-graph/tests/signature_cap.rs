@@ -188,6 +188,25 @@ fn ordinary_source_with_a_few_long_lines_is_still_indexed() {
     assert_eq!(summary.symbols, 40);
 }
 
+#[test]
+fn one_embedded_long_line_does_not_drop_an_otherwise_ordinary_module() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut source = format!("DATA = \"{}\"\n", "x".repeat(6_000));
+    for i in 0..120 {
+        source.push_str(&format!(
+            "# ordinary comment line {i} explaining the data above\n"
+        ));
+    }
+    source.push_str("def useful():\n    return len(DATA)\n");
+    write_file(root.join("embedded.py"), &source);
+
+    let conn = open_graph(root);
+    sync_repo(&conn, root).unwrap();
+    assert_eq!(indexed_paths(&conn), paths(["embedded.py"]));
+    assert!(skipped_rows(&conn).is_empty());
+}
+
 fn minified_source() -> String {
     let mut minified = String::new();
     for i in 0..1500 {
