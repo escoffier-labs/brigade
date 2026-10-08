@@ -11,7 +11,7 @@ use std::fs;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::extractors::common::hex_hash;
 use crate::model::{FileGraph, Lang};
@@ -39,16 +39,67 @@ pub fn extractor_fingerprint_for(lang: Lang) -> &'static str {
     }
 }
 
+/// Why a file could not be indexed. The text form is stored in
+/// `skipped_files.reason` and reported by `doctor` and `evaluate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// The file is not valid UTF-8 (Latin-1 fixtures, stray bytes, binaries).
+    UnreadableUtf8,
+    /// Reading the file or its metadata failed (permissions, races).
+    IoError,
+    /// The extractor could not produce a parse tree for the file.
+    ParseError,
+}
+
+impl SkipReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SkipReason::UnreadableUtf8 => "unreadable_utf8",
+            SkipReason::IoError => "io_error",
+            SkipReason::ParseError => "parse_error",
+        }
+    }
+}
+
+/// A per-file indexing failure. Sync and evaluate skip the file and record
+/// this instead of aborting the whole run.
+#[derive(Debug)]
+pub struct IndexFailure {
+    pub reason: SkipReason,
+    pub detail: String,
+}
+
+impl IndexFailure {
+    fn new(reason: SkipReason, detail: impl std::fmt::Display) -> Self {
+        Self {
+            reason,
+            detail: detail.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for IndexFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.reason.as_str(), self.detail)
+    }
+}
+
+impl std::error::Error for IndexFailure {}
+
 /// Read and extract a single file into a [`FileGraph`].
-pub fn index_file(root: &Path, path: &Path, lang: Lang) -> Result<FileGraph> {
-    let content =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+///
+/// Files that are not valid UTF-8 are skipped, not decoded lossily, so every
+/// stored line number refers to the real file.
+pub fn index_file(root: &Path, path: &Path, lang: Lang) -> Result<FileGraph, IndexFailure> {
+    let bytes = fs::read(path).map_err(|err| IndexFailure::new(SkipReason::IoError, err))?;
+    let metadata = fs::metadata(path).map_err(|err| IndexFailure::new(SkipReason::IoError, err))?;
+    let content = String::from_utf8(bytes)
+        .map_err(|err| IndexFailure::new(SkipReason::UnreadableUtf8, err.utf8_error()))?;
     let rel = path
         .strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/");
-    let metadata = fs::metadata(path)?;
     let modified_at = metadata
         .modified()
         .ok()
@@ -56,13 +107,15 @@ pub fn index_file(root: &Path, path: &Path, lang: Lang) -> Result<FileGraph> {
         .map_or(0, |d| d.as_secs() as i64);
     let hash = hex_hash(content.as_bytes());
 
-    let mut graph = match lang {
-        Lang::Python => python::extract_python(&rel, &content, &hash)?,
-        Lang::TypeScript => typescript::extract_typescript(&rel, &content, &hash)?,
-        Lang::Astro => astro::extract_astro(&rel, &content, &hash)?,
-        Lang::Rust => rust::extract_rust(&rel, &content, &hash)?,
-        Lang::Go => go::extract_go(&rel, &content, &hash)?,
+    let extracted: Result<FileGraph> = match lang {
+        Lang::Python => python::extract_python(&rel, &content, &hash),
+        Lang::TypeScript => typescript::extract_typescript(&rel, &content, &hash),
+        Lang::Astro => astro::extract_astro(&rel, &content, &hash),
+        Lang::Rust => rust::extract_rust(&rel, &content, &hash),
+        Lang::Go => go::extract_go(&rel, &content, &hash),
     };
+    let mut graph =
+        extracted.map_err(|err| IndexFailure::new(SkipReason::ParseError, format!("{err:#}")))?;
     graph.language = lang.db_label().to_string();
     graph.size = metadata.len();
     graph.modified_at = modified_at;

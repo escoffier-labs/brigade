@@ -9,6 +9,7 @@ use rusqlite::{Connection, params};
 
 use crate::extractors::common::hex_hash;
 use crate::extractors::{extractor_fingerprint_for, language_for};
+use crate::store::skipped::SkippedStat;
 use crate::store::walk::Entry;
 
 pub(super) struct DbFile {
@@ -24,6 +25,9 @@ pub(super) struct StalePlan<'a> {
 
 pub(super) enum EntryFreshness {
     Fresh,
+    /// Not indexed because an earlier sync skipped it, and its stat has not
+    /// changed since. Retrying would fail the same way.
+    Skipped,
     New,
     Changed,
     FingerprintStale,
@@ -32,14 +36,15 @@ pub(super) enum EntryFreshness {
 pub(super) fn stale_plan<'a>(
     entries: &'a [Entry],
     db_files: &HashMap<String, DbFile>,
+    skipped: &HashMap<String, SkippedStat>,
 ) -> Result<StalePlan<'a>> {
     let mut stale = Vec::new();
     for entry in entries {
-        match entry_freshness(entry, db_files)? {
+        match entry_freshness(entry, db_files, skipped)? {
             EntryFreshness::New | EntryFreshness::Changed | EntryFreshness::FingerprintStale => {
                 stale.push(entry)
             }
-            EntryFreshness::Fresh => {}
+            EntryFreshness::Fresh | EntryFreshness::Skipped => {}
         }
     }
     Ok(StalePlan { entries: stale })
@@ -54,8 +59,8 @@ pub(super) fn write_file_graph(
 ) -> Result<()> {
     let lang = language_for(Path::new(&graph.path)).expect("indexed graph has a known language");
     tx.execute(
-        "INSERT OR REPLACE INTO files(path, content_hash, size, modified_at, indexed_at, language, extractor_fingerprint)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT OR REPLACE INTO files(path, content_hash, size, modified_at, indexed_at, language, extractor_fingerprint, parse_errors)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             graph.path,
             graph.hash,
@@ -63,7 +68,8 @@ pub(super) fn write_file_graph(
             graph.modified_at,
             now,
             graph.language,
-            extractor_fingerprint_for(lang)
+            extractor_fingerprint_for(lang),
+            graph.parse_errors
         ],
     )?;
     for symbol in &graph.symbols {
@@ -145,14 +151,23 @@ pub(super) fn purge_file_graph(tx: &Connection, path: &str) -> Result<()> {
 pub(super) fn entry_freshness(
     entry: &Entry,
     db_files: &HashMap<String, DbFile>,
+    skipped: &HashMap<String, SkippedStat>,
 ) -> Result<EntryFreshness> {
     let Some(db_file) = db_files.get(&entry.rel) else {
-        return Ok(EntryFreshness::New);
+        return Ok(match skipped.get(&entry.rel) {
+            Some(stat) if stat.size == entry.size && stat.mtime == entry.mtime => {
+                EntryFreshness::Skipped
+            }
+            _ => EntryFreshness::New,
+        });
     };
     if db_file.size != entry.size || db_file.mtime != entry.mtime {
-        let content = fs::read_to_string(&entry.path)?;
-        if hex_hash(content.as_bytes()) != db_file.content_hash {
-            return Ok(EntryFreshness::Changed);
+        // Hash raw bytes (identical to the stored hash of valid UTF-8). A file
+        // that can no longer be read counts as changed, so sync retries it and
+        // records the failure instead of the freshness check aborting.
+        match fs::read(&entry.path) {
+            Ok(bytes) if hex_hash(&bytes) == db_file.content_hash => {}
+            _ => return Ok(EntryFreshness::Changed),
         }
     }
     if db_file.extractor_fingerprint.as_deref() != Some(extractor_fingerprint_for(entry.lang)) {

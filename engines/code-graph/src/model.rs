@@ -109,6 +109,8 @@ pub struct FileGraph {
     pub symbols: Vec<Symbol>,
     pub imports: Vec<Import>,
     pub calls: Vec<PendingCall>,
+    /// True when tree-sitter had to recover from syntax errors while parsing.
+    pub parse_errors: bool,
 }
 
 #[derive(Debug, Serialize)]

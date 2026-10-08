@@ -99,6 +99,8 @@ Python, TypeScript/JavaScript, Astro, Rust, and Go. One SQLite file per repo. CL
 
 When the sync root is inside a git repository, `sync` follows `.gitignore` and `.git/info/exclude`, while still indexing hidden paths such as `.github` if they are not ignored. Doctor JSON includes `resolver: {stored, current, stale}`: stored and current resolver versions are strings (stored can be null), and stale is a boolean. Missing or mismatched resolver versions or sync provenance yield `STALE`. Sync rebuilds derived edges without reparsing unchanged files. `doctor` exits 0 for `FRESH`, 1 for `STALE`, or 2 for `NEEDS-MIGRATION` or a missing database.
 
+A file that cannot be indexed does not fail the sync. Sync skips it, drops any rows it had, indexes everything else, and prints `skipped files=N <reason>=N` when anything is skipped. Files that are not valid UTF-8 are skipped rather than decoded lossily, so stored line numbers always match the file. Reasons are `unreadable_utf8`, `io_error`, and `parse_error`. A skipped file is retried when its size or mtime changes (or on `sync --force`), and its entry clears once it indexes or is deleted. Doctor JSON includes `skipped: {count, sample: [{path, reason}]}`, `parse_errors: {count, sample: [path]}` for indexed files where tree-sitter had to recover from syntax errors, and a `warnings` array of strings describing both. Samples list at most five paths. Skipped and parse-error files never change the verdict, so a permanently bad vendored file does not pin `doctor` to `STALE`. `evaluate` reports the same skips in a `skipped` list and `totals.skipped`.
+
 ## MCP server
 
 `graphtrail-mcp` speaks newline-delimited JSON-RPC 2.0 over stdio. It has no async runtime and no extra dependencies, so the sidecar stays small. `refresh: true` starts an incremental graph-index write and waits up to 10 seconds before opening the query read-only. If the refresh fails or times out, the query proceeds and appends a `refresh_error` note to its text result. A timed-out worker may finish concurrently with that read-only query. Without `refresh`, query tools do not write the graph.
@@ -130,7 +132,7 @@ The server exposes fourteen tools. This list is verified against the live `tools
 | `impact` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Combined callers and callees of a symbol (the blast radius of a change), with `hops` on each edge. |
 | `context` | `task` (`limit` optional, default 12) | A context pack: matching entry points plus their caller/callee neighborhood and related files. |
 | `stats` | none | Counts of files, symbols, edges, imports, schema version, sync metadata, and per-language file counts. |
-| `doctor` | none | Freshness contract for the graph: schema status, resolver status, last sync age, branch drift, pending file changes, ignored entries, and `FRESH`/`STALE`/`NEEDS-MIGRATION` verdict. |
+| `doctor` | none | Freshness contract for the graph: schema status, resolver status, last sync age, branch drift, pending file changes, ignored entries, skipped and parse-error files, and `FRESH`/`STALE`/`NEEDS-MIGRATION` verdict. |
 | `file_neighbors` | `path` | Files connected to an indexed file by incoming or outgoing call edges. |
 | `dead_code` | none (`limit` optional, default 100) | Callables with no incoming call edges. A candidate list, not proof: dynamic dispatch, exports, and entry points are invisible to call edges. |
 | `cycles` | none | File-level dependency cycles from cross-file call edges, grouped into strongly connected components. |
