@@ -97,7 +97,7 @@ main --calls@19 hops=1--> serve  (src/bin/graphtrail-mcp.rs -> src/mcp.rs)
 
 Python, TypeScript/JavaScript, Astro, Rust, and Go. One SQLite file per repo. CLI for humans and scripts. `graphtrail-mcp` serves agents, opens query connections with `SQLITE_OPEN_READ_ONLY`, and supports multiple repositories through `repo` and `db` arguments. No hooks, no daemon, no network in the default build.
 
-When the sync root is inside a git repository, `sync` follows `.gitignore` and `.git/info/exclude`, while still indexing hidden paths such as `.github` if they are not ignored. Doctor JSON includes `resolver: {stored, current, stale}`: stored and current resolver versions are strings (stored can be null), and stale is a boolean. Missing or mismatched resolver versions or sync provenance yield `STALE`. Sync rebuilds derived edges without reparsing unchanged files. `doctor` exits 0 for `FRESH`, 1 for `STALE`, or 2 for `NEEDS-MIGRATION` or a missing database.
+When the sync root is inside a git repository, `sync` follows `.gitignore` and `.git/info/exclude`, while still indexing hidden paths such as `.github` if they are not ignored. Sync also skips any directory below the root that has its own `.git` file or directory (linked worktrees, nested clones, submodules), since those are separate checkouts. `doctor` counts them as `ignored.nested_repo`. Doctor JSON includes `resolver: {stored, current, stale}`: stored and current resolver versions are strings (stored can be null), and stale is a boolean. Missing or mismatched resolver versions or sync provenance yield `STALE`. Sync rebuilds derived edges without reparsing unchanged files. `doctor` exits 0 for `FRESH`, 1 for `STALE`, or 2 for `NEEDS-MIGRATION` or a missing database.
 
 ## MCP server
 
