@@ -1,8 +1,21 @@
-use std::{collections::HashMap, hint::black_box, path::Path, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    hint::black_box,
+    path::Path,
+    time::Instant,
+};
 
 use graphtrail::{
     model::SearchRow,
-    query::{build_context_pack_from_entry_points, personalize_context_pack},
+    query::{
+        build_context_pack_from_entry_points,
+        context::build_floored_context_pack,
+        personalize_context_pack,
+        search::{
+            CANDIDATE_POOL, FloorParams, MIN_NAME_COVERAGE, MIN_TASK_COVERAGE,
+            RELEVANCE_FLOOR_RULE, search_symbols, select_entry_points,
+        },
+    },
     store::init_schema,
 };
 use rusqlite::{Connection, params};
@@ -242,4 +255,474 @@ fn personalized_ranking_meets_relevance_and_latency_thresholds() {
         "p95 overhead {p95_overhead_us}us exceeds {}us",
         corpus.thresholds.maximum_p95_overhead_us
     );
+}
+
+// ---------------------------------------------------------------------------
+// Relevance floor (brigade#1648): labeled search tasks, scored on entry points.
+// ---------------------------------------------------------------------------
+
+const FLOOR_CORPUS: &str = include_str!("../benchmarks/context-ranking/floor-corpus.json");
+
+#[derive(Deserialize)]
+struct FloorCorpus {
+    schema_version: u32,
+    limit: usize,
+    cases: Vec<FloorCase>,
+}
+
+#[derive(Deserialize)]
+struct FloorCase {
+    id: String,
+    task: String,
+    nodes: Vec<FloorNode>,
+    edges: Vec<[String; 2]>,
+    relevant: Vec<String>,
+    #[serde(default)]
+    first: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FloorNode {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    path: String,
+}
+
+fn load_floor_corpus() -> FloorCorpus {
+    serde_json::from_str(FLOOR_CORPUS).expect("floor corpus must be valid JSON")
+}
+
+fn index_fixture(nodes: &[(String, String, String)], edges: &[[String; 2]]) -> Connection {
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+    for (id, name, path) in nodes {
+        conn.execute(
+            "INSERT OR IGNORE INTO files(path, content_hash, size, modified_at, indexed_at, language)
+             VALUES (?1, 'fixture', 1, 1, 1, 'python')",
+            params![path],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, kind, name, qualified_name, file_path, start_line, end_line, signature, content_hash)
+             VALUES (?1, 'function', ?2, ?2, ?3, 1, 1, ?2, 'fixture')",
+            params![id, name, path],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols_fts(symbol_id, name, qualified_name, signature, file_path)
+             VALUES (?1, ?2, ?2, ?2, ?3)",
+            params![id, name, path],
+        )
+        .unwrap();
+    }
+    for [source, target] in edges {
+        conn.execute(
+            "INSERT INTO edges(source, target, kind, line) VALUES (?1, ?2, 'calls', 1)",
+            params![source, target],
+        )
+        .unwrap();
+    }
+    conn
+}
+
+fn floor_case_connection(case: &FloorCase) -> Connection {
+    let nodes: Vec<_> = case
+        .nodes
+        .iter()
+        .map(|node| {
+            let name = node.name.clone().unwrap_or_else(|| node.id.clone());
+            (node.id.clone(), name, node.path.clone())
+        })
+        .collect();
+    index_fixture(&nodes, &case.edges)
+}
+
+#[derive(Default, Clone, Copy)]
+struct Tally {
+    returned: usize,
+    relevant: usize,
+    hits: usize,
+}
+
+impl Tally {
+    fn add(&mut self, returned: &[String], relevant: &[String]) {
+        self.returned += returned.len();
+        self.relevant += relevant.len();
+        self.hits += returned.iter().filter(|id| relevant.contains(id)).count();
+    }
+
+    fn precision(&self) -> f64 {
+        if self.returned == 0 {
+            1.0
+        } else {
+            self.hits as f64 / self.returned as f64
+        }
+    }
+
+    fn recall(&self) -> f64 {
+        if self.relevant == 0 {
+            1.0
+        } else {
+            self.hits as f64 / self.relevant as f64
+        }
+    }
+
+    /// F-beta with beta 0.5, weighting precision over recall.
+    fn f05(&self) -> f64 {
+        let (p, r) = (self.precision(), self.recall());
+        if p + r == 0.0 {
+            0.0
+        } else {
+            1.25 * p * r / (0.25 * p + r)
+        }
+    }
+
+    fn json(&self) -> serde_json::Value {
+        json!({
+            "returned": self.returned,
+            "relevant": self.relevant,
+            "hits": self.hits,
+            "precision": self.precision(),
+            "recall": self.recall(),
+            "f05": self.f05(),
+        })
+    }
+}
+
+fn ids(rows: &[SearchRow]) -> Vec<String> {
+    rows.iter().map(|row| row.id.clone()).collect()
+}
+
+#[test]
+fn floor_corpus_is_synthetic_and_labeled() {
+    let corpus = load_floor_corpus();
+    assert_eq!(corpus.schema_version, 1);
+    assert!(corpus.limit > 0);
+    assert!(corpus.cases.iter().any(|case| case.relevant.is_empty()));
+    assert!(corpus.cases.iter().any(|case| !case.relevant.is_empty()));
+    for case in &corpus.cases {
+        let node_ids: Vec<_> = case.nodes.iter().map(|node| node.id.as_str()).collect();
+        let mut unique = node_ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            node_ids.len(),
+            "{} repeats a node id",
+            case.id
+        );
+        for id in &case.relevant {
+            assert!(
+                node_ids.contains(&id.as_str()),
+                "{} labels unknown {id}",
+                case.id
+            );
+        }
+        if let Some(first) = &case.first {
+            assert!(
+                case.relevant.contains(first),
+                "{} first is unlabeled",
+                case.id
+            );
+        }
+        for node in &case.nodes {
+            assert!(
+                Path::new(&node.path).is_relative(),
+                "{} absolute path",
+                case.id
+            );
+            assert!(
+                !node.path.contains(".."),
+                "{} escapes the corpus root",
+                case.id
+            );
+        }
+    }
+}
+
+#[test]
+fn relevance_floor_raises_precision_without_losing_recall() {
+    let corpus = load_floor_corpus();
+    let mut baseline = Tally::default();
+    let mut floored = Tally::default();
+    let mut cases = Vec::new();
+    for case in &corpus.cases {
+        let conn = floor_case_connection(case);
+        let before = ids(&search_symbols(&conn, &case.task, corpus.limit).unwrap());
+        let pack = build_floored_context_pack(&conn, case.task.clone(), corpus.limit).unwrap();
+        let after = ids(&pack.entry_points);
+        baseline.add(&before, &case.relevant);
+        floored.add(&after, &case.relevant);
+        cases.push(json!({"id": case.id, "before": before, "after": after}));
+
+        if case.relevant.is_empty() {
+            assert!(
+                !pack.confident,
+                "{} should have no confident context",
+                case.id
+            );
+            assert!(after.is_empty(), "{} kept {after:?}", case.id);
+        } else {
+            assert!(pack.confident, "{} lost its confident context", case.id);
+        }
+        if let Some(first) = &case.first {
+            assert_eq!(after.first(), Some(first), "{} entry point 1", case.id);
+        }
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "floor": {
+                "rule": RELEVANCE_FLOOR_RULE,
+                "min_task_coverage": MIN_TASK_COVERAGE,
+                "min_name_coverage": MIN_NAME_COVERAGE,
+            },
+            "baseline": baseline.json(),
+            "floored": floored.json(),
+            "cases": cases,
+        }))
+        .unwrap()
+    );
+
+    assert!(
+        floored.recall() >= baseline.recall(),
+        "floor lost recall: {:.3} < {:.3}",
+        floored.recall(),
+        baseline.recall()
+    );
+    assert!(
+        floored.precision() > baseline.precision(),
+        "floor did not raise precision: {:.3} <= {:.3}",
+        floored.precision(),
+        baseline.precision()
+    );
+}
+
+// Real calibration split (brigade#1648): hand-labeled Brigade issue titles with
+// the pre-floor keyword top 8 for each. The held-out split lives in
+// benchmarks/context-floor-heldout and is never read here.
+
+const REAL_CALIBRATION: &str =
+    include_str!("../benchmarks/context-ranking/floor-calibration-real.json");
+
+#[derive(Deserialize)]
+struct RealCalibration {
+    schema_version: u32,
+    limit: usize,
+    pool: usize,
+    cases: Vec<RealCase>,
+}
+
+#[derive(Deserialize)]
+struct RealCase {
+    issue: u64,
+    task: String,
+    relevant_total: usize,
+    candidates: Vec<RealCandidate>,
+}
+
+/// `[name, qualified_name or null, file_path, bm25 score, label]`, where label
+/// is 1 relevant, 0 judged not relevant, and -1 never judged.
+#[derive(Deserialize)]
+struct RealCandidate(String, Option<String>, String, f64, i8);
+
+impl RealCandidate {
+    fn name(&self) -> &str {
+        &self.0
+    }
+
+    fn qualified_name(&self) -> &str {
+        self.1.as_deref().unwrap_or(&self.0)
+    }
+
+    fn file_path(&self) -> &str {
+        &self.2
+    }
+
+    fn relevant(&self) -> bool {
+        self.4 == 1
+    }
+}
+
+fn load_real_calibration() -> RealCalibration {
+    serde_json::from_str(REAL_CALIBRATION).expect("real calibration fixture must be valid JSON")
+}
+
+fn real_rows(case: &RealCase) -> Vec<SearchRow> {
+    case.candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| SearchRow {
+            id: format!("{}-{index}", case.issue),
+            kind: "function".to_string(),
+            name: candidate.name().to_string(),
+            qualified_name: candidate.qualified_name().to_string(),
+            file_path: candidate.file_path().to_string(),
+            start_line: index + 1,
+            end_line: index + 1,
+            signature: candidate.name().to_string(),
+            score: candidate.3,
+        })
+        .collect()
+}
+
+/// Files among the candidates that a path token in the task names.
+fn real_mentioned(case: &RealCase) -> HashSet<String> {
+    let tokens: Vec<String> = case
+        .task
+        .split_whitespace()
+        .map(|raw| {
+            raw.trim_matches(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .to_lowercase()
+        })
+        .filter(|token| token.contains('/') || token.contains('.'))
+        .collect();
+    case.candidates
+        .iter()
+        .map(|candidate| candidate.file_path().to_string())
+        .filter(|path| {
+            let lower = path.to_lowercase();
+            tokens
+                .iter()
+                .any(|token| lower == *token || lower.ends_with(&format!("/{token}")))
+        })
+        .collect()
+}
+
+/// Precision and recall over every labeled relevant symbol, including the ones
+/// the keyword pool missed.
+fn score_real(corpus: &RealCalibration, select: impl Fn(&RealCase) -> Vec<usize>) -> Tally {
+    let mut tally = Tally::default();
+    for case in &corpus.cases {
+        let kept = select(case);
+        tally.returned += kept.len();
+        tally.hits += kept
+            .iter()
+            .filter(|index| case.candidates[**index].relevant())
+            .count();
+        tally.relevant += case.relevant_total;
+    }
+    tally
+}
+
+fn floored_indexes(case: &RealCase, limit: usize, params: FloorParams) -> Vec<usize> {
+    let rows = real_rows(case);
+    select_entry_points(&case.task, &rows, &real_mentioned(case), limit, params)
+        .rows
+        .iter()
+        .map(|row| {
+            rows.iter()
+                .position(|candidate| candidate.id == row.id)
+                .unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn real_calibration_fixture_is_labeled_and_bounded() {
+    let corpus = load_real_calibration();
+    assert_eq!(corpus.schema_version, 2);
+    assert!(corpus.cases.len() >= 60);
+    assert!(corpus.limit <= corpus.pool);
+    assert_eq!(corpus.pool, CANDIDATE_POOL);
+    for case in &corpus.cases {
+        assert!(case.candidates.len() <= corpus.pool, "#{}", case.issue);
+        let labeled = case.candidates.iter().filter(|c| c.relevant()).count();
+        assert!(labeled <= case.relevant_total, "#{}", case.issue);
+        for candidate in &case.candidates {
+            assert!((-1..=1).contains(&candidate.4), "#{}", case.issue);
+            assert!(
+                Path::new(candidate.file_path()).is_relative(),
+                "#{}",
+                case.issue
+            );
+        }
+    }
+}
+
+#[test]
+fn floor_thresholds_match_their_real_calibration_sweep() {
+    let corpus = load_real_calibration();
+    let tasks: Vec<f64> = (2..=8).map(|step| step as f64 / 20.0).collect();
+    let names: Vec<f64> = (0..=3).map(|step| step as f64 / 10.0).collect();
+    let mut sweep = Vec::new();
+    for &min_task_coverage in &tasks {
+        for &min_name_coverage in &names {
+            let params = FloorParams {
+                min_task_coverage,
+                min_name_coverage,
+            };
+            let tally = score_real(&corpus, |case| floored_indexes(case, corpus.limit, params));
+            sweep.push((params, tally));
+        }
+    }
+    let best = sweep
+        .iter()
+        .map(|(_, tally)| tally.f05())
+        .fold(0.0, f64::max);
+    // The best precision-weighted score. Ties go to the most permissive pair.
+    let (calibrated, _) = sweep
+        .iter()
+        .find(|(_, tally)| (tally.f05() - best).abs() < 1e-12)
+        .unwrap();
+    let baseline = score_real(&corpus, |case| {
+        (0..case.candidates.len().min(corpus.limit)).collect()
+    });
+    let floored = score_real(&corpus, |case| {
+        floored_indexes(case, corpus.limit, FloorParams::CALIBRATED)
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "baseline_keyword_top8": baseline.json(),
+            "floored": floored.json(),
+            "calibrated": {
+                "min_task_coverage": calibrated.min_task_coverage,
+                "min_name_coverage": calibrated.min_name_coverage,
+            },
+            "sweep": sweep
+                .iter()
+                .map(|(params, tally)| json!({
+                    "min_task_coverage": params.min_task_coverage,
+                    "min_name_coverage": params.min_name_coverage,
+                    "score": tally.json(),
+                }))
+                .collect::<Vec<_>>(),
+        }))
+        .unwrap()
+    );
+
+    // Change the labeled corpus, not these constants, to move the floor.
+    assert!(
+        (MIN_TASK_COVERAGE - calibrated.min_task_coverage).abs() < 1e-12
+            && (MIN_NAME_COVERAGE - calibrated.min_name_coverage).abs() < 1e-12,
+        "floor is ({MIN_TASK_COVERAGE}, {MIN_NAME_COVERAGE}), calibration picks {calibrated:?}"
+    );
+    assert!(floored.precision() > baseline.precision());
+    assert!(floored.f05() > baseline.f05());
+}
+
+#[test]
+fn ranking_corpus_relevant_files_survive_the_floor() {
+    let corpus = load_corpus();
+    for case in &corpus.cases {
+        let nodes: Vec<_> = case
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.id.clone(), node.path.clone()))
+            .collect();
+        let conn = index_fixture(&nodes, &case.edges);
+        let mut pack = build_floored_context_pack(&conn, case.task.clone(), 12).unwrap();
+        personalize_context_pack(&conn, &mut pack).unwrap();
+        assert!(
+            pack.related_files.contains(&case.relevant_file),
+            "{} lost {} under the floor: {:?}",
+            case.id,
+            case.relevant_file,
+            pack.related_files
+        );
+    }
 }

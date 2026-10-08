@@ -90,6 +90,9 @@ enum Command {
         /// Rank files from task-specific seeds through the resolved call graph.
         #[arg(long)]
         personalized: bool,
+        /// Drop keyword hits the task gives no evidence for (opt-in, brigade#1648).
+        #[arg(long)]
+        relevance_floor: bool,
         /// Maximum markdown characters when --personalized is enabled.
         #[arg(long, default_value_t = 4000)]
         max_chars: usize,
@@ -314,6 +317,7 @@ pub fn run(cli: Cli) -> Result<()> {
             json,
             markdown,
             personalized,
+            relevance_floor,
             max_chars,
             #[cfg(feature = "codesearch")]
             blend_code_search,
@@ -340,11 +344,17 @@ pub fn run(cli: Cli) -> Result<()> {
                 let rows = crate::query::blend(&conn, &hits, embed_weight, graph_weight, limit)?;
                 let entry_points = rows.into_iter().map(|row| row.symbol).collect();
                 build_context_pack_from_entry_points(&conn, task.clone(), entry_points)?
+            } else if relevance_floor {
+                crate::query::context::build_floored_context_pack(&conn, task.clone(), limit)?
             } else {
                 build_context_pack(&conn, task.clone(), limit)?
             };
             #[cfg(not(feature = "codesearch"))]
-            let pack = build_context_pack(&conn, task.clone(), limit)?;
+            let pack = if relevance_floor {
+                crate::query::context::build_floored_context_pack(&conn, task.clone(), limit)?
+            } else {
+                build_context_pack(&conn, task.clone(), limit)?
+            };
             let mut pack = pack;
             if personalized {
                 personalize_context_pack(&conn, &mut pack)?;
@@ -1042,6 +1052,8 @@ mod tests {
                 "cli.py".to_string(),
                 "lib.py".to_string(),
             ],
+            confident: true,
+            relevance_floor: None,
         }
     }
 

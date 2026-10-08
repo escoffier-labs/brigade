@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "description": "Synthetic labeled tasks for the context relevance floor. Symbol names and paths mirror the noise and hits reported in brigade#1648. relevant lists the entry points a reviewer would call relevant. An empty list means the task needs no code context.",
+  "limit": 8,
+  "cases": [
+    {
+      "id": "docs-readme-install-pipx",
+      "task": "Update the README install section to mention pipx",
+      "nodes": [
+        {"id": "pipx_error", "name": "_is_transient_pipx_install_error", "path": "scripts/published-artifact-acceptance.py"},
+        {"id": "readme_brand", "name": "test_readme_header_matches_brigade_tools_brand", "path": "tests/test_readme_brand_header.py"},
+        {"id": "stable_update", "name": "test_stable_update_installs_exact_release_then_new_binary_setup", "path": "tests/test_update_cmd.py"},
+        {"id": "pipx_bin_dir", "name": "test_default_paths_uses_configured_pipx_bin_dir", "path": "tests/test_update_cmd.py"},
+        {"id": "readme_limits", "name": "test_readme_states_limits", "path": "tests/test_memory_retrieval_eval.py"},
+        {"id": "render_section", "name": "render_section", "path": "src/brigade/brief_sections.py"},
+        {"id": "hooks_update", "name": "hooks_update", "path": "src/brigade/claude_hooks/install_cmd.py"},
+        {"id": "install_skills", "name": "install", "path": "src/brigade/skills_cmd/install.py"},
+        {"id": "install_care", "name": "install", "path": "src/brigade/care_cmd.py"},
+        {"id": "install_pi", "name": "install", "path": "src/brigade/pi_mcp_cmd.py"},
+        {"id": "install_selection", "name": "install_selection", "path": "src/brigade/install.py"}
+      ],
+      "edges": [],
+      "relevant": []
+    },
+    {
+      "id": "docs-changelog-typo",
+      "task": "fix typo in CHANGELOG",
+      "nodes": [
+        {"id": "prose_typo", "name": "test_prose_fix_typo_still_routes_docs", "path": "tests/test_router.py"},
+        {"id": "release_changelog", "name": "_release_changelog", "path": "tests/test_release_metadata.py"},
+        {"id": "changelog_unreleased", "name": "_changelog_unreleased", "path": "src/brigade/release_cmd/candidate.py"},
+        {"id": "changelog_payload", "name": "_changelog_payload", "path": "src/brigade/skills_cmd/registry.py"},
+        {"id": "security_fix", "name": "fix", "path": "src/brigade/security_cmd/config.py"},
+        {"id": "plan_fixes", "name": "plan_fixes", "path": "src/brigade/memory_cmd.py"}
+      ],
+      "edges": [["changelog_unreleased", "changelog_payload"]],
+      "relevant": []
+    },
+    {
+      "id": "named-snake-case-symbol",
+      "task": "fix extract_delta_files reading the wrong sidecar keys",
+      "nodes": [
+        {"id": "extract_delta_files", "name": "extract_delta_files", "path": "src/brigade/context_eval.py"},
+        {"id": "legacy_keys_test", "name": "test_extract_delta_files_still_reads_legacy_node_keys", "path": "tests/test_context_eval.py"},
+        {"id": "sidecar_test", "name": "test_extract_delta_files_reads_sidecar_written_by_graphtrail_delta", "path": "tests/test_context_eval.py"},
+        {"id": "prefers_test", "name": "test_extract_delta_files_prefers_code_reference_nodes", "path": "tests/test_context_eval.py"},
+        {"id": "hook_sidecar", "name": "_sidecar", "path": "src/brigade/claude_hooks/install_cmd.py"},
+        {"id": "sidecar_revisions", "name": "_sidecar_revisions", "path": "tests/test_aboyeur.py"},
+        {"id": "roles_keys", "name": "test_roles_keep_their_keys_and_gain_labels", "path": "tests/test_fleet_roster_page.py"}
+      ],
+      "edges": [["legacy_keys_test", "extract_delta_files"], ["sidecar_test", "extract_delta_files"]],
+      "relevant": ["extract_delta_files"],
+      "first": "extract_delta_files"
+    },
+    {
+      "id": "named-camel-case-type",
+      "task": "add a confident flag to CodeGraphBrief",
+      "nodes": [
+        {"id": "brief_type", "name": "CodeGraphBrief", "path": "src/brigade/aboyeur/briefs.py"},
+        {"id": "brief_fn", "name": "code_graph_brief", "path": "src/brigade/aboyeur/briefs.py"},
+        {"id": "brief_test", "name": "test_code_graph_brief_attaches_markdown_pack", "path": "tests/test_aboyeur.py"},
+        {"id": "drift_type", "name": "DriftImpactBrief", "path": "src/brigade/aboyeur/briefs.py"},
+        {"id": "flag_parser", "name": "parse_flag", "path": "src/brigade/cli_flags.py"}
+      ],
+      "edges": [["brief_fn", "brief_type"]],
+      "relevant": ["brief_type", "brief_fn"],
+      "first": "brief_type"
+    },
+    {
+      "id": "named-snake-case-with-sibling",
+      "task": "make render_markdown_budgeted keep whole lines",
+      "nodes": [
+        {"id": "budgeted", "name": "render_markdown_budgeted", "path": "src/query/context.rs"},
+        {"id": "plain_render", "name": "render_markdown", "path": "src/query/context.rs"},
+        {"id": "budget_test", "name": "budgeted_markdown_never_splits_lines_or_exceeds_budget", "path": "src/query/context.rs"},
+        {"id": "keep_alive", "name": "keep_alive", "path": "src/net/session.rs"}
+      ],
+      "edges": [],
+      "relevant": ["budgeted"],
+      "first": "budgeted"
+    },
+    {
+      "id": "plain-words-name-a-type",
+      "task": "the hub client should retry when a request times out",
+      "nodes": [
+        {"id": "hub_client", "name": "HubClient", "path": "src/brigade/fleet/hub_client.py"},
+        {"id": "hub_client_test", "name": "test_hub_client_retries_on_timeout", "path": "tests/test_hub_client.py"},
+        {"id": "retry_after", "name": "retry_after", "path": "src/brigade/http_retry.py"},
+        {"id": "client_a", "name": "client", "path": "src/brigade/grokbot_mcp.py"},
+        {"id": "client_b", "name": "client", "path": "src/brigade/t3_fleet.py"},
+        {"id": "request_id", "name": "request_id", "path": "src/brigade/message_envelope.py"}
+      ],
+      "edges": [["hub_client_test", "hub_client"]],
+      "relevant": ["hub_client"],
+      "first": "hub_client"
+    },
+    {
+      "id": "named-path",
+      "task": "tighten the floor in src/query/context.rs",
+      "nodes": [
+        {"id": "build_pack", "name": "build_context_pack", "path": "src/query/context.rs"},
+        {"id": "render_md", "name": "render_markdown", "path": "src/query/context.rs"},
+        {"id": "search_fn", "name": "search_symbols", "path": "src/query/search.rs"},
+        {"id": "floor_price", "name": "floor_price", "path": "src/shop/pricing.rs"}
+      ],
+      "edges": [["build_pack", "search_fn"]],
+      "relevant": ["build_pack", "render_md"]
+    },
+    {
+      "id": "file-stem-and-name-agree",
+      "task": "Find the request router and the service function it invokes.",
+      "nodes": [
+        {"id": "route_request", "name": "routeRequest", "path": "typescript/router.ts"},
+        {"id": "handle_request", "name": "handleRequest", "path": "typescript/service.ts"},
+        {"id": "authorize", "path": "typescript/service.ts"},
+        {"id": "process_order", "path": "python/service.py"},
+        {"id": "serve", "name": "Serve", "path": "go/service.go"}
+      ],
+      "edges": [["route_request", "handle_request"], ["handle_request", "authorize"]],
+      "relevant": ["route_request", "handle_request"]
+    },
+    {
+      "id": "named-module-directory",
+      "task": "Trace the central Rust routing hub and identify its downstream handlers.",
+      "nodes": [
+        {"id": "dispatch", "path": "rust/src/lib.rs"},
+        {"id": "parse", "path": "rust/src/lib.rs"},
+        {"id": "validate", "path": "rust/src/lib.rs"},
+        {"id": "dispatch_reaches_each_handler", "path": "rust/tests/impact.rs"},
+        {"id": "handle_request", "name": "handleRequest", "path": "typescript/service.ts"}
+      ],
+      "edges": [["dispatch", "parse"], ["dispatch", "validate"], ["dispatch_reaches_each_handler", "dispatch"]],
+      "relevant": ["dispatch"]
+    },
+    {
+      "id": "keyword-query",
+      "task": "evidence",
+      "nodes": [
+        {"id": "evidence_alpha", "path": "evidence.py"},
+        {"id": "evidence_beta", "path": "evidence.py"},
+        {"id": "ledger_alpha", "path": "ledger.py"}
+      ],
+      "edges": [["evidence_beta", "evidence_alpha"]],
+      "relevant": ["evidence_alpha", "evidence_beta"]
+    },
+    {
+      "id": "ranking-named-path-beats-unrelated-hub",
+      "task": "change src/target.rs",
+      "nodes": [
+        {"id": "seed", "path": "src/target.rs"},
+        {"id": "hub", "path": "src/hub.rs"},
+        {"id": "a", "path": "src/a.rs"},
+        {"id": "b", "path": "src/b.rs"},
+        {"id": "c", "path": "src/c.rs"}
+      ],
+      "edges": [["hub", "a"], ["hub", "b"], ["hub", "c"]],
+      "relevant": ["seed"],
+      "first": "seed"
+    },
+    {
+      "id": "ranking-connected-caller-beats-alphabetical-order",
+      "task": "change target",
+      "nodes": [
+        {"id": "target", "path": "src/target.rs"},
+        {"id": "low", "path": "src/a-low.rs"},
+        {"id": "high", "path": "src/z-high.rs"},
+        {"id": "leaf1", "path": "src/leaf1.rs"},
+        {"id": "leaf2", "path": "src/leaf2.rs"},
+        {"id": "leaf3", "path": "src/leaf3.rs"}
+      ],
+      "edges": [["low", "target"], ["high", "target"], ["high", "leaf1"], ["high", "leaf2"], ["high", "leaf3"]],
+      "relevant": ["target"],
+      "first": "target"
+    },
+    {
+      "id": "ranking-mentioned-disconnected-file-is-retained",
+      "task": "change src/mentioned.rs",
+      "nodes": [
+        {"id": "entry", "path": "src/entry.rs"},
+        {"id": "mentioned", "path": "src/mentioned.rs"}
+      ],
+      "edges": [],
+      "relevant": ["mentioned"],
+      "first": "mentioned"
+    }
+  ]
+}

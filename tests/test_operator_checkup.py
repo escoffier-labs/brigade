@@ -106,6 +106,27 @@ def test_operator_checkup_loop_reports_graph_ledger_and_brief_hit_rate(monkeypat
     assert payload["loop"]["context_eval"]["sample_count"] == 1
 
 
+def test_operator_checkup_loop_handles_runs_with_and_without_brief_precision(tmp_path):
+    runs = tmp_path / ".brigade" / "runs"
+    for name, started, context in [
+        ("old", "2026-07-08T00:00:00Z", {"brief_hit_rate": 0.5}),
+        ("new", "2026-07-09T00:00:00Z", {"brief_hit_rate": 1.0, "brief_precision": 0.25, "brief_f05": 0.294}),
+        ("partial", "2026-07-07T00:00:00Z", {"brief_hit_rate": None, "brief_precision": None, "truncated": True}),
+    ]:
+        (runs / name).mkdir(parents=True)
+        (runs / name / "run.json").write_text(json.dumps({"started_at": started, "context_eval": context}))
+
+    payload = lifecycle._loop_stations_payload(tmp_path)["context_eval"]
+
+    assert payload["last_brief_hit_rate"] == 1.0
+    assert payload["mean_brief_hit_rate"] == 0.75
+    assert payload["sample_count"] == 2
+    assert payload["mean_brief_precision"] == 0.25
+    assert payload["precision_sample_count"] == 1
+    assert "precision=0.250 (n=1)" in payload["detail"]
+    assert payload["ok"] is True
+
+
 def test_loop_stations_missing_miseledger_explains_go_install_is_one_release_compatibility(monkeypatch, tmp_path):
     monkeypatch.setattr("brigade.context_cmd._graphtrail_bin", lambda: None)
     monkeypatch.setattr("brigade.evidence_brief._miseledger_bin", lambda: None)

@@ -111,11 +111,19 @@ def delta_is_truncated(delta_sidecar_path_or_dict: str | Path | dict[str, Any]) 
 
 
 def evaluate(brief_files: list[str], delta_files: list[str]) -> dict[str, object]:
-    """Compare brief coverage against delta files."""
+    """Compare brief coverage against delta files.
+
+    ``brief_hit_rate`` is recall (hits over delta files), so a brief that lists
+    every file scores 1.0. ``brief_precision`` is hits over brief files, and
+    ``brief_f05`` is the F-beta score with beta 0.5, which weights precision
+    over recall so a tighter brief scores better (#1648).
+    """
     brief = {_cleaned for item in brief_files if (_cleaned := _clean_path(item)) is not None}
     delta = {_cleaned for item in delta_files if (_cleaned := _clean_path(item)) is not None}
     hits = sorted(brief & delta)
     missed = sorted(delta - brief)
+    recall = len(hits) / len(delta) if delta else None
+    precision = len(hits) / len(brief) if brief else None
     return {
         "counts": {
             "brief_files": len(brief),
@@ -125,8 +133,19 @@ def evaluate(brief_files: list[str], delta_files: list[str]) -> dict[str, object
         },
         "hits": hits,
         "missed": missed,
-        "brief_hit_rate": round(len(hits) / len(delta), 3) if delta else None,
+        "brief_hit_rate": round(recall, 3) if recall is not None else None,
+        "brief_precision": round(precision, 3) if precision is not None else None,
+        "brief_f05": _f_beta(precision, recall, beta=0.5),
     }
+
+
+def _f_beta(precision: float | None, recall: float | None, *, beta: float) -> float | None:
+    if precision is None or recall is None:
+        return None
+    if precision + recall == 0:
+        return 0.0
+    weight = beta * beta
+    return round((1 + weight) * precision * recall / (weight * precision + recall), 3)
 
 
 def _clean_path(value: Any) -> str | None:

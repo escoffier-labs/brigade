@@ -596,6 +596,8 @@ def test_context_eval_reports_sorted_hits_misses_and_rate():
         "hits": ["tests/test_aboyeur.py"],
         "missed": ["src/brigade/context_eval.py"],
         "brief_hit_rate": 0.5,
+        "brief_precision": 0.5,
+        "brief_f05": 0.5,
     }
 
 
@@ -4076,6 +4078,9 @@ def test_run_writes_context_eval_when_brief_and_delta_sidecar_overlap(monkeypatc
         "hits": ["tests/test_aboyeur.py"],
         "missed": ["src/brigade/context_eval.py"],
         "brief_hit_rate": 0.5,
+        "brief_precision": 0.5,
+        "brief_f05": 0.5,
+        "brief_files_source": "markdown",
     }
     ground_truth = json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]
     assert ground_truth["context_eval"] == expected

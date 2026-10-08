@@ -1,0 +1,4935 @@
+{
+ "schema_version": 1,
+ "description": "Held-out labels for the context relevance floor. See README.md.",
+ "cases": [
+  {
+   "issue": 1658,
+   "title": "code-graph(python): module-level assignments do not shadow earlier definitions, so stale definitions keep import-strict edges",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "tests.python_module_level_call_dropped",
+     "file_path": "engines/code-graph/src/extractors/python.rs"
+    },
+    {
+     "qualified_name": "python_namespace_parent_does_not_shadow_stdlib",
+     "file_path": "engines/code-graph/tests/resolution.rs"
+    },
+    {
+     "qualified_name": "python_module_prefix",
+     "file_path": "engines/code-graph/src/store/resolve.rs"
+    },
+    {
+     "qualified_name": "rust_import_directory_does_not_match_python",
+     "file_path": "engines/code-graph/tests/resolution.rs"
+    },
+    {
+     "qualified_name": "test_resolve_capabilities_fallback_definitions_are_not_independent_report_entries",
+     "file_path": "tests/test_roster.py"
+    },
+    {
+     "qualified_name": "python_import_fallback_does_not_match_typescript_names",
+     "file_path": "engines/code-graph/tests/resolution.rs"
+    },
+    {
+     "qualified_name": "python_relative_parent_imported_module_resolves_qualified_call",
+     "file_path": "engines/code-graph/tests/resolution.rs"
+    },
+    {
+     "qualified_name": "normalize_python_relative_module",
+     "file_path": "engines/code-graph/src/store/resolve.rs"
+    },
+    {
+     "qualified_name": "graph_edges",
+     "file_path": "engines/code-graph/src/query/graph.rs"
+    },
+    {
+     "qualified_name": "__grokbotLoadZod.ZodObject.strict",
+     "file_path": "obsidian-plugin/grokbot-operator-adapter/main.js"
+    },
+    {
+     "qualified_name": "_module",
+     "file_path": "tests/test_component_manifest_provenance.py"
+    },
+    {
+     "qualified_name": "Edge",
+     "file_path": "engines/code-graph/tests/golden_corpus.rs"
+    },
+    {
+     "qualified_name": "test_module_imports",
+     "file_path": "tests/test_run_shadow.py"
+    },
+    {
+     "qualified_name": "_python_module_invocation",
+     "file_path": "src/brigade/claude_hooks/runtime.py"
+    },
+    {
+     "qualified_name": "_uncapped_module_graph",
+     "file_path": "src/brigade/code_export.py"
+    }
+   ]
+  },
+  {
+   "issue": 1650,
+   "title": "code-graph: cap stored signatures and skip minified files",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "astro_files_are_indexed_and_css_is_skipped",
+     "file_path": "engines/code-graph/tests/astro.rs"
+    },
+    {
+     "qualified_name": "test_doctor_skips_old_state_files_and_caps_recent_candidates",
+     "file_path": "tests/test_claude_hooks_doctor.py"
+    },
+    {
+     "qualified_name": "dead_code_downgrades_stored_reference_hints",
+     "file_path": "engines/code-graph/tests/analysis.rs"
+    },
+    {
+     "qualified_name": "_code_graph_delta_skip",
+     "file_path": "src/brigade/aboyeur/prompts.py"
+    },
+    {
+     "qualified_name": "stored_schema_version",
+     "file_path": "engines/code-graph/src/store/schema.rs"
+    },
+    {
+     "qualified_name": "tests.go_grouped_imports_and_builtins_skipped",
+     "file_path": "engines/code-graph/src/extractors/go.rs"
+    },
+    {
+     "qualified_name": "test_session_scan_skips_old_files_and_oversized_reads",
+     "file_path": "tests/test_center_page_load.py"
+    },
+    {
+     "qualified_name": "SkipCounters",
+     "file_path": "engines/code-graph/src/store/walk.rs"
+    },
+    {
+     "qualified_name": "file_graph",
+     "file_path": "engines/code-graph/src/query/export.rs"
+    },
+    {
+     "qualified_name": "_skip",
+     "file_path": "src/brigade/run_reap.py"
+    },
+    {
+     "qualified_name": "FileGraph",
+     "file_path": "engines/code-graph/src/model.rs"
+    },
+    {
+     "qualified_name": "Caps",
+     "file_path": "src/brigade/research/types.py"
+    },
+    {
+     "qualified_name": "_cap",
+     "file_path": "src/brigade/causal_receipt.py"
+    },
+    {
+     "qualified_name": "_prepend_code_graph",
+     "file_path": "src/brigade/aboyeur/briefs.py"
+    },
+    {
+     "qualified_name": "code_graph_brief",
+     "file_path": "src/brigade/aboyeur/briefs.py"
+    }
+   ]
+  },
+  {
+   "issue": 1649,
+   "title": "code-graph tests: incremental-equals-cold, corpus-wide cross-language, and Python ast recall guards",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "tests.language_for_maps_astro_and_skips_css",
+     "file_path": "engines/code-graph/src/extractors/mod.rs"
+    },
+    {
+     "qualified_name": "mixed_language_fixture_edges_match_golden_corpus",
+     "file_path": "engines/code-graph/tests/golden_corpus.rs"
+    },
+    {
+     "qualified_name": "cross_tool_corpus_is_versioned_public_and_complete",
+     "file_path": "engines/code-graph/tests/cross_tool_benchmark.rs"
+    },
+    {
+     "qualified_name": "Corpus",
+     "file_path": "engines/code-graph/tests/cross_tool_benchmark.rs"
+    },
+    {
+     "qualified_name": "only_doctored_language_row_is_reextracted",
+     "file_path": "engines/code-graph/tests/incremental.rs"
+    },
+    {
+     "qualified_name": "load_corpus",
+     "file_path": "engines/code-graph/benchmarks/cross-tool/run.py"
+    },
+    {
+     "qualified_name": "python",
+     "file_path": "engines/code-graph/tests/cross_tool_benchmark.rs"
+    },
+    {
+     "qualified_name": "astro_imports_and_symbols_resolve_across_components",
+     "file_path": "engines/code-graph/tests/astro.rs"
+    },
+    {
+     "qualified_name": "graph_tests",
+     "file_path": "engines/code-graph/src/query/mod.rs"
+    },
+    {
+     "qualified_name": "test_corpus_resolution",
+     "file_path": "tests/test_research_config.py"
+    },
+    {
+     "qualified_name": "_prepend_code_graph",
+     "file_path": "src/brigade/aboyeur/briefs.py"
+    },
+    {
+     "qualified_name": "code_graph_brief",
+     "file_path": "src/brigade/aboyeur/briefs.py"
+    },
+    {
+     "qualified_name": "_code_graph_summary",
+     "file_path": "src/brigade/context_cmd.py"
+    },
+    {
+     "qualified_name": "CodeGraphBrief",
+     "file_path": "src/brigade/aboyeur/briefs.py"
+    },
+    {
+     "qualified_name": "test_code_graph_summary_parses_and_trims",
+     "file_path": "tests/test_context_cmd.py"
+    }
+   ]
+  },
+  {
+   "issue": 1648,
+   "title": "brief: relevance floor, explicit no-context answer, and record the brief as symbol ids",
+   "relevant": [
+    {
+     "qualified_name": "RelevanceFloor",
+     "file_path": "engines/code-graph/src/model.rs"
+    },
+    {
+     "qualified_name": "floor",
+     "file_path": "engines/code-graph/src/query/search.rs"
+    },
+    {
+     "qualified_name": "relevance_floor_raises_precision_without_losing_recall",
+     "file_path": "engines/code-graph/tests/context_ranking_benchmark.rs"
+    },
+    {
+     "qualified_name": "tests.context_pack_with_a_named_symbol_is_confident_and_marks_the_floor",
+     "file_path": "engines/code-graph/src/query/context.rs"
+    },
+    {
+     "qualified_name": "tests.floor_keeps_symbols_in_a_file_the_task_names",
+     "file_path": "engines/code-graph/src/query/search/floor.rs"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_arbitrate_briefs_prefers_drift_context_for_release_tasks_and_truncates",
+     "file_path": "tests/test_aboyeur.py"
+    },
+    {
+     "qualified_name": "test_arbitrate_briefs_keeps_evidence_as_third_optional_brief",
+     "file_path": "tests/test_aboyeur.py"
+    },
+    {
+     "qualified_name": "test_evidence_brief_skips_trust_without_explicit_label",
+     "file_path": "tests/test_aboyeur.py"
+    },
+    {
+     "qualified_name": "test_run_writes_context_eval_when_brief_and_delta_sidecar_overlap",
+     "file_path": "tests/test_aboyeur.py"
+    },
+    {
+     "qualified_name": "_restore_brief_records",
+     "file_path": "src/brigade/claude_hooks/runtime.py"
+    },
+    {
+     "qualified_name": "_brief_records",
+     "file_path": "src/brigade/claude_hooks/runtime.py"
+    },
+    {
+     "qualified_name": "Symbol",
+     "file_path": "engines/code-graph/src/model.rs"
+    },
+    {
+     "qualified_name": "symbol_id",
+     "file_path": "engines/code-graph/src/extractors/common.rs"
+    },
+    {
+     "qualified_name": "context",
+     "file_path": "engines/code-graph/src/query/mod.rs"
+    },
+    {
+     "qualified_name": "HandoffIssue.as_import_record",
+     "file_path": "src/brigade/handoff_cmd/models.py"
+    }
+   ]
+  },
+  {
+   "issue": 1647,
+   "title": "code-graph(python): module-level calls, decorator spans, star imports, and __init__ re-exports drop edges",
+   "relevant": [
+    {
+     "qualified_name": "tests.python_module_level_call_dropped",
+     "file_path": "engines/code-graph/src/extractors/python.rs"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "tests.python_extractor_finds_symbols_imports_and_calls",
+     "file_path": "engines/code-graph/src/extractors/python.rs"
+    },
+    {
+     "qualified_name": "tests.go_finds_symbols_imports_and_calls",
+     "file_path": "engines/code-graph/src/extractors/go.rs"
+    },
+    {
+     "qualified_name": "tests.rust_finds_symbols_imports_and_calls",
+     "file_path": "engines/code-graph/src/extractors/rust.rs"
+    },
+    {
+     "qualified_name": "assert_python_layout_calls",
+     "file_path": "engines/code-graph/tests/resolution.rs"
+    },
+    {
+     "qualified_name": "normalize_python_relative_module",
+     "file_path": "engines/code-graph/src/store/resolve.rs"
+    },
+    {
+     "qualified_name": "python_module_prefix",
+     "file_path": "engines/code-graph/src/store/resolve.rs"
+    },
+    {
+     "qualified_name": "python_relative_parent_imported_module_resolves_qualified_call",
+     "file_path": "engines/code-graph/tests/resolution.rs"
+    },
+    {
+     "qualified_name": "test_start_closes_spawned_process_when_initialize_fails.StubThread.__init__",
+     "file_path": "tests/test_codex_appserver.py"
+    },
+    {
+     "qualified_name": "_ModuleAlias.__init__",
+     "file_path": "src/brigade/release_cmd/__init__.py"
+    },
+    {
+     "qualified_name": "_ModuleAlias.__init__",
+     "file_path": "src/brigade/center_cmd/__init__.py"
+    },
+    {
+     "qualified_name": "_ModuleAlias.__init__",
+     "file_path": "src/brigade/cli/work/__init__.py"
+    },
+    {
+     "qualified_name": "_ModuleAlias.__init__",
+     "file_path": "src/brigade/daily_cmd/__init__.py"
+    },
+    {
+     "qualified_name": "_ModuleAlias.__init__",
+     "file_path": "src/brigade/handoff_cmd/__init__.py"
+    },
+    {
+     "qualified_name": "_ModuleAlias.__init__",
+     "file_path": "src/brigade/security_cmd/__init__.py"
+    },
+    {
+     "qualified_name": "_ModuleAlias.__init__",
+     "file_path": "src/brigade/work_cmd/session/__init__.py"
+    }
+   ]
+  },
+  {
+   "issue": 1646,
+   "title": "code-graph: callers/callees/impact merge up to 20 fuzzy prefix matches instead of resolving one symbol",
+   "relevant": [
+    {
+     "qualified_name": "impact_edges",
+     "file_path": "engines/code-graph/src/query/graph.rs"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "astro_layout_is_queryable_through_affected_callers_and_impact",
+     "file_path": "engines/code-graph/tests/astro.rs"
+    },
+    {
+     "qualified_name": "test_export_impact_section_matches_graphtrail_edges",
+     "file_path": "tests/test_code_export.py"
+    },
+    {
+     "qualified_name": "_impact_diagram",
+     "file_path": "src/brigade/center_cmd/dashboard/views/code_graph.py"
+    },
+    {
+     "qualified_name": "explain_reports_unresolved_calls_instead_of_hiding_them",
+     "file_path": "engines/code-graph/tests/round3.rs"
+    },
+    {
+     "qualified_name": "test_later_current_reading_replaces_an_earlier_one_instead_of_conflicting",
+     "file_path": "tests/test_fleet_quota.py"
+    },
+    {
+     "qualified_name": "tests.fts_query_splits_path_segments_instead_of_fusing_them",
+     "file_path": "engines/code-graph/src/query/search.rs"
+    },
+    {
+     "qualified_name": "depth_one_matches_direct_edges_with_hops",
+     "file_path": "engines/code-graph/src/query/graph_tests.rs"
+    },
+    {
+     "qualified_name": "symbol_graph",
+     "file_path": "engines/code-graph/src/query/export.rs"
+    },
+    {
+     "qualified_name": "Symbol",
+     "file_path": "engines/code-graph/src/model.rs"
+    },
+    {
+     "qualified_name": "test_two_local_callers_replay_one_record_and_reject_repo_conflict.caller",
+     "file_path": "tests/test_claude_cloud_adoption.py"
+    },
+    {
+     "qualified_name": "__grokbotLoadZod.ZodObject.merge",
+     "file_path": "obsidian-plugin/grokbot-operator-adapter/main.js"
+    },
+    {
+     "qualified_name": "_matches_sensitive_prefix",
+     "file_path": "src/brigade/grokbot_obsidian/path_policy.py"
+    },
+    {
+     "qualified_name": "_print_graph_impact",
+     "file_path": "src/brigade/work_cmd/verify_scoreability.py"
+    },
+    {
+     "qualified_name": "_prepend_code_graph",
+     "file_path": "src/brigade/aboyeur/briefs.py"
+    },
+    {
+     "qualified_name": "code_graph_brief",
+     "file_path": "src/brigade/aboyeur/briefs.py"
+    }
+   ]
+  },
+  {
+   "issue": 1645,
+   "title": "code-graph: one non-UTF-8 file aborts the whole sync, and skipped or parse-error files are never recorded",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "astro_files_are_indexed_and_css_is_skipped",
+     "file_path": "engines/code-graph/tests/astro.rs"
+    },
+    {
+     "qualified_name": "tests.source_files_are_relevant_and_internal_dirs_are_not",
+     "file_path": "engines/code-graph/src/watch.rs"
+    },
+    {
+     "qualified_name": "fileScanCounts",
+     "file_path": "engines/evidence-ledger/internal/app/app.go"
+    },
+    {
+     "qualified_name": "sync_migrates_v3_files_table_and_populates_extractor_fingerprint",
+     "file_path": "engines/code-graph/tests/incremental.rs"
+    },
+    {
+     "qualified_name": "second_sync_is_noop_then_change_and_delete_are_detected",
+     "file_path": "engines/code-graph/tests/incremental.rs"
+    },
+    {
+     "qualified_name": "unchanged_sync_refreshes_synced_at_without_reindexing_files",
+     "file_path": "engines/code-graph/tests/incremental.rs"
+    },
+    {
+     "qualified_name": "tests.personalized_ranks_are_exactly_deterministic_for_symmetric_files",
+     "file_path": "engines/code-graph/src/query/context.rs"
+    },
+    {
+     "qualified_name": "ranking_corpus_relevant_files_survive_the_floor",
+     "file_path": "engines/code-graph/tests/context_ranking_benchmark.rs"
+    },
+    {
+     "qualified_name": "file_graph",
+     "file_path": "engines/code-graph/src/query/export.rs"
+    },
+    {
+     "qualified_name": "FileGraph",
+     "file_path": "engines/code-graph/src/model.rs"
+    },
+    {
+     "qualified_name": "_error_code",
+     "file_path": "src/brigade/worklore_client.py"
+    },
+    {
+     "qualified_name": "__grokbotLoadZod.ZodType._parseSync",
+     "file_path": "obsidian-plugin/grokbot-operator-adapter/main.js"
+    },
+    {
+     "qualified_name": "__grokbotLoadZod.ZodError.errors",
+     "file_path": "obsidian-plugin/grokbot-operator-adapter/main.js"
+    },
+    {
+     "qualified_name": "_sync_rendered_files",
+     "file_path": "src/brigade/skills_cmd/sync_history.py"
+    },
+    {
+     "qualified_name": "_sync_files_fingerprint",
+     "file_path": "src/brigade/skills_cmd/sync_history.py"
+    },
+    {
+     "qualified_name": "_shuffle_file_graph",
+     "file_path": "tests/test_dashboard_code_graph.py"
+    }
+   ]
+  },
+  {
+   "issue": 1644,
+   "title": "context_eval: brief_hit_rate is never computed because extract_delta_files reads keys the graph-delta sidecar does not write",
+   "relevant": [
+    {
+     "qualified_name": "extract_delta_files",
+     "file_path": "src/brigade/context_eval.py"
+    },
+    {
+     "qualified_name": "test_extract_delta_files_reads_sidecar_written_by_graphtrail_delta",
+     "file_path": "tests/test_context_eval.py"
+    },
+    {
+     "qualified_name": "test_extract_delta_files_still_reads_legacy_node_keys",
+     "file_path": "tests/test_context_eval.py"
+    },
+    {
+     "qualified_name": "test_extract_delta_files_prefers_code_reference_nodes",
+     "file_path": "tests/test_context_eval.py"
+    },
+    {
+     "qualified_name": "test_every_key_context_eval_reads_is_written_by_graphtrail_delta",
+     "file_path": "tests/test_context_eval.py"
+    },
+    {
+     "qualified_name": "test_run_writes_context_eval_when_brief_and_delta_sidecar_overlap",
+     "file_path": "tests/test_aboyeur.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "delta_is_truncated",
+     "file_path": "src/brigade/context_eval.py"
+    },
+    {
+     "qualified_name": "test_receipts_verify_reports_mismatch_when_graph_delta_sidecar_is_edited",
+     "file_path": "tests/test_receipts_cmd.py"
+    },
+    {
+     "qualified_name": "extract_brief_files",
+     "file_path": "src/brigade/context_eval.py"
+    },
+    {
+     "qualified_name": "_brief_hit_rate_value",
+     "file_path": "src/brigade/outcome_cmd.py"
+    },
+    {
+     "qualified_name": "_compact_context_eval",
+     "file_path": "src/brigade/outcome_cmd.py"
+    },
+    {
+     "qualified_name": "_context_eval_fact",
+     "file_path": "src/brigade/aboyeur/prompts.py"
+    },
+    {
+     "qualified_name": "_files_from_delta",
+     "file_path": "src/brigade/work_cmd/footprint.py"
+    }
+   ]
+  },
+  {
+   "issue": 1643,
+   "title": "code-graph: sync indexes nested git worktrees (91% of indexed files in the main clone are worktree copies)",
+   "relevant": [
+    {
+     "qualified_name": "nested_worktree_and_nested_clone_are_not_indexed",
+     "file_path": "engines/code-graph/tests/incremental.rs"
+    },
+    {
+     "qualified_name": "existing_nested_repo_rows_are_dropped_on_next_sync",
+     "file_path": "engines/code-graph/tests/incremental.rs"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "astro_files_are_indexed_and_css_is_skipped",
+     "file_path": "engines/code-graph/tests/astro.rs"
+    },
+    {
+     "qualified_name": "_worktrees_payload",
+     "file_path": "tests/test_dashboard_code_graph.py"
+    },
+    {
+     "qualified_name": "test_worktrees_collapsed_by_default_and_toggle_reveals_them",
+     "file_path": "tests/test_dashboard_code_graph.py"
+    },
+    {
+     "qualified_name": "sync_honors_nested_gitignore_patterns",
+     "file_path": "engines/code-graph/tests/incremental.rs"
+    },
+    {
+     "qualified_name": "hidden_paths_are_indexed",
+     "file_path": "engines/code-graph/tests/incremental.rs"
+    },
+    {
+     "qualified_name": "tests.astro_script_symbols_are_indexed",
+     "file_path": "engines/code-graph/src/extractors/astro.rs"
+    },
+    {
+     "qualified_name": "file_graph",
+     "file_path": "engines/code-graph/src/query/export.rs"
+    },
+    {
+     "qualified_name": "index",
+     "file_path": "engines/code-graph/tests/diff.rs"
+    },
+    {
+     "qualified_name": "index_file",
+     "file_path": "engines/code-graph/src/extractors/mod.rs"
+    },
+    {
+     "qualified_name": "FileGraph",
+     "file_path": "engines/code-graph/src/model.rs"
+    },
+    {
+     "qualified_name": "FileIndex",
+     "file_path": "engines/code-graph/src/store/resolve.rs"
+    },
+    {
+     "qualified_name": "_git_changed_files",
+     "file_path": "src/brigade/code_export.py"
+    },
+    {
+     "qualified_name": "is_git_worktree",
+     "file_path": "src/brigade/runguard.py"
+    }
+   ]
+  },
+  {
+   "issue": 1639,
+   "title": "fleet: repo claim key falls back to the home directory name, so unrelated repos share one claim",
+   "relevant": [
+    {
+     "qualified_name": "repo_claim",
+     "file_path": "src/brigade/fleet_client.py"
+    },
+    {
+     "qualified_name": "TestMachineIdentity.test_repo_claim_holds_under_the_home_identity",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "TestMachineIdentity.test_claims_resolve_the_home_identity_through_base_path",
+     "file_path": "tests/test_fleet_claims.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_tile_falls_back_to_claim_conductor_for_seat",
+     "file_path": "tests/test_fleet_deck_badges.py"
+    },
+    {
+     "qualified_name": "TestClient.test_repo_claim_without_supersede_names_the_way_out",
+     "file_path": "tests/test_fleet_claim_release.py"
+    },
+    {
+     "qualified_name": "TestDispatchWiring.test_hub_down_falls_back_to_local_lock",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "test_roster_doctor_falls_back_to_home_roster",
+     "file_path": "tests/test_roster_cmd.py"
+    },
+    {
+     "qualified_name": "test_resolve_claude_home_falls_back_to_dot_claude",
+     "file_path": "tests/test_claude_hooks_user_scope.py"
+    },
+    {
+     "qualified_name": "TestClientClaims.test_repo_claim_holds_then_releases",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "_Claims",
+     "file_path": "tests/test_grokbot_fleet_remediation.py"
+    },
+    {
+     "qualified_name": "_scan_one_repo",
+     "file_path": "src/brigade/repos_cmd/friction_fleet.py"
+    },
+    {
+     "qualified_name": "_repo_sort_key",
+     "file_path": "src/brigade/fleet_dashboard.py"
+    },
+    {
+     "qualified_name": "_refers_to_directory",
+     "file_path": "tests/test_run_journal.py"
+    },
+    {
+     "qualified_name": "_fleet_copy_keys",
+     "file_path": "src/brigade/skills_cmd/adapters.py"
+    },
+    {
+     "qualified_name": "_fleet_repo_errors",
+     "file_path": "src/brigade/receipts_cmd.py"
+    },
+    {
+     "qualified_name": "FleetHubClaims",
+     "file_path": "src/brigade/grokbot_fleet/tools.py"
+    }
+   ]
+  },
+  {
+   "issue": 1638,
+   "title": "code graph: name-only resolution creates call edges across languages",
+   "relevant": [
+    {
+     "qualified_name": "name_fallback_uses_only_the_callers_language_family",
+     "file_path": "engines/code-graph/tests/resolution.rs"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "load_call_edges",
+     "file_path": "engines/code-graph/src/query/diff.rs"
+    },
+    {
+     "qualified_name": "scoped_rust_call_resolves_to_matching_impl_container_only",
+     "file_path": "engines/code-graph/tests/resolution.rs"
+    },
+    {
+     "qualified_name": "affected_attributes_tests_through_call_edges",
+     "file_path": "engines/code-graph/tests/analysis.rs"
+    },
+    {
+     "qualified_name": "dead_code_lists_uncalled_callables_only",
+     "file_path": "engines/code-graph/tests/analysis.rs"
+    },
+    {
+     "qualified_name": "tools_call_diff_reports_added_symbols_and_edges",
+     "file_path": "engines/code-graph/tests/mcp.rs"
+    },
+    {
+     "qualified_name": "resolver_upgrade_rebuilds_existing_edges_without_reparsing",
+     "file_path": "engines/code-graph/tests/resolution.rs"
+    },
+    {
+     "qualified_name": "graph_edges",
+     "file_path": "engines/code-graph/src/query/graph.rs"
+    },
+    {
+     "qualified_name": "edge_names",
+     "file_path": "engines/code-graph/tests/incremental.rs"
+    },
+    {
+     "qualified_name": "Edge",
+     "file_path": "engines/code-graph/tests/golden_corpus.rs"
+    },
+    {
+     "qualified_name": "_prepend_code_graph",
+     "file_path": "src/brigade/aboyeur/briefs.py"
+    },
+    {
+     "qualified_name": "code_graph_brief",
+     "file_path": "src/brigade/aboyeur/briefs.py"
+    },
+    {
+     "qualified_name": "_code_graph_summary",
+     "file_path": "src/brigade/context_cmd.py"
+    },
+    {
+     "qualified_name": "CodeGraphBrief",
+     "file_path": "src/brigade/aboyeur/briefs.py"
+    }
+   ]
+  },
+  {
+   "issue": 1637,
+   "title": "code graph: absolute Python imports in src-layout repos resolve as external, dropping most test-to-source edges",
+   "relevant": [
+    {
+     "qualified_name": "python_absolute_imports_resolve_under_inferred_source_roots",
+     "file_path": "engines/code-graph/tests/resolution.rs"
+    },
+    {
+     "qualified_name": "python_layout_fixture",
+     "file_path": "engines/code-graph/tests/resolution.rs"
+    },
+    {
+     "qualified_name": "assert_python_layout_calls",
+     "file_path": "engines/code-graph/tests/resolution.rs"
+    },
+    {
+     "qualified_name": "python_flat_layout_keeps_repo_root_precedence",
+     "file_path": "engines/code-graph/tests/resolution.rs"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "astro_imports_and_symbols_resolve_across_components",
+     "file_path": "engines/code-graph/tests/astro.rs"
+    },
+    {
+     "qualified_name": "imported_python_call_resolves_to_imported_file_before_global_fallback",
+     "file_path": "engines/code-graph/tests/resolution.rs"
+    },
+    {
+     "qualified_name": "tests.python_extractor_finds_symbols_imports_and_calls",
+     "file_path": "engines/code-graph/src/extractors/python.rs"
+    },
+    {
+     "qualified_name": "python_module_prefix",
+     "file_path": "engines/code-graph/src/store/resolve.rs"
+    },
+    {
+     "qualified_name": "graph_edges",
+     "file_path": "engines/code-graph/src/query/graph.rs"
+    },
+    {
+     "qualified_name": "_layout",
+     "file_path": "src/brigade/claude_hooks/install_cmd.py"
+    },
+    {
+     "qualified_name": "resolve_source",
+     "file_path": "src/brigade/jules_cloud.py"
+    },
+    {
+     "qualified_name": "resolve_source",
+     "file_path": "src/brigade/release_version_sync.py"
+    },
+    {
+     "qualified_name": "_resolve_sources",
+     "file_path": "src/brigade/research_cmd.py"
+    },
+    {
+     "qualified_name": "to_edge",
+     "file_path": "engines/code-graph/src/query/diff.rs"
+    },
+    {
+     "qualified_name": "graph_tests",
+     "file_path": "engines/code-graph/src/query/mod.rs"
+    },
+    {
+     "qualified_name": "Import",
+     "file_path": "engines/code-graph/src/model.rs"
+    }
+   ]
+  },
+  {
+   "issue": 1636,
+   "title": "research(fleet): evaluate managed persistent-volume hosting and qualify one adapter",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "test_cli_run_persistent_retain_lock_receipt_failure_is_safe",
+     "file_path": "tests/test_research_cmd.py"
+    },
+    {
+     "qualified_name": "measure_volume",
+     "file_path": "scripts/measure_run_journal.py"
+    },
+    {
+     "qualified_name": "_drive_volume_scenario",
+     "file_path": "scripts/measure_run_journal.py"
+    },
+    {
+     "qualified_name": "qualify_tool_name",
+     "file_path": "src/brigade/pi_mcp_bridge.py"
+    },
+    {
+     "qualified_name": "qualify_task_id",
+     "file_path": "src/brigade/work_cmd/campaign.py"
+    },
+    {
+     "qualified_name": "_qualify_edge",
+     "file_path": "src/brigade/work_cmd/campaign.py"
+    },
+    {
+     "qualified_name": "test_first_delivery_writes_one_draft_and_one_fleet_report",
+     "file_path": "tests/test_grokbot_operations_relay.py"
+    },
+    {
+     "qualified_name": "test_retired_adapter_link_unlinks_to_native_with_one_event_and_kept_schedule",
+     "file_path": "tests/test_worklore_store.py"
+    },
+    {
+     "qualified_name": "_adapter",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "adapters",
+     "file_path": "engines/code-graph/src/lib.rs"
+    },
+    {
+     "qualified_name": "FleetAdapter",
+     "file_path": "src/brigade/grokbot_fleet/lifecycle.py"
+    },
+    {
+     "qualified_name": "create_fleet_adapters",
+     "file_path": "src/brigade/grokbot_fleet/probes.py"
+    }
+   ]
+  },
+  {
+   "issue": 1635,
+   "title": "feat(fleet): provide persistent OCI Hub image and Compose/Podman recipes",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "ci_covers_supported_platform_and_feature_configurations",
+     "file_path": "engines/code-graph/tests/repository_contract.rs"
+    },
+    {
+     "qualified_name": "_compose",
+     "file_path": "src/brigade/memory_proposals.py"
+    },
+    {
+     "qualified_name": "miseledger_commands_are_unavailable_without_the_feature_and_do_not_warn",
+     "file_path": "engines/code-graph/tests/cli_read_only.rs"
+    },
+    {
+     "qualified_name": "composed_prompt_fingerprint",
+     "file_path": "src/brigade/run_audit.py"
+    },
+    {
+     "qualified_name": "_provider_defaults",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "_cloud_provider",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "forbid_yaml_features",
+     "file_path": "engines/evidence-ledger/scripts/validate_release_workflow.py"
+    },
+    {
+     "qualified_name": "test_route_brief_composes_expected_stages",
+     "file_path": "tests/test_router.py"
+    },
+    {
+     "qualified_name": "_hub_and_token",
+     "file_path": "src/brigade/fleet_client_policy.py"
+    },
+    {
+     "qualified_name": "_fleet_hub_configured",
+     "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "FleetHubForbidden",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubConflict",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubUnprocessable",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubError",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubClaims",
+     "file_path": "src/brigade/grokbot_fleet/tools.py"
+    }
+   ]
+  },
+  {
+   "issue": 1634,
+   "title": "feat(fleet): qualify native Windows background Hub hosting",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "test_hub_rejects_unsafe_native_launch_ids",
+     "file_path": "tests/test_fleet_native_launch_binding.py"
+    },
+    {
+     "qualified_name": "_windows_native_script_host",
+     "file_path": "src/brigade/work_cmd/verification.py"
+    },
+    {
+     "qualified_name": "test_native_windows_capabilities_are_disabled",
+     "file_path": "tests/test_windows_read_security.py"
+    },
+    {
+     "qualified_name": "test_resolve_executable_accepts_native_windows_claude_exe",
+     "file_path": "tests/test_agents_windows_executable.py"
+    },
+    {
+     "qualified_name": "test_pre_push_hook_fixture_disables_background_update_checks",
+     "file_path": "tests/test_pre_push_hook.py"
+    },
+    {
+     "qualified_name": "qualify_tool_name",
+     "file_path": "src/brigade/pi_mcp_bridge.py"
+    },
+    {
+     "qualified_name": "qualify_task_id",
+     "file_path": "src/brigade/work_cmd/campaign.py"
+    },
+    {
+     "qualified_name": "_qualify_edge",
+     "file_path": "src/brigade/work_cmd/campaign.py"
+    },
+    {
+     "qualified_name": "_window",
+     "file_path": "tests/test_fleet_quota.py"
+    },
+    {
+     "qualified_name": "_fleet_hub_configured",
+     "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "FleetHubForbidden",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubConflict",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubUnprocessable",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubError",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubClaims",
+     "file_path": "src/brigade/grokbot_fleet/tools.py"
+    }
+   ]
+  },
+  {
+   "issue": 1633,
+   "title": "feat(fleet): qualify native macOS Hub hosting with launchd",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "test_pre_push_hook_is_compatible_with_macos_bash_3",
+     "file_path": "tests/test_pre_push_hook.py"
+    },
+    {
+     "qualified_name": "miseledger_commands_are_unavailable_without_the_feature_and_do_not_warn",
+     "file_path": "engines/code-graph/tests/cli_read_only.rs"
+    },
+    {
+     "qualified_name": "test_hub_rejects_unsafe_native_launch_ids",
+     "file_path": "tests/test_fleet_native_launch_binding.py"
+    },
+    {
+     "qualified_name": "qualify_tool_name",
+     "file_path": "src/brigade/pi_mcp_bridge.py"
+    },
+    {
+     "qualified_name": "qualify_task_id",
+     "file_path": "src/brigade/work_cmd/campaign.py"
+    },
+    {
+     "qualified_name": "_qualify_edge",
+     "file_path": "src/brigade/work_cmd/campaign.py"
+    },
+    {
+     "qualified_name": "test_seat_without_native_binding_keeps_canonical_argv",
+     "file_path": "tests/test_fleet_native_launch_binding.py"
+    },
+    {
+     "qualified_name": "test_bound_native_override_is_admitted_without_remediation",
+     "file_path": "tests/test_fleet_native_launch_binding.py"
+    },
+    {
+     "qualified_name": "_fleet_hub_configured",
+     "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "FleetHubForbidden",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubConflict",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubUnprocessable",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubError",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubClaims",
+     "file_path": "src/brigade/grokbot_fleet/tools.py"
+    }
+   ]
+  },
+  {
+   "issue": 1632,
+   "title": "docs(fleet): add native Hub quickstart and generic Linux hosting",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "test_quickstart_smoke_covers_linux_macos_and_windows_powershell",
+     "file_path": "tests/test_ci_workflow.py"
+    },
+    {
+     "qualified_name": "test_review_profile_generic_auth_collision_preserves_native",
+     "file_path": "tests/test_harness_profile_cmd.py"
+    },
+    {
+     "qualified_name": "test_codex_native_auth_takes_precedence_over_generic_headers",
+     "file_path": "tests/test_mcp_adapters.py"
+    },
+    {
+     "qualified_name": "test_review_changed_generic_auth_conflicts_with_adopted_native",
+     "file_path": "tests/test_mcp_cmd.py"
+    },
+    {
+     "qualified_name": "test_hub_authority_mcp_does_not_call_generic_fleet_paths",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "test_codex_sync_preserves_explicit_native_auth_over_generic_headers",
+     "file_path": "tests/test_mcp_cmd.py"
+    },
+    {
+     "qualified_name": "_observe_linux_fleet",
+     "file_path": "tests/test_fleet_routing.py"
+    },
+    {
+     "qualified_name": "test_empty_document_parses_and_is_generic",
+     "file_path": "tests/test_fleet_policy.py"
+    },
+    {
+     "qualified_name": "quickstart",
+     "file_path": "src/brigade/operator_cmd/lifecycle.py"
+    },
+    {
+     "qualified_name": "_add_hub_counts",
+     "file_path": "src/brigade/worklore_brigade_sync.py"
+    },
+    {
+     "qualified_name": "_hub_and_token",
+     "file_path": "src/brigade/fleet_client_policy.py"
+    },
+    {
+     "qualified_name": "_fleet_hub_configured",
+     "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "FleetHubForbidden",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubConflict",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubUnprocessable",
+     "file_path": "src/brigade/fleet_hub.py"
+    }
+   ]
+  },
+  {
+   "issue": 1630,
+   "title": "feat(fleet): qualify Hub-authoritative T3 dispatch and retained-result handoff",
+   "relevant": [
+    {
+     "qualified_name": "T3FleetClient",
+     "file_path": "src/brigade/fleet_t3_transport.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_grokbot_hub_is_authoritative_for_enqueue_claim_renew_and_replay",
+     "file_path": "tests/test_fleet_cloud.py"
+    },
+    {
+     "qualified_name": "_recover_authoritative_dispatch_checkpoint",
+     "file_path": "src/brigade/run_lifecycle.py"
+    },
+    {
+     "qualified_name": "test_writable_remote_result_is_pending_handoff_not_locally_implemented",
+     "file_path": "tests/test_fleet_t3_transport.py"
+    },
+    {
+     "qualified_name": "test_map_hub_admission_rejects_non_authoritative_or_extra_fields_and_applies_retired_floor",
+     "file_path": "tests/test_fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "test_sanitized_raw_is_retained_and_bounded",
+     "file_path": "tests/test_fleet_quota.py"
+    },
+    {
+     "qualified_name": "ci_covers_supported_platform_and_feature_configurations",
+     "file_path": "engines/code-graph/tests/repository_contract.rs"
+    },
+    {
+     "qualified_name": "_authoritative_roles_panel",
+     "file_path": "src/brigade/fleet_hub_roster_page.py"
+    },
+    {
+     "qualified_name": "_authoritative_admission_panel",
+     "file_path": "src/brigade/fleet_hub_roster_page.py"
+    },
+    {
+     "qualified_name": "_hub_and_token",
+     "file_path": "src/brigade/fleet_client_policy.py"
+    },
+    {
+     "qualified_name": "_fleet_hub_configured",
+     "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "FleetHubForbidden",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubConflict",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubUnprocessable",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubError",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "HandoffLintResult",
+     "file_path": "src/brigade/handoff_cmd/models.py"
+    }
+   ]
+  },
+  {
+   "issue": 1625,
+   "title": "[P1 conditional] docs(security): add CRA actor and incident-evidence readiness worksheet",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "test_security_template_audit_covers_templates_docs_and_allowlisted_examples",
+     "file_path": "tests/test_security_template_audit_cmd.py"
+    },
+    {
+     "qualified_name": "test_release_readiness_blocks_unusable_security_evidence",
+     "file_path": "tests/test_release_cmd.py"
+    },
+    {
+     "qualified_name": "test_release_readiness_requires_security_evidence_for_candidate_commit",
+     "file_path": "tests/test_release_cmd.py"
+    },
+    {
+     "qualified_name": "_add_care_and_evidence_edges",
+     "file_path": "src/brigade/memory_operations.py"
+    },
+    {
+     "qualified_name": "test_command_tree_exposes_executable_evidence_crawl_and_search",
+     "file_path": "tests/test_issue362_code_evidence_facades.py"
+    },
+    {
+     "qualified_name": "Actor",
+     "file_path": "engines/evidence-ledger/internal/adapter/record.go"
+    },
+    {
+     "qualified_name": "test_release_readiness_distinguishes_security_findings_from_health_warnings",
+     "file_path": "tests/test_release_cmd.py"
+    },
+    {
+     "qualified_name": "ActorFromRole",
+     "file_path": "engines/evidence-ledger/internal/sources/source.go"
+    },
+    {
+     "qualified_name": "evidence_add",
+     "file_path": "src/brigade/phases_cmd/checks_actions.py"
+    },
+    {
+     "qualified_name": "test_bound_prior_clean_match_swap_cannot_authorize_with_outside_shadow.readiness",
+     "file_path": "tests/test_aboyeur_run_io.py"
+    },
+    {
+     "qualified_name": "_add_evidence_node",
+     "file_path": "src/brigade/memory_operations.py"
+    }
+   ]
+  },
+  {
+   "issue": 1624,
+   "title": "[P2] feat(receipts): attribute observed model and harness provenance in existing worker metadata",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "test_direct_worker_does_not_attribute_orchestrator_seat",
+     "file_path": "tests/test_model_scorecard.py"
+    },
+    {
+     "qualified_name": "_valid_observed_worker",
+     "file_path": "src/brigade/governance_inventory.py"
+    },
+    {
+     "qualified_name": "test_observed_runs_use_worker_results_and_authenticated_provider_attribution",
+     "file_path": "tests/test_governance_inventory.py"
+    },
+    {
+     "qualified_name": "test_budget_cancellation_report_combines_appserver_and_process_observations.ControlRegistry.interrupt_observed",
+     "file_path": "tests/test_aboyeur.py"
+    },
+    {
+     "qualified_name": "test_receipts_export_miseledger_copies_git_metadata_and_github_commit_link",
+     "file_path": "tests/test_receipts_cmd.py"
+    },
+    {
+     "qualified_name": "ci_covers_supported_platform_and_feature_configurations",
+     "file_path": "engines/code-graph/tests/repository_contract.rs"
+    },
+    {
+     "qualified_name": "test_receipts_export_recomputes_inconsistent_compact_code_reference_metadata",
+     "file_path": "tests/test_receipts_cmd.py"
+    },
+    {
+     "qualified_name": "test_observed_runs_refuse_unverifiable_worker_documents",
+     "file_path": "tests/test_governance_inventory.py"
+    },
+    {
+     "qualified_name": "test_dispatch_callbacks_follow_each_external_result_and_keep_attempt_identity.observed",
+     "file_path": "tests/test_run_transport_failfast.py"
+    },
+    {
+     "qualified_name": "workers",
+     "file_path": "src/brigade/roster.py"
+    },
+    {
+     "qualified_name": "model",
+     "file_path": "engines/code-graph/src/lib.rs"
+    },
+    {
+     "qualified_name": "_receipt",
+     "file_path": "src/brigade/harness_profile_cmd.py"
+    },
+    {
+     "qualified_name": "_stamp_receipt_provenance",
+     "file_path": "src/brigade/receipts_cmd.py"
+    },
+    {
+     "qualified_name": "model_policy_model",
+     "file_path": "src/brigade/agents.py"
+    }
+   ]
+  },
+  {
+   "issue": 1623,
+   "title": "[P1] feat(evidence): export minimized derivatives with original-digest provenance",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "test_cli_export_without_receipt_digest_verifies_against_target",
+     "file_path": "tests/test_attestation.py"
+    },
+    {
+     "qualified_name": "test_original_evidence_labels_survive_with_relation_scope",
+     "file_path": "tests/test_memory_proposals.py"
+    },
+    {
+     "qualified_name": "forbid_yaml_features",
+     "file_path": "engines/evidence-ledger/scripts/validate_release_workflow.py"
+    },
+    {
+     "qualified_name": "miseledger_commands_are_unavailable_without_the_feature_and_do_not_warn",
+     "file_path": "engines/code-graph/tests/cli_read_only.rs"
+    },
+    {
+     "qualified_name": "test_phase257_facades_export_original_top_level_symbols",
+     "file_path": "tests/test_phase257_facades.py"
+    },
+    {
+     "qualified_name": "test_cleanup_removes_original_digest_oracle_from_durable_metadata",
+     "file_path": "tests/test_run_redaction.py"
+    },
+    {
+     "qualified_name": "TestExport.test_jsonl_is_deterministic_pk_ordered_with_digest",
+     "file_path": "tests/test_fleet_export.py"
+    },
+    {
+     "qualified_name": "test_receipts_export_miseledger_exports_run_and_digestless_verify_receipts",
+     "file_path": "tests/test_receipts_cmd.py"
+    },
+    {
+     "qualified_name": "_valid_digest",
+     "file_path": "src/brigade/provenance.py"
+    },
+    {
+     "qualified_name": "EvidenceInput",
+     "file_path": "engines/evidence-ledger/internal/provenance/envelope.go"
+    },
+    {
+     "qualified_name": "cloneEvidence",
+     "file_path": "engines/evidence-ledger/internal/ingest/provenance.go"
+    },
+    {
+     "qualified_name": "validDigest",
+     "file_path": "engines/evidence-ledger/internal/provenance/envelope.go"
+    },
+    {
+     "qualified_name": "verify_content_digest",
+     "file_path": "src/brigade/provenance.py"
+    },
+    {
+     "qualified_name": "verify_raw_digest",
+     "file_path": "src/brigade/provenance.py"
+    },
+    {
+     "qualified_name": "NewEvidenceEnvelope",
+     "file_path": "engines/evidence-ledger/internal/provenance/envelope.go"
+    },
+    {
+     "qualified_name": "BackfillItemEvidence",
+     "file_path": "engines/evidence-ledger/internal/ingest/provenance.go"
+    }
+   ]
+  },
+  {
+   "issue": 1622,
+   "title": "[P1] feat(receipts): add acknowledged prune intent and recoverable post-action evidence",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "FleetActionStore._prune_terminal_receipts",
+     "file_path": "src/brigade/grokbot_fleet/actions.py"
+    },
+    {
+     "qualified_name": "evidence_add",
+     "file_path": "src/brigade/phases_cmd/checks_actions.py"
+    },
+    {
+     "qualified_name": "release_publication_is_preflighted_protected_and_recoverable",
+     "file_path": "engines/code-graph/tests/repository_contract.rs"
+    },
+    {
+     "qualified_name": "ci_covers_supported_platform_and_feature_configurations",
+     "file_path": "engines/code-graph/tests/repository_contract.rs"
+    },
+    {
+     "qualified_name": "FleetActionStore._prune_action_state",
+     "file_path": "src/brigade/grokbot_fleet/actions.py"
+    },
+    {
+     "qualified_name": "forbid_yaml_features",
+     "file_path": "engines/evidence-ledger/scripts/validate_release_workflow.py"
+    },
+    {
+     "qualified_name": "_add_care_and_evidence_edges",
+     "file_path": "src/brigade/memory_operations.py"
+    },
+    {
+     "qualified_name": "ConfirmedWorkflow.__post_init__",
+     "file_path": "src/brigade/claude_actions_evidence.py"
+    },
+    {
+     "qualified_name": "_prune",
+     "file_path": "src/brigade/fleet_policy_form.py"
+    },
+    {
+     "qualified_name": "FakeOpener.posts",
+     "file_path": "tests/test_jules_cloud.py"
+    },
+    {
+     "qualified_name": "_actions",
+     "file_path": "src/brigade/fleet_policy_page.py"
+    },
+    {
+     "qualified_name": "FleetStewardTools._action_receipt",
+     "file_path": "src/brigade/grokbot_fleet/tools.py"
+    },
+    {
+     "qualified_name": "_receipt",
+     "file_path": "tests/test_grokbot_fleet_actions.py"
+    }
+   ]
+  },
+  {
+   "issue": 1621,
+   "title": "[P1] feat(receipts): record retention and legal-hold observations for acknowledged evidence",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "forbid_yaml_features",
+     "file_path": "engines/evidence-ledger/scripts/validate_release_workflow.py"
+    },
+    {
+     "qualified_name": "test_record_acknowledged_policy_validates_expected_context_hash_format",
+     "file_path": "tests/test_fleet_policy_core_completion.py"
+    },
+    {
+     "qualified_name": "test_holder_report_refuses_unknown_fields_and_stale_observations",
+     "file_path": "tests/test_worklore_ownership.py"
+    },
+    {
+     "qualified_name": "test_record_acknowledged_policy_persists_snapshot_and_projection",
+     "file_path": "tests/test_fleet_policy_core_completion.py"
+    },
+    {
+     "qualified_name": "record_acknowledged_policy",
+     "file_path": "src/brigade/fleet_hub_policy.py"
+    },
+    {
+     "qualified_name": "test_ledger_records_observations_and_finding_revisions",
+     "file_path": "tests/test_grokbot_backup_ledger.py"
+    },
+    {
+     "qualified_name": "test_deny_and_hold_need_no_receipts_and_do_not_fail_verify",
+     "file_path": "tests/test_approval.py"
+    },
+    {
+     "qualified_name": "_items_for_observations",
+     "file_path": "src/brigade/worklore_store.py"
+    },
+    {
+     "qualified_name": "retentionRecord",
+     "file_path": "engines/evidence-ledger/internal/app/app_test.go"
+    },
+    {
+     "qualified_name": "receipt_record",
+     "file_path": "src/brigade/handoff_cmd/receipts.py"
+    },
+    {
+     "qualified_name": "FleetLedger.record_observation",
+     "file_path": "src/brigade/grokbot_fleet/ledger.py"
+    },
+    {
+     "qualified_name": "BackupLedger.record_observation",
+     "file_path": "src/brigade/grokbot_backup/ledger.py"
+    },
+    {
+     "qualified_name": "_Observation",
+     "file_path": "src/brigade/evidence_package_snapshot.py"
+    },
+    {
+     "qualified_name": "observations_for_target",
+     "file_path": "src/brigade/worklore_brigade_sync.py"
+    }
+   ]
+  },
+  {
+   "issue": 1620,
+   "title": "[P1] feat(evidence): bind existing acknowledgement observations to package and destination policy",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "test_refresh_acknowledgements_are_owner_checked_and_validated",
+     "file_path": "tests/test_fleet_hub_policy.py"
+    },
+    {
+     "qualified_name": "test_the_sessions_table_separates_the_acknowledgement_from_policy_now",
+     "file_path": "tests/test_fleet_policy_page.py"
+    },
+    {
+     "qualified_name": "test_move_bundle_refuses_existing_destination",
+     "file_path": "tests/test_reportstore.py"
+    },
+    {
+     "qualified_name": "test_resolve_named_policy_falls_back_to_packaged_policy",
+     "file_path": "tests/test_scrub.py"
+    },
+    {
+     "qualified_name": "ci_covers_supported_platform_and_feature_configurations",
+     "file_path": "engines/code-graph/tests/repository_contract.rs"
+    },
+    {
+     "qualified_name": "forbid_yaml_features",
+     "file_path": "engines/evidence-ledger/scripts/validate_release_workflow.py"
+    },
+    {
+     "qualified_name": "test_refresh_acknowledgements_are_only_recorded_when_they_happen",
+     "file_path": "tests/test_fleet_hub_policy.py"
+    },
+    {
+     "qualified_name": "_bind_port_from_existing_config",
+     "file_path": "src/brigade/grokbot_packs.py"
+    },
+    {
+     "qualified_name": "_existing_policy_extensions",
+     "file_path": "src/brigade/route_receipts.py"
+    },
+    {
+     "qualified_name": "EvidencePackageError",
+     "file_path": "src/brigade/evidence_package.py"
+    }
+   ]
+  },
+  {
+   "issue": 1619,
+   "title": "[P1] docs(evidence): define identity, historical trust and audit acceptance boundaries",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "test_security_template_audit_covers_templates_docs_and_allowlisted_examples",
+     "file_path": "tests/test_security_template_audit_cmd.py"
+    },
+    {
+     "qualified_name": "test_invalid_trusted_identity_fails_closed",
+     "file_path": "tests/test_claude_review_evidence.py"
+    },
+    {
+     "qualified_name": "test_request_field_boundaries_and_temporal_interval",
+     "file_path": "tests/test_evidence_ack_protocol.py"
+    },
+    {
+     "qualified_name": "test_empty_store_and_trusted_identity_read_access",
+     "file_path": "tests/test_fleet_work_page.py"
+    },
+    {
+     "qualified_name": "test_destination_and_keyid_boundaries_cover_character_and_lexical_rules",
+     "file_path": "tests/test_evidence_ack_protocol.py"
+    },
+    {
+     "qualified_name": "test_normal_cleanup_removes_tempdir_and_programming_boundaries_propagate",
+     "file_path": "tests/test_evidence_ack_crypto.py"
+    },
+    {
+     "qualified_name": "test_destination_reference_utf8_boundaries_and_controls",
+     "file_path": "tests/test_evidence_ack_protocol.py"
+    },
+    {
+     "qualified_name": "test_evidence_memory_audit_cli_is_read_only_and_json_safe",
+     "file_path": "tests/test_memory_identity_audit.py"
+    },
+    {
+     "qualified_name": "Trust",
+     "file_path": "engines/evidence-ledger/internal/provenance/envelope.go"
+    },
+    {
+     "qualified_name": "acceptance",
+     "file_path": "src/brigade/work_cmd/verification.py"
+    }
+   ]
+  },
+  {
+   "issue": 1618,
+   "title": "[P0] feat(evidence): bind receipt, cosign and package index results to existing verifiers",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "_index_binding",
+     "file_path": "src/brigade/agent_change_verify.py"
+    },
+    {
+     "qualified_name": "_restamp_package_receipt",
+     "file_path": "tests/test_evidence_package_snapshot.py"
+    },
+    {
+     "qualified_name": "test_receipt_binding_write_failure_restores_receipt_proof_inbox_and_bindings",
+     "file_path": "tests/test_work_import_provenance_stamp.py"
+    },
+    {
+     "qualified_name": "ci_covers_supported_platform_and_feature_configurations",
+     "file_path": "engines/code-graph/tests/repository_contract.rs"
+    },
+    {
+     "qualified_name": "forbid_yaml_features",
+     "file_path": "engines/evidence-ledger/scripts/validate_release_workflow.py"
+    },
+    {
+     "qualified_name": "test_receipt_index_redacts_before_persist",
+     "file_path": "tests/test_evidence_redaction.py"
+    },
+    {
+     "qualified_name": "_write_receipt_to_disk",
+     "file_path": "tests/test_cosign_attestation.py"
+    },
+    {
+     "qualified_name": "test_missing_receipt_prints_filename_not_path.load_and_remove_receipt",
+     "file_path": "tests/test_evidence_package.py"
+    },
+    {
+     "qualified_name": "AuditReport.to_receipt",
+     "file_path": "src/brigade/run_audit.py"
+    },
+    {
+     "qualified_name": "_index_verify_receipt",
+     "file_path": "tests/test_receipts_cmd.py"
+    },
+    {
+     "qualified_name": "index_miseledger_receipts",
+     "file_path": "src/brigade/receipts_cmd.py"
+    },
+    {
+     "qualified_name": "_bind_receipt_file",
+     "file_path": "tests/test_work_import_provenance_stamp.py"
+    },
+    {
+     "qualified_name": "EvidencePackageError",
+     "file_path": "src/brigade/evidence_package.py"
+    },
+    {
+     "qualified_name": "_index_result_payload",
+     "file_path": "src/brigade/receipts_cmd.py"
+    },
+    {
+     "qualified_name": "collect_receipt_evidence",
+     "file_path": "src/brigade/skill_obligations.py"
+    }
+   ]
+  },
+  {
+   "issue": 1617,
+   "title": "[P0] fix(evidence): separate discovered artifacts from validated evidence in controls output",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "discoveredRoots",
+     "file_path": "engines/evidence-ledger/internal/app/watch.go"
+    },
+    {
+     "qualified_name": "test_cursor_cli_and_cursor_gui_preserve_separate_fixture_capability_evidence",
+     "file_path": "tests/test_surface_aware_install.py"
+    },
+    {
+     "qualified_name": "discoveredRoot",
+     "file_path": "engines/evidence-ledger/internal/app/watch.go"
+    },
+    {
+     "qualified_name": "discoveredImportRow",
+     "file_path": "engines/evidence-ledger/internal/app/watch.go"
+    },
+    {
+     "qualified_name": "discoveredImportExitCode",
+     "file_path": "engines/evidence-ledger/internal/app/watch.go"
+    },
+    {
+     "qualified_name": "discoveredSource",
+     "file_path": "engines/evidence-ledger/internal/app/app_test.go"
+    },
+    {
+     "qualified_name": "test_validate_inventory_separates_unavailable_from_missing",
+     "file_path": "tests/test_fleet_policy.py"
+    },
+    {
+     "qualified_name": "test_discovered_from_ignored_by_cycle_detection",
+     "file_path": "tests/test_work_cmd_edges.py"
+    },
+    {
+     "qualified_name": "Artifact",
+     "file_path": "engines/evidence-ledger/internal/adapter/record.go"
+    },
+    {
+     "qualified_name": "artifactsFromArguments",
+     "file_path": "engines/evidence-ledger/internal/sources/codex/codex.go"
+    },
+    {
+     "qualified_name": "artifactsFromMessage",
+     "file_path": "engines/evidence-ledger/internal/sources/opencode/opencode.go"
+    },
+    {
+     "qualified_name": "_result_from_output",
+     "file_path": "src/brigade/proc.py"
+    },
+    {
+     "qualified_name": "ValidatedApprovalArtifact",
+     "file_path": "src/brigade/approval_verification.py"
+    }
+   ]
+  },
+  {
+   "issue": 1616,
+   "title": "[P0] fix(evidence): correct the 12 NIST crosswalk relationships and qualify unsupported claims",
+   "relevant": [
+    {
+     "qualified_name": "test_crosswalk_json_loads_and_validates",
+     "file_path": "tests/test_control_crosswalk.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "_relationships",
+     "file_path": "src/brigade/obsidian_vault.py"
+    },
+    {
+     "qualified_name": "test_observed_runs_bound_unsupported_descriptor_scans_and_closes_the_scan_fd",
+     "file_path": "tests/test_governance_inventory.py"
+    },
+    {
+     "qualified_name": "test_observed_runs_bound_unsupported_descriptor_scans_and_closes_the_scan_fd.unsupported_scan",
+     "file_path": "tests/test_governance_inventory.py"
+    },
+    {
+     "qualified_name": "test_the_coordination_table_still_lists_claims_and_live_runs",
+     "file_path": "tests/test_fleet_repo_policy_page.py"
+    },
+    {
+     "qualified_name": "test_wazuh_finding_id_parser_accepts_128_and_rejects_129",
+     "file_path": "tests/test_grokbot_fleet_contracts.py"
+    },
+    {
+     "qualified_name": "test_evidence_search_timeout_returns_124",
+     "file_path": "tests/test_issue362_code_evidence_facades.py"
+    },
+    {
+     "qualified_name": "test_evidence_crawl_timeout_returns_124",
+     "file_path": "tests/test_issue362_code_evidence_facades.py"
+    },
+    {
+     "qualified_name": "_Claims",
+     "file_path": "tests/test_grokbot_fleet_remediation.py"
+    }
+   ]
+  },
+  {
+   "issue": 1614,
+   "title": "feat(research): require named browser preflight before projecting execution readiness",
+   "relevant": [
+    {
+     "qualified_name": "BrowserAiProvider",
+     "file_path": "src/brigade/research/sources/browser_ai.py"
+    },
+    {
+     "qualified_name": "test_doctor_browser_ai_requires_browser_discovery",
+     "file_path": "tests/test_research_doctor.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "miseledger_deprecation_warning_requires_the_miseledger_feature",
+     "file_path": "engines/code-graph/tests/repository_contract.rs"
+    },
+    {
+     "qualified_name": "test_browser_ai_discovery_requires_explicit_mode",
+     "file_path": "tests/test_research_acceptance.py"
+    },
+    {
+     "qualified_name": "_required_readiness",
+     "file_path": "src/brigade/projects_cmd.py"
+    },
+    {
+     "qualified_name": "test_named_doctor_endpoint_requires_matching_identity",
+     "file_path": "tests/test_grokbot_client_identity.py"
+    },
+    {
+     "qualified_name": "test_run_cursor_reuses_registry_for_all_preflight_and_execution_calls",
+     "file_path": "tests/test_acpx_adapter.py"
+    },
+    {
+     "qualified_name": "BrowserAiDiscoveryError",
+     "file_path": "src/brigade/research/sources/browser_ai.py"
+    },
+    {
+     "qualified_name": "test_bound_prior_clean_match_swap_cannot_authorize_with_outside_shadow.readiness",
+     "file_path": "tests/test_aboyeur_run_io.py"
+    }
+   ]
+  },
+  {
+   "issue": 1609,
+   "title": "feat(deck): show retained tasks and named observed groups",
+   "relevant": [
+    {
+     "qualified_name": "_observed_work_groups",
+     "file_path": "src/brigade/fleet_command_deck.py"
+    },
+    {
+     "qualified_name": "ObservedWorkGroup",
+     "file_path": "src/brigade/fleet_command_deck.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "ci_covers_supported_platform_and_feature_configurations",
+     "file_path": "engines/code-graph/tests/repository_contract.rs"
+    },
+    {
+     "qualified_name": "test_observed_config_rejects_invalid_collections",
+     "file_path": "tests/test_fleet_work_page.py"
+    },
+    {
+     "qualified_name": "load_observed_group",
+     "file_path": "src/brigade/fleet_work_page.py"
+    },
+    {
+     "qualified_name": "test_sanitized_raw_is_retained_and_bounded",
+     "file_path": "tests/test_fleet_quota.py"
+    },
+    {
+     "qualified_name": "test_observed_home_shows_snapshot_freshness_without_changing_active_slots",
+     "file_path": "tests/test_fleet_work_page.py"
+    },
+    {
+     "qualified_name": "miseledger_commands_are_unavailable_without_the_feature_and_do_not_warn",
+     "file_path": "engines/code-graph/tests/cli_read_only.rs"
+    },
+    {
+     "qualified_name": "test_dispatch_callbacks_follow_each_external_result_and_keep_attempt_identity.observed",
+     "file_path": "tests/test_run_transport_failfast.py"
+    },
+    {
+     "qualified_name": "_groups",
+     "file_path": "src/brigade/obsidian_vault.py"
+    },
+    {
+     "qualified_name": "tasks",
+     "file_path": "src/brigade/work_cmd/session/task_ops.py"
+    },
+    {
+     "qualified_name": "task_show",
+     "file_path": "src/brigade/work_cmd/session/task_ops.py"
+    },
+    {
+     "qualified_name": "test_work_tasks_cli.fake_task_show",
+     "file_path": "tests/test_work_cmd_ledger.py"
+    }
+   ]
+  },
+  {
+   "issue": 1606,
+   "title": "feat(fleet): report bounded Dot cloud session metadata through existing Hub records",
+   "relevant": [
+    {
+     "qualified_name": "report_session",
+     "file_path": "src/brigade/fleet_dot.py"
+    },
+    {
+     "qualified_name": "DotReport",
+     "file_path": "src/brigade/fleet_dot.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "_existing_session",
+     "file_path": "src/brigade/fleet_hub_policy.py"
+    },
+    {
+     "qualified_name": "test_phase_session_checkpoint_records_recovery_metadata",
+     "file_path": "tests/test_phase_ledger_session_cmd.py"
+    },
+    {
+     "qualified_name": "report_transport.presence",
+     "file_path": "tests/test_fleet_dot.py"
+    },
+    {
+     "qualified_name": "parse_report",
+     "file_path": "src/brigade/fleet_dot.py"
+    },
+    {
+     "qualified_name": "ownership_report_envelope",
+     "file_path": "src/brigade/fleet_dot.py"
+    },
+    {
+     "qualified_name": "report",
+     "file_path": "tests/test_fleet_dot.py"
+    },
+    {
+     "qualified_name": "dot_report",
+     "file_path": "tests/test_worklore_ownership.py"
+    },
+    {
+     "qualified_name": "fleet_session",
+     "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "_record_session",
+     "file_path": "tests/test_fleet_policy_page.py"
+    },
+    {
+     "qualified_name": "sessions",
+     "file_path": "src/brigade/fleet_client_enrollment.py"
+    },
+    {
+     "qualified_name": "_bounded_report_ref",
+     "file_path": "src/brigade/repos_cmd/fleet_health.py"
+    }
+   ]
+  },
+  {
+   "issue": 1602,
+   "title": "feat(fleet): diagnose Claude GitHub configuration and track Actions runs passively",
+   "relevant": [
+    {
+     "qualified_name": "diagnose",
+     "file_path": "src/brigade/claude_actions_diagnostics.py"
+    },
+    {
+     "qualified_name": "test_app_only_report_never_implies_configuration_auth_or_review",
+     "file_path": "tests/test_claude_actions_diagnostics.py"
+    },
+    {
+     "qualified_name": "ActionRunEvidence",
+     "file_path": "src/brigade/claude_actions_evidence.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "ci_covers_supported_platform_and_feature_configurations",
+     "file_path": "engines/code-graph/tests/repository_contract.rs"
+    },
+    {
+     "qualified_name": "_mixed_provider_and_github",
+     "file_path": "tests/test_cloud_tracker.py"
+    },
+    {
+     "qualified_name": "test_github_actions_is_rejected_even_if_caller_misconfigures_identity",
+     "file_path": "tests/test_claude_review_evidence.py"
+    },
+    {
+     "qualified_name": "_scan_github_actions",
+     "file_path": "src/brigade/security_cmd/scan_detectors.py"
+    },
+    {
+     "qualified_name": "miseledger_commands_are_unavailable_without_the_feature_and_do_not_warn",
+     "file_path": "engines/code-graph/tests/cli_read_only.rs"
+    },
+    {
+     "qualified_name": "diagnose_parent",
+     "file_path": "src/brigade/causal_receipt.py"
+    },
+    {
+     "qualified_name": "_configuration",
+     "file_path": "src/brigade/memory_proposals.py"
+    },
+    {
+     "qualified_name": "_actions",
+     "file_path": "src/brigade/fleet_policy_page.py"
+    },
+    {
+     "qualified_name": "_git",
+     "file_path": "tests/test_claude_hooks_fingerprint.py"
+    },
+    {
+     "qualified_name": "_claude_and_ownership",
+     "file_path": "tests/test_mcp_projection.py"
+    },
+    {
+     "qualified_name": "FleetActionStore",
+     "file_path": "src/brigade/grokbot_fleet/actions.py"
+    },
+    {
+     "qualified_name": "_git_wired_claude",
+     "file_path": "tests/test_claude_hooks_fingerprint.py"
+    }
+   ]
+  },
+  {
+   "issue": 1601,
+   "title": "feat(fleet): ingest managed Claude Code Review evidence for the exact PR head",
+   "relevant": [
+    {
+     "qualified_name": "ManagedReviewEvidence",
+     "file_path": "src/brigade/claude_review_evidence.py"
+    },
+    {
+     "qualified_name": "_head",
+     "file_path": "src/brigade/claude_review_evidence.py"
+    },
+    {
+     "qualified_name": "collect_managed_review",
+     "file_path": "src/brigade/claude_review_import.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "forbid_yaml_features",
+     "file_path": "engines/evidence-ledger/scripts/validate_release_workflow.py"
+    },
+    {
+     "qualified_name": "miseledger_deprecation_warning_requires_the_miseledger_feature",
+     "file_path": "engines/code-graph/tests/repository_contract.rs"
+    },
+    {
+     "qualified_name": "test_review_codex_preserved_options_roundtrip_exactly",
+     "file_path": "tests/test_mcp_adapters.py"
+    },
+    {
+     "qualified_name": "test_conventional_feat_prefix_routes_code_despite_changelog",
+     "file_path": "tests/test_router.py"
+    },
+    {
+     "qualified_name": "test_work_review_run_writes_receipts_for_fake_codex_and_claude",
+     "file_path": "tests/test_work_cmd_reviews.py"
+    },
+    {
+     "qualified_name": "ingest_fleet",
+     "file_path": "src/brigade/repos_cmd/fleet.py"
+    },
+    {
+     "qualified_name": "ClaudeCodeStop",
+     "file_path": "stations/notify/internal/adapter/claude_code_stop.go"
+    },
+    {
+     "qualified_name": "ClaudeCodeNotification",
+     "file_path": "stations/notify/internal/adapter/claude_code_notification.go"
+    },
+    {
+     "qualified_name": "_evidence_for_train",
+     "file_path": "src/brigade/repos_cmd/release_ops.py"
+    },
+    {
+     "qualified_name": "_prs_for_branch",
+     "file_path": "src/brigade/cloud_tracker.py"
+    }
+   ]
+  },
+  {
+   "issue": 1600,
+   "title": "feat(fleet): adopt Claude Code cloud sessions with explicit unknown lifecycle",
+   "relevant": [
+    {
+     "qualified_name": "_claude_lifecycle",
+     "file_path": "src/brigade/cloud_tracker.py"
+    },
+    {
+     "qualified_name": "adopt",
+     "file_path": "src/brigade/cloud_tracker.py"
+    },
+    {
+     "qualified_name": "TestTrackerContract.test_claude_cloud_register_and_adopt_accepted",
+     "file_path": "tests/test_claude_cloud.py"
+    },
+    {
+     "qualified_name": "test_artifact_never_establishes_provider_lifecycle",
+     "file_path": "tests/test_claude_cloud_adoption.py"
+    },
+    {
+     "qualified_name": "test_refs_require_explicit_repo_and_session",
+     "file_path": "tests/test_claude_cloud_adoption.py"
+    },
+    {
+     "qualified_name": "test_local_refs_do_not_establish_remote_existence_for_bound_sessions",
+     "file_path": "tests/test_claude_cloud_adoption.py"
+    },
+    {
+     "qualified_name": "_claude_session_ids",
+     "file_path": "src/brigade/cloud_tracker.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_local_refs_do_not_establish_remote_existence_for_bound_sessions.read",
+     "file_path": "tests/test_claude_cloud_adoption.py"
+    },
+    {
+     "qualified_name": "test_observer_retains_explicit_refs_and_scopes_branch_evidence.read",
+     "file_path": "tests/test_claude_cloud_adoption.py"
+    },
+    {
+     "qualified_name": "test_observed_provider_without_a_configured_seat_is_explicitly_unknown",
+     "file_path": "tests/test_governance_inventory.py"
+    },
+    {
+     "qualified_name": "miseledger_commands_are_unavailable_without_the_feature_and_do_not_warn",
+     "file_path": "engines/code-graph/tests/cli_read_only.rs"
+    },
+    {
+     "qualified_name": "sessions",
+     "file_path": "src/brigade/fleet_client_enrollment.py"
+    },
+    {
+     "qualified_name": "_write_claude_session",
+     "file_path": "tests/test_repos_adoption_cmd.py"
+    },
+    {
+     "qualified_name": "ClaudeCloudIdentity",
+     "file_path": "src/brigade/claude_cloud_identity.py"
+    },
+    {
+     "qualified_name": "ClaudeCodeStop",
+     "file_path": "stations/notify/internal/adapter/claude_code_stop.go"
+    },
+    {
+     "qualified_name": "ClaudeCodeNotification",
+     "file_path": "stations/notify/internal/adapter/claude_code_notification.go"
+    }
+   ]
+  },
+  {
+   "issue": 1595,
+   "title": "feat(fleet): make Hub work records authoritative for independent ownership, dependencies and merge completion",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "test_work_import_ingest_makes_forged_trusted_source_non_authoritative",
+     "file_path": "tests/test_work_cmd_imports.py"
+    },
+    {
+     "qualified_name": "test_grokbot_hub_is_authoritative_for_enqueue_claim_renew_and_replay",
+     "file_path": "tests/test_fleet_cloud.py"
+    },
+    {
+     "qualified_name": "forbid_yaml_features",
+     "file_path": "engines/evidence-ledger/scripts/validate_release_workflow.py"
+    },
+    {
+     "qualified_name": "test_merge_commit_records_merge_kind_and_parents",
+     "file_path": "tests/test_commit_linkage.py"
+    },
+    {
+     "qualified_name": "test_work_run_records_task_snapshot_and_completion_metadata",
+     "file_path": "tests/test_work_cmd_session.py"
+    },
+    {
+     "qualified_name": "make_terminal",
+     "file_path": "tests/test_worklore_ownership.py"
+    },
+    {
+     "qualified_name": "hub",
+     "file_path": "tests/test_fleet_work_ownership_cli.py"
+    },
+    {
+     "qualified_name": "test_work_import_promote_run_success_records_completion",
+     "file_path": "tests/test_work_cmd_imports.py"
+    },
+    {
+     "qualified_name": "_dependencies",
+     "file_path": "src/brigade/worklore_brigade.py"
+    },
+    {
+     "qualified_name": "__grokbotLoadZod.ZodObject.merge",
+     "file_path": "obsidian-plugin/grokbot-operator-adapter/main.js"
+    },
+    {
+     "qualified_name": "test_hub_authority_mcp_does_not_call_generic_fleet_paths._record",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "_report_fleet_completion",
+     "file_path": "src/brigade/work_cmd/verification.py"
+    },
+    {
+     "qualified_name": "_claude_and_ownership",
+     "file_path": "tests/test_mcp_projection.py"
+    },
+    {
+     "qualified_name": "_hub_and_token",
+     "file_path": "src/brigade/fleet_client_policy.py"
+    },
+    {
+     "qualified_name": "_fleet_hub_configured",
+     "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "_make_call_record",
+     "file_path": "src/brigade/tools_cmd/calls.py"
+    }
+   ]
+  },
+  {
+   "issue": 1578,
+   "title": "fix(tests): restore journal logger state after configuration test",
+   "relevant": [
+    {
+     "qualified_name": "test_journal_configuration_is_idempotent_and_writes_message_only_lines",
+     "file_path": "tests/test_grokbot_mcp.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "_restore_after_failure",
+     "file_path": "src/brigade/projection/kernel.py"
+    },
+    {
+     "qualified_name": "_fixed_statement_sources.FixedDatetime",
+     "file_path": "tests/test_cosign_statement_profiles.py"
+    },
+    {
+     "qualified_name": "_within_sqlite_budget.stop_after_fixed_work",
+     "file_path": "tests/test_worklore_store.py"
+    },
+    {
+     "qualified_name": "_fixed_statement_sources",
+     "file_path": "tests/test_cosign_statement_profiles.py"
+    },
+    {
+     "qualified_name": "test_mapped_ok_after_lag_restores_readiness",
+     "file_path": "tests/test_run_shadow.py"
+    },
+    {
+     "qualified_name": "test_downgrade_restores_all_artifacts_after_durability_failure",
+     "file_path": "tests/test_authority_store_hmac.py"
+    },
+    {
+     "qualified_name": "ConfigurationError",
+     "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "_journal_state",
+     "file_path": "tests/test_run_events_cursor_control.py"
+    },
+    {
+     "qualified_name": "_configuration",
+     "file_path": "src/brigade/memory_proposals.py"
+    },
+    {
+     "qualified_name": "TestStateAndErrors.test_normalize_state",
+     "file_path": "tests/test_cursor_cloud.py"
+    },
+    {
+     "qualified_name": "TestJournalHook",
+     "file_path": "tests/test_fleet_sync.py"
+    }
+   ]
+  },
+  {
+   "issue": 1576,
+   "title": "feat(fleet): expose supported cloud concurrency controls",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "ci_covers_supported_platform_and_feature_configurations",
+     "file_path": "engines/code-graph/tests/repository_contract.rs"
+    },
+    {
+     "qualified_name": "test_module_exposes_supported_schema_constant",
+     "file_path": "tests/test_run_event_cursor.py"
+    },
+    {
+     "qualified_name": "TestObservationMetadata.test_get_agent_usage_feature_unavailable_is_none",
+     "file_path": "tests/test_cursor_cloud.py"
+    },
+    {
+     "qualified_name": "test_zero_concurrency_is_disabled_not_unlimited",
+     "file_path": "tests/test_fleet_routing.py"
+    },
+    {
+     "qualified_name": "test_action_store_concurrency_serializes_claims",
+     "file_path": "tests/test_grokbot_fleet_actions.py"
+    },
+    {
+     "qualified_name": "TestCodexCloudCli.test_cloud_doctor_and_canary_route_to_supported_provider_adapters",
+     "file_path": "tests/test_codex_cloud.py"
+    },
+    {
+     "qualified_name": "nofollow_supported",
+     "file_path": "src/brigade/fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "_lane_concurrency",
+     "file_path": "src/brigade/research/doctor.py"
+    },
+    {
+     "qualified_name": "_dispatch_cloud",
+     "file_path": "src/brigade/cli/fleet.py"
+    }
+   ]
+  },
+  {
+   "issue": 1575,
+   "title": "fix(mcp): reject malformed VS Code input IDs without a traceback",
+   "relevant": [
+    {
+     "qualified_name": "test_malformed_vscode_input_ids_refuse_without_mutation",
+     "file_path": "tests/test_mcp_fidelity.py"
+    },
+    {
+     "qualified_name": "_merge_vscode_inputs",
+     "file_path": "src/brigade/mcp_adapters.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_memory_topology_malformed_config_degrades_without_traceback",
+     "file_path": "tests/test_memory_topology_cmd.py"
+    },
+    {
+     "qualified_name": "test_rejects_unsafe_or_malformed_identity_without_echoing_input",
+     "file_path": "tests/test_claude_cloud_identity.py"
+    },
+    {
+     "qualified_name": "test_vscode_uses_servers_key_and_input_refs",
+     "file_path": "tests/test_mcp_adapters.py"
+    },
+    {
+     "qualified_name": "test_review_vscode_remote_auth_defines_inputs",
+     "file_path": "tests/test_mcp_adapters.py"
+    },
+    {
+     "qualified_name": "TestHubClaims.test_unknown_and_malformed_node_ids_rejected",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "test_parse_document_rejects_malformed_input",
+     "file_path": "tests/test_fleet_policy.py"
+    },
+    {
+     "qualified_name": "mcp",
+     "file_path": "engines/code-graph/src/lib.rs"
+    },
+    {
+     "qualified_name": "_rejects",
+     "file_path": "tests/test_worklore_store.py"
+    },
+    {
+     "qualified_name": "_input",
+     "file_path": "src/brigade/fleet_policy_page.py"
+    }
+   ]
+  },
+  {
+   "issue": 1574,
+   "title": "fix(work): archive import inboxes above the snapshot limit",
+   "relevant": [
+    {
+     "qualified_name": "test_inbox_archive_recovers_inbox_above_snapshot_limit",
+     "file_path": "tests/test_work_cmd_services.py"
+    },
+    {
+     "qualified_name": "test_read_import_inbox_raw_is_bounded_by_snapshot_limit",
+     "file_path": "tests/test_work_cmd_imports.py"
+    },
+    {
+     "qualified_name": "import_archive",
+     "file_path": "src/brigade/work_run_archive.py"
+    },
+    {
+     "qualified_name": "_import_inbox_for_archive",
+     "file_path": "src/brigade/work_cmd/ledger/import_model.py"
+    },
+    {
+     "qualified_name": "inbox_archive",
+     "file_path": "src/brigade/work_cmd/services.py"
+    },
+    {
+     "qualified_name": "ImportInboxSnapshotLimitExceeded",
+     "file_path": "src/brigade/work_cmd/ledger/locking.py"
+    },
+    {
+     "qualified_name": "_snapshot_import_inbox",
+     "file_path": "src/brigade/work_cmd/ledger/inbox_provenance.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "_imports_archive_path",
+     "file_path": "src/brigade/work_cmd/helpers.py"
+    },
+    {
+     "qualified_name": "test_archive_verify_run_does_not_mutate_already_archived_destination._snapshot",
+     "file_path": "tests/test_work_cmd_verification.py"
+    },
+    {
+     "qualified_name": "_append_archived_imports",
+     "file_path": "src/brigade/work_cmd/ledger/import_model.py"
+    },
+    {
+     "qualified_name": "test_import_archive_refuses_lifecycle_jsonl_worker_envelope_smuggling",
+     "file_path": "tests/test_work_run_archive.py"
+    },
+    {
+     "qualified_name": "inbox",
+     "file_path": "src/brigade/work_cmd/services.py"
+    },
+    {
+     "qualified_name": "_restore_import_inbox_snapshot",
+     "file_path": "src/brigade/work_cmd/ledger/inbox_provenance.py"
+    }
+   ]
+  },
+  {
+   "issue": 1573,
+   "title": "fix(fleet): preserve actionable cloud provider denial reasons",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "TestFleetAdmission.test_admission_denial_makes_zero_provider_calls",
+     "file_path": "tests/test_codex_cloud.py"
+    },
+    {
+     "qualified_name": "TestLaunchGate.test_admission_denial_makes_zero_provider_calls",
+     "file_path": "tests/test_cursor_cloud.py"
+    },
+    {
+     "qualified_name": "TestLaunchGate.test_admission_denial_makes_zero_provider_mutation",
+     "file_path": "tests/test_jules_cloud.py"
+    },
+    {
+     "qualified_name": "test_model_override_denial_names_the_native_binding_fix",
+     "file_path": "tests/test_fleet_native_launch_binding.py"
+    },
+    {
+     "qualified_name": "test_enrolled_lease_denial_reports_trusted_identity_before_provider_launch",
+     "file_path": "tests/test_fleet_session_bootstrap.py"
+    },
+    {
+     "qualified_name": "test_repo_metadata_command_inventory_failure_is_actionable_and_preserves_status",
+     "file_path": "tests/test_ci_workflow.py"
+    },
+    {
+     "qualified_name": "test_repo_metadata_roadmap_version_failure_is_actionable_and_preserves_status",
+     "file_path": "tests/test_ci_workflow.py"
+    },
+    {
+     "qualified_name": "_cloud_provider",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "cloud_provider_unsupported",
+     "file_path": "src/brigade/fleet_session_bootstrap.py"
+    },
+    {
+     "qualified_name": "CloudProviderConfig",
+     "file_path": "src/brigade/fleet_command_deck.py"
+    }
+   ]
+  },
+  {
+   "issue": 1572,
+   "title": "fix(fleet): validate consumer bindings before saving default seats",
+   "relevant": [
+    {
+     "qualified_name": "validate_consumer_launch_bindings",
+     "file_path": "src/brigade/fleet_model_roster.py"
+    },
+    {
+     "qualified_name": "set_consumer_default",
+     "file_path": "src/brigade/fleet_model_admission.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_consumer_seat_bindings_are_editable",
+     "file_path": "tests/test_fleet_policy_page.py"
+    },
+    {
+     "qualified_name": "test_affected_consumer_specific_seat_bindings",
+     "file_path": "tests/test_fleet_policy_core_completion.py"
+    },
+    {
+     "qualified_name": "project_consumer_launch_bindings",
+     "file_path": "src/brigade/fleet_hub_model_roster.py"
+    },
+    {
+     "qualified_name": "test_consumer_launch_bindings_are_projected_and_not_inherited",
+     "file_path": "tests/test_fleet_authority_proof.py"
+    },
+    {
+     "qualified_name": "_default_fixtures_dir",
+     "file_path": "src/brigade/guard/n8n_validate.py"
+    },
+    {
+     "qualified_name": "project_model_bindings",
+     "file_path": "src/brigade/fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "test_legacy_digest_and_mac_unchanged_without_consumer_launch_bindings",
+     "file_path": "tests/test_fleet_authority_proof.py"
+    },
+    {
+     "qualified_name": "_consumer_defaults",
+     "file_path": "src/brigade/fleet_hub_model_roster.py"
+    },
+    {
+     "qualified_name": "_validate_binding",
+     "file_path": "src/brigade/memory_proposals.py"
+    },
+    {
+     "qualified_name": "projected_consumer_defaults",
+     "file_path": "src/brigade/fleet_policy_migration.py"
+    },
+    {
+     "qualified_name": "raw_consumer_defaults",
+     "file_path": "src/brigade/fleet_hub_model_roster.py"
+    },
+    {
+     "qualified_name": "default_fix_command",
+     "file_path": "src/brigade/managed_block.py"
+    },
+    {
+     "qualified_name": "effective_seat_bindings",
+     "file_path": "src/brigade/fleet_policy.py"
+    }
+   ]
+  },
+  {
+   "issue": 1571,
+   "title": "fix(fleet): remove retired seats from operational roster lists",
+   "relevant": [
+    {
+     "qualified_name": "retired_policy_seats",
+     "file_path": "src/brigade/fleet_hub_model_roster.py"
+    },
+    {
+     "qualified_name": "test_retired_seats_leave_the_table_and_legacy_selectors_but_keep_history",
+     "file_path": "tests/test_fleet_roster_page.py"
+    },
+    {
+     "qualified_name": "test_retired_policy_seats_are_excluded_even_when_current_role_or_default",
+     "file_path": "tests/test_fleet_roster_page.py"
+    },
+    {
+     "qualified_name": "test_list_excludes_retired_seats_but_reports_retirement_history",
+     "file_path": "tests/test_fleet_models_list.py"
+    },
+    {
+     "qualified_name": "test_retired_native_binding_is_not_an_operational_model",
+     "file_path": "tests/test_fleet_model_roster.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_resolve_from_roster_retired_guards_native_launch_model",
+     "file_path": "tests/test_fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "_policy_select",
+     "file_path": "src/brigade/fleet_hub_roster_page.py"
+    },
+    {
+     "qualified_name": "retired_reason",
+     "file_path": "src/brigade/fleet_model_roster.py"
+    },
+    {
+     "qualified_name": "_resolve_from_roster",
+     "file_path": "src/brigade/fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "_roster_from_snapshot",
+     "file_path": "src/brigade/run_resume.py"
+    },
+    {
+     "qualified_name": "_fleet_remove_command",
+     "file_path": "src/brigade/skills_cmd/adapters.py"
+    },
+    {
+     "qualified_name": "_result_from_seat",
+     "file_path": "src/brigade/aboyeur/planning.py"
+    },
+    {
+     "qualified_name": "_roster_without_seat",
+     "file_path": "tests/test_hub_seat_resolution.py"
+    }
+   ]
+  },
+  {
+   "issue": 1566,
+   "title": "release: track 0.28.0 implementation and qualification",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "test_schema_requires_implementation_layers_and_exact_capability_count",
+     "file_path": "tests/test_harness_conformance_probe.py"
+    },
+    {
+     "qualified_name": "enqueue_implementation_worker",
+     "file_path": "src/brigade/grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "test_apply_enqueues_one_bounded_draft_pr_implementation_worker_and_redacts_results",
+     "file_path": "tests/test_grokbot_build_feed.py"
+    },
+    {
+     "qualified_name": "test_bound_recovery_directory_handles_without_posix_flag.track_directory",
+     "file_path": "tests/test_run_journal_qualification.py"
+    },
+    {
+     "qualified_name": "test_fsync_error_retry_requires_new_sync_without_second_append.track_sync",
+     "file_path": "tests/test_run_journal_qualification.py"
+    },
+    {
+     "qualified_name": "test_phase_4a_compatibility_and_archive_policy_is_tracked",
+     "file_path": "tests/test_release_metadata.py"
+    },
+    {
+     "qualified_name": "test_parse_beta_dev_version_accepts_only_exact_0_28_daily_form",
+     "file_path": "tests/test_update_cmd.py"
+    },
+    {
+     "qualified_name": "test_resolve_beta_cli_version_selects_newest_non_yanked_0_28_dev_wheel",
+     "file_path": "tests/test_update_cmd.py"
+    }
+   ]
+  },
+  {
+   "issue": 1565,
+   "title": "test(run): qualify journal writer, replay, and recovery invariants",
+   "relevant": [
+    {
+     "qualified_name": "test_killed_writer_releases_os_lock_for_replay_or_partial_recovery",
+     "file_path": "tests/test_run_journal_process_qualification.py"
+    },
+    {
+     "qualified_name": "test_owner_replay_sync_failure_is_bounded_and_recovery_keeps_original_event",
+     "file_path": "tests/test_run_journal_qualification.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_terminal_recovery_journal_replays_exact_receipts_before_fenced_claim_release",
+     "file_path": "tests/test_grokbot_fleet_remediation.py"
+    },
+    {
+     "qualified_name": "test_owner_replay_sync_failure_is_bounded_and_recovery_keeps_original_event.fail_journal_sync",
+     "file_path": "tests/test_run_journal_qualification.py"
+    },
+    {
+     "qualified_name": "test_owner_replay_sync_failure_is_bounded_and_recovery_keeps_original_event.record",
+     "file_path": "tests/test_run_journal_qualification.py"
+    },
+    {
+     "qualified_name": "_recovery_writer_bytes",
+     "file_path": "tests/test_doctor.py"
+    },
+    {
+     "qualified_name": "_recovery_journal_chain_reason",
+     "file_path": "src/brigade/doctor.py"
+    },
+    {
+     "qualified_name": "test_recovery_writer_does_not_append",
+     "file_path": "tests/test_run_lifecycle.py"
+    },
+    {
+     "qualified_name": "test_recover_partial_tail_serializes_on_fcntl_lock.run_recovery",
+     "file_path": "tests/test_run_journal.py"
+    },
+    {
+     "qualified_name": "run_replay",
+     "file_path": "src/brigade/tools_cmd/runs.py"
+    },
+    {
+     "qualified_name": "_replay_messages.replay",
+     "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "test_tools_cli.fake_run_replay",
+     "file_path": "tests/test_work_cmd_services.py"
+    },
+    {
+     "qualified_name": "run_recovery_status",
+     "file_path": "src/brigade/runguard.py"
+    },
+    {
+     "qualified_name": "RunJournalError",
+     "file_path": "src/brigade/run_journal.py"
+    },
+    {
+     "qualified_name": "test_run_dispatches_and_synthesizes",
+     "file_path": "tests/test_aboyeur.py"
+    }
+   ]
+  },
+  {
+   "issue": 1564,
+   "title": "feat(doctor): inspect effective instruction chains and cumulative harness budgets",
+   "relevant": [
+    {
+     "qualified_name": "resolve_effective_instruction_profile",
+     "file_path": "src/brigade/harness_profile_cmd.py"
+    },
+    {
+     "qualified_name": "_check_bootstrap_budgets",
+     "file_path": "src/brigade/doctor.py"
+    },
+    {
+     "qualified_name": "test_effective_profile_is_richest_active_requirement",
+     "file_path": "tests/test_instruction_profiles.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_cross_family_security_and_effective_activation",
+     "file_path": "tests/test_mcp_fidelity.py"
+    },
+    {
+     "qualified_name": "ci_covers_supported_platform_and_feature_configurations",
+     "file_path": "engines/code-graph/tests/repository_contract.rs"
+    },
+    {
+     "qualified_name": "plan_instruction",
+     "file_path": "src/brigade/harness_profile_cmd.py"
+    },
+    {
+     "qualified_name": "_instruction_plan",
+     "file_path": "src/brigade/harness_profile_cmd.py"
+    },
+    {
+     "qualified_name": "_instruction_help_command",
+     "file_path": "src/brigade/harness_profile_cmd.py"
+    },
+    {
+     "qualified_name": "_instructions",
+     "file_path": "src/brigade/fleet_hub_policy_api.py"
+    },
+    {
+     "qualified_name": "_effective",
+     "file_path": "src/brigade/fleet_hub_policy.py"
+    },
+    {
+     "qualified_name": "_bootstrap_doctor_doctor",
+     "file_path": "src/brigade/managed.py"
+    }
+   ]
+  },
+  {
+   "issue": 1563,
+   "title": "feat(memory): use task context and stable repository identity for bounded recall",
+   "relevant": [
+    {
+     "qualified_name": "recall_text_for_hook",
+     "file_path": "src/brigade/memory_hooks.py"
+    },
+    {
+     "qualified_name": "test_workspace_query_precedes_repository_identity",
+     "file_path": "tests/test_memory_hooks.py"
+    },
+    {
+     "qualified_name": "test_recall_caps_matches_and_stable_equal_score_order",
+     "file_path": "tests/test_memory_hooks.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "ci_covers_supported_platform_and_feature_configurations",
+     "file_path": "engines/code-graph/tests/repository_contract.rs"
+    },
+    {
+     "qualified_name": "test_repository_anchors_are_stable_and_collision_free",
+     "file_path": "tests/test_fleet_policy_page.py"
+    },
+    {
+     "qualified_name": "test_arbitrate_briefs_prefers_drift_context_for_release_tasks_and_truncates",
+     "file_path": "tests/test_aboyeur.py"
+    },
+    {
+     "qualified_name": "format_recall_text",
+     "file_path": "src/brigade/memory_hooks.py"
+    },
+    {
+     "qualified_name": "format_recall_match_line",
+     "file_path": "src/brigade/memory_hooks.py"
+    },
+    {
+     "qualified_name": "repository_identity",
+     "file_path": "src/brigade/fleet_session_presence.py"
+    },
+    {
+     "qualified_name": "identityFor",
+     "file_path": "stations/notify/internal/channels/format.go"
+    },
+    {
+     "qualified_name": "RepositoryIdentity",
+     "file_path": "src/brigade/fleet_session_presence.py"
+    },
+    {
+     "qualified_name": "context",
+     "file_path": "engines/code-graph/src/query/mod.rs"
+    },
+    {
+     "qualified_name": "_task",
+     "file_path": "scripts/measure_work_store.py"
+    },
+    {
+     "qualified_name": "tasks",
+     "file_path": "src/brigade/work_cmd/session/task_ops.py"
+    },
+    {
+     "qualified_name": "edges_for_task",
+     "file_path": "src/brigade/work_cmd/edges.py"
+    }
+   ]
+  },
+  {
+   "issue": 1562,
+   "title": "feat(memory): propose reviewed card merges and supersessions from care findings",
+   "relevant": [
+    {
+     "qualified_name": "_finding",
+     "file_path": "src/brigade/memory_proposals.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_memory_care_status_archive_candidates_include_age_reviewed_and_evidence_pointers",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "_valid_memory_care_card",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "test_memory_care_health_ignores_legacy_reviewed_closeout_with_candidates",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "test_memory_care_status_reports_archive_candidates_from_scan_payload_without_rescan._fail_iter_cards",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "test_memory_care_backfill_skips_symlinked_cards",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "test_memory_care_scan_detects_card_decay_issues",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "test_memory_care_doctor_warns_on_missing_card_ids",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "test_memory_care_backfill_fingerprint_only_for_dated_cards",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "_memory_refresh_cards",
+     "file_path": "src/brigade/work_cmd/services.py"
+    },
+    {
+     "qualified_name": "_memory_care_today",
+     "file_path": "src/brigade/doctor.py"
+    },
+    {
+     "qualified_name": "_check_memory_cards",
+     "file_path": "src/brigade/doctor.py"
+    },
+    {
+     "qualified_name": "import_memory_care",
+     "file_path": "src/brigade/work_cmd/imports.py"
+    },
+    {
+     "qualified_name": "_findings_from_observation",
+     "file_path": "src/brigade/grokbot_backup/tools.py"
+    },
+    {
+     "qualified_name": "_check_memory_care",
+     "file_path": "src/brigade/doctor.py"
+    }
+   ]
+  },
+  {
+   "issue": 1561,
+   "title": "feat(mcp): report field-level projection fidelity in plans and doctor",
+   "relevant": [
+    {
+     "qualified_name": "_fidelity_report",
+     "file_path": "src/brigade/mcp_cmd.py"
+    },
+    {
+     "qualified_name": "test_doctor_verify_mcp_is_read_only_and_reports_projection_drift",
+     "file_path": "tests/test_harness_user_scope.py"
+    },
+    {
+     "qualified_name": "test_projection_refusal_has_value_free_report_and_text",
+     "file_path": "tests/test_mcp_fidelity.py"
+    },
+    {
+     "qualified_name": "test_opencode_doctor_verify_mcp_reports_projection_drift",
+     "file_path": "tests/test_harness_user_scope_slice2.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_doctor_preserves_secret_warnings_and_fidelity_omits_credential_names",
+     "file_path": "tests/test_mcp_fidelity.py"
+    },
+    {
+     "qualified_name": "_field",
+     "file_path": "tests/test_mcp_fidelity.py"
+    },
+    {
+     "qualified_name": "_auth_fields",
+     "file_path": "src/brigade/mcp_fidelity.py"
+    },
+    {
+     "qualified_name": "_opencode_fields",
+     "file_path": "src/brigade/mcp_fidelity.py"
+    },
+    {
+     "qualified_name": "plans",
+     "file_path": "src/brigade/work_cmd/sweeps.py"
+    },
+    {
+     "qualified_name": "report_plan",
+     "file_path": "src/brigade/center_cmd/reports.py"
+    },
+    {
+     "qualified_name": "report_plan",
+     "file_path": "src/brigade/repos_cmd/sweeps.py"
+    },
+    {
+     "qualified_name": "DoctorReport",
+     "file_path": "engines/code-graph/src/query/doctor.rs"
+    },
+    {
+     "qualified_name": "mcp",
+     "file_path": "engines/code-graph/src/lib.rs"
+    },
+    {
+     "qualified_name": "_mcp_plan",
+     "file_path": "src/brigade/harness_profile_cmd.py"
+    },
+    {
+     "qualified_name": "_plan_mcp",
+     "file_path": "src/brigade/cursor_user_cmd.py"
+    }
+   ]
+  },
+  {
+   "issue": 1560,
+   "title": "feat(mcp): preserve versioned OpenCode configuration shapes",
+   "relevant": [
+    {
+     "qualified_name": "OpenCodeConfig",
+     "file_path": "src/brigade/mcp_adapters.py"
+    },
+    {
+     "qualified_name": "OpenCodeLayoutError",
+     "file_path": "src/brigade/mcp_adapters.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "ci_covers_supported_platform_and_feature_configurations",
+     "file_path": "engines/code-graph/tests/repository_contract.rs"
+    },
+    {
+     "qualified_name": "ConfigurationError",
+     "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "_opencode_fields",
+     "file_path": "src/brigade/mcp_fidelity.py"
+    },
+    {
+     "qualified_name": "test_sync_transport_change_preserves_options_and_final_fingerprint",
+     "file_path": "tests/test_opencode_mcp_contract.py"
+    },
+    {
+     "qualified_name": "_opencode_direct",
+     "file_path": "src/brigade/mcp_adapters.py"
+    },
+    {
+     "qualified_name": "opencode_merge_server",
+     "file_path": "src/brigade/mcp_adapters.py"
+    }
+   ]
+  },
+  {
+   "issue": 1559,
+   "title": "fix(mcp): preserve native Codex remote authentication fields",
+   "relevant": [
+    {
+     "qualified_name": "codex_native_auth",
+     "file_path": "src/brigade/mcp_adapters.py"
+    },
+    {
+     "qualified_name": "test_codex_import_sync_preserves_native_auth_and_unmanaged_config",
+     "file_path": "tests/test_mcp_cmd.py"
+    },
+    {
+     "qualified_name": "test_codex_sync_preserves_explicit_native_auth_over_generic_headers",
+     "file_path": "tests/test_mcp_cmd.py"
+    },
+    {
+     "qualified_name": "test_codex_remote_headers_roundtrip",
+     "file_path": "tests/test_mcp_adapters.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_remote_to_local_drops_native_transport_fields",
+     "file_path": "tests/test_opencode_mcp_contract.py"
+    },
+    {
+     "qualified_name": "test_codex_remote_to_stdio_does_not_restore_remote_modeled_fields",
+     "file_path": "tests/test_mcp_cmd.py"
+    },
+    {
+     "qualified_name": "test_codex_stdio_to_remote_sync_does_not_restore_stdio_fields",
+     "file_path": "tests/test_mcp_cmd.py"
+    },
+    {
+     "qualified_name": "test_remote_mcp_ipv6_endpoint_preserves_brackets",
+     "file_path": "tests/test_governance_inventory.py"
+    },
+    {
+     "qualified_name": "_assess",
+     "file_path": "tests/test_mcp_fidelity.py"
+    },
+    {
+     "qualified_name": "_remote",
+     "file_path": "tests/test_mcp_adapters.py"
+    },
+    {
+     "qualified_name": "mcp",
+     "file_path": "engines/code-graph/src/lib.rs"
+    },
+    {
+     "qualified_name": "_field",
+     "file_path": "tests/test_mcp_fidelity.py"
+    },
+    {
+     "qualified_name": "NativeMcpPort",
+     "file_path": "src/brigade/grokbot_obsidian/adapters.py"
+    },
+    {
+     "qualified_name": "NativeMcpClient",
+     "file_path": "src/brigade/grokbot_obsidian/adapters.py"
+    }
+   ]
+  },
+  {
+   "issue": 1551,
+   "title": "windows-pytest driver: deadline kills count as regressions, plus five smaller gaps",
+   "relevant": [
+    {
+     "qualified_name": "regressions",
+     "file_path": "scripts/windows_pytest.py"
+    },
+    {
+     "qualified_name": "_deadline_failure",
+     "file_path": "scripts/windows_pytest.py"
+    },
+    {
+     "qualified_name": "test_run_files_keeps_active_file_as_deadline_failure_after_cleanup",
+     "file_path": "tests/test_windows_pytest.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_attempt_number_uses_max_plus_one_and_tolerates_gaps",
+     "file_path": "tests/test_model_trials.py"
+    },
+    {
+     "qualified_name": "UsPhoneTighteningTests.test_plus_one_country_code_matches",
+     "file_path": "tests/guard/test_rules.py"
+    },
+    {
+     "qualified_name": "test_run_files_keeps_active_file_as_deadline_failure_after_cleanup.fake_wait",
+     "file_path": "tests/test_windows_pytest.py"
+    },
+    {
+     "qualified_name": "test_console_handler_failure_stops_the_driver",
+     "file_path": "tests/test_windows_pytest.py"
+    },
+    {
+     "qualified_name": "test_timeout_kills_process_tree_and_waits_for_cleanup.Process",
+     "file_path": "tests/test_windows_pytest.py"
+    },
+    {
+     "qualified_name": "_as_count",
+     "file_path": "src/brigade/worklore_brigade_sync.py"
+    },
+    {
+     "qualified_name": "_as_count",
+     "file_path": "src/brigade/worklore_github_sync.py"
+    },
+    {
+     "qualified_name": "test_best_effort_fleet_gaps_still_claim_the_queue.gap",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "_count",
+     "file_path": "src/brigade/claude_review_import.py"
+    }
+   ]
+  },
+  {
+   "issue": 1523,
+   "title": "grokbot: Windows read paths have no owner gate after the write paths were made fail-closed",
+   "relevant": [
+    {
+     "qualified_name": "test_windows_action_list_reads_fail_closed_before_io",
+     "file_path": "tests/test_grokbot_backup_actions.py"
+    },
+    {
+     "qualified_name": "test_windows_secure_read_fails_closed",
+     "file_path": "tests/test_grokbot_n8n_runtime.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_reap_fails_closed_when_the_lock_owner_changes_after_preflight",
+     "file_path": "tests/test_run_reap.py"
+    },
+    {
+     "qualified_name": "test_list_and_detail_have_no_home_paths",
+     "file_path": "tests/test_runs_serve.py"
+    },
+    {
+     "qualified_name": "validate_ownership_paths",
+     "file_path": "src/brigade/grokbot_job_validation.py"
+    },
+    {
+     "qualified_name": "test_relay_setup_writes_owner_only_config_and_hides_paths",
+     "file_path": "tests/test_grokbot_pack_relay.py"
+    },
+    {
+     "qualified_name": "test_runtime_journal_paths_do_not_call_the_unbounded_forensic_reader",
+     "file_path": "tests/test_run_journal.py"
+    },
+    {
+     "qualified_name": "test_replaced_proposals_dir_after_ready_fails_closed",
+     "file_path": "tests/test_grokbot_n8n_actions.py"
+    },
+    {
+     "qualified_name": "_write_owner",
+     "file_path": "tests/test_runguard_wait.py"
+    },
+    {
+     "qualified_name": "test_failed_import_persistence_does_not_create_import_proof.fail_write",
+     "file_path": "tests/test_work_import_provenance_stamp.py"
+    },
+    {
+     "qualified_name": "test_publish_checkpoint_file_removes_temp_when_write_raises.fail_write",
+     "file_path": "tests/test_run_checkpoint.py"
+    },
+    {
+     "qualified_name": "test_scanner_stamp_discards_staged_receipt_proof_when_inbox_rewrite_fails.fail_write",
+     "file_path": "tests/test_work_cmd_scanners.py"
+    },
+    {
+     "qualified_name": "test_prewrite_error_leaves_journal_and_projection_unchanged.fail_write",
+     "file_path": "tests/test_run_journal_qualification.py"
+    },
+    {
+     "qualified_name": "test_scanner_inbox_rewrite_failure_preserves_original_bytes.WriteFails",
+     "file_path": "tests/test_work_cmd_scanners.py"
+    },
+    {
+     "qualified_name": "_path",
+     "file_path": "src/brigade/worklore_ownership.py"
+    },
+    {
+     "qualified_name": "_windows_path",
+     "file_path": "src/brigade/care_cmd.py"
+    }
+   ]
+  },
+  {
+   "issue": 1520,
+   "title": "agents: env-file secret references reject Windows drive paths, so seats using them cannot start",
+   "relevant": [
+    {
+     "qualified_name": "test_parse_env_file_reference_accepts_posix_and_windows_absolute_paths",
+     "file_path": "tests/test_agents.py"
+    },
+    {
+     "qualified_name": "test_parse_env_file_reference_rejects_relative_bare_drive_unc_and_hash",
+     "file_path": "tests/test_agents.py"
+    },
+    {
+     "qualified_name": "is_env_file_reference",
+     "file_path": "src/brigade/agents.py"
+    },
+    {
+     "qualified_name": "_read_env_file_reference",
+     "file_path": "src/brigade/agents.py"
+    },
+    {
+     "qualified_name": "_parse_env_file_reference",
+     "file_path": "src/brigade/agents.py"
+    },
+    {
+     "qualified_name": "test_env_file_reference_rejects_non_local_absolute_paths",
+     "file_path": "tests/test_agents.py"
+    },
+    {
+     "qualified_name": "test_env_file_reference_accepts_absolute_paths",
+     "file_path": "tests/test_agents.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_windows_disjoint_paths_reject_drive_less_alias_of_drive_path",
+     "file_path": "tests/test_grokbot_fleet_lifecycle.py"
+    },
+    {
+     "qualified_name": "test_split_outcome_line_keeps_windows_drive_paths",
+     "file_path": "tests/test_handoff_cmd.py"
+    },
+    {
+     "qualified_name": "test_setup_supports_all_roles_and_secret_file_references",
+     "file_path": "tests/test_grokbot_ops.py"
+    },
+    {
+     "qualified_name": "test_setup_rejects_missing_and_weak_secret_references",
+     "file_path": "tests/test_grokbot_packs.py"
+    },
+    {
+     "qualified_name": "_secrets",
+     "file_path": "tests/test_grokbot_cerebro.py"
+    },
+    {
+     "qualified_name": "_secret_path",
+     "file_path": "tests/test_runs_watch.py"
+    },
+    {
+     "qualified_name": "_windows_path",
+     "file_path": "src/brigade/care_cmd.py"
+    },
+    {
+     "qualified_name": "_rejects",
+     "file_path": "tests/test_worklore_store.py"
+    },
+    {
+     "qualified_name": "_write_secret_file",
+     "file_path": "tests/test_grokbot_packs.py"
+    }
+   ]
+  },
+  {
+   "issue": 1514,
+   "title": "grokbot: pack doctor should report a connector pack that no cloud bot can reach",
+   "relevant": [
+    {
+     "qualified_name": "test_pack_doctor_reports_manual_no_public_route_for_connector",
+     "file_path": "tests/test_grokbot_packs.py"
+    },
+    {
+     "qualified_name": "_connector_pack",
+     "file_path": "src/brigade/grokbot_packs.py"
+    },
+    {
+     "qualified_name": "test_pack_doctor_stays_quiet_when_connector_has_public_host",
+     "file_path": "tests/test_grokbot_packs.py"
+    },
+    {
+     "qualified_name": "test_pack_doctor_stays_quiet_when_connector_is_host_local",
+     "file_path": "tests/test_grokbot_packs.py"
+    },
+    {
+     "qualified_name": "_pack_reachability",
+     "file_path": "src/brigade/grokbot_packs.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "_connector_tools",
+     "file_path": "src/brigade/grokbot_packs.py"
+    },
+    {
+     "qualified_name": "test_legacy_connector_pack_names_remain_exact",
+     "file_path": "tests/test_grokbot_client_identity.py"
+    },
+    {
+     "qualified_name": "test_named_connector_pack_names_are_refused",
+     "file_path": "tests/test_grokbot_client_identity.py"
+    },
+    {
+     "qualified_name": "_packs",
+     "file_path": "src/brigade/context_cmd.py"
+    },
+    {
+     "qualified_name": "dag_cycle_members.reaches",
+     "file_path": "src/brigade/run_transport.py"
+    },
+    {
+     "qualified_name": "DoctorReport",
+     "file_path": "engines/code-graph/src/query/doctor.rs"
+    },
+    {
+     "qualified_name": "_dispatch_grokbot_pack",
+     "file_path": "src/brigade/cli/run_cloud.py"
+    },
+    {
+     "qualified_name": "cmd_pack_doctor",
+     "file_path": "registry/skills/verify-brigade/control-brigade.py"
+    },
+    {
+     "qualified_name": "_grokbot_cloud_observation",
+     "file_path": "src/brigade/cloud_tracker.py"
+    },
+    {
+     "qualified_name": "_bootstrap_doctor_doctor",
+     "file_path": "src/brigade/managed.py"
+    }
+   ]
+  },
+  {
+   "issue": 1512,
+   "title": "scanners: descriptor-relative inbox and rollback have no Windows path, so the module fails closed on every call",
+   "relevant": [
+    {
+     "qualified_name": "_scanner_inbox_path",
+     "file_path": "src/brigade/work_cmd/scanners.py"
+    },
+    {
+     "qualified_name": "test_scanner_inbox_rewrite_restores_original_after_repeated_rollback_substitution.substitute_every_rollback",
+     "file_path": "tests/test_work_cmd_scanners.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_every_opened_descriptor_is_closed_on_success_and_child_read_failure",
+     "file_path": "tests/test_evidence_package_snapshot.py"
+    },
+    {
+     "qualified_name": "test_verify_inbox_lock_fstats_live_descriptor_and_refuses_closed_fd",
+     "file_path": "tests/test_work_cmd_scanners.py"
+    },
+    {
+     "qualified_name": "test_the_bound_transaction_closes_every_descriptor_on_both_paths",
+     "file_path": "tests/test_run_reap.py"
+    },
+    {
+     "qualified_name": "test_ingest_fails_closed_on_non_file_handoff_sources",
+     "file_path": "tests/test_ingest.py"
+    },
+    {
+     "qualified_name": "test_recovery_mutation_failure_preserves_every_completed_byte_and_fails_closed",
+     "file_path": "tests/test_outcome_cmd.py"
+    },
+    {
+     "qualified_name": "test_every_opened_descriptor_is_closed_on_success_and_child_read_failure.track",
+     "file_path": "tests/test_evidence_package_snapshot.py"
+    },
+    {
+     "qualified_name": "test_classify_source_origin_normalizes_and_fails_closed",
+     "file_path": "tests/test_evidence_redaction.py"
+    },
+    {
+     "qualified_name": "_relative_path",
+     "file_path": "src/brigade/tools_cmd/projections.py"
+    },
+    {
+     "qualified_name": "_relative_path",
+     "file_path": "src/brigade/memory_cmd.py"
+    },
+    {
+     "qualified_name": "_relative_path",
+     "file_path": "src/brigade/guard/baseline.py"
+    },
+    {
+     "qualified_name": "TestResultEvidence.descriptor",
+     "file_path": "src/brigade/approval_v2.py"
+    },
+    {
+     "qualified_name": "test_equal_but_distinct_unredacted_text_fails_closed.scanner",
+     "file_path": "tests/test_evidence_redaction.py"
+    },
+    {
+     "qualified_name": "_module",
+     "file_path": "tests/test_component_manifest_provenance.py"
+    },
+    {
+     "qualified_name": "scanner_module",
+     "file_path": "src/brigade/scrub.py"
+    }
+   ]
+  },
+  {
+   "issue": 1506,
+   "title": "brigade run dies with CheckpointError when the worktree checkpoint exceeds MAX_CHECKPOINT_BYTES (screenshots in the tree)",
+   "relevant": [
+    {
+     "qualified_name": "CheckpointError",
+     "file_path": "src/brigade/run_checkpoint.py"
+    },
+    {
+     "qualified_name": "CheckpointError.__init__",
+     "file_path": "src/brigade/run_checkpoint.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "_close_guarded",
+     "file_path": "src/brigade/run_checkpoint.py"
+    },
+    {
+     "qualified_name": "test_deny_stays_non_exit_changing_when_the_tree_is_stale",
+     "file_path": "tests/test_approval.py"
+    },
+    {
+     "qualified_name": "test_swap_before_the_checkpoint_write_never_writes_outside_the_bound_run",
+     "file_path": "tests/test_run_reap.py"
+    },
+    {
+     "qualified_name": "test_bash_script_walks_the_tree",
+     "file_path": "tests/test_completions.py"
+    },
+    {
+     "qualified_name": "test_write_checkpoint_append_then_replay",
+     "file_path": "tests/test_run_checkpoint.py"
+    },
+    {
+     "qualified_name": "test_bash_hook_events_fingerprint_the_worktree_once_each",
+     "file_path": "tests/test_claude_hooks_runtime.py"
+    },
+    {
+     "qualified_name": "_exported_checkpoint_errors",
+     "file_path": "src/brigade/work_cmd/verification.py"
+    }
+   ]
+  },
+  {
+   "issue": 1503,
+   "title": "grokbot: wake.json accepts several webhook targets per role so every Builder bot gets the enqueue wake",
+   "relevant": [
+    {
+     "qualified_name": "_wake_targets_for_role",
+     "file_path": "src/brigade/grokbot_feed.py"
+    },
+    {
+     "qualified_name": "_parse_wake_role_targets",
+     "file_path": "src/brigade/grokbot_feed.py"
+    },
+    {
+     "qualified_name": "test_wake_role_list_caps_at_eight_targets",
+     "file_path": "tests/test_grokbot_feed.py"
+    },
+    {
+     "qualified_name": "_parse_wake_webhooks",
+     "file_path": "src/brigade/grokbot_feed.py"
+    },
+    {
+     "qualified_name": "test_wake_per_role_sender_key_file_honored",
+     "file_path": "tests/test_grokbot_feed.py"
+    },
+    {
+     "qualified_name": "test_wake_role_list_writes_per_target_status_lines",
+     "file_path": "tests/test_grokbot_feed.py"
+    },
+    {
+     "qualified_name": "test_wake_role_list_skips_invalid_target_and_posts_the_rest",
+     "file_path": "tests/test_grokbot_feed.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "_wake_job",
+     "file_path": "tests/test_grokbot_feed.py"
+    },
+    {
+     "qualified_name": "_grokbot_enqueue",
+     "file_path": "tests/test_fleet_cloud.py"
+    },
+    {
+     "qualified_name": "FakeOpener.gets",
+     "file_path": "tests/test_jules_cloud.py"
+    },
+    {
+     "qualified_name": "_targets",
+     "file_path": "tests/test_mcp_fidelity.py"
+    },
+    {
+     "qualified_name": "N8nClient.get_json",
+     "file_path": "src/brigade/grokbot_n8n/client.py"
+    },
+    {
+     "qualified_name": "_get_json",
+     "file_path": "tests/test_runs_serve.py"
+    },
+    {
+     "qualified_name": "collect_actions.accept",
+     "file_path": "src/brigade/claude_actions_import.py"
+    }
+   ]
+  },
+  {
+   "issue": 1502,
+   "title": "fleet: surface active Grok Bot jobs in brigade fleet claims and the dashboard so conductors see Bot work",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "test_long_fields_and_both_link_truncation_sources_are_explicit",
+     "file_path": "tests/test_fleet_work_page.py"
+    },
+    {
+     "qualified_name": "test_interleaved_turns_both_retain_their_completions",
+     "file_path": "tests/test_codex_appserver.py"
+    },
+    {
+     "qualified_name": "test_card_renders_both_badges_and_model_text",
+     "file_path": "tests/test_fleet_deck_badges.py"
+    },
+    {
+     "qualified_name": "TestBoards.test_machine_board_renders_seeded_events_and_claims",
+     "file_path": "tests/test_fleet_dashboard.py"
+    },
+    {
+     "qualified_name": "test_activation_is_compare_and_swap_on_both_revisions",
+     "file_path": "tests/test_fleet_policy_migration.py"
+    },
+    {
+     "qualified_name": "test_runtime_role_keys_and_friendly_labels_both_render",
+     "file_path": "tests/test_fleet_policy_page.py"
+    },
+    {
+     "qualified_name": "ListenerConfig.bot_id",
+     "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "test_authoritative_save_keeps_retired_roles_and_both_admission_defaults",
+     "file_path": "tests/test_fleet_roster_page.py"
+    },
+    {
+     "qualified_name": "_Claims",
+     "file_path": "tests/test_grokbot_fleet_remediation.py"
+    },
+    {
+     "qualified_name": "_claim_job",
+     "file_path": "src/brigade/grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "dispatch.cancel_active_work",
+     "file_path": "src/brigade/run_transport.py"
+    },
+    {
+     "qualified_name": "FleetHubClaims",
+     "file_path": "src/brigade/grokbot_fleet/tools.py"
+    },
+    {
+     "qualified_name": "_write_brigade_fleet",
+     "file_path": "tests/test_worklore_brigade.py"
+    },
+    {
+     "qualified_name": "_claim_in_process",
+     "file_path": "tests/test_grokbot_jobs.py"
+    }
+   ]
+  },
+  {
+   "issue": 1501,
+   "title": "grokbot: per-bot worker label on hub job rows so several Builder bots are distinguishable",
+   "relevant": [
+    {
+     "qualified_name": "test_hub_does_not_yet_persist_worker_label",
+     "file_path": "tests/test_grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "_drop_unsafe_worker_label",
+     "file_path": "src/brigade/grokbot_jobs_hub.py"
+    },
+    {
+     "qualified_name": "validate_worker_label",
+     "file_path": "src/brigade/grokbot_job_validation.py"
+    },
+    {
+     "qualified_name": "test_reclaim_without_a_worker_label_keeps_the_stored_one",
+     "file_path": "tests/test_grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "test_hub_projection_drops_a_worker_label_the_write_path_would_refuse",
+     "file_path": "tests/test_grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "test_hub_claim_forwards_worker_label_in_the_outbound_request_body",
+     "file_path": "tests/test_grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "_worker_label",
+     "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "_hub_job",
+     "file_path": "src/brigade/grokbot_jobs_hub.py"
+    },
+    {
+     "qualified_name": "_hub_jobs",
+     "file_path": "src/brigade/grokbot_jobs_hub.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_grokbot_hub_failures_are_permissive_only_without_a_configured_hub",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "TestHubClaims.test_opaque_labels_are_acquire_only",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "_grokbot_rows",
+     "file_path": "src/brigade/cloud_tracker.py"
+    },
+    {
+     "qualified_name": "_grokbot_rows",
+     "file_path": "src/brigade/fleet_claim_display.py"
+    },
+    {
+     "qualified_name": "_rows",
+     "file_path": "tests/test_telemetry_export.py"
+    },
+    {
+     "qualified_name": "workers",
+     "file_path": "src/brigade/roster.py"
+    },
+    {
+     "qualified_name": "softTombstoneMissingMemoryCards.row",
+     "file_path": "engines/evidence-ledger/internal/ingest/memory.go"
+    }
+   ]
+  },
+  {
+   "issue": 1498,
+   "title": "cloud: Jules sessions end at planGenerated with no output, and status/sync still report them as pending with no hub lease",
+   "relevant": [
+    {
+     "qualified_name": "TestInventory.test_sanitize_session_without_outputs_reports_has_outputs_false",
+     "file_path": "tests/test_jules_cloud.py"
+    },
+    {
+     "qualified_name": "_jules_hub_leases",
+     "file_path": "tests/test_cloud_tracker.py"
+    },
+    {
+     "qualified_name": "test_jules_plan_session_with_surrounding_activities_still_needs_approval",
+     "file_path": "tests/test_cloud_tracker.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "TestFleetAdmission.test_nonzero_status_with_error_marker_releases_failed_lease",
+     "file_path": "tests/test_codex_cloud.py"
+    },
+    {
+     "qualified_name": "test_a_live_lease_conflict_is_still_not_reported_as_expiry",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "_events_ending_with_failed",
+     "file_path": "tests/test_run_projector.py"
+    },
+    {
+     "qualified_name": "_events_ending_with_completed",
+     "file_path": "tests/test_run_projector.py"
+    },
+    {
+     "qualified_name": "test_durable_session_snapshots_rendered_with_provenance_and_pending_status",
+     "file_path": "tests/test_fleet_policy_page.py"
+    },
+    {
+     "qualified_name": "end_session",
+     "file_path": "src/brigade/fleet_client.py"
+    },
+    {
+     "qualified_name": "_end_session",
+     "file_path": "src/brigade/fleet_hub_sessions.py"
+    },
+    {
+     "qualified_name": "sync_plan",
+     "file_path": "src/brigade/tools_cmd/packs.py"
+    },
+    {
+     "qualified_name": "sessions",
+     "file_path": "src/brigade/fleet_client_enrollment.py"
+    },
+    {
+     "qualified_name": "sync_plan",
+     "file_path": "src/brigade/search_cmd.py"
+    },
+    {
+     "qualified_name": "__grokbotLoadZod.ZodString.endsWith",
+     "file_path": "obsidian-plugin/grokbot-operator-adapter/main.js"
+    },
+    {
+     "qualified_name": "sync_plan",
+     "file_path": "src/brigade/context_cmd.py"
+    }
+   ]
+  },
+  {
+   "issue": 1495,
+   "title": "ui: one Deck stylesheet for the hub, the fleet boards, and Center, with a real spacing scale",
+   "relevant": [
+    {
+     "qualified_name": "test_base_css_carries_the_spacing_scale",
+     "file_path": "tests/test_ui_theme.py"
+    },
+    {
+     "qualified_name": "test_spacing_export_and_shared_component_alias_contract",
+     "file_path": "tests/test_ui_theme.py"
+    },
+    {
+     "qualified_name": "test_boards_render_through_the_shared_deck_shell",
+     "file_path": "tests/test_fleet_dashboard.py"
+    },
+    {
+     "qualified_name": "test_center_pages_render_through_the_shared_deck_shell",
+     "file_path": "tests/test_center_dashboard.py"
+    },
+    {
+     "qualified_name": "test_all_fleet_renderers_use_one_shared_shell_and_navigation",
+     "file_path": "tests/test_ui_theme_integration.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_badge_palette_uses_nonce_stylesheet_without_inline_styles",
+     "file_path": "tests/test_ui_theme_integration.py"
+    },
+    {
+     "qualified_name": "TestExitOrphanReleaseHardening.test_orphan_release_retries_missing_within_uncertainty_window.missing_then_real",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "test_concurrent_applies_for_distinct_issues_admit_one_job_under_the_hub_daily_limit",
+     "file_path": "tests/test_grokbot_build_feed.py"
+    },
+    {
+     "qualified_name": "real_hub",
+     "file_path": "tests/test_worklore_ownership.py"
+    },
+    {
+     "qualified_name": "_hub_and_token",
+     "file_path": "src/brigade/fleet_client_policy.py"
+    },
+    {
+     "qualified_name": "_fleet_hub_configured",
+     "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "FleetHubForbidden",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubConflict",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubUnprocessable",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "FleetHubError",
+     "file_path": "src/brigade/fleet_hub.py"
+    }
+   ]
+  },
+  {
+   "issue": 1492,
+   "title": "release: post-publish acceptance asserts a search snippet that 0.27.0 trust gating hides; Unix acceptance does not assert it at all",
+   "relevant": [
+    {
+     "qualified_name": "test_windows_native_acceptance_search_asserts_imported_ids_not_snippet_text",
+     "file_path": "tests/test_ci_workflow.py"
+    },
+    {
+     "qualified_name": "test_search_hits_imported_receipts_accepts_empty_snippet",
+     "file_path": "tests/test_published_artifact_acceptance.py"
+    },
+    {
+     "qualified_name": "assert_search_hits_imported_receipts",
+     "file_path": "scripts/published-artifact-acceptance.py"
+    },
+    {
+     "qualified_name": "test_search_hits_imported_receipts_rejects_snippet_only_or_id_mismatch",
+     "file_path": "tests/test_published_artifact_acceptance.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_windows_native_acceptance_asserts_component_health_before_pinning_engines",
+     "file_path": "tests/test_ci_workflow.py"
+    },
+    {
+     "qualified_name": "test_published_artifact_acceptance_unix_step_passes_github_token_from_github_token",
+     "file_path": "tests/test_publish_workflow.py"
+    },
+    {
+     "qualified_name": "test_wait_for_github_release_tag_does_not_retry_permanent_404",
+     "file_path": "tests/test_published_artifact_acceptance.py"
+    },
+    {
+     "qualified_name": "test_publish_release_gate_requires_27_release_assets",
+     "file_path": "tests/test_publish_workflow.py"
+    },
+    {
+     "qualified_name": "acceptance",
+     "file_path": "src/brigade/work_cmd/verification.py"
+    },
+    {
+     "qualified_name": "_snippet",
+     "file_path": "src/brigade/memory_vault.py"
+    },
+    {
+     "qualified_name": "test_review_runtime_native_auth_is_sent_and_not_persisted.AuthHandler.do_POST",
+     "file_path": "tests/test_mcp_runtime.py"
+    },
+    {
+     "qualified_name": "Trust",
+     "file_path": "engines/evidence-ledger/internal/provenance/envelope.go"
+    },
+    {
+     "qualified_name": "__grokbotLoadZod.ZodError.assert",
+     "file_path": "obsidian-plugin/grokbot-operator-adapter/main.js"
+    },
+    {
+     "qualified_name": "FakeOpener.posts",
+     "file_path": "tests/test_jules_cloud.py"
+    },
+    {
+     "qualified_name": "_server.Handler.do_POST",
+     "file_path": "tests/test_grokbot_n8n_client.py"
+    },
+    {
+     "qualified_name": "_start_wake_server.Handler.do_POST",
+     "file_path": "tests/test_grokbot_feed.py"
+    }
+   ]
+  },
+  {
+   "issue": 1488,
+   "title": "fleet: test_release_with_renew_in_flight_never_resurrects flakes on CI shard 3",
+   "relevant": [
+    {
+     "qualified_name": "TestClientClaims.test_release_with_renew_in_flight_never_resurrects",
+     "file_path": "tests/test_fleet_claims.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_ci_workflow_runs_four_shards_on_every_supported_python",
+     "file_path": "tests/test_ci_workflow.py"
+    },
+    {
+     "qualified_name": "test_ci_workflow_test_shards_installs_grokbot_extra_on_python312",
+     "file_path": "tests/test_ci_workflow.py"
+    },
+    {
+     "qualified_name": "ShardPlugin",
+     "file_path": "scripts/ci_pytest_shard.py"
+    },
+    {
+     "qualified_name": "shard_for_nodeid",
+     "file_path": "scripts/ci_pytest_shard.py"
+    },
+    {
+     "qualified_name": "test_ci_workflow_test_shards_asserts_grokbot_mcp_tests_run_without_skips",
+     "file_path": "tests/test_ci_workflow.py"
+    },
+    {
+     "qualified_name": "ShardPlugin.__init__",
+     "file_path": "scripts/ci_pytest_shard.py"
+    },
+    {
+     "qualified_name": "test_shard_plugin_rejects_invalid_coordinates",
+     "file_path": "tests/test_ci_pytest_shard.py"
+    },
+    {
+     "qualified_name": "test_shard_assignment_is_stable_disjoint_and_exhaustive",
+     "file_path": "tests/test_ci_pytest_shard.py"
+    },
+    {
+     "qualified_name": "TestReleaseCli",
+     "file_path": "tests/test_fleet_claim_release.py"
+    }
+   ]
+  },
+  {
+   "issue": 1486,
+   "title": "test: test_slow_timeout_writes_eventually_latch_and_hold returns the degraded envelope under parallel load",
+   "relevant": [
+    {
+     "qualified_name": "test_slow_timeout_writes_eventually_latch_and_hold",
+     "file_path": "tests/test_claude_hooks_latch_race.py"
+    },
+    {
+     "qualified_name": "degraded_envelope",
+     "file_path": "src/brigade/claude_hooks/envelope.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_resolve_returns_wire_envelope_and_does_not_mark_loaded",
+     "file_path": "tests/test_fleet_policy_api.py"
+    },
+    {
+     "qualified_name": "test_campaign_parallel_safe_returns_deterministic_nonempty_waves",
+     "file_path": "tests/test_work_cmd_campaign.py"
+    },
+    {
+     "qualified_name": "test_validate_accepts_envelope_under_4096_compact_bytes",
+     "file_path": "tests/test_provenance_envelope.py"
+    },
+    {
+     "qualified_name": "test_quality_metrics_attach_under_projection_on_722_envelope",
+     "file_path": "tests/test_memory_retrieval_eval.py"
+    },
+    {
+     "qualified_name": "test_load_missing_returns_none",
+     "file_path": "tests/test_config.py"
+    },
+    {
+     "qualified_name": "_load_envelope",
+     "file_path": "src/brigade/agent_change_verify.py"
+    },
+    {
+     "qualified_name": "test_snapshot_cache_returns_loading_when_miss_exceeds_wait",
+     "file_path": "tests/test_center_page_load.py"
+    }
+   ]
+  },
+  {
+   "issue": 1482,
+   "title": "ci: add a per-file Windows pytest lane with a known-failing allowlist and ratchet",
+   "relevant": [
+    {
+     "qualified_name": "test_ci_workflow_runs_per_file_windows_pytest_and_uploads_results",
+     "file_path": "tests/test_ci_workflow.py"
+    },
+    {
+     "qualified_name": "test_allowlist_ratchet_rejects_growth_and_allows_deletion",
+     "file_path": "tests/test_windows_pytest.py"
+    },
+    {
+     "qualified_name": "check_allowlist_ratchet",
+     "file_path": "scripts/windows_pytest.py"
+    },
+    {
+     "qualified_name": "test_shipped_allowlist_matches_the_initial_ratchet_cap",
+     "file_path": "tests/test_windows_pytest.py"
+    },
+    {
+     "qualified_name": "validate_allowlist",
+     "file_path": "scripts/windows_pytest.py"
+    },
+    {
+     "qualified_name": "test_discovery_and_allowlist_names_support_nested_tests_without_traversal",
+     "file_path": "tests/test_windows_pytest.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_added_key_fails_with_added_allowlist_entry",
+     "file_path": "tests/test_size_ratchet_baseline.py"
+    },
+    {
+     "qualified_name": "regressions",
+     "file_path": "scripts/windows_pytest.py"
+    },
+    {
+     "qualified_name": "_lanes",
+     "file_path": "tests/test_research_claim_audit.py"
+    },
+    {
+     "qualified_name": "test_lock_gap_does_not_leak_process_lock.failing_file_lock",
+     "file_path": "tests/test_claude_hooks_latch_race.py"
+    },
+    {
+     "qualified_name": "_with_file_newlines",
+     "file_path": "src/brigade/managed_block.py"
+    }
+   ]
+  },
+  {
+   "issue": 1481,
+   "title": "roster doctor: hangs on Windows and leaves probe processes alive for days",
+   "relevant": [
+    {
+     "qualified_name": "test_roster_doctor_bounds_hanging_probe_and_reaps_its_tree",
+     "file_path": "tests/test_roster_doctor.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "_pid_alive",
+     "file_path": "tests/test_roster_doctor.py"
+    },
+    {
+     "qualified_name": "test_redact_text_removes_forward_slash_and_mixed_windows_private_paths",
+     "file_path": "tests/test_harness_conformance_probe.py"
+    },
+    {
+     "qualified_name": "_wait_for_processes",
+     "file_path": "src/brigade/proc.py"
+    },
+    {
+     "qualified_name": "test_safe_probe_grammar_accepts_only_documented_help_and_version_forms",
+     "file_path": "tests/test_stations_verify.py"
+    },
+    {
+     "qualified_name": "test_host_capability_probe_uses_detect_and_command_for",
+     "file_path": "tests/test_roster.py"
+    },
+    {
+     "qualified_name": "test_roster_doctor_expected_incomplete_health_is_info.IncompleteHealth.probe_roster",
+     "file_path": "tests/test_roster_cmd.py"
+    },
+    {
+     "qualified_name": "test_roster_doctor_unexpected_health_failure_stays_warn.FailedHealth.probe_roster",
+     "file_path": "tests/test_roster_cmd.py"
+    },
+    {
+     "qualified_name": "RecordingProbe.probe_roster",
+     "file_path": "tests/test_aboyeur_seat_health_probe.py"
+    },
+    {
+     "qualified_name": "SeatHealthProbe.probe_roster",
+     "file_path": "src/brigade/seat_health.py"
+    },
+    {
+     "qualified_name": "RaisingProbe.probe_roster",
+     "file_path": "tests/test_aboyeur_seat_health_probe.py"
+    },
+    {
+     "qualified_name": "_process_alive",
+     "file_path": "src/brigade/tools_cmd/runtimes.py"
+    },
+    {
+     "qualified_name": "RaisingProbe.probe_roster",
+     "file_path": "tests/test_aboyeur_orchestrator_health_routing.py"
+    },
+    {
+     "qualified_name": "doctor_roster",
+     "file_path": "tests/test_research_doctor.py"
+    }
+   ]
+  },
+  {
+   "issue": 1480,
+   "title": "work: no-follow parent walk rejects temp paths on Windows; component paths crash without LOCALAPPDATA",
+   "relevant": [
+    {
+     "qualified_name": "test_windows_defaults_use_localappdata",
+     "file_path": "tests/test_component_paths.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_doctor_lineage_rejects_symlinked_parent_without_following",
+     "file_path": "tests/test_doctor.py"
+    },
+    {
+     "qualified_name": "collect_walk_paths",
+     "file_path": "engines/code-graph/src/store/walk.rs"
+    },
+    {
+     "qualified_name": "test_paths_overlap_is_case_insensitive_on_windows",
+     "file_path": "tests/test_grokbot_backup_lifecycle.py"
+    },
+    {
+     "qualified_name": "test_paths_overlap_is_case_insensitive_on_windows",
+     "file_path": "tests/test_grokbot_fleet_lifecycle.py"
+    },
+    {
+     "qualified_name": "test_paths_overlap_is_case_insensitive_on_windows",
+     "file_path": "tests/test_grokbot_n8n_lifecycle.py"
+    },
+    {
+     "qualified_name": "test_paths_overlap_is_case_insensitive_on_windows",
+     "file_path": "tests/test_grokbot_obsidian_lifecycle.py"
+    },
+    {
+     "qualified_name": "test_disjoint_paths_are_case_insensitive_on_windows",
+     "file_path": "tests/test_grokbot_wazuh_lifecycle.py"
+    },
+    {
+     "qualified_name": "_rejects",
+     "file_path": "tests/test_worklore_store.py"
+    },
+    {
+     "qualified_name": "_windows_path",
+     "file_path": "src/brigade/care_cmd.py"
+    },
+    {
+     "qualified_name": "_is_windows_path",
+     "file_path": "src/brigade/component_paths.py"
+    },
+    {
+     "qualified_name": "_walk_existing_parent",
+     "file_path": "src/brigade/projection/kernel.py"
+    },
+    {
+     "qualified_name": "test_control_crash_points.crash_on_terminal",
+     "file_path": "tests/test_run_events_cursor_control.py"
+    },
+    {
+     "qualified_name": "_reject_symlink_parents",
+     "file_path": "src/brigade/managed_block.py"
+    },
+    {
+     "qualified_name": "_reject_parent_symlink",
+     "file_path": "src/brigade/projection/kernel.py"
+    }
+   ]
+  },
+  {
+   "issue": 1479,
+   "title": "agents: dispatch tests measure the Windows shim guard instead of dispatch; cover real Windows executable shapes",
+   "relevant": [
+    {
+     "qualified_name": "test_resolve_executable_classifies_windows_shim_kinds",
+     "file_path": "tests/test_agents_windows_executable.py"
+    },
+    {
+     "qualified_name": "test_resolve_executable_rejects_unsupported_windows_ps1_shim",
+     "file_path": "tests/test_agents_windows_executable.py"
+    },
+    {
+     "qualified_name": "test_run_agent_rejects_unsupported_windows_shim_before_inference",
+     "file_path": "tests/test_agents_windows_executable.py"
+    },
+    {
+     "qualified_name": "test_resolve_executable_ps1_shim_needs_per_seat_command_override",
+     "file_path": "tests/test_agents_windows_executable.py"
+    },
+    {
+     "qualified_name": "test_resolve_executable_accepts_extensionless_windows_pe",
+     "file_path": "tests/test_agents_windows_executable.py"
+    },
+    {
+     "qualified_name": "_windows_executable_kind",
+     "file_path": "src/brigade/proc.py"
+    },
+    {
+     "qualified_name": "resolve_agent_executable",
+     "file_path": "src/brigade/agents.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_run_agent_rejects_unsupported_windows_shim_before_inference._run",
+     "file_path": "tests/test_agents_windows_executable.py"
+    },
+    {
+     "qualified_name": "test_care_windows_status_reports_task_presence_instead_of_refusing",
+     "file_path": "tests/test_care_cmd.py"
+    },
+    {
+     "qualified_name": "test_resolve_executable_ps1_shim_needs_per_seat_command_override._which",
+     "file_path": "tests/test_agents_windows_executable.py"
+    },
+    {
+     "qualified_name": "measure_shape",
+     "file_path": "scripts/measure_work_store.py"
+    },
+    {
+     "qualified_name": "_stub_agent_executable",
+     "file_path": "tests/test_agents.py"
+    },
+    {
+     "qualified_name": "_resolve_agent_executable",
+     "file_path": "src/brigade/seat_health.py"
+    },
+    {
+     "qualified_name": "measure_dolt_shape",
+     "file_path": "scripts/measure_work_store.py"
+    },
+    {
+     "qualified_name": "TestDispatchWiring",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "TestDispatchRecovery",
+     "file_path": "tests/test_fleet_claim_release.py"
+    }
+   ]
+  },
+  {
+   "issue": 1478,
+   "title": "portability: os.O_DIRECTORY and os.getpgid used directly in nine shipped modules, AttributeError on Windows",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "test_recover_from_checkpoint_normalizes_raw_oserror_on_initial_journal_read.raise_oserror",
+     "file_path": "tests/test_run_checkpoint.py"
+    },
+    {
+     "qualified_name": "test_raw_oserror_is_bounded_and_blocks_run_json.raise_oserror",
+     "file_path": "tests/test_run_lifecycle.py"
+    },
+    {
+     "qualified_name": "TestLaunchGate.test_oserror_after_post_holds_lease_and_returns_uncertain.raise_oserror",
+     "file_path": "tests/test_cursor_cloud.py"
+    },
+    {
+     "qualified_name": "test_recover_from_checkpoint_normalizes_raw_oserror_on_initial_journal_read",
+     "file_path": "tests/test_run_checkpoint.py"
+    },
+    {
+     "qualified_name": "test_validate_checkpoint_translates_raw_oserror_on_fstat",
+     "file_path": "tests/test_run_checkpoint.py"
+    },
+    {
+     "qualified_name": "test_validate_checkpoint_translates_raw_oserror_on_read",
+     "file_path": "tests/test_run_checkpoint.py"
+    },
+    {
+     "qualified_name": "test_validate_checkpoint_translates_raw_oserror_on_close",
+     "file_path": "tests/test_run_checkpoint.py"
+    },
+    {
+     "qualified_name": "test_verify_collision_translates_raw_oserror_on_fstat",
+     "file_path": "tests/test_run_checkpoint.py"
+    },
+    {
+     "qualified_name": "test_path_binary_oserror_returns_none.raise_os_error",
+     "file_path": "tests/test_component_report.py"
+    },
+    {
+     "qualified_name": "test_corrupt_managed_executable_read_error.raise_os_error",
+     "file_path": "tests/test_component_report.py"
+    }
+   ]
+  },
+  {
+   "issue": 1477,
+   "title": "runguard: activated-journal RunLockError on fresh repos under Windows (doctor, fleet model admission, health routing)",
+   "relevant": [
+    {
+     "qualified_name": "RunLockError",
+     "file_path": "src/brigade/runguard.py"
+    },
+    {
+     "qualified_name": "_activated_journal",
+     "file_path": "tests/test_runguard.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_resume_paused_daily_consumes_once_under_fresh_lock",
+     "file_path": "tests/test_runs_cmd.py"
+    },
+    {
+     "qualified_name": "test_target_admission_rejects_fresh_roster_drift_before_hub_replay",
+     "file_path": "tests/test_fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "_audit_row_fresh",
+     "file_path": "src/brigade/fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "doctor_model_roster",
+     "file_path": "src/brigade/fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "test_repos_health_loads_fleet_config_once",
+     "file_path": "tests/test_issue266_work_status_memory.py"
+    },
+    {
+     "qualified_name": "test_target_admission_rejects_fresh_roster_drift_before_hub_replay.replay_prior_admission",
+     "file_path": "tests/test_fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "run_lock",
+     "file_path": "src/brigade/runguard.py"
+    },
+    {
+     "qualified_name": "RetainRunLockError",
+     "file_path": "src/brigade/runguard.py"
+    },
+    {
+     "qualified_name": "RetainRunLockError",
+     "file_path": "src/brigade/run_reap.py"
+    },
+    {
+     "qualified_name": "RunGuardError",
+     "file_path": "src/brigade/runguard.py"
+    },
+    {
+     "qualified_name": "_RunLockClock",
+     "file_path": "src/brigade/runguard.py"
+    },
+    {
+     "qualified_name": "reconcile_run_lock",
+     "file_path": "src/brigade/runguard.py"
+    }
+   ]
+  },
+  {
+   "issue": 1476,
+   "title": "grokbot: pack, feed, findings, reconcile, fleet, backup, n8n, Obsidian, and Wazuh gates fail on Windows",
+   "relevant": [
+    {
+     "qualified_name": "test_windows_private_feed_reads_fail_closed_before_io",
+     "file_path": "tests/test_grokbot_feed.py"
+    },
+    {
+     "qualified_name": "test_windows_lifecycle_fails_closed",
+     "file_path": "tests/test_grokbot_n8n_lifecycle.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_non_catalogued_wazuh_findings_remain_review_only",
+     "file_path": "tests/test_grokbot_fleet_remediation.py"
+    },
+    {
+     "qualified_name": "test_backup_setup_keeps_prior_config_on_failed_rewrite",
+     "file_path": "tests/test_grokbot_packs.py"
+    },
+    {
+     "qualified_name": "_reconcile_findings",
+     "file_path": "src/brigade/fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "test_cli_pack_and_serve_choices_include_wazuh_triage",
+     "file_path": "tests/test_grokbot_wazuh_lifecycle.py"
+    },
+    {
+     "qualified_name": "test_cli_pack_and_serve_choices_include_n8n_operator",
+     "file_path": "tests/test_grokbot_n8n_lifecycle.py"
+    },
+    {
+     "qualified_name": "CliTests.test_n8n_validation_pack_reports_expectation_failure",
+     "file_path": "tests/guard/test_cli.py"
+    },
+    {
+     "qualified_name": "_backup_finding",
+     "file_path": "tests/test_grokbot_pack_relay.py"
+    },
+    {
+     "qualified_name": "_fleet_finding",
+     "file_path": "tests/test_grokbot_pack_relay.py"
+    },
+    {
+     "qualified_name": "_packs",
+     "file_path": "src/brigade/context_cmd.py"
+    },
+    {
+     "qualified_name": "_finding",
+     "file_path": "tests/test_grokbot_backup_ledger.py"
+    },
+    {
+     "qualified_name": "discover_and_reconcile",
+     "file_path": "src/brigade/worklore_github_sync.py"
+    },
+    {
+     "qualified_name": "_WazuhRequestGate",
+     "file_path": "src/brigade/grokbot_wazuh/lifecycle.py"
+    },
+    {
+     "qualified_name": "_WazuhGateASGI",
+     "file_path": "src/brigade/grokbot_wazuh/lifecycle.py"
+    }
+   ]
+  },
+  {
+   "issue": 1475,
+   "title": "tests: suite reaches live Codex cloud and the update-check URL when agent CLIs are installed",
+   "relevant": [
+    {
+     "qualified_name": "_no_update_check_for_suite",
+     "file_path": "tests/conftest.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_available_update_none_when_latest_equals_installed",
+     "file_path": "tests/test_update_notify.py"
+    },
+    {
+     "qualified_name": "test_configured_service_reaches_live_client_factory_and_allowlist",
+     "file_path": "tests/test_grokbot_obsidian_lifecycle.py"
+    },
+    {
+     "qualified_name": "test_phase2_updates_are_rejected_before_mutation_when_adapter_absent",
+     "file_path": "tests/test_grokbot_obsidian_phase2.py"
+    },
+    {
+     "qualified_name": "test_session_end_reaches_the_heartbeat_and_stop_never_ends_the_session",
+     "file_path": "tests/test_claude_hooks_runtime.py"
+    },
+    {
+     "qualified_name": "test_available_update_checked_at_none_when_absent_or_invalid",
+     "file_path": "tests/test_update_notify.py"
+    },
+    {
+     "qualified_name": "test_refresh_acknowledgements_are_only_recorded_when_they_happen",
+     "file_path": "tests/test_fleet_hub_policy.py"
+    },
+    {
+     "qualified_name": "test_doctor_checks_codex_inbox_when_selected",
+     "file_path": "tests/test_doctor.py"
+    },
+    {
+     "qualified_name": "TestCodexCloudCli",
+     "file_path": "tests/test_codex_cloud.py"
+    },
+    {
+     "qualified_name": "dag_cycle_members.reaches",
+     "file_path": "src/brigade/run_transport.py"
+    },
+    {
+     "qualified_name": "RunRow.live",
+     "file_path": "src/brigade/fleet_dashboard.py"
+    },
+    {
+     "qualified_name": "Agent",
+     "file_path": "src/brigade/roster.py"
+    },
+    {
+     "qualified_name": "test_cli_check",
+     "file_path": "tests/test_release_version_sync.py"
+    },
+    {
+     "qualified_name": "_installed_bind_checks",
+     "file_path": "src/brigade/grokbot_packs.py"
+    },
+    {
+     "qualified_name": "_codex_cloud_observation",
+     "file_path": "src/brigade/cloud_tracker.py"
+    },
+    {
+     "qualified_name": "_check_agents_quality",
+     "file_path": "src/brigade/doctor.py"
+    }
+   ]
+  },
+  {
+   "issue": 1474,
+   "title": "tests: home isolation sets HOME but Windows resolves USERPROFILE, so the suite touches the real ~/.brigade",
+   "relevant": [
+    {
+     "qualified_name": "test_home_isolation_points_at_pytest_temp",
+     "file_path": "tests/test_conftest_home_isolation.py"
+    },
+    {
+     "qualified_name": "set_home",
+     "file_path": "tests/_home.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_root_inside_the_operator_home_is_refused",
+     "file_path": "tests/test_verify_brigade_skill.py"
+    },
+    {
+     "qualified_name": "test_evidence_root_inside_the_operator_home_is_refused",
+     "file_path": "tests/test_verify_brigade_skill.py"
+    },
+    {
+     "qualified_name": "TestMachineIdentity.test_repo_claim_holds_under_the_home_identity",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "test_node_machine_defaults_to_the_home_identity_path",
+     "file_path": "tests/test_node.py"
+    },
+    {
+     "qualified_name": "test_burn_eligibility_has_no_second_home_in_the_validator",
+     "file_path": "tests/test_worklore_validate.py"
+    },
+    {
+     "qualified_name": "TestMachineIdentity.test_claims_resolve_the_home_identity_through_base_path",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "test_a_temp_base_inside_the_operator_home_is_still_allowed",
+     "file_path": "tests/test_verify_brigade_skill.py"
+    },
+    {
+     "qualified_name": "brigade_home",
+     "file_path": "src/brigade/fleet_client.py"
+    },
+    {
+     "qualified_name": "TestClaimLossAborts.test_grace_boundary_race_fires_the_interrupt_exactly_once._RacyEvent.set",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "resolve_brigade",
+     "file_path": "registry/skills/verify-brigade/control-brigade.py"
+    },
+    {
+     "qualified_name": "resolve_claude_home",
+     "file_path": "src/brigade/claude_hooks/paths.py"
+    },
+    {
+     "qualified_name": "_windows_resolve_interpreter",
+     "file_path": "src/brigade/work_cmd/verification.py"
+    }
+   ]
+  },
+  {
+   "issue": 1473,
+   "title": "tests: pytest suite cannot run as one session on Windows (KeyboardInterrupt escapes through the taskkill path)",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "test_node_cannot_link_another_nodes_run_through_the_route",
+     "file_path": "tests/test_worklore_http.py"
+    },
+    {
+     "qualified_name": "_assert_one_latched_one_silent",
+     "file_path": "tests/test_claude_hooks_latch_race.py"
+    },
+    {
+     "qualified_name": "dispatch.run_one",
+     "file_path": "src/brigade/run_transport.py"
+    },
+    {
+     "qualified_name": "test_launcher_argv_keeps_prompt_as_one_argument",
+     "file_path": "tests/test_fleet_session_bootstrap.py"
+    },
+    {
+     "qualified_name": "test_requester_cannot_approve_their_own_run",
+     "file_path": "tests/test_approval.py"
+    },
+    {
+     "qualified_name": "test_daily_run_writes_one_phase_session_checkpoint",
+     "file_path": "tests/test_daily_driver_cmd.py"
+    },
+    {
+     "qualified_name": "test_run_one_exception_finalizes_scanner_receipt_as_failed",
+     "file_path": "tests/test_work_cmd_scanners.py"
+    },
+    {
+     "qualified_name": "_plant_suite",
+     "file_path": "tests/test_runs_serve.py"
+    },
+    {
+     "qualified_name": "test_daily_run_safe_adapters_and_json_cleanliness.run_one",
+     "file_path": "tests/test_daily_driver_cmd.py"
+    },
+    {
+     "qualified_name": "_windows_path",
+     "file_path": "src/brigade/care_cmd.py"
+    },
+    {
+     "qualified_name": "_as_path",
+     "file_path": "src/brigade/tools_cmd/helpers.py"
+    },
+    {
+     "qualified_name": "_as_path",
+     "file_path": "src/brigade/dogfood_cmd.py"
+    },
+    {
+     "qualified_name": "sessions",
+     "file_path": "src/brigade/fleet_client_enrollment.py"
+    },
+    {
+     "qualified_name": "test_root_path_cannot_escape_the_vault",
+     "file_path": "tests/test_memory_vault_search.py"
+    },
+    {
+     "qualified_name": "_scanner_run_one",
+     "file_path": "src/brigade/work_cmd/scanners.py"
+    }
+   ]
+  },
+  {
+   "issue": 1472,
+   "title": "grokbot: queue complete with report_text on a draft-pr job crashes with KeyError 'sha256' instead of a bounded error",
+   "relevant": [
+    {
+     "qualified_name": "test_hub_complete_with_report_text_on_draft_pr_returns_report_not_allowed",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "test_local_complete_with_report_text_on_draft_pr_returns_report_not_allowed",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "test_complete_with_report_text_retrieves_via_operator_without_leaking",
+     "file_path": "tests/test_grokbot_mcp.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_hub_complete_with_report_text_on_draft_pr_returns_report_not_allowed.refuse_complete",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "test_grokbot_merged_draft_pr_lands_without_queue_attention",
+     "file_path": "tests/test_cloud_tracker.py"
+    },
+    {
+     "qualified_name": "test_apply_stops_on_unexpected_queue_error_with_generic_reason",
+     "file_path": "tests/test_grokbot_feed.py"
+    },
+    {
+     "qualified_name": "test_hub_authority_preview_lists_completed_scout_without_local_job_record",
+     "file_path": "tests/test_grokbot_reconcile.py"
+    },
+    {
+     "qualified_name": "test_a_refused_hub_listing_reports_the_bounded_reason_instead_of_all_known",
+     "file_path": "tests/test_grokbot_scout_feed.py"
+    },
+    {
+     "qualified_name": "_error_report",
+     "file_path": "src/brigade/run_audit.py"
+    }
+   ]
+  },
+  {
+   "issue": 1469,
+   "title": "test: fleet routing review_after fixture expired at 2026-09-06 12:00 UTC and now fails on main",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "_approval_for",
+     "file_path": "tests/test_grokbot_fleet_actions.py"
+    },
+    {
+     "qualified_name": "_cap_record",
+     "file_path": "tests/test_outcome.py"
+    },
+    {
+     "qualified_name": "test_preflight_and_apply_enforce_the_utc_daily_limit_including_failed_and_expired_attempts",
+     "file_path": "tests/test_grokbot_scout_feed.py"
+    },
+    {
+     "qualified_name": "_homegrown_note",
+     "file_path": "tests/test_handoff_cmd.py"
+    },
+    {
+     "qualified_name": "_utc_now",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "_utc_now",
+     "file_path": "src/brigade/fleet_hub_preference.py"
+    },
+    {
+     "qualified_name": "utc_now",
+     "file_path": "src/brigade/fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "utc_now",
+     "file_path": "src/brigade/fleet_session_bootstrap.py"
+    },
+    {
+     "qualified_name": "_review_after_future",
+     "file_path": "src/brigade/worklore_store.py"
+    }
+   ]
+  },
+  {
+   "issue": 1468,
+   "title": "release: bump pyproject and BETA_PREVIEW_BASE to 0.28.0 right after the v0.27.0 tag so the beta lane keeps advancing",
+   "relevant": [],
+   "judged": [
+    {
+     "qualified_name": "test_release_checklist_bumps_then_verifies_then_tags",
+     "file_path": "tests/test_release_checklist.py"
+    },
+    {
+     "qualified_name": "test_release_resolution_dereferences_annotated_tags_to_their_commit",
+     "file_path": "tests/test_update_cmd.py"
+    },
+    {
+     "qualified_name": "test_a_hub_enqueue_that_times_out_after_the_commit_keeps_the_snapshot",
+     "file_path": "tests/test_grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "test_version_tag_check_warns_when_pyproject_version_missing",
+     "file_path": "tests/test_release_version_guard.py"
+    },
+    {
+     "qualified_name": "test_wait_for_github_release_tag_retries_transient_403_then_succeeds",
+     "file_path": "tests/test_published_artifact_acceptance.py"
+    },
+    {
+     "qualified_name": "test_setup_auto_online_keeps_beta_unreadable_cache_fail_closed.read_then_raise",
+     "file_path": "tests/test_component_install.py"
+    },
+    {
+     "qualified_name": "test_newer_tombstone_keeps_the_last_known_external_state",
+     "file_path": "tests/test_worklore_store.py"
+    },
+    {
+     "qualified_name": "test_parse_beta_dev_version_accepts_only_exact_0_28_daily_form",
+     "file_path": "tests/test_update_cmd.py"
+    },
+    {
+     "qualified_name": "test_two_threads_do_not_lose_updates_under_writer_lock.bump",
+     "file_path": "tests/test_work_cmd_scanners.py"
+    },
+    {
+     "qualified_name": "_lanes",
+     "file_path": "tests/test_research_claim_audit.py"
+    },
+    {
+     "qualified_name": "test_preview_editor_resubmit_keeps_retired_roles_and_both_admission_defaults.preview",
+     "file_path": "tests/test_fleet_roster_page.py"
+    },
+    {
+     "qualified_name": "_default_beta_releases",
+     "file_path": "tests/test_update_cmd.py"
+    },
+    {
+     "qualified_name": "test_run_files_keeps_active_file_as_deadline_failure_after_cleanup.release_after_cleanup",
+     "file_path": "tests/test_windows_pytest.py"
+    },
+    {
+     "qualified_name": "test_run_files_stops_scheduling_and_records_partial_results_at_deadline.release_after_cleanup",
+     "file_path": "tests/test_windows_pytest.py"
+    },
+    {
+     "qualified_name": "test_acquire_lock_retries_when_release_removes_lock_during_type_probe.publish_after_release",
+     "file_path": "tests/test_runguard.py"
+    },
+    {
+     "qualified_name": "test_discovery_daemon_workers_capped_at_four_for_more_providers._release_after_cap",
+     "file_path": "tests/test_research_engine.py"
+    }
+   ]
+  },
+  {
+   "issue": 1467,
+   "title": "memory-care: plan-fixes reports every planned fix blocked (504 of 504) so card metadata debt cannot drain",
+   "relevant": [
+    {
+     "qualified_name": "test_memory_care_plan_fixes_reports_blockers_and_writes_nothing",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "plan_fixes",
+     "file_path": "src/brigade/memory_care_plan.py"
+    },
+    {
+     "qualified_name": "plan_fixes",
+     "file_path": "src/brigade/memory_cmd.py"
+    },
+    {
+     "qualified_name": "metadata_plan_blockers",
+     "file_path": "src/brigade/memory_care_plan.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_memory_care_cli.fake_plan_fixes",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "test_skills_compatibility_reports_installed_and_planned_adapters",
+     "file_path": "tests/test_skills_cmd.py"
+    },
+    {
+     "qualified_name": "_valid_memory_care_card",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "test_apply_fixes_only_drifted",
+     "file_path": "tests/test_release_version_sync.py"
+    }
+   ]
+  },
+  {
+   "issue": 1466,
+   "title": "memory-care: closeout needs a preview mode before the hub timer can be re-enabled on a 906-entry queue",
+   "relevant": [
+    {
+     "qualified_name": "test_memory_care_closeout_dry_run_previews_queue_by_issue_kind_without_writes",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "test_memory_care_closeout_refuses_missing_or_invalid_queue",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "test_memory_care_closeout_dry_run_still_refuses_invalid_queue",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "_write_memory_care_closeout",
+     "file_path": "tests/test_memory_cmd.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "_systemd_timer_is_enabled",
+     "file_path": "src/brigade/care_cmd.py"
+    },
+    {
+     "qualified_name": "test_claim_is_admitted_before_queue_mutation_and_binds_the_deterministic_hub_lease",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "test_code_reference_compaction_counts_only_valid_candidates_before_the_cap",
+     "file_path": "tests/test_work_cmd_verification.py"
+    },
+    {
+     "qualified_name": "test_memory_care_health_ignores_legacy_reviewed_closeout_with_candidates",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "test_fork_worker_applies_bounds_before_process_start._Ctx.Queue",
+     "file_path": "tests/test_claude_hooks_stdin_bounds.py"
+    },
+    {
+     "qualified_name": "_Timer",
+     "file_path": "src/brigade/center_cmd/dashboard/timing.py"
+    },
+    {
+     "qualified_name": "_hub_queue",
+     "file_path": "tests/test_grokbot_scout_feed.py"
+    },
+    {
+     "qualified_name": "CareEntry",
+     "file_path": "src/brigade/care_cmd.py"
+    },
+    {
+     "qualified_name": "mode",
+     "file_path": "engines/evidence-ledger/internal/security/security_test.go"
+    },
+    {
+     "qualified_name": "_write_memory_care_queue",
+     "file_path": "tests/test_memory_cmd.py"
+    },
+    {
+     "qualified_name": "_memory_care_today",
+     "file_path": "src/brigade/doctor.py"
+    }
+   ]
+  },
+  {
+   "issue": 1464,
+   "title": "agent-change verifier: a signed approval that fails segregation of duties reports INVALID rather than a policy failure",
+   "relevant": [
+    {
+     "qualified_name": "verify_agent_change",
+     "file_path": "src/brigade/agent_change_verify.py"
+    }
+   ],
+   "judged": [
+    {
+     "qualified_name": "test_verifier_approval_baseline_only_subject_reports_binding_conflicted",
+     "file_path": "tests/test_agent_change.py"
+    },
+    {
+     "qualified_name": "test_unusable_stamp_reads_as_due_rather_than_pinning_the_session_off",
+     "file_path": "tests/test_claude_hooks_heartbeat.py"
+    },
+    {
+     "qualified_name": "test_group_e_signed_approval_reference_orphaned_from_valid_journal_is_invalid",
+     "file_path": "tests/test_agent_change_approval_integration.py"
+    },
+    {
+     "qualified_name": "test_a_task_without_a_usable_revision_reports_none_rather_than_a_guess",
+     "file_path": "tests/test_worklore_brigade.py"
+    },
+    {
+     "qualified_name": "test_verifier_untrusted_index_signer_reports_trust_untrusted_and_status_invalid",
+     "file_path": "tests/test_agent_change.py"
+    },
+    {
+     "qualified_name": "test_absent_linkage_stays_unknown_rather_than_inherited",
+     "file_path": "tests/test_fleet_repo_policy_page.py"
+    },
+    {
+     "qualified_name": "test_verifier_missing_required_reports_incomplete_before_policy_digest_mismatch",
+     "file_path": "tests/test_agent_change.py"
+    },
+    {
+     "qualified_name": "test_verifier_untrusted_reference_signer_reports_trust_untrusted_and_policy_fail",
+     "file_path": "tests/test_agent_change.py"
+    },
+    {
+     "qualified_name": "_approval",
+     "file_path": "tests/test_agent_change_approval_policy.py"
+    },
+    {
+     "qualified_name": "Agent",
+     "file_path": "src/brigade/roster.py"
+    },
+    {
+     "qualified_name": "export_agent_change",
+     "file_path": "src/brigade/agent_change.py"
+    },
+    {
+     "qualified_name": "_invalid_config_failure",
+     "file_path": "src/brigade/research_cmd.py"
+    },
+    {
+     "qualified_name": "_invalid_sidecar_failure",
+     "file_path": "src/brigade/research_cmd.py"
+    },
+    {
+     "qualified_name": "AgentChangeError",
+     "file_path": "src/brigade/agent_change_refs.py"
+    },
+    {
+     "qualified_name": "report_terminal_failure",
+     "file_path": "src/brigade/aboyeur/direct_worker_finish.py"
+    }
+   ]
+  }
+ ]
+}

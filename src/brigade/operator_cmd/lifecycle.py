@@ -1193,6 +1193,7 @@ def _loop_stations_payload(target: Path) -> dict[str, Any]:
         }
 
     rates: list[float] = []
+    precisions: list[float] = []
     runs_root = target / ".brigade" / "runs"
     if runs_root.is_dir():
         run_rows: list[tuple[str, float]] = []
@@ -1216,11 +1217,17 @@ def _loop_stations_payload(target: Path) -> dict[str, Any]:
                 continue
             stamp = str(payload.get("started_at") or child.name)
             run_rows.append((stamp, float(rate)))
+            # Receipts from before #1648 carry no precision. Average only the ones that do.
+            precision = context_eval.get("brief_precision")
+            if not isinstance(precision, bool) and isinstance(precision, (int, float)):
+                precisions.append(float(precision))
         run_rows.sort(key=lambda item: item[0], reverse=True)
         rates = [rate for _, rate in run_rows]
 
     last_rate = rates[0] if rates else None
     mean_rate = round(sum(rates) / len(rates), 3) if rates else None
+    mean_precision = round(sum(precisions) / len(precisions), 3) if precisions else None
+    precision_detail = f" precision={mean_precision:.3f} (n={len(precisions)})" if mean_precision is not None else ""
     return {
         "graph": graph,
         "ledger": ledger,
@@ -1228,8 +1235,10 @@ def _loop_stations_payload(target: Path) -> dict[str, Any]:
             "last_brief_hit_rate": last_rate,
             "mean_brief_hit_rate": mean_rate,
             "sample_count": len(rates),
+            "mean_brief_precision": mean_precision,
+            "precision_sample_count": len(precisions),
             "detail": (
-                f"last={last_rate:.3f} mean={mean_rate:.3f} (n={len(rates)})"
+                f"last={last_rate:.3f} mean={mean_rate:.3f} (n={len(rates)}){precision_detail}"
                 if rates and last_rate is not None and mean_rate is not None
                 else "no context_eval on recent run receipts"
             ),

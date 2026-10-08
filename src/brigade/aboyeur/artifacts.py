@@ -706,10 +706,7 @@ def _run_payload(
         "started_at": run_io._utc_iso(started_at),
         "status_started_at": run_io._utc_iso(started_at if status == "started" else datetime.now(timezone.utc)),
         "suspected_noop": suspected_noop,
-        "code_graph_brief": {
-            "attached": bool(code_graph.attached) if code_graph is not None else False,
-            "bytes": code_graph.bytes if code_graph is not None else 0,
-        },
+        "code_graph_brief": briefs.code_graph_brief_record(code_graph),
         "drift_impact_brief": {
             "attached": bool(drift_impact.attached) if drift_impact is not None else False,
             "bytes": drift_impact.bytes if drift_impact is not None else 0,

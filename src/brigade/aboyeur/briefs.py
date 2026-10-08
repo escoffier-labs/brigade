@@ -67,6 +67,7 @@ from . import orchestrator as _orchestrator_mod
 
 CODE_GRAPH_HEADING = "## Code graph context (GraphTrail, read-only)"
 CODE_GRAPH_LIMIT = 4000
+RELEVANCE_FLOOR_ENV = "BRIGADE_BRIEF_RELEVANCE_FLOOR"
 DRIFT_IMPACT_HEADING = "## Upstream drift impact (Upstream Drift + GraphTrail, read-only)"
 DRIFT_IMPACT_LIMIT = 4000
 BRIEF_BUDGET_BYTES = 6000
@@ -84,9 +85,21 @@ NO_PLAN_FILE_RULE = (
 
 @dataclass(frozen=True)
 class CodeGraphBrief:
+    """The GraphTrail brief, plus what it showed as data when the engine says so.
+
+    ``symbols`` and ``files`` come from the engine's ``--json`` pack whenever
+    the brief is a context pack, floored or not. They stay None only when the
+    JSON call fails or an older engine returns no pack, so only markdown exists.
+    ``confident`` is False when the engine found no code worth listing (#1648).
+    """
+
     attached: bool
     text: str = ""
     bytes: int = 0
+    confident: bool = True
+    floor_applied: bool = False
+    symbols: tuple[dict[str, object], ...] | None = None
+    files: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -173,7 +186,7 @@ def arbitrate_briefs(
         used += size
         attached.append({"name": name, "bytes": size, "truncated": truncated})
         if name == "code_graph":
-            kept_code_graph = CodeGraphBrief(attached=True, text=text, bytes=size)
+            kept_code_graph = replace(code_graph, attached=True, text=text, bytes=size)
         elif name == "drift_impact":
             kept_drift = DriftImpactBrief(
                 attached=True,
@@ -251,18 +264,122 @@ def code_graph_brief(cwd: Path | None, task: str) -> CodeGraphBrief:
     binary = _graphtrail_bin()
     if binary is None:
         return CodeGraphBrief(attached=False)
-    result = proc.run(
-        [binary, "--db", str(db_path), "context", task, "--markdown", "--limit", "8"],
-        timeout=10.0,
-        cwd=cwd,
-    )
+    base = [binary, "--db", str(db_path), "context", task]
+    floor = ["--relevance-floor"] if relevance_floor_enabled() else []
+    result = proc.run([*base, "--markdown", "--limit", "8", *floor], timeout=10.0, cwd=cwd)
+    if result.code != 0 and floor:
+        # An engine without the opt-in floor rejects the flag. Use its default pack.
+        floor = []
+        result = proc.run([*base, "--markdown", "--limit", "8"], timeout=10.0, cwd=cwd)
     if result.code != 0:
         return CodeGraphBrief(attached=False)
     body = result.stdout.strip()
     if not body:
         return CodeGraphBrief(attached=False)
     text = _truncate_on_line_boundary(f"{CODE_GRAPH_HEADING}\n\n{body}\n")
-    return CodeGraphBrief(attached=True, text=text, bytes=len(text.encode()))
+    brief = CodeGraphBrief(attached=True, text=text, bytes=len(text.encode()))
+    if not body.startswith("# Context Pack:"):
+        # Not a GraphTrail context pack: keep the markdown-only brief and its old receipt shape.
+        return brief
+    return _with_structured_pack(brief, [*base, "--json", "--limit", "8", *floor], cwd)
+
+
+def relevance_floor_enabled() -> bool:
+    """Operator opt-in for the GraphTrail relevance floor (brigade#1648).
+
+    Off by default: on labeled issue titles the floor raised precision but lost
+    recall and answered some tasks with no context. Set
+    ``BRIGADE_BRIEF_RELEVANCE_FLOOR=1`` to pass ``--relevance-floor`` to the engine.
+    """
+    return os.environ.get(RELEVANCE_FLOOR_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _with_structured_pack(brief: CodeGraphBrief, argv: list[str], cwd: Path) -> CodeGraphBrief:
+    """Record the brief's entry points and files from the engine's JSON pack."""
+    result = proc.run(argv, timeout=10.0, cwd=cwd)
+    if result.code != 0:
+        return brief
+    try:
+        pack = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return brief
+    if not isinstance(pack, dict):
+        return brief
+    entry_points = pack.get("entry_points")
+    related_files = pack.get("related_files")
+    if not isinstance(entry_points, list) or not isinstance(related_files, list):
+        return brief
+    symbols = tuple(
+        {key: entry.get(key) for key in ("id", "qualified_name", "file_path", "score")}
+        for entry in entry_points
+        if isinstance(entry, dict)
+    )
+    confident = pack.get("confident")
+    return replace(
+        brief,
+        # An engine that predates the field had no floor, so its pack counts as confident.
+        confident=confident if isinstance(confident, bool) else True,
+        floor_applied=isinstance(pack.get("relevance_floor"), dict),
+        symbols=symbols,
+        files=tuple(item for item in related_files if isinstance(item, str)),
+    )
+
+
+def shown_brief_files(code_graph: CodeGraphBrief | None) -> list[str] | None:
+    """Recorded brief files that survived truncation into the text the worker saw.
+
+    None when the brief carries no structured data, so callers fall back to
+    reading paths out of the markdown.
+    """
+    if code_graph is None or code_graph.files is None:
+        return None
+    lines = _graph_section_lines(code_graph.text)
+    return [path for path in code_graph.files if any(_line_shows_file(line, path) for line in lines)]
+
+
+def _graph_section_lines(text: str) -> list[str]:
+    """Lines after the engine's summary line, so the echoed task never counts.
+
+    The pack prints the task first and the summary line after it, so the last
+    summary line is always the engine's own, even when the task text contains
+    something that looks like one.
+    """
+    lines = text.splitlines()
+    starts = [index for index, line in enumerate(lines) if line.startswith("_schema v") and " entry points - " in line]
+    return lines[starts[-1] + 1 :] if starts else []
+
+
+def _line_shows_file(line: str, path: str) -> bool:
+    """A file is shown by a related-file line, an entry or edge location, or an edge target."""
+    return line == f"- {path}" or f" - {path}:" in line or line.endswith(f" -> {path}")
+
+
+def code_graph_brief_record(code_graph: CodeGraphBrief | None) -> dict[str, object]:
+    """The run receipt's ``code_graph_brief`` block."""
+    if code_graph is None:
+        return {"attached": False, "bytes": 0}
+    record: dict[str, object] = {"attached": bool(code_graph.attached), "bytes": code_graph.bytes}
+    files = shown_brief_files(code_graph)
+    if not code_graph.attached or code_graph.symbols is None or files is None:
+        return record
+    record.update(
+        {
+            "confident": code_graph.confident,
+            "floor_applied": code_graph.floor_applied,
+            "symbols": [dict(symbol) for symbol in code_graph.symbols if _entry_point_shown(symbol, code_graph.text)],
+            "files": files,
+        }
+    )
+    return record
+
+
+def _entry_point_shown(symbol: dict[str, object], text: str) -> bool:
+    """True when the graph sections still list this entry point, name and file, after truncation."""
+    name = symbol.get("qualified_name")
+    path = symbol.get("file_path")
+    if not isinstance(name, str) or not isinstance(path, str):
+        return False
+    return any(line.startswith(f"- `{name}` (") and f" - {path}:" in line for line in _graph_section_lines(text))
 
 
 def _upstream_drift_state_path() -> Path:

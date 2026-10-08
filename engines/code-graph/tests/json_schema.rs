@@ -14,6 +14,8 @@ fn context_pack_json_has_versioned_stable_shape() {
         callers: vec![],
         callees: vec![],
         related_files: vec![],
+        confident: true,
+        relevance_floor: None,
     };
     let value: serde_json::Value = serde_json::to_value(&pack).unwrap();
     let obj = value.as_object().unwrap();
@@ -24,6 +26,7 @@ fn context_pack_json_has_versioned_stable_shape() {
         "callers",
         "callees",
         "related_files",
+        "confident",
     ] {
         assert!(obj.contains_key(key), "missing key: {key}");
     }

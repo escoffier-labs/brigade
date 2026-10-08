@@ -25,6 +25,80 @@ def _init_git_repo(path: Path) -> None:
     subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True)
 
 
+def assert_code_graph_brief_block(block: object) -> None:
+    """Field types of the run receipt's code_graph_brief block (#1648).
+
+    ``attached`` is always present. ``bytes`` and the structured fields are
+    optional so legacy receipts keep validating.
+    """
+    assert isinstance(block, dict)
+    assert isinstance(block["attached"], bool)
+    if "bytes" in block:
+        assert isinstance(block["bytes"], int) and not isinstance(block["bytes"], bool)
+    structured = {"confident", "floor_applied", "symbols", "files"}
+    present = structured & block.keys()
+    assert present in (set(), structured), f"partial structured brief: {sorted(present)}"
+    if not present:
+        return
+    assert isinstance(block["confident"], bool)
+    assert isinstance(block["floor_applied"], bool)
+    assert isinstance(block["files"], list) and all(isinstance(path, str) for path in block["files"])
+    assert isinstance(block["symbols"], list)
+    for symbol in block["symbols"]:
+        assert set(symbol) == {"id", "qualified_name", "file_path", "score"}
+        assert isinstance(symbol["file_path"], str)
+
+
+def test_run_receipt_code_graph_brief_block_has_typed_fields():
+    from brigade.aboyeur import artifacts
+    from brigade.roster import Agent, Roster
+
+    roster = Roster(orchestrator="chef", agents={"chef": Agent("chef", "codex", "plan")}, max_workers=1)
+    structured = aboyeur.CodeGraphBrief(
+        attached=True,
+        text=(
+            "## Code graph context\n\n# Context Pack: t\n\n"
+            "_schema v7 - 1 entry points - 0 callers - 0 callees - 1 related files - relevance floor task-coverage-v2_\n\n"
+            "## Entry points\n\n- `run` (function) - src/app.py:1-2\n"
+        ),
+        bytes=60,
+        confident=True,
+        floor_applied=True,
+        symbols=({"id": "s1", "qualified_name": "run", "file_path": "src/app.py", "score": 3.5},),
+        files=("src/app.py",),
+    )
+    structured_block = artifacts._run_payload(
+        task="t",
+        cwd=None,
+        lock_workspace=None,
+        roster=roster,
+        dry_run=True,
+        read_only=False,
+        status="completed",
+        started_at=datetime(2026, 10, 8, tzinfo=timezone.utc),
+        code_graph=structured,
+        include_git=False,
+    )["code_graph_brief"]
+    # The audit must see a populated block, not one emptied by the shown filter.
+    assert len(structured_block["symbols"]) == 1
+    assert structured_block["files"] == ["src/app.py"]
+    for brief in (structured, aboyeur.CodeGraphBrief(attached=True, text="graph", bytes=5), None):
+        payload = artifacts._run_payload(
+            task="t",
+            cwd=None,
+            lock_workspace=None,
+            roster=roster,
+            dry_run=True,
+            read_only=False,
+            status="completed",
+            started_at=datetime(2026, 10, 8, tzinfo=timezone.utc),
+            code_graph=brief,
+            include_git=False,
+        )
+        assert_code_graph_brief_block(payload["code_graph_brief"])
+    assert payload["code_graph_brief"] == {"attached": False, "bytes": 0}
+
+
 def test_verify_receipt_emits_schema_version(tmp_path, capsys):
     _init_git_repo(tmp_path)
     rc = verify_mod.verify_run(
@@ -166,6 +240,7 @@ def test_run_receipt_legacy_without_schema_version_still_loads(tmp_path):
     }
     (run_dir / "run.json").write_text(json.dumps(legacy, sort_keys=True) + "\n")
     payload, run_json = outcome_cmd._read_run_receipt(run_dir)
+    assert_code_graph_brief_block(payload["code_graph_brief"])
     assert payload is not None
     assert run_json.name == "run.json"
     assert payload["schema"] == receipt_schema.RUN_RECEIPT_SCHEMA
