@@ -2501,6 +2501,42 @@ def _record_fleet_calls(monkeypatch, resolve):
     return seen
 
 
+def test_retrying_the_same_lease_keeps_its_pinned_target(tmp_path: Path, monkeypatch):
+    """An idempotent claim retry must not re-resolve: failing the job must release the live claim."""
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    current = {"key": "acme/repo"}
+    seen = _record_fleet_calls(monkeypatch, lambda base_path=None: current["key"])
+
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    current["key"] = "acme/new-repo"
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    adapter.call_tool("grokbot_queue_fail", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert {target for _kind, target in seen} == {"acme/repo"}
+    assert [kind for kind, _target in seen].count("release") == 1
+
+
+def test_many_live_leases_keep_their_pins_and_expired_ones_do_not(tmp_path: Path, monkeypatch):
+    adapter = _adapter(tmp_path)
+    current = {"key": "acme/repo"}
+    seen = _record_fleet_calls(monkeypatch, lambda base_path=None: current["key"])
+
+    for index in range(200):
+        assert adapter._fleet_acquire(f"job-{index}", f"holder-{index}", f"session-{index}", 900).granted
+    current["key"] = "acme/new-repo"
+    seen.clear()
+    adapter._fleet_renew("holder-0", 900)
+    adapter._fleet_release("holder-0")
+    assert seen == [("renew", "acme/repo"), ("release", "acme/repo")]
+
+    # A lease past its expiry is not live: a later acquire for it resolves afresh.
+    assert adapter._fleet_acquire("job-x", "holder-x", "session-x", 0).granted
+    seen.clear()
+    assert adapter._fleet_acquire("job-x", "holder-x", "session-x", 900).granted
+    assert seen == [("acquire", "acme/new-repo")]
+
+
 def test_a_new_lease_resolves_the_target_again_after_the_old_one_was_released(tmp_path: Path, monkeypatch):
     """The pin is per lease: when origin changes, the next acquisition gets the new key."""
     adapter = _adapter(tmp_path)

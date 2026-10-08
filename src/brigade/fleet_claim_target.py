@@ -39,9 +39,62 @@ def _fail(cwd: Path, detail: object) -> ClaimTargetError:
     return ClaimTargetError(f"cannot determine the claim target for {cwd}: git failed ({detail})")
 
 
+def _ceiling_directories() -> set[Path]:
+    """``GIT_CEILING_DIRECTORIES`` with git's semantics.
+
+    Absolute entries only. Entries before the first empty entry have their
+    symlinks resolved. An empty entry tells git the entries after it are
+    already real paths, so they are used as written; it does not disable them.
+    """
+    ceilings: set[Path] = set()
+    resolve = True
+    for entry in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep):
+        if not entry:
+            resolve = False
+            continue
+        path = Path(entry)
+        if not path.is_absolute():
+            continue
+        if resolve:
+            try:
+                path = path.resolve()
+            except OSError:
+                pass
+        ceilings.add(path)
+    return ceilings
+
+
+def _device(path: Path) -> int | None:
+    try:
+        return os.stat(path).st_dev
+    except OSError:
+        return None
+
+
 def _inside_checkout(cwd: Path) -> bool:
-    """Whether a ``.git`` file or directory exists at or above ``cwd``."""
-    return any((candidate / ".git").exists() for candidate in (cwd, *cwd.parents))
+    """Whether git would find a ``.git`` file or directory at or above ``cwd``.
+
+    The walk stops where git's own discovery stops: it never ascends into a
+    ``GIT_CEILING_DIRECTORIES`` entry (the starting directory is always
+    examined) and, unless ``GIT_DISCOVERY_ACROSS_FILESYSTEM`` is set, never
+    crosses onto another filesystem.
+    """
+    try:
+        cwd = cwd.resolve()
+    except OSError:
+        pass
+    ceilings = _ceiling_directories()
+    across = os.environ.get("GIT_DISCOVERY_ACROSS_FILESYSTEM", "").lower() in {"1", "true", "yes", "on"}
+    start_device = _device(cwd)
+    for candidate in (cwd, *cwd.parents):
+        if candidate != cwd:
+            if candidate in ceilings:
+                return False
+            if not across and start_device is not None and _device(candidate) != start_device:
+                return False
+        if (candidate / ".git").exists():
+            return True
+    return False
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -91,14 +144,17 @@ def _git_layout(cwd: Path) -> tuple[Path, bool] | None:
 def _origin_remote(toplevel: Path) -> str | None:
     """The ``origin`` URL, or ``None`` when no ``origin`` remote is configured.
 
-    Unlike ``fleet_session_presence`` this tells "no such remote" (exit 2, a
-    legitimate fallback) apart from a failed read (any other nonzero exit),
-    which raises.
+    ``git config --get`` exits 1 when the key is unset, which is the
+    legitimate fallback, and works on every git version (``remote get-url``
+    needs 2.7 and exits differently across versions). Any other nonzero exit
+    raises, unlike ``fleet_session_presence``, which maps every failure to
+    "no remote". The raw configured URL is used, so a per-user ``insteadOf``
+    rewrite cannot make two machines disagree on the key.
     """
-    completed = _git(toplevel, "remote", "get-url", "origin")
+    completed = _git(toplevel, "config", "--get", "remote.origin.url")
     if completed.returncode == 0:
         return completed.stdout.strip() or None
-    if completed.returncode == 2 or "No such remote" in completed.stderr:
+    if completed.returncode == 1:
         return None
     raise _fail(toplevel, completed.stderr.strip() or f"exit {completed.returncode}")
 

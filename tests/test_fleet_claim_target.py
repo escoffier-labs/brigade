@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -160,7 +161,7 @@ def test_transient_git_failure_raises_instead_of_changing_the_key(tmp_path, monk
 
 
 def _fail_remote_reads(monkeypatch, state: dict, outcome):
-    """Stub only the ``git remote`` command; every other git call is real.
+    """Stub only the ``git config`` remote read; every other git call is real.
 
     ``outcome`` is a CompletedProcess to return or an exception to raise.
     Clearing ``state["fail"]`` lets the real git run again (recovery).
@@ -168,7 +169,7 @@ def _fail_remote_reads(monkeypatch, state: dict, outcome):
     real_run = subprocess.run
 
     def run(cmd, *args, **kwargs):
-        if state["fail"] and list(cmd[:2]) == ["git", "remote"]:
+        if state["fail"] and list(cmd[:2]) == ["git", "config"]:
             if isinstance(outcome, BaseException):
                 raise outcome
             return outcome
@@ -186,7 +187,7 @@ def _fail_remote_reads(monkeypatch, state: dict, outcome):
     ids=["exit-128", "timeout"],
 )
 def test_failed_remote_read_raises_and_the_key_recovers_once_git_does(tmp_path, monkeypatch, outcome):
-    """A failed ``git remote`` read must never become the toplevel-name key, and
+    """A failed remote read must never become the toplevel-name key, and
     must not be remembered after git recovers."""
     home = _make_home(tmp_path, "homeA", monkeypatch)
     repo = _make_repo(home / "repos", "worker", "https://github.com/acme/repo.git")
@@ -223,6 +224,52 @@ def test_missing_git_fails_closed_inside_a_checkout_but_not_outside_one(tmp_path
     with pytest.raises(ClaimTargetError):
         fleet_client.resolve_claim_target(nested)
     assert fleet_client.resolve_claim_target(plain) == "notes"
+
+
+def _ceiling_layout(tmp_path, monkeypatch):
+    """A fake checkout at ``outer`` with a plain ``sub/child`` below it, git missing."""
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    outer = home / "outer"
+    (outer / ".git").mkdir(parents=True)
+    child = outer / "sub" / "child"
+    child.mkdir(parents=True)
+    monkeypatch.setattr("brigade.fleet_claim_target.subprocess.run", _boom(FileNotFoundError("git")))
+    return outer, child
+
+
+def test_missing_git_walk_honors_git_ceiling_directories(tmp_path, monkeypatch):
+    """With git installed a child under a ceiling is outside git; the fallback must agree."""
+    outer, child = _ceiling_layout(tmp_path, monkeypatch)
+    # The sandbox itself is always a ceiling so the host's own checkouts never matter.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    with pytest.raises(ClaimTargetError):
+        fleet_client.resolve_claim_target(child)
+    sub = str(outer / "sub")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", os.pathsep.join([str(tmp_path), sub]))
+    assert fleet_client.resolve_claim_target(child) == "child"
+    # An empty entry means "do not resolve symlinks for the rest", not "ignore the rest".
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", os.pathsep.join([str(tmp_path), "", sub]))
+    assert fleet_client.resolve_claim_target(child) == "child"
+
+
+def test_missing_git_walk_never_hides_the_checkout_at_the_ceiling_itself(tmp_path, monkeypatch):
+    outer, _child = _ceiling_layout(tmp_path, monkeypatch)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", os.pathsep.join([str(tmp_path), str(outer)]))
+    with pytest.raises(ClaimTargetError):
+        fleet_client.resolve_claim_target(outer)
+
+
+def test_missing_git_walk_stops_at_a_filesystem_boundary(tmp_path, monkeypatch):
+    outer, child = _ceiling_layout(tmp_path, monkeypatch)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.delenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", raising=False)
+    monkeypatch.setattr(
+        "brigade.fleet_claim_target._device", lambda path: 2 if path.resolve() == outer.resolve() else 1
+    )
+    assert fleet_client.resolve_claim_target(child) == "child"
+    monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
+    with pytest.raises(ClaimTargetError):
+        fleet_client.resolve_claim_target(child)
 
 
 def test_a_directory_that_is_not_a_git_repo_is_not_an_error(tmp_path, monkeypatch):

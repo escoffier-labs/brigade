@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import stat
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -32,8 +33,6 @@ MAX_REQUEST_BYTES = 80_000
 # The bound is the queue's own, so a listener can never hand out a lease the
 # queue or the hub would refuse.
 DEFAULT_LEASE_SECONDS = 900
-# Per-lease claim-key pins kept at once; older ones belong to expired leases.
-_MAX_FLEET_PINS = 128
 MIN_LEASE_SECONDS = grokbot_job_validation.LEASE_SECONDS_MIN
 MAX_LEASE_SECONDS = grokbot_job_validation.LEASE_SECONDS_MAX
 # Fits native UUID node IDs and leaves room for the role prefix inside opaque-ID128.
@@ -324,7 +323,8 @@ class GrokbotAdapter:
         config.validate()
         self.config = config
         self._hub_actor_verified = False
-        self._fleet_pins: dict[str, str] = {}
+        # holder -> (claim target, monotonic expiry of the lease's claim)
+        self._fleet_pins: dict[str, tuple[str, float]] = {}
 
     def ensure_hub_actor(self) -> None:
         """Fail closed when the listener's hub credential does not match this instance."""
@@ -788,27 +788,37 @@ class GrokbotAdapter:
         resolver's subprocess off the heartbeat path. A failed resolution
         raises and is never pinned.
         """
-        pinned = self._fleet_pins.get(holder) if holder is not None else None
-        return pinned if pinned is not None else fleet_client.resolve_claim_target(self.config.target)
+        if holder is not None:
+            entry = self._fleet_pins.get(holder)
+            if entry is not None and entry[1] > time.monotonic():
+                return entry[0]
+        return fleet_client.resolve_claim_target(self.config.target)
 
-    def _fleet_pin(self, holder: str, target: str) -> None:
-        self._fleet_pins.pop(holder, None)
-        self._fleet_pins[holder] = target
-        while len(self._fleet_pins) > _MAX_FLEET_PINS:
-            # Leases that expire without a release; a new lease has a new holder.
-            self._fleet_pins.pop(next(iter(self._fleet_pins)))
+    def _fleet_pin(self, holder: str, target: str, ttl_seconds: int) -> None:
+        """Pin ``holder``'s lease to ``target`` until its claim TTL runs out.
+
+        ``holder`` is the hash of the job and lease ids, so a retry of the
+        same lease finds its pin and a new lease does not. Entries past their
+        expiry belong to leases nobody released; they are swept here, so the
+        map holds only live leases and never evicts one.
+        """
+        now = time.monotonic()
+        for stale in [key for key, (_target, expires) in self._fleet_pins.items() if expires <= now]:
+            del self._fleet_pins[stale]
+        self._fleet_pins[holder] = (target, now + ttl_seconds)
 
     def _fleet_acquire(
         self, job_id: str, holder: str, session: str, lease_seconds: int | None = None
     ) -> fleet_client.ClaimDecision:
+        ttl = lease_seconds if lease_seconds is not None else self.config.lease_seconds
         try:
-            # Every acquisition resolves afresh, so a released or expired
-            # lease never carries an obsolete key into the next one.
-            target = fleet_client.resolve_claim_target(self.config.target)
+            # An idempotent retry of a live lease reuses its pin. Only a new
+            # lease, or one released or past its expiry, resolves afresh.
+            target = self._fleet_target(holder)
             decision = fleet_client.acquire_claim(
                 target,
                 holder=holder,
-                ttl_seconds=lease_seconds if lease_seconds is not None else self.config.lease_seconds,
+                ttl_seconds=ttl,
                 harness="grokbot",
                 role=self.config.instance,
                 job=job_id,
@@ -817,18 +827,18 @@ class GrokbotAdapter:
         except Exception:
             return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder)
         if decision.granted:
-            self._fleet_pin(holder, target)
+            self._fleet_pin(holder, target, ttl)
         return decision
 
     def _fleet_renew(self, holder: str, lease_seconds: int | None = None) -> fleet_client.ClaimDecision:
+        ttl = lease_seconds if lease_seconds is not None else self.config.lease_seconds
         try:
-            ttl = lease_seconds if lease_seconds is not None else self.config.lease_seconds
             target = self._fleet_target(holder)
             decision = fleet_client.renew_claim(target, holder=holder, ttl_seconds=ttl)
         except Exception:
             return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder)
         if decision.granted:
-            self._fleet_pin(holder, target)
+            self._fleet_pin(holder, target, ttl)
         return decision
 
     def _fleet_release(self, holder: str) -> None:
