@@ -61,6 +61,7 @@ impl LangSpec for GoSpec {
             alias,
             line: node.start_position().row + 1,
             module_scope: true,
+            conditional: false,
         });
     }
 

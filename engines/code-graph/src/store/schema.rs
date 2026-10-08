@@ -65,12 +65,20 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             imported_name TEXT,
             alias TEXT,
             line INTEGER NOT NULL,
-            module_scope INTEGER NOT NULL DEFAULT 1
+            module_scope INTEGER NOT NULL DEFAULT 1,
+            conditional INTEGER NOT NULL DEFAULT 0
         );
 
         -- A module's literal export list (Python `__all__`) as a JSON array.
         -- No row means the module declares none. Populated by extraction, so
         -- an extractor fingerprint bump fills it for existing databases.
+        -- Top-level symbols defined under an `if`, `try`, `with`, loop, or
+        -- `match` (Python), whose definition may not run.
+        CREATE TABLE IF NOT EXISTS conditional_symbols (
+            symbol_id TEXT PRIMARY KEY,
+            file_path TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS module_exports (
             file_path TEXT PRIMARY KEY,
             names TEXT NOT NULL
@@ -254,6 +262,12 @@ fn ensure_import_columns(conn: &Connection) -> Result<()> {
     if !columns.iter().any(|existing| existing == "module_scope") {
         conn.execute(
             "ALTER TABLE imports ADD COLUMN module_scope INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
+    if !columns.iter().any(|existing| existing == "conditional") {
+        conn.execute(
+            "ALTER TABLE imports ADD COLUMN conditional INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }

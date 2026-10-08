@@ -74,6 +74,7 @@ impl LangSpec for TypeScriptSpec {
                         alias: None,
                         line,
                         module_scope: true,
+                        conditional: false,
                     });
                 }
             }
@@ -109,6 +110,7 @@ impl LangSpec for TypeScriptSpec {
                             alias: None,
                             line,
                             module_scope: true,
+                            conditional: false,
                         });
                         break;
                     }
@@ -169,6 +171,7 @@ fn collect_ts_import_bindings(
                 alias,
                 line,
                 module_scope: true,
+                conditional: false,
             });
         }
         "namespace_import" => {
@@ -182,6 +185,7 @@ fn collect_ts_import_bindings(
                         alias: Some(local),
                         line,
                         module_scope: true,
+                        conditional: false,
                     });
                 }
             }
@@ -200,6 +204,7 @@ fn collect_ts_import_bindings(
                         alias: None,
                         line,
                         module_scope: true,
+                        conditional: false,
                     });
                 }
             }

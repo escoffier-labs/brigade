@@ -16,7 +16,8 @@ use crate::model::{CallKind, Import, PendingCall};
 /// v4 solves Python module bindings as a fixpoint and ignores function- and
 /// class-local imports as module exports.
 /// v5 treats star-import cycles that can bind more than one definition as ambiguous.
-pub(crate) const RESOLVER_VERSION: &str = "5";
+/// v6 drops binding statements shadowed by a later unconditional binding.
+pub(crate) const RESOLVER_VERSION: &str = "6";
 
 #[derive(Clone, PartialEq)]
 pub(super) struct SymbolCandidate {
@@ -162,6 +163,8 @@ pub(crate) struct FileIndex {
     python_roots: HashMap<String, Vec<String>>,
     /// Literal Python `__all__` lists by file.
     python_exports: HashMap<String, Vec<String>>,
+    /// Ids of Python top-level symbols defined under a conditional block.
+    python_conditional_symbols: HashSet<String>,
     /// Complete Python binding lookups, shared by every call resolved against
     /// this index so re-export walks are not repeated per call.
     python_bindings: RefCell<HashMap<(String, String), Binding>>,
@@ -201,20 +204,34 @@ pub(super) fn load_file_index(conn: &Connection) -> Result<FileIndex> {
         files,
         python_roots,
         python_exports: load_python_exports(conn)?,
+        python_conditional_symbols: load_conditional_symbols(conn)?,
         python_bindings: RefCell::default(),
     })
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [table],
+        |row| row.get(0),
+    )?)
+}
+
+/// Read the ids of conditionally defined symbols. An older database has none.
+fn load_conditional_symbols(conn: &Connection) -> Result<HashSet<String>> {
+    if !table_exists(conn, "conditional_symbols")? {
+        return Ok(HashSet::new());
+    }
+    let mut stmt = conn.prepare("SELECT symbol_id FROM conditional_symbols")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
 }
 
 /// Read stored `__all__` lists. A database written before the table existed
 /// has none, which means "no declared export list" everywhere.
 fn load_python_exports(conn: &Connection) -> Result<HashMap<String, Vec<String>>> {
-    let has_table: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'module_exports')",
-        [],
-        |row| row.get(0),
-    )?;
     let mut exports = HashMap::new();
-    if !has_table {
+    if !table_exists(conn, "module_exports")? {
         return Ok(exports);
     }
     let mut stmt = conn.prepare("SELECT file_path, names FROM module_exports")?;
@@ -232,14 +249,21 @@ fn load_python_exports(conn: &Connection) -> Result<HashMap<String, Vec<String>>
 }
 
 pub(super) fn load_import_index(conn: &Connection) -> Result<HashMap<String, Vec<Import>>> {
-    // A read-only database written before the column existed has only module-scope rows.
-    let module_scope = if super::schema::table_has_column(conn, "imports", "module_scope")? {
-        "module_scope"
-    } else {
-        "1"
+    // A read-only database written before these columns existed has only
+    // unconditional module-scope rows.
+    let column_or = |column: &'static str, default: &'static str| -> Result<&'static str> {
+        Ok(
+            if super::schema::table_has_column(conn, "imports", column)? {
+                column
+            } else {
+                default
+            },
+        )
     };
+    let module_scope = column_or("module_scope", "1")?;
+    let conditional = column_or("conditional", "0")?;
     let mut stmt = conn.prepare(&format!(
-        "SELECT file_path, module, local_name, imported_name, alias, line, {module_scope}
+        "SELECT file_path, module, local_name, imported_name, alias, line, {module_scope}, {conditional}
          FROM imports ORDER BY file_path, line, module, local_name"
     ))?;
     let rows = stmt.query_map([], |row| {
@@ -252,6 +276,7 @@ pub(super) fn load_import_index(conn: &Connection) -> Result<HashMap<String, Vec
                 alias: row.get::<_, Option<String>>(4)?,
                 line: row.get::<_, i64>(5)? as usize,
                 module_scope: row.get::<_, bool>(6)?,
+                conditional: row.get::<_, bool>(7)?,
             },
         ))
     })?;
@@ -651,6 +676,18 @@ enum Statement {
     },
 }
 
+/// A binding statement plus whether it sits under a block that may not run.
+struct Binder {
+    statement: Statement,
+    conditional: bool,
+}
+
+impl Binder {
+    fn reads(&self) -> &[BindingKey] {
+        self.statement.reads()
+    }
+}
+
 impl Statement {
     fn reads(&self) -> &[BindingKey] {
         match self {
@@ -712,16 +749,37 @@ impl PythonBindings<'_> {
         }
     }
 
-    /// The module-scope statements of `file` that may bind `name`, latest first.
-    fn statements(&self, file: &str, name: &str) -> Vec<Statement> {
-        let mut statements: Vec<(usize, Statement)> = self
+    /// The module-scope statements of `file` that can still decide its binding
+    /// of `name`, latest first.
+    ///
+    /// Reading bottom up, the first statement that certainly binds the name
+    /// shadows everything above it: an unconditional definition, `import`, or
+    /// `from x import name`, or an unconditional star import whose `__all__`
+    /// lists the name. Statements under an `if`, `try`, `with`, loop, or
+    /// `match` may not run, so earlier statements stay. Shadowed statements add
+    /// no definitions and no dependencies, which keeps them out of cycles.
+    fn statements(&self, file: &str, name: &str) -> Vec<Binder> {
+        let mut statements: Vec<(usize, bool, Binder)> = self
             .names
             .and_then(|names| names.get(name))
             .into_iter()
             .flatten()
             // Only top-level definitions are module attributes, so `Box.helper` is not one.
             .filter(|candidate| candidate.file_path == file && candidate.container.is_none())
-            .map(|candidate| (candidate.line, Statement::Definition(candidate.clone())))
+            .map(|candidate| {
+                let conditional = self
+                    .file_index
+                    .python_conditional_symbols
+                    .contains(&candidate.id);
+                (
+                    candidate.line,
+                    !conditional,
+                    Binder {
+                        statement: Statement::Definition(candidate.clone()),
+                        conditional,
+                    },
+                )
+            })
             .collect();
         for import in self.import_index.get(file).into_iter().flatten() {
             if !import.module_scope {
@@ -737,13 +795,31 @@ impl PythonBindings<'_> {
             } else {
                 None
             };
-            statements.extend(statement.map(|statement| (import.line, statement)));
+            if let Some(statement) = statement {
+                let binds = match &statement {
+                    Statement::Star { listed, .. } => *listed,
+                    _ => true,
+                };
+                statements.push((
+                    import.line,
+                    binds && !import.conditional,
+                    Binder {
+                        statement,
+                        conditional: import.conditional,
+                    },
+                ));
+            }
         }
         // Python keeps the last binding, so read the module bottom up.
-        statements.sort_by_key(|(line, _)| Reverse(*line));
+        statements.sort_by_key(|(line, _, _)| Reverse(*line));
+        let shadowing = statements
+            .iter()
+            .position(|(_, certain, _)| *certain)
+            .map_or(statements.len(), |position| position + 1);
+        statements.truncate(shadowing);
         statements
             .into_iter()
-            .map(|(_, statement)| statement)
+            .map(|(_, _, statement)| statement)
             .collect()
     }
 
@@ -777,7 +853,7 @@ impl PythonBindings<'_> {
 
     /// Solve every unsolved pair reachable from `roots` and memoize the results.
     fn solve(&self, roots: &[BindingKey]) {
-        let mut statements: Vec<Vec<Statement>> = Vec::new();
+        let mut statements: Vec<Vec<Binder>> = Vec::new();
         let mut keys: Vec<BindingKey> = Vec::new();
         let mut index: HashMap<BindingKey, usize> = HashMap::new();
         {
@@ -791,7 +867,7 @@ impl PythonBindings<'_> {
                 pending.extend(
                     key_statements
                         .iter()
-                        .flat_map(Statement::reads)
+                        .flat_map(Binder::reads)
                         .filter(|read| !memo.contains_key(*read) && !index.contains_key(*read))
                         .cloned(),
                 );
@@ -810,7 +886,7 @@ impl PythonBindings<'_> {
             .map(|key_statements| {
                 let mut targets: Vec<usize> = key_statements
                     .iter()
-                    .flat_map(Statement::reads)
+                    .flat_map(Binder::reads)
                     .filter_map(|read| index.get(read).copied())
                     .collect();
                 targets.sort_unstable();
@@ -872,7 +948,7 @@ fn read_value(
 /// cached as solved.
 fn solve_cycle(
     component: &[usize],
-    statements: &[Vec<Statement>],
+    statements: &[Vec<Binder>],
     reads: &[Vec<usize>],
     index: &HashMap<BindingKey, usize>,
     values: &[Option<Binding>],
@@ -888,7 +964,7 @@ fn solve_cycle(
     let mut supplied: HashSet<&str> = HashSet::new();
     for member in component {
         for statement in &statements[*member] {
-            if let Statement::Definition(candidate) = statement {
+            if let Statement::Definition(candidate) = &statement.statement {
                 supplied.insert(&candidate.id);
             }
             for read in statement.reads() {
@@ -1025,26 +1101,51 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
 }
 
 /// A module's binding from its statements, latest first, given the bindings it reads.
-fn evaluate(statements: &[Statement], read: impl Fn(&BindingKey) -> Binding) -> Binding {
-    for statement in statements {
-        match statement {
-            Statement::Definition(candidate) => return Binding::Found(vec![candidate.clone()]),
-            Statement::ModuleImport => return Binding::Missing,
-            Statement::Explicit(reads) => {
-                return match combine(reads, &read) {
-                    Binding::Found(targets) => Binding::Found(targets),
-                    Binding::Ambiguous => Binding::Ambiguous,
-                    Binding::Missing | Binding::Unbound => Binding::Missing,
-                };
-            }
-            Statement::Star { reads, listed } => match combine(reads, &read) {
-                Binding::Unbound if !listed => {}
-                Binding::Unbound => return Binding::Missing,
-                binding => return binding,
+///
+/// The latest statement that binds the name wins. When it is conditional, an
+/// earlier statement may bind instead, so every candidate up to the first
+/// unconditional binding counts. If those candidates name more than one
+/// definition, the binding is `Ambiguous`.
+fn evaluate(statements: &[Binder], read: impl Fn(&BindingKey) -> Binding) -> Binding {
+    let mut chosen: Option<Binding> = None;
+    let mut definitions: Vec<String> = Vec::new();
+    for binder in statements {
+        let value = match &binder.statement {
+            Statement::Definition(candidate) => Binding::Found(vec![candidate.clone()]),
+            Statement::ModuleImport => Binding::Missing,
+            Statement::Explicit(reads) => match combine(reads, &read) {
+                Binding::Found(targets) => Binding::Found(targets),
+                Binding::Ambiguous => Binding::Ambiguous,
+                Binding::Missing | Binding::Unbound => Binding::Missing,
             },
+            Statement::Star { reads, listed } => match combine(reads, &read) {
+                Binding::Unbound if !listed => continue,
+                Binding::Unbound => Binding::Missing,
+                binding => binding,
+            },
+        };
+        match &value {
+            Binding::Ambiguous => return Binding::Ambiguous,
+            Binding::Found(targets) => {
+                // One import can name several files. Only a different
+                // definition from another statement makes the binding ambiguous.
+                if !definitions.is_empty()
+                    && targets
+                        .iter()
+                        .any(|target| !definitions.contains(&target.id))
+                {
+                    return Binding::Ambiguous;
+                }
+                definitions.extend(targets.iter().map(|target| target.id.clone()));
+            }
+            Binding::Missing | Binding::Unbound => {}
+        }
+        chosen.get_or_insert(value);
+        if !binder.conditional {
+            break;
         }
     }
-    Binding::Unbound
+    chosen.unwrap_or(Binding::Unbound)
 }
 
 /// Merge the bindings of one import's target files (normally a single file).

@@ -10,7 +10,8 @@ use crate::model::{CallTarget, FileGraph, Import};
 /// v3: module-level calls belong to a `<module>` pseudo-symbol, decorated
 /// definitions span their decorators, and `from x import *` is recorded.
 /// v4: literal `__all__` lists, import scope, and a stable `<module>` span.
-pub const EXTRACTOR_FINGERPRINT: &str = "python-extractor-v4";
+/// v5: conditional module-scope imports and definitions are recorded.
+pub const EXTRACTOR_FINGERPRINT: &str = "python-extractor-v5";
 
 /// `imported_name` of a `from x import *` row.
 pub const WILDCARD_IMPORT: &str = "*";
@@ -53,6 +54,18 @@ impl LangSpec for PythonSpec {
 
     fn module_scope_calls(&self) -> bool {
         true
+    }
+
+    fn conditional_block(&self, kind: &str) -> bool {
+        matches!(
+            kind,
+            "if_statement"
+                | "try_statement"
+                | "with_statement"
+                | "for_statement"
+                | "while_statement"
+                | "match_statement"
+        )
     }
 
     fn module_exports(&self, root: TsNode<'_>, source: &[u8]) -> Option<Vec<String>> {
@@ -130,6 +143,7 @@ impl LangSpec for PythonSpec {
                             alias,
                             line,
                             module_scope: true,
+                            conditional: false,
                         });
                     }
                 }
@@ -154,6 +168,7 @@ impl LangSpec for PythonSpec {
                                 alias: None,
                                 line,
                                 module_scope: true,
+                                conditional: false,
                             });
                             continue;
                         }
@@ -181,6 +196,7 @@ impl LangSpec for PythonSpec {
                             alias,
                             line,
                             module_scope: true,
+                            conditional: false,
                         });
                     }
                 }
@@ -499,6 +515,45 @@ class Box:
             scopes,
             [("os", true), ("a", true), ("b", false), ("c", false)]
         );
+        let conditional: Vec<(&str, bool)> = g
+            .imports
+            .iter()
+            .map(|import| (import.module.as_str(), import.conditional))
+            .collect();
+        assert_eq!(
+            conditional,
+            [("os", false), ("a", true), ("b", false), ("c", false)]
+        );
+    }
+
+    #[test]
+    fn python_conditional_top_level_definitions_are_recorded() {
+        let g = graph(
+            "def plain():
+    pass
+
+if FLAG:
+    def guarded():
+        def inner():
+            pass
+else:
+    @wrap
+    def other():
+        pass
+
+class C:
+    if FLAG:
+        def method(self):
+            pass
+",
+        );
+        let conditional: Vec<&str> = g
+            .symbols
+            .iter()
+            .filter(|symbol| g.conditional_symbols.contains(&symbol.id))
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect();
+        assert_eq!(conditional, ["guarded", "other"]);
     }
 
     #[test]

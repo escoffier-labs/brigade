@@ -39,6 +39,18 @@ pub trait LangSpec {
     fn module_exports(&self, _root: TsNode<'_>, _source: &[u8]) -> Option<Vec<String>> {
         None
     }
+    /// Whether a node of this kind runs its body only conditionally (an `if`,
+    /// `try`, `with`, loop, or `match`). Module-scope imports and definitions
+    /// under one are recorded as conditional.
+    fn conditional_block(&self, _kind: &str) -> bool {
+        false
+    }
+}
+
+/// Whether `node` sits under a block that may not run its body.
+fn under_conditional_block<L: LangSpec>(spec: &L, node: TsNode<'_>) -> bool {
+    std::iter::successors(node.parent(), TsNode::parent)
+        .any(|parent| spec.conditional_block(parent.kind()))
 }
 
 /// Name and qualified name of the per-file pseudo-symbol that owns module-level calls.
@@ -57,6 +69,8 @@ struct SymbolState {
     /// same-named symbols of the same kind in one file.
     occurrences: std::collections::HashMap<String, usize>,
     symbols: Vec<Symbol>,
+    /// Ids of module-level symbols defined under a conditional block.
+    conditional: Vec<String>,
 }
 
 struct Ctx<'a> {
@@ -126,6 +140,7 @@ pub fn extract_with<L: LangSpec>(
         imports,
         calls,
         exports: spec.module_exports(tree.root_node(), ctx.source),
+        conditional_symbols: symbol_state.conditional,
     })
 }
 
@@ -140,10 +155,14 @@ fn visit<L: LangSpec>(
 ) {
     let first_new_import = imports.len();
     spec.collect_import(node, ctx.source, imports);
-    if ctx.module_id.is_some() && !stack.is_empty() {
+    if ctx.module_id.is_some() && imports.len() > first_new_import {
         // A function- or class-local import binds in that body, not the module.
+        // A module-scope import under an `if` or `try` may not run at all.
+        let module_scope = stack.is_empty();
+        let conditional = module_scope && under_conditional_block(spec, node);
         for import in &mut imports[first_new_import..] {
-            import.module_scope = false;
+            import.module_scope = module_scope;
+            import.conditional = conditional;
         }
     }
 
@@ -197,6 +216,9 @@ fn visit<L: LangSpec>(
                 current
             };
             let id = symbol_id(ctx.path, &qualified_name, kind, occurrence);
+            if ctx.module_id.is_some() && stack.is_empty() && under_conditional_block(spec, node) {
+                symbol_state.conditional.push(id.clone());
+            }
             symbol_state.symbols.push(Symbol {
                 id: id.clone(),
                 kind: kind.to_string(),

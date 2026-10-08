@@ -1502,19 +1502,29 @@ fn python_function_local_import_is_not_a_module_export() {
         "from facade import helper\n\ndef run():\n    return helper()\n",
     );
     // An import under a module-level `if` still binds at module scope.
-    write_resolution_file(
-        root,
-        "guarded.py",
-        "from a import helper\n\nif True:\n    from b import helper\n",
-    );
+    write_resolution_file(root, "guarded.py", "if FLAG:\n    from b import helper\n");
     write_resolution_file(
         root,
         "use_guarded.py",
         "from guarded import helper\n\ndef go():\n    return helper()\n",
     );
+    // When it may not run, the earlier binding to a different definition
+    // still counts, so neither one is claimed strictly.
+    write_resolution_file(
+        root,
+        "either.py",
+        "from a import helper\n\nif FLAG:\n    from b import helper\n",
+    );
+    write_resolution_file(
+        root,
+        "use_either.py",
+        "from either import helper\n\ndef pick():\n    return helper()\n",
+    );
     let conn = resolution_db(root);
     assert_resolves_to(&conn, "run", "helper", "import-strict", "a.py");
     assert_resolves_to(&conn, "go", "helper", "import-strict", "b.py");
+    let rows = graphtrail::store::explain_calls(&conn, "pick", "helper").unwrap();
+    assert_ne!(rows[0].resolution, "import-strict", "{rows:?}");
 }
 
 #[test]
@@ -1736,5 +1746,53 @@ fn python_star_cycle_with_competing_definitions_is_not_import_strict() {
             )
             .unwrap();
         assert_eq!(strict, 0, "wrappers={wrappers}");
+    }
+}
+
+/// a and b star-import each other, but a's last binding of `helper` is an
+/// unconditional `from seed import helper`. That shadows the star import, so
+/// Python binds seed's helper whatever the import order, and the cycle no
+/// longer matters.
+fn shadowed_cycle_fixture(root: &std::path::Path, a: &str) -> rusqlite::Connection {
+    write_resolution_file(root, "seed.py", "def helper():\n    return 0\n");
+    write_resolution_file(root, "a.py", a);
+    write_resolution_file(
+        root,
+        "b.py",
+        "from a import *\n\ndef helper():\n    return 1\n",
+    );
+    write_resolution_file(
+        root,
+        "use.py",
+        "from a import helper\n\ndef run():\n    return helper()\n",
+    );
+    resolution_db(root)
+}
+
+#[test]
+fn python_unconditional_binding_shadows_earlier_cycle_statements() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = shadowed_cycle_fixture(dir.path(), "from b import *\nfrom seed import helper\n");
+    assert_resolves_to(&conn, "run", "helper", "import-strict", "seed.py");
+}
+
+#[test]
+fn python_conditional_binding_keeps_earlier_cycle_statements() {
+    // Under an `if`, the seed import may not run, so b's helper can still
+    // arrive through the star-import cycle and no strict claim is safe.
+    for guard in ["if FLAG:\n    ", "try:\n    "] {
+        let tail = if guard.starts_with("try") {
+            "\nexcept ImportError:\n    pass\n"
+        } else {
+            "\n"
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let conn = shadowed_cycle_fixture(
+            dir.path(),
+            &format!("FLAG = True\nfrom b import *\n{guard}from seed import helper{tail}"),
+        );
+        let rows = graphtrail::store::explain_calls(&conn, "run", "helper").unwrap();
+        assert_eq!(rows.len(), 1, "{guard:?}: {rows:?}");
+        assert_ne!(rows[0].resolution, "import-strict", "{guard:?}: {rows:?}");
     }
 }

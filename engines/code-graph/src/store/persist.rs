@@ -103,8 +103,8 @@ pub(super) fn write_file_graph(
     }
     for import in &graph.imports {
         tx.execute(
-            "INSERT INTO imports(file_path, module, local_name, imported_name, alias, line, module_scope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO imports(file_path, module, local_name, imported_name, alias, line, module_scope, conditional)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 graph.path,
                 import.module,
@@ -112,8 +112,15 @@ pub(super) fn write_file_graph(
                 import.imported_name,
                 import.alias,
                 import.line as i64,
-                import.module_scope
+                import.module_scope,
+                import.conditional
             ],
+        )?;
+    }
+    for symbol_id in &graph.conditional_symbols {
+        tx.execute(
+            "INSERT OR REPLACE INTO conditional_symbols(symbol_id, file_path) VALUES (?1, ?2)",
+            params![symbol_id, graph.path],
         )?;
     }
     if let Some(names) = &graph.exports {
@@ -152,6 +159,10 @@ pub(super) fn purge_file_graph(tx: &Connection, path: &str) -> Result<()> {
     tx.execute("DELETE FROM imports WHERE file_path = ?1", params![path])?;
     tx.execute(
         "DELETE FROM module_exports WHERE file_path = ?1",
+        params![path],
+    )?;
+    tx.execute(
+        "DELETE FROM conditional_symbols WHERE file_path = ?1",
         params![path],
     )?;
     tx.execute(

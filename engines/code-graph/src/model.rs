@@ -29,6 +29,9 @@ pub struct Import {
     /// Whether the import binds in the module namespace. Python imports inside
     /// a function or class body do not, so they are not module exports.
     pub module_scope: bool,
+    /// Whether a module-scope import sits under an `if`, `try`, `with`, loop,
+    /// or `match`, so it may not run. Always `false` for other imports.
+    pub conditional: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +117,9 @@ pub struct FileGraph {
     pub calls: Vec<PendingCall>,
     /// The module's literal export list (Python `__all__`), when it declares one.
     pub exports: Option<Vec<String>>,
+    /// Ids of top-level symbols defined under an `if`, `try`, `with`, loop, or
+    /// `match`, so their definition may not run.
+    pub conditional_symbols: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
