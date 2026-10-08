@@ -1054,9 +1054,14 @@ def _assess_trailer(
     run_json = run_dir / "run.json"
     try:
         run_mode = run_dir.lstat().st_mode
+    except FileNotFoundError:
+        run_mode = 0
+    except OSError:
+        return _verifier_unavailable(relpath, "discovery_unreadable")
+    try:
         receipt_mode = run_json.lstat().st_mode
     except FileNotFoundError:
-        run_mode = receipt_mode = 0
+        receipt_mode = 0
     except OSError:
         return _verifier_unavailable(relpath, "discovery_unreadable")
     if stat.S_ISLNK(run_mode) or stat.S_ISLNK(receipt_mode):
