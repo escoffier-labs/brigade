@@ -878,3 +878,354 @@ fn extractor_fingerprint(conn: &Connection, path: &str) -> Option<String> {
 fn paths<const N: usize>(paths: [&str; N]) -> BTreeSet<String> {
     paths.into_iter().map(str::to_owned).collect()
 }
+
+// --- Incremental sync must equal a cold rebuild ---------------------------------
+
+/// Every table sync writes, as sorted rows of SQL `quote()`d columns. Timestamps
+/// (`modified_at`, `indexed_at`) and autoincrement ids (`imports.id`,
+/// `pending_calls.id`) are legitimately nondeterministic, so they are left out.
+/// Rows stay a sorted multiset, so a duplicated row is a difference.
+const SNAPSHOT_TABLES: [(&str, &str, &str); 8] = [
+    (
+        "files",
+        "path, content_hash, size, language, extractor_fingerprint",
+        "files",
+    ),
+    (
+        "symbols",
+        "id, kind, name, qualified_name, file_path, start_line, end_line, signature, container, content_hash, body_hash",
+        "symbols",
+    ),
+    (
+        "imports",
+        "file_path, module, local_name, imported_name, alias, line, module_scope, conditional",
+        "imports",
+    ),
+    (
+        "pending_calls",
+        "source_id, file_path, target_name, kind, qualifier, line",
+        "pending_calls",
+    ),
+    ("edges", "source, target, kind, line, confidence", "edges"),
+    (
+        "conditional_symbols",
+        "symbol_id, file_path",
+        "conditional_symbols",
+    ),
+    ("module_exports", "file_path, names", "module_exports"),
+    (
+        "symbols_fts",
+        "symbol_id, name, qualified_name, signature, file_path",
+        "symbols_fts",
+    ),
+];
+
+type Snapshot = Vec<(&'static str, Vec<String>)>;
+
+fn snapshot(conn: &Connection) -> Snapshot {
+    SNAPSHOT_TABLES
+        .iter()
+        .map(|(label, columns, table)| {
+            let expression = columns
+                .split(", ")
+                .map(|column| format!("quote({column})"))
+                .collect::<Vec<_>>()
+                .join(" || '|' || ");
+            let mut statement = conn
+                .prepare(&format!("SELECT {expression} FROM {table}"))
+                .unwrap();
+            let mut rows: Vec<String> = statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect();
+            rows.sort();
+            (*label, rows)
+        })
+        .collect()
+}
+
+/// A readable report of every row present on one side only, or empty when equal.
+fn snapshot_diff(incremental: &Snapshot, cold: &Snapshot) -> String {
+    let mut report = String::new();
+    for ((label, left), (_, right)) in incremental.iter().zip(cold) {
+        if left == right {
+            continue;
+        }
+        let mut counts: std::collections::BTreeMap<&str, i64> = Default::default();
+        for row in left {
+            *counts.entry(row).or_default() += 1;
+        }
+        for row in right {
+            *counts.entry(row).or_default() -= 1;
+        }
+        report.push_str(&format!("[{label}]\n"));
+        for (row, count) in counts.into_iter().filter(|(_, count)| *count != 0) {
+            let side = if count > 0 {
+                "incremental only"
+            } else {
+                "cold only"
+            };
+            report.push_str(&format!("  {side} x{}: {row}\n", count.abs()));
+        }
+    }
+    report
+}
+
+enum Op {
+    Write(&'static str, String),
+    Remove(&'static str),
+    Rename(&'static str, &'static str),
+}
+
+/// A tree that is edited step by step. Every write moves the file's mtime to a
+/// fresh value, so change detection never depends on wall-clock sleeps.
+struct EditedTree {
+    root: std::path::PathBuf,
+    clock: u64,
+}
+
+impl EditedTree {
+    fn apply(&mut self, op: &Op) {
+        match op {
+            Op::Write(path, content) => {
+                write_file(self.root.join(path), content);
+                self.clock += 10;
+                let file = fs::File::options()
+                    .write(true)
+                    .open(self.root.join(path))
+                    .unwrap();
+                file.set_modified(
+                    std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + self.clock),
+                )
+                .unwrap();
+            }
+            Op::Remove(path) => fs::remove_file(self.root.join(path)).unwrap(),
+            Op::Rename(from, to) => {
+                if let Some(parent) = self.root.join(to).parent() {
+                    fs::create_dir_all(parent).unwrap();
+                }
+                fs::rename(self.root.join(from), self.root.join(to)).unwrap();
+            }
+        }
+    }
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// Sync `root` into a brand-new database and return what it holds.
+fn cold_snapshot(root: &Path) -> Snapshot {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = open_graph(dir.path());
+    sync_repo(&conn, root).unwrap();
+    snapshot(&conn)
+}
+
+fn assert_incremental_equals_cold(conn: &Connection, root: &Path, step: &str) {
+    let incremental = snapshot(conn);
+    let diff = snapshot_diff(&incremental, &cold_snapshot(root));
+    assert!(
+        diff.is_empty(),
+        "incremental graph differs from a cold rebuild after step {step:?}:\n{diff}"
+    );
+}
+
+#[test]
+fn incremental_sync_matches_cold_rebuild() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/golden/mixed");
+    let tree_dir = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let root = tree_dir.path();
+    copy_tree(&fixture, root);
+    make_git_repo(root);
+
+    let conn = open_graph(db_dir.path());
+    sync_repo(&conn, root).unwrap();
+    assert!(
+        edge_count(&conn) > 0,
+        "the baseline fixture must resolve calls"
+    );
+    assert_incremental_equals_cold(&conn, root, "baseline");
+
+    let mut tree = EditedTree {
+        root: root.to_path_buf(),
+        clock: 0,
+    };
+    let steps: Vec<(&str, Vec<Op>)> = vec![
+        (
+            "add files in two languages",
+            vec![
+                Op::Write(
+                    "python/pkg/commands/extra.py",
+                    "from .handoff_cmd import lint\n\n\ndef extra_task():\n    return lint()\n".into(),
+                ),
+                Op::Write("ts/src/extra.ts", "export function extra() {\n  return 1;\n}\n".into()),
+            ],
+        ),
+        (
+            "modify callers and callees",
+            vec![
+                Op::Write(
+                    "python/pkg/commands/entry.py",
+                    "from pkg.commands import lint\nfrom .sub.sibling import *\nfrom .extra import extra_task\n\n\ndef tag(name):\n    return lambda fn: fn\n\n\n@tag(\"cli\")\ndef cli():\n    extra_task()\n    return lint()\n\n\nif __name__ == \"__main__\":\n    cli()\n    func()\n".into(),
+                ),
+                Op::Write(
+                    "go/pkg/pkg.go",
+                    "package pkg\n\nfunc Func() {}\n\nfunc Other() { Func() }\n".into(),
+                ),
+            ],
+        ),
+        (
+            "rename a function whose caller is in an unchanged file",
+            vec![Op::Write(
+                "ts/src/util.ts",
+                "export function parseAll() {\n  return 1;\n}\n".into(),
+            )],
+        ),
+        (
+            "add a definition that resolves a call in an unchanged file",
+            vec![Op::Write(
+                "go/builder.go",
+                "package main\n\nfunc build() {}\n".into(),
+            )],
+        ),
+        (
+            "delete a file that other files call into",
+            vec![Op::Remove("src/factory.rs")],
+        ),
+        (
+            "move the import target of unchanged callers to a new module",
+            vec![
+                Op::Write(
+                    "python/pkg/commands/lint_impl.py",
+                    "def lint():\n    return 1\n".into(),
+                ),
+                Op::Write(
+                    "python/pkg/commands/__init__.py",
+                    "from .lint_impl import lint\n".into(),
+                ),
+                Op::Write(
+                    "python/pkg/commands/handoff_cmd.py",
+                    "def other():\n    return 1\n".into(),
+                ),
+            ],
+        ),
+        (
+            "rename a module that is imported relatively",
+            vec![Op::Rename(
+                "python/pkg/commands/sub/sibling.py",
+                "python/pkg/commands/sub/sibling_renamed.py",
+            )],
+        ),
+        (
+            "edit a Rust file so a call in another file loses its target",
+            vec![Op::Write(
+                "src/m.rs",
+                "pub fn f() {}\n\npub fn g2() {}\n".into(),
+            )],
+        ),
+        (
+            "add a gitignore rule that hides an indexed file",
+            vec![Op::Write(".gitignore", "ts/src/extra.ts\n".into())],
+        ),
+        (
+            "remove the gitignore rule again",
+            vec![Op::Write(".gitignore", String::new())],
+        ),
+    ];
+    for (step, ops) in steps {
+        for op in &ops {
+            tree.apply(op);
+        }
+        let summary = sync_repo(&conn, root).unwrap();
+        assert!(!summary.unchanged, "step {step:?} must be noticed by sync");
+        assert_incremental_equals_cold(&conn, root, step);
+    }
+}
+
+#[test]
+fn incremental_sync_matches_cold_rebuild_over_seeded_random_edits() {
+    // Small name pool so calls collide and resolve differently as files come and go.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self, bound: u64) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) % bound
+        }
+    }
+    const FILES: [&str; 8] = [
+        "m0.py",
+        "m1.py",
+        "pkg/m2.py",
+        "t0.ts",
+        "t1.ts",
+        "g0.go",
+        "g1.go",
+        "r0.rs",
+    ];
+    fn content(rng: &mut Lcg, file: &str) -> String {
+        let (a, b, c) = (rng.next(6), rng.next(6), rng.next(6));
+        let other = FILES[rng.next(FILES.len() as u64) as usize];
+        let stem = other.rsplit_once('.').unwrap().0.replace('/', ".");
+        match file.rsplit_once('.').unwrap().1 {
+            "py" => format!(
+                "from {stem} import f{c}\n\n\ndef f{a}():\n    f{b}()\n    f{c}()\n\n\ndef f{b}():\n    f{a}()\n"
+            ),
+            "ts" => format!(
+                "import {{ f{c} }} from './{stem}';\nexport function f{a}() {{ f{b}(); f{c}(); }}\n"
+            ),
+            "go" => {
+                format!("package main\n\nfunc f{a}() {{ f{b}() }}\n\nfunc f{c}() {{ f{a}() }}\n")
+            }
+            _ => format!("pub fn f{a}() {{ f{b}(); }}\n\npub fn f{c}() {{ f{a}(); }}\n"),
+        }
+    }
+
+    let tree_dir = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let root = tree_dir.path();
+    let conn = open_graph(db_dir.path());
+    let mut tree = EditedTree {
+        root: root.to_path_buf(),
+        clock: 0,
+    };
+    let mut rng = Lcg(0x1649);
+    let mut live: BTreeSet<&str> = BTreeSet::new();
+
+    for step in 0..24 {
+        let file = FILES[rng.next(FILES.len() as u64) as usize];
+        let kind = rng.next(10);
+        let (label, op) = if !live.contains(file) || kind < 5 {
+            live.insert(file);
+            ("write", Op::Write(file, content(&mut rng, file)))
+        } else if kind < 8 {
+            live.remove(file);
+            ("delete", Op::Remove(file))
+        } else {
+            let target = FILES[rng.next(FILES.len() as u64) as usize];
+            if live.contains(target) {
+                continue;
+            }
+            live.remove(file);
+            live.insert(target);
+            ("rename", Op::Rename(file, target))
+        };
+        tree.apply(&op);
+        sync_repo(&conn, root).unwrap();
+        assert_incremental_equals_cold(&conn, root, &format!("random step {step}: {label} {file}"));
+    }
+}
