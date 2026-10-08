@@ -127,9 +127,9 @@ The server exposes fourteen tools. This list is verified against the live `tools
 | Tool | Required args | What it returns |
 |---|---|---|
 | `search` | `query` (`limit` optional, default 20, `path` optional) | Full-text search of code symbols (functions, classes, methods) by name, optionally filtered by indexed file path. |
-| `callers` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Symbols that call the given symbol (incoming call edges), with `hops` on each edge. |
-| `callees` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Symbols called by the given symbol (outgoing call edges), with `hops` on each edge. |
-| `impact` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Combined callers and callees of a symbol (the blast radius of a change), with `hops` on each edge. |
+| `callers` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Symbols that call the given symbol (incoming call edges), with `hops` on each edge, plus how `symbol` resolved (see [Symbol resolution](#symbol-resolution)). |
+| `callees` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Symbols called by the given symbol (outgoing call edges), with `hops` on each edge, plus how `symbol` resolved. |
+| `impact` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Combined callers and callees of a symbol (the blast radius of a change), with `hops` on each edge, plus how `symbol` resolved. |
 | `context` | `task` (`limit` optional, default 12) | A context pack: matching entry points plus their caller/callee neighborhood and related files. |
 | `stats` | none | Counts of files, symbols, edges, imports, schema version, sync metadata, and per-language file counts. |
 | `doctor` | none | Freshness contract for the graph: schema status, resolver status, last sync age, branch drift, pending file changes, ignored entries, skipped and parse-error files, and `FRESH`/`STALE`/`NEEDS-MIGRATION` verdict. |
@@ -137,13 +137,33 @@ The server exposes fourteen tools. This list is verified against the live `tools
 | `dead_code` | none (`limit` optional, default 100) | Callables with no incoming call edges. A candidate list, not proof: dynamic dispatch, exports, and entry points are invisible to call edges. |
 | `cycles` | none | File-level dependency cycles from cross-file call edges, grouped into strongly connected components. |
 | `affected` | `files` (`depth` optional, default 3, clamped to 1..5) | Tests statically attributed to the changed files via incoming call edges, plus impacted source files. A lower bound on what to run, not coverage. |
-| `explain` | `source`, `target` | How call edges from `source` to `target` resolved: resolution path, confidence, matched import, and targets. Exact name match, unlike the fuzzy symbol tools. |
+| `explain` | `source`, `target` | How call edges from `source` to `target` resolved: resolution path, confidence, matched import, and targets. Exact name match, like the seed of `callers`, `callees`, and `impact`. |
 | `repos` | none (`roots` optional) | Default database metadata plus optional one-level scans for `.graphtrail/graphtrail.db` under root directories. |
 | `diff` | `before`, `after` | Structural diff of two indexed graph DBs: added, removed, and changed symbols plus added and removed call edges. |
 
 Every tool additionally accepts an optional `repo` or `db` selector for multi-repo use.
 `doctor`, `repos`, and `diff` do not accept `refresh`; `doctor` reports staleness and leaves refresh to the query tools that opt into it.
-Call-edge tools cap each direction at 500 real edges. When a traversal is capped, the JSON array includes a final row with `kind: "truncated"`.
+Call-edge tools cap each direction at 500 real edges. When a traversal is capped, the `edges` array includes a final row with `kind: "truncated"`.
+
+### Symbol resolution
+
+`callers`, `callees`, and `impact` (CLI and MCP) resolve `symbol` to seed symbols by exact match, in this order: symbol id, qualified name (`run`, `Class.method`), name path (`src/app.py::helper` or `src/app.py:helper`, matching the qualified or bare name in that file), then bare name. Only when nothing matches exactly do they fall back to the fuzzy prefix search that `search` and `context` use. `search` and `context` stay fuzzy.
+
+When an exact step matches several symbols (the same name in two files, for example), the edges of all of those symbols are returned and the result is marked ambiguous. Narrow it with a name path. Prefix neighbors (`run_journal` for `run`) are never merged into an exact result.
+
+`--json` output and the MCP result are an object:
+
+| Field | Meaning |
+|---|---|
+| `query` | The `symbol` string as given. |
+| `resolution` | `id`, `qualified_name`, `name_path`, `name`, `fuzzy`, or `none`. |
+| `fuzzy` | `true` only when no exact match existed and the fuzzy fallback seeded the query. |
+| `ambiguous` | `true` when more than one symbol was selected. |
+| `selected` | Symbols whose edges are in `edges` (`id`, `kind`, `name`, `qualified_name`, `file_path`, `start_line`, `end_line`). |
+| `candidates` | Every symbol the winning resolution step matched, with the same fields. |
+| `edges` | The edge rows. |
+
+Text output is unchanged for a single exact match. An ambiguous or fuzzy result starts with a `resolution:` line and a `candidates:` block. When there are no edges, that note goes to stderr and stdout stays empty.
 
 Builds compiled with `--features codesearch` also expose the Code Search integration over MCP:
 

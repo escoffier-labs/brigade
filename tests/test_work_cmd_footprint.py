@@ -245,3 +245,21 @@ def test_extract_plan_files_from_steps_and_source_context():
         "src/brigade/cli/work/registration.py",
         "docs/technical-guide.md",
     ]
+
+
+def test_run_graphtrail_impact_unwraps_graph_query_object(tmp_path, monkeypatch):
+    """Engines since #1646 wrap impact edges in a resolution object."""
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"fake-graphtrail-index")
+    edge = {"source": "a", "target": "b", "source_file": "src/a.py", "target_file": "src/b.py"}
+    payload = {"query": "b", "resolution": "name", "fuzzy": False, "ambiguous": False, "edges": [edge]}
+
+    def fake_run(argv, **kwargs):
+        from brigade import proc
+
+        return proc.Result(code=0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(footprint_mod.proc, "run", fake_run)
+
+    assert footprint_mod._run_graphtrail_impact(tmp_path, "/bin/graphtrail", db, "b") == {"items": [edge]}
