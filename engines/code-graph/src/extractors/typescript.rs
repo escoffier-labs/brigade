@@ -7,7 +7,7 @@ use crate::extractors::common::{LangSpec, extract_with, node_text, string_litera
 use crate::model::{CallTarget, FileGraph, Import};
 
 /// Bump when TypeScript or JavaScript extraction output can change for the same file content.
-pub const EXTRACTOR_FINGERPRINT: &str = "typescript-extractor-v2";
+pub const EXTRACTOR_FINGERPRINT: &str = "typescript-extractor-v3";
 
 /// Ubiquitous globals/methods that would only ever produce noise edges.
 const JS_SKIP: &[&str] = &[

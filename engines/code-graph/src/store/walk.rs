@@ -70,6 +70,9 @@ pub(super) fn collect_sync_walk(root: &Path, count_ignored: bool) -> Result<Sync
             nested_repo: skipped
                 .as_ref()
                 .map_or(0, |c| c.nested_repo.load(Ordering::Relaxed)),
+            minified: skipped
+                .as_ref()
+                .map_or(0, |c| c.minified.load(Ordering::Relaxed)),
             ..ignored
         },
     })
@@ -80,6 +83,7 @@ pub(super) fn collect_sync_walk(root: &Path, count_ignored: bool) -> Result<Sync
 struct SkipCounters {
     hardcoded_floor: AtomicUsize,
     nested_repo: AtomicUsize,
+    minified: AtomicUsize,
 }
 
 fn collect_supported_entries(
@@ -88,6 +92,7 @@ fn collect_supported_entries(
     skipped: Option<Arc<SkipCounters>>,
 ) -> Result<Vec<Entry>> {
     let mut entries: Vec<Entry> = Vec::new();
+    let minified_counter = skipped.clone();
     let mut walker = WalkBuilder::new(root);
     walker
         .hidden(false)
@@ -108,6 +113,12 @@ fn collect_supported_entries(
         let Some(lang) = language_for(entry.path()) else {
             continue;
         };
+        if has_minified_name(entry.path()) {
+            if let Some(counters) = &minified_counter {
+                counters.minified.fetch_add(1, Ordering::Relaxed);
+            }
+            continue;
+        }
         let metadata = entry.metadata()?;
         let mtime = metadata
             .modified()
@@ -123,6 +134,21 @@ fn collect_supported_entries(
         });
     }
     Ok(entries)
+}
+
+const MINIFIED_NAME_SUFFIXES: [&str; 3] = [".min.js", ".min.mjs", ".bundle.js"];
+
+/// Whether the file name marks minified or generated output. This costs no
+/// read. Content-based detection runs at index time, where the bytes are
+/// already loaded (`extractors::index_file`).
+fn has_minified_name(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    MINIFIED_NAME_SUFFIXES
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
 }
 
 fn count_gitignored_entries(root: &Path) -> Result<usize> {

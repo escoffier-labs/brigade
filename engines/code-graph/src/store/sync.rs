@@ -38,7 +38,7 @@ pub struct SyncSummary {
     /// Files currently recorded as skipped (unreadable or unparseable),
     /// including ones skipped by earlier syncs and left unchanged since.
     pub skipped: usize,
-    /// `skipped` broken down by reason (`unreadable_utf8`, `io_error`, `parse_error`).
+    /// `skipped` broken down by reason (`unreadable_utf8`, `io_error`, `parse_error`, `minified`).
     pub skipped_by_reason: BTreeMap<String, usize>,
 }
 

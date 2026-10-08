@@ -148,6 +148,25 @@ pub fn extract_with<L: LangSpec>(
     })
 }
 
+/// Longest stored signature body in bytes. Brigade's own longest first line is
+/// 225 bytes, so real code is untouched while a minified one-line file cannot
+/// copy its whole line into `symbols` and `symbols_fts` once per symbol.
+pub const MAX_SIGNATURE_BYTES: usize = 256;
+
+/// Truncate `line` so the stored signature, `…` marker included, fits in
+/// [`MAX_SIGNATURE_BYTES`]. The cut lands on a char boundary.
+pub(crate) fn cap_signature(line: &str) -> String {
+    if line.len() <= MAX_SIGNATURE_BYTES {
+        return line.to_string();
+    }
+    const MARKER: &str = "…";
+    let mut end = MAX_SIGNATURE_BYTES - MARKER.len();
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{MARKER}", &line[..end])
+}
+
 fn visit<L: LangSpec>(
     spec: &L,
     ctx: &Ctx,
@@ -197,12 +216,12 @@ fn visit<L: LangSpec>(
         if !name.is_empty() {
             let start_line = node.start_position().row + 1;
             let end_line = node.end_position().row + 1;
-            let signature = ctx
-                .lines
-                .get(definition.start_position().row)
-                .map_or("", |line| *line)
-                .trim()
-                .to_string();
+            let signature = cap_signature(
+                ctx.lines
+                    .get(definition.start_position().row)
+                    .map_or("", |line| *line)
+                    .trim(),
+            );
             let body_hash = hex_hash(line_span_text(ctx.source, start_line, end_line).as_bytes());
             let container = spec
                 .symbol_container(definition, ctx.source)
