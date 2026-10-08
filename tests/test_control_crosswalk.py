@@ -1805,3 +1805,177 @@ def test_run_discovery_root_stat_error_is_unavailable(tmp_path, monkeypatch, cla
     readiness = _assess(target, claim_id, run_id)
     assert readiness["outcome"] == "unavailable"
     assert readiness["reason"] == "discovery_unreadable"
+
+
+@pytest.mark.parametrize("status", [[], {}])
+def test_unhashable_receipt_status_is_invalid(tmp_path, status):
+    target = _ws(tmp_path)
+    _write_json(
+        target / ".brigade/work/verify-runs/verify-a/receipt.json",
+        {"schema_version": 2, "run_id": "verify-a", "status": status},
+    )
+    result = _assess(target, "EC-01")
+    assert result["outcome"] == "invalid"
+    assert result["reason"] == "schema_missing"
+
+
+@pytest.mark.parametrize(
+    "receipt,expected,reason",
+    [
+        ({"run_id": "run-b", "status": "completed"}, "rejected", "run_binding_mismatch"),
+        ({}, "invalid", "schema_missing"),
+    ],
+)
+@pytest.mark.parametrize("run_id", [None, "run-a"])
+def test_trailer_requires_receipt_identity(tmp_path, receipt, expected, reason, run_id):
+    import subprocess
+
+    from brigade import causal_receipt
+
+    target = _ws(tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    _write_json(target / ".brigade/runs/run-a/run.json", receipt)
+    message = "fixture\n\nBrigade-Run: run-a\nBrigade-Receipt: sha256:" + causal_receipt.receipt_digest(receipt)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            message,
+        ],
+        cwd=target,
+        check=True,
+    )
+    result = _assess(target, "EC-08", run_id)
+    assert result["outcome"] == expected
+    assert result["reason"] == reason
+    assert result["dimensions"]["subject"]["status"] != "passed"
+
+
+@pytest.mark.parametrize(
+    "claim,relative",
+    [
+        ("EC-01", ".brigade/work/verify-runs"),
+        ("EC-02", ".brigade/work/verify-runs"),
+        ("EC-03", ".brigade/work/verify-runs"),
+        ("EC-12", ".brigade/evidence-packages"),
+        ("EC-04", ".brigade/runs/run-a/requests"),
+    ],
+)
+def test_shared_discovery_stat_refusal_is_unavailable(tmp_path, monkeypatch, claim, relative):
+    import os
+
+    target = _ws(tmp_path)
+    root = target / relative
+    root.mkdir(parents=True)
+    original = os.lstat
+
+    def refused(path, *args, **kwargs):
+        if Path(path) == root:
+            raise PermissionError("synthetic discovery metadata refusal")
+        return original(path, *args, **kwargs)
+
+    original_path_lstat = Path.lstat
+
+    def path_refused(path):
+        if path == root:
+            raise PermissionError("synthetic discovery metadata refusal")
+        return original_path_lstat(path)
+
+    # os.path.lexists and Path.lstat use different metadata APIs. The fixture
+    # denies the same root at both seams, matching a real metadata refusal.
+    monkeypatch.setattr(os, "lstat", refused)
+    monkeypatch.setattr(Path, "lstat", path_refused)
+    result = _assess(target, claim)
+    assert result["outcome"] == "unavailable"
+    assert result["reason"] == "discovery_unreadable"
+
+
+@pytest.mark.parametrize("ssh_available", [True, False])
+@pytest.mark.parametrize("bound", ["byte", "event"])
+def test_approval_read_bound_is_incomplete(tmp_path, monkeypatch, ssh_available, bound):
+    from brigade import run_checkpoint
+
+    target = _ws(tmp_path)
+    journal = target / ".brigade/runs/run-a/events/lifecycle.jsonl"
+    journal.parent.mkdir(parents=True)
+    if bound == "byte":
+        with journal.open("wb") as stream:
+            stream.truncate(run_checkpoint.MAX_JOURNAL_BYTES + 1)
+    else:
+        _approval_journal(journal.parent.parent, broken=False)
+        monkeypatch.setattr(run_checkpoint, "MAX_JOURNAL_EVENTS", 0)
+    monkeypatch.setattr(control_crosswalk, "_ssh_keygen_available", lambda: ssh_available)
+    result = _assess(target, "EC-05")
+    assert result["outcome"] == "incomplete"
+    assert result["reason"] == "read_limit_exceeded"
+    assert result["dimensions"]["integrity"]["status"] != "failed"
+
+
+@pytest.mark.parametrize("ssh_available", [True, False])
+def test_approval_journal_read_error_is_unavailable(tmp_path, monkeypatch, ssh_available):
+    from brigade import run_journal
+
+    target = _ws(tmp_path)
+    run_dir = target / ".brigade" / "runs" / "run-a"
+    _approval_journal(run_dir, broken=False)
+    original = run_journal._open_nofollow
+    journal = run_dir / "events" / "lifecycle.jsonl"
+
+    def refused(path, *args, **kwargs):
+        if Path(path) == journal:
+            raise PermissionError("synthetic journal read refusal")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(run_journal, "_open_nofollow", refused)
+    monkeypatch.setattr(control_crosswalk, "_ssh_keygen_available", lambda: ssh_available)
+    readiness = _assess(target, "EC-05")
+    assert readiness["outcome"] == "unavailable"
+    assert readiness["reason"] == "verifier_error"
+    assert readiness["dimensions"]["integrity"]["status"] != "failed"
+
+
+@pytest.mark.parametrize("run_id", [None, "run-a"])
+def test_valid_legacy_request_does_not_hide_unreadable_request_population(tmp_path, monkeypatch, run_id):
+    import os
+
+    from brigade import attestation
+
+    target = _ws(tmp_path)
+    run_dir = target / ".brigade" / "runs" / "run-a"
+    _write_json(run_dir / "request.json", {})
+    root = run_dir / "requests"
+    root.mkdir()
+    original_os_lstat = os.lstat
+    original_path_lstat = Path.lstat
+
+    def os_refused(path, *args, **kwargs):
+        if Path(path) == root:
+            raise PermissionError("synthetic request population refusal")
+        return original_os_lstat(path, *args, **kwargs)
+
+    def path_refused(path):
+        if path == root:
+            raise PermissionError("synthetic request population refusal")
+        return original_path_lstat(path)
+
+    monkeypatch.setattr(os, "lstat", os_refused)
+    monkeypatch.setattr(Path, "lstat", path_refused)
+    monkeypatch.setattr(control_crosswalk, "_ssh_keygen_available", lambda: True)
+    _stub_attestation(
+        monkeypatch,
+        attestation.AttestationVerifyResult(status=attestation.STATUS_SIGNED_OK, run_id="run-a"),
+    )
+    readiness = _assess(target, "EC-04", run_id)
+    assert readiness["outcome"] == "unavailable"
+    assert readiness["reason"] == "discovery_unreadable"
+    assert readiness["legacy_state"] == "untested"
+    assert any(artifact["outcome"] == "validated" for artifact in readiness["artifacts"])

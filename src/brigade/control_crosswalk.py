@@ -161,10 +161,16 @@ def _bounded_children(root: Path) -> tuple[list[Path], bool, str | None]:
     empty population; a symlinked or unreadable root is a discovery error, not
     an absence.
     """
-    if not os.path.lexists(root):
+    try:
+        mode = root.lstat().st_mode
+    except FileNotFoundError:
         return [], False, None
-    if root.is_symlink():
+    except OSError:
+        return [], False, "discovery_unreadable"
+    if stat.S_ISLNK(mode):
         return [], False, "symlink_refused"
+    if not stat.S_ISDIR(mode):
+        return [], False, "discovery_unreadable"
     names: list[str] = []
     try:
         with os.scandir(root) as entries:
@@ -329,6 +335,8 @@ def _assess_verify_receipt(
         )
 
     status = receipt.get("status")
+    if not isinstance(status, str):
+        return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
     commands = receipt.get("commands")
     # Producer receipt statuses: running (nonterminal) and the terminal
     # completed, failed, rejected (a command was refused) and canceled.
@@ -656,8 +664,9 @@ def _evaluate_human_approval_allow_with_sod(ctx: _Context) -> _Discovery:
         else:
             if verification.status == "UNAPPROVED":
                 continue
-            obs = _approval_observation(relpath, verification)
-            if obs.proposed in {"rejected", "invalid"} and not _ssh_keygen_available():
+            refusal = _approval_journal_refusal(run_dir, relpath) if verification.status == "APPROVAL-INVALID" else None
+            obs = refusal if refusal is not None else _approval_observation(relpath, verification)
+            if refusal is None and obs.proposed in {"rejected", "invalid"} and not _ssh_keygen_available():
                 # Without ssh-keygen the verifier reports APPROVAL-INVALID for
                 # any signed approval.  A failure that needs no signature check
                 # (journal chain, run binding or approval event shape) is still
@@ -680,6 +689,32 @@ def _evaluate_human_approval_allow_with_sod(ctx: _Context) -> _Discovery:
         _run_scope(obs, ctx, run_dir)
         out.observations.append(obs)
     return out
+
+
+def _approval_journal_refusal(run_dir: Path, relpath: str) -> control_readiness.ArtifactObservation | None:
+    """Recover read-capability refusals hidden by APPROVAL-INVALID.
+
+    Approval verification uses the same status for malformed journals and read
+    refusals. A bounded-read refusal cannot establish an integrity failure,
+    regardless of signature-tool availability. Other journal failures keep the
+    approval verifier's rejection and existing prerequisite checks.
+    """
+    try:
+        report = run_journal.read_journal_bounded(run_dir / "events" / "lifecycle.jsonl")
+    except run_journal.RunJournalError as exc:
+        if "bound exceeded" not in str(exc):
+            return None
+    except OSError:
+        return _verifier_unavailable(relpath, "verifier_error")
+    else:
+        if not any("bound exceeded" in error for error in report.chain_errors):
+            return None
+    return _obs(
+        relpath,
+        "discovered",
+        "incomplete",
+        _dims(integrity="unknown", subject="unknown", population=("unknown", "read_limit_exceeded")),
+    )
 
 
 def _approval_prerequisite_failure(run_dir: Path) -> tuple[str, str] | None:
@@ -1010,6 +1045,15 @@ def _assess_trailer(
     receipt = _read_json_object(run_json)
     if receipt is None:
         return _obs(relpath, "structure_observed", "invalid", _dims(), ["invalid_json"])
+    recorded_run = receipt.get("run_id")
+    identity_valid = isinstance(recorded_run, str) and receipts_trailer._is_bare_run_id(recorded_run)
+    subject: str | tuple[str, str] = (
+        ("unknown", "schema_missing")
+        if not identity_valid
+        else "passed"
+        if recorded_run == run_dir.name == run_id_value
+        else ("failed", "run_binding_mismatch")
+    )
     try:
         actual_digest = causal_receipt.receipt_digest(receipt)
     except Exception:
@@ -1019,7 +1063,21 @@ def _assess_trailer(
             relpath,
             "claim_validated",
             "rejected",
-            _dims(integrity=("failed", "trailer_digest_mismatch"), subject="passed", population="not_applicable"),
+            _dims(integrity=("failed", "trailer_digest_mismatch"), subject=subject, population="not_applicable"),
+        )
+    if not identity_valid:
+        return _obs(
+            relpath,
+            "structure_observed",
+            "invalid",
+            _dims(integrity="passed", subject=subject, population="not_applicable"),
+        )
+    if subject != "passed":
+        return _obs(
+            relpath,
+            "claim_validated",
+            "rejected",
+            _dims(integrity="passed", subject=subject, population="not_applicable"),
         )
     return _obs(
         relpath,
