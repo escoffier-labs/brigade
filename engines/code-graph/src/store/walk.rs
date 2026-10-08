@@ -1,7 +1,6 @@
 //! Repository walking and ignore accounting for sync.
 
 use std::collections::HashSet;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -114,15 +113,13 @@ fn collect_supported_entries(
         let Some(lang) = language_for(entry.path()) else {
             continue;
         };
-        let metadata = entry.metadata()?;
-        if is_minified_source(entry.path(), metadata.len()) {
-            // TODO(#1655): record this as a `minified` skip reason in `skipped_files`
-            // once that table lands, so `doctor` can list the files and not only count them.
+        if has_minified_name(entry.path()) {
             if let Some(counters) = &minified_counter {
                 counters.minified.fetch_add(1, Ordering::Relaxed);
             }
             continue;
         }
+        let metadata = entry.metadata()?;
         let mtime = metadata
             .modified()
             .ok()
@@ -139,45 +136,19 @@ fn collect_supported_entries(
     Ok(entries)
 }
 
-/// Source files at or below this size are never treated as minified.
-const MINIFIED_MIN_FILE_BYTES: u64 = 5_000;
-/// A line longer than this marks a minified or generated file.
-const MINIFIED_MAX_LINE_BYTES: usize = 5_000;
-/// An average line longer than this marks a minified or generated file.
-const MINIFIED_MAX_AVG_LINE_BYTES: usize = 500;
 const MINIFIED_NAME_SUFFIXES: [&str; 3] = [".min.js", ".min.mjs", ".bundle.js"];
 
-/// Whether `path` looks like minified or generated output that would flood the
-/// graph with huge one-line signatures. Name checks cost nothing. The content
-/// check reads only files large enough to trip it, and treats an unreadable
-/// file as not minified so extraction reports the real error.
-fn is_minified_source(path: &Path, size: u64) -> bool {
+/// Whether the file name marks minified or generated output. This costs no
+/// read. Content-based detection runs at index time, where the bytes are
+/// already loaded (`extractors::index_file`).
+fn has_minified_name(path: &Path) -> bool {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    if MINIFIED_NAME_SUFFIXES
+    MINIFIED_NAME_SUFFIXES
         .iter()
         .any(|suffix| name.ends_with(suffix))
-    {
-        return true;
-    }
-    if size <= MINIFIED_MIN_FILE_BYTES {
-        return false;
-    }
-    let Ok(bytes) = fs::read(path) else {
-        return false;
-    };
-    let longest = bytes
-        .split(|byte| *byte == b'\n')
-        .map(<[u8]>::len)
-        .max()
-        .unwrap_or(0);
-    let mut lines = bytes.iter().filter(|byte| **byte == b'\n').count();
-    if bytes.last().is_some_and(|byte| *byte != b'\n') {
-        lines += 1;
-    }
-    longest > MINIFIED_MAX_LINE_BYTES || bytes.len() / lines.max(1) > MINIFIED_MAX_AVG_LINE_BYTES
 }
 
 fn count_gitignored_entries(root: &Path) -> Result<usize> {

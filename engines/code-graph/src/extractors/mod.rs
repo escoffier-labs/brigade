@@ -49,6 +49,9 @@ pub enum SkipReason {
     IoError,
     /// The extractor could not produce a parse tree for the file.
     ParseError,
+    /// Minified or generated content: a line over [`MINIFIED_MAX_LINE_BYTES`]
+    /// or an average line over [`MINIFIED_MAX_AVG_LINE_BYTES`].
+    Minified,
 }
 
 impl SkipReason {
@@ -57,8 +60,34 @@ impl SkipReason {
             SkipReason::UnreadableUtf8 => "unreadable_utf8",
             SkipReason::IoError => "io_error",
             SkipReason::ParseError => "parse_error",
+            SkipReason::Minified => "minified",
         }
     }
+}
+
+/// Files at or below this size are never treated as minified.
+const MINIFIED_MIN_FILE_BYTES: usize = 5_000;
+/// A line longer than this marks a minified or generated file.
+const MINIFIED_MAX_LINE_BYTES: usize = 5_000;
+/// An average line longer than this marks a minified or generated file.
+const MINIFIED_MAX_AVG_LINE_BYTES: usize = 500;
+
+/// Whether `bytes` look like minified or generated source. It runs on the
+/// bytes `index_file` already read, so freshness checks never pay for it.
+fn looks_minified(bytes: &[u8]) -> bool {
+    if bytes.len() <= MINIFIED_MIN_FILE_BYTES {
+        return false;
+    }
+    let longest = bytes
+        .split(|byte| *byte == b'\n')
+        .map(<[u8]>::len)
+        .max()
+        .unwrap_or(0);
+    let mut lines = bytes.iter().filter(|byte| **byte == b'\n').count();
+    if bytes.last().is_some_and(|byte| *byte != b'\n') {
+        lines += 1;
+    }
+    longest > MINIFIED_MAX_LINE_BYTES || bytes.len() / lines.max(1) > MINIFIED_MAX_AVG_LINE_BYTES
 }
 
 /// A per-file indexing failure. Sync and evaluate skip the file and record
@@ -89,10 +118,18 @@ impl std::error::Error for IndexFailure {}
 /// Read and extract a single file into a [`FileGraph`].
 ///
 /// Files that are not valid UTF-8 are skipped, not decoded lossily, so every
-/// stored line number refers to the real file.
+/// stored line number refers to the real file. Minified or generated content
+/// is skipped too and recorded with its stat, so it is rechecked only when the
+/// file changes.
 pub fn index_file(root: &Path, path: &Path, lang: Lang) -> Result<FileGraph, IndexFailure> {
     let bytes = fs::read(path).map_err(|err| IndexFailure::new(SkipReason::IoError, err))?;
     let metadata = fs::metadata(path).map_err(|err| IndexFailure::new(SkipReason::IoError, err))?;
+    if looks_minified(&bytes) {
+        return Err(IndexFailure::new(
+            SkipReason::Minified,
+            "minified or generated source (very long lines)",
+        ));
+    }
     let content = String::from_utf8(bytes)
         .map_err(|err| IndexFailure::new(SkipReason::UnreadableUtf8, err.utf8_error()))?;
     let rel = path
