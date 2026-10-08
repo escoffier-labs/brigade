@@ -730,6 +730,23 @@ def _impact_argv(binary: str, db: str, verb: str, query: str) -> list[str]:
     return [binary, "--db", db, verb, query, "--json"]
 
 
+def _graph_edges(result: proc.Result) -> list[Any]:
+    """Edge rows from `callers`/`callees`/`impact --json`.
+
+    Current engines print an object whose `edges` key holds the rows (#1646).
+    Older engines printed the bare edge array. Accept both.
+    """
+    if result.code != 0:
+        return []
+    try:
+        parsed = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(parsed, dict):
+        parsed = parsed.get("edges")
+    return parsed if isinstance(parsed, list) else []
+
+
 def _impact_section(binary: str, db_path: Path, target: Path, query: str) -> dict[str, Any]:
     db = str(db_path)
     search = _run_json(binary, db_path, target, "search", query, "--json")
@@ -738,24 +755,10 @@ def _impact_section(binary: str, db_path: Path, target: Path, query: str) -> dic
     impact_query = str((resolved or {}).get("qualified_name") or query)
 
     impact_result = proc.run(_impact_argv(binary, db, "impact", impact_query), timeout=_GRAPH_TIMEOUT, cwd=target)
-    impact_edges: list[Any] = []
-    if impact_result.code == 0:
-        try:
-            parsed = json.loads(impact_result.stdout)
-            if isinstance(parsed, list):
-                impact_edges = parsed
-        except json.JSONDecodeError:
-            impact_edges = []
+    impact_edges = _graph_edges(impact_result)
 
     callers_result = proc.run(_impact_argv(binary, db, "callers", impact_query), timeout=_GRAPH_TIMEOUT, cwd=target)
-    callers: list[Any] = []
-    if callers_result.code == 0:
-        try:
-            parsed = json.loads(callers_result.stdout)
-            if isinstance(parsed, list):
-                callers = parsed
-        except json.JSONDecodeError:
-            callers = []
+    callers = _graph_edges(callers_result)
 
     impacted_files = sorted(
         {
