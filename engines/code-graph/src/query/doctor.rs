@@ -8,7 +8,12 @@ use serde::Serialize;
 
 use crate::model::{IgnoredSummary, PendingChanges};
 use crate::store::db::now_ts;
-use crate::store::{SCHEMA_VERSION, meta, pending_changes};
+use crate::store::{
+    SCHEMA_VERSION, SkippedFile, meta, parse_error_census, pending_changes, skipped_census,
+};
+
+/// How many paths `doctor` lists for skipped and parse-error files.
+const SAMPLE_LIMIT: usize = 5;
 
 #[derive(Debug, Serialize)]
 pub struct DoctorReport {
@@ -21,7 +26,26 @@ pub struct DoctorReport {
     pub branch: BranchStatus,
     pub pending: PendingChanges,
     pub ignored: IgnoredSummary,
+    /// Files sync could not index. They do not affect the verdict.
+    pub skipped: SkippedSummary,
+    /// Indexed files that tree-sitter parsed only by recovering from syntax
+    /// errors. They do not affect the verdict.
+    pub parse_errors: ParseErrorSummary,
+    /// Human-readable notes about skipped and parse-error files.
+    pub warnings: Vec<String>,
     pub verdict: &'static str,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct SkippedSummary {
+    pub count: usize,
+    pub sample: Vec<SkippedFile>,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ParseErrorSummary {
+    pub count: usize,
+    pub sample: Vec<String>,
 }
 
 /// Which branch the graph was synced on versus the branch checked out now.
@@ -83,6 +107,17 @@ pub fn doctor(conn: &Connection, repo_root: &Path, db_path: &Path) -> Result<Doc
         current: crate::store::RESOLVER_VERSION,
         stale: meta::resolver_is_stale(conn)?,
     };
+    let (skipped_count, skipped_sample) = skipped_census(conn, SAMPLE_LIMIT)?;
+    let skipped = SkippedSummary {
+        count: skipped_count,
+        sample: skipped_sample,
+    };
+    let (parse_error_count, parse_error_sample) = parse_error_census(conn, SAMPLE_LIMIT)?;
+    let parse_errors = ParseErrorSummary {
+        count: parse_error_count,
+        sample: parse_error_sample,
+    };
+    let warnings = warnings(&skipped, &parse_errors);
     let verdict = if needs_migration {
         "NEEDS-MIGRATION"
     } else if pending.is_empty() && !branch.drifted && !resolver.stale {
@@ -108,8 +143,44 @@ pub fn doctor(conn: &Connection, repo_root: &Path, db_path: &Path) -> Result<Doc
         branch,
         pending,
         ignored,
+        skipped,
+        parse_errors,
+        warnings,
         verdict,
     })
+}
+
+fn warnings(skipped: &SkippedSummary, parse_errors: &ParseErrorSummary) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if skipped.count > 0 {
+        warnings.push(format!(
+            "{} {} could not be indexed and {} missing from the graph",
+            skipped.count,
+            plural(skipped.count, "file"),
+            if skipped.count == 1 { "is" } else { "are" }
+        ));
+    }
+    if parse_errors.count > 0 {
+        warnings.push(format!(
+            "{} {} indexed with parse errors, so symbols or edges from {} may be missing",
+            parse_errors.count,
+            plural(parse_errors.count, "file"),
+            if parse_errors.count == 1 {
+                "it"
+            } else {
+                "them"
+            }
+        ));
+    }
+    warnings
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        noun.to_string()
+    } else {
+        format!("{noun}s")
+    }
 }
 
 fn branch_status(conn: &Connection, repo_root: &Path) -> Result<BranchStatus> {
@@ -147,6 +218,9 @@ pub fn missing_db_report(repo_root: &Path, db_path: &Path) -> DoctorReport {
         branch: BranchStatus::default(),
         pending: PendingChanges::default(),
         ignored: IgnoredSummary::default(),
+        skipped: SkippedSummary::default(),
+        parse_errors: ParseErrorSummary::default(),
+        warnings: Vec::new(),
         verdict: "NEEDS-MIGRATION",
     }
 }

@@ -801,6 +801,352 @@ fn sync_reclaims_lock_from_dead_process() {
     assert!(!root.join("g.db.lock").exists());
 }
 
+#[test]
+fn unreadable_file_is_skipped_while_valid_new_file_indexes() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("pkg/core.py"), "def helper():\n    return 1\n");
+    let conn = open_graph(root);
+    sync_repo(&conn, root).unwrap();
+
+    write_file(root.join("pkg/new.py"), "def newfn():\n    return 2\n");
+    write_bytes(root.join("pkg/bad.py"), b"x = 1\n\xff\xfe bad\n");
+
+    let summary = sync_repo(&conn, root).expect("one unreadable file must not abort sync");
+
+    assert!(!summary.unchanged);
+    assert_eq!(summary.skipped, 1);
+    assert_eq!(indexed_paths(&conn), paths(["pkg/core.py", "pkg/new.py"]));
+    assert_eq!(symbol_count(&conn, "newfn"), 1);
+    assert_eq!(
+        skipped_rows(&conn),
+        vec![("pkg/bad.py".to_string(), "unreadable_utf8".to_string())]
+    );
+
+    let report = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(
+        report.verdict, "FRESH",
+        "a skipped file alone must not pin doctor to STALE"
+    );
+    assert!(report.pending.is_empty(), "{:?}", report.pending);
+    assert_eq!(report.skipped.count, 1);
+    assert_eq!(report.skipped.sample[0].path, "pkg/bad.py");
+    assert_eq!(report.skipped.sample[0].reason, "unreadable_utf8");
+    assert!(!report.warnings.is_empty());
+
+    let again = sync_repo(&conn, root).unwrap();
+    assert!(
+        again.unchanged,
+        "an unchanged skipped file must not force a resync"
+    );
+    assert_eq!(again.skipped, 1);
+}
+
+#[test]
+fn fixing_a_skipped_file_indexes_it_and_clears_the_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("core.py"), "def helper():\n    return 1\n");
+    write_bytes(root.join("bad.py"), b"x = 1\n\xff\xfe bad\n");
+    let conn = open_graph(root);
+    let first = sync_repo(&conn, root).unwrap();
+    assert_eq!(first.skipped, 1);
+
+    write_file(root.join("bad.py"), "def repaired():\n    return 3\n");
+    let second = sync_repo(&conn, root).unwrap();
+
+    assert!(!second.unchanged);
+    assert_eq!(second.skipped, 0);
+    assert_eq!(indexed_paths(&conn), paths(["bad.py", "core.py"]));
+    assert_eq!(symbol_count(&conn, "repaired"), 1);
+    assert!(skipped_rows(&conn).is_empty());
+    let report = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(report.verdict, "FRESH");
+    assert_eq!(report.skipped.count, 0);
+    assert!(report.warnings.is_empty());
+}
+
+#[test]
+fn deleting_a_skipped_file_drops_its_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("core.py"), "def helper():\n    return 1\n");
+    write_bytes(root.join("bad.py"), b"\xff\xfe\n");
+    let conn = open_graph(root);
+    sync_repo(&conn, root).unwrap();
+    assert_eq!(skipped_rows(&conn).len(), 1);
+
+    fs::remove_file(root.join("bad.py")).unwrap();
+    let summary = sync_repo(&conn, root).unwrap();
+
+    assert_eq!(summary.skipped, 0);
+    assert!(skipped_rows(&conn).is_empty());
+    let report = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(report.verdict, "FRESH");
+    assert_eq!(report.skipped.count, 0);
+}
+
+#[test]
+fn indexed_file_that_turns_unreadable_loses_its_stale_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("core.py"), "def helper():\n    return 1\n");
+    write_file(root.join("mod.py"), "def old_symbol():\n    return 1\n");
+    let conn = open_graph(root);
+    sync_repo(&conn, root).unwrap();
+    assert_eq!(symbol_count(&conn, "old_symbol"), 1);
+
+    write_bytes(
+        root.join("mod.py"),
+        b"def old_symbol():\n    return '\xff'\n",
+    );
+    let summary = sync_repo(&conn, root).unwrap();
+
+    assert_eq!(summary.skipped, 1);
+    assert_eq!(indexed_paths(&conn), paths(["core.py"]));
+    assert_eq!(symbol_count(&conn, "old_symbol"), 0);
+    assert_eq!(
+        skipped_rows(&conn),
+        vec![("mod.py".to_string(), "unreadable_utf8".to_string())]
+    );
+}
+
+#[test]
+fn python_syntax_error_is_indexed_and_counted_as_parse_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("ok.py"), "def fine():\n    return 1\n");
+    write_file(
+        root.join("broken.py"),
+        "def good():\n    return 1\n\ndef broken(:\n    pass\n",
+    );
+    let conn = open_graph(root);
+    sync_repo(&conn, root).unwrap();
+
+    assert_eq!(indexed_paths(&conn), paths(["broken.py", "ok.py"]));
+    assert_eq!(symbol_count(&conn, "good"), 1);
+    let report = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(report.verdict, "FRESH");
+    assert_eq!(report.parse_errors.count, 1);
+    assert_eq!(report.parse_errors.sample, vec!["broken.py".to_string()]);
+    assert!(!report.warnings.is_empty());
+
+    write_file(root.join("broken.py"), "def good():\n    return 1\n");
+    sync_repo(&conn, root).unwrap();
+    let repaired = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(repaired.parse_errors.count, 0);
+    assert!(repaired.warnings.is_empty());
+}
+
+#[test]
+fn sync_upgrades_v7_schema_with_skip_and_parse_error_tracking() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(
+        root.join("broken.py"),
+        "def good():\n    return 1\n\ndef broken(:\n    pass\n",
+    );
+    let conn = open_graph(root);
+    sync_repo(&conn, root).unwrap();
+
+    // Simulate a v7 database: no parse_errors column, no skipped_files table.
+    conn.execute("ALTER TABLE files DROP COLUMN parse_errors", [])
+        .unwrap();
+    conn.execute("DROP TABLE skipped_files", []).unwrap();
+    conn.execute(
+        "UPDATE meta SET value = '7' WHERE key = 'schema_version'",
+        [],
+    )
+    .unwrap();
+    let stale = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(stale.verdict, "NEEDS-MIGRATION");
+    assert_eq!(stale.skipped.count, 0);
+    assert_eq!(stale.parse_errors.count, 0);
+
+    write_bytes(root.join("bad.py"), b"\xff\n");
+    let summary = sync_repo(&conn, root).unwrap();
+
+    assert!(!summary.unchanged, "v7 database must reindex once");
+    assert_eq!(summary.skipped, 1);
+    assert_eq!(
+        meta::read(&conn, "schema_version").unwrap().as_deref(),
+        Some(SCHEMA_VERSION.to_string().as_str())
+    );
+    let report = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(report.verdict, "FRESH");
+    assert_eq!(
+        report.parse_errors.count, 1,
+        "reindex must census parse errors"
+    );
+    assert_eq!(report.skipped.count, 1);
+}
+
+#[test]
+fn failed_v8_upgrade_sync_keeps_the_parse_census_obligation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(
+        root.join("broken.py"),
+        "def good():\n    return 1\n\ndef broken(:\n    pass\n",
+    );
+    let conn = open_graph(root);
+    sync_repo(&conn, root).unwrap();
+
+    // Simulate a v7 database.
+    conn.execute("ALTER TABLE files DROP COLUMN parse_errors", [])
+        .unwrap();
+    conn.execute("DROP TABLE skipped_files", []).unwrap();
+    conn.execute(
+        "UPDATE meta SET value = '7' WHERE key = 'schema_version'",
+        [],
+    )
+    .unwrap();
+
+    // The first upgrade sync fails after the schema change, inside the
+    // reindex transaction.
+    conn.execute_batch(
+        "CREATE TRIGGER abort_upgrade BEFORE INSERT ON files
+         BEGIN SELECT RAISE(ABORT, 'simulated failure'); END;",
+    )
+    .unwrap();
+    assert!(sync_repo(&conn, root).is_err());
+    conn.execute("DROP TRIGGER abort_upgrade", []).unwrap();
+
+    let retry = sync_repo(&conn, root).unwrap();
+
+    assert!(
+        !retry.unchanged,
+        "the retry must still run the one-time reindex"
+    );
+    let report = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(report.verdict, "FRESH");
+    assert_eq!(report.parse_errors.count, 1);
+    assert_eq!(report.parse_errors.sample, vec!["broken.py".to_string()]);
+
+    let after = sync_repo(&conn, root).unwrap();
+    assert!(after.unchanged, "the census obligation clears once it runs");
+}
+
+#[cfg(unix)]
+#[test]
+fn io_error_skip_is_retried_once_the_file_is_readable_again() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("core.py"), "def helper():\n    return 1\n");
+    write_file(root.join("locked.py"), "def locked_fn():\n    return 2\n");
+    let locked = root.join("locked.py");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&locked).is_ok() {
+        // Running as root (or on a filesystem without permission checks):
+        // the failure cannot be reproduced.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+        return;
+    }
+    let conn = open_graph(root);
+
+    let first = sync_repo(&conn, root).unwrap();
+    assert_eq!(first.skipped, 1);
+    assert_eq!(
+        skipped_rows(&conn),
+        vec![("locked.py".to_string(), "io_error".to_string())]
+    );
+    let still_locked = sync_repo(&conn, root).unwrap();
+    assert!(
+        still_locked.unchanged,
+        "a file that still cannot be read must not churn every sync"
+    );
+    let report = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(report.verdict, "FRESH");
+
+    // chmod changes neither size nor mtime.
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+    let readable = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(readable.verdict, "STALE");
+    assert_eq!(readable.pending.new_files, 1);
+
+    let retried = sync_repo(&conn, root).unwrap();
+
+    assert!(!retried.unchanged);
+    assert_eq!(retried.skipped, 0);
+    assert_eq!(symbol_count(&conn, "locked_fn"), 1);
+    assert!(skipped_rows(&conn).is_empty());
+    let fresh = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(fresh.verdict, "FRESH");
+}
+
+#[cfg(unix)]
+#[test]
+fn skipped_file_replaced_by_fifo_or_symlink_does_not_hang_doctor_or_sync() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::mpsc;
+
+    for replacement in ["fifo", "symlink"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        write_file(root.join("core.py"), "def helper():\n    return 1\n");
+        write_file(root.join("locked.py"), "def locked_fn():\n    return 2\n");
+        let locked = root.join("locked.py");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&locked).is_ok() {
+            return; // Running as root: the io_error skip cannot be reproduced.
+        }
+        let conn = open_graph(&root);
+        sync_repo(&conn, &root).unwrap();
+        assert_eq!(
+            skipped_rows(&conn),
+            vec![("locked.py".to_string(), "io_error".to_string())]
+        );
+        drop(conn);
+
+        fs::remove_file(&locked).unwrap();
+        if replacement == "fifo" {
+            let made = std::process::Command::new("mkfifo").arg(&locked).status();
+            if !made.is_ok_and(|status| status.success()) {
+                continue; // mkfifo unavailable.
+            }
+        } else {
+            std::os::unix::fs::symlink(root.join("core.py"), &locked).unwrap();
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let worker_root = root.clone();
+        std::thread::spawn(move || {
+            let conn = open_graph(&worker_root);
+            let report = doctor(&conn, &worker_root, &worker_root.join("g.db")).unwrap();
+            let summary = sync_repo(&conn, &worker_root).unwrap();
+            let _ = tx.send((report.verdict, summary.skipped, skipped_rows(&conn)));
+        });
+        let result = rx.recv_timeout(Duration::from_secs(10));
+        if result.is_err() && replacement == "fifo" {
+            let _ = fs::OpenOptions::new().write(true).open(&locked);
+        }
+        let (verdict, skipped, rows) =
+            result.unwrap_or_else(|_| panic!("doctor or sync hung on a {replacement}"));
+
+        // The walk indexes regular files only, so the replaced path leaves
+        // the graph and its skip entry clears.
+        assert_eq!(verdict, "FRESH", "{replacement}");
+        assert_eq!(skipped, 0, "{replacement}");
+        assert!(rows.is_empty(), "{replacement}");
+    }
+}
+
+#[test]
+fn database_errors_still_abort_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("a.py"), "def helper():\n    return 1\n");
+    let conn = open_graph(root);
+    sync_repo(&conn, root).unwrap();
+
+    conn.execute("DROP TABLE imports", []).unwrap();
+    write_file(root.join("b.py"), "import os\n\ndef run():\n    return 1\n");
+
+    assert!(sync_repo(&conn, root).is_err());
+}
+
 fn make_git_repo(root: &Path) {
     fs::create_dir_all(root.join(".git")).unwrap();
     fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
@@ -824,6 +1170,34 @@ fn write_file(path: impl AsRef<Path>, content: &str) {
         fs::create_dir_all(parent).unwrap();
     }
     fs::write(path, content).unwrap();
+}
+
+fn write_bytes(path: impl AsRef<Path>, content: &[u8]) {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(path, content).unwrap();
+}
+
+fn symbol_count(conn: &Connection, name: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM symbols WHERE name = ?1",
+        [name],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// (path, reason) for every recorded skipped file, ordered by path.
+fn skipped_rows(conn: &Connection) -> Vec<(String, String)> {
+    let mut stmt = conn
+        .prepare("SELECT path, reason FROM skipped_files ORDER BY path")
+        .unwrap();
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
 }
 
 fn indexed_paths(conn: &Connection) -> BTreeSet<String> {

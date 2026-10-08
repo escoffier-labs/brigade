@@ -8,6 +8,7 @@ mod persist;
 mod repo_policy;
 mod resolve;
 pub mod schema;
+mod skipped;
 pub mod sync;
 mod walk;
 
@@ -16,5 +17,6 @@ pub use explain::{ExplainRow, explain_calls};
 pub(crate) use repo_policy::{current_git_branch, guard_unsafe_root};
 pub(crate) use resolve::RESOLVER_VERSION;
 pub use schema::{SCHEMA_VERSION, init_schema};
+pub use skipped::{SkippedFile, parse_error_census, skipped_census};
 pub use sync::{pending_changes, sync_repo, sync_repo_force};
 pub use walk::{IndexablePath, list_indexable};

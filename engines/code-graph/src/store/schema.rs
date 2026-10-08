@@ -4,7 +4,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Bumped when the on-disk schema changes; surfaced in JSON packs from Phase 2 on.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// What sync must redo after a schema upgrade, from nothing to everything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -18,6 +18,30 @@ pub enum SchemaUpgrade {
     FullReindex,
 }
 
+/// Files sync could not index, with the stat they had when skipped. A row
+/// clears when the file next indexes cleanly or leaves the walk.
+const SKIPPED_FILES_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS skipped_files (
+        path TEXT PRIMARY KEY,
+        reason TEXT NOT NULL,
+        detail TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        modified_at INTEGER NOT NULL,
+        skipped_at INTEGER NOT NULL
+    );
+";
+
+/// Meta key set when the v8 upgrade adds `files.parse_errors`. Its presence
+/// forces a full reindex until one commits.
+const PARSE_CENSUS_PENDING: &str = "parse_census_pending";
+
+/// Clear the v8 parse-census obligation. Call only inside the transaction
+/// that commits a full reindex.
+pub(crate) fn clear_parse_census_pending(tx: &Connection) -> Result<()> {
+    tx.execute("DELETE FROM meta WHERE key = ?1", [PARSE_CENSUS_PENDING])?;
+    Ok(())
+}
+
 pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -28,7 +52,8 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             modified_at INTEGER NOT NULL,
             indexed_at INTEGER NOT NULL,
             language TEXT NOT NULL,
-            extractor_fingerprint TEXT
+            extractor_fingerprint TEXT,
+            parse_errors INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS symbols (
@@ -114,6 +139,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_pending_calls_file ON pending_calls(file_path);
         "#,
     )?;
+    conn.execute_batch(SKIPPED_FILES_TABLE)?;
     ensure_import_columns(conn)?;
     Ok(())
 }
@@ -169,6 +195,27 @@ pub fn upgrade_for_sync(conn: &Connection) -> Result<SchemaUpgrade> {
     if stored_schema_version(conn)?.is_some_and(|version| (5..7).contains(&version)) {
         rewrite_symbol_ids_v7(conn)?;
         upgrade = upgrade.max(SchemaUpgrade::RebuildEdges);
+    }
+    // v8 records files sync could not index (skipped_files) and files that
+    // tree-sitter parsed only by recovering from syntax errors
+    // (files.parse_errors). Existing rows were never checked for parse errors,
+    // so reindex once to take the census. The column commits before the
+    // reindex does, so the column cannot be the signal: a sync that fails in
+    // between would lose the obligation. A meta marker written with the column
+    // carries it instead, and sync clears it only in the transaction that
+    // commits a full reindex.
+    conn.execute_batch(SKIPPED_FILES_TABLE)?;
+    if !table_has_column(conn, "files", "parse_errors")? {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "ALTER TABLE files ADD COLUMN parse_errors INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        super::meta::upsert(&tx, PARSE_CENSUS_PENDING, "1")?;
+        tx.commit()?;
+    }
+    if table_exists(conn, "meta")? && super::meta::read(conn, PARSE_CENSUS_PENDING)?.is_some() {
+        upgrade = upgrade.max(SchemaUpgrade::FullReindex);
     }
     // Resolver changes and older writers affect derived edges only. Sync writes
     // version and timestamp provenance in the same transaction as the edges.
@@ -280,4 +327,12 @@ pub fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(columns.iter().any(|existing| existing == column))
+}
+
+pub fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [table],
+        |row| row.get(0),
+    )?)
 }
