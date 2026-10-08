@@ -5,10 +5,16 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
+use crate::extractors::python::WILDCARD_IMPORT;
 use crate::model::{CallKind, Import, PendingCall};
 
 /// Bump when resolution rules change; persisted edges must be rebuilt on sync.
-pub(crate) const RESOLVER_VERSION: &str = "2";
+///
+/// v3 follows Python re-exports and resolves names through `from x import *`.
+pub(crate) const RESOLVER_VERSION: &str = "3";
+
+/// How many re-export hops Python resolution follows from the imported module.
+const MAX_REEXPORT_HOPS: usize = 4;
 
 #[derive(Clone)]
 pub(super) struct SymbolCandidate {
@@ -233,7 +239,8 @@ pub(crate) enum ResolutionPath {
     SameFileBare,
     /// Cross-file bare call and exactly one symbol has this name.
     NameUnique,
-    /// Import matched but the module could not be pinned to indexed files.
+    /// Import matched but the module could not be pinned to indexed files, or a
+    /// bare Python call matched a name brought in by `from x import *`.
     ImportFallback,
     /// Cross-file bare call with several same-named candidates.
     NameAmbiguous,
@@ -287,7 +294,7 @@ impl ResolutionPath {
                 "exactly one indexed symbol in the caller's language family carries this name, in another file"
             }
             ResolutionPath::ImportFallback => {
-                "an import matched but its module could not be pinned to indexed files"
+                "an import matched but its module could not be pinned to indexed files, or the name came in through `from x import *`"
             }
             ResolutionPath::NameAmbiguous => {
                 "several indexed symbols in the caller's language family carry this name; candidates kept up to the cap"
@@ -403,6 +410,13 @@ pub(crate) fn resolve_call_explained(
         };
     }
 
+    if let Some(targets) = resolve_star_imported_call(call, name_index, import_index, file_index) {
+        return ResolvedCall {
+            path: ResolutionPath::ImportFallback,
+            targets,
+        };
+    }
+
     let path = if candidates.len() == 1 {
         ResolutionPath::NameUnique
     } else {
@@ -486,26 +500,173 @@ fn resolve_imported_call(
     } else {
         call.target_name.as_str()
     };
-    let Some(candidates) = language_family(&call.source_file)
-        .and_then(|family| name_index.get(family))
-        .and_then(|names| names.get(target_name))
-    else {
-        let module_targets =
-            module_targets(&call.source_file, matched_import, call.kind, file_index);
-        return unresolved_import_resolution(call, &module_targets, file_index);
-    };
+    let names = language_family(&call.source_file).and_then(|family| name_index.get(family));
     let module_targets = module_targets(&call.source_file, matched_import, call.kind, file_index);
-    let targets: Vec<SymbolCandidate> = candidates
-        .iter()
+    let targets: Vec<SymbolCandidate> = names
+        .and_then(|names| names.get(target_name))
+        .into_iter()
+        .flatten()
         .filter(|candidate| module_targets.matches(&candidate.file_path))
         .take(8)
         .cloned()
         .collect();
-    if targets.is_empty() {
-        unresolved_import_resolution(call, &module_targets, file_index)
-    } else {
-        ImportResolution::Resolved(targets)
+    if !targets.is_empty() {
+        return ImportResolution::Resolved(targets);
     }
+    if call.source_file.ends_with(".py") {
+        // The imported module may only re-export the name, as a package
+        // `__init__.py` publishing a flat API does.
+        let files = module_targets.indexed_files(file_index);
+        match python_definitions(
+            target_name,
+            &files,
+            names,
+            import_index,
+            file_index,
+            &mut HashSet::new(),
+            0,
+        ) {
+            Reexport::Found(targets) => return ImportResolution::Resolved(targets),
+            // A package that neither defines nor re-exports the name says
+            // nothing about where it lives; let the name fallback decide.
+            Reexport::Unknown
+                if call.kind == CallKind::Bare
+                    && !files.is_empty()
+                    && files.iter().all(|file| is_python_package_init(file)) =>
+            {
+                return ImportResolution::NoImport;
+            }
+            Reexport::Unknown | Reexport::Missing => {}
+        }
+    }
+    unresolved_import_resolution(call, &module_targets, file_index)
+}
+
+fn is_python_package_init(file: &str) -> bool {
+    file == "__init__.py" || file.ends_with("/__init__.py")
+}
+
+fn is_wildcard_import(import: &Import) -> bool {
+    import.imported_name.as_deref() == Some(WILDCARD_IMPORT)
+}
+
+/// Where a Python name lives, searched from a set of module files.
+enum Reexport {
+    /// Definitions in a module the import chain reaches.
+    Found(Vec<SymbolCandidate>),
+    /// An explicit `from x import name` chain ended without a definition: the
+    /// name is missing, the chain leaves the index, or it loops.
+    Missing,
+    /// The modules neither define nor explicitly re-export the name.
+    Unknown,
+}
+
+/// Find `name` defined in `files`, following their `from x import name` and
+/// `from x import *` re-exports for up to [`MAX_REEXPORT_HOPS`] hops.
+/// `visited` holds `(file, name)` pairs so re-export cycles terminate.
+fn python_definitions(
+    name: &str,
+    files: &[String],
+    names: Option<&HashMap<String, Vec<SymbolCandidate>>>,
+    import_index: &HashMap<String, Vec<Import>>,
+    file_index: &FileIndex,
+    visited: &mut HashSet<(String, String)>,
+    hops: usize,
+) -> Reexport {
+    let files: Vec<&String> = files
+        .iter()
+        .filter(|file| visited.insert(((*file).clone(), name.to_string())))
+        .collect();
+    if files.is_empty() {
+        return Reexport::Unknown;
+    }
+    let defined: Vec<SymbolCandidate> = names
+        .and_then(|names| names.get(name))
+        .into_iter()
+        .flatten()
+        .filter(|candidate| files.contains(&&candidate.file_path))
+        .take(8)
+        .cloned()
+        .collect();
+    if !defined.is_empty() {
+        return Reexport::Found(defined);
+    }
+    if hops >= MAX_REEXPORT_HOPS {
+        return Reexport::Unknown;
+    }
+
+    let mut explicit = false;
+    for file in files {
+        for import in import_index.get(file).into_iter().flatten() {
+            let wildcard = is_wildcard_import(import);
+            let reexported = if wildcard {
+                name
+            } else if import.local_name.as_deref() == Some(name) {
+                // `import x as name` binds a module, not a callable.
+                let Some(imported) = import.imported_name.as_deref() else {
+                    continue;
+                };
+                imported
+            } else {
+                continue;
+            };
+            let next =
+                module_targets(file, import, CallKind::Bare, file_index).indexed_files(file_index);
+            match python_definitions(
+                reexported,
+                &next,
+                names,
+                import_index,
+                file_index,
+                visited,
+                hops + 1,
+            ) {
+                Reexport::Found(targets) => return Reexport::Found(targets),
+                // A star import does not promise the name; keep looking.
+                _ if wildcard => {}
+                _ => explicit = true,
+            }
+        }
+    }
+    if explicit {
+        Reexport::Missing
+    } else {
+        Reexport::Unknown
+    }
+}
+
+/// Resolve a bare Python call through the caller's `from x import *` imports.
+fn resolve_star_imported_call(
+    call: &PendingCall,
+    name_index: &NameIndex,
+    import_index: &HashMap<String, Vec<Import>>,
+    file_index: &FileIndex,
+) -> Option<Vec<SymbolCandidate>> {
+    if !call.source_file.ends_with(".py") {
+        return None;
+    }
+    let names = name_index.get("python");
+    let mut visited = HashSet::new();
+    import_index
+        .get(&call.source_file)?
+        .iter()
+        .filter(|import| is_wildcard_import(import))
+        .find_map(|import| {
+            let files = module_targets(&call.source_file, import, CallKind::Bare, file_index)
+                .indexed_files(file_index);
+            match python_definitions(
+                &call.target_name,
+                &files,
+                names,
+                import_index,
+                file_index,
+                &mut visited,
+                0,
+            ) {
+                Reexport::Found(targets) => Some(targets),
+                Reexport::Missing | Reexport::Unknown => None,
+            }
+        })
 }
 
 fn unresolved_import_resolution(
@@ -525,13 +686,17 @@ pub(super) fn matched_import_for<'i>(
     call: &PendingCall,
     imports: &'i [Import],
 ) -> Option<&'i Import> {
-    imports.iter().find(|import| match call.kind {
-        CallKind::Bare => import.local_name.as_deref() == Some(call.target_name.as_str()),
-        CallKind::Member | CallKind::Scoped => call
-            .qualifier
-            .as_deref()
-            .is_some_and(|qualifier| import_matches_qualifier(import, qualifier)),
-    })
+    // A star import binds no single name, so it never matches by name here.
+    imports
+        .iter()
+        .filter(|import| !is_wildcard_import(import))
+        .find(|import| match call.kind {
+            CallKind::Bare => import.local_name.as_deref() == Some(call.target_name.as_str()),
+            CallKind::Member | CallKind::Scoped => call
+                .qualifier
+                .as_deref()
+                .is_some_and(|qualifier| import_matches_qualifier(import, qualifier)),
+        })
 }
 
 fn import_matches_qualifier(import: &Import, qualifier: &str) -> bool {
@@ -567,6 +732,15 @@ impl ModuleTargets {
             .iter()
             .any(|file| file_index.files.contains(file) && self.matches(file))
             || (!self.dirs.is_empty() && file_index.files.iter().any(|file| self.matches(file)))
+    }
+
+    /// Indexed files this target names exactly, in sorted order.
+    fn indexed_files(&self, file_index: &FileIndex) -> Vec<String> {
+        self.files
+            .iter()
+            .filter(|file| file_index.files.contains(*file) && self.matches(file))
+            .cloned()
+            .collect()
     }
 
     fn is_external(&self, file_index: &FileIndex) -> bool {
