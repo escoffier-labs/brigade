@@ -369,6 +369,138 @@ fn file_removed_by_new_gitignore_rule_self_cleans_from_db() {
 }
 
 #[test]
+fn nested_worktree_and_nested_clone_are_not_indexed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_git_repo(root);
+    write_file(root.join("app.py"), "def kept():\n    return 1\n");
+    write_file(root.join("pkg/mod.py"), "def normal():\n    return 1\n");
+    // Linked worktree: `.git` is a file.
+    write_file(
+        root.join(".worktrees/x/.git"),
+        "gitdir: /elsewhere/.git/worktrees/x\n",
+    );
+    write_file(
+        root.join(".worktrees/x/app.py"),
+        "def kept():\n    return 1\n",
+    );
+    // Nested clone: `.git` is a directory.
+    make_git_repo(&root.join("vendor/y"));
+    write_file(
+        root.join("vendor/y/lib.py"),
+        "def vendored():\n    return 1\n",
+    );
+    // A directory below a worktree is covered by the same boundary.
+    write_file(
+        root.join(".worktrees/x/sub/deep.py"),
+        "def deep():\n    return 1\n",
+    );
+
+    let conn = open_graph(root);
+    let summary = sync_repo(&conn, root).unwrap();
+
+    assert_eq!(summary.files, 2);
+    assert_eq!(indexed_paths(&conn), paths(["app.py", "pkg/mod.py"]));
+}
+
+#[test]
+fn nested_repo_boundary_applies_without_a_root_git_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("app.py"), "def kept():\n    return 1\n");
+    write_file(root.join("wt/.git"), "gitdir: /elsewhere\n");
+    write_file(root.join("wt/app.py"), "def kept():\n    return 1\n");
+
+    let conn = open_graph(root);
+    sync_repo(&conn, root).unwrap();
+
+    assert_eq!(indexed_paths(&conn), paths(["app.py"]));
+}
+
+#[test]
+fn root_that_is_itself_a_linked_worktree_is_still_indexed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(
+        root.join(".git"),
+        "gitdir: /elsewhere/.git/worktrees/root\n",
+    );
+    write_file(root.join("app.py"), "def kept():\n    return 1\n");
+    write_file(root.join("pkg/mod.py"), "def normal():\n    return 1\n");
+
+    let conn = open_graph(root);
+    let summary = sync_repo(&conn, root).unwrap();
+
+    assert_eq!(summary.files, 2);
+    assert_eq!(indexed_paths(&conn), paths(["app.py", "pkg/mod.py"]));
+}
+
+#[test]
+fn existing_nested_repo_rows_are_dropped_on_next_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_git_repo(root);
+    write_file(root.join("app.py"), "def kept():\n    return 1\n");
+    write_file(
+        root.join(".worktrees/x/app.py"),
+        "def kept():\n    return 1\n",
+    );
+    write_file(
+        root.join(".worktrees/x/extra.py"),
+        "def extra():\n    return 1\n",
+    );
+
+    let conn = open_graph(root);
+    let first = sync_repo(&conn, root).unwrap();
+    assert_eq!(first.files, 3, "no .git marker yet, so the copy is indexed");
+
+    // The directory becomes a worktree, as when `git worktree add` lands on a
+    // path an older engine already walked.
+    write_file(
+        root.join(".worktrees/x/.git"),
+        "gitdir: /elsewhere/.git/worktrees/x\n",
+    );
+    let second = sync_repo(&conn, root).unwrap();
+
+    assert!(!second.unchanged);
+    assert_eq!(second.deleted, 2);
+    assert_eq!(indexed_paths(&conn), paths(["app.py"]));
+    let orphans: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM symbols WHERE file_path LIKE '.worktrees/%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphans, 0, "symbols of dropped files are purged too");
+}
+
+#[test]
+fn doctor_reports_nested_repo_skip_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_git_repo(root);
+    write_file(root.join("app.py"), "def kept():\n    return 1\n");
+    write_file(root.join(".worktrees/x/.git"), "gitdir: /elsewhere\n");
+    write_file(
+        root.join(".worktrees/x/app.py"),
+        "def kept():\n    return 1\n",
+    );
+    make_git_repo(&root.join("vendor/y"));
+    write_file(
+        root.join("vendor/y/lib.py"),
+        "def vendored():\n    return 1\n",
+    );
+
+    let conn = open_graph(root);
+    sync_repo(&conn, root).unwrap();
+    let report = doctor::doctor(&conn, root, &root.join("g.db")).unwrap();
+
+    assert_eq!(report.ignored.nested_repo, 2);
+    assert_eq!(report.pending.deleted_files, 0);
+}
+
+#[test]
 fn first_graphtrail_index_in_git_repo_adds_root_gitignore_entry() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
