@@ -1,10 +1,18 @@
-use std::{collections::HashMap, hint::black_box, path::Path, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    hint::black_box,
+    path::Path,
+    time::Instant,
+};
 
 use graphtrail::{
     model::SearchRow,
     query::{
         build_context_pack, build_context_pack_from_entry_points, personalize_context_pack,
-        search::{NAME_COVERAGE_FLOOR, RELEVANCE_FLOOR_RULE, floored_search, search_symbols},
+        search::{
+            FloorParams, MIN_NAME_COVERAGE, MIN_TASK_COVERAGE, RELEVANCE_FLOOR_RULE,
+            search_symbols, select_entry_points,
+        },
     },
     store::init_schema,
 };
@@ -466,7 +474,8 @@ fn relevance_floor_raises_precision_without_losing_recall() {
         serde_json::to_string_pretty(&json!({
             "floor": {
                 "rule": RELEVANCE_FLOOR_RULE,
-                "min_name_coverage": NAME_COVERAGE_FLOOR,
+                "min_task_coverage": MIN_TASK_COVERAGE,
+                "min_name_coverage": MIN_NAME_COVERAGE,
             },
             "baseline": baseline.json(),
             "floored": floored.json(),
@@ -489,58 +498,189 @@ fn relevance_floor_raises_precision_without_losing_recall() {
     );
 }
 
-#[test]
-fn name_coverage_floor_matches_its_calibration_sweep() {
-    let corpus = load_floor_corpus();
-    let grid: Vec<f64> = (0..=20).map(|step| step as f64 / 20.0).collect();
-    let mut sweep = Vec::new();
-    for &floor in &grid {
-        let mut tally = Tally::default();
-        for case in &corpus.cases {
-            let conn = floor_case_connection(case);
-            let rows = floored_search(&conn, &case.task, corpus.limit, floor)
-                .unwrap()
-                .rows;
-            tally.add(&ids(&rows), &case.relevant);
-        }
-        sweep.push((floor, tally));
+// Real calibration split (brigade#1648): hand-labeled Brigade issue titles with
+// the pre-floor keyword top 8 for each. The held-out split lives in
+// benchmarks/context-floor-heldout and is never read here.
+
+const REAL_CALIBRATION: &str =
+    include_str!("../benchmarks/context-ranking/floor-calibration-real.json");
+
+#[derive(Deserialize)]
+struct RealCalibration {
+    schema_version: u32,
+    limit: usize,
+    cases: Vec<RealCase>,
+}
+
+#[derive(Deserialize)]
+struct RealCase {
+    issue: u64,
+    task: String,
+    relevant_total: usize,
+    candidates: Vec<RealCandidate>,
+}
+
+#[derive(Deserialize)]
+struct RealCandidate {
+    name: String,
+    qualified_name: String,
+    file_path: String,
+    score: f64,
+    relevant: bool,
+}
+
+fn load_real_calibration() -> RealCalibration {
+    serde_json::from_str(REAL_CALIBRATION).expect("real calibration fixture must be valid JSON")
+}
+
+fn real_rows(case: &RealCase) -> Vec<SearchRow> {
+    case.candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| SearchRow {
+            id: format!("{}-{index}", case.issue),
+            kind: "function".to_string(),
+            name: candidate.name.clone(),
+            qualified_name: candidate.qualified_name.clone(),
+            file_path: candidate.file_path.clone(),
+            start_line: index + 1,
+            end_line: index + 1,
+            signature: candidate.name.clone(),
+            score: candidate.score,
+        })
+        .collect()
+}
+
+/// Files among the candidates that a path token in the task names.
+fn real_mentioned(case: &RealCase) -> HashSet<String> {
+    let tokens: Vec<String> = case
+        .task
+        .split_whitespace()
+        .map(|raw| {
+            raw.trim_matches(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .to_lowercase()
+        })
+        .filter(|token| token.contains('/') || token.contains('.'))
+        .collect();
+    case.candidates
+        .iter()
+        .map(|candidate| candidate.file_path.clone())
+        .filter(|path| {
+            let lower = path.to_lowercase();
+            tokens
+                .iter()
+                .any(|token| lower == *token || lower.ends_with(&format!("/{token}")))
+        })
+        .collect()
+}
+
+/// Precision and recall over every labeled relevant symbol, including the ones
+/// the keyword top 8 missed.
+fn score_real(corpus: &RealCalibration, select: impl Fn(&RealCase) -> Vec<usize>) -> Tally {
+    let mut tally = Tally::default();
+    for case in &corpus.cases {
+        let kept = select(case);
+        tally.returned += kept.len();
+        tally.hits += kept
+            .iter()
+            .filter(|index| case.candidates[**index].relevant)
+            .count();
+        tally.relevant += case.relevant_total;
     }
-    let best_recall = sweep
+    tally
+}
+
+fn floored_indexes(case: &RealCase, limit: usize, params: FloorParams) -> Vec<usize> {
+    let rows = real_rows(case);
+    select_entry_points(&case.task, &rows, &real_mentioned(case), limit, params)
+        .rows
         .iter()
-        .map(|(_, tally)| tally.recall())
-        .fold(0.0, f64::max);
-    let full_recall = |tally: &Tally| (tally.recall() - best_recall).abs() < 1e-12;
-    let best_f05 = sweep
+        .map(|row| {
+            rows.iter()
+                .position(|candidate| candidate.id == row.id)
+                .unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn real_calibration_fixture_is_labeled_and_bounded() {
+    let corpus = load_real_calibration();
+    assert_eq!(corpus.schema_version, 1);
+    assert!(corpus.cases.len() >= 60);
+    for case in &corpus.cases {
+        assert!(case.candidates.len() <= corpus.limit, "#{}", case.issue);
+        let labeled = case.candidates.iter().filter(|c| c.relevant).count();
+        assert!(labeled <= case.relevant_total, "#{}", case.issue);
+        for candidate in &case.candidates {
+            assert!(
+                Path::new(&candidate.file_path).is_relative(),
+                "#{}",
+                case.issue
+            );
+        }
+    }
+}
+
+#[test]
+fn floor_thresholds_match_their_real_calibration_sweep() {
+    let corpus = load_real_calibration();
+    let tasks: Vec<f64> = (2..=8).map(|step| step as f64 / 20.0).collect();
+    let names: Vec<f64> = (0..=3).map(|step| step as f64 / 10.0).collect();
+    let mut sweep = Vec::new();
+    for &min_task_coverage in &tasks {
+        for &min_name_coverage in &names {
+            let params = FloorParams {
+                min_task_coverage,
+                min_name_coverage,
+            };
+            let tally = score_real(&corpus, |case| floored_indexes(case, corpus.limit, params));
+            sweep.push((params, tally));
+        }
+    }
+    let best = sweep
         .iter()
-        .filter(|(_, tally)| full_recall(tally))
         .map(|(_, tally)| tally.f05())
         .fold(0.0, f64::max);
-    let optimal: Vec<f64> = sweep
+    // The best precision-weighted score. Ties go to the most permissive pair.
+    let (calibrated, _) = sweep
         .iter()
-        .filter(|(_, tally)| full_recall(tally) && (tally.f05() - best_f05).abs() < 1e-12)
-        .map(|(floor, _)| *floor)
-        .collect();
-    let calibrated = optimal[0];
+        .find(|(_, tally)| (tally.f05() - best).abs() < 1e-12)
+        .unwrap();
+    let baseline = score_real(&corpus, |case| (0..case.candidates.len()).collect());
+    let floored = score_real(&corpus, |case| {
+        floored_indexes(case, corpus.limit, FloorParams::CALIBRATED)
+    });
 
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
+            "baseline_keyword_top8": baseline.json(),
+            "floored": floored.json(),
+            "calibrated": {
+                "min_task_coverage": calibrated.min_task_coverage,
+                "min_name_coverage": calibrated.min_name_coverage,
+            },
             "sweep": sweep
                 .iter()
-                .map(|(floor, tally)| json!({"min_name_coverage": floor, "score": tally.json()}))
+                .map(|(params, tally)| json!({
+                    "min_task_coverage": params.min_task_coverage,
+                    "min_name_coverage": params.min_name_coverage,
+                    "score": tally.json(),
+                }))
                 .collect::<Vec<_>>(),
-            "optimal_band": optimal,
-            "calibrated": calibrated,
         }))
         .unwrap()
     );
 
-    // The most permissive floor that reaches the best precision-weighted score
-    // with no recall loss. Change the corpus, not this constant, to move it.
+    // Change the labeled corpus, not these constants, to move the floor.
     assert!(
-        (NAME_COVERAGE_FLOOR - calibrated).abs() < 1e-12,
-        "NAME_COVERAGE_FLOOR is {NAME_COVERAGE_FLOOR}, calibration picks {calibrated} (band {optimal:?})"
+        (MIN_TASK_COVERAGE - calibrated.min_task_coverage).abs() < 1e-12
+            && (MIN_NAME_COVERAGE - calibrated.min_name_coverage).abs() < 1e-12,
+        "floor is ({MIN_TASK_COVERAGE}, {MIN_NAME_COVERAGE}), calibration picks {calibrated:?}"
     );
+    assert!(floored.precision() > baseline.precision());
+    assert!(floored.f05() > baseline.f05());
 }
 
 #[test]

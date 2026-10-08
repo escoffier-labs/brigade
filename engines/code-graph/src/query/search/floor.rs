@@ -2,22 +2,30 @@
 //!
 //! Keyword search ORs every word of a task sentence, so words like "update" or
 //! "install" pull in symbols from anywhere in the repository, and the top `limit`
-//! rows used to be returned whatever their quality. The floor keeps a hit only
-//! when the task carries evidence for it:
+//! rows used to be returned whatever their quality. The floor filters those rows
+//! and keeps a hit only when the task carries evidence for it:
 //!
-//! 1. identified: the task names the hit's file, spells the hit's name as a code
-//!    identifier, or a code identifier in the task covers enough of a multi-word
-//!    name;
-//! 2. described: plain task words cover enough of the hit's name and at least one
-//!    of them is not a generic task word, or the hit's name holds every
-//!    distinctive word of the task (a keyword query like `evidence`). A one-word
-//!    name must also be unique among candidates;
-//! 3. located: the task names a directory the hit lives in ("the Rust routing
-//!    hub"), or names its file stem while a second distinctive task word appears
-//!    in its name ("the request router" for `routeRequest` in `router.ts`).
+//! 1. identified: the task names the hit's file, or spells the hit's name as a
+//!    code identifier or as a compound name in any case (`codegraphbrief`).
+//! 2. described: the hit's name and path explain at least `min_task_coverage`
+//!    of the task's distinctive words, at least one of them in the name, and the
+//!    task explains at least `min_name_coverage` of the hit's name.
+//! 3. located (fallback only): the task names a directory the hit lives in ("the
+//!    Rust routing hub"), or names its file stem while a second distinctive task
+//!    word appears in its name ("the request router" for `routeRequest`).
 //!
-//! Only the best tier with any hit is kept. When no hit clears the floor the pack
-//! is empty and marked not confident.
+//! A one-word name is identified only when no other symbol shares it.
+//! Identified and described hits are kept together, identified first. Located
+//! hits are used only when neither tier has any, or when every kept hit is a
+//! test (then only located code, not tests, joins). Symbols found by exact-name
+//! or named-file lookup count only as identified. A task about documentation
+//! (README, CHANGELOG, a `docs:` change, a Markdown path) keeps identified hits
+//! only. Nested helpers inside test functions and vendored or minified files
+//! never count as described or located.
+//!
+//! When no hit clears the floor the pack is empty and marked not confident. Both
+//! thresholds are calibrated on hand-labeled real issue titles. See
+//! `tests/context_ranking_benchmark.rs`.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -29,40 +37,76 @@ use super::{search_row_from_sql, search_symbols, sqlite_limit};
 use crate::model::{RelevanceFloor, SearchRow};
 
 /// Name of the rule `floored_search` applies, recorded on every context pack.
-pub const RELEVANCE_FLOOR_RULE: &str = "name-coverage-v1";
+pub const RELEVANCE_FLOOR_RULE: &str = "task-coverage-v2";
 
-/// Minimum share of a symbol's name tokens the task must cover. Calibrated by the
-/// sweep in `tests/context_ranking_benchmark.rs`, which fails if this drifts.
-pub const NAME_COVERAGE_FLOOR: f64 = 0.55;
+/// Minimum share of the task's distinctive words a described hit must explain.
+/// Calibrated by `floor_thresholds_match_their_real_calibration_sweep`.
+pub const MIN_TASK_COVERAGE: f64 = 0.30;
 
-/// Most keyword candidates the floor scores. A cost guard only: exact identifier
-/// and named-file lookups add their symbols regardless of keyword rank.
-const CANDIDATE_POOL: usize = 4096;
+/// Minimum share of a described hit's name tokens the task must explain.
+/// Calibrated by `floor_thresholds_match_their_real_calibration_sweep`.
+pub const MIN_NAME_COVERAGE: f64 = 0.20;
 
-/// Generic words that never count as evidence on their own: English function
-/// words plus the verbs and nouns most task titles use for any kind of change.
+/// Thresholds for the described tier.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FloorParams {
+    pub min_task_coverage: f64,
+    pub min_name_coverage: f64,
+}
+
+impl FloorParams {
+    pub const CALIBRATED: FloorParams = FloorParams {
+        min_task_coverage: MIN_TASK_COVERAGE,
+        min_name_coverage: MIN_NAME_COVERAGE,
+    };
+}
+
+/// Most exact-name and named-file symbols added to the keyword candidates. A cost
+/// guard only.
+const LOOKUP_LIMIT: usize = 4096;
+
+/// Generic words that never count as evidence: English function words, the
+/// verbs and nouns most task titles use for any kind of change, and
+/// conventional-commit types.
 #[rustfmt::skip]
 const STOPWORDS: &[&str] = &[
     "a", "about", "add", "added", "adds", "after", "all", "also", "an", "and", "any", "are", "as",
-    "at", "be", "before", "but", "by", "can", "change", "changed", "changes", "check", "could",
-    "do", "does", "doc", "docs", "ensure", "explain", "find", "fix", "fixed", "fixes", "for",
-    "from", "go", "has", "have", "how", "identify", "if", "in", "inspect", "into", "investigate",
-    "is", "it", "its", "look", "make", "makes", "mention", "mentions", "more", "new", "no", "not",
-    "of", "old", "on", "only", "or", "out", "remove", "removed", "removes", "section", "should",
-    "show", "so", "some", "support", "test", "tests", "than", "that", "the", "their", "them",
-    "then", "there", "these", "this", "those", "to", "trace", "update", "updated", "updates",
-    "use", "used", "uses", "via", "was", "were", "when", "where", "which", "while", "will",
-    "with", "would",
+    "at", "be", "before", "build", "but", "by", "can", "change", "changed", "changes", "check",
+    "chore", "ci", "could", "do", "does", "doc", "docs", "ensure", "explain", "feat", "find",
+    "fix", "fixed", "fixes", "for", "from", "go", "has", "have", "how", "identify", "if", "in",
+    "inspect", "into", "investigate", "is", "it", "its", "look", "make", "makes", "mention",
+    "mentions", "more", "new", "no", "not", "of", "old", "on", "only", "or", "out", "perf",
+    "refactor", "remove", "removed", "removes", "section", "should", "show", "so", "some",
+    "style", "support", "test", "tests", "than", "that", "the", "their", "them", "then", "there",
+    "these", "this", "those", "to", "trace", "update", "updated", "updates", "use", "used",
+    "uses", "via", "was", "were", "when", "where", "which", "while", "will", "with", "would",
+];
+
+/// Words that make a task about documentation files rather than code.
+const DOC_WORDS: &[&str] = &[
+    "readme",
+    "changelog",
+    "license",
+    "contributing",
+    "documentation",
+];
+
+/// Path segments too common to say anything about a file.
+const PATH_NOISE: &[&str] = &[
+    "src", "test", "tests", "lib", "mod", "index", "main", "init",
 ];
 
 /// Extensions that make a task token a file reference rather than a dotted name.
 #[rustfmt::skip]
 const FILE_EXTENSIONS: &[&str] = &[
-    "astro", "bash", "c", "cc", "cjs", "cpp", "cs", "css", "fish", "go", "h", "hpp", "html",
-    "java", "js", "json", "jsx", "kt", "kts", "md", "mjs", "php", "py", "pyi", "rb", "rs",
-    "scala", "sh", "sql", "svelte", "swift", "toml", "ts", "tsx", "txt", "vue", "yaml", "yml",
-    "zsh",
+    "adoc", "astro", "bash", "c", "cc", "cjs", "cpp", "cs", "css", "fish", "go", "h", "hpp",
+    "html", "java", "js", "json", "jsx", "kt", "kts", "md", "mjs", "php", "py", "pyi", "rb",
+    "rs", "rst", "scala", "sh", "sql", "svelte", "swift", "toml", "ts", "tsx", "txt", "vue",
+    "yaml", "yml", "zsh",
 ];
+
+/// Extensions of documentation files.
+const DOC_EXTENSIONS: &[&str] = &["md", "rst", "txt", "adoc"];
 
 /// Search hits that cleared the relevance floor, plus how the floor was applied.
 #[derive(Debug)]
@@ -72,34 +116,89 @@ pub struct FlooredSearch {
 }
 
 /// Search the task text and keep at most `limit` hits that clear the floor.
+///
+/// The keyword candidates are the top `limit` rows, so the floor filters what
+/// search would have returned. Symbols named exactly by the task and symbols in
+/// files the task names are added whatever their keyword rank.
 pub fn floored_search(
     conn: &Connection,
     task: &str,
     limit: usize,
-    min_name_coverage: f64,
+    params: FloorParams,
 ) -> Result<FlooredSearch> {
     let terms = TaskTerms::parse(task);
     let mentioned = mentioned_files(conn, &terms.paths)?;
-    let pool = candidate_pool(conn, task, &terms, &mentioned)?;
-    let mut name_counts: HashMap<Vec<String>, usize> = HashMap::new();
-    for row in &pool {
-        *name_counts.entry(name_tokens(&row.name)).or_default() += 1;
+    let keyword = search_symbols(conn, task, limit)?;
+    let lookups = lookup_candidates(conn, &terms, &mentioned)?;
+    Ok(select(
+        &terms, &keyword, &lookups, &mentioned, limit, params,
+    ))
+}
+
+/// Apply the floor to candidates already in hand. `mentioned` holds the indexed
+/// files the task names.
+pub fn select_entry_points(
+    task: &str,
+    candidates: &[SearchRow],
+    mentioned: &HashSet<String>,
+    limit: usize,
+    params: FloorParams,
+) -> FlooredSearch {
+    select(
+        &TaskTerms::parse(task),
+        candidates,
+        &[],
+        mentioned,
+        limit,
+        params,
+    )
+}
+
+/// `keyword` rows are what search returned. `lookups` are symbols the task
+/// names exactly or that live in files it names: they count only as identified
+/// evidence, never as described or located.
+fn select(
+    terms: &TaskTerms,
+    keyword: &[SearchRow],
+    lookups: &[SearchRow],
+    mentioned: &HashSet<String>,
+    limit: usize,
+    params: FloorParams,
+) -> FlooredSearch {
+    let mut seen = HashSet::new();
+    let pool: Vec<(&SearchRow, bool)> = keyword
+        .iter()
+        .map(|row| (row, false))
+        .chain(lookups.iter().map(|row| (row, true)))
+        .filter(|(row, _)| seen.insert(row.id.as_str()))
+        .collect();
+    let mut name_counts: HashMap<String, usize> = HashMap::new();
+    for (row, _) in &pool {
+        *name_counts.entry(compact(&row.name)).or_default() += 1;
     }
-    let mut tiers: [Vec<(Evidence, &SearchRow)>; 3] = Default::default();
-    for row in &pool {
-        if let Some(found) = evidence(row, &terms, &mentioned, &name_counts, min_name_coverage) {
-            tiers[found.tier as usize].push((found, row));
+    let mut kept = Vec::new();
+    let mut located = Vec::new();
+    for &(row, lookup_only) in &pool {
+        match evidence(row, terms, mentioned, &name_counts, params) {
+            Some(found) if lookup_only && !matches!(found.tier, Tier::Identified) => {}
+            Some(found) if matches!(found.tier, Tier::Located) => located.push((found, row)),
+            Some(found) => kept.push((found, row)),
+            None => {}
         }
     }
-    let mut kept = tiers
-        .into_iter()
-        .find(|tier| !tier.is_empty())
-        .unwrap_or_default();
+    if kept.is_empty() {
+        kept = located;
+    } else if kept.iter().all(|(_, row)| is_test_symbol(row)) {
+        // Only tests matched, so the code under test is missing. Add the
+        // located code, never more located tests.
+        kept.extend(located.into_iter().filter(|(_, row)| !is_test_symbol(row)));
+    }
     kept.sort_by(|(a_ev, a), (b_ev, b)| {
-        b_ev.verbatim
-            .cmp(&a_ev.verbatim)
-            .then_with(|| b_ev.exact.cmp(&a_ev.exact))
-            .then_with(|| b_ev.coverage.total_cmp(&a_ev.coverage))
+        (a_ev.tier as u8)
+            .cmp(&(b_ev.tier as u8))
+            .then_with(|| b_ev.verbatim.cmp(&a_ev.verbatim))
+            .then_with(|| b_ev.task_coverage.total_cmp(&a_ev.task_coverage))
+            .then_with(|| b_ev.name_coverage.total_cmp(&a_ev.name_coverage))
             .then_with(|| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal))
             .then_with(|| a.file_path.cmp(&b.file_path))
             .then_with(|| a.start_line.cmp(&b.start_line))
@@ -111,26 +210,24 @@ pub fn floored_search(
         .take(limit)
         .map(|(_, row)| row.clone())
         .collect();
-    Ok(FlooredSearch {
+    FlooredSearch {
         rows,
         floor: RelevanceFloor {
             rule: RELEVANCE_FLOOR_RULE.to_string(),
-            min_name_coverage,
+            min_task_coverage: params.min_task_coverage,
+            min_name_coverage: params.min_name_coverage,
             candidates: pool.len(),
             kept: survivors,
             dropped: pool.len() - survivors,
         },
-    })
+    }
 }
 
 #[derive(Debug, Default)]
 struct TaskTerms {
-    /// Lowercase word tokens of the whole task.
-    words: Vec<String>,
-    /// Words outside file references that are not stopwords, deduplicated.
+    /// Words outside file references that are neither stopwords nor doc words,
+    /// deduplicated.
     distinctive: Vec<String>,
-    /// Lowercase word tokens of code-shaped identifiers only.
-    identifier_words: Vec<String>,
     /// Identifier segments as written (`Foo::bar` gives `Foo` and `bar`).
     identifiers: Vec<String>,
     /// Lowercase file references (`src/a.rs`, `context.rs`).
@@ -138,24 +235,34 @@ struct TaskTerms {
     /// Every non-path token and identifier segment, lowercased with separators
     /// removed, so `codegraphbrief` and `CODE_GRAPH_BRIEF` both name `CodeGraphBrief`.
     compact: Vec<String>,
+    /// The task is about documentation files, not code.
+    docs: bool,
 }
 
 impl TaskTerms {
     fn parse(task: &str) -> Self {
         let mut terms = TaskTerms::default();
+        let lead = task.trim_start().to_lowercase();
+        terms.docs = lead.starts_with("docs:") || lead.starts_with("docs(");
         for raw in task.split_whitespace() {
             let token = raw.trim_matches(|c: char| !(c.is_alphanumeric() || c == '_'));
             if token.is_empty() {
                 continue;
             }
-            let words = name_tokens(token);
-            terms.words.extend(words.iter().cloned());
             if is_file_reference(token) {
-                terms.paths.push(token.to_lowercase());
+                let lower = token.to_lowercase();
+                let doc_file = lower.starts_with("docs/")
+                    || lower
+                        .rsplit_once('.')
+                        .is_some_and(|(_, ext)| DOC_EXTENSIONS.contains(&ext));
+                terms.docs |= doc_file;
+                terms.paths.push(lower);
                 continue;
             }
-            for word in words {
-                if !is_stopword(&word) && !terms.distinctive.contains(&word) {
+            for word in name_tokens(token) {
+                if DOC_WORDS.contains(&word.as_str()) {
+                    terms.docs = true;
+                } else if !is_stopword(&word) && !terms.distinctive.contains(&word) {
                     terms.distinctive.push(word);
                 }
             }
@@ -166,7 +273,6 @@ impl TaskTerms {
                 }
             }
             if is_code_identifier(token) {
-                terms.identifier_words.extend(name_tokens(token));
                 for segment in token.split(['.', ':']) {
                     if !name_tokens(segment).is_empty() {
                         terms.identifiers.push(segment.to_string());
@@ -261,69 +367,128 @@ struct Evidence {
     tier: Tier,
     /// The task spells this name exactly as written.
     verbatim: bool,
-    /// The task names this symbol as an identifier, ignoring case and separators.
-    exact: bool,
-    coverage: f64,
+    task_coverage: f64,
+    name_coverage: f64,
 }
 
-/// Share of `name` tokens matched by `words`, and whether any match is not a stopword.
-fn coverage(name: &[String], words: &[String]) -> (f64, bool) {
-    if name.is_empty() {
-        return (0.0, false);
-    }
-    let mut covered = 0usize;
-    let mut distinctive = false;
-    for token in name {
-        let mut matched = false;
-        for word in words.iter().filter(|word| token_matches(token, word)) {
-            matched = true;
-            distinctive |= !is_stopword(word);
-        }
-        covered += usize::from(matched);
-    }
-    (covered as f64 / name.len() as f64, distinctive)
+/// A helper defined inside a test function (`test_x.readiness`), not a test.
+fn is_nested_test_helper(qualified_name: &str) -> bool {
+    let mut segments: Vec<&str> = qualified_name
+        .split(['.', ':'])
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    segments.pop();
+    segments.iter().any(|segment| segment.starts_with("test"))
+}
+
+/// A test: under a `test`/`tests` directory, in a `test_*`/`*_test` file, or
+/// named `test*`.
+fn is_test_symbol(row: &SearchRow) -> bool {
+    let mut segments: Vec<&str> = row.file_path.split('/').collect();
+    let file = segments.pop().unwrap_or_default();
+    let stem = file.split('.').next().unwrap_or(file);
+    segments
+        .iter()
+        .any(|segment| *segment == "test" || *segment == "tests")
+        || stem.starts_with("test_")
+        || stem.ends_with("_test")
+        || row.name.to_lowercase().starts_with("test")
+}
+
+/// Vendored, bundled, or minified code.
+fn is_vendored(file_path: &str) -> bool {
+    let path = format!("/{}", file_path.to_lowercase());
+    ["/node_modules/", "/vendor/", "/third_party/", "/dist/"]
+        .iter()
+        .any(|dir| path.contains(dir))
+        || path.contains(".min.")
+}
+
+/// Distinctive task words that appear among `tokens`.
+fn words_in<'a>(distinctive: &'a [String], tokens: &[String]) -> Vec<&'a String> {
+    distinctive
+        .iter()
+        .filter(|word| tokens.iter().any(|token| token_matches(token, word)))
+        .collect()
 }
 
 fn evidence(
     row: &SearchRow,
     terms: &TaskTerms,
     mentioned: &HashSet<String>,
-    name_counts: &HashMap<Vec<String>, usize>,
-    min_name_coverage: f64,
+    name_counts: &HashMap<String, usize>,
+    params: FloorParams,
 ) -> Option<Evidence> {
     let name = name_tokens(&row.name);
-    let verbatim = terms.identifiers.contains(&row.name);
+    // A one-word name identifies a symbol only when no other symbol shares it:
+    // `__init__` or `main` named in a task point at nothing in particular.
+    let unique = name_counts.get(&compact(&row.name)).copied().unwrap_or(0) <= 1;
+    let verbatim = terms.identifiers.contains(&row.name) && (name.len() >= 2 || unique);
     // A compound name spelled out in full, in any case and with or without
     // separators, names the symbol. A one-word name stays a plain word.
     let exact = verbatim
         || (!name.is_empty()
+            && (name.len() >= 2 || unique)
             && terms
                 .identifiers
                 .iter()
                 .any(|ident| name_tokens(ident) == name))
         || (name.len() >= 2 && terms.compact.contains(&compact(&row.name)));
-    let (identifier_coverage, _) = coverage(&name, &terms.identifier_words);
-    let identifier_covered =
-        name.len() >= 2 && identifier_coverage > 0.0 && identifier_coverage >= min_name_coverage;
-    if exact || identifier_covered || mentioned.contains(&row.file_path) {
+    if exact || mentioned.contains(&row.file_path) {
         return Some(Evidence {
             tier: Tier::Identified,
             verbatim,
-            exact,
-            coverage: identifier_coverage,
+            task_coverage: 1.0,
+            name_coverage: 1.0,
         });
     }
-    let (word_coverage, distinctive) = coverage(&name, &terms.words);
-    let covered = distinctive && word_coverage >= min_name_coverage;
-    let holds_task = !terms.distinctive.is_empty()
-        && terms
-            .distinctive
-            .iter()
-            .all(|word| name.iter().any(|token| token_matches(token, word)));
-    let unambiguous = name.len() >= 2 || name_counts.get(&name).copied().unwrap_or(0) <= 1;
-    let tier = if (covered || holds_task) && unambiguous {
+    if terms.docs
+        || terms.distinctive.is_empty()
+        || is_nested_test_helper(&row.qualified_name)
+        || is_vendored(&row.file_path)
+    {
+        return None;
+    }
+    let name: Vec<String> = name
+        .into_iter()
+        .filter(|token| token != "test" && token != "tests")
+        .collect();
+    let mut segments: Vec<&str> = row.file_path.split('/').collect();
+    let file = segments.pop().unwrap_or_default();
+    let stem = file.split('.').next().unwrap_or(file);
+    let path_tokens: Vec<String> = segments
+        .iter()
+        .flat_map(|segment| name_tokens(segment))
+        .chain(name_tokens(stem))
+        .filter(|token| !PATH_NOISE.contains(&token.as_str()))
+        .collect();
+    let in_name = words_in(&terms.distinctive, &name);
+    let in_path = words_in(&terms.distinctive, &path_tokens);
+    let explained = terms
+        .distinctive
+        .iter()
+        .filter(|word| in_name.contains(word) || in_path.contains(word))
+        .count();
+    let task_coverage = explained as f64 / terms.distinctive.len() as f64;
+    let name_coverage = if name.is_empty() {
+        0.0
+    } else {
+        name.iter()
+            .filter(|token| {
+                terms
+                    .distinctive
+                    .iter()
+                    .any(|word| token_matches(token, word))
+            })
+            .count() as f64
+            / name.len() as f64
+    };
+    let tier = if !in_name.is_empty()
+        && task_coverage >= params.min_task_coverage
+        && name_coverage >= params.min_name_coverage
+    {
         Tier::Described
-    } else if located_by_task(row, &name, &terms.distinctive) {
+    } else if located_by_task(&segments, stem, &in_name, &terms.distinctive) {
         Tier::Located
     } else {
         return None;
@@ -331,13 +496,13 @@ fn evidence(
     Some(Evidence {
         tier,
         verbatim: false,
-        exact: false,
-        coverage: word_coverage,
+        task_coverage,
+        name_coverage,
     })
 }
 
 /// The task words that spell out every token of a path segment, if any do.
-fn segment_words(segment: &str, distinctive: &[String]) -> Option<Vec<String>> {
+fn segment_named(segment: &str, distinctive: &[String]) -> Option<Vec<String>> {
     let tokens = name_tokens(segment);
     if tokens.is_empty() {
         return None;
@@ -355,26 +520,22 @@ fn segment_words(segment: &str, distinctive: &[String]) -> Option<Vec<String>> {
 
 /// The task names a directory the hit lives in, or names the hit's file stem and
 /// a second distinctive word of the task appears in the hit's name.
-fn located_by_task(row: &SearchRow, name: &[String], distinctive: &[String]) -> bool {
-    let mut segments: Vec<&str> = row.file_path.split('/').collect();
-    let Some(file) = segments.pop() else {
-        return false;
-    };
-    if segments
+fn located_by_task(
+    directories: &[&str],
+    stem: &str,
+    in_name: &[&String],
+    distinctive: &[String],
+) -> bool {
+    if directories
         .iter()
-        .any(|dir| segment_words(dir, distinctive).is_some())
+        .any(|dir| segment_named(dir, distinctive).is_some())
     {
         return true;
     }
-    let stem = file.split('.').next().unwrap_or(file);
-    let Some(stem_words) = segment_words(stem, distinctive) else {
-        return false;
-    };
-    name.iter().any(|token| {
-        distinctive
-            .iter()
-            .any(|word| !stem_words.contains(word) && token_matches(token, word))
-    })
+    match segment_named(stem, distinctive) {
+        Some(stem_words) => in_name.iter().any(|word| !stem_words.contains(word)),
+        None => false,
+    }
 }
 
 fn mentioned_files(conn: &Connection, paths: &[String]) -> Result<HashSet<String>> {
@@ -398,14 +559,13 @@ fn mentioned_files(conn: &Connection, paths: &[String]) -> Result<HashSet<String
     Ok(mentioned)
 }
 
-fn candidate_pool(
+/// Symbols whose name, stripped of case and separators, equals a task token,
+/// plus every symbol in a file the task names. Keyword rank does not matter.
+fn lookup_candidates(
     conn: &Connection,
-    task: &str,
     terms: &TaskTerms,
     mentioned: &HashSet<String>,
 ) -> Result<Vec<SearchRow>> {
-    let mut pool = search_symbols(conn, task, CANDIDATE_POOL)?;
-    let mut seen: HashSet<String> = pool.iter().map(|row| row.id.clone()).collect();
     let mut extra = Vec::new();
     // Exact-name lookups bypass keyword rank, one bounded query per chunk of keys.
     for keys in terms.compact.chunks(256) {
@@ -415,7 +575,7 @@ fn candidate_pool(
              FROM symbols
              WHERE replace(replace(replace(lower(name), '_', ''), '-', ''), '$', '') IN ({placeholders})
              ORDER BY file_path, start_line
-             LIMIT {CANDIDATE_POOL}"
+             LIMIT {LOOKUP_LIMIT}"
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(keys.iter()), search_row_from_sql)?;
@@ -432,7 +592,7 @@ fn candidate_pool(
         files.sort();
         for file in files {
             let rows = stmt.query_map(
-                params![file, sqlite_limit(CANDIDATE_POOL)],
+                params![file, sqlite_limit(LOOKUP_LIMIT)],
                 search_row_from_sql,
             )?;
             for row in rows {
@@ -440,12 +600,7 @@ fn candidate_pool(
             }
         }
     }
-    for row in extra {
-        if seen.insert(row.id.clone()) {
-            pool.push(row);
-        }
-    }
-    Ok(pool)
+    Ok(extra)
 }
 
 #[cfg(test)]
@@ -477,7 +632,7 @@ mod tests {
     }
 
     fn floored_ids(conn: &Connection, task: &str) -> Vec<String> {
-        floored_search(conn, task, 8, NAME_COVERAGE_FLOOR)
+        floored_search(conn, task, 8, FloorParams::CALIBRATED)
             .unwrap()
             .rows
             .into_iter()
@@ -535,7 +690,7 @@ mod tests {
             "Update the README install section to mention pipx",
             "fix typo in CHANGELOG",
         ] {
-            let floored = floored_search(&conn, task, 8, NAME_COVERAGE_FLOOR).unwrap();
+            let floored = floored_search(&conn, task, 8, FloorParams::CALIBRATED).unwrap();
             assert!(
                 floored.rows.is_empty(),
                 "{task} kept {:?}",
@@ -558,7 +713,9 @@ mod tests {
             &conn,
             "fix extract_delta_files reading the wrong sidecar keys",
         );
-        assert_eq!(ids, vec!["extract".to_string()]);
+        // The exact name comes first. Its test explains four of the task's seven
+        // distinctive words, so it stays. One-word `_sidecar` explains one.
+        assert_eq!(ids, vec!["extract".to_string(), "extract_test".to_string()]);
     }
 
     #[test]
@@ -648,7 +805,133 @@ mod tests {
             ],
         );
         assert_eq!(floored_ids(&conn, "evidence"), vec!["alpha", "beta"]);
-        assert!(floored_ids(&conn, "update the evidence ledger docs").is_empty());
+        // Each name explains one of three distinctive words, under the task floor.
+        assert!(floored_ids(&conn, "rotate the evidence ledger archives").is_empty());
+    }
+
+    #[test]
+    fn a_one_word_identifier_must_name_a_single_symbol() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        index_symbols(
+            &conn,
+            &[
+                ("init_a", "__init__", "src/a.py"),
+                ("init_b", "__init__", "src/b.py"),
+                ("init_c", "__init__", "src/c.py"),
+                ("layout", "_layout", "src/hooks/install_cmd.py"),
+            ],
+        );
+
+        assert!(floored_ids(&conn, "__init__ re-exports drop edges").is_empty());
+        assert_eq!(
+            floored_ids(&conn, "the _layout probe misreads"),
+            vec!["layout"]
+        );
+    }
+
+    #[test]
+    fn located_code_joins_when_only_tests_matched() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        index_symbols(
+            &conn,
+            &[
+                (
+                    "test",
+                    "dispatch_reaches_each_handler",
+                    "rust/tests/impact.rs",
+                ),
+                ("hub", "dispatch", "rust/src/lib.rs"),
+                ("other", "unrelated_helper", "python/service.py"),
+            ],
+        );
+
+        let ids = floored_ids(
+            &conn,
+            "Trace the central Rust routing hub and identify its downstream handlers.",
+        );
+
+        assert_eq!(ids, vec!["test", "hub"]);
+    }
+
+    #[test]
+    fn floor_needs_the_hit_to_explain_enough_of_the_task() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        index_symbols(
+            &conn,
+            &[
+                ("compose", "_compose", "src/brigade/memory_proposals.py"),
+                ("hub_error", "FleetHubError", "src/brigade/fleet_hub.py"),
+                ("image", "build_hub_image", "src/brigade/fleet/hub_image.py"),
+            ],
+        );
+
+        let ids = floored_ids(
+            &conn,
+            "feat(fleet): provide persistent OCI Hub image and Compose/Podman recipes",
+        );
+
+        assert_eq!(ids, vec!["image"]);
+    }
+
+    #[test]
+    fn floor_drops_nested_test_helpers_and_vendored_code() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        index_symbols(
+            &conn,
+            &[
+                (
+                    "helper",
+                    "test_bound_swap_cannot_authorize.browser_preflight_readiness",
+                    "tests/test_run_io.py",
+                ),
+                (
+                    "bundled",
+                    "browser_preflight_readiness",
+                    "plugin/dist/main.js",
+                ),
+                ("minified", "browser_preflight_readiness", "web/app.min.js"),
+                (
+                    "real",
+                    "require_browser_preflight",
+                    "src/research/preflight.py",
+                ),
+            ],
+        );
+
+        let ids = floored_ids(
+            &conn,
+            "feat(research): require named browser preflight before projecting execution readiness",
+        );
+
+        assert_eq!(ids, vec!["real"]);
+    }
+
+    #[test]
+    fn docs_tasks_keep_only_symbols_they_name() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        index_symbols(
+            &conn,
+            &[
+                (
+                    "quickstart",
+                    "hub_quickstart",
+                    "src/brigade/hub_quickstart.py",
+                ),
+                ("render", "render_quickstart", "src/brigade/docs_render.py"),
+            ],
+        );
+
+        assert!(floored_ids(&conn, "docs(fleet): add native Hub quickstart").is_empty());
+        assert!(floored_ids(&conn, "explain the hub quickstart in docs/hub.md").is_empty());
+        assert_eq!(
+            floored_ids(&conn, "docs: describe render_quickstart output"),
+            vec!["render"]
+        );
     }
 
     #[test]

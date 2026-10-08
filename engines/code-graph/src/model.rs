@@ -208,6 +208,7 @@ pub struct ContextPack {
 #[derive(Debug, Clone, Serialize)]
 pub struct RelevanceFloor {
     pub rule: String,
+    pub min_task_coverage: f64,
     pub min_name_coverage: f64,
     pub candidates: usize,
     pub kept: usize,

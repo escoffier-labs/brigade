@@ -41,31 +41,51 @@ argument opt-in until that evidence exists.
 
 ## Relevance floor
 
-`benchmarks/context-ranking/floor-corpus.json` holds labeled search tasks for
-the relevance floor that `context` applies to keyword hits before they become
-entry points (brigade#1648). Each case lists synthetic symbols and the entry
-points a reviewer would call relevant. An empty list means the task needs no
-code context, and the pack must come back with `confident: false`. The docs-only
-and named-symbol cases mirror the briefs reported in the issue.
+`context` filters its keyword hits through a relevance floor before they become
+entry points (brigade#1648). The rule, `task-coverage-v2`, keeps:
 
-The same test file runs three floor checks:
+- identified hits: the task names the hit's file, or spells its name as a code
+  identifier or a compound name in any case (`codegraphbrief`). A one-word name
+  counts only when no other symbol shares it.
+- described hits: the hit's name and path explain at least `MIN_TASK_COVERAGE`
+  (0.30) of the task's distinctive words, at least one of them in the name, and
+  the task explains at least `MIN_NAME_COVERAGE` (0.20) of the hit's name.
+- located hits, only when nothing above matched or only tests did: the task
+  names a directory the hit lives in, or its file stem plus a second word of its
+  name.
 
-- `relevance_floor_raises_precision_without_losing_recall` compares the old
-  top-`limit` search against the floored pack. It requires equal or better
-  recall, strictly better precision, an empty pack for every no-context case,
-  and the labeled `first` symbol as entry point 1.
-- `name_coverage_floor_matches_its_calibration_sweep` sweeps the minimum name
-  coverage from 0.00 to 1.00 in steps of 0.05. It keeps the values that reach
-  the best recall and then the best F0.5, and it fails unless
-  `NAME_COVERAGE_FLOOR` equals the lowest of them. To move the floor, change the
-  labeled corpus, not the constant.
-- `ranking_corpus_relevant_files_survive_the_floor` runs the personalized
-  ranking cases above through real search and checks that each relevant file
-  still reaches the pack.
+Documentation tasks (README, CHANGELOG, a `docs:` change, a Markdown path) keep
+identified hits only. Nested helpers inside test functions and vendored or
+minified files never count as described or located. Generic task words such as
+"fix", "update", "add", and "section" never count as evidence.
 
-The floor keeps only the best tier that has any hit. Identified hits are named
-by file path or code identifier. Described hits have most of their name spelled
-out by distinctive task words. Located hits sit in a directory the task names,
-or in a file whose stem the task names when a second task word also appears in
-the hit's name. Generic task words such as "fix", "update", "add", and
-"section" never count as evidence on their own.
+Three labeled sets back the rule:
+
+- `benchmarks/context-ranking/floor-corpus.json` is synthetic. Its cases mirror
+  the briefs reported in the issue and pin contracts: no-context tasks must come
+  back with `confident: false` and no entry points, and a labeled `first`
+  symbol must be entry point 1. `relevance_floor_raises_precision_without_losing_recall`
+  checks those and compares precision and recall with the old top-`limit`
+  search.
+- `benchmarks/context-ranking/floor-calibration-real.json` freezes the keyword
+  top 8 for 80 hand-labeled Brigade issue titles.
+  `floor_thresholds_match_their_real_calibration_sweep` sweeps the task coverage
+  from 0.10 to 0.40 and the name coverage from 0.0 to 0.3, picks the best F0.5
+  (ties go to the most permissive pair), and fails unless the constants match.
+  To move the floor, change the labels, not the constants.
+- `benchmarks/context-floor-heldout/` holds 80 newer labeled titles that are
+  never used for tuning. `run.py` scores an engine binary against a synced
+  index. See its README for how the labels were made.
+
+On the real sets the floor trades recall for precision, by design of F0.5:
+
+| Set | Engine | Precision | Recall | F0.5 |
+|---|---|---|---|---|
+| Calibration (fixture) | keyword top 8 | 0.342 | 0.842 | 0.388 |
+| Calibration (fixture) | task-coverage-v2 | 0.656 | 0.608 | 0.645 |
+| Held-out (live index) | keyword top 8 | 0.216 | 0.831 | 0.253 |
+| Held-out (live index) | task-coverage-v2 | 0.488 | 0.627 | 0.511 |
+
+`ranking_corpus_relevant_files_survive_the_floor` also runs the personalized
+ranking cases above through real search and checks that each relevant file
+still reaches the pack.

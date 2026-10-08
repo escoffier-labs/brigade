@@ -7,14 +7,14 @@ use rusqlite::Connection;
 
 use crate::model::{ContextPack, Direction, EdgeRow, SearchRow};
 use crate::query::graph::edges_for_symbol_id;
-use crate::query::search::{NAME_COVERAGE_FLOOR, floored_search};
+use crate::query::search::{FloorParams, floored_search};
 use crate::store::SCHEMA_VERSION;
 
 /// What a pack says when no search hit cleared the relevance floor.
 pub const NO_CONFIDENT_CONTEXT: &str = "No confident code context for this task.";
 
 pub fn build_context_pack(conn: &Connection, task: String, limit: usize) -> Result<ContextPack> {
-    let floored = floored_search(conn, &task, limit, NAME_COVERAGE_FLOOR)?;
+    let floored = floored_search(conn, &task, limit, FloorParams::CALIBRATED)?;
     let mut pack = build_context_pack_from_entry_points(conn, task, floored.rows)?;
     pack.relevance_floor = Some(floored.floor);
     Ok(pack)
