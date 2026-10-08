@@ -617,6 +617,18 @@ def test_context_eval_extractors_propagate_process_signals(monkeypatch, signal_t
         context_eval.extract_delta_files(SignalMapping())
 
 
+def _delta_node(file_path: str, change_kind: str = "changed") -> dict:
+    """A code_reference_nodes entry in the shape graphtrail_delta writes."""
+    return {
+        "change_kind": change_kind,
+        "file_path": file_path,
+        "kind": "function",
+        "qualified_name": "fixture_fn",
+        "start_line": 1,
+        "end_line": 2,
+    }
+
+
 def test_context_eval_for_run_returns_none_when_stale_graph_used(tmp_path):
     brief = aboyeur.CodeGraphBrief(
         attached=True,
@@ -624,7 +636,7 @@ def test_context_eval_for_run_returns_none_when_stale_graph_used(tmp_path):
         bytes=80,
     )
     sidecar = tmp_path / "graph-delta.json"
-    sidecar.write_text(json.dumps({"ok": True, "changed_nodes": [{"file_path": "tests/test_aboyeur.py"}]}) + "\n")
+    sidecar.write_text(json.dumps({"ok": True, "code_reference_nodes": [_delta_node("tests/test_aboyeur.py")]}) + "\n")
     delta = {
         "ok": True,
         "status": "ok",
@@ -4026,9 +4038,12 @@ def test_run_writes_context_eval_when_brief_and_delta_sidecar_overlap(monkeypatc
             json.dumps(
                 {
                     "ok": True,
-                    "changed_nodes": [{"file_path": "tests/test_aboyeur.py"}],
-                    "added_nodes": [{"file_path": "src/brigade/context_eval.py"}],
-                    "removed_nodes": [],
+                    "code_reference_nodes": [
+                        _delta_node("tests/test_aboyeur.py"),
+                        _delta_node("src/brigade/context_eval.py", "added"),
+                    ],
+                    "code_reference_nodes_total": 2,
+                    "code_reference_nodes_truncated": False,
                 }
             )
             + "\n"
@@ -4084,7 +4099,9 @@ def test_run_omits_context_eval_without_brief(monkeypatch, tmp_path):
 
     def fake_capture_after(target, run_dir, before):
         sidecar = run_dir / "graph-delta.json"
-        sidecar.write_text(json.dumps({"ok": True, "changed_nodes": [{"file_path": "tests/test_aboyeur.py"}]}) + "\n")
+        sidecar.write_text(
+            json.dumps({"ok": True, "code_reference_nodes": [_delta_node("tests/test_aboyeur.py")]}) + "\n"
+        )
         return {"status": "ok", "ok": True, "summary": "code graph delta: ok", "sidecar_path": str(sidecar)}
 
     output_dir = tmp_path / "run"
@@ -4162,7 +4179,7 @@ def test_run_omits_context_eval_when_delta_has_no_files(monkeypatch, tmp_path):
 
     def fake_capture_after(target, run_dir, before):
         sidecar = run_dir / "graph-delta.json"
-        sidecar.write_text(json.dumps({"ok": True, "changed_nodes": []}) + "\n")
+        sidecar.write_text(json.dumps({"ok": True, "code_reference_nodes": []}) + "\n")
         return {"status": "ok", "ok": True, "summary": "code graph delta: ok", "sidecar_path": str(sidecar)}
 
     output_dir = tmp_path / "run"

@@ -64,19 +64,30 @@ def extract_brief_files(brief_text: str) -> list[str]:
         return []
 
 
-def extract_delta_files(delta_sidecar_path_or_dict: str | Path | dict[str, Any]) -> list[str]:
-    """Extract changed file paths from a GraphTrail delta sidecar or payload."""
-    try:
-        if isinstance(delta_sidecar_path_or_dict, dict):
-            payload = delta_sidecar_path_or_dict
-        else:
-            path = Path(delta_sidecar_path_or_dict)
-            payload = json.loads(path.read_text())
-        if not isinstance(payload, dict):
-            return []
+# Keys read from the graph-delta sidecar that graphtrail_delta writes. A contract
+# test keeps this tuple in step with the writer (#1644).
+DELTA_SIDECAR_KEYS = ("code_reference_nodes", "code_reference_nodes_truncated")
+_LEGACY_NODE_KEYS = ("added_nodes", "removed_nodes", "changed_nodes")
 
+
+def _load_delta_payload(delta_sidecar_path_or_dict: str | Path | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(delta_sidecar_path_or_dict, dict):
+        return delta_sidecar_path_or_dict
+    payload = json.loads(Path(delta_sidecar_path_or_dict).read_text())
+    return payload if isinstance(payload, dict) else {}
+
+
+def extract_delta_files(delta_sidecar_path_or_dict: str | Path | dict[str, Any]) -> list[str]:
+    """Extract changed file paths from a GraphTrail delta sidecar or payload.
+
+    Reads ``code_reference_nodes`` (what ``graphtrail_delta`` writes) and falls
+    back to the legacy ``added/removed/changed_nodes`` keys for older sidecars.
+    """
+    try:
+        payload = _load_delta_payload(delta_sidecar_path_or_dict)
+        keys = ("code_reference_nodes",) if isinstance(payload.get("code_reference_nodes"), list) else _LEGACY_NODE_KEYS
         files: set[str] = set()
-        for key in ("added_nodes", "removed_nodes", "changed_nodes"):
+        for key in keys:
             nodes = payload.get(key)
             if not isinstance(nodes, list):
                 continue
@@ -89,6 +100,14 @@ def extract_delta_files(delta_sidecar_path_or_dict: str | Path | dict[str, Any])
         return sorted(files)
     except Exception:
         return []
+
+
+def delta_is_truncated(delta_sidecar_path_or_dict: str | Path | dict[str, Any]) -> bool:
+    """True when the sidecar capped its node list, so the file set is partial."""
+    try:
+        return _load_delta_payload(delta_sidecar_path_or_dict).get("code_reference_nodes_truncated") is True
+    except Exception:
+        return False
 
 
 def evaluate(brief_files: list[str], delta_files: list[str]) -> dict[str, object]:

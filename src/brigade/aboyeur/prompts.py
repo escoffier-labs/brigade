@@ -529,6 +529,12 @@ def _context_eval_for_run(
         if not delta_files:
             return None
         brief_files = context_eval.extract_brief_files(code_graph.text)
-        return context_eval.evaluate(brief_files, delta_files)
+        result = context_eval.evaluate(brief_files, delta_files)
+        if context_eval.delta_is_truncated(sidecar_path):
+            # The sidecar capped its node list, so the denominator is partial.
+            # Withhold the rate so ranking and checkup never score a partial sample.
+            result["truncated"] = True
+            result["brief_hit_rate"] = None
+        return result
     except Exception:
         return None
