@@ -119,3 +119,86 @@ def test_every_key_context_eval_reads_is_written_by_graphtrail_delta(monkeypatch
 
     for key in context_eval.DELTA_SIDECAR_KEYS:
         assert key in sidecar
+
+
+def test_evaluate_reports_precision_and_f05_next_to_recall():
+    result = context_eval.evaluate(
+        ["src/a.py", "src/b.py", "src/c.py", "src/d.py"],
+        ["src/a.py", "src/e.py"],
+    )
+
+    assert result["brief_hit_rate"] == 0.5
+    assert result["brief_precision"] == 0.25
+    # F0.5 weights precision: (1.25 * 0.25 * 0.5) / (0.25 * 0.25 + 0.5)
+    assert result["brief_f05"] == 0.278
+
+
+def test_a_brief_that_lists_everything_scores_full_recall_but_low_precision():
+    delta = ["src/a.py"]
+    everything = context_eval.evaluate([f"src/{name}.py" for name in "abcdefghij"], delta)
+    tight = context_eval.evaluate(["src/a.py"], delta)
+
+    assert everything["brief_hit_rate"] == tight["brief_hit_rate"] == 1.0
+    assert everything["brief_precision"] == 0.1
+    assert tight["brief_precision"] == 1.0
+    assert tight["brief_f05"] > everything["brief_f05"]
+
+
+def test_empty_brief_has_no_precision_and_no_f05():
+    result = context_eval.evaluate([], ["src/a.py"])
+
+    assert result["brief_hit_rate"] == 0.0
+    assert result["brief_precision"] is None
+    assert result["brief_f05"] is None
+
+
+def test_no_hits_scores_zero_f05():
+    result = context_eval.evaluate(["src/x.py"], ["src/a.py"])
+
+    assert result["brief_precision"] == 0.0
+    assert result["brief_f05"] == 0.0
+
+
+def test_truncated_delta_withholds_precision_and_f05_too(monkeypatch, tmp_path):
+    limit = graphtrail_delta.CODE_REFERENCE_NODE_LIMIT
+    nodes = [_diff_node(f"src/pkg/mod_{index:03d}.py", f"fn_{index}") for index in range(limit + 5)]
+    delta = _write_real_sidecar(monkeypatch, tmp_path, {"changed_nodes": nodes})
+    brief = aboyeur.CodeGraphBrief(attached=True, text="- `src/pkg/mod_000.py:1`\n", bytes=30)
+
+    result = aboyeur._context_eval_for_run(brief, delta)
+
+    assert result is not None
+    assert result["brief_precision"] is None
+    assert result["brief_f05"] is None
+
+
+def test_outcome_rank_handles_records_with_and_without_precision(tmp_path, capsys):
+    from brigade import outcome, outcome_cmd
+
+    def record(artifact, task, context):
+        return outcome.OutcomeRecord(
+            artifact, "skill", task, "verify", 1, f"ref-{task}", "2026-06-20T00:00:00+00:00", context_eval=context
+        )
+
+    outcome_cmd.append_records(
+        tmp_path,
+        [
+            record("skill-old", "t1", {"brief_hit_rate": 0.5, "hits": ["a.py"], "missed": ["b.py"]}),
+            record("skill-new", "t2", {"brief_hit_rate": 1.0, "brief_precision": 0.25, "brief_f05": 0.294}),
+            record("skill-new", "t3", {"brief_hit_rate": 0.5}),
+            record("skill-new", "t4", {"brief_hit_rate": 1.0, "brief_precision": 0.75, "brief_f05": 0.789}),
+        ],
+    )
+
+    assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
+    ranking = {item["artifact_id"]: item for item in json.loads(capsys.readouterr().out)["ranking"]}
+    assert ranking["skill-old"]["brief_hit_rate"] == 0.5
+    assert "brief_precision" not in ranking["skill-old"]
+    assert ranking["skill-new"]["brief_hit_samples"] == 3
+    assert ranking["skill-new"]["brief_precision"] == 0.5
+    assert ranking["skill-new"]["brief_precision_samples"] == 2
+
+    assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
+    out = capsys.readouterr().out
+    assert "brief_hit: 0.500 (n=1)" in out
+    assert "brief_precision: 0.500 (n=2)" in out

@@ -498,7 +498,11 @@ def _context_eval_fact(payload: dict[str, object]) -> str:
             or not isinstance(missed, int)
         ):
             return ""
-        return f"brief hit rate {rate:.2f} ({hits}/{delta_files} files, {missed} missed)"
+        fact = f"brief hit rate {rate:.2f} ({hits}/{delta_files} files, {missed} missed)"
+        precision = payload.get("brief_precision")
+        if isinstance(precision, (int, float)) and not isinstance(precision, bool):
+            fact += f", precision {precision:.2f}"
+        return fact
     except Exception:
         return ""
 
@@ -528,13 +532,22 @@ def _context_eval_for_run(
         delta_files = context_eval.extract_delta_files(sidecar_path)
         if not delta_files:
             return None
-        brief_files = context_eval.extract_brief_files(code_graph.text)
+        # Prefer the files the engine reported for the brief. Briefs from older
+        # engines carry only markdown, so read the paths out of it instead.
+        brief_files = briefs.shown_brief_files(code_graph)
+        source = "recorded"
+        if brief_files is None:
+            brief_files = context_eval.extract_brief_files(code_graph.text)
+            source = "markdown"
         result = context_eval.evaluate(brief_files, delta_files)
+        result["brief_files_source"] = source
         if context_eval.delta_is_truncated(sidecar_path):
             # The sidecar capped its node list, so the denominator is partial.
-            # Withhold the rate so ranking and checkup never score a partial sample.
+            # Withhold the scores so ranking and checkup never score a partial sample.
             result["truncated"] = True
             result["brief_hit_rate"] = None
+            result["brief_precision"] = None
+            result["brief_f05"] = None
         return result
     except Exception:
         return None

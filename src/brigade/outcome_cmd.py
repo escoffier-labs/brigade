@@ -1700,8 +1700,14 @@ def _brief_hit_rate_value(value) -> float | None:
 
 
 def _brief_hit_stats(records: list[core.OutcomeRecord]) -> dict[str, float | int] | None:
-    """Aggregate context_eval.brief_hit_rate across scored records with a rate."""
+    """Aggregate context_eval.brief_hit_rate across scored records with a rate.
+
+    Records captured after #1648 also carry brief_precision. Its mean is
+    reported over only the records that have it, so mixed old and new records
+    keep the hit-rate fields unchanged.
+    """
     rates: list[float] = []
+    precisions: list[float] = []
     for record in core.scored_records(records):
         context_eval = record.context_eval
         if not isinstance(context_eval, dict):
@@ -1710,15 +1716,22 @@ def _brief_hit_stats(records: list[core.OutcomeRecord]) -> dict[str, float | int
         if rate is None:
             continue
         rates.append(rate)
+        precision = _brief_hit_rate_value(context_eval.get("brief_precision"))
+        if precision is not None:
+            precisions.append(precision)
     if not rates:
         return None
     mean = round(sum(rates) / len(rates), 3)
-    return {
+    stats: dict[str, float | int] = {
         "brief_hit_rate": mean,
         "brief_hit_samples": len(rates),
         "brief_hit_min": round(min(rates), 3),
         "brief_hit_max": round(max(rates), 3),
     }
+    if precisions:
+        stats["brief_precision"] = round(sum(precisions) / len(precisions), 3)
+        stats["brief_precision_samples"] = len(precisions)
+    return stats
 
 
 def _brief_hit_stats_by_artifact(records: list[core.OutcomeRecord]) -> dict[str, dict[str, float | int]]:
@@ -1732,7 +1745,10 @@ def _brief_hit_stats_by_artifact(records: list[core.OutcomeRecord]) -> dict[str,
 def _brief_hit_human_suffix(stats: dict[str, float | int] | None) -> str:
     if stats is None:
         return ""
-    return f" brief_hit: {stats['brief_hit_rate']:.3f} (n={stats['brief_hit_samples']})"
+    suffix = f" brief_hit: {stats['brief_hit_rate']:.3f} (n={stats['brief_hit_samples']})"
+    if "brief_precision" in stats:
+        suffix += f" brief_precision: {stats['brief_precision']:.3f} (n={stats['brief_precision_samples']})"
+    return suffix
 
 
 def _fingerprint_decision_fields(cohorts: core.FingerprintCohorts) -> dict[str, Any]:
