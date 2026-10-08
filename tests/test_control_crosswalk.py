@@ -1979,3 +1979,68 @@ def test_valid_legacy_request_does_not_hide_unreadable_request_population(tmp_pa
     assert readiness["reason"] == "discovery_unreadable"
     assert readiness["legacy_state"] == "untested"
     assert any(artifact["outcome"] == "validated" for artifact in readiness["artifacts"])
+
+
+@pytest.mark.parametrize("claim_id", ["EC-02", "EC-12"])
+@pytest.mark.parametrize("run_id", [None, RUN])
+def test_unreadable_artifact_sibling_cannot_be_omitted(tmp_path, monkeypatch, claim_id, run_id):
+    import os
+
+    from brigade import attestation, control_readiness
+
+    target = _ws(tmp_path)
+    if claim_id == "EC-02":
+        valid = _verify_dir(target, "a-valid")
+        _write_verify_receipt(valid, run_id="a-valid", producer_run_id=RUN)
+        receipt = json.loads((valid / "receipt.json").read_text())
+        receipt.update(tree_fingerprint="1" * 40, baseline_commit="2" * 40, changes_patch_sha256="3" * 64)
+        receipt["digests"] = {
+            "algorithm": "sha256",
+            "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+        }
+        _write_json(valid / "receipt.json", receipt)
+        _write_json(valid / "attestation.json", {})
+        denied = _verify_dir(target, "b-unreadable") / "attestation.json"
+        _write_json(denied, {})
+        monkeypatch.setattr(control_crosswalk, "_ssh_keygen_available", lambda: True)
+        _stub_attestation(
+            monkeypatch,
+            attestation.AttestationVerifyResult(status=attestation.STATUS_SIGNED_OK, rederived=True, run_id="a-valid"),
+        )
+    else:
+        root = target / ".brigade" / "evidence-packages"
+        manifest = _package_manifest([])
+        manifest["source"] = {"producer_run_id": RUN}
+        _write_json(root / "a-valid" / "manifest.json", manifest)
+        denied = root / "b-unreadable" / "manifest.json"
+        _write_json(denied, manifest)
+
+        def adapter(_target, package_dir):
+            return control_readiness.ArtifactObservation(
+                relpath="manifest.json",
+                level="claim_validated",
+                proposed="validated",
+                dimensions=control_readiness.dims(integrity="passed", subject="passed", population="not_applicable"),
+            )
+
+        monkeypatch.setitem(control_crosswalk._VERIFIER_ADAPTERS, "evidence-package", adapter)
+    original_os_lstat = os.lstat
+    original_path_lstat = Path.lstat
+
+    def os_refused(path, *args, **kwargs):
+        if Path(path) == denied:
+            raise PermissionError("synthetic artifact metadata refusal")
+        return original_os_lstat(path, *args, **kwargs)
+
+    def path_refused(path):
+        if path == denied:
+            raise PermissionError("synthetic artifact metadata refusal")
+        return original_path_lstat(path)
+
+    monkeypatch.setattr(os, "lstat", os_refused)
+    monkeypatch.setattr(Path, "lstat", path_refused)
+    readiness = _assess(target, claim_id, run_id)
+    assert readiness["outcome"] == "unavailable"
+    assert readiness["reason"] == "discovery_unreadable"
+    assert readiness["legacy_state"] == "untested"
+    assert readiness["population"]["validated"] == 1
