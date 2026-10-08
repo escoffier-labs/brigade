@@ -26,6 +26,7 @@ MAX_BLAST_HOPS = 5
 _TOP_FILES = 5
 _TEST_CAP = 8
 _SEARCH_LIMIT = 12
+_MODULE_PSEUDO_SYMBOL = "<module>"
 _GRAPH_TIMEOUT = 30.0
 
 
@@ -750,7 +751,13 @@ def _graph_edges(result: proc.Result) -> list[Any]:
 def _impact_section(binary: str, db_path: Path, target: Path, query: str) -> dict[str, Any]:
     db = str(db_path)
     search = _run_json(binary, db_path, target, "search", query, "--json")
-    search_hits = search if isinstance(search, list) else []
+    # Every Python file with module-level calls has a `<module>` pseudo-symbol under the
+    # same name, so querying impact by it would mix edges from unrelated files.
+    search_hits = [
+        hit
+        for hit in (search if isinstance(search, list) else [])
+        if not (isinstance(hit, dict) and hit.get("qualified_name") == _MODULE_PSEUDO_SYMBOL)
+    ]
     resolved = search_hits[0] if search_hits and isinstance(search_hits[0], dict) else None
     impact_query = str((resolved or {}).get("qualified_name") or query)
 
