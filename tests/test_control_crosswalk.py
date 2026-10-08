@@ -2044,3 +2044,84 @@ def test_unreadable_artifact_sibling_cannot_be_omitted(tmp_path, monkeypatch, cl
     assert readiness["reason"] == "discovery_unreadable"
     assert readiness["legacy_state"] == "untested"
     assert readiness["population"]["validated"] == 1
+
+
+def _deny_artifact_metadata(monkeypatch, denied: Path) -> None:
+    """Deny the same path/ancestor at both metadata APIs without relying on uid."""
+    import os
+
+    for owner, attribute in ((Path, "stat"), (Path, "lstat"), (os, "stat"), (os, "lstat")):
+        original = getattr(owner, attribute)
+
+        def refused(path, *args, _original=original, **kwargs):
+            candidate = Path(path)
+            if candidate == denied or denied in candidate.parents:
+                raise PermissionError("synthetic artifact metadata refusal")
+            return _original(path, *args, **kwargs)
+
+        monkeypatch.setattr(owner, attribute, refused)
+
+
+@pytest.mark.parametrize("run_id", [None, "b-unreadable"])
+@pytest.mark.parametrize("denied_location", ["parent", "leaf"])
+def test_journal_metadata_refusal_does_not_abort_or_hide_population(tmp_path, monkeypatch, run_id, denied_location):
+    target = _ws(tmp_path)
+    runs = target / ".brigade" / "runs"
+    _append_events(runs / "a-valid" / "events" / "lifecycle.jsonl", "a-valid")
+    refused = runs / "b-unreadable" / "events" / "lifecycle.jsonl"
+    _append_events(refused, "b-unreadable")
+    _deny_artifact_metadata(monkeypatch, refused.parent if denied_location == "parent" else refused)
+    result = _assess(target, "EC-06", run_id)
+    assert result["outcome"] == "unavailable"
+    assert result["reason"] == "discovery_unreadable"
+    assert result["legacy_state"] == "untested"
+    assert result["population"]["validated"] == (1 if run_id is None else 0)
+    assert any(
+        artifact["outcome"] == "unavailable" and artifact["scope"] == "in_scope" for artifact in result["artifacts"]
+    )
+
+
+@pytest.mark.parametrize("run_id", [None, RUN])
+@pytest.mark.parametrize(
+    "claim_id,relative,payload",
+    [
+        ("EC-07", ".brigade/governance/inventory.json", {}),
+        ("EC-09", ".brigade/work/guard/audit.json", {"summary": {"blocked": False}}),
+        ("EC-10", "memory/outcome/records.jsonl", {"schema_version": 1}),
+        ("EC-11", ".brigade/work/verify-archive/index.jsonl", {"run_id": "archived-run"}),
+    ],
+)
+def test_workspace_artifact_metadata_refusal_is_unavailable(tmp_path, monkeypatch, run_id, claim_id, relative, payload):
+    target = _ws(tmp_path)
+    artifact = target / relative
+    _write_json(artifact, payload)
+    _deny_artifact_metadata(monkeypatch, artifact)
+    result = _assess(target, claim_id, run_id)
+    assert result["outcome"] == "unavailable"
+    assert result["reason"] == "discovery_unreadable"
+    assert result["legacy_state"] == "untested"
+    assert result["population"]["validated"] == 0
+    assert any(item["outcome"] == "unavailable" and item["scope"] == "in_scope" for item in result["artifacts"])
+
+
+@pytest.mark.parametrize("run_id", [None, "run-a"])
+@pytest.mark.parametrize("denied_location", ["parent", "leaf"])
+def test_trailer_receipt_metadata_refusal_is_unavailable(tmp_path, monkeypatch, run_id, denied_location):
+    import subprocess
+
+    from brigade import causal_receipt
+
+    target = _ws(tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    receipt = {"run_id": "run-a", "status": "completed"}
+    path = target / ".brigade" / "runs" / "run-a" / "run.json"
+    _write_json(path, receipt)
+    _git_commit(
+        target, "fixture\n\nBrigade-Run: run-a\nBrigade-Receipt: sha256:" + causal_receipt.receipt_digest(receipt)
+    )
+    _deny_artifact_metadata(monkeypatch, path.parent if denied_location == "parent" else path)
+    result = _assess(target, "EC-08", run_id)
+    assert result["outcome"] == "unavailable"
+    assert result["reason"] == "discovery_unreadable"
+    assert result["legacy_state"] == "untested"
+    assert result["population"]["validated"] == 0
