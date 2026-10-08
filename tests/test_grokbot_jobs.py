@@ -2530,3 +2530,51 @@ def test_binding_a_claim_target_leaves_the_item_revision_alone(tmp_path: Path):
     grokbot_jobs.bind_lease_claim_target(tmp_path, job_id, "bot-a", "lease-a", "acme/repo")
 
     assert grokbot_jobs.status(tmp_path, job_id, now=NOW)["item_revision"] == claimed["item_revision"]
+
+
+def test_claim_stores_the_claim_target_in_the_same_write_that_grants_the_lease(tmp_path: Path, monkeypatch):
+    job_id = _enqueue(tmp_path)
+    written: list[dict[str, object]] = []
+    real_write = grokbot_jobs._write_json_file
+
+    def spy(directory, name, payload):
+        if payload.get("schema") == grokbot_jobs.JOB_SCHEMA:
+            written.append(dict(payload))
+        return real_write(directory, name, payload)
+
+    monkeypatch.setattr(grokbot_jobs, "_write_json_file", spy)
+    claimed = grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, claim_target="acme/repo")
+
+    assert claimed["state"] == "claimed" and "claim_target" not in claimed
+    assert len(written) == 1
+    assert written[0]["state"] == "claimed" and written[0]["claim_target"] == "acme/repo"
+
+
+def test_a_retried_claim_never_overwrites_the_stored_claim_target(tmp_path: Path):
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, claim_target="acme/repo")
+
+    retried = grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, claim_target="acme/other")
+
+    assert retried["state"] == "claimed"
+    assert grokbot_jobs.lease_claim_target(tmp_path, job_id, "bot-a", "lease-a") == "acme/repo"
+
+
+def test_a_retried_claim_writes_a_target_into_a_row_that_has_none(tmp_path: Path):
+    """A lease taken before the field existed gets its key on the first retry that carries one."""
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)
+
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, claim_target="acme/repo")
+
+    assert grokbot_jobs.lease_claim_target(tmp_path, job_id, "bot-a", "lease-a") == "acme/repo"
+
+
+@pytest.mark.parametrize("value", ["", "x" * 513, "acme/repo\n", 5])
+def test_an_invalid_claim_target_refuses_the_claim_before_writing(tmp_path: Path, value):
+    job_id = _enqueue(tmp_path)
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-claim-target$"):
+        grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW, claim_target=value)
+
+    assert grokbot_jobs.status(tmp_path, job_id, now=NOW)["state"] == "queued"

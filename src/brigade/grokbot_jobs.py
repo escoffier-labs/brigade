@@ -40,6 +40,11 @@ from .grokbot_job_validation import (
     validate_repository as _validate_repository,
     validate_worker_label,
 )
+from .grokbot_jobs_claim_target import (
+    bind_lease_claim_target as bind_lease_claim_target,
+    lease_claim_target as lease_claim_target,
+    valid_claim_target as _valid_claim_target,
+)
 from .grokbot_jobs_hub import (
     _hub_job,
     _hub_jobs,
@@ -467,10 +472,19 @@ def claim(
     now: datetime | None = None,
     *,
     worker_label: str | None = None,
+    claim_target: str | None = None,
 ) -> dict[str, Any]:
     """Claim a queued job with one opaque bot lease."""
     return _claim_job(
-        target, job_id, bot_id, lease_id, lease_seconds, now, include_context=False, worker_label=worker_label
+        target,
+        job_id,
+        bot_id,
+        lease_id,
+        lease_seconds,
+        now,
+        include_context=False,
+        worker_label=worker_label,
+        claim_target=claim_target,
     )
 
 
@@ -483,10 +497,19 @@ def claim_execution_context(
     now: datetime | None = None,
     *,
     worker_label: str | None = None,
+    claim_target: str | None = None,
 ) -> dict[str, Any]:
     """Claim a queued job and return its validated worker context."""
     return _claim_job(
-        target, job_id, bot_id, lease_id, lease_seconds, now, include_context=True, worker_label=worker_label
+        target,
+        job_id,
+        bot_id,
+        lease_id,
+        lease_seconds,
+        now,
+        include_context=True,
+        worker_label=worker_label,
+        claim_target=claim_target,
     )
 
 
@@ -500,12 +523,15 @@ def _claim_job(
     *,
     include_context: bool,
     worker_label: str | None = None,
+    claim_target: str | None = None,
 ) -> dict[str, Any]:
     job_id = _validate_job_id(job_id)
     bot_id = _validate_opaque_id(bot_id, "invalid-bot-id")
     lease_id = _validate_opaque_id(lease_id, "invalid-lease-id")
     lease_seconds = _validate_lease_seconds(lease_seconds)
     worker_label = None if worker_label is None else validate_worker_label(worker_label)
+    if claim_target is not None and not _valid_claim_target(claim_target):
+        raise GrokbotJobError("invalid-claim-target")
     if hub_authority(target):
         return _claim_via_hub(
             target,
@@ -526,9 +552,16 @@ def _claim_job(
                 # that carries a label writes it even when the row already has a
                 # different one. Omitting the label means "no opinion" and leaves
                 # the stored value alone, so a pure retry stays a no-op (#1501).
+                # A stored claim key is never replaced; a lease from before the
+                # field existed gets the first one a retry carries (#1639).
+                stamp_target = claim_target is not None and "claim_target" not in record
+                if stamp_target:
+                    record["claim_target"] = claim_target
                 if worker_label is not None and record.get("worker_label") != worker_label:
                     record["worker_label"] = worker_label
                     _commit_mutation(storage.jobs, record, timestamp)
+                elif stamp_target:
+                    _write_json_file(storage.jobs, f"{job_id}.json", record)
                 return _claim_result(record, include_context=include_context)
             raise GrokbotJobError("lease-conflict")
         if record["state"] != "queued":
@@ -550,6 +583,10 @@ def _claim_job(
         )
         if worker_label is not None:
             record["worker_label"] = worker_label
+        if claim_target is not None:
+            # Same write that grants the lease, so the key can never be missing
+            # from a claimed row or written without one (#1639).
+            record["claim_target"] = claim_target
         _commit_mutation(storage.jobs, record, timestamp)
         return _claim_result(record, include_context=include_context)
 
@@ -578,56 +615,6 @@ def renew(
         )
         _commit_mutation(storage.jobs, record, timestamp)
         return _projection(record)
-
-
-def _valid_claim_target(value: object) -> bool:
-    """A fleet claim key: bounded text with no control characters."""
-    return isinstance(value, str) and 0 < len(value) <= 512 and not any(ord(ch) < 32 or ord(ch) == 127 for ch in value)
-
-
-def lease_claim_target(target: Path, job_id: str, bot_id: str, lease_id: str) -> str | None:
-    """The fleet claim key stored on this lease's row, or ``None`` (#1639).
-
-    The row is the one source every renew, release and event reads, so they
-    all address the claim the lease acquired under. It stays readable after a
-    terminal transition, so a release that follows a failure still finds it.
-    """
-    job_id = _validate_job_id(job_id)
-    bot_id = _validate_opaque_id(bot_id, "invalid-bot-id")
-    lease_id = _validate_opaque_id(lease_id, "invalid-lease-id")
-    if hub_authority(target):
-        return None
-    with _storage_paths(target) as storage, _queue_lock(storage):
-        record = _load_record(storage.jobs, job_id)
-        if record.get("bot_id") == bot_id and record.get("lease_id") == lease_id:
-            return record.get("claim_target")
-    return None
-
-
-def bind_lease_claim_target(target: Path, job_id: str, bot_id: str, lease_id: str, claim_target: str) -> str:
-    """Store ``claim_target`` on this lease's row unless it has one; return the stored key.
-
-    First writer wins under the queue lock, so a retry or a racing binder
-    gets the winner's value back. Metadata only: the item revision and
-    ``updated_at`` stay as they are.
-    """
-    job_id = _validate_job_id(job_id)
-    bot_id = _validate_opaque_id(bot_id, "invalid-bot-id")
-    lease_id = _validate_opaque_id(lease_id, "invalid-lease-id")
-    if not _valid_claim_target(claim_target):
-        raise GrokbotJobError("invalid-claim-target")
-    if hub_authority(target):
-        raise GrokbotJobError("hub-authority")
-    with _storage_paths(target) as storage, _queue_lock(storage):
-        record = _load_record(storage.jobs, job_id)
-        if record.get("bot_id") != bot_id or record.get("lease_id") != lease_id:
-            raise GrokbotJobError("lease-conflict")
-        stored = record.get("claim_target")
-        if stored is not None:
-            return stored
-        record["claim_target"] = claim_target
-        _write_json_file(storage.jobs, f"{job_id}.json", record)
-        return claim_target
 
 
 def transition(

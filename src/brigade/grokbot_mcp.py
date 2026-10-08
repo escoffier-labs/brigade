@@ -48,6 +48,9 @@ INSTANCES = frozenset({"operator", "repository-scout", "implementation-worker"})
 _FLEET_HOLDER_DOMAIN = b"brigade.grokbot.fleet-holder"
 _FLEET_SESSION_DOMAIN = b"brigade.grokbot.fleet-session"
 _FLEET_BEST_EFFORT = frozenset({"no-hub", "no-identity", "hub-unavailable"})
+# Refusal for a claim that raced another call across an origin change (#1639).
+# It is an ordinary retryable refusal: the retry reads the stored key.
+CLAIM_TARGET_CHANGED = "claim target changed concurrently, retrying the same lease is safe"
 ENVIRONMENT_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 _DIRECT_QUEUE_HUB_TOKEN_FILE_ENV = "BRIGADE_GROKBOT_HUB_TOKEN_FILE"
 _DIRECT_QUEUE_HUB_TOKEN_MAX_BYTES = 4098
@@ -474,6 +477,8 @@ class GrokbotAdapter:
                     self._release_hub_lease(job["job_id"], lease_id, "released")
                 raise AdapterError()
             try:
+                # The claim key is stored in the same row write that grants the
+                # lease, so a failed write grants nothing and strands no row.
                 result = grokbot_jobs.claim_execution_context(
                     self.config.target,
                     job["job_id"],
@@ -481,21 +486,26 @@ class GrokbotAdapter:
                     lease_id,
                     lease_seconds,
                     worker_label=worker_label,
+                    claim_target=claim_target,
+                )
+                stored_target = grokbot_jobs.lease_claim_target(
+                    self.config.target, job["job_id"], self.config.bot_id, lease_id
                 )
             except Exception:
                 self._release_hub_lease(job["job_id"], lease_id, "released")
                 if decision.granted:
                     self._fleet_release(job["job_id"], lease_id, holder, claim_target)
                 raise
-            if not self._store_claim_target(job["job_id"], lease_id, claim_target):
-                # The row holds another key, or could not be written. Give back
-                # the key just taken (a failed release lapses by TTL) and refuse
-                # the call; the caller's retry reads the stored key. Never
-                # acquire a second key inside one call.
-                self._release_hub_lease(job["job_id"], lease_id, "released")
+            if stored_target is not None and stored_target != claim_target:
+                # Only possible when two first claims of one lease raced across an
+                # origin change: the other call's row write won. Give back just the
+                # key this call acquired and refuse so the caller retries, which
+                # reads the stored key. A stored key equal to ours is the same hub
+                # claim and is never released. A failed release lapses by the hub
+                # TTL, as it does for a worker that crashed after acquiring.
                 if decision.granted:
                     self._fleet_release(job["job_id"], lease_id, holder, claim_target)
-                raise AdapterError()
+                raise AdapterError(CLAIM_TARGET_CHANGED)
             self._bind_hub_lease(job["job_id"], lease_id)
             self._fleet_event(job["job_id"], lease_id, session, "external.claimed")
             return self._granted_lease(name, result, lease_id, lease_seconds)
@@ -827,22 +837,6 @@ class GrokbotAdapter:
             return decision, target
         except Exception:
             return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder), None
-
-    def _store_claim_target(self, job_id: str, lease_id: str, target: str | None) -> bool:
-        """Store the key a new lease acquired under on its row.
-
-        False when the row already holds a different key (a racing retry won)
-        or the write failed; the caller refuses the claim in both cases.
-        """
-        if target is None:
-            return True
-        try:
-            stored = grokbot_jobs.bind_lease_claim_target(
-                self.config.target, job_id, self.config.bot_id, lease_id, target
-            )
-        except Exception:
-            return False
-        return stored == target
 
     def _fleet_renew(
         self, job_id: str, lease_id: str, holder: str, lease_seconds: int | None = None
