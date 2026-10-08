@@ -1,12 +1,14 @@
-//! Relevance floor for task search (brigade#1648).
+//! Relevance floor for task search (brigade#1648). Opt-in: `context` applies it
+//! only with `--relevance-floor`.
 //!
 //! Keyword search ORs every word of a task sentence, so words like "update" or
-//! "install" pull in symbols from anywhere in the repository, and the top `limit`
-//! rows used to be returned whatever their quality. The floor filters those rows
-//! and keeps a hit only when the task carries evidence for it:
+//! "install" pull in symbols from anywhere in the repository. The floor reads the
+//! top `CANDIDATE_POOL` keyword rows, keeps a hit only when the task carries
+//! evidence for it, and truncates to `limit`:
 //!
 //! 1. identified: the task names the hit's file, or spells the hit's name as a
-//!    code identifier or as a compound name in any case (`codegraphbrief`).
+//!    code identifier or as a compound name in any case (`codegraphbrief`), and
+//!    no other symbol shares that name.
 //! 2. described: the hit's name and path explain at least `min_task_coverage`
 //!    of the task's distinctive words, at least one of them in the name, and the
 //!    task explains at least `min_name_coverage` of the hit's name.
@@ -14,14 +16,14 @@
 //!    Rust routing hub"), or names its file stem while a second distinctive task
 //!    word appears in its name ("the request router" for `routeRequest`).
 //!
-//! A one-word name is identified only when no other symbol shares it.
-//! Identified and described hits are kept together, identified first. Located
-//! hits are used only when neither tier has any, or when every kept hit is a
-//! test (then only located code, not tests, joins). Symbols found by exact-name
-//! or named-file lookup count only as identified. A task about documentation
-//! (README, CHANGELOG, a `docs:` change, a Markdown path) keeps identified hits
-//! only. Nested helpers inside test functions and vendored or minified files
-//! never count as described or located.
+//! An exact name that other symbols share (`run_dir`, `__init__`) is only
+//! ordinary evidence. Identified and described hits are kept together,
+//! identified first. Located hits are used only when neither tier has any, or
+//! when every kept hit is a test (then only located code, not tests, joins).
+//! Symbols found by exact-name or named-file lookup count only as identified. A
+//! task about documentation (README, CHANGELOG, a `docs:` change, a Markdown
+//! path) keeps identified hits only. Nested helpers inside test functions and
+//! vendored or minified files never count as described or located.
 //!
 //! When no hit clears the floor the pack is empty and marked not confident. Both
 //! thresholds are calibrated on hand-labeled real issue titles. See
@@ -45,7 +47,7 @@ pub const MIN_TASK_COVERAGE: f64 = 0.30;
 
 /// Minimum share of a described hit's name tokens the task must explain.
 /// Calibrated by `floor_thresholds_match_their_real_calibration_sweep`.
-pub const MIN_NAME_COVERAGE: f64 = 0.20;
+pub const MIN_NAME_COVERAGE: f64 = 0.10;
 
 /// Thresholds for the described tier.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,6 +62,10 @@ impl FloorParams {
         min_name_coverage: MIN_NAME_COVERAGE,
     };
 }
+
+/// Keyword rows the floor looks at before truncating to `limit`, so a relevant
+/// hit ranked just past `limit` is not lost to noise ranked above it.
+pub const CANDIDATE_POOL: usize = 50;
 
 /// Most exact-name and named-file symbols added to the keyword candidates. A cost
 /// guard only.
@@ -128,7 +134,7 @@ pub fn floored_search(
 ) -> Result<FlooredSearch> {
     let terms = TaskTerms::parse(task);
     let mentioned = mentioned_files(conn, &terms.paths)?;
-    let keyword = search_symbols(conn, task, limit)?;
+    let keyword = search_symbols(conn, task, limit.max(CANDIDATE_POOL))?;
     let lookups = lookup_candidates(conn, &terms, &mentioned)?;
     Ok(select(
         &terms, &keyword, &lookups, &mentioned, limit, params,
@@ -180,7 +186,8 @@ fn select(
     let mut located = Vec::new();
     for &(row, lookup_only) in &pool {
         match evidence(row, terms, mentioned, &name_counts, params) {
-            Some(found) if lookup_only && !matches!(found.tier, Tier::Identified) => {}
+            // Lookups found by name count only when the task names them.
+            Some(found) if lookup_only && !found.named => {}
             Some(found) if matches!(found.tier, Tier::Located) => located.push((found, row)),
             Some(found) => kept.push((found, row)),
             None => {}
@@ -367,6 +374,8 @@ struct Evidence {
     tier: Tier,
     /// The task spells this name exactly as written.
     verbatim: bool,
+    /// The task spells the whole name, ignoring case and separators.
+    named: bool,
     task_coverage: f64,
     name_coverage: f64,
 }
@@ -420,24 +429,28 @@ fn evidence(
     params: FloorParams,
 ) -> Option<Evidence> {
     let name = name_tokens(&row.name);
-    // A one-word name identifies a symbol only when no other symbol shares it:
-    // `__init__` or `main` named in a task point at nothing in particular.
-    let unique = name_counts.get(&compact(&row.name)).copied().unwrap_or(0) <= 1;
-    let verbatim = terms.identifiers.contains(&row.name) && (name.len() >= 2 || unique);
+    let compact_name = compact(&row.name);
+    // An exact name identifies a symbol only when no other symbol shares it,
+    // ignoring case and separators: `run_dir` next to several `_run_dir`
+    // helpers, `__init__` or `main` point at nothing in particular. Shared
+    // names still count as ordinary evidence below.
+    let unique = name_counts.get(&compact_name).copied().unwrap_or(0) <= 1;
+    let verbatim = unique && terms.identifiers.contains(&row.name);
     // A compound name spelled out in full, in any case and with or without
     // separators, names the symbol. A one-word name stays a plain word.
     let exact = verbatim
-        || (!name.is_empty()
-            && (name.len() >= 2 || unique)
+        || (unique
+            && !name.is_empty()
             && terms
                 .identifiers
                 .iter()
                 .any(|ident| name_tokens(ident) == name))
-        || (name.len() >= 2 && terms.compact.contains(&compact(&row.name)));
+        || (unique && name.len() >= 2 && terms.compact.contains(&compact_name));
     if exact || mentioned.contains(&row.file_path) {
         return Some(Evidence {
             tier: Tier::Identified,
             verbatim,
+            named: true,
             task_coverage: 1.0,
             name_coverage: 1.0,
         });
@@ -462,7 +475,18 @@ fn evidence(
         .chain(name_tokens(stem))
         .filter(|token| !PATH_NOISE.contains(&token.as_str()))
         .collect();
-    let in_name = words_in(&terms.distinctive, &name);
+    // A task word that spells the whole name without separators
+    // (`codegraphbrief`) matches the name as a whole.
+    let whole_name = name.len() >= 2 && terms.compact.contains(&compact_name);
+    let mut in_name = words_in(&terms.distinctive, &name);
+    if whole_name && !in_name.contains(&&compact_name) {
+        in_name.extend(
+            terms
+                .distinctive
+                .iter()
+                .filter(|word| **word == compact_name),
+        );
+    }
     let in_path = words_in(&terms.distinctive, &path_tokens);
     let explained = terms
         .distinctive
@@ -470,7 +494,9 @@ fn evidence(
         .filter(|word| in_name.contains(word) || in_path.contains(word))
         .count();
     let task_coverage = explained as f64 / terms.distinctive.len() as f64;
-    let name_coverage = if name.is_empty() {
+    let name_coverage = if whole_name {
+        1.0
+    } else if name.is_empty() {
         0.0
     } else {
         name.iter()
@@ -496,6 +522,7 @@ fn evidence(
     Some(Evidence {
         tier,
         verbatim: false,
+        named: whole_name,
         task_coverage,
         name_coverage,
     })
@@ -828,6 +855,66 @@ mod tests {
             floored_ids(&conn, "the _layout probe misreads"),
             vec!["layout"]
         );
+    }
+
+    #[test]
+    fn floor_looks_past_the_first_keyword_rows_before_truncating() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let mut symbols: Vec<(String, String, String)> = (0..30)
+            .map(|index| {
+                (
+                    format!("bundle{index}"),
+                    "rotate_operator_report_dirs".to_string(),
+                    format!("dist/b{index:02}.js"),
+                )
+            })
+            .collect();
+        symbols.push((
+            "real".to_string(),
+            "rotate_operator_report_dirs".to_string(),
+            "src/zz/module.py".to_string(),
+        ));
+        let borrowed: Vec<(&str, &str, &str)> = symbols
+            .iter()
+            .map(|(id, name, path)| (id.as_str(), name.as_str(), path.as_str()))
+            .collect();
+        index_symbols(&conn, &borrowed);
+        let task = "center report build: rotate old operator report dirs automatically";
+        let keyword = search_symbols(&conn, task, 8).unwrap();
+        assert!(
+            keyword.iter().all(|row| row.id != "real"),
+            "fixture must rank real past 8"
+        );
+
+        assert_eq!(floored_ids(&conn, task), vec!["real"]);
+    }
+
+    #[test]
+    fn a_shared_compound_name_is_not_identified_by_itself() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        index_symbols(
+            &conn,
+            &[
+                ("dir_a", "run_dir", "src/brigade/research/registry.py"),
+                ("dir_b", "_run_dir", "tests/test_run_lifecycle.py"),
+                ("dir_c", "_run_dir", "tests/test_run_journal.py"),
+                ("dir_d", "_run_dir", "tests/test_run_shadow.py"),
+                (
+                    "unique",
+                    "release_claim_without_force",
+                    "src/brigade/fleet_claims.py",
+                ),
+            ],
+        );
+
+        let ids = floored_ids(
+            &conn,
+            "fleet claims --release follow-ups: NULL run_dir claims need a non-force path",
+        );
+
+        assert_eq!(ids, vec!["unique"]);
     }
 
     #[test]

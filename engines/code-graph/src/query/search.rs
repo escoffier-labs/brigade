@@ -8,8 +8,8 @@ use crate::model::SearchRow;
 mod floor;
 
 pub use floor::{
-    FloorParams, FlooredSearch, MIN_NAME_COVERAGE, MIN_TASK_COVERAGE, RELEVANCE_FLOOR_RULE,
-    floored_search, select_entry_points,
+    CANDIDATE_POOL, FloorParams, FlooredSearch, MIN_NAME_COVERAGE, MIN_TASK_COVERAGE,
+    RELEVANCE_FLOOR_RULE, floored_search, select_entry_points,
 };
 
 pub fn search_symbols(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchRow>> {

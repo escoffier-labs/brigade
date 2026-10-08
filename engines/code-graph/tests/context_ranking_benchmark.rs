@@ -8,10 +8,12 @@ use std::{
 use graphtrail::{
     model::SearchRow,
     query::{
-        build_context_pack, build_context_pack_from_entry_points, personalize_context_pack,
+        build_context_pack_from_entry_points,
+        context::build_floored_context_pack,
+        personalize_context_pack,
         search::{
-            FloorParams, MIN_NAME_COVERAGE, MIN_TASK_COVERAGE, RELEVANCE_FLOOR_RULE,
-            search_symbols, select_entry_points,
+            CANDIDATE_POOL, FloorParams, MIN_NAME_COVERAGE, MIN_TASK_COVERAGE,
+            RELEVANCE_FLOOR_RULE, search_symbols, select_entry_points,
         },
     },
     store::init_schema,
@@ -448,7 +450,7 @@ fn relevance_floor_raises_precision_without_losing_recall() {
     for case in &corpus.cases {
         let conn = floor_case_connection(case);
         let before = ids(&search_symbols(&conn, &case.task, corpus.limit).unwrap());
-        let pack = build_context_pack(&conn, case.task.clone(), corpus.limit).unwrap();
+        let pack = build_floored_context_pack(&conn, case.task.clone(), corpus.limit).unwrap();
         let after = ids(&pack.entry_points);
         baseline.add(&before, &case.relevant);
         floored.add(&after, &case.relevant);
@@ -509,6 +511,7 @@ const REAL_CALIBRATION: &str =
 struct RealCalibration {
     schema_version: u32,
     limit: usize,
+    pool: usize,
     cases: Vec<RealCase>,
 }
 
@@ -520,13 +523,27 @@ struct RealCase {
     candidates: Vec<RealCandidate>,
 }
 
+/// `[name, qualified_name or null, file_path, bm25 score, label]`, where label
+/// is 1 relevant, 0 judged not relevant, and -1 never judged.
 #[derive(Deserialize)]
-struct RealCandidate {
-    name: String,
-    qualified_name: String,
-    file_path: String,
-    score: f64,
-    relevant: bool,
+struct RealCandidate(String, Option<String>, String, f64, i8);
+
+impl RealCandidate {
+    fn name(&self) -> &str {
+        &self.0
+    }
+
+    fn qualified_name(&self) -> &str {
+        self.1.as_deref().unwrap_or(&self.0)
+    }
+
+    fn file_path(&self) -> &str {
+        &self.2
+    }
+
+    fn relevant(&self) -> bool {
+        self.4 == 1
+    }
 }
 
 fn load_real_calibration() -> RealCalibration {
@@ -540,13 +557,13 @@ fn real_rows(case: &RealCase) -> Vec<SearchRow> {
         .map(|(index, candidate)| SearchRow {
             id: format!("{}-{index}", case.issue),
             kind: "function".to_string(),
-            name: candidate.name.clone(),
-            qualified_name: candidate.qualified_name.clone(),
-            file_path: candidate.file_path.clone(),
+            name: candidate.name().to_string(),
+            qualified_name: candidate.qualified_name().to_string(),
+            file_path: candidate.file_path().to_string(),
             start_line: index + 1,
             end_line: index + 1,
-            signature: candidate.name.clone(),
-            score: candidate.score,
+            signature: candidate.name().to_string(),
+            score: candidate.3,
         })
         .collect()
 }
@@ -564,7 +581,7 @@ fn real_mentioned(case: &RealCase) -> HashSet<String> {
         .collect();
     case.candidates
         .iter()
-        .map(|candidate| candidate.file_path.clone())
+        .map(|candidate| candidate.file_path().to_string())
         .filter(|path| {
             let lower = path.to_lowercase();
             tokens
@@ -575,7 +592,7 @@ fn real_mentioned(case: &RealCase) -> HashSet<String> {
 }
 
 /// Precision and recall over every labeled relevant symbol, including the ones
-/// the keyword top 8 missed.
+/// the keyword pool missed.
 fn score_real(corpus: &RealCalibration, select: impl Fn(&RealCase) -> Vec<usize>) -> Tally {
     let mut tally = Tally::default();
     for case in &corpus.cases {
@@ -583,7 +600,7 @@ fn score_real(corpus: &RealCalibration, select: impl Fn(&RealCase) -> Vec<usize>
         tally.returned += kept.len();
         tally.hits += kept
             .iter()
-            .filter(|index| case.candidates[**index].relevant)
+            .filter(|index| case.candidates[**index].relevant())
             .count();
         tally.relevant += case.relevant_total;
     }
@@ -606,15 +623,18 @@ fn floored_indexes(case: &RealCase, limit: usize, params: FloorParams) -> Vec<us
 #[test]
 fn real_calibration_fixture_is_labeled_and_bounded() {
     let corpus = load_real_calibration();
-    assert_eq!(corpus.schema_version, 1);
+    assert_eq!(corpus.schema_version, 2);
     assert!(corpus.cases.len() >= 60);
+    assert!(corpus.limit <= corpus.pool);
+    assert_eq!(corpus.pool, CANDIDATE_POOL);
     for case in &corpus.cases {
-        assert!(case.candidates.len() <= corpus.limit, "#{}", case.issue);
-        let labeled = case.candidates.iter().filter(|c| c.relevant).count();
+        assert!(case.candidates.len() <= corpus.pool, "#{}", case.issue);
+        let labeled = case.candidates.iter().filter(|c| c.relevant()).count();
         assert!(labeled <= case.relevant_total, "#{}", case.issue);
         for candidate in &case.candidates {
+            assert!((-1..=1).contains(&candidate.4), "#{}", case.issue);
             assert!(
-                Path::new(&candidate.file_path).is_relative(),
+                Path::new(candidate.file_path()).is_relative(),
                 "#{}",
                 case.issue
             );
@@ -647,7 +667,9 @@ fn floor_thresholds_match_their_real_calibration_sweep() {
         .iter()
         .find(|(_, tally)| (tally.f05() - best).abs() < 1e-12)
         .unwrap();
-    let baseline = score_real(&corpus, |case| (0..case.candidates.len()).collect());
+    let baseline = score_real(&corpus, |case| {
+        (0..case.candidates.len().min(corpus.limit)).collect()
+    });
     let floored = score_real(&corpus, |case| {
         floored_indexes(case, corpus.limit, FloorParams::CALIBRATED)
     });
@@ -693,7 +715,7 @@ fn ranking_corpus_relevant_files_survive_the_floor() {
             .map(|node| (node.id.clone(), node.id.clone(), node.path.clone()))
             .collect();
         let conn = index_fixture(&nodes, &case.edges);
-        let mut pack = build_context_pack(&conn, case.task.clone(), 12).unwrap();
+        let mut pack = build_floored_context_pack(&conn, case.task.clone(), 12).unwrap();
         personalize_context_pack(&conn, &mut pack).unwrap();
         assert!(
             pack.related_files.contains(&case.relevant_file),

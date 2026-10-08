@@ -4,11 +4,19 @@ Two hand-labeled sets of Brigade issue titles score the relevance floor that
 `graphtrail context` applies to keyword hits (brigade#1648).
 
 - `labels.json` is the held-out set: the 80 most recent issues at labeling time
-  (#1464 to #1658). Never tune the floor on it.
+  (#1464 to #1658). Never tune the floor on it. Its results were seen while the
+  rule was revised, so it is leaked: treat its numbers as a sanity check, not as
+  evidence that the floor is ready to be the default.
 - `calibration-labels.json` is the calibration set: the next 80 older issues
   (#1228 to #1463). `../context-ranking/floor-calibration-real.json` freezes its
-  keyword top 8 per title, and `tests/context_ranking_benchmark.rs` sweeps the
-  floor thresholds over that fixture.
+  keyword top 50 per title, and `tests/context_ranking_benchmark.rs` sweeps the
+  floor thresholds over that fixture. A second labeling pass judged every
+  calibration candidate any swept threshold pair selects from the top 50.
+
+Both sets were labeled by the person who wrote the floor. An independent review
+labeled 30 older titles before running either engine and measured precision
+0.285 to 0.483, recall 0.371 to 0.276, and 4 of 30 false empty answers. That is
+why `--relevance-floor` is opt-in.
 
 ## How the labels were made
 
@@ -37,8 +45,8 @@ that surfaces unseen symbols gets a lower-bound precision.
 
 ```bash
 graphtrail --db /tmp/brigade.db sync /path/to/brigade
-python3 run.py --graphtrail target/release/graphtrail --db /tmp/brigade.db
-python3 run.py --labels calibration-labels.json --graphtrail target/release/graphtrail --db /tmp/brigade.db
+python3 run.py --graphtrail target/release/graphtrail --db /tmp/brigade.db --relevance-floor
+python3 run.py --labels calibration-labels.json --graphtrail target/release/graphtrail --db /tmp/brigade.db --relevance-floor
 ```
 
 Scores depend on the indexed tree, so rerun against the commit you label.

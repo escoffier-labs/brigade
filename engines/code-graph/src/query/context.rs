@@ -7,15 +7,28 @@ use rusqlite::Connection;
 
 use crate::model::{ContextPack, Direction, EdgeRow, SearchRow};
 use crate::query::graph::edges_for_symbol_id;
-use crate::query::search::{FloorParams, floored_search};
+use crate::query::search::{FloorParams, floored_search, search_symbols};
 use crate::store::SCHEMA_VERSION;
 
 /// What a pack says when no search hit cleared the relevance floor.
 pub const NO_CONFIDENT_CONTEXT: &str = "No confident code context for this task.";
 
+/// The top `limit` keyword hits as entry points, unfiltered.
 pub fn build_context_pack(conn: &Connection, task: String, limit: usize) -> Result<ContextPack> {
+    let entry_points = search_symbols(conn, &task, limit)?;
+    build_context_pack_from_entry_points(conn, task, entry_points)
+}
+
+/// Keyword hits filtered by the relevance floor (opt-in, brigade#1648). The pack
+/// is marked not confident when nothing clears the floor.
+pub fn build_floored_context_pack(
+    conn: &Connection,
+    task: String,
+    limit: usize,
+) -> Result<ContextPack> {
     let floored = floored_search(conn, &task, limit, FloorParams::CALIBRATED)?;
     let mut pack = build_context_pack_from_entry_points(conn, task, floored.rows)?;
+    pack.confident = !pack.entry_points.is_empty();
     pack.relevance_floor = Some(floored.floor);
     Ok(pack)
 }
@@ -39,7 +52,6 @@ pub fn build_context_pack_from_entry_points(
     }
     let mut related_files: Vec<String> = files.into_iter().collect();
     related_files.sort();
-    let confident = !entry_points.is_empty();
     Ok(ContextPack {
         schema_version: SCHEMA_VERSION,
         task,
@@ -47,7 +59,7 @@ pub fn build_context_pack_from_entry_points(
         callers,
         callees,
         related_files,
-        confident,
+        confident: true,
         relevance_floor: None,
     })
 }
@@ -746,7 +758,7 @@ mod tests {
     #[test]
     fn context_pack_without_confident_hits_is_empty_and_says_so() {
         let conn = docs_only_repo();
-        let pack = build_context_pack(
+        let pack = build_floored_context_pack(
             &conn,
             "Update the README install section to mention pipx".to_string(),
             8,
@@ -780,7 +792,7 @@ mod tests {
     #[test]
     fn context_pack_with_a_named_symbol_is_confident_and_marks_the_floor() {
         let conn = docs_only_repo();
-        let pack = build_context_pack(
+        let pack = build_floored_context_pack(
             &conn,
             "retry _is_transient_pipx_install_error on 503".to_string(),
             8,
@@ -801,11 +813,35 @@ mod tests {
         let conn = docs_only_repo();
         let pack = build_context_pack_from_entry_points(&conn, "anything".to_string(), Vec::new())
             .unwrap();
-        assert!(!pack.confident);
+        // Without the floor nothing judged the hits, so the pack is not marked
+        // unconfident, and an empty pack renders exactly as it did before.
+        assert!(pack.confident);
         assert!(pack.relevance_floor.is_none());
+        assert!(!render_markdown(&pack).contains(NO_CONFIDENT_CONTEXT));
         let value = serde_json::to_value(&pack).unwrap();
         assert!(value.get("relevance_floor").is_none());
         assert!(!render_markdown(&pack).contains("relevance floor"));
+    }
+
+    #[test]
+    fn default_context_pack_keeps_the_unfloored_keyword_entry_points() {
+        let conn = docs_only_repo();
+        let task = "Update the README install section to mention pipx".to_string();
+        let pack = build_context_pack(&conn, task.clone(), 8).unwrap();
+        let keyword = crate::query::search::search_symbols(&conn, &task, 8).unwrap();
+
+        let ids = |rows: &[SearchRow]| rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&pack.entry_points), ids(&keyword));
+        assert!(!pack.entry_points.is_empty());
+        assert!(pack.confident);
+        assert!(pack.relevance_floor.is_none());
+        let value = serde_json::to_value(&pack).unwrap();
+        assert_eq!(value["confident"], serde_json::json!(true));
+        assert!(value.get("relevance_floor").is_none());
+        let md = render_markdown(&pack);
+        assert!(!md.contains("relevance floor"), "{md}");
+        assert!(!md.contains(NO_CONFIDENT_CONTEXT), "{md}");
+        assert!(md.contains("## Entry points"), "{md}");
     }
 
     #[test]

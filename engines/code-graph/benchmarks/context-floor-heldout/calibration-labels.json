@@ -70,6 +70,18 @@
     {
      "qualified_name": "runs_list_contract",
      "file_path": "src/brigade/runs_cmd.py"
+    },
+    {
+     "qualified_name": "test_worker_instructions_carry_the_five_swarm_contract_rules",
+     "file_path": "tests/test_grokbot_feed.py"
+    },
+    {
+     "qualified_name": "test_event_decision_time_must_match_the_signed_decision_time",
+     "file_path": "tests/test_approval.py"
+    },
+    {
+     "qualified_name": "test_reconcile_refreshes_stop_at_the_run_refresh_ceiling",
+     "file_path": "tests/test_worklore_github.py"
     }
    ]
   },
@@ -142,6 +154,14 @@
     {
      "qualified_name": "_hub_job_id",
      "file_path": "tests/test_grokbot_reconcile.py"
+    },
+    {
+     "qualified_name": "test_t3_reservation_occupies_seat_against_new_lease",
+     "file_path": "tests/test_fleet_hub_capacity.py"
+    },
+    {
+     "qualified_name": "test_care_bare_install_adopts_predecessor_ids_instead_of_stacking",
+     "file_path": "tests/test_care_cmd.py"
     }
    ]
   },
@@ -172,6 +192,14 @@
     {
      "qualified_name": "ControlPlane",
      "file_path": "src/brigade/fleet_command_deck.py"
+    },
+    {
+     "qualified_name": "AuthorityState",
+     "file_path": "src/brigade/fleet_command_deck.py"
+    },
+    {
+     "qualified_name": "test_deck_http_projects_fake_activated_authority",
+     "file_path": "tests/test_fleet_command_deck.py"
     }
    ],
    "judged": [
@@ -198,6 +226,10 @@
     {
      "qualified_name": "_control_plane_snapshot",
      "file_path": "tests/test_fleet_command_deck.py"
+    },
+    {
+     "qualified_name": "test_legacy_install_on_v2_state_reports_actionable_recovery",
+     "file_path": "tests/test_cursor_install_state_migration.py"
     }
    ]
   },
@@ -246,6 +278,14 @@
     {
      "qualified_name": "_is_test_path",
      "file_path": "src/brigade/code_export.py"
+    },
+    {
+     "qualified_name": "test_snapshot_uses_writer_digest_and_retains_path_and_nested_digests_as_content",
+     "file_path": "tests/test_attestation_receipt.py"
+    },
+    {
+     "qualified_name": "_content_digest",
+     "file_path": "tests/test_grokbot_findings.py"
     }
    ]
   },
@@ -286,6 +326,10 @@
     {
      "qualified_name": "tree_fingerprint_with_head.git",
      "file_path": "src/brigade/localio.py"
+    },
+    {
+     "qualified_name": "test_export_refuses_receipt_with_null_tree_fingerprint",
+     "file_path": "tests/test_attestation.py"
     }
    ]
   },
@@ -358,6 +402,22 @@
     {
      "qualified_name": "test_run_cli_cancels_blocked_worker_process_before_releasing_lock.blocked_dispatch_ready",
      "file_path": "tests/test_run_cli.py"
+    },
+    {
+     "qualified_name": "test_schtasks_create_command_is_well_formed_for_every_catalog_entry",
+     "file_path": "tests/test_care_cmd.py"
+    },
+    {
+     "qualified_name": "test_runtime_projects_generic_aliases_and_hides_runners_when_not_safety_ready",
+     "file_path": "tests/test_grokbot_backup_runtime.py"
+    },
+    {
+     "qualified_name": "test_ready_excludes_in_progress_blocked_deferred",
+     "file_path": "tests/test_work_cmd_edges.py"
+    },
+    {
+     "qualified_name": "test_pack_doctor_cli_returns_zero_when_every_check_is_ok",
+     "file_path": "tests/test_grokbot_packs.py"
     }
    ]
   },
@@ -404,6 +464,14 @@
     {
      "qualified_name": "test_scout_apply_wake_notify_posts_bounded_body_on_success",
      "file_path": "tests/test_grokbot_scout_feed.py"
+    },
+    {
+     "qualified_name": "test_wake_role_list_writes_per_target_status_lines",
+     "file_path": "tests/test_grokbot_feed.py"
+    },
+    {
+     "qualified_name": "test_wake_per_role_sender_key_file_honored",
+     "file_path": "tests/test_grokbot_feed.py"
     }
    ],
    "judged": [
@@ -486,6 +554,10 @@
     {
      "qualified_name": "Actor",
      "file_path": "engines/evidence-ledger/internal/adapter/record.go"
+    },
+    {
+     "qualified_name": "_drift_hub_enqueue_digest",
+     "file_path": "tests/test_grokbot_feed.py"
     }
    ]
   },
@@ -516,6 +588,10 @@
     {
      "qualified_name": "test_pins_model_for_opencode",
      "file_path": "tests/test_agents_model_pin.py"
+    },
+    {
+     "qualified_name": "test_hub_only_seat_dispatch_argv_uses_native_launch_id",
+     "file_path": "tests/test_hub_seat_resolution.py"
     }
    ],
    "judged": [
@@ -530,6 +606,42 @@
     {
      "qualified_name": "OpenCodeConfig",
      "file_path": "src/brigade/mcp_adapters.py"
+    },
+    {
+     "qualified_name": "test_matching_seats_brigade_run_uses_cli_and_optional_launch_model",
+     "file_path": "tests/test_fleet_policy.py"
+    },
+    {
+     "qualified_name": "_canonical_antigravity_model_id",
+     "file_path": "src/brigade/seat_health.py"
+    },
+    {
+     "qualified_name": "_optional_launch_identity",
+     "file_path": "src/brigade/fleet_hub_model_roster.py"
+    },
+    {
+     "qualified_name": "retired_policy_seats",
+     "file_path": "src/brigade/fleet_hub_model_roster.py"
+    },
+    {
+     "qualified_name": "_seats",
+     "file_path": "src/brigade/fleet_hub_model_roster.py"
+    },
+    {
+     "qualified_name": "raw_seats",
+     "file_path": "src/brigade/fleet_hub_model_roster.py"
+    },
+    {
+     "qualified_name": "_model_policy_for_seats",
+     "file_path": "src/brigade/fleet_command_deck.py"
+    },
+    {
+     "qualified_name": "_legacy_bootstrap_seats",
+     "file_path": "src/brigade/fleet_hub_policy_api.py"
+    },
+    {
+     "qualified_name": "_canonicalize_launch_label",
+     "file_path": "src/brigade/cli/run_cloud.py"
     }
    ]
   },
@@ -586,6 +698,22 @@
     {
      "qualified_name": "_run_cursor_inventory",
      "file_path": "src/brigade/model_inventory.py"
+    },
+    {
+     "qualified_name": "test_observed_runs_closes_the_scan_fd_after_a_successful_scan",
+     "file_path": "tests/test_governance_inventory.py"
+    },
+    {
+     "qualified_name": "test_observed_runs_bound_unsupported_descriptor_scans_and_closes_the_scan_fd",
+     "file_path": "tests/test_governance_inventory.py"
+    },
+    {
+     "qualified_name": "test_time_bounds_constrain_only_observed_run_facts",
+     "file_path": "tests/test_governance_inventory.py"
+    },
+    {
+     "qualified_name": "_open_runs_directory",
+     "file_path": "src/brigade/governance_inventory.py"
     }
    ]
   },
@@ -612,6 +740,10 @@
     {
      "qualified_name": "_bound_journal_failure",
      "file_path": "src/brigade/run_lifecycle.py"
+    },
+    {
+     "qualified_name": "test_unpaired_journal_ahead_fails_closed_before_status_append",
+     "file_path": "tests/test_run_lifecycle.py"
     }
    ],
    "judged": [
@@ -654,6 +786,14 @@
     {
      "qualified_name": "run_tile_state",
      "file_path": "src/brigade/center_cmd/dashboard/views/research.py"
+    },
+    {
+     "qualified_name": "test_reap_leaves_a_legacy_snapshot_only_run_without_a_journal",
+     "file_path": "tests/test_run_reap.py"
+    },
+    {
+     "qualified_name": "_read_tail_state",
+     "file_path": "src/brigade/run_journal.py"
     }
    ]
   },
@@ -722,6 +862,10 @@
     {
      "qualified_name": "_print_worker_status",
      "file_path": "src/brigade/aboyeur/prompts.py"
+    },
+    {
+     "qualified_name": "test_every_public_failure_class_has_a_valid_default_phase_and_retry",
+     "file_path": "tests/test_worker_failure.py"
     }
    ]
   },
@@ -790,6 +934,18 @@
     {
      "qualified_name": "TestDispatchRecovery._plant_dead_run_lock",
      "file_path": "tests/test_fleet_claim_release.py"
+    },
+    {
+     "qualified_name": "TestDispatchRecovery.test_dead_owner_lock_never_steals_another_nodes_claim",
+     "file_path": "tests/test_fleet_claim_release.py"
+    },
+    {
+     "qualified_name": "TestDispatchRecovery.test_dead_owner_lock_supersedes_own_stale_claim_without_ttl_wait",
+     "file_path": "tests/test_fleet_claim_release.py"
+    },
+    {
+     "qualified_name": "test_run_lock_wait_timeout_reports_live_owner_details",
+     "file_path": "tests/test_runguard_wait.py"
     }
    ]
   },
@@ -861,6 +1017,38 @@
     {
      "qualified_name": "Agent",
      "file_path": "src/brigade/roster.py"
+    },
+    {
+     "qualified_name": "TestObservationMetadata.test_get_agent_usage_keeps_token_counts_and_drops_secret_fields",
+     "file_path": "tests/test_cursor_cloud.py"
+    },
+    {
+     "qualified_name": "get_run",
+     "file_path": "src/brigade/cursor_cloud.py"
+    },
+    {
+     "qualified_name": "_cloud_worker_html",
+     "file_path": "src/brigade/fleet_command_deck.py"
+    },
+    {
+     "qualified_name": "agent_result_from_worker",
+     "file_path": "src/brigade/run_receipts.py"
+    },
+    {
+     "qualified_name": "_get_cloud_blocking",
+     "file_path": "src/brigade/fleet_client_cloud.py"
+    },
+    {
+     "qualified_name": "cloud_workers_from_snapshot",
+     "file_path": "src/brigade/fleet_command_deck.py"
+    },
+    {
+     "qualified_name": "parse_cursor_agent_models",
+     "file_path": "src/brigade/fleet_model_inventory.py"
+    },
+    {
+     "qualified_name": "list_agents",
+     "file_path": "src/brigade/cursor_cloud.py"
     }
    ]
   },
@@ -895,6 +1083,18 @@
     {
      "qualified_name": "test_cli_run_cloud_launch_cursor_rejects_no_plan_approval",
      "file_path": "tests/test_cloud_tracker.py"
+    },
+    {
+     "qualified_name": "test_jules_completed_session_with_work_activity_is_not_plan_approval",
+     "file_path": "tests/test_cloud_tracker.py"
+    },
+    {
+     "qualified_name": "test_jules_plan_followed_by_artifacts_is_not_plan_approval",
+     "file_path": "tests/test_cloud_tracker.py"
+    },
+    {
+     "qualified_name": "approve_plan",
+     "file_path": "src/brigade/jules_cloud.py"
     }
    ],
    "judged": [
@@ -963,6 +1163,14 @@
     {
      "qualified_name": "parse_agy_models",
      "file_path": "src/brigade/fleet_model_inventory.py"
+    },
+    {
+     "qualified_name": "SeatHealthProbe._antigravity_model_check",
+     "file_path": "src/brigade/seat_health.py"
+    },
+    {
+     "qualified_name": "_antigravity_probe_invocation",
+     "file_path": "src/brigade/seat_health.py"
     }
    ],
    "judged": [
@@ -993,6 +1201,10 @@
     {
      "qualified_name": "_seat_health_probe_reports_healthy",
      "file_path": "tests/conftest.py"
+    },
+    {
+     "qualified_name": "test_probe_normalizes_auth_version_model_transport_hang_and_timeout_failures",
+     "file_path": "tests/test_seat_health.py"
     }
    ]
   },
@@ -1015,6 +1227,10 @@
     {
      "qualified_name": "test_model_override_denial_names_the_native_binding_fix",
      "file_path": "tests/test_fleet_native_launch_binding.py"
+    },
+    {
+     "qualified_name": "_set_command_remediation",
+     "file_path": "src/brigade/fleet_model_admission.py"
     }
    ],
    "judged": [
@@ -1061,6 +1277,14 @@
     {
      "qualified_name": "FileScanSet.List",
      "file_path": "engines/evidence-ledger/internal/sources/source.go"
+    },
+    {
+     "qualified_name": "test_model_policy_cli_set_exposes_exact_fields_and_expected_revision",
+     "file_path": "tests/test_fleet_cloud.py"
+    },
+    {
+     "qualified_name": "test_set_and_set_default_reject_retired_models_before_revision_bump",
+     "file_path": "tests/test_fleet_model_roster.py"
     }
    ]
   },
@@ -1091,6 +1315,18 @@
     {
      "qualified_name": "test_antigravity_supports_print_timeout_cache_does_not_retain_environment_values",
      "file_path": "tests/test_agents.py"
+    },
+    {
+     "qualified_name": "test_build_argv_antigravity_timeout_floor",
+     "file_path": "tests/test_agents.py"
+    },
+    {
+     "qualified_name": "test_run_agent_antigravity_forwards_timeout_and_probes_resolved_seat",
+     "file_path": "tests/test_agents.py"
+    },
+    {
+     "qualified_name": "_antigravity_argv",
+     "file_path": "src/brigade/agents.py"
     }
    ],
    "judged": [
@@ -1121,6 +1357,18 @@
     {
      "qualified_name": "test_windows_registry_taskkill_timeout_is_bounded_and_falls_back.StubProcess.kill",
      "file_path": "tests/test_proc.py"
+    },
+    {
+     "qualified_name": "_antigravity_model_pin",
+     "file_path": "src/brigade/agents.py"
+    },
+    {
+     "qualified_name": "_antigravity_env_fingerprint",
+     "file_path": "src/brigade/agents.py"
+    },
+    {
+     "qualified_name": "turnContextLine",
+     "file_path": "stations/notify/internal/adapter/codex_model_test.go"
     }
    ]
   },
@@ -1187,6 +1435,10 @@
     {
      "qualified_name": "artifactsFromArguments",
      "file_path": "engines/evidence-ledger/internal/sources/codex/codex.go"
+    },
+    {
+     "qualified_name": "codexCallText",
+     "file_path": "engines/evidence-ledger/internal/sources/codex/codex.go"
     }
    ],
    "judged": [
@@ -1245,6 +1497,30 @@
     {
      "qualified_name": "_tools_call_arguments",
      "file_path": "tests/test_grokbot_obsidian_phase2.py"
+    },
+    {
+     "qualified_name": "toolCallRecords",
+     "file_path": "engines/evidence-ledger/internal/sources/hermes/hermes.go"
+    },
+    {
+     "qualified_name": "codexText",
+     "file_path": "engines/evidence-ledger/internal/sources/codex/codex.go"
+    },
+    {
+     "qualified_name": "codexKind",
+     "file_path": "engines/evidence-ledger/internal/sources/codex/codex.go"
+    },
+    {
+     "qualified_name": "normalize",
+     "file_path": "engines/evidence-ledger/internal/sources/codex/codex.go"
+    },
+    {
+     "qualified_name": "parseRecords",
+     "file_path": "engines/evidence-ledger/internal/sources/codex/codex_test.go"
+    },
+    {
+     "qualified_name": "NativeMcpClient.call_tool",
+     "file_path": "src/brigade/grokbot_obsidian/adapters.py"
     }
    ]
   },
@@ -1259,6 +1535,14 @@
     {
      "qualified_name": "verify_run",
      "file_path": "src/brigade/work_cmd/verification.py"
+    },
+    {
+     "qualified_name": "_collect_descendants",
+     "file_path": "src/brigade/work_cmd/verify_reaper.py"
+    },
+    {
+     "qualified_name": "test_registered_timeout_kills_descendant_after_group_leader_exits",
+     "file_path": "tests/test_proc.py"
     }
    ],
    "judged": [
@@ -1313,6 +1597,26 @@
     {
      "qualified_name": "_run_verify",
      "file_path": "src/brigade/evidence_ack_crypto.py"
+    },
+    {
+     "qualified_name": "test_work_verify_run_cli_passes_graphtrail_timeout_override",
+     "file_path": "tests/test_work_cmd_verification.py"
+    },
+    {
+     "qualified_name": "test_work_verify_graphtrail_delta_invalid_config_timeout_returns_2_without_orphan_run",
+     "file_path": "tests/test_work_cmd_verification.py"
+    },
+    {
+     "qualified_name": "test_work_verify_graphtrail_delta_timeout_evidence_and_verify_exit_unchanged",
+     "file_path": "tests/test_work_cmd_verification.py"
+    },
+    {
+     "qualified_name": "test_outside_writer_blocks_under_run_lock_then_proceeds_after_release",
+     "file_path": "tests/test_work_cmd_imports.py"
+    },
+    {
+     "qualified_name": "test_work_verify_graphtrail_delta_config_timeout_reaches_pre_and_post_sync",
+     "file_path": "tests/test_work_cmd_verification.py"
     }
    ]
   },
@@ -1365,6 +1669,14 @@
     {
      "qualified_name": "_queue_error",
      "file_path": "src/brigade/grokbot_scout_feed.py"
+    },
+    {
+     "qualified_name": "test_apply_translates_oserror_from_enqueue_to_queue_error",
+     "file_path": "tests/test_grokbot_feed.py"
+    },
+    {
+     "qualified_name": "test_cli_feed_reports_generic_queue_error_with_index",
+     "file_path": "tests/test_grokbot_feed.py"
     }
    ]
   },
@@ -1382,6 +1694,14 @@
     },
     {
      "qualified_name": "_provider_for",
+     "file_path": "src/brigade/governance_inventory.py"
+    },
+    {
+     "qualified_name": "test_agents_expose_each_required_unknown_field",
+     "file_path": "tests/test_governance_inventory.py"
+    },
+    {
+     "qualified_name": "build_inventory",
      "file_path": "src/brigade/governance_inventory.py"
     }
    ],
@@ -1429,6 +1749,26 @@
     {
      "qualified_name": "N8nAdapter.tool_inventory",
      "file_path": "src/brigade/grokbot_n8n/lifecycle.py"
+    },
+    {
+     "qualified_name": "test_observed_runs_require_an_authenticated_model_match_for_provider_attribution",
+     "file_path": "tests/test_governance_inventory.py"
+    },
+    {
+     "qualified_name": "test_validate_inventory_marks_uninventoried_providers_unavailable",
+     "file_path": "tests/test_fleet_policy.py"
+    },
+    {
+     "qualified_name": "test_inventory_collector_bindings_omit_ambiguous_providers",
+     "file_path": "tests/test_fleet_policy.py"
+    },
+    {
+     "qualified_name": "_evaluate_governance_inventory_exists",
+     "file_path": "src/brigade/control_crosswalk.py"
+    },
+    {
+     "qualified_name": "test_run_agent_forwards_model_to_argv",
+     "file_path": "tests/test_agents.py"
     }
    ]
   },
@@ -1451,6 +1791,14 @@
     {
      "qualified_name": "_evaluate_commit_trailer_receipts",
      "file_path": "src/brigade/control_crosswalk.py"
+    },
+    {
+     "qualified_name": "test_verify_commit_missing_target",
+     "file_path": "tests/test_receipts_trailer.py"
+    },
+    {
+     "qualified_name": "parse_trailers",
+     "file_path": "src/brigade/receipts_trailer.py"
     }
    ],
    "judged": [
@@ -1613,6 +1961,38 @@
     {
      "qualified_name": "_approval",
      "file_path": "tests/test_agent_change_approval_policy.py"
+    },
+    {
+     "qualified_name": "test_signed_approval_semantics_v7_quarantines_old_v6_shadow_artifact",
+     "file_path": "tests/test_run_shadow.py"
+    },
+    {
+     "qualified_name": "test_invalid_projection_refuses_approval_without_appending_an_event",
+     "file_path": "tests/test_approval.py"
+    },
+    {
+     "qualified_name": "_append_signed_request",
+     "file_path": "tests/test_approval.py"
+    },
+    {
+     "qualified_name": "_latest_approval_event",
+     "file_path": "src/brigade/approval.py"
+    },
+    {
+     "qualified_name": "parse_signed_bindings",
+     "file_path": "src/brigade/approval_v2.py"
+    },
+    {
+     "qualified_name": "_latest_approval_event",
+     "file_path": "src/brigade/agent_change.py"
+    },
+    {
+     "qualified_name": "_approval_events_by_nonce",
+     "file_path": "src/brigade/agent_change_approval_verify.py"
+    },
+    {
+     "qualified_name": "_signed_subjects",
+     "file_path": "src/brigade/approval.py"
     }
    ]
   },
@@ -1647,6 +2027,18 @@
     {
      "qualified_name": "get_public_key_fingerprint",
      "file_path": "src/brigade/attestation.py"
+    },
+    {
+     "qualified_name": "test_keygen_force_without_old_public_key_refuses_rotation",
+     "file_path": "tests/test_attestation.py"
+    },
+    {
+     "qualified_name": "key_id",
+     "file_path": "src/brigade/receipt_signing.py"
+    },
+    {
+     "qualified_name": "test_export_statement_forwards_the_snapshot_and_export_attestation_delegates",
+     "file_path": "tests/test_cosign_statement_profiles.py"
     }
    ],
    "judged": [
@@ -1681,6 +2073,14 @@
     {
      "qualified_name": "_collect_export_receipts",
      "file_path": "src/brigade/receipts_cmd.py"
+    },
+    {
+     "qualified_name": "test_receipts_export_miseledger_exports_run_and_digestless_verify_receipts",
+     "file_path": "tests/test_receipts_cmd.py"
+    },
+    {
+     "qualified_name": "test_receipts_export_miseledger_new_only_exports_once_and_records_cursor",
+     "file_path": "tests/test_receipts_cmd.py"
     }
    ]
   },
@@ -1715,6 +2115,26 @@
     {
      "qualified_name": "test_sweep_expires_a_queued_job_with_no_request_at_all",
      "file_path": "tests/test_fleet_hub_grokbot_expiry.py"
+    },
+    {
+     "qualified_name": "test_status_expires_a_job_past_its_timeout_without_an_operator_sweep",
+     "file_path": "tests/test_grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "test_a_late_claim_is_granted_and_expires_only_past_the_queue_ttl",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "test_renew_and_fail_past_the_execution_deadline_answer_job_expired",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "renew",
+     "file_path": "src/brigade/grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "_renew_via_hub",
+     "file_path": "src/brigade/grokbot_jobs.py"
     }
    ],
    "judged": [
@@ -1729,6 +2149,14 @@
     {
      "qualified_name": "_invalid_request",
      "file_path": "src/brigade/grokbot_fleet/probes.py"
+    },
+    {
+     "qualified_name": "test_apply_counts_hub_worker_jobs_when_the_hub_is_the_queue_authority",
+     "file_path": "tests/test_grokbot_build_feed.py"
+    },
+    {
+     "qualified_name": "_queue_lock",
+     "file_path": "src/brigade/grokbot_jobs.py"
     }
    ]
   },
@@ -1801,6 +2229,18 @@
     {
      "qualified_name": "_mcp_tool_call",
      "file_path": "src/brigade/skills_cmd/adapters.py"
+    },
+    {
+     "qualified_name": "load_direct_queue_listener_token",
+     "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "tools_call_context_defaults_to_json_content",
+     "file_path": "engines/code-graph/tests/mcp.rs"
+    },
+    {
+     "qualified_name": "run_listener",
+     "file_path": "src/brigade/grokbot_cerebro.py"
     }
    ]
   },
@@ -1848,6 +2288,58 @@
     {
      "qualified_name": "firstBundleResult",
      "file_path": "engines/evidence-ledger/internal/app/content_eligibility_test.go"
+    },
+    {
+     "qualified_name": "test_grokbot_control_actor_lists_only_its_own_queue",
+     "file_path": "tests/test_fleet_cloud.py"
+    },
+    {
+     "qualified_name": "test_named_queue_role_service_result_uses_client_unit",
+     "file_path": "tests/test_grokbot_client_identity.py"
+    },
+    {
+     "qualified_name": "test_worker_lifecycle_is_mirrored_to_the_fleet_without_queue_content",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "test_grokbot_feed_actor_list_is_scoped_to_its_own_queue",
+     "file_path": "tests/test_fleet_cloud.py"
+    },
+    {
+     "qualified_name": "QueueState",
+     "file_path": "src/brigade/fleet_command_deck.py"
+    },
+    {
+     "qualified_name": "TestConfirmedLeaseDeadline.test_on_time_response_extends_from_request_start",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "test_repos_first_run_plan_guides_empty_fleet",
+     "file_path": "tests/test_repos_cmd.py"
+    },
+    {
+     "qualified_name": "first_run_payload",
+     "file_path": "src/brigade/repos_cmd/fleet_health.py"
+    },
+    {
+     "qualified_name": "_queue_tools",
+     "file_path": "tests/test_grokbot_packs.py"
+    },
+    {
+     "qualified_name": "run_cloud_task.timeout_result",
+     "file_path": "src/brigade/codex_cloud.py"
+    },
+    {
+     "qualified_name": "_overall_timeout_result",
+     "file_path": "src/brigade/seat_health.py"
+    },
+    {
+     "qualified_name": "call_queue",
+     "file_path": "src/brigade/tools_cmd/calls.py"
+    },
+    {
+     "qualified_name": "_queue_call_payload",
+     "file_path": "src/brigade/tools_cmd/calls.py"
     }
    ]
   },
@@ -1891,6 +2383,26 @@
     {
      "qualified_name": "_skill",
      "file_path": "tests/test_agent_skill_format.py"
+    },
+    {
+     "qualified_name": "test_context_eval_for_run_flags_truncated_delta_and_withholds_rate",
+     "file_path": "tests/test_context_eval.py"
+    },
+    {
+     "qualified_name": "test_scout_feed_error_keeps_stable_reasons_for_non_hub_failures",
+     "file_path": "tests/test_grokbot_scout_feed.py"
+    },
+    {
+     "qualified_name": "_render_skill_text_for_harness",
+     "file_path": "src/brigade/skills_cmd/registry.py"
+    },
+    {
+     "qualified_name": "SkillObligation",
+     "file_path": "src/brigade/skill_obligations.py"
+    },
+    {
+     "qualified_name": "_skill_text",
+     "file_path": "tests/test_memory_care_skills.py"
     }
    ]
   },
@@ -1963,6 +2475,50 @@
     {
      "qualified_name": "test_journal_overflow_retries_lock_instead_of_dropping.timeout_lock",
      "file_path": "tests/test_claude_hooks_latch_race.py"
+    },
+    {
+     "qualified_name": "TestHubClaims.test_holder_token_fences_sibling_release_and_renew",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "test_outside_writer_blocks_under_run_lock_then_proceeds_after_release",
+     "file_path": "tests/test_work_cmd_imports.py"
+    },
+    {
+     "qualified_name": "TestConfirmedLeaseDeadline.test_rejected_renew_notifies_and_aborts_while_release_is_blocked",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "TestHubClaims.test_renew_refused_for_non_owner_and_after_expiry",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "TestConfirmedLeaseDeadline.test_rejected_renew_publication_is_drained_after_cleanup",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "TestDispatchWiring.test_claim_taken_after_local_lock",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "TestFleetClaimsCli.test_holder_release_reports_outcome_only_after_granted_release",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "test_lock_timeout_journal_claims_announce_so_next_hook_is_silent",
+     "file_path": "tests/test_claude_hooks_latch_race.py"
+    },
+    {
+     "qualified_name": "release_waiver_renew",
+     "file_path": "src/brigade/repos_cmd/release_ops.py"
+    },
+    {
+     "qualified_name": "TestFleetAdmission.test_renew_refused_stops_polling_without_release",
+     "file_path": "tests/test_codex_cloud.py"
+    },
+    {
+     "qualified_name": "test_searxng_forwards_subsecond_remaining_timeout",
+     "file_path": "tests/test_research_web.py"
     }
    ]
   },
@@ -1981,6 +2537,26 @@
     {
      "qualified_name": "_register_tracked_verify_manifest",
      "file_path": "tests/test_work_cmd_verification.py"
+    },
+    {
+     "qualified_name": "_load_tracked_workspace_manifest",
+     "file_path": "src/brigade/verify_manifest.py"
+    },
+    {
+     "qualified_name": "test_resolve_manifest_rejects_untracked_workspace_source_path",
+     "file_path": "tests/test_verify_manifest_tracked.py"
+    },
+    {
+     "qualified_name": "test_suggested_manifest_command_names_matching_tracked_manifest",
+     "file_path": "tests/test_verify_manifest_tracked.py"
+    },
+    {
+     "qualified_name": "manifests_matching_paths",
+     "file_path": "src/brigade/verify_manifest.py"
+    },
+    {
+     "qualified_name": "_workspace_manifests_root",
+     "file_path": "src/brigade/verify_manifest.py"
     }
    ],
    "judged": [
@@ -2035,6 +2611,18 @@
     {
      "qualified_name": "_verify_receipt",
      "file_path": "tests/test_telemetry_export.py"
+    },
+    {
+     "qualified_name": "test_project_trial_copied_binding_without_tracked_manifest_is_ineligible",
+     "file_path": "tests/test_verify_trial.py"
+    },
+    {
+     "qualified_name": "collect_verify_receipts",
+     "file_path": "src/brigade/approval.py"
+    },
+    {
+     "qualified_name": "_iter_verify_receipts",
+     "file_path": "src/brigade/workflow_cmd.py"
     }
    ]
   },
@@ -2049,6 +2637,10 @@
     {
      "qualified_name": "test_listener_lease_defaults_to_fifteen_minutes_and_is_a_per_instance_setting",
      "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "ListenerConfig",
+     "file_path": "src/brigade/grokbot_mcp.py"
     }
    ],
    "judged": [
@@ -2107,6 +2699,18 @@
     {
      "qualified_name": "_expire_cloud_leases",
      "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "test_grokbot_two_claimer_race_one_winner",
+     "file_path": "tests/test_fleet_cloud.py"
+    },
+    {
+     "qualified_name": "test_oracle_read_only_enforcement_is_hard",
+     "file_path": "tests/test_agents_oracle.py"
+    },
+    {
+     "qualified_name": "run_listener",
+     "file_path": "src/brigade/grokbot_mcp.py"
     }
    ]
   },
@@ -2116,6 +2720,10 @@
    "relevant": [
     {
      "qualified_name": "test_command_capture_run_warns_that_receipt_is_not_scoreable",
+     "file_path": "tests/test_work_cmd_verification.py"
+    },
+    {
+     "qualified_name": "test_manifest_capture_run_prints_scoreable_yes_on_stdout",
      "file_path": "tests/test_work_cmd_verification.py"
     }
    ],
@@ -2179,6 +2787,22 @@
     {
      "qualified_name": "_is_verify_receipt",
      "file_path": "src/brigade/friction_cmd.py"
+    },
+    {
+     "qualified_name": "test_verify_run_capture_auto_indexes_miseledger_receipts",
+     "file_path": "tests/test_work_cmd_verification.py"
+    },
+    {
+     "qualified_name": "test_forged_receipt_is_audit_visible_but_ineligible",
+     "file_path": "tests/test_scorecard.py"
+    },
+    {
+     "qualified_name": "test_project_trial_missing_receipt_digest_is_ineligible",
+     "file_path": "tests/test_verify_trial.py"
+    },
+    {
+     "qualified_name": "test_project_trial_receipt_digest_mismatch_is_ineligible",
+     "file_path": "tests/test_verify_trial.py"
     }
    ]
   },
@@ -2193,6 +2817,10 @@
     {
      "qualified_name": "work_verify_run_help_requested",
      "file_path": "src/brigade/cli/work/dispatching.py"
+    },
+    {
+     "qualified_name": "test_work_verify_run_help_prints_flag_list_and_exits_0",
+     "file_path": "tests/test_work_cmd_verification.py"
     }
    ],
    "judged": [
@@ -2251,6 +2879,14 @@
     {
      "qualified_name": "test_capture_verify_run_is_unrouted",
      "file_path": "tests/test_outcome_cmd.py"
+    },
+    {
+     "qualified_name": "test_verify_run_capture_miseledger_failure_is_fail_open",
+     "file_path": "tests/test_work_cmd_verification.py"
+    },
+    {
+     "qualified_name": "test_tools_call_queue_blocked_requires_include_blocked_and_cannot_approve",
+     "file_path": "tests/test_work_cmd_services.py"
     }
    ]
   },
@@ -2281,6 +2917,18 @@
     {
      "qualified_name": "TestRunsPruneWorktrees",
      "file_path": "tests/test_run_worktree.py"
+    },
+    {
+     "qualified_name": "test_run_cli_worktree_retains_failed_checkout_with_changes",
+     "file_path": "tests/test_run_cli.py"
+    },
+    {
+     "qualified_name": "test_run_cli_worktree_keeps_failed_checkout_without_changes",
+     "file_path": "tests/test_run_cli.py"
+    },
+    {
+     "qualified_name": "remove_worktree",
+     "file_path": "src/brigade/runguard.py"
     }
    ],
    "judged": [
@@ -2319,6 +2967,22 @@
     {
      "qualified_name": "_repo_with_worktree",
      "file_path": "tests/test_memory_hooks.py"
+    },
+    {
+     "qualified_name": "test_run_cli_rejects_worktree_with_no_artifacts",
+     "file_path": "tests/test_run_cli.py"
+    },
+    {
+     "qualified_name": "test_run_cli_worktree_parent_roster_resolves_without_shadow_warning",
+     "file_path": "tests/test_run_cli.py"
+    },
+    {
+     "qualified_name": "_write_successful_worktree_run",
+     "file_path": "tests/test_run_worktree.py"
+    },
+    {
+     "qualified_name": "_write_successful_worktree_run",
+     "file_path": "tests/test_run_cli.py"
     }
    ]
   },
@@ -2391,6 +3055,26 @@
     {
      "qualified_name": "_run_status",
      "file_path": "tests/test_status.py"
+    },
+    {
+     "qualified_name": "test_resume_read_only_sandbox_never_becomes_a_write",
+     "file_path": "tests/test_run_transport.py"
+    },
+    {
+     "qualified_name": "test_swap_before_journal_activation_never_writes_outside_the_bound_run",
+     "file_path": "tests/test_run_reap.py"
+    },
+    {
+     "qualified_name": "test_resume_synthesis_carries_orchestrator_env",
+     "file_path": "tests/test_run_resume.py"
+    },
+    {
+     "qualified_name": "test_resolve_worker_never_resolves_to_orchestrator",
+     "file_path": "tests/test_run_preference.py"
+    },
+    {
+     "qualified_name": "test_run_writes_handoff",
+     "file_path": "tests/test_aboyeur.py"
     }
    ]
   },
@@ -2405,6 +3089,10 @@
     {
      "qualified_name": "required_upstream_url",
      "file_path": "src/brigade/grokbot_obsidian/__init__.py"
+    },
+    {
+     "qualified_name": "required_upstream_url",
+     "file_path": "src/brigade/grokbot_obsidian/runtime_config.py"
     }
    ],
    "judged": [
@@ -2455,6 +3143,34 @@
     {
      "qualified_name": "GrokbotOperatorAdapter",
      "file_path": "obsidian-plugin/grokbot-operator-adapter/src/adapter.js"
+    },
+    {
+     "qualified_name": "test_installer_rejects_symlink_and_non_owner_vault",
+     "file_path": "tests/test_grokbot_obsidian_operator_install.py"
+    },
+    {
+     "qualified_name": "_resolve_upstream_key",
+     "file_path": "src/brigade/grokbot_obsidian/lifecycle.py"
+    },
+    {
+     "qualified_name": "ObsidianTools._read_vault",
+     "file_path": "src/brigade/grokbot_obsidian/tools.py"
+    },
+    {
+     "qualified_name": "required_loopback_host",
+     "file_path": "src/brigade/grokbot_obsidian/runtime_config.py"
+    },
+    {
+     "qualified_name": "require_vault_path",
+     "file_path": "src/brigade/grokbot_obsidian/contracts.py"
+    },
+    {
+     "qualified_name": "normalize_vault_path",
+     "file_path": "src/brigade/grokbot_obsidian/path_policy.py"
+    },
+    {
+     "qualified_name": "_ObsidianRequestGate.__init__",
+     "file_path": "src/brigade/grokbot_obsidian/lifecycle.py"
     }
    ]
   },
@@ -2481,6 +3197,14 @@
     {
      "qualified_name": "test_registry_rejects_unsafe_or_non_loopback_default_binds",
      "file_path": "tests/test_grokbot_packs.py"
+    },
+    {
+     "qualified_name": "_ingress_origin_ports",
+     "file_path": "src/brigade/grokbot_packs.py"
+    },
+    {
+     "qualified_name": "_peek_installed_bind",
+     "file_path": "src/brigade/grokbot_packs.py"
     }
    ],
    "judged": [
@@ -2494,6 +3218,22 @@
     },
     {
      "qualified_name": "_bind_port_from_existing_config",
+     "file_path": "src/brigade/grokbot_packs.py"
+    },
+    {
+     "qualified_name": "test_registry_rejects_declared_tool_inventory_drift",
+     "file_path": "tests/test_grokbot_packs.py"
+    },
+    {
+     "qualified_name": "_cloudflared_metrics_binds",
+     "file_path": "src/brigade/grokbot_packs.py"
+    },
+    {
+     "qualified_name": "_loopback_metrics_bind",
+     "file_path": "src/brigade/grokbot_packs.py"
+    },
+    {
+     "qualified_name": "_assert_setup_bind_available",
      "file_path": "src/brigade/grokbot_packs.py"
     }
    ]
@@ -2585,6 +3325,14 @@
     {
      "qualified_name": "test_preview_counts_completed_scout_reports_and_writes_nothing",
      "file_path": "tests/test_grokbot_reconcile.py"
+    },
+    {
+     "qualified_name": "test_hub_authority_apply_drafts_unmarked_hub_report",
+     "file_path": "tests/test_grokbot_reconcile.py"
+    },
+    {
+     "qualified_name": "test_hub_authority_known_marker_skips_hub_report",
+     "file_path": "tests/test_grokbot_reconcile.py"
     }
    ],
    "judged": [
@@ -2637,6 +3385,14 @@
     {
      "qualified_name": "_IgnoredFileAllow",
      "file_path": "src/brigade/guard/engine.py"
+    },
+    {
+     "qualified_name": "FileScopedAllowStringLiteralTests.test_single_quoted_allow_all_file_does_not_exempt_file",
+     "file_path": "tests/guard/test_engine.py"
+    },
+    {
+     "qualified_name": "_allowed_by",
+     "file_path": "src/brigade/guard/engine.py"
     }
    ],
    "judged": [
@@ -2671,6 +3427,14 @@
     {
      "qualified_name": "_wait_for_files",
      "file_path": "tests/test_run_journal.py"
+    },
+    {
+     "qualified_name": "FileScopedAllowTests.test_allow_file_scope_exempts_entire_file",
+     "file_path": "tests/guard/test_engine.py"
+    },
+    {
+     "qualified_name": "_allowed_by_superstring_value",
+     "file_path": "src/brigade/guard/engine.py"
     }
    ]
   },
@@ -2684,6 +3448,14 @@
     },
     {
      "qualified_name": "test_mcp_asgi_rejects_extra_and_malformed_raw_tool_arguments",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "test_queue_claim_mints_a_lease_id_when_omitted_and_still_refuses_malformed",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "test_queue_claim_returns_a_supplied_lease_id_unchanged",
      "file_path": "tests/test_grokbot_mcp.py"
     }
    ],
@@ -2719,6 +3491,22 @@
     {
      "qualified_name": "_parse_id_list",
      "file_path": "src/brigade/research/claim_audit.py"
+    },
+    {
+     "qualified_name": "TestInteractiveSessions.test_node_writes_reject_body_node_id_and_admin_requires_it",
+     "file_path": "tests/test_fleet_claims.py"
+    },
+    {
+     "qualified_name": "test_cerebro_setup_requires_path_refs_and_rejects_them_on_queue_roles",
+     "file_path": "tests/test_grokbot_packs.py"
+    },
+    {
+     "qualified_name": "test_claim_advertises_the_optional_lease_seconds_argument",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "test_claim_execution_context_rejects_conflicting_and_expired_leases",
+     "file_path": "tests/test_grokbot_jobs.py"
     }
    ]
   },
@@ -2787,6 +3575,26 @@
     {
      "qualified_name": "_issue_records",
      "file_path": "src/brigade/tools_cmd/status.py"
+    },
+    {
+     "qualified_name": "test_a_hub_scout_report_snapshot_is_named_from_its_derived_job_id",
+     "file_path": "tests/test_grokbot_build_feed.py"
+    },
+    {
+     "qualified_name": "test_preflight_and_apply_report_no_approved_issues_without_queue_state",
+     "file_path": "tests/test_grokbot_scout_feed.py"
+    },
+    {
+     "qualified_name": "_known_job_id",
+     "file_path": "src/brigade/grokbot_scout_feed.py"
+    },
+    {
+     "qualified_name": "completed_scout_job_id",
+     "file_path": "src/brigade/grokbot_scout_feed.py"
+    },
+    {
+     "qualified_name": "_validate_idempotency_record",
+     "file_path": "src/brigade/grokbot_jobs.py"
     }
    ]
   },
@@ -2842,6 +3650,30 @@
     {
      "qualified_name": "receipt_dir_for",
      "file_path": "src/brigade/fleet_session_bootstrap.py"
+    },
+    {
+     "qualified_name": "test_outbound_cap_covers_max_replacement_plus_envelope_below_hard_ceiling",
+     "file_path": "tests/test_grokbot_obsidian_phase2.py"
+    },
+    {
+     "qualified_name": "test_security_gate_checks_host_origin_auth_and_bounded_request_size",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "test_an_envelope_may_declare_a_bounded_queue_ttl",
+     "file_path": "tests/test_grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "test_receipt_binding_write_failure_restores_receipt_proof_inbox_and_bindings",
+     "file_path": "tests/test_work_import_provenance_stamp.py"
+    },
+    {
+     "qualified_name": "_start_host_gate_server",
+     "file_path": "tests/test_grokbot_packs.py"
+    },
+    {
+     "qualified_name": "test_observed_completions_map_stays_bounded",
+     "file_path": "tests/test_codex_appserver.py"
     }
    ]
   },
@@ -2872,6 +3704,14 @@
     {
      "qualified_name": "test_scout_apply_wake_notify_timeout_does_not_fail_enqueue",
      "file_path": "tests/test_grokbot_scout_feed.py"
+    },
+    {
+     "qualified_name": "test_build_apply_wake_notify_non_200_does_not_fail_enqueue",
+     "file_path": "tests/test_grokbot_build_feed.py"
+    },
+    {
+     "qualified_name": "test_scout_apply_wake_notify_non_200_does_not_fail_enqueue",
+     "file_path": "tests/test_grokbot_scout_feed.py"
     }
    ],
    "judged": [
@@ -2886,6 +3726,10 @@
     {
      "qualified_name": "_grokbot_enqueue",
      "file_path": "tests/test_fleet_cloud.py"
+    },
+    {
+     "qualified_name": "_WakeRecorder",
+     "file_path": "tests/test_grokbot_feed.py"
     }
    ]
   },
@@ -2900,6 +3744,18 @@
     {
      "qualified_name": "sweep_expired_jobs",
      "file_path": "src/brigade/fleet_hub_grokbot.py"
+    },
+    {
+     "qualified_name": "test_status_expires_a_running_job_past_its_own_deadline",
+     "file_path": "tests/test_grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "test_status_expires_a_job_past_its_timeout_without_an_operator_sweep",
+     "file_path": "tests/test_grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "test_list_expires_a_queued_job_and_records_an_expire_operation",
+     "file_path": "tests/test_fleet_hub_grokbot_expiry.py"
     }
    ],
    "judged": [
@@ -2954,6 +3810,18 @@
     {
      "qualified_name": "_hub_projection_job",
      "file_path": "src/brigade/grokbot_jobs_hub.py"
+    },
+    {
+     "qualified_name": "test_hub_transport_timeout_is_local_and_preserves_job_timeout",
+     "file_path": "tests/test_grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "test_hub_transport_timeout_enforces_a_real_deadline",
+     "file_path": "tests/test_grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "test_hub_transport_timeout_rejects_invalid_values_before_network",
+     "file_path": "tests/test_grokbot_jobs.py"
     }
    ]
   },
@@ -2998,6 +3866,26 @@
     {
      "qualified_name": "_model_roster",
      "file_path": "tests/test_aboyeur.py"
+    },
+    {
+     "qualified_name": "test_configured_admin_token_roster_read_fails_closed_without_flattening",
+     "file_path": "tests/test_fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "test_old_hub_roster_read_fails_closed_with_unsupported_schema",
+     "file_path": "tests/test_fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "test_target_admission_fails_closed_when_roster_changes_after_controller_admission",
+     "file_path": "tests/test_fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "test_private_readers_fail_closed_before_filesystem_access",
+     "file_path": "tests/test_windows_read_security.py"
+    },
+    {
+     "qualified_name": "test_security_health_fails_closed_for_malformed_security_report",
+     "file_path": "tests/test_security_cmd.py"
     }
    ]
   },
@@ -3069,6 +3957,42 @@
     {
      "qualified_name": "GrokbotOperatorAdapter",
      "file_path": "obsidian-plugin/grokbot-operator-adapter/src/adapter.js"
+    },
+    {
+     "qualified_name": "test_doctor_feed_authority_probe_lists_both_feed_roles_with_no_mutating_hub_action",
+     "file_path": "tests/test_grokbot_ops.py"
+    },
+    {
+     "qualified_name": "test_wake_role_list_skips_invalid_target_and_posts_the_rest",
+     "file_path": "tests/test_grokbot_feed.py"
+    },
+    {
+     "qualified_name": "test_apply_counts_hub_worker_jobs_when_the_hub_is_the_queue_authority",
+     "file_path": "tests/test_grokbot_build_feed.py"
+    },
+    {
+     "qualified_name": "_hub_queue",
+     "file_path": "tests/test_grokbot_scout_feed.py"
+    },
+    {
+     "qualified_name": "load_feed_hub_token",
+     "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "test_grokbot_feed_actor_list_needs_no_reenrollment",
+     "file_path": "tests/test_fleet_cloud.py"
+    },
+    {
+     "qualified_name": "_hub_decision",
+     "file_path": "tests/test_grokbot_build_feed.py"
+    },
+    {
+     "qualified_name": "_hub_decision",
+     "file_path": "tests/test_grokbot_scout_feed.py"
+    },
+    {
+     "qualified_name": "_stub_hub",
+     "file_path": "tests/test_grokbot_ops.py"
     }
    ]
   },
@@ -3103,6 +4027,10 @@
     {
      "qualified_name": "_map_hub_admission",
      "file_path": "src/brigade/fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "test_admitted_none_reasoning_is_dropped_for_reasoning_adapters_too",
+     "file_path": "tests/test_fleet_model_admission.py"
     }
    ],
    "judged": [
@@ -3133,6 +4061,18 @@
     {
      "qualified_name": "_antigravity_model_pin",
      "file_path": "src/brigade/agents.py"
+    },
+    {
+     "qualified_name": "test_map_hub_admission_rejects_non_authoritative_or_extra_fields_and_applies_retired_floor",
+     "file_path": "tests/test_fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "test_validate_roster_rows_requires_nonempty_reasoning_and_hub_lkg_schema_match",
+     "file_path": "tests/test_fleet_model_admission.py"
+    },
+    {
+     "qualified_name": "_reasoning_adapter_roster",
+     "file_path": "tests/test_fleet_model_admission.py"
     }
    ]
   },
@@ -3155,6 +4095,10 @@
     {
      "qualified_name": "_grok_envelope",
      "file_path": "tests/test_aboyeur.py"
+    },
+    {
+     "qualified_name": "test_run_agent_accepts_grok_write_mode_envelope_text",
+     "file_path": "tests/test_agents.py"
     }
    ],
    "judged": [
@@ -3205,6 +4149,26 @@
     {
      "qualified_name": "emit",
      "file_path": "src/brigade/message_envelope.py"
+    },
+    {
+     "qualified_name": "test_run_parses_protocol_and_final_text",
+     "file_path": "tests/test_acpx_adapter.py"
+    },
+    {
+     "qualified_name": "test_run_rejects_non_final_stop_reason_with_partial_text",
+     "file_path": "tests/test_acpx_adapter.py"
+    },
+    {
+     "qualified_name": "_file_not_found_text",
+     "file_path": "src/brigade/grokbot_obsidian/adapters.py"
+    },
+    {
+     "qualified_name": "generator.emitSession",
+     "file_path": "engines/evidence-ledger/internal/sources/grok/grok.go"
+    },
+    {
+     "qualified_name": "_parse_staged_envelope",
+     "file_path": "src/brigade/grokbot_obsidian/adapters.py"
     }
    ]
   },
@@ -3219,6 +4183,10 @@
     {
      "qualified_name": "test_grokbot_feed_actor_still_cannot_mutate_or_read_reports",
      "file_path": "tests/test_fleet_cloud.py"
+    },
+    {
+     "qualified_name": "test_doctor_feed_authority_probe_lists_both_feed_roles_with_no_mutating_hub_action",
+     "file_path": "tests/test_grokbot_ops.py"
     }
    ],
    "judged": [
@@ -3273,6 +4241,14 @@
     {
      "qualified_name": "_authority_run",
      "file_path": "tests/test_run_redaction.py"
+    },
+    {
+     "qualified_name": "test_apply_surfaces_the_refused_hub_action_and_actor_kind",
+     "file_path": "tests/test_grokbot_scout_feed.py"
+    },
+    {
+     "qualified_name": "test_hub_authority_preview_lists_completed_scout_without_local_job_record",
+     "file_path": "tests/test_grokbot_reconcile.py"
     }
    ]
   },
@@ -3295,6 +4271,10 @@
     {
      "qualified_name": "test_direct_worker_read_only_sandbox_never_becomes_a_write",
      "file_path": "tests/test_run_transport.py"
+    },
+    {
+     "qualified_name": "synthesis_document_payload",
+     "file_path": "src/brigade/aboyeur/direct_worker_finish.py"
     }
    ],
    "judged": [
@@ -3341,6 +4321,10 @@
     {
      "qualified_name": "_direct_worker_error",
      "file_path": "src/brigade/aboyeur/artifacts.py"
+    },
+    {
+     "qualified_name": "test_run_cli_explicit_direct_worker_reports_choice_without_shadow_warning",
+     "file_path": "tests/test_run_cli.py"
     }
    ]
   },
@@ -3381,6 +4365,30 @@
     {
      "qualified_name": "_sink_csv_value",
      "file_path": "src/brigade/fleet_export.py"
+    },
+    {
+     "qualified_name": "test_security_finding_outputs_sanitize_hostile_strings",
+     "file_path": "tests/test_security_cmd.py"
+    },
+    {
+     "qualified_name": "test_security_finding_outputs_redact_private_url_token_and_path",
+     "file_path": "tests/test_security_cmd.py"
+    },
+    {
+     "qualified_name": "test_chat_backup_and_security_outputs_do_not_copy_private_values",
+     "file_path": "tests/test_privacy_regression.py"
+    },
+    {
+     "qualified_name": "TestSink.test_sink_keeps_formula_like_values_raw_while_human_csv_guards_them",
+     "file_path": "tests/test_fleet_export.py"
+    },
+    {
+     "qualified_name": "_sanitize_finding_for_output",
+     "file_path": "src/brigade/security_cmd/models.py"
+    },
+    {
+     "qualified_name": "AtomicFile",
+     "file_path": "engines/evidence-ledger/internal/security/security.go"
     }
    ]
   },
@@ -3407,6 +4415,10 @@
     {
      "qualified_name": "exportMarkdownGroup",
      "file_path": "engines/evidence-ledger/internal/app/app.go"
+    },
+    {
+     "qualified_name": "markdownExportBasenameHasDigest",
+     "file_path": "engines/evidence-ledger/internal/app/app_test.go"
     }
    ],
    "judged": [
@@ -3509,6 +4521,34 @@
     {
      "qualified_name": "_imports_archive_path",
      "file_path": "src/brigade/work_cmd/helpers.py"
+    },
+    {
+     "qualified_name": "test_security_scan_include_paths_do_not_open_unrelated_files",
+     "file_path": "tests/test_security_cmd.py"
+    },
+    {
+     "qualified_name": "test_self_import_accepts_producer_stable_hash_fingerprint_and_normalizes_queue_path",
+     "file_path": "tests/test_work_import_provenance_stamp.py"
+    },
+    {
+     "qualified_name": "_should_skip_harness_wiring_path",
+     "file_path": "src/brigade/security_cmd/models.py"
+    },
+    {
+     "qualified_name": "_untrusted_import_canonical_hash",
+     "file_path": "src/brigade/work_cmd/ledger/import_model.py"
+    },
+    {
+     "qualified_name": "_locally_stamped_import_content_hash",
+     "file_path": "src/brigade/work_cmd/ledger/import_model.py"
+    },
+    {
+     "qualified_name": "test_runbook_closeout_without_import_flag_skips_imports",
+     "file_path": "tests/test_runbook_import.py"
+    },
+    {
+     "qualified_name": "test_security_scan_can_import_findings",
+     "file_path": "tests/test_security_cmd.py"
     }
    ]
   },
@@ -3519,6 +4559,10 @@
     {
      "qualified_name": "test_run_direct_grok_continuation_recovery_preserves_both_attempts",
      "file_path": "tests/test_aboyeur.py"
+    },
+    {
+     "qualified_name": "test_run_agent_binds_initial_grok_session_to_launcher_id",
+     "file_path": "tests/test_agents.py"
     }
    ],
    "judged": [
@@ -3549,6 +4593,10 @@
     {
      "qualified_name": "TestLaunchGate.test_admission_then_create_binds_agent_and_run_ids",
      "file_path": "tests/test_cursor_cloud.py"
+    },
+    {
+     "qualified_name": "dispatch",
+     "file_path": "src/brigade/cli/security.py"
     }
    ]
   },
@@ -3609,6 +4657,22 @@
     {
      "qualified_name": "_scanner_output_path",
      "file_path": "src/brigade/work_cmd/config.py"
+    },
+    {
+     "qualified_name": "_is_security_scanner_literal",
+     "file_path": "src/brigade/security_cmd/models.py"
+    },
+    {
+     "qualified_name": "_scanner_validate_import_output",
+     "file_path": "src/brigade/work_cmd/scanners.py"
+    },
+    {
+     "qualified_name": "test_security_finding_outputs_sanitize_hostile_strings",
+     "file_path": "tests/test_security_cmd.py"
+    },
+    {
+     "qualified_name": "_repo_summaries",
+     "file_path": "src/brigade/repos_cmd/fleet.py"
     }
    ]
   },
@@ -3656,6 +4720,50 @@
     {
      "qualified_name": "FleetQuotaError",
      "file_path": "src/brigade/fleet_quota.py"
+    },
+    {
+     "qualified_name": "_handoff",
+     "file_path": "src/brigade/fleet_t3_transport.py"
+    },
+    {
+     "qualified_name": "test_tile_falls_back_to_claim_conductor_for_seat",
+     "file_path": "tests/test_fleet_deck_badges.py"
+    },
+    {
+     "qualified_name": "test_origin_selection_keeps_the_local_path",
+     "file_path": "tests/test_fleet_t3_transport.py"
+    },
+    {
+     "qualified_name": "test_the_orchestrator_keeps_its_own_local_lease",
+     "file_path": "tests/test_fleet_t3_transport.py"
+    },
+    {
+     "qualified_name": "test_unmapped_origin_identity_is_blocked_not_local",
+     "file_path": "tests/test_fleet_t3_transport.py"
+    },
+    {
+     "qualified_name": "test_refresh_cache_keeps_local_copy_when_hub_is_down",
+     "file_path": "tests/test_run_preference.py"
+    },
+    {
+     "qualified_name": "test_handoff_template_prefers_local_install",
+     "file_path": "tests/test_handoff.py"
+    },
+    {
+     "qualified_name": "_dispatch_work_burn",
+     "file_path": "src/brigade/cli/fleet.py"
+    },
+    {
+     "qualified_name": "matching_seats",
+     "file_path": "src/brigade/fleet_policy.py"
+    },
+    {
+     "qualified_name": "test_fleet_work_create_and_burn_json",
+     "file_path": "tests/test_worklore_client.py"
+    },
+    {
+     "qualified_name": "test_work_brief_includes_handoff_ingest_issues",
+     "file_path": "tests/test_work_cmd_services.py"
     }
    ]
   },
@@ -3700,6 +4808,34 @@
     {
      "qualified_name": "test_launcher_stamping_waits_for_child_writer_lock",
      "file_path": "tests/test_work_cmd_scanners.py"
+    },
+    {
+     "qualified_name": "test_busy_writer_lock_deadline_bounds_launcher_stamping_and_releases_run_lock",
+     "file_path": "tests/test_work_cmd_scanners.py"
+    },
+    {
+     "qualified_name": "test_skills_fleet_status_reports_copies_under_external_skills_root",
+     "file_path": "tests/test_skills_cmd.py"
+    },
+    {
+     "qualified_name": "test_import_provenance_reports_missing_envelope_for_legacy_rows",
+     "file_path": "tests/test_work_import_provenance_stamp.py"
+    },
+    {
+     "qualified_name": "test_require_scout_report_accepts_a_report_produced_by_a_retry_revision",
+     "file_path": "tests/test_grokbot_build_feed.py"
+    },
+    {
+     "qualified_name": "test_a_scout_report_produced_by_a_retry_revision_is_named",
+     "file_path": "tests/test_grokbot_build_feed.py"
+    },
+    {
+     "qualified_name": "_load_report",
+     "file_path": "src/brigade/security_cmd/reports.py"
+    },
+    {
+     "qualified_name": "_load_report_file",
+     "file_path": "src/brigade/security_cmd/reports.py"
     }
    ]
   },
@@ -3718,6 +4854,18 @@
     {
      "qualified_name": "busyRetryExhaustedError.Code",
      "file_path": "engines/evidence-ledger/internal/ingest/busy.go"
+    },
+    {
+     "qualified_name": "isBusyFamilyCode",
+     "file_path": "engines/evidence-ledger/internal/ingest/busy.go"
+    },
+    {
+     "qualified_name": "TestIsBusyRecognizesDriverResultCode",
+     "file_path": "engines/evidence-ledger/internal/ingest/busy_test.go"
+    },
+    {
+     "qualified_name": "TestIsBusyRecognizesBusyFamilyCodes",
+     "file_path": "engines/evidence-ledger/internal/ingest/busy_test.go"
     }
    ],
    "judged": [
@@ -3764,6 +4912,14 @@
     {
      "qualified_name": "release_evidence_plan",
      "file_path": "src/brigade/repos_cmd/release_ops.py"
+    },
+    {
+     "qualified_name": "resultCodeError.Code",
+     "file_path": "engines/evidence-ledger/internal/ingest/busy_test.go"
+    },
+    {
+     "qualified_name": "resultCodeError",
+     "file_path": "engines/evidence-ledger/internal/ingest/busy_test.go"
     }
    ]
   },
@@ -3804,6 +4960,46 @@
     {
      "qualified_name": "test_doctor_immediate_run_dir_stat_oserror_is_omitted._flaky_iterdir",
      "file_path": "tests/test_doctor.py"
+    },
+    {
+     "qualified_name": "test_held_lock_past_budget_does_not_lose_increments",
+     "file_path": "tests/test_claude_hooks_latch_race.py"
+    },
+    {
+     "qualified_name": "test_good_host_returns_200",
+     "file_path": "tests/test_center_serve.py"
+    },
+    {
+     "qualified_name": "test_renew_clamps_to_deadline_and_increments_revision",
+     "file_path": "tests/test_grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "test_get_view_status_returns_200",
+     "file_path": "tests/test_center_dashboard.py"
+    },
+    {
+     "qualified_name": "underRoot",
+     "file_path": "obsidian-plugin/grokbot-operator-adapter/main.js"
+    },
+    {
+     "qualified_name": "underRoot",
+     "file_path": "obsidian-plugin/grokbot-operator-adapter/src/adapter.js"
+    },
+    {
+     "qualified_name": "_enqueue_under_limits",
+     "file_path": "src/brigade/grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "_under",
+     "file_path": "src/brigade/grokbot_obsidian/path_policy.py"
+    },
+    {
+     "qualified_name": "_path_under",
+     "file_path": "src/brigade/operator_cmd/health.py"
+    },
+    {
+     "qualified_name": "_strictly_under",
+     "file_path": "src/brigade/grokbot_obsidian/path_policy.py"
     }
    ]
   },
@@ -3860,6 +5056,22 @@
     {
      "qualified_name": "test_work_verify_graphtrail_delta_malformed_diff_fails_open",
      "file_path": "tests/test_work_cmd_verification.py"
+    },
+    {
+     "qualified_name": "test_append_fails_closed_with_typed_error_on_envelope_missing_field",
+     "file_path": "tests/test_run_journal.py"
+    },
+    {
+     "qualified_name": "test_context_eval_for_run_returns_none_when_stale_graph_used",
+     "file_path": "tests/test_aboyeur.py"
+    },
+    {
+     "qualified_name": "test_capture_persists_stale_graph_used_and_loaded_counts_exclude_it",
+     "file_path": "tests/test_outcome_cmd.py"
+    },
+    {
+     "qualified_name": "test_wait_for_event_fails_on_hard_timeout",
+     "file_path": "tests/test_thread_sync.py"
     }
    ]
   },
@@ -3899,6 +5111,34 @@
     {
      "qualified_name": "test_raw_chat_metadata_still_blocked_alongside_envelope",
      "file_path": "tests/test_work_import_provenance_stamp.py"
+    },
+    {
+     "qualified_name": "_is_shell_wrapper",
+     "file_path": "src/brigade/runbook_cmd.py"
+    },
+    {
+     "qualified_name": "_shell_wrapper_payload",
+     "file_path": "src/brigade/claude_hooks/runtime.py"
+    },
+    {
+     "qualified_name": "_counting_wrapper",
+     "file_path": "tests/test_issue266_work_status_memory.py"
+    },
+    {
+     "qualified_name": "PackageSource",
+     "file_path": "src/brigade/evidence_package_snapshot.py"
+    },
+    {
+     "qualified_name": "PackageEntry",
+     "file_path": "src/brigade/evidence_package_snapshot.py"
+    },
+    {
+     "qualified_name": "_read_source_file",
+     "file_path": "src/brigade/evidence_package.py"
+    },
+    {
+     "qualified_name": "PackageSnapshot",
+     "file_path": "src/brigade/evidence_package_snapshot.py"
     }
    ]
   },
@@ -3951,6 +5191,14 @@
     {
      "qualified_name": "is_test_file",
      "file_path": "engines/code-graph/src/query/affected.rs"
+    },
+    {
+     "qualified_name": "test_v21_database_gains_brigade_model_column_on_init",
+     "file_path": "tests/test_fleet_model_roster.py"
+    },
+    {
+     "qualified_name": "test_concurrent_locked_followups_one_latched_one_silent",
+     "file_path": "tests/test_claude_hooks_latch_race.py"
     }
    ]
   },
@@ -3965,6 +5213,14 @@
     {
      "qualified_name": "_terminalize",
      "file_path": "src/brigade/run_reap.py"
+    },
+    {
+     "qualified_name": "test_hub_history_ages_old_nonterminal_as_synthetic_stale",
+     "file_path": "tests/test_run_reap.py"
+    },
+    {
+     "qualified_name": "test_run_orphaned_is_terminal_across_contracts",
+     "file_path": "tests/test_run_reap.py"
     }
    ],
    "judged": [
@@ -4023,6 +5279,22 @@
     {
      "qualified_name": "_write_terminal_parent_run",
      "file_path": "tests/test_runs_cmd.py"
+    },
+    {
+     "qualified_name": "test_recover_stale_run_without_callback_terminalizes_as_today",
+     "file_path": "tests/test_runguard.py"
+    },
+    {
+     "qualified_name": "test_recover_stale_run_invokes_before_terminalize_after_token_check",
+     "file_path": "tests/test_runguard.py"
+    },
+    {
+     "qualified_name": "test_runs_child_refuses_terminal_parent_event",
+     "file_path": "tests/test_runs_cmd.py"
+    },
+    {
+     "qualified_name": "_terminalize_escaped_run",
+     "file_path": "src/brigade/cli/run.py"
     }
    ]
   },
@@ -4069,6 +5341,10 @@
     {
      "qualified_name": "publish_session",
      "file_path": "src/brigade/fleet_client.py"
+    },
+    {
+     "qualified_name": "_normalize_dirty_path",
+     "file_path": "src/brigade/fleet_session_presence.py"
     }
    ],
    "judged": [
@@ -4158,6 +5434,42 @@
     {
      "qualified_name": "_fleet_hub_configured",
      "file_path": "src/brigade/grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "hub",
+     "file_path": "tests/test_fleet_nodes.py"
+    },
+    {
+     "qualified_name": "list_nodes",
+     "file_path": "src/brigade/fleet_hub_http.py"
+    },
+    {
+     "qualified_name": "list_nodes",
+     "file_path": "src/brigade/fleet_hub.py"
+    },
+    {
+     "qualified_name": "legacy_hub",
+     "file_path": "tests/test_fleet_nodes.py"
+    },
+    {
+     "qualified_name": "test_grokbot_hub_rejects_private_bodies_and_unenrolled_nodes",
+     "file_path": "tests/test_fleet_cloud.py"
+    },
+    {
+     "qualified_name": "test_isolated_hub_route_status_and_quota_transport_two_nodes",
+     "file_path": "tests/test_fleet_policy_api.py"
+    },
+    {
+     "qualified_name": "RosterView",
+     "file_path": "src/brigade/fleet_hub_roster_page.py"
+    },
+    {
+     "qualified_name": "project_roster",
+     "file_path": "src/brigade/fleet_hub_model_roster.py"
+    },
+    {
+     "qualified_name": "_hub",
+     "file_path": "tests/test_fleet_model_roster.py"
     }
    ]
   },
@@ -4221,6 +5533,18 @@
     {
      "qualified_name": "_review_from_dict",
      "file_path": "src/brigade/research/registry.py"
+    },
+    {
+     "qualified_name": "review_import_findings",
+     "file_path": "src/brigade/work_cmd/reviews.py"
+    },
+    {
+     "qualified_name": "_user_profile_package",
+     "file_path": "src/brigade/skills_cmd/install.py"
+    },
+    {
+     "qualified_name": "user_profile_skill_packages",
+     "file_path": "src/brigade/skills_cmd/install.py"
     }
    ]
   },
@@ -4288,6 +5612,34 @@
     {
      "qualified_name": "_dispatch_grokbot_pack",
      "file_path": "src/brigade/cli/run_cloud.py"
+    },
+    {
+     "qualified_name": "test_worker_inputs_cannot_select_target_role_bot_identity_or_lease_duration",
+     "file_path": "tests/test_grokbot_mcp.py"
+    },
+    {
+     "qualified_name": "test_reclaim_without_a_worker_label_keeps_the_stored_one",
+     "file_path": "tests/test_grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "test_grokbot_enqueue_rejects_local_repository_path",
+     "file_path": "tests/test_fleet_cloud.py"
+    },
+    {
+     "qualified_name": "enqueue_repository_scout",
+     "file_path": "src/brigade/grokbot_jobs.py"
+    },
+    {
+     "qualified_name": "validate_repository",
+     "file_path": "src/brigade/grokbot_job_validation.py"
+    },
+    {
+     "qualified_name": "_classify_one",
+     "file_path": "src/brigade/grokbot_findings.py"
+    },
+    {
+     "qualified_name": "_deliver_one",
+     "file_path": "src/brigade/grokbot_findings.py"
     }
    ]
   },
@@ -4351,6 +5703,42 @@
     {
      "qualified_name": "_report_review_status",
      "file_path": "src/brigade/repos_cmd/fleet_health.py"
+    },
+    {
+     "qualified_name": "test_work_review_closeout_stamps_completed_task_and_session",
+     "file_path": "tests/test_work_cmd_reviews.py"
+    },
+    {
+     "qualified_name": "test_doctor_reports_completed_ledger_chain_break",
+     "file_path": "tests/test_outcome_repair.py"
+    },
+    {
+     "qualified_name": "test_budgets_show_json_reports_canonical_values",
+     "file_path": "tests/test_budgets.py"
+    },
+    {
+     "qualified_name": "test_pathlike_handles_never_leave_owner_review_draft",
+     "file_path": "tests/test_grokbot_findings_relay.py"
+    },
+    {
+     "qualified_name": "test_configured_owner_without_writer_route_refuses",
+     "file_path": "tests/test_memory_proposals.py"
+    },
+    {
+     "qualified_name": "test_scheduler_resolution_reports_missing_route_dependencies",
+     "file_path": "tests/test_run_transport_dag.py"
+    },
+    {
+     "qualified_name": "test_work_sweep_review_health_reports_missing_provenance_and_stale_review",
+     "file_path": "tests/test_work_cmd_sweeps.py"
+    },
+    {
+     "qualified_name": "review",
+     "file_path": "src/brigade/security_cmd/reports.py"
+    },
+    {
+     "qualified_name": "_review_groups",
+     "file_path": "src/brigade/center_cmd/reports.py"
     }
    ]
   },
@@ -4381,6 +5769,10 @@
     {
      "qualified_name": "persisted_launchd_schedules",
      "file_path": "src/brigade/care_schedules.py"
+    },
+    {
+     "qualified_name": "persisted_systemd_schedules",
+     "file_path": "src/brigade/care_schedules.py"
     }
    ],
    "judged": [
@@ -4409,6 +5801,10 @@
     {
      "qualified_name": "_plan_coverage_payload",
      "file_path": "src/brigade/work_cmd/ledger/tasks_plans.py"
+    },
+    {
+     "qualified_name": "test_work_doctor_warns_for_plan_coverage",
+     "file_path": "tests/test_work_cmd_session.py"
     }
    ],
    "judged": [
@@ -4435,13 +5831,34 @@
     {
      "qualified_name": "test_roster_doctor_warns_when_live_inventory_is_unavailable",
      "file_path": "tests/test_roster_cmd.py"
+    },
+    {
+     "qualified_name": "test_work_brief_reports_next_task_acceptance",
+     "file_path": "tests/test_work_cmd_ledger.py"
+    },
+    {
+     "qualified_name": "test_doctor_reports_bootstrap_budget_ok",
+     "file_path": "tests/test_doctor.py"
+    },
+    {
+     "qualified_name": "test_work_inbox_doctor_reports_hygiene_issues_and_daily_loop",
+     "file_path": "tests/test_work_cmd_services.py"
     }
    ]
   },
   {
    "issue": 1238,
    "title": "claude hooks: anchor session-state reads and writes to a validated directory descriptor",
-   "relevant": [],
+   "relevant": [
+    {
+     "qualified_name": "read_session_state",
+     "file_path": "src/brigade/claude_hooks/runtime.py"
+    },
+    {
+     "qualified_name": "write_session_state",
+     "file_path": "src/brigade/claude_hooks/runtime.py"
+    }
+   ],
    "judged": [
     {
      "qualified_name": "_write_compatibility_directory_anchor",
@@ -4482,6 +5899,18 @@
     {
      "qualified_name": "_session_state",
      "file_path": "src/brigade/fleet_hub_policy.py"
+    },
+    {
+     "qualified_name": "_write_session_state_preserving_latch",
+     "file_path": "src/brigade/claude_hooks/session_state.py"
+    },
+    {
+     "qualified_name": "test_posttooluse_records_bash_write_when_other_session_only_reads",
+     "file_path": "tests/test_claude_hooks_runtime.py"
+    },
+    {
+     "qualified_name": "_session_state_lock",
+     "file_path": "src/brigade/claude_hooks/session_state.py"
     }
    ]
   },
@@ -4507,6 +5936,18 @@
     },
     {
      "qualified_name": "test_timeout_followup_claims_announce_in_journal_not_state",
+     "file_path": "tests/test_claude_hooks_latch_race.py"
+    },
+    {
+     "qualified_name": "test_session_lock_timeout_preserves_latched_state",
+     "file_path": "tests/test_claude_hooks_latch_race.py"
+    },
+    {
+     "qualified_name": "_apply_timeout_latch",
+     "file_path": "src/brigade/claude_hooks/session_state.py"
+    },
+    {
+     "qualified_name": "test_slow_timeout_writes_eventually_latch_and_hold",
      "file_path": "tests/test_claude_hooks_latch_race.py"
     }
    ],
@@ -4554,6 +5995,10 @@
     {
      "qualified_name": "write_update_state",
      "file_path": "src/brigade/update_cmd.py"
+    },
+    {
+     "qualified_name": "test_concurrent_timeout_increments_are_not_lost",
+     "file_path": "tests/test_claude_hooks_latch_race.py"
     }
    ]
   },
@@ -4617,6 +6062,34 @@
     {
      "qualified_name": "_review_findings_path",
      "file_path": "src/brigade/work_cmd/config.py"
+    },
+    {
+     "qualified_name": "test_existing_findings_commands_remain_in_parser_inventory",
+     "file_path": "tests/test_grokbot_findings_relay.py"
+    },
+    {
+     "qualified_name": "_review_findings_payload",
+     "file_path": "src/brigade/work_cmd/reviews.py"
+    },
+    {
+     "qualified_name": "_review_malformed_findings",
+     "file_path": "src/brigade/work_cmd/reviews.py"
+    },
+    {
+     "qualified_name": "splitScheduleArray",
+     "file_path": "engines/evidence-ledger/internal/app/schedule.go"
+    },
+    {
+     "qualified_name": "_existing_handoff",
+     "file_path": "src/brigade/grokbot_findings.py"
+    },
+    {
+     "qualified_name": "splitLines",
+     "file_path": "engines/evidence-ledger/internal/sources/memory/memory.go"
+    },
+    {
+     "qualified_name": "review_import_findings",
+     "file_path": "src/brigade/work_cmd/reviews.py"
     }
    ]
   },
@@ -4718,6 +6191,10 @@
     {
      "qualified_name": "untested_parser_paths_report",
      "file_path": "tests/test_cli_inventory_contract.py"
+    },
+    {
+     "qualified_name": "test_fragment_aliases_still_dispatch",
+     "file_path": "tests/test_cli_inventory_contract.py"
     }
    ],
    "judged": [
@@ -4756,6 +6233,14 @@
     {
      "qualified_name": "TestInventory",
      "file_path": "tests/test_jules_cloud.py"
+    },
+    {
+     "qualified_name": "test_cli_run_cloud_status_json_contract",
+     "file_path": "tests/test_cloud_tracker.py"
+    },
+    {
+     "qualified_name": "test_cli_run_cloud_compact_json_contract",
+     "file_path": "tests/test_cloud_tracker.py"
     }
    ]
   },
@@ -4804,6 +6289,42 @@
     {
      "qualified_name": "_ledgers",
      "file_path": "src/brigade/obsidian_vault.py"
+    },
+    {
+     "qualified_name": "_validate_decision_entry_field_types",
+     "file_path": "src/brigade/work_cmd/ledger/tasks_plans.py"
+    },
+    {
+     "qualified_name": "test_plan_decision_malformed_field_types_fail_closed_on_accept_claim_done",
+     "file_path": "tests/test_work_cmd_ledger.py"
+    },
+    {
+     "qualified_name": "test_caps_from_overrides",
+     "file_path": "tests/test_research_types.py"
+    },
+    {
+     "qualified_name": "test_claim_next_skips_task_with_malformed_plan_decision_field_types",
+     "file_path": "tests/test_work_cmd_claim.py"
+    },
+    {
+     "qualified_name": "test_sandbox_override_upgrades_soft_declaration_to_hard_isolation",
+     "file_path": "tests/test_aboyeur_seat_health_probe.py"
+    },
+    {
+     "qualified_name": "check_allowlist_ratchet",
+     "file_path": "scripts/windows_pytest.py"
+    },
+    {
+     "qualified_name": "TypeScriptSpec",
+     "file_path": "engines/code-graph/src/extractors/typescript.rs"
+    },
+    {
+     "qualified_name": "media_types",
+     "file_path": "src/brigade/worker_events.py"
+    },
+    {
+     "qualified_name": "_mapped_lifecycle_event_types",
+     "file_path": "src/brigade/run_checkpoint.py"
     }
    ]
   }

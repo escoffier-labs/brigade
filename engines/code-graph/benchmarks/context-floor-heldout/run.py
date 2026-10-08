@@ -5,7 +5,7 @@ Usage: run.py --graphtrail BIN --db GRAPH_DB [--labels labels.json] [--limit 8]
 
 The labels come from real Brigade issue titles, judged against a synced index
 of the Brigade repository. See README.md for how they were made. Never tune the
-relevance floor on this set: calibrate on ../context-ranking/floor-corpus.json
+relevance floor on this set: calibrate on ../context-ranking/floor-calibration-real.json
 and only report numbers here.
 """
 
@@ -17,7 +17,7 @@ import subprocess
 from pathlib import Path
 
 
-def score(binary: str, db: str, labels: dict, limit: int) -> dict:
+def score(binary: str, db: str, labels: dict, limit: int, floor: bool = False) -> dict:
     returned = hits = relevant = 0
     false_empty = correct_empty = labeled_none = unjudged = 0
     cases = []
@@ -25,7 +25,8 @@ def score(binary: str, db: str, labels: dict, limit: int) -> dict:
         wanted = {(item["qualified_name"], item["file_path"]) for item in case["relevant"]}
         judged = {(item["qualified_name"], item["file_path"]) for item in case.get("judged", [])} | wanted
         out = subprocess.run(
-            [binary, "--db", db, "context", case["title"], "--json", "--limit", str(limit)],
+            [binary, "--db", db, "context", case["title"], "--json", "--limit", str(limit)]
+            + (["--relevance-floor"] if floor else []),
             capture_output=True,
             text=True,
             check=True,
@@ -66,8 +67,12 @@ def main() -> int:
     parser.add_argument("--labels", default=str(Path(__file__).with_name("labels.json")))
     parser.add_argument("--limit", type=int, default=8)
     parser.add_argument("--cases", action="store_true", help="include per-title counts")
+    parser.add_argument(
+        "--relevance-floor", action="store_true", help="pass --relevance-floor (engines where the floor is opt-in)"
+    )
     args = parser.parse_args()
-    result = score(args.graphtrail, args.db, json.loads(Path(args.labels).read_text()), args.limit)
+    labels = json.loads(Path(args.labels).read_text())
+    result = score(args.graphtrail, args.db, labels, args.limit, args.relevance_floor)
     if not args.cases:
         result.pop("cases")
     print(json.dumps(result, indent=2))
