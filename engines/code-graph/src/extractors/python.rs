@@ -7,7 +7,12 @@ use crate::extractors::common::{LangSpec, extract_with, node_text};
 use crate::model::{CallTarget, FileGraph, Import};
 
 /// Bump when Python extraction output can change for the same file content.
-pub const EXTRACTOR_FINGERPRINT: &str = "python-extractor-v2";
+/// v3: module-level calls belong to a `<module>` pseudo-symbol, decorated
+/// definitions span their decorators, and `from x import *` is recorded.
+pub const EXTRACTOR_FINGERPRINT: &str = "python-extractor-v3";
+
+/// `imported_name` of a `from x import *` row.
+pub const WILDCARD_IMPORT: &str = "*";
 
 /// Ubiquitous builtins that would only ever produce noise edges; AST already excludes keywords.
 const PY_SKIP: &[&str] = &[
@@ -37,6 +42,16 @@ impl LangSpec for PythonSpec {
                 .map(|name| ("function", name)),
             _ => None,
         }
+    }
+
+    fn decorated_definition<'t>(&self, node: TsNode<'t>) -> Option<TsNode<'t>> {
+        (node.kind() == "decorated_definition")
+            .then(|| node.child_by_field_name("definition"))
+            .flatten()
+    }
+
+    fn module_scope_calls(&self) -> bool {
+        true
     }
 
     fn collect_import(&self, node: TsNode<'_>, source: &[u8], out: &mut Vec<Import>) {
@@ -82,6 +97,17 @@ impl LangSpec for PythonSpec {
                     let mut cursor = node.walk();
                     for child in node.named_children(&mut cursor) {
                         if child == module {
+                            continue;
+                        }
+                        if child.kind() == "wildcard_import" {
+                            // `from x import *` binds no single local name.
+                            out.push(Import {
+                                module: module_text.clone(),
+                                local_name: None,
+                                imported_name: Some(WILDCARD_IMPORT.to_string()),
+                                alias: None,
+                                line,
+                            });
                             continue;
                         }
                         let (imported_name, alias) = match child.kind() {
@@ -248,9 +274,129 @@ class Runner:
     }
 
     #[test]
-    fn python_module_level_call_dropped() {
-        let g = graph("foo()\n");
-        assert!(g.calls.iter().all(|c| c.target_name != "foo"));
+    fn python_module_level_call_attributed_to_module_symbol() {
+        let g = graph(
+            r#"
+def main():
+    pass
+
+if __name__ == "__main__":
+    main()
+"#,
+        );
+        let module = g
+            .symbols
+            .iter()
+            .find(|s| s.kind == "module")
+            .expect("module pseudo-symbol");
+        assert_eq!(module.name, "<module>");
+        assert_eq!(module.qualified_name, "<module>");
+        assert_eq!(module.container, None);
+        assert_eq!((module.start_line, module.end_line), (1, 6));
+        let call = g
+            .calls
+            .iter()
+            .find(|c| c.target_name == "main")
+            .expect("module-level call is kept");
+        assert_eq!(call.source_id, module.id);
+        assert_eq!(call.line, 6);
+    }
+
+    #[test]
+    fn python_module_body_hash_ignores_function_bodies() {
+        let module_hash = |source: &str| {
+            graph(source)
+                .symbols
+                .into_iter()
+                .find(|s| s.kind == "module")
+                .and_then(|s| s.body_hash)
+                .expect("module body hash")
+        };
+        let base = module_hash("def main():\n    return 1\n\nmain()\n");
+        assert_eq!(
+            base,
+            module_hash("def main():\n    return 2\n\nmain()\n"),
+            "a function body edit leaves the module unchanged"
+        );
+        assert_ne!(
+            base,
+            module_hash("def main():\n    return 1\n\nmain()\nmain()\n")
+        );
+    }
+
+    #[test]
+    fn python_module_symbol_only_when_module_level_calls_exist() {
+        let g = graph("import os\n\ndef run():\n    os.getcwd()\n");
+        assert!(g.symbols.iter().all(|s| s.kind != "module"));
+    }
+
+    #[test]
+    fn python_decorated_definition_span_includes_decorators() {
+        let g = graph(
+            r#"import functools
+
+@functools.lru_cache(maxsize=None)
+def cached():
+    return helper()
+
+class Box:
+    @staticmethod
+    @register("x")
+    def build():
+        pass
+"#,
+        );
+        let cached = g
+            .symbols
+            .iter()
+            .find(|s| s.name == "cached")
+            .expect("cached symbol");
+        assert_eq!((cached.start_line, cached.end_line), (3, 5));
+        assert_eq!(cached.signature, "def cached():");
+        let lru = g
+            .calls
+            .iter()
+            .find(|c| c.target_name == "lru_cache")
+            .expect("decorator call is kept");
+        assert_eq!(lru.source_id, cached.id);
+        assert_eq!(lru.line, 3);
+
+        let build = g
+            .symbols
+            .iter()
+            .find(|s| s.name == "build")
+            .expect("build symbol");
+        assert_eq!((build.start_line, build.end_line), (8, 11));
+        assert_eq!(build.signature, "def build():");
+        assert_eq!(build.container.as_deref(), Some("Box"));
+        let register = g
+            .calls
+            .iter()
+            .find(|c| c.target_name == "register")
+            .expect("method decorator call");
+        assert_eq!(register.source_id, build.id);
+        // Decorators never need the module pseudo-symbol.
+        assert!(g.symbols.iter().all(|s| s.kind != "module"));
+    }
+
+    #[test]
+    fn python_wildcard_import_is_recorded() {
+        let g = graph("from .core import *\nfrom pkg.util import *\n");
+        let stars: Vec<(&str, Option<&str>, Option<&str>)> = g
+            .imports
+            .iter()
+            .map(|import| {
+                (
+                    import.module.as_str(),
+                    import.imported_name.as_deref(),
+                    import.local_name.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            stars,
+            [(".core", Some("*"), None), ("pkg.util", Some("*"), None)]
+        );
     }
 
     #[test]
