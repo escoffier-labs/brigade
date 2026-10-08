@@ -810,7 +810,7 @@ def _evaluate_run_event_journal_exists(ctx: _Context) -> _Discovery:
     run_dirs, out = _run_dirs(ctx)
     for run_dir in run_dirs:
         path = run_dir / "events" / "lifecycle.jsonl"
-        if not (path.exists() or path.is_symlink()):
+        if not _discovery_path_present(ctx, out, path):
             continue
         relpath = _relpath(ctx, path)
         if run_dir.is_symlink() or path.is_symlink():
@@ -912,7 +912,7 @@ def _evaluate_governance_inventory_exists(ctx: _Context) -> _Discovery:
         ctx.target / ".brigade" / "governance" / "inventory.json",
         ctx.target / "governance-inventory.json",
     ):
-        if not (path.exists() or path.is_symlink()):
+        if not _discovery_path_present(ctx, out, path):
             continue
         payload = None if path.is_symlink() else _read_json_object(path)
         if path.is_symlink():
@@ -1052,7 +1052,14 @@ def _assess_trailer(
         return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
     run_dir = ctx.target / ".brigade" / "runs" / run_id_value
     run_json = run_dir / "run.json"
-    if run_dir.is_symlink() or run_json.is_symlink():
+    try:
+        run_mode = run_dir.lstat().st_mode
+        receipt_mode = run_json.lstat().st_mode
+    except FileNotFoundError:
+        run_mode = receipt_mode = 0
+    except OSError:
+        return _verifier_unavailable(relpath, "discovery_unreadable")
+    if stat.S_ISLNK(run_mode) or stat.S_ISLNK(receipt_mode):
         return _obs(
             relpath,
             "discovered",
@@ -1060,7 +1067,7 @@ def _assess_trailer(
             _dims(integrity=("unknown", "symlink_refused"), subject="unknown", population="not_applicable"),
             ["symlink_refused"],
         )
-    if not run_json.is_file():
+    if not stat.S_ISREG(receipt_mode):
         # No local receipt to compare: the link is unverified, not a digest failure.
         return _obs(
             relpath,
@@ -1117,7 +1124,7 @@ def _evaluate_guard_audit_allow(ctx: _Context) -> _Discovery:
     """EC-09: content-guard audit with an explicit, unblocked verdict (structural only)."""
     out = _Discovery()
     path = ctx.target / ".brigade" / "work" / "guard" / "audit.json"
-    if not (path.exists() or path.is_symlink()):
+    if not _discovery_path_present(ctx, out, path):
         return out
     payload = None if path.is_symlink() else _read_json_object(path)
     relpath = _relpath(ctx, path)
@@ -1172,7 +1179,7 @@ def _evaluate_jsonl_ledger(
     ctx: _Context, path: Path, valid_record: Callable[[dict[str, Any]], bool], timestamp_keys: tuple[str, ...]
 ) -> _Discovery:
     out = _Discovery()
-    if not (path.exists() or path.is_symlink()):
+    if not _discovery_path_present(ctx, out, path):
         return out
     relpath = _relpath(ctx, path)
     timestamp: datetime | None = None
