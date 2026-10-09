@@ -604,7 +604,8 @@ def _run_dirs(ctx: _Context) -> tuple[list[Path], _Discovery]:
 def _run_scope(obs: control_readiness.ArtifactObservation, ctx: _Context, run_dir: Path) -> None:
     """Run-directory artifacts are bound by their run directory name."""
     _bind(obs, ctx, {"run_dir": run_dir.name})
-    obs.timestamp = _first_timestamp(_read_json_object(run_dir / "run.json"), "started_at", "created_at")
+    if not run_dir.is_symlink():
+        obs.timestamp = _first_timestamp(_read_json_object(run_dir / "run.json"), "started_at", "created_at")
     _apply_period(obs, ctx)
 
 
@@ -639,6 +640,11 @@ def _evaluate_agent_request_signed(ctx: _Context) -> _Discovery:
     """
     run_dirs, out = _run_dirs(ctx)
     for run_dir in run_dirs:
+        if run_dir.is_symlink():
+            obs = _invalid(ctx, run_dir, "symlink_refused")
+            _run_scope(obs, ctx, run_dir)
+            out.observations.append(obs)
+            continue
         for path in _agent_request_paths(ctx, run_dir, out):
             relpath = _relpath(ctx, path)
             if run_dir.is_symlink() or path.is_symlink():

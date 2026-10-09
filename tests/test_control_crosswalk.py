@@ -1678,6 +1678,35 @@ def test_ec04_discovers_record_request_nonce_path(tmp_path, monkeypatch):
     assert _assess(target, "EC-04", "run-1")["outcome"] == "rejected"
 
 
+@pytest.mark.parametrize("run_id", [None, "linked-run"])
+@pytest.mark.parametrize("period", [None, ("2026-01-01T00:00:00Z", "2026-12-31T00:00:00Z")])
+def test_ec04_refuses_linked_run_with_only_producer_requests(tmp_path, monkeypatch, run_id, period):
+    from brigade import attestation
+
+    target = _ws(tmp_path)
+    runs = target / ".brigade" / "runs"
+    sibling = runs / "valid-run" / "requests" / ("ab" * 16 + ".json")
+    _write_json(sibling, {})
+    destination = tmp_path / "external-run"
+    _write_json(destination / "requests" / ("cd" * 16 + ".json"), {})
+    _write_json(destination / "run.json", {"started_at": "2025-01-01T00:00:00Z"})
+    (runs / "linked-run").symlink_to(destination, target_is_directory=True)
+    seen = []
+
+    def verify(path, **kwargs):
+        assert Path(path) == sibling
+        seen.append(Path(path))
+        return attestation.AttestationVerifyResult(status=attestation.STATUS_SIGNED_OK, run_id="valid-run")
+
+    monkeypatch.setattr(attestation, "verify_attestation", verify)
+    monkeypatch.setattr(control_crosswalk, "_ssh_keygen_available", lambda: True)
+    readiness = _assess(target, "EC-04", run_id, period=period)
+    assert readiness["outcome"] == "invalid"
+    assert "symlink_refused" in readiness["reason_codes"]
+    assert any(artifact["relpath"] == ".brigade/runs/linked-run" for artifact in readiness["artifacts"])
+    assert seen == ([sibling] if run_id is None else [])
+
+
 def _approval_journal(run_dir: Path, *, broken: bool) -> None:
     import base64
 
