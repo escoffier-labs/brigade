@@ -51,7 +51,7 @@ jobs:
         working-directory: engines/code-graph
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: 1.85.0
       - uses: Swatinem/rust-cache@v2
@@ -70,7 +70,7 @@ jobs:
         working-directory: engines/code-graph
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -112,7 +112,7 @@ jobs:
         working-directory: engines/code-graph
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
@@ -131,7 +131,7 @@ jobs:
         working-directory: engines/code-graph
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
@@ -663,7 +663,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
