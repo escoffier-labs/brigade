@@ -213,7 +213,7 @@
       "relationship": "supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Receipts record command results. Digests and optional local HMACs support consistency checks. The index does not verify HMACs or establish independent custody or key-management effectiveness.",
+      "rationale": "Receipts record command results. Digests and optional local HMACs support consistency checks. The evaluator does not verify HMACs or establish independent custody or key-management effectiveness.",
       "source_locator": "https://www.iso.org/standard/42001"
     },
     {

@@ -75,7 +75,7 @@ Note: Licensed clause text was not reviewed for this crosswalk. Control identifi
 | `A.4.2` | EC-07 | supports | deployer | any | Inventory of resources including agents, models, and tools. | https://www.iso.org/standard/42001 |
 | `A.5` | EC-07 | no-relationship | deployer | any | no sourced sub-control identifier | https://www.iso.org/standard/42001 |
 | `A.6.2.1` | EC-04 | supports | deployer | any | Signed change request supports AI system lifecycle control. | https://www.iso.org/standard/42001 |
-| `A.6.2.8` | EC-01 | supports | service-organisation | any | Receipts record command results. Digests and optional local HMACs support consistency checks. The index does not verify HMACs or establish independent custody or key-management effectiveness. | https://www.iso.org/standard/42001 |
+| `A.6.2.8` | EC-01 | supports | service-organisation | any | Receipts record command results. Digests and optional local HMACs support consistency checks. The evaluator does not verify HMACs or establish independent custody or key-management effectiveness. | https://www.iso.org/standard/42001 |
 | `A.6.2.8` | EC-06 | supports | deployer | any | Hash-chained lifecycle journal records events. It detects broken links; a consistent rewrite is undetectable without an external anchor. | https://www.iso.org/standard/42001 |
 | `A.6.2.8` | EC-11 | supports | deployer | any | Archive index records verification evidence before pruning; preservation depends on the adopting organization storage and retention controls. | https://www.iso.org/standard/42001 |
 | `A.7` | EC-09 | no-relationship | deployer | any | no sourced sub-control identifier | https://www.iso.org/standard/42001 |
