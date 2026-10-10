@@ -487,8 +487,24 @@ def unlink_child(parent: int, name: str) -> None:
 
 
 def stat_child(parent: int, name: str) -> os.stat_result:
-    """Return ``lstat``-equivalent metadata for ``name`` under the held parent."""
-    descriptor = open_file(parent, name, os.O_RDONLY)
+    """Read file or directory metadata under the held parent, refusing reparse points."""
+    api = _require_api()
+    handle = _nt_create(
+        api,
+        parent,
+        name,
+        access=_FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
+        disposition=_FILE_OPEN,
+        options=_FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
+        attributes=_FILE_ATTRIBUTE_NORMAL,
+    )
+    try:
+        _reject_reparse(api, handle, expected_directory=None)
+    except BaseException:
+        api.CloseHandle(handle)
+        raise
+    # Conversion closes on failure and transfers ownership to the fd on success.
+    descriptor = _handle_to_fd(api, handle, os.O_RDONLY)
     try:
         return os.fstat(descriptor)
     finally:
@@ -556,7 +572,7 @@ def _handle_from_fd(fd: int) -> int:
     return int(msvcrt.get_osfhandle(fd))  # type: ignore[attr-defined]
 
 
-def _reject_reparse(api: Any, handle: Any, *, expected_directory: bool) -> None:
+def _reject_reparse(api: Any, handle: Any, *, expected_directory: bool | None) -> None:
     info = api.BY_HANDLE_FILE_INFORMATION()
     if not api.GetFileInformationByHandle(handle, ctypes.byref(info)):
         raise _win_error()
@@ -566,7 +582,7 @@ def _reject_reparse(api: Any, handle: Any, *, expected_directory: bool) -> None:
     is_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
     if expected_directory and not is_directory:
         raise OSError("path component is not a directory")
-    if not expected_directory and is_directory:
+    if expected_directory is False and is_directory:
         raise OSError("path component is a directory")
 
 

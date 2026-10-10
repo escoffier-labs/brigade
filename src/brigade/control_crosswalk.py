@@ -180,19 +180,22 @@ class _AssessmentReader:
             if not stat.S_ISREG(info.st_mode):
                 raise _ReadRefusal("discovery_unreadable")
             permitted = min(limit, _ASSESSMENT_BYTE_BUDGET - self.used)
-            if info.st_size > permitted:
+            if permitted < 0 or info.st_size > permitted:
                 raise _ReadRefusal("read_limit_exceeded")
             raw = bytearray()
             while True:
                 chunk = os.read(descriptor, min(65536, permitted + 1 - len(raw)))
                 if not chunk:
                     break
+                # Charge transport even when growth or a later I/O error
+                # refuses this file. Once the single aggregate overflow byte
+                # is consumed, subsequent uncached reads are refused above.
+                self.used += len(chunk)
                 raw.extend(chunk)
                 if len(raw) > permitted:
                     raise _ReadRefusal("read_limit_exceeded")
             result = bytes(raw)
             self.contents[path] = result
-            self.used += len(result)
             return result
         except FileNotFoundError:
             raise

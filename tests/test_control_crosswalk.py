@@ -24,6 +24,95 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTROL_CROSSWALK_DOC = REPO_ROOT / "docs" / "control-crosswalk.md"
 
 
+@pytest.mark.parametrize("attempts,cached_bytes,budget", [(2, 0, 4), (20, 3, 16)])
+def test_assessment_reader_charges_failed_growing_reads_to_shared_budget(
+    tmp_path, monkeypatch, attempts, cached_bytes, budget
+):
+    import os
+
+    from brigade.control_crosswalk import _AssessmentReader, _ReadRefusal
+
+    monkeypatch.setattr(control_crosswalk, "_ASSESSMENT_BYTE_BUDGET", budget)
+    paths = [tmp_path / f"growing-{index}.json" for index in range(attempts)]
+    for path in paths:
+        path.write_bytes(b"abcdef")
+    cached_path = tmp_path / "cached.json"
+    cached_path.write_bytes(b"x" * cached_bytes)
+    real_fstat, real_read = os.fstat, os.read
+    transported = 0
+
+    def stale_size(fd):
+        fields = list(real_fstat(fd))
+        fields[6] = 0  # The file grows after this size observation.
+        return os.stat_result(fields)
+
+    def counted_read(fd, count):
+        nonlocal transported
+        chunk = real_read(fd, count)
+        transported += len(chunk)
+        return chunk
+
+    monkeypatch.setattr(os, "fstat", stale_size)
+    monkeypatch.setattr(os, "read", counted_read)
+    reader = _AssessmentReader(tmp_path)
+    try:
+        assert reader.read(cached_path, 4) == b"x" * cached_bytes
+        for path in paths:
+            with pytest.raises(_ReadRefusal, match="read_limit_exceeded"):
+                reader.read(path, 4)
+            assert reader.used == transported
+            assert reader.errors[path] == "read_limit_exceeded"
+            assert path not in reader.contents
+        assert transported == budget + 1
+        assert reader.read(cached_path, 4) == b"x" * cached_bytes
+        assert reader.used == transported
+        if cached_bytes:
+            with pytest.raises(_ReadRefusal, match="read_limit_exceeded"):
+                reader.read(cached_path, cached_bytes - 1)
+            assert reader.used == transported
+    finally:
+        reader.close()
+
+
+def test_assessment_reader_charges_chunks_before_later_io_error(tmp_path, monkeypatch):
+    import os
+
+    from brigade.control_crosswalk import _AssessmentReader
+
+    path = tmp_path / "receipt.json"
+    path.write_bytes(b"abcdef")
+    real_read = os.read
+    calls = 0
+
+    def interrupted_read(fd, count):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("read failed after partial transport")
+        return real_read(fd, min(count, 2))
+
+    monkeypatch.setattr(os, "read", interrupted_read)
+    reader = _AssessmentReader(tmp_path)
+    try:
+        with pytest.raises(OSError, match="read failed after partial transport"):
+            reader.read(path)
+        assert reader.used == 2
+        assert reader.errors[path] == "discovery_unreadable"
+        assert path not in reader.contents
+    finally:
+        reader.close()
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="native Windows assessment integration")
+def test_native_windows_assessment_traverses_brigade_and_reads_receipt(tmp_path):
+    target = _ws(tmp_path)
+    _write_verify_receipt(_verify_dir(target, "verify-a"), run_id="verify-a", status="failed")
+    result = _assess(target, "EC-01")
+    assert result["outcome"] == "failed"
+    assert result["population"]["failed"] == 1
+    assert result["artifacts"][0]["relpath"] == ".brigade/work/verify-runs/verify-a/receipt.json"
+
+
 def _write_verify_receipt(
     run_dir: Path,
     *,
