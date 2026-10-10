@@ -789,12 +789,14 @@ class TestNativeContainment:
 
     def test_breakaway_is_denied(self, native):
         marker = native.path / "breakaway"
+        # Launch the interpreter directly so the breakaway probe is an
+        # immediate child of the job root, even when pytest runs in a venv.
         inner = (
             "try:\n subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)'],creationflags=0x1000000)\n"
             f"except OSError as e:\n pathlib.Path({str(marker)!r}).write_text(str(e.winerror))"
         )
         code = f"import subprocess,sys,pathlib; exec({inner!r})"
-        process = native.start(code)
+        process = native.start(code, python=Path(sys._base_executable))
         assert read_marker(marker) == "5"
         assert process.wait(10) == 0
 
@@ -1145,7 +1147,8 @@ def test_actual_breakaway_program_compiles_nested_windows_paths():
 
     captured = []
 
-    def capture(code):
+    def capture(code, *, python):
+        assert python == Path(sys._base_executable)
         captured.append(code)
         raise CapturedProgram
 
