@@ -222,7 +222,20 @@ def finalize_artifact(obs: ArtifactObservation, required: frozenset[str]) -> Art
     validate_observation(obs)
     statuses = {str(obs.dimensions[name]["status"]) for name in required}
     outcome = obs.proposed
-    if "failed" in statuses and outcome not in {"rejected", "invalid", "failed"}:
+    # A recorded denial or negative SoD verdict is an operational failure,
+    # not malformed evidence. Other required failures still reject a failed
+    # operation, including a receipt that names the wrong run.
+    failed = {
+        name
+        for name in required
+        if obs.dimensions[name]["status"] == "failed"
+        and not (
+            outcome == "failed"
+            and name == "authorization"
+            and obs.dimensions[name]["reason"] in {"approval_denied", "sod_failed"}
+        )
+    }
+    if failed and outcome not in {"rejected", "invalid"}:
         outcome = "rejected"
     elif "unavailable" in statuses and _SEVERITY_RANK[outcome] > _SEVERITY_RANK["unavailable"]:
         outcome = "unavailable"

@@ -31,6 +31,7 @@ from . import (
     cosign_attestation,
     evidence_package,
     localio,
+    proc,
     receipts_trailer,
     run_journal,
 )
@@ -123,8 +124,32 @@ def _relpath(ctx: _Context, path: Path) -> str:
         return path.name
 
 
-def _read_json_object(path: Path) -> dict[str, Any] | None:
+def _path_refusal(ctx: _Context, path: Path, *, include_leaf: bool = False) -> str | None:
+    """Refuse linked components below the canonical assessed target before I/O.
+
+    Missing components remain absence; metadata errors remain unreadable. The
+    target itself may have been selected through a symlink and is canonicalized
+    at the assessment boundary, so only components beneath it are checked.
+    """
+    parts = path.relative_to(ctx.target).parts
+    current = ctx.target
+    for part in parts if include_leaf else parts[:-1]:
+        current /= part
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return "discovery_unreadable"
+        if stat.S_ISLNK(mode):
+            return "symlink_refused"
+    return None
+
+
+def _read_json_object(ctx: _Context, path: Path) -> dict[str, Any] | None:
     """Bounded no-follow read of a JSON object; returns None on missing or invalid."""
+    if _path_refusal(ctx, path) is not None:
+        return None
     try:
         return attestation_input.read_json_object(path)
     except (attestation_input.AttestationInputError, FileNotFoundError, IsADirectoryError, OSError):
@@ -151,7 +176,7 @@ def _first_timestamp(payload: dict[str, Any] | None, *keys: str) -> datetime | N
     return None
 
 
-def _bounded_children(root: Path) -> tuple[list[Path], bool, str | None]:
+def _bounded_children(ctx: _Context, root: Path) -> tuple[list[Path], bool, str | None]:
     """Capped directory children as ``(children, truncated, discovery_error)``.
 
     At most ``_MAX + 1`` names are read, in filesystem order, so the scan stays
@@ -161,6 +186,9 @@ def _bounded_children(root: Path) -> tuple[list[Path], bool, str | None]:
     empty population; a symlinked or unreadable root is a discovery error, not
     an absence.
     """
+    refusal = _path_refusal(ctx, root)
+    if refusal is not None:
+        return [], False, refusal
     try:
         mode = root.lstat().st_mode
     except FileNotFoundError:
@@ -212,6 +240,10 @@ def _record_discovery_error(out: _Discovery, ctx: _Context, root: Path, error: s
 
 def _discovery_path_present(ctx: _Context, out: _Discovery, path: Path, *, directory: bool = False) -> bool:
     """Only a missing artifact is absent; denied metadata leaves population unknown."""
+    refusal = _path_refusal(ctx, path)
+    if refusal is not None:
+        _record_discovery_error(out, ctx, path, refusal)
+        return False
     try:
         mode = path.lstat().st_mode
     except FileNotFoundError:
@@ -291,7 +323,7 @@ def _verify_receipt_children(ctx: _Context, filename: str) -> tuple[list[tuple[P
     scope still needs the scan; a truncated scan keeps the claim incomplete.
     """
     root = ctx.target / ".brigade" / "work" / "verify-runs"
-    children, truncated, error = _bounded_children(root)
+    children, truncated, error = _bounded_children(ctx, root)
     out = _Discovery(truncated=truncated)
     _record_discovery_error(out, ctx, root, error)
     found = [
@@ -313,7 +345,7 @@ def _evaluate_verify_receipt_completed(ctx: _Context) -> _Discovery:
     """EC-01: completed verify receipt whose non-empty command list all exited 0."""
     found, out = _verify_receipt_children(ctx, "receipt.json")
     for run_dir, path in found:
-        receipt = None if (run_dir.is_symlink() or path.is_symlink()) else _read_json_object(path)
+        receipt = None if (run_dir.is_symlink() or path.is_symlink()) else _read_json_object(ctx, path)
         if run_dir.is_symlink() or path.is_symlink():
             obs = _invalid(ctx, path, "symlink_refused")
         elif receipt is None:
@@ -469,7 +501,7 @@ def _evaluate_sshsig_test_result_signed_ok(ctx: _Context) -> _Discovery:
     """EC-02: signed SSHSIG Test Result attestation with rederived receipt."""
     found, out = _verify_receipt_children(ctx, "attestation.json")
     for run_dir, path in found:
-        receipt = _read_json_object(run_dir / "receipt.json")
+        receipt = _read_json_object(ctx, run_dir / "receipt.json")
         relpath = _relpath(ctx, path)
         if run_dir.is_symlink() or path.is_symlink():
             obs = _invalid(ctx, path, "symlink_refused")
@@ -517,9 +549,9 @@ def _evaluate_cosign_bundle_exists(ctx: _Context) -> _Discovery:
     found, out = _verify_receipt_children(ctx, "attestation.sigstore.json")
     adapter = _VERIFIER_ADAPTERS.get("cosign-bundle")
     for run_dir, path in found:
-        receipt = _read_json_object(run_dir / "receipt.json")
+        receipt = _read_json_object(ctx, run_dir / "receipt.json")
         relpath = _relpath(ctx, path)
-        bundle = None if (run_dir.is_symlink() or path.is_symlink()) else _read_json_object(path)
+        bundle = None if (run_dir.is_symlink() or path.is_symlink()) else _read_json_object(ctx, path)
         if run_dir.is_symlink() or path.is_symlink():
             obs = _invalid(ctx, path, "symlink_refused")
         elif bundle is None:
@@ -561,6 +593,10 @@ def _run_dirs(ctx: _Context) -> tuple[list[Path], _Discovery]:
     """
     root = ctx.target / ".brigade" / "runs"
     out = _Discovery()
+    refusal = _path_refusal(ctx, root)
+    if refusal is not None:
+        _record_discovery_error(out, ctx, root, refusal)
+        return [], out
     try:
         mode = root.lstat().st_mode
     except FileNotFoundError:
@@ -585,7 +621,7 @@ def _run_dirs(ctx: _Context) -> tuple[list[Path], _Discovery]:
             return [], out
         return ([selected] if stat.S_ISDIR(mode) or stat.S_ISLNK(mode) else []), out
     try:
-        children, out.truncated, error = _bounded_children(root)
+        children, out.truncated, error = _bounded_children(ctx, root)
     except OSError:
         children, error = [], "discovery_unreadable"
     _record_discovery_error(out, ctx, root, error)
@@ -604,8 +640,8 @@ def _run_dirs(ctx: _Context) -> tuple[list[Path], _Discovery]:
 def _run_scope(obs: control_readiness.ArtifactObservation, ctx: _Context, run_dir: Path) -> None:
     """Run-directory artifacts are bound by their run directory name."""
     _bind(obs, ctx, {"run_dir": run_dir.name})
-    if not run_dir.is_symlink():
-        obs.timestamp = _first_timestamp(_read_json_object(run_dir / "run.json"), "started_at", "created_at")
+    if _path_refusal(ctx, run_dir, include_leaf=True) is None:
+        obs.timestamp = _first_timestamp(_read_json_object(ctx, run_dir / "run.json"), "started_at", "created_at")
     _apply_period(obs, ctx)
 
 
@@ -625,7 +661,7 @@ def _agent_request_paths(ctx: _Context, run_dir: Path, out: _Discovery) -> list[
     if run_dir.is_symlink():
         return paths
     root = run_dir / "requests"
-    children, truncated, error = _bounded_children(root)
+    children, truncated, error = _bounded_children(ctx, root)
     out.truncated = out.truncated or truncated
     _record_discovery_error(out, ctx, root, error)
     paths.extend(child for child in children if child.name.endswith(".json"))
@@ -663,6 +699,13 @@ def _evaluate_agent_request_signed(ctx: _Context) -> _Discovery:
                     obs = _verifier_unavailable(relpath, "verifier_error")
                 else:
                     obs = _attestation_observation(relpath, result, subject_ok=result.run_id == run_dir.name)
+                    # Signature trust and run identity cannot establish that
+                    # signing preceded dispatch. Keep those dimensions, but
+                    # cap the claim until an ordering verifier is wired.
+                    if obs.proposed == "validated":
+                        obs.level = "structure_observed"
+                        obs.proposed = "structure_observed"
+                        obs.reasons.append("verifier_not_wired")
             _run_scope(obs, ctx, run_dir)
             out.observations.append(obs)
     return out
@@ -689,6 +732,15 @@ def _evaluate_human_approval_allow_with_sod(ctx: _Context) -> _Discovery:
             _run_scope(obs, ctx, run_dir)
             out.observations.append(obs)
             continue
+        refused = False
+        for path in (run_dir / "run.json", run_dir / "events" / "lifecycle.jsonl", run_dir / "approvals"):
+            path_refusal = _path_refusal(ctx, path, include_leaf=True)
+            if path_refusal is not None:
+                _record_discovery_error(out, ctx, path, path_refusal)
+                refused = True
+                break
+        if refused:
+            continue
         try:
             verification = approval.verify_run_approval(ctx.target, run_dir)
         except Exception:
@@ -703,7 +755,7 @@ def _evaluate_human_approval_allow_with_sod(ctx: _Context) -> _Discovery:
                 # any signed approval.  A failure that needs no signature check
                 # (journal chain, run binding or approval event shape) is still
                 # known; only otherwise is the claim unavailable.
-                known = _approval_prerequisite_failure(run_dir)
+                known = _approval_prerequisite_failure(ctx, run_dir)
                 if known is None:
                     obs = _verifier_unavailable(relpath, "verifier_tool_unavailable")
                     out.verifier_unavailable = True
@@ -749,7 +801,7 @@ def _approval_journal_refusal(run_dir: Path, relpath: str) -> control_readiness.
     )
 
 
-def _approval_prerequisite_failure(run_dir: Path) -> tuple[str, str] | None:
+def _approval_prerequisite_failure(ctx: _Context, run_dir: Path) -> tuple[str, str] | None:
     """A known approval failure that needs no signature verifier, or None.
 
     Uses the bounded journal reader and the approval event shape that
@@ -775,14 +827,14 @@ def _approval_prerequisite_failure(run_dir: Path) -> tuple[str, str] | None:
     event = approval._latest_approval_event(report.events)
     if event is None:
         return None
-    if _read_json_object(run_dir / "run.json") is None:
+    if _read_json_object(ctx, run_dir / "run.json") is None:
         return "integrity", "approval_invalid"
     nonce = event.payload.get("nonce")
     if not isinstance(nonce, str) or not approval._HEX32_RE.fullmatch(nonce):
         return "integrity", "approval_invalid"
     if event.payload.get("attestation_path") != f"approvals/{nonce}.json":
         return "integrity", "approval_invalid"
-    envelope = _read_json_object(run_dir / "approvals" / f"{nonce}.json")
+    envelope = _read_json_object(ctx, run_dir / "approvals" / f"{nonce}.json")
     if envelope is None or approval._decode_statement(envelope)[0] is None:
         return "integrity", "approval_invalid"
     return None
@@ -920,7 +972,7 @@ def _evaluate_governance_inventory_exists(ctx: _Context) -> _Discovery:
     ):
         if not _discovery_path_present(ctx, out, path):
             continue
-        payload = None if path.is_symlink() else _read_json_object(path)
+        payload = None if path.is_symlink() else _read_json_object(ctx, path)
         if path.is_symlink():
             obs = _invalid(ctx, path, "symlink_refused")
         elif payload is None:
@@ -937,33 +989,40 @@ def _evaluate_governance_inventory_exists(ctx: _Context) -> _Discovery:
 _TRAILER_WINDOW = 20
 
 
-def _git(ctx: _Context, *args: str) -> subprocess.CompletedProcess[str]:
-    # Explicit decode policy: commit messages are not assumed to match the locale.
-    return subprocess.run(
-        ["git", *args],
-        cwd=str(ctx.target),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=10,
-        check=False,
+class _GitReadLimitExceeded(ValueError):
+    """Git output crossed the fixed capture or transport byte budget."""
+
+
+def _git(ctx: _Context, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    """Read both Git pipes under proc's fixed byte budgets and ten-second timeout."""
+    argv = ["git", *args]
+    bounded = proc.run(argv, cwd=ctx.target, env=env, timeout=10)
+    if bounded.output_limit_exceeded or bounded.stream_limit_exceeded:
+        raise _GitReadLimitExceeded
+    # proc decodes UTF-8 with replacement, as the original Git calls did.
+    return subprocess.CompletedProcess(argv, bounded.code, bounded.stdout, bounded.stderr)
+
+
+def _git_read_refusal(ctx: _Context, relpath: str) -> control_readiness.ArtifactObservation:
+    obs = _obs(
+        relpath,
+        "discovered",
+        "incomplete",
+        _dims(integrity="unknown", subject="unknown", population=("unknown", "read_limit_exceeded")),
+        ["read_limit_exceeded"],
     )
+    _claim_wide(obs, ctx)
+    return obs
 
 
 def _is_git_repo(target: Path) -> bool | None:
     """True for a repository, False for a reported non-repository, None for a probe error."""
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-dir"],
-            cwd=str(target),
+        result = _git(
+            _Context(target, None, None),
+            "rev-parse",
+            "--git-dir",
             env={**os.environ, "LC_ALL": "C"},
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10,
-            check=False,
         )
         if result.returncode == 0:
             return True
@@ -988,7 +1047,11 @@ def _evaluate_commit_trailer_receipts(ctx: _Context) -> _Discovery:
         _claim_wide(obs, ctx)
         out.observations.append(obs)
         return out
-    repo_status = _is_git_repo(ctx.target)
+    try:
+        repo_status = _is_git_repo(ctx.target)
+    except _GitReadLimitExceeded:
+        out.observations.append(_git_read_refusal(ctx, "git-history"))
+        return out
     if repo_status is False:
         out.not_applicable_reason = "not_git_repository"
         return out
@@ -999,6 +1062,9 @@ def _evaluate_commit_trailer_receipts(ctx: _Context) -> _Discovery:
         return out
     try:
         result = _git(ctx, "log", f"-{_TRAILER_WINDOW}", "--format=%H")
+    except _GitReadLimitExceeded:
+        out.observations.append(_git_read_refusal(ctx, "git-history"))
+        return out
     except (OSError, subprocess.TimeoutExpired):
         result = None
     if result is None or result.returncode != 0:
@@ -1019,11 +1085,15 @@ def _evaluate_commit_trailer_receipts(ctx: _Context) -> _Discovery:
     }
     out.window = window
     for sha in commits:
+        relpath = f"git-commit:{sha[:12]}"
         try:
             msg_out = _git(ctx, "log", "-1", "--format=%B%x00%cI", sha)
+        except _GitReadLimitExceeded:
+            window["unreadable"] += 1
+            out.observations.append(_git_read_refusal(ctx, relpath))
+            continue
         except (OSError, subprocess.TimeoutExpired):
             msg_out = None
-        relpath = f"git-commit:{sha[:12]}"
         if msg_out is None or msg_out.returncode != 0:
             # The commit's trailer is unknown, so it cannot be bound to any run.
             window["unreadable"] += 1
@@ -1058,6 +1128,17 @@ def _assess_trailer(
         return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
     run_dir = ctx.target / ".brigade" / "runs" / run_id_value
     run_json = run_dir / "run.json"
+    refusal = _path_refusal(ctx, run_json)
+    if refusal == "symlink_refused":
+        return _obs(
+            relpath,
+            "discovered",
+            "invalid",
+            _dims(integrity=("unknown", refusal), subject="unknown", population=("unknown", refusal)),
+            [refusal],
+        )
+    if refusal is not None:
+        return _verifier_unavailable(relpath, refusal)
     try:
         run_mode = run_dir.lstat().st_mode
     except FileNotFoundError:
@@ -1086,7 +1167,7 @@ def _assess_trailer(
             "incomplete",
             _dims(integrity=("unknown", "entry_missing"), subject="unknown", population="not_applicable"),
         )
-    receipt = _read_json_object(run_json)
+    receipt = _read_json_object(ctx, run_json)
     if receipt is None:
         return _obs(relpath, "structure_observed", "invalid", _dims(), ["invalid_json"])
     recorded_run = receipt.get("run_id")
@@ -1137,7 +1218,7 @@ def _evaluate_guard_audit_allow(ctx: _Context) -> _Discovery:
     path = ctx.target / ".brigade" / "work" / "guard" / "audit.json"
     if not _discovery_path_present(ctx, out, path):
         return out
-    payload = None if path.is_symlink() else _read_json_object(path)
+    payload = None if path.is_symlink() else _read_json_object(ctx, path)
     relpath = _relpath(ctx, path)
     if path.is_symlink():
         obs = _invalid(ctx, path, "symlink_refused")
@@ -1255,7 +1336,7 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
     and the claim cannot validate.
     """
     root = ctx.target / ".brigade" / "evidence-packages"
-    children, truncated, error = _bounded_children(root)
+    children, truncated, error = _bounded_children(ctx, root)
     out = _Discovery(truncated=truncated)
     _record_discovery_error(out, ctx, root, error)
     adapter = _VERIFIER_ADAPTERS.get("evidence-package")
@@ -1267,7 +1348,7 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
         if not _discovery_path_present(ctx, out, path):
             continue
         relpath = _relpath(ctx, path)
-        manifest = None if (package_dir.is_symlink() or path.is_symlink()) else _read_json_object(path)
+        manifest = None if (package_dir.is_symlink() or path.is_symlink()) else _read_json_object(ctx, path)
         if package_dir.is_symlink() or path.is_symlink():
             obs = _invalid(ctx, path, "symlink_refused")
         elif manifest is None:
@@ -1314,6 +1395,11 @@ def _assess_package_manifest(
         if not isinstance(name, str) or not evidence_package._is_safe_entry_path(name):
             return _obs(relpath, "discovered", "invalid", _dims(), ["entry_path_unsafe"])
         entry_path = package_dir / name
+        refusal = _path_refusal(ctx, entry_path)
+        if refusal == "symlink_refused":
+            return _obs(relpath, "discovered", "invalid", _dims(population=("unknown", refusal)), [refusal])
+        if refusal is not None:
+            return _verifier_unavailable(relpath, refusal)
         if entry_path.is_symlink() or not entry_path.is_file():
             return _obs(
                 relpath,
@@ -1431,7 +1517,7 @@ def assess_claim(
         raise ControlCrosswalkError(f"unknown state_rule: {state_rule}")
     if run_id is not None and not receipts_trailer._is_bare_run_id(run_id):
         raise ControlCrosswalkError("run id must be a bare run directory name")
-    ctx = _Context(target=target, run_id=run_id, period=_normalize_period(period))
+    ctx = _Context(target=target.expanduser().resolve(), run_id=run_id, period=_normalize_period(period))
     discovery = rule.evaluate(ctx)
     required = rule.required | ({"freshness"} if ctx.period is not None else frozenset())
     verifier_status = "unavailable" if discovery.verifier_unavailable else rule.verifier_status
@@ -1583,7 +1669,9 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "`not_applicable`.",
     "",
     "Aggregation: per artifact, a failed required dimension yields `rejected`, an unavailable one yields "
-    "`unavailable` and an unknown one yields `incomplete`. A passed signature never offsets another failed "
+    "`unavailable` and an unknown one yields `incomplete`. Required trust failures reject even negative "
+    "operational results. For a proposed `failed` outcome, a recorded authorization denial or negative SoD "
+    "verdict remains `failed` unless another required dimension failed. `SOD-VIOLATION` remains `rejected`. A passed signature never offsets another failed "
     "dimension. `validated` requires `claim_validated` depth and every required dimension passed or not "
     "applicable. Per claim, the most severe in-scope outcome wins, in the order rejected, invalid, failed, "
     "unavailable, incomplete, absent, discovered_only, structure_observed, validated. A claim is therefore "
@@ -1606,11 +1694,16 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "`.brigade/evidence-packages/manifest.json` and `.brigade/evidence-packages/<package>/manifest.json`; deeper "
     "nesting is not discovered, and no strict package verification runs before #1618. Packages bind through "
     "either their recorded producer-run or verify-run identity. JSONL reads are capped at 8 MiB and 10,000 "
-    "records. `artifacts_reported_truncated` reports when the 20-artifact output cap omits observed artifacts.",
+    "records. Discovery and reads refuse symlinked components beneath the canonical assessed target, "
+    "including a linked `.brigade` or lifecycle `events/` ancestor. Metadata errors remain "
+    "`discovery_unreadable`. Refused discovery leaves the population unknown. "
+    "`artifacts_reported_truncated` reports when the 20-artifact output cap omits observed artifacts.",
     "",
     "Verify receipts (EC-01): `running` is nonterminal (`status_not_terminal`). `canceled` is terminal but "
     "`incomplete` (`status_canceled`). `failed` and `rejected` are terminal `failed` outcomes, and a command with a "
-    "nonzero exit code is `failed`. A `completed` receipt needs a non-empty `planned_commands` list, a `run_id` "
+    "nonzero exit code is `failed`, provided no required trust dimension failed. A failed or rejected receipt "
+    "whose `run_id` differs from its directory is `rejected` with `run_binding_mismatch`. A `completed` receipt "
+    "needs a non-empty `planned_commands` list, a `run_id` "
     "matching its directory, and one `completed` command with exit code 0 per planned check whose `command` "
     "display string equals the planned entry at the same position. A different, missing or reordered command is "
     "`incomplete` with `planned_commands_mismatch`. An empty intended check list never shows that a test ran. The "
@@ -1625,13 +1718,21 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "`.brigade/runs/<run>/requests/<nonce>.json` written by `agent_request.record_request`, plus the legacy "
     "`agent-request.json` and `request.json` names, with a bounded `requests/` scan. It checks signature, key "
     "trust and that the statement names the run directory. It does not independently check that the request "
-    "preceded worker dispatch. EC-05 reads the latest approval event in the lifecycle journal. Without "
+    "preceded worker dispatch. Its positive outcome and validation depth are capped at `structure_observed` "
+    "(`untested`), with `verifier_not_wired`, even when signature trust and run identity pass. The wired "
+    "signature verifier does not validate the ordering claim. Full validation requires a verifier that binds "
+    "the same signed request to a `request.signed` lifecycle event preceding worker dispatch. "
+    "EC-05 reads the latest approval event in the lifecycle journal. Without "
     "`ssh-keygen`, a failure that needs no signature check (a broken or partial journal chain, an event naming "
     "another run, missing or invalid run metadata, or an invalid approval event nonce, path or statement) stays `rejected`; only otherwise is "
     "the claim `unavailable`. A trusted key is a key-trust result; organizational identity and authority remain "
     "the adopting organization's evidence.",
     "",
-    "Commit trailers (EC-08): a failed Git repository probe is `unavailable` (`verifier_error`); "
+    "Commit trailers (EC-08): Git stdout and stderr share a fixed capture budget of at most 1 MiB enforced "
+    "while reading the subprocess pipes. Head-buffer overflow can conservatively refuse output earlier, "
+    "at about 512 KiB. The transport budget is fixed at 16 MiB, with a ten-second timeout. Oversized output "
+    "is `incomplete` with `read_limit_exceeded`. An oversized commit message counts as `unreadable`, "
+    "never `without_trailer`. A failed Git repository probe is `unavailable` (`verifier_error`); "
     "only a confirmed non-repository is `not_applicable`. A trailer whose local `run.json` is missing is `incomplete` with integrity "
     "`unknown` and `entry_missing`; it is never reported as a digest comparison failure. A symlinked run "
     "directory or `run.json` is refused as `invalid` with `symlink_refused`. A recomputed digest that differs "
@@ -1659,7 +1760,7 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "`integrity_boundary`, `unmapped_evidence_properties`, `readiness_contract`, `assessment_period` and "
     "`evidence_readiness`. Mapping rows add `validation_level`, `evidence_outcome` and provenance fields. "
     "`evidenced_passed` is stricter. Claims checked only "
-    "for presence or structure (EC-01, EC-03, EC-07, EC-09, EC-10, EC-11 and EC-12) now report `untested` with "
+    "for presence or structure (EC-01, EC-03, EC-04, EC-07, EC-09, EC-10, EC-11 and EC-12) now report `untested` with "
     "`structure_observed` until a dedicated verifier is wired. An EC-01 receipt with an empty command list or "
     "commands that do not match `planned_commands` is no longer a pass, and legacy receipts without "
     "`planned_commands` report `untested`. Artifacts now classified `invalid` (for example a previously accepted "
