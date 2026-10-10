@@ -928,10 +928,9 @@ def report_event(
 
 
 def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None = None) -> bool:
-    """Denormalize and report a run_event.v1 envelope without raising ``Exception``.
-
-    ``repo`` shares claim keys (#1662); git failures retain ``workspace.name`` and log
-    ``repo-key-fallback``. ``node_id`` uses home identity; see ``report_event`` for interrupts.
+    """Report a run_event.v1 envelope; git roots use claim keys (#1662).
+    Non-git roots and git failures retain the workspace name; failures log
+    ``repo-key-fallback``. See ``report_event`` for home identity and interrupts.
     """
     try:
         if not load_fleet_config()["hub_url"]:
@@ -942,7 +941,9 @@ def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None 
         repo = workspace.name if workspace is not None else None
         if journal_path is not None:
             try:
-                repo = resolve_claim_target(journal_path)
+                root = next((p.parent for p in journal_path.parents if p.name == ".brigade" and p.is_dir()), None)
+                if root is not None and _claim_target.git_claim_key(root) is not None:
+                    repo = resolve_claim_target(root)
             except _claim_target.ClaimTargetError:
                 _LOG.warning("repo-key-fallback: fleet event is using the previous workspace name")
         repo_identity = None

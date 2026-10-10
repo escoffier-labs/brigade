@@ -107,6 +107,30 @@ def test_journal_events_from_unrelated_repos_under_one_home_have_distinct_keys(t
     assert journal_events(two)["repo"] == "acme/two"
 
 
+@pytest.mark.parametrize("home_identity", [True, False], ids=["home-workspace", "no-workspace"])
+def test_non_git_journal_events_keep_the_workspace_fallback(tmp_path, monkeypatch, journal_events, home_identity):
+    home = _make_home(tmp_path, "homeA", monkeypatch) if home_identity else tmp_path / "homeA"
+    if not home_identity:
+        monkeypatch.setenv("BRIGADE_HOME", str(home / ".brigade"))
+    root = home / "repos" / "notes"
+    root.mkdir(parents=True)
+    assert journal_events(root)["repo"] == ("homeA" if home_identity else None)
+
+
+@pytest.mark.parametrize("local_identity", [True, False], ids=["repo-workspace", "home-identity"])
+def test_git_journal_events_match_claims_from_the_project_root(tmp_path, monkeypatch, journal_events, local_identity):
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    root = _make_repo(home / "repos", "checkout", "https://github.com/acme/project.git")
+    if local_identity:
+        identity = node_mod.NodeIdentity(node_id=NODE_A, hostname="fleet-test", roles=(), platform="test")
+        path = node_mod.node_path(root)
+        path.parent.mkdir(parents=True)
+        path.write_text(node_mod._format_node_toml(identity), encoding="utf-8")
+    event = journal_events(root)
+    assert event["repo"] == ("checkout" if local_identity else "acme/project")
+    assert event["repo"] == fleet_client.resolve_claim_target(root)
+
+
 def test_journal_events_from_clones_under_different_homes_have_the_same_key(tmp_path, monkeypatch, journal_events):
     home_a = _make_home(tmp_path, "homeA", monkeypatch)
     one = _make_repo(home_a / "repos", "one", "https://github.com/acme/project.git")
