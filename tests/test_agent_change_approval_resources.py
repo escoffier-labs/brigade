@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import gc
+import io
+import os
+import subprocess
+import sys
 import json
 import tracemalloc
 from collections.abc import Mapping
+from contextlib import redirect_stdout
 from pathlib import Path
 from pathlib import PureWindowsPath
 
@@ -57,33 +62,74 @@ def _resource_fixture(tmp_path: Path, *, padding_bytes: int) -> tuple[Path, Path
     return target, run_dir, key, fixtures.agent_change.build_statement(target, run_dir.name)
 
 
+def _measure_public_verifier(index_path: str, target: str, *, retain_history: bool) -> None:
+    arguments = ["receipts", "verify-agent-change", index_path, "--target", target, "--json"]
+    # Warm lazy imports and CLI caches outside tracing in this fresh process.
+    with redirect_stdout(io.StringIO()):
+        warm_result = cli.main(arguments)
+        assert warm_result == 0
+    retained: list[object] = []
+    if retain_history:
+        original_load = agent_change_approval_verify._load_selected_approval
+
+        def retain_envelope(path: Path, nonce: str) -> agent_change_approval_verify._LoadedApproval | None:
+            loaded = original_load(path, nonce)
+            retained.append(loaded)
+            return loaded
+
+        agent_change_approval_verify._load_selected_approval = retain_envelope
+    output = io.StringIO()
+    was_collecting = gc.isenabled()
+    gc.collect()
+    try:
+        gc.disable()
+        tracemalloc.start()
+        baseline, _previous_peak = tracemalloc.get_traced_memory()
+        tracemalloc.reset_peak()
+        with redirect_stdout(output):
+            result = cli.main(arguments)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+        if was_collecting:
+            gc.enable()
+    print(json.dumps([result, json.loads(output.getvalue()), peak - baseline]))
+
+
 def _peak_verification_memory(
-    target: Path, run_dir: Path, key: Path, statement: dict[str, object], capsys: pytest.CaptureFixture[str]
+    target: Path,
+    run_dir: Path,
+    key: Path,
+    statement: dict[str, object],
+    *,
+    retain_history: bool = False,
 ) -> tuple[int, dict[str, object], int]:
     envelope = attestation.create_envelope(statement, key)
     index_path = run_dir / "agent-change.json"
     index_path.write_text(json.dumps(envelope, indent=2, sort_keys=True), encoding="utf-8")
-    was_tracing = tracemalloc.is_tracing()
-    was_collecting = gc.isenabled()
-    # Both runs must retain argparse's cyclic parser graph for the same window.
-    # Otherwise collection timing can dwarf the approval-padding allocation.
-    gc.collect()
-    try:
-        gc.disable()
-        if not was_tracing:
-            tracemalloc.start()
-        baseline, _previous_peak = tracemalloc.get_traced_memory()
-        tracemalloc.reset_peak()
-        result = cli.main(["receipts", "verify-agent-change", str(index_path), "--target", str(target), "--json"])
-        _current, peak = tracemalloc.get_traced_memory()
-    finally:
-        if not was_tracing:
-            tracemalloc.stop()
-        if was_collecting:
-            gc.enable()
-        else:
-            gc.disable()
-    return result, json.loads(capsys.readouterr().out), peak - baseline
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join([str(root / "src"), environment.get("PYTHONPATH", "")])
+    # A full shard can trigger a multi-megabyte CPython intern-table allocation
+    # inside pathlib. Give each fixture the same fresh, warmed process instead.
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tests.test_agent_change_approval_resources",
+            str(index_path),
+            str(target),
+            str(int(retain_history)),
+        ],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    result, output, peak = json.loads(completed.stdout)
+    return result, output, peak
 
 
 def test_mixed_hash_peer_preserves_the_valid_current_observation_and_matching_duplicates_conflict(
@@ -130,18 +176,25 @@ def test_mixed_hash_peer_preserves_the_valid_current_observation_and_matching_du
     assert required["count"] == 0
 
 
-def test_historical_approval_padding_has_a_bounded_public_verifier_peak(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def _assert_historical_padding_peak(tmp_path: Path, *, retain_history: bool = False) -> None:
     plain = _resource_fixture(tmp_path / "plain", padding_bytes=0)
     padded = _resource_fixture(tmp_path / "padded", padding_bytes=128 * 1024)
 
-    plain_result, plain_output, plain_peak = _peak_verification_memory(*plain, capsys)
-    padded_result, padded_output, padded_peak = _peak_verification_memory(*padded, capsys)
+    plain_result, plain_output, plain_peak = _peak_verification_memory(*plain, retain_history=retain_history)
+    padded_result, padded_output, padded_peak = _peak_verification_memory(*padded, retain_history=retain_history)
 
     assert plain_result == padded_result == 0
     assert plain_output["status"] == padded_output["status"] == "COMPLETE-OK"
-    assert padded_peak - plain_peak < 768 * 1024
+    assert padded_peak - plain_peak < 768 * 1024, "historical approval padding exceeds peak bound"
+
+
+def test_historical_approval_padding_has_a_bounded_public_verifier_peak(tmp_path: Path) -> None:
+    _assert_historical_padding_peak(tmp_path)
+
+
+def test_public_verifier_peak_detects_retained_historical_envelopes(tmp_path: Path) -> None:
+    with pytest.raises(AssertionError, match="historical approval padding exceeds peak bound"):
+        _assert_historical_padding_peak(tmp_path, retain_history=True)
 
 
 def test_repeated_valid_descriptor_is_invalid_without_repeating_first_window_load_or_validation(
@@ -250,3 +303,7 @@ def test_historical_reread_preserves_the_validated_posix_locator_on_windows(
     assert emulating_windows
     assert result == 0
     assert output["status"] == "COMPLETE-OK"
+
+
+if __name__ == "__main__":
+    _measure_public_verifier(sys.argv[1], sys.argv[2], retain_history=bool(int(sys.argv[3])))
