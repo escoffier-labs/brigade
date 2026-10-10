@@ -8,15 +8,12 @@ artifacts.
 
 from __future__ import annotations
 
-import errno
-import glob
 import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -25,19 +22,29 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    _control_crosswalk_io,
     agent_request,
     approval,
     attestation,
-    attestation_input,
     causal_receipt,
     control_readiness,
     cosign_attestation,
-    dirfd,
     evidence_package,
     localio,
-    proc,
     receipts_trailer,
     run_journal,
+)
+
+from ._control_crosswalk_io import (
+    _copy_public_trust as _copy_public_trust,
+    _ReadRefusal as _ReadRefusal,
+    _GitReadLimitExceeded as _GitReadLimitExceeded,
+    _path_refusal as _path_refusal,
+    _read_json_object as _read_json_object,
+    _is_symlink as _is_symlink,
+    _is_regular as _is_regular,
+    _read_journal as _read_journal,
+    _verify_attestation_snapshot as _verify_attestation_snapshot,
 )
 
 SCHEMA = "brigade.control_crosswalk.v1"
@@ -90,146 +97,12 @@ def load_crosswalk() -> dict[str, Any]:
 _ASSESSMENT_BYTE_BUDGET = 64 * 1024 * 1024
 
 
-class _ReadRefusal(OSError):
-    def __init__(self, reason: str):
-        super().__init__(reason)
-        self.reason = reason
-
-
-class _AssessmentReader:
-    """Hold the canonical assessment root and every descended directory.
-
-    Reads and discovery never resolve an artifact pathname again. Bytes copied
-    for delegated verifiers are private, bounded and fixed for this assessment,
-    but observations across files do not constitute an atomic filesystem view.
-    """
-
-    def __init__(self, target: Path):
-        self.target = target
-        self.directories: dict[tuple[str, ...], int] = {(): dirfd.open_directory_nofollow(target, writable=False)}
-        self.errors: dict[Path, str] = {}
-        self.contents: dict[Path, bytes] = {}
-        self.used = 0
-        self.temporary: tempfile.TemporaryDirectory[str] | None = None
-        self.copied: set[Path] = set()
-        self.populations: dict[Path, list[str]] = {}
-        self.approval_context: approval.ApprovalVerificationContext | None = None
+class _AssessmentReader(_control_crosswalk_io._AssessmentReader):
+    """Keep the facade's aggregate-budget override for assessment tests."""
 
     @property
-    def snapshot_target(self) -> Path:
-        if self.temporary is None:
-            self.temporary = tempfile.TemporaryDirectory(prefix="brigade-controls-")
-        return Path(self.temporary.name)
-
-    def close(self) -> None:
-        try:
-            if self.temporary is not None:
-                self.temporary.cleanup()
-        finally:
-            for descriptor in reversed(list(self.directories.values())):
-                os.close(descriptor)
-
-    def directory(self, path: Path) -> int:
-        parts = path.relative_to(self.target).parts
-        parent = self.directories[()]
-        for index, name in enumerate(parts):
-            key = parts[: index + 1]
-            if key not in self.directories:
-                info = dirfd.stat_child(parent, name)
-                if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
-                    raise _ReadRefusal("symlink_refused")
-                if not stat.S_ISDIR(info.st_mode):
-                    raise _ReadRefusal("discovery_unreadable")
-                try:
-                    self.directories[key] = dirfd.open_child_directory(parent, name, writable=False)
-                except OSError as exc:
-                    # An open racing a new link is still refused. No check is
-                    # used as authorization for a later pathname operation.
-                    if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
-                        raise _ReadRefusal("symlink_refused") from exc
-                    raise
-            parent = self.directories[key]
-        return parent
-
-    def info(self, path: Path) -> os.stat_result:
-        if path == self.target:
-            return os.fstat(self.directories[()])
-        return dirfd.stat_child(self.directory(path.parent), path.name)
-
-    def refusal(self, path: Path, exc: OSError) -> str:
-        reason = (
-            exc.reason
-            if isinstance(exc, _ReadRefusal)
-            else ("symlink_refused" if "reparse point" in str(exc) else "discovery_unreadable")
-        )
-        self.errors[path] = reason
-        return reason
-
-    def read(self, path: Path, limit: int = attestation_input.MAX_JSON_BYTES) -> bytes:
-        if path in self.contents:
-            cached = self.contents[path]
-            if len(cached) > limit:
-                raise _ReadRefusal("read_limit_exceeded")
-            return cached
-        descriptor = -1
-        try:
-            parent = self.directory(path.parent)
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-            descriptor = dirfd.open_child_file(parent, path.name, flags)
-            info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode):
-                raise _ReadRefusal("discovery_unreadable")
-            permitted = min(limit, _ASSESSMENT_BYTE_BUDGET - self.used)
-            if permitted < 0 or info.st_size > permitted:
-                raise _ReadRefusal("read_limit_exceeded")
-            raw = bytearray()
-            while True:
-                chunk = os.read(descriptor, min(65536, permitted + 1 - len(raw)))
-                if not chunk:
-                    break
-                # Charge transport even when growth or a later I/O error
-                # refuses this file. Once the single aggregate overflow byte
-                # is consumed, subsequent uncached reads are refused above.
-                self.used += len(chunk)
-                raw.extend(chunk)
-                if len(raw) > permitted:
-                    raise _ReadRefusal("read_limit_exceeded")
-            result = bytes(raw)
-            self.contents[path] = result
-            return result
-        except FileNotFoundError:
-            raise
-        except OSError as exc:
-            if exc.errno == errno.ELOOP:
-                exc = _ReadRefusal("symlink_refused")
-            self.refusal(path, exc)
-            raise exc
-        finally:
-            if descriptor != -1:
-                os.close(descriptor)
-
-    def copy(self, path: Path, *, limit: int = attestation_input.MAX_JSON_BYTES) -> Path:
-        destination = self.snapshot_target / path.relative_to(self.target)
-        if path in self.copied:
-            return destination
-        try:
-            self.info(path)
-        except FileNotFoundError:
-            return destination  # Preserve absence of optional dependencies.
-        except OSError as exc:
-            self.refusal(path, exc)
-            raise
-        try:
-            raw = self.read(path, limit)
-        except FileNotFoundError as exc:
-            # Disappearance after discovery is not optional-data absence.
-            self.errors[path] = "discovery_unreadable"
-            raise _ReadRefusal("discovery_unreadable") from exc
-        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with destination.open("xb") as stream:
-            stream.write(raw)
-        self.copied.add(path)
-        return destination
+    def byte_budget(self) -> int:
+        return _ASSESSMENT_BYTE_BUDGET
 
 
 @dataclass(frozen=True)
@@ -274,211 +147,20 @@ def _relpath(ctx: _Context, path: Path) -> str:
         return path.name
 
 
-def _path_refusal(ctx: _Context, path: Path, *, include_leaf: bool = False) -> str | None:
-    """Check components using held handles; never authorize pathname I/O."""
-    try:
-        ctx.reader.directory(path.parent)
-        if include_leaf and _is_symlink(ctx, path):
-            return "symlink_refused"
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        return ctx.reader.refusal(path, exc)
-    return None
-
-
-def _read_json_object(ctx: _Context, path: Path) -> dict[str, Any] | None:
-    """Bounded, regular-file, handle-relative JSON read."""
-    try:
-        value = attestation_input.strict_json_loads(ctx.reader.read(path))
-        return value if isinstance(value, dict) else None
-    except (attestation_input.AttestationInputError, OSError):
-        return None
-
-
-def _is_symlink(ctx: _Context, path: Path) -> bool:
-    try:
-        info = ctx.reader.info(path)
-        return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
-    except FileNotFoundError:
-        return False
-    except OSError as exc:
-        ctx.reader.refusal(path, exc)
-        return isinstance(exc, _ReadRefusal) and exc.reason == "symlink_refused"
-
-
-def _is_regular(ctx: _Context, path: Path) -> bool:
-    try:
-        return stat.S_ISREG(ctx.reader.info(path).st_mode)
-    except FileNotFoundError:
-        return False
-    except OSError as exc:
-        ctx.reader.refusal(path, exc)
-        return False
-
-
-def _read_journal(ctx: _Context, path: Path) -> run_journal.JournalReport:
-    from .run_checkpoint import MAX_JOURNAL_BYTES
-
-    try:
-        snapshot = ctx.reader.copy(path, limit=MAX_JOURNAL_BYTES)
-    except _ReadRefusal as exc:
-        if exc.reason == "read_limit_exceeded":
-            raise run_journal.RunJournalError("bound exceeded: journal byte budget") from exc
-        raise
-    return run_journal.read_journal_bounded(snapshot)
-
-
-def _copy_public_trust(ctx: _Context) -> Path:
-    root = ctx.target / ".brigade" / "attestation"
-    for name in (attestation.DEFAULT_ALLOWED_SIGNERS_NAME, attestation.DEFAULT_REVOKED_KEYS_NAME):
-        ctx.reader.copy(root / name)
-    return ctx.reader.snapshot_target
-
-
-def _verify_attestation_snapshot(ctx: _Context, path: Path, **kwargs: Any) -> attestation.AttestationVerifyResult:
-    target = _copy_public_trust(ctx)
-    envelope = ctx.reader.copy(path)
-    ctx.reader.copy(path.parent / "receipt.json")
-    return attestation.verify_attestation(envelope, target=target, **kwargs)
-
-
-def _copy_population(ctx: _Context, root: Path, names: tuple[str, ...] | None = None) -> None:
-    children, truncated, error = _bounded_children(ctx, root)
-    if truncated or error is not None:
-        reason = "read_limit_exceeded" if truncated else error or "discovery_unreadable"
-        ctx.reader.errors[root] = reason
-        raise _ReadRefusal(reason)
-    for child in children:
-        if names is None:
-            if child.name.endswith(".json"):
-                ctx.reader.copy(child)
-                if _read_json_object(ctx, child) is None:
-                    ctx.reader.errors[child] = "invalid_json"
-                    raise _ReadRefusal("invalid_json")
-        elif stat.S_ISDIR(ctx.reader.info(child).st_mode):
-            # Bind the directory before copying even absent children. A linked
-            # population member is a refusal, never silently omitted.
-            ctx.reader.directory(child)
-            for name in names:
-                dependency = child / name
-                ctx.reader.copy(dependency)
-                if (
-                    dependency in ctx.reader.copied
-                    and name.endswith(".json")
-                    and _read_json_object(ctx, dependency) is None
-                ):
-                    ctx.reader.errors[dependency] = "invalid_json"
-                    raise _ReadRefusal("invalid_json")
-        elif _is_symlink(ctx, child):
-            ctx.reader.errors[child] = "symlink_refused"
-            raise _ReadRefusal("symlink_refused")
-
-
 def _approval_live_tree(ctx: _Context, key_path: Path) -> str | None:
-    """Compute the original workspace tree without staging private key bytes.
+    def run_git(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        return _git(ctx, *args, env=env)
 
-    Preserve the shared fingerprint's normalization, but explicitly exclude the
-    signing key even if ignore rules change during collection. A key included
-    by the original normalization is a refusal rather than a different tree
-    silently compared against the approval. Git output/time bounds still apply.
-    """
-    relative_key = key_path.relative_to(ctx.target).as_posix()
-    with tempfile.TemporaryDirectory(prefix="brigade-controls-index-") as temporary:
-        env = {**os.environ, "GIT_INDEX_FILE": str(Path(temporary) / "index")}
-
-        def git(*args: str) -> subprocess.CompletedProcess[str]:
-            return _git(ctx, *args, env=env)
-
-        try:
-            head = git("rev-parse", "HEAD")
-            if head.returncode != 0 or not head.stdout.strip():
-                return None
-            excluded = {relative_key, ".brigade/attestation/" + attestation.DEFAULT_KEY_NAME}
-            for name in sorted(excluded):
-                try:
-                    ctx.reader.info(ctx.target / name)
-                except FileNotFoundError:
-                    continue
-                tracked = git("ls-files", "--error-unmatch", "--", name)
-                ignored = git("check-ignore", "-q", "--", name)
-                if tracked.returncode == 0 or ignored.returncode != 0:
-                    ctx.reader.errors[ctx.target / name] = "discovery_unreadable"
-                    raise _ReadRefusal("discovery_unreadable")
-            if git("read-tree", head.stdout.strip()).returncode != 0:
-                return None
-            patterns = []
-            for name in sorted(excluded):
-                if not name[0].isascii() or not (name[0].isalnum() or name[0] == "."):
-                    raise _ReadRefusal("discovery_unreadable")
-                # An exact exclusion with a literal ignored prefix makes Git
-                # reject add -A. Bracket-quote its first ASCII character to
-                # keep the same match without treating that prefix as input.
-                patterns.append(":(exclude,glob)[" + name[0] + "]" + glob.escape(name[1:]))
-            if git("add", "-A", "--", ".", *patterns).returncode != 0:
-                return None
-            if git("reset", "-q", head.stdout.strip(), "--", *localio.TREE_FINGERPRINT_EVIDENCE_PATHS).returncode != 0:
-                return None
-            value = git("write-tree")
-            return value.stdout.strip() if value.returncode == 0 and value.stdout.strip() else None
-        except _ReadRefusal:
-            raise
-        except (OSError, subprocess.TimeoutExpired, _GitReadLimitExceeded):
-            return None
+    return _control_crosswalk_io._approval_live_tree(ctx, key_path, run_git=run_git)
 
 
 def _verify_approval_snapshot(ctx: _Context, run_dir: Path) -> approval.ApprovalVerification:
-    from .run_checkpoint import MAX_JOURNAL_BYTES
-
-    target = _copy_public_trust(ctx)
-    ctx.reader.copy(run_dir / "run.json")
-    ctx.reader.copy(run_dir / "events" / "lifecycle.jsonl", limit=MAX_JOURNAL_BYTES)
-    for name in ("approvals", "requests"):
-        _copy_population(ctx, run_dir / name)
-    for name in ("request.json", "agent-request.json"):
-        ctx.reader.copy(run_dir / name)
-    _copy_population(
-        ctx, ctx.target / ".brigade/work/verify-runs", ("receipt.json", "attestation.json", "changes.patch")
-    )
-    # Compute the live workspace fact at its original location. Never infer
-    # freshness or SoD identity from the private dependency snapshot.
-    key_path = attestation.resolve_signing_key_path(ctx.target)
-    public_key = Path(str(key_path) + ".pub")
-    try:
-        public_key.relative_to(ctx.target)
-    except ValueError as exc:
-        raise _ReadRefusal("discovery_unreadable") from exc
-    live_tree = (
-        ctx.reader.approval_context.live_tree
-        if ctx.reader.approval_context is not None
-        else _approval_live_tree(ctx, key_path)
-    )
-    public_snapshot = ctx.reader.copy(public_key)
-    workspace_keyid = None
-    if public_key in ctx.reader.copied:
-        workspace_keyid = attestation.get_key_fingerprint(public_snapshot)
-    else:
-        try:
-            ctx.reader.info(key_path)
-        except FileNotFoundError:
-            pass
-        else:
-            # No private key reads, including ssh-keygen's implicit fallback.
-            ctx.reader.errors[public_key] = "discovery_unreadable"
-            raise _ReadRefusal("discovery_unreadable")
-    context = approval.ApprovalVerificationContext(
-        target=ctx.target,
-        live_tree=live_tree,
-        live_tree_state="computed" if live_tree is not None else "unavailable",
-        workspace_keyid=workspace_keyid,
-        workspace_keyid_state="computed" if workspace_keyid is not None else "unavailable",
-        receipts={},
-    )
-    ctx.reader.approval_context = context
-    return approval.verify_run_approval(
-        target,
-        target / run_dir.relative_to(ctx.target),
-        context=context,
+    return _control_crosswalk_io._verify_approval_snapshot(
+        ctx,
+        run_dir,
+        max_children=_MAX,
+        read_json=lambda path: _read_json_object(ctx, path),
+        live_tree=lambda key_path: _approval_live_tree(ctx, key_path),
     )
 
 
@@ -503,25 +185,7 @@ def _first_timestamp(payload: dict[str, Any] | None, *keys: str) -> datetime | N
 
 
 def _bounded_children(ctx: _Context, root: Path) -> tuple[list[Path], bool, str | None]:
-    """Capped directory children as ``(children, truncated, discovery_error)``.
-
-    At most ``_MAX + 1`` names are read, in filesystem order, so the scan stays
-    bounded however large the directory is.  The kept names are sorted.  When
-    the cap is exceeded the population is truncated and the inspected sample
-    depends on filesystem order, so it never validates.  A missing root is an
-    empty population; a symlinked or unreadable root is a discovery error, not
-    an absence.
-    """
-    try:
-        descriptor = ctx.reader.directory(root)
-        if root not in ctx.reader.populations:
-            ctx.reader.populations[root] = dirfd.child_names(descriptor, _MAX + 1)
-        names = ctx.reader.populations[root]
-    except FileNotFoundError:
-        return [], False, None
-    except OSError as exc:
-        return [], False, ctx.reader.refusal(root, exc)
-    return [root / name for name in sorted(names)[:_MAX]], len(names) > _MAX, None
+    return _control_crosswalk_io._bounded_children(ctx, root, max_children=_MAX)
 
 
 def _claim_wide(obs: control_readiness.ArtifactObservation, ctx: _Context) -> None:
@@ -912,56 +576,11 @@ def _evaluate_cosign_bundle_exists(ctx: _Context) -> _Discovery:
 
 
 def _run_dirs(ctx: _Context) -> tuple[list[Path], _Discovery]:
-    """Run directories to inspect.
-
-    Run-directory artifacts are bound by directory name, so a run scope
-    inspects the selected (already validated bare) run directory directly and
-    never loses it behind the scan cap.  A workspace scope uses the bounded scan.
-    """
-    root = ctx.target / ".brigade" / "runs"
-    out = _Discovery()
-    refusal = _path_refusal(ctx, root)
-    if refusal is not None:
-        _record_discovery_error(out, ctx, root, refusal)
-        return [], out
-    try:
-        mode = ctx.reader.info(root).st_mode
-    except FileNotFoundError:
-        return [], out
-    except OSError:
-        _record_discovery_error(out, ctx, root, "discovery_unreadable")
-        return [], out
-    if stat.S_ISLNK(mode):
-        _record_discovery_error(out, ctx, root, "symlink_refused")
-        return [], out
-    if not stat.S_ISDIR(mode):
-        _record_discovery_error(out, ctx, root, "discovery_unreadable")
-        return [], out
-    if ctx.run_id is not None:
-        selected = root / ctx.run_id
-        try:
-            mode = ctx.reader.info(selected).st_mode
-        except FileNotFoundError:
-            return [], out
-        except OSError:
-            _record_discovery_error(out, ctx, selected, "discovery_unreadable")
-            return [], out
-        return ([selected] if stat.S_ISDIR(mode) or stat.S_ISLNK(mode) else []), out
-    try:
-        children, out.truncated, error = _bounded_children(ctx, root)
-    except OSError:
-        children, error = [], "discovery_unreadable"
-    _record_discovery_error(out, ctx, root, error)
-    directories = []
-    for child in children:
-        try:
-            mode = ctx.reader.info(child).st_mode
-        except OSError:
-            _record_discovery_error(out, ctx, child, "discovery_unreadable")
-            continue
-        if stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
-            directories.append(child)
-    return directories, out
+    population = _control_crosswalk_io._run_directories(ctx, ctx.run_id, max_children=_MAX)
+    out = _Discovery(truncated=population.truncated)
+    for path, reason in population.errors:
+        _record_discovery_error(out, ctx, path, reason)
+    return population.paths, out
 
 
 def _run_scope(obs: control_readiness.ArtifactObservation, ctx: _Context, run_dir: Path) -> None:
@@ -1343,18 +962,8 @@ def _evaluate_governance_inventory_exists(ctx: _Context) -> _Discovery:
 _TRAILER_WINDOW = 20
 
 
-class _GitReadLimitExceeded(ValueError):
-    """Git output crossed the fixed capture or transport byte budget."""
-
-
 def _git(ctx: _Context | Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    """Read both Git pipes under proc's fixed byte budgets and ten-second timeout."""
-    argv = ["git", *args]
-    bounded = proc.run(argv, cwd=ctx.target if isinstance(ctx, _Context) else ctx, env=env, timeout=10)
-    if bounded.output_limit_exceeded or bounded.stream_limit_exceeded:
-        raise _GitReadLimitExceeded
-    # proc decodes UTF-8 with replacement, as the original Git calls did.
-    return subprocess.CompletedProcess(argv, bounded.code, bounded.stdout, bounded.stderr)
+    return _control_crosswalk_io._git(ctx.target if isinstance(ctx, _Context) else ctx, *args, env=env)
 
 
 def _git_read_refusal(ctx: _Context, relpath: str) -> control_readiness.ArtifactObservation:
@@ -1598,29 +1207,7 @@ _MAX_JSONL_RECORDS = 10_000
 
 
 def _read_jsonl_records(ctx: _Context, path: Path) -> tuple[list[dict[str, Any]] | None, str | None]:
-    """Bounded strict JSONL read: (records, None) or (None, reason_code)."""
-    try:
-        raw = ctx.reader.read(path)
-    except (attestation_input.AttestationInputError, _ReadRefusal) as exc:
-        return None, "read_limit_exceeded" if "byte limit" in str(exc) or "read_limit_exceeded" in str(
-            exc
-        ) else "invalid_json"
-    except OSError:
-        return None, "invalid_json"
-    records: list[dict[str, Any]] = []
-    for line in raw.splitlines():
-        if not line.strip():
-            continue
-        if len(records) >= _MAX_JSONL_RECORDS:
-            return None, "read_limit_exceeded"
-        try:
-            value = attestation_input.strict_json_loads(line)
-        except attestation_input.AttestationInputError:
-            return None, "invalid_jsonl_line"
-        if not isinstance(value, dict):
-            return None, "invalid_jsonl_line"
-        records.append(value)
-    return records, None
+    return _control_crosswalk_io._read_jsonl_records(ctx, path, max_records=_MAX_JSONL_RECORDS)
 
 
 def _evaluate_jsonl_ledger(
