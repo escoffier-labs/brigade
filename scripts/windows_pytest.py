@@ -223,7 +223,7 @@ def _cleanup_path(root: Path, path: Path, *, allow_leaf_link: bool = False) -> o
 
 
 def _remove_owned_temp_root(root: Path) -> None:
-    """Strict removal after shutdown, with one Windows read-only unlink retry."""
+    """Strict removal after shutdown, with one Windows read-only removal retry."""
     root = root.absolute()
     _cleanup_path(root, root)
     # No worker is alive here. Remove links before traversal, including junctions
@@ -244,22 +244,27 @@ def _remove_owned_temp_root(root: Path) -> None:
         error = exc_info[1]
         if (
             not is_windows()
-            or (function is not os.unlink and function is not os.remove)
+            or (function is not os.unlink and function is not os.remove and function is not os.rmdir)
             or not isinstance(error, PermissionError)
             or getattr(error, "winerror", None) != 5
         ):
             raise error
         path = Path(filename).absolute()
         info = _cleanup_path(root, path)
-        if not stat.S_ISREG(info.st_mode) or not getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_READONLY:
+        directory = function is os.rmdir
+        expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+        if not expected_type(info.st_mode) or not getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_READONLY:
             raise error
         # On Windows chmod changes only FILE_ATTRIBUTE_READONLY, not ACLs.
         os.chmod(path, info.st_mode | stat.S_IWRITE)
         after = _cleanup_path(root, path)
-        if (after.st_dev, after.st_ino) != (info.st_dev, info.st_ino) or not stat.S_ISREG(after.st_mode):
-            raise ValueError("temporary cleanup file changed during read-only repair")
-        # Never execute the callback-supplied function. Retry our unlink once.
-        os.unlink(path)
+        if (after.st_dev, after.st_ino) != (info.st_dev, info.st_ino) or not expected_type(after.st_mode):
+            raise ValueError("temporary cleanup path changed during read-only repair")
+        # Never execute the callback-supplied function. Retry our removal once.
+        if directory:
+            os.rmdir(path)
+        else:
+            os.unlink(path)
 
     shutil.rmtree(root, onerror=onerror)
 

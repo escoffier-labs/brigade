@@ -1870,6 +1870,80 @@ def test_owned_cleanup_rejects_unsafe_repairs(tmp_path, monkeypatch, invalid):
     assert target.read_text() == "preserved"
 
 
+@pytest.mark.parametrize("failure", [None, "writable", "retry", "reparse", "changed"])
+def test_owned_cleanup_readonly_directory_retry_is_bounded(tmp_path, monkeypatch, failure):
+    root = tmp_path / "owned"
+    target = root / "module" / "english"
+    target.mkdir(parents=True)
+    original_lstat = os.lstat
+    original_rmdir = os.rmdir
+    original_rmtree = windows_pytest.shutil.rmtree
+    original_mode = target.stat().st_mode
+    error = PermissionError("directory access denied")
+    error.winerror = 5
+    callback_started = False
+    changes, retries = [], []
+
+    def attrs(path, *args, **kwargs):
+        info = original_lstat(path, *args, **kwargs)
+        if Path(path) == target:
+            return SimpleNamespace(
+                st_mode=info.st_mode,
+                st_dev=info.st_dev,
+                st_ino=info.st_ino + (1 if failure == "changed" and changes else 0),
+                st_file_attributes=stat.FILE_ATTRIBUTE_DIRECTORY
+                | (0 if failure == "writable" or changes else stat.FILE_ATTRIBUTE_READONLY)
+                | (stat.FILE_ATTRIBUTE_REPARSE_POINT if failure == "reparse" and callback_started else 0),
+            )
+        return info
+
+    def rmdir(path, *args, **kwargs):
+        if Path(path) == target:
+            retries.append(Path(path))
+            if failure == "retry":
+                raise error
+        return original_rmdir(path, *args, **kwargs)
+
+    def remove(path, *, onerror):
+        nonlocal callback_started
+        callback_started = True
+        onerror(os.rmdir, str(target), (PermissionError, error, None))
+        original_rmtree(path)
+
+    monkeypatch.setattr(windows_pytest, "is_windows", lambda: True)
+    monkeypatch.setattr(windows_pytest.os, "lstat", attrs)
+    monkeypatch.setattr(windows_pytest.os, "chmod", lambda path, mode: changes.append((Path(path), mode)))
+    monkeypatch.setattr(windows_pytest.os, "rmdir", rmdir)
+    monkeypatch.setattr(windows_pytest.shutil, "rmtree", remove)
+    if failure is None:
+        windows_pytest._remove_owned_temp_root(root)
+        assert not root.exists()
+    else:
+        with pytest.raises((PermissionError, ValueError)):
+            windows_pytest._remove_owned_temp_root(root)
+        assert target.is_dir()
+    assert changes == ([] if failure in {"writable", "reparse"} else [(target, original_mode | stat.S_IWRITE)])
+    assert retries == ([target] if failure in {None, "retry"} else [])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows read-only directory removal requires Windows")
+def test_owned_cleanup_removes_native_readonly_module_cache(tmp_path):
+    root = tmp_path / "owned"
+    target = root / "go" / "pkg" / "mod" / "example.com" / "module@v1.0.0" / "english"
+    target.mkdir(parents=True)
+    source = target / "source.go"
+    source.write_text("package english\n")
+    for path in (source, target, target.parent):
+        os.chmod(path, stat.S_IREAD)
+    try:
+        windows_pytest._remove_owned_temp_root(root)
+        assert not root.exists()
+    finally:
+        for path in (target.parent, target, source):
+            if path.exists():
+                os.chmod(path, stat.S_IWRITE)
+
+
 @pytest.mark.parametrize("location", ["root", "ancestor"])
 def test_owned_cleanup_never_traverses_links(tmp_path, monkeypatch, location):
     outside = tmp_path / "external"

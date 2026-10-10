@@ -149,8 +149,11 @@ unfinished workers are infrastructure errors and retain the temporary target.
 Cleanup uncertainty aborts the whole sweep. The driver launches no further
 files while process ownership or cleanup is uncertain.
 After workers finish and containment is confirmed, removal of an owned temporary
-target retries an access-denied unlink once for a regular Windows read-only file.
-It clears only that file's read-only attribute. Links, reparse points, paths outside
+target retries an access-denied unlink or directory removal once for a regular
+Windows read-only file or directory. It clears only that entry's read-only
+attribute and rechecks its identity and type before retrying. Descendant symlinks and junctions
+are removed before traversal without following their targets or changing target
+permissions. A linked root or ancestor, unsupported reparse points, paths outside
 the owned target, other permission failures, and failed retries retain the target
 and remain driver errors.
 The coordinator finalizes its record after bounded cleanup. Workers do not
