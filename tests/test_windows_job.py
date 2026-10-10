@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import ctypes as C
+import gc
 import json
 import os
 import subprocess
@@ -567,8 +568,15 @@ class TestNativeContainment:
         (tests / "test_probe.py").write_text(
             "def test_probe(capfd):\n    with capfd.disabled():\n        " + body + "\n"
         )
-        tracker = native.tracker
         ready = threading.Event()
+
+        class ObservedAPI(ProxyAPI):
+            def WaitForSingleObject(self, handle, timeout):
+                # Keep driver cleanup behind the independent identity probe.
+                assert ready.wait(10)
+                return self.inner.WaitForSingleObject(handle, timeout)
+
+        tracker = job.ProcessTracker(ObservedAPI(native.api))
         if behavior == "exception":
 
             class ErrorAPI(ProxyAPI):
@@ -580,7 +588,7 @@ class TestNativeContainment:
             tracker = job.ProcessTracker(ErrorAPI(native.api))
         if behavior == "failed-cleanup":
 
-            class CleanupFailureAPI(ProxyAPI):
+            class CleanupFailureAPI(ObservedAPI):
                 def QueryInformationJobObject(self, *args):
                     C.set_last_error(5)
                     return False
@@ -722,6 +730,9 @@ class TestNativeContainment:
                         )
 
         def count():
+            # Earlier thread/event cycles own Windows semaphore handles until GC.
+            # Drain them on both sides so their collection cannot change the baseline.
+            gc.collect()
             result = job.DWORD()
             assert native.api.GetProcessHandleCount(native.api.GetCurrentProcess(), C.byref(result))
             return result.value
@@ -1090,6 +1101,42 @@ def test_actual_native_natural_exit_barrier_with_injected_kernel(tmp_path, first
         if api.identity is not None:
             assert api.CloseHandle(api.identity)
     assert not api.live
+
+
+def test_actual_native_driver_observes_descendant_before_cleanup(tmp_path, monkeypatch):
+    marker_ready = threading.Event()
+    cleaned = threading.Event()
+    observed = []
+    api = FakeAPI()
+    api.live.update({123, 456})
+    native = SimpleNamespace(api=api, tracker=job.ProcessTracker(api), path=tmp_path)
+
+    def run_file(name, **kwargs):
+        marker_ready.set()
+        kwargs["tracker"].api.WaitForSingleObject(123, 0)
+        cleaned.set()
+        output = kwargs["output_dir"]
+        output.mkdir()
+        (output / "probe.log").write_bytes(b"pytest sentinel")
+        return SimpleNamespace(status="passed", log="probe.log")
+
+    def marker(path):
+        assert marker_ready.wait(1)
+        # Let a fast driver finish unless the fixture holds its cleanup.
+        cleaned.wait(0.1)
+        return "42"
+
+    def open_process(pid):
+        assert pid == 42
+        assert not cleaned.is_set(), "descendant was cleaned before its identity handle was opened"
+        observed.append(pid)
+        return 456
+
+    native.open_process = open_process
+    monkeypatch.setattr(driver, "run_file", run_file)
+    monkeypatch.setattr(sys.modules[__name__], "read_marker", marker)
+    TestNativeContainment().test_driver_status_diagnostics_and_output_survive_cleanup(native, "passed")
+    assert observed == [42] and cleaned.is_set()
 
 
 def test_actual_breakaway_program_compiles_nested_windows_paths():
