@@ -578,6 +578,15 @@ def run_files(
                         # A user interrupt during cleanup keeps its interrupt status.
                         if isinstance(exc, KeyboardInterrupt):
                             driver_error = driver_error or exc
+            # Workers can retain failed closes after the first ownership snapshot.
+            # Drain those handles within the same shutdown cause and deadline.
+            if tracker._entries:
+                try:
+                    tracker.kill_all(cause=cause, deadline=cleanup_deadline)
+                except BaseException as exc:
+                    cleanup_error = cleanup_error or exc
+                    if isinstance(exc, KeyboardInterrupt):
+                        driver_error = driver_error or exc
             for future, name in active.items():
                 if future.done():
                     try:

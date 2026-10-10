@@ -717,6 +717,108 @@ def test_process_tracker_prevents_a_launch_after_closing(tmp_path):
         )
 
 
+@pytest.mark.parametrize("returncode", [0, 7])
+@pytest.mark.parametrize("interrupted", [False, True], ids=["deadline", "interrupt"])
+def test_run_files_drains_process_close_registered_after_shutdown_snapshot(
+    tmp_path, monkeypatch, returncode, interrupted
+):
+    from tests.test_windows_job import FakeAPI, dereference
+
+    reached_close = threading.Event()
+    release_close = threading.Event()
+    cleanup_calls = []
+    interrupt = KeyboardInterrupt("driver interrupted")
+
+    class ProcessCloseFailureAPI(FakeAPI):
+        process_handle = None
+        failed_close = False
+
+        def CreateProcessW(self, *args):
+            result = super().CreateProcessW(*args)
+            self.process_handle = dereference(args[-1], windows_job.PROCESS_INFORMATION).hProcess
+            return result
+
+        def CloseHandle(self, handle):
+            if handle == self.process_handle and not self.failed_close:
+                self.failed_close = True
+                self.events.append(("CloseHandle-failed", handle))
+                return False
+            return super().CloseHandle(handle)
+
+    class Tracker(windows_job.ProcessTracker):
+        def kill_all(self, **kwargs):
+            cleanup_calls.append(kwargs)
+            try:
+                return super().kill_all(**kwargs)
+            finally:
+                release_close.set()
+
+    api = ProcessCloseFailureAPI()
+    api.exitcode = returncode
+    tracker = Tracker(api)
+    real_launch = windows_pytest.launch_process
+
+    def launch(**kwargs):
+        process = real_launch(**kwargs)
+        real_close = process.close
+
+        def delayed_close():
+            reached_close.set()
+            assert release_close.wait(3)
+            real_close()
+
+        process.close = delayed_close
+        return process
+
+    def stop(active, **kwargs):
+        assert reached_close.wait(3)
+        # finish() has removed the job before the shutdown snapshot is taken.
+        assert not tracker._entries
+        if interrupted:
+            raise interrupt
+        return set(), set(active)
+
+    monkeypatch.setattr(windows_pytest, "ProcessTracker", lambda: tracker)
+    monkeypatch.setattr(windows_pytest, "launch_process", launch)
+    monkeypatch.setattr(windows_pytest, "wait", stop)
+    try:
+        try:
+            rows = windows_pytest.run_files(
+                files=["test_close_retry.py"],
+                serial=set(),
+                repo=tmp_path,
+                python=Path(__import__("sys").executable),
+                output_dir=tmp_path / "out",
+                temp_root=tmp_path,
+                workers=1,
+                timeout_seconds=10,
+                deadline=time.monotonic() + 60,
+            )
+        except KeyboardInterrupt as exc:
+            assert interrupted and exc is interrupt
+            rows = exc.windows_pytest_results
+        else:
+            assert not interrupted
+
+        assert reached_close.is_set() and api.failed_close
+        assert (rows[0].status, rows[0].returncode) == (
+            ("cleanup-unconfirmed", None) if returncode == 0 else ("failed", returncode)
+        )
+        assert "CloseHandle(process)" in rows[0].diagnostic
+        if returncode:
+            assert rows[0].cleanup_error == rows[0].diagnostic
+            assert windows_pytest.regressions(rows, set()) == rows
+        assert windows_pytest.infrastructure_results(rows) == rows
+        assert not api.live and not tracker._entries
+        assert len(cleanup_calls) == 2 and cleanup_calls[0] == cleanup_calls[1]
+        assert cleanup_calls[1]["cause"] == (
+            windows_job.DRIVER_ABORT if interrupted else windows_job.AGGREGATE_DEADLINE
+        )
+    finally:
+        release_close.set()
+        tracker.kill_all()
+
+
 def test_cancelled_worker_future_records_unstarted_coverage(tmp_path):
     future = Future()
     assert future.cancel()
