@@ -1660,7 +1660,9 @@ def test_ec04_discovers_record_request_nonce_path(tmp_path, monkeypatch):
     monkeypatch.setattr(control_crosswalk, "_ssh_keygen_available", lambda: True)
     readiness = _assess(target, "EC-04", "run-1")
     assert seen == ["requests/" + "ab" * 16 + ".json"]
-    assert readiness["outcome"] == "validated"
+    assert readiness["outcome"] == "structure_observed"
+    assert readiness["validation_level"] == "structure_observed"
+    assert readiness["legacy_state"] == "untested"
     assert readiness["population"]["in_scope"] == 1
     assert readiness["artifacts"][0]["relpath"] == ".brigade/runs/run-1/requests/" + "ab" * 16 + ".json"
 
@@ -1790,15 +1792,15 @@ def test_ec08_git_probe_failure_is_unavailable_not_not_applicable(tmp_path, monk
     target = _ws(tmp_path)
     monkeypatch.setattr(control_crosswalk.shutil, "which", lambda name: "synthetic-git")
 
-    def failed_probe(*args, **kwargs):
+    def failed_probe(ctx, *args, **kwargs):
         if git_error == "timeout":
             raise subprocess.TimeoutExpired("git", 10)
         if git_error == "oserror":
             raise OSError("synthetic unavailable tool")
         detail = "fatal: detected dubious ownership" if git_error == "dubious" else "fatal: corrupted repository"
-        return subprocess.CompletedProcess(args[0], 128, stdout="", stderr=detail)
+        return subprocess.CompletedProcess(["git", *args], 128, stdout="", stderr=detail)
 
-    monkeypatch.setattr(control_crosswalk.subprocess, "run", failed_probe)
+    monkeypatch.setattr(control_crosswalk, "_git", failed_probe)
     readiness = _assess(target, "EC-08")
     assert readiness["outcome"] == "unavailable"
     assert readiness["reason"] == "verifier_error"
@@ -2007,7 +2009,7 @@ def test_valid_legacy_request_does_not_hide_unreadable_request_population(tmp_pa
     assert readiness["outcome"] == "unavailable"
     assert readiness["reason"] == "discovery_unreadable"
     assert readiness["legacy_state"] == "untested"
-    assert any(artifact["outcome"] == "validated" for artifact in readiness["artifacts"])
+    assert any(artifact["outcome"] == "structure_observed" for artifact in readiness["artifacts"])
 
 
 @pytest.mark.parametrize("claim_id", ["EC-02", "EC-12"])
@@ -2179,3 +2181,257 @@ def test_trailer_symlinked_run_without_receipt_is_invalid(tmp_path, run_id, link
     assert result["outcome"] == "invalid"
     assert result["reason"] == "symlink_refused"
     assert result["population"]["validated"] == 0
+
+
+def test_ec04_signed_post_dispatch_request_cannot_validate_ordering(tmp_path):
+    import shutil
+
+    from brigade import agent_request, attestation, run_journal
+
+    if shutil.which("ssh-keygen") is None:
+        pytest.skip("ssh-keygen is required for signed requests")
+    target = _ws(tmp_path)
+    key, _ = attestation.keygen(target, principal="requester")
+    run_dir = target / ".brigade/runs/run-a"
+    _write_json(run_dir / "run.json", {"run_id": "run-a", "started_at": "2026-01-01T00:00:00Z"})
+    journal = run_dir / "events/lifecycle.jsonl"
+    journal.parent.mkdir()
+    run_journal.append_event(
+        journal,
+        run_id="run-a",
+        event_type="run.dispatch.requested",
+        payload={"seat": "worker", "attempt": 1},
+        idempotency_key="dispatch:worker:1",
+        expected_previous_sequence=0,
+        recorded_at="2026-01-01T00:00:01.000000Z",
+    )
+    nonce = "ab" * 16
+    statement = agent_request.build_statement(
+        run_id="run-a",
+        baseline_commit="a" * 40,
+        task="fixture task",
+        requested_at="2026-01-01T00:00:02.000000Z",
+        nonce=nonce,
+    )
+    envelope = attestation.create_envelope(statement, key)
+    _write_json(run_dir / f"requests/{nonce}.json", envelope)
+    run_journal.append_event(
+        journal,
+        run_id="run-a",
+        event_type="request.signed",
+        payload=agent_request.event_payload(
+            requester_principal="requester",
+            requester_keyid=envelope["signatures"][0]["keyid"],
+            baseline_commit="a" * 40,
+            task="fixture task",
+            nonce=nonce,
+            statement_sha256=localio.canonical_json_digest(statement),
+            attestation_path=f"requests/{nonce}.json",
+        ),
+        idempotency_key=f"request:{nonce}",
+        expected_previous_sequence=1,
+        recorded_at="2026-01-01T00:00:02.000000Z",
+    )
+    result = _assess(target, "EC-04", "run-a")
+    assert result["dimensions"]["signature"]["status"] == "passed"
+    assert result["dimensions"]["subject"]["status"] == "passed"
+    assert result["outcome"] == "structure_observed"
+    assert result["validation_level"] == "structure_observed"
+    assert result["legacy_state"] == "untested"
+    assert "verifier_not_wired" in result["reason_codes"]
+
+
+@pytest.mark.parametrize("status", ["failed", "rejected"])
+def test_failed_wrong_directory_receipt_is_rejected(tmp_path, status):
+    target = _ws(tmp_path)
+    _write_verify_receipt(_verify_dir(target, "verify-a"), run_id="verify-b", status=status)
+    result = _assess(target, "EC-01")
+    assert result["outcome"] == "rejected"
+    assert result["dimensions"]["subject"] == {"status": "failed", "reason": "run_binding_mismatch"}
+    assert "run_binding_mismatch" in result["reason_codes"]
+    assert result["population"]["failed"] == 0
+    assert result["population"]["rejected"] == 1
+
+
+@pytest.mark.parametrize(
+    "dimension,reason",
+    [
+        ("integrity", "trailer_digest_mismatch"),
+        ("signature", "signature_mismatch"),
+        ("subject", "run_binding_mismatch"),
+        ("population", "no_records"),
+        ("authorization", "untrusted_key"),
+    ],
+)
+def test_failed_operation_cannot_mask_required_trust_failure(dimension, reason):
+    from brigade import control_readiness
+
+    obs = _agg_obs("receipt.json", "claim_validated", "failed", **{dimension: ("failed", reason)})
+    assert control_readiness.finalize_artifact(obs, frozenset({dimension})).outcome == "rejected"
+
+
+@pytest.mark.parametrize("run_id", [None, "run-a"])
+@pytest.mark.parametrize("claim", ["EC-01", "EC-04", "EC-05", "EC-06", "EC-08", "EC-12"])
+def test_brigade_symlink_ancestor_refused_before_discovery_or_read(tmp_path, monkeypatch, run_id, claim):
+    import os
+    import subprocess
+
+    from brigade import run_journal
+
+    target = _ws(tmp_path)
+    external = tmp_path / "external-evidence"
+    external.mkdir()
+    _approval_journal(external / "runs/run-a", broken=False)
+    _write_verify_receipt(external / "work/verify-runs/verify-a", run_id="verify-a")
+    try:
+        (target / ".brigade").symlink_to(external, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    reads: list[Path] = []
+    scans: list[Path] = []
+    original_scandir = os.scandir
+
+    def observe_scan(path):
+        scans.append(Path(path))
+        return original_scandir(path)
+
+    def forbidden_read(path, *args, **kwargs):
+        reads.append(Path(path))
+        raise AssertionError("linked evidence must not be read")
+
+    monkeypatch.setattr(os, "scandir", observe_scan)
+    monkeypatch.setattr(run_journal, "read_journal_bounded", forbidden_read)
+    monkeypatch.setattr(control_crosswalk, "_read_json_object", forbidden_read)
+    if claim == "EC-08":
+        monkeypatch.setattr(control_crosswalk.shutil, "which", lambda name: "fixture-git")
+        monkeypatch.setattr(control_crosswalk, "_is_git_repo", lambda _target: True)
+
+        def history(ctx, *args):
+            stdout = (
+                "a" * 40 + "\n"
+                if args[-1] == "--format=%H"
+                else ("fixture\nBrigade-Run: run-a\nBrigade-Receipt: sha256:" + "b" * 64 + "\x002026-01-01T00:00:00Z\n")
+            )
+            return subprocess.CompletedProcess(args, 0, stdout, "")
+
+        monkeypatch.setattr(control_crosswalk, "_git", history)
+    result = _assess(target, claim, run_id)
+    assert result["outcome"] == "invalid"
+    assert result["reason"] == "symlink_refused"
+    assert result["dimensions"]["population"]["status"] == "unknown"
+    assert result["population"]["validated"] == 0
+    assert reads == []
+    assert scans == []
+
+
+@pytest.mark.parametrize("claim", ["EC-05", "EC-06"])
+def test_lifecycle_symlink_ancestor_is_refused_before_verifier(tmp_path, monkeypatch, claim):
+    from brigade import approval, run_journal
+
+    target = _ws(tmp_path)
+    run_dir = target / ".brigade/runs/run-a"
+    _write_json(run_dir / "run.json", {"run_id": "run-a"})
+    external = tmp_path / "external-events"
+    external.mkdir()
+    (external / "lifecycle.jsonl").write_text("fixture\n")
+    (run_dir / "events").symlink_to(external, target_is_directory=True)
+    calls: list[object] = []
+
+    def forbidden(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("linked journal must not reach verifier")
+
+    monkeypatch.setattr(approval, "verify_run_approval", forbidden)
+    monkeypatch.setattr(run_journal, "read_journal_bounded", forbidden)
+    result = _assess(target, claim, "run-a")
+    assert result["outcome"] == "invalid"
+    assert result["reason"] == "symlink_refused"
+    assert calls == []
+
+
+@pytest.mark.parametrize("run_id", [None, "run-a"])
+def test_ec08_oversized_commit_message_is_read_limit_exceeded(tmp_path, run_id):
+    import shutil
+    import subprocess
+
+    from brigade import proc
+
+    if shutil.which("git") is None:
+        pytest.skip("git is required for commit history")
+    target = _ws(tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    message_file = tmp_path / "large-message.txt"
+    message_file.write_bytes(b"x" * (proc.MAX_CAPTURE_BYTES + 1))
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-F",
+            str(message_file),
+        ],
+        cwd=target,
+        check=True,
+    )
+    result = _assess(target, "EC-08", run_id)
+    assert result["outcome"] == "incomplete"
+    assert result["reason"] == "read_limit_exceeded"
+    assert result["population"]["window"]["unreadable"] == 1
+    assert result["population"]["window"]["without_trailer"] == 0
+    assert result["dimensions"]["population"]["status"] == "unknown"
+    assert result["artifacts"][0]["scope"] == "in_scope"
+
+
+def test_ec08_oversized_git_stderr_is_read_limit_exceeded(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    from brigade import proc
+
+    if os.name != "posix":
+        pytest.skip("executable script fixture requires POSIX")
+    target = _ws(tmp_path)
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    git = tools_dir / "git"
+    git.write_text(f"#!{sys.executable}\nimport sys\nsys.stderr.buffer.write(b'x' * {proc.MAX_CAPTURE_BYTES + 1})\n")
+    git.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tools_dir))
+    result = _assess(target, "EC-08", "run-a")
+    assert result["outcome"] == "incomplete"
+    assert result["reason"] == "read_limit_exceeded"
+    assert result["dimensions"]["population"]["status"] == "unknown"
+    assert result["artifacts"][0]["scope"] == "in_scope"
+
+
+@pytest.mark.parametrize("claim", ["EC-01", "EC-04", "EC-06", "EC-12"])
+def test_ancestor_metadata_error_preserves_unavailable_population(tmp_path, monkeypatch, claim):
+    target = _ws(tmp_path)
+    ancestor = target / ".brigade"
+    ancestor.mkdir()
+    _deny_artifact_metadata(monkeypatch, ancestor)
+    result = _assess(target, claim, "run-a")
+    assert result["outcome"] == "unavailable"
+    assert result["reason"] == "discovery_unreadable"
+    assert result["dimensions"]["population"]["status"] == "unavailable"
+    assert result["population"]["validated"] == 0
+
+
+def test_assessed_target_symlink_remains_canonical(tmp_path):
+    target = _ws(tmp_path)
+    _approval_journal(target / ".brigade/runs/run-a", broken=False)
+    alias = tmp_path / "target-alias"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    result = _assess(alias, "EC-06", "run-a")
+    assert result["outcome"] == "validated"
+    assert result["artifacts"][0]["relpath"] == ".brigade/runs/run-a/events/lifecycle.jsonl"
