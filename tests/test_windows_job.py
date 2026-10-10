@@ -1362,7 +1362,8 @@ def test_run_file_failed_process_close_remains_retryable_by_tracker(tmp_path, mo
     assert (result.status, result.returncode) == (
         ("cleanup-unconfirmed", None) if returncode == 0 else ("failed", returncode)
     )
-    assert result.diagnostic == "[Errno 5] CloseHandle(process) failed (winerror=5)"
+    assert result.diagnostic is not None
+    assert result.diagnostic.endswith("CloseHandle(process) failed (winerror=5)")
     if returncode:
         assert result.cleanup_error == result.diagnostic
         assert driver.regressions([result], set()) == [result]

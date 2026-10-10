@@ -201,8 +201,8 @@ def make_temp_root(repo: Path) -> Path:
         raise
 
 
-def _cleanup_path(root: Path, path: Path) -> os.stat_result:
-    """Reject lexical escapes and links/reparse points, including ancestors."""
+def _cleanup_path(root: Path, path: Path, *, allow_leaf_link: bool = False) -> os.stat_result:
+    """Reject escapes and linked ancestors; optionally allow a removable leaf link."""
     if not path.is_relative_to(root) or ".." in path.parts:
         raise ValueError("temporary cleanup path escapes owned root")
     info = os.lstat(path)
@@ -212,7 +212,13 @@ def _cleanup_path(root: Path, path: Path) -> os.stat_result:
             stat.S_ISLNK(metadata.st_mode)
             or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
         ):
-            raise ValueError("temporary cleanup path contains a link or reparse point")
+            if allow_leaf_link and current == path and path != root:
+                if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_reparse_tag", 0) in {
+                    stat.IO_REPARSE_TAG_SYMLINK,
+                    stat.IO_REPARSE_TAG_MOUNT_POINT,
+                }:
+                    continue
+            raise ValueError(f"temporary cleanup path contains a link or reparse point: {current}")
     return info
 
 
@@ -220,10 +226,19 @@ def _remove_owned_temp_root(root: Path) -> None:
     """Strict removal after shutdown, with one Windows read-only unlink retry."""
     root = root.absolute()
     _cleanup_path(root, root)
-    # No worker is alive here. Check traversal before rmtree, including 3.10.
+    # No worker is alive here. Remove links before traversal, including junctions
+    # that os.walk on Python 3.10 can otherwise descend into despite followlinks=False.
     for directory, dirs, files in os.walk(root, followlinks=False):
         for name in (*dirs, *files):
-            _cleanup_path(root, Path(directory) / name)
+            path = Path(directory) / name
+            info = _cleanup_path(root, path, allow_leaf_link=True)
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                if getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_DIRECTORY:
+                    os.rmdir(path)
+                else:
+                    os.unlink(path)
+                if name in dirs:
+                    dirs.remove(name)
 
     def onerror(function, filename, exc_info):
         error = exc_info[1]

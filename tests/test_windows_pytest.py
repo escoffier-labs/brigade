@@ -1870,7 +1870,7 @@ def test_owned_cleanup_rejects_unsafe_repairs(tmp_path, monkeypatch, invalid):
     assert target.read_text() == "preserved"
 
 
-@pytest.mark.parametrize("location", ["root", "ancestor", "entry"])
+@pytest.mark.parametrize("location", ["root", "ancestor"])
 def test_owned_cleanup_never_traverses_links(tmp_path, monkeypatch, location):
     outside = tmp_path / "external"
     outside.mkdir()
@@ -1884,11 +1884,33 @@ def test_owned_cleanup_never_traverses_links(tmp_path, monkeypatch, location):
         alias.symlink_to(outside, target_is_directory=True)
         root = alias / "subdir"
         root.mkdir()
-    else:
-        root.mkdir()
-        (root / "link").symlink_to(outside, target_is_directory=True)
     monkeypatch.setattr(windows_pytest.shutil, "rmtree", lambda *args, **kwargs: pytest.fail("link traversal"))
     monkeypatch.setattr(windows_pytest.os, "chmod", lambda *args: pytest.fail("link permission repair"))
     with pytest.raises(ValueError, match="link or reparse point"):
         windows_pytest._remove_owned_temp_root(root)
+    assert sentinel.read_text() == "preserved"
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "dangling", "junction"])
+def test_owned_cleanup_removes_descendant_links_without_touching_targets(tmp_path, monkeypatch, kind):
+    outside = tmp_path / "external"
+    outside.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_text("preserved")
+    root = tmp_path / "owned"
+    root.mkdir()
+    link = root / "link"
+    if kind == "junction":
+        if os.name != "nt":
+            pytest.skip("junctions require Windows")
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], check=True, capture_output=True)
+    else:
+        target = sentinel if kind == "file" else outside if kind == "directory" else outside / "missing"
+        try:
+            link.symlink_to(target, target_is_directory=kind == "directory")
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+    monkeypatch.setattr(windows_pytest.os, "chmod", lambda *args: pytest.fail("link target permission repair"))
+    windows_pytest._remove_owned_temp_root(root)
+    assert not root.exists()
     assert sentinel.read_text() == "preserved"
