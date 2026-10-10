@@ -28,6 +28,44 @@ status of each phase.
   `BRIGADE_FLEET_TOKEN` override. Tokens are dedicated fleet secrets and are
   never written into a Brigade config value.
 
+## Cloud concurrency controls
+
+`brigade fleet cloud` remains a read command. Use `--json` to see the effective
+`policy.global_limit` and each provider's `limit`, enabled state, and usage.
+`--all` also includes released and expired leases.
+
+With the administrator token already configured in `[fleet] token_file` or
+`BRIGADE_FLEET_TOKEN`, change both limits in one request:
+
+```bash
+brigade fleet cloud set --global-limit 8 --provider codex --limit 8 --json
+```
+
+To change one limit, use `fleet cloud set --global-limit 8` or
+`fleet cloud set --provider codex --limit 8`. Both limits accept integers in
+`0..64`. A provider name and its limit must be supplied together. Node tokens
+cannot make these policy changes. The command uses the existing administrator
+authentication path and does not enable administrator lease writes.
+
+The hub validates the entire request before committing either limit. Omitted
+fields retain their current values, including provider enabled state, hosted
+classification, circuit state, and subscription metadata. Updates leave active
+leases and model retirement policy intact. Lowering a limit, including to zero,
+blocks new admissions above that limit while existing leases can still renew or
+release. A persisted global override survives restart and takes precedence over
+the startup configuration. Without an override, the startup default still applies.
+
+These are Brigade's internal hosted-worker admission limits. Ordinary local
+Codex workers use the separate model-seat lease limit. These controls do not
+describe or change an OpenAI account limit.
+
+Upgrade the hub before using the writer. The client checks the hub's cloud
+schema before sending a policy update and refuses an older hub. Schema v25 adds
+the persisted global override. An older Brigade cannot open the upgraded database.
+The override has no reset command. Set it explicitly to the desired value to
+change it again. Explicit null limits are rejected. For direct policy API writes,
+omitted reason and subscription fields remain even when enabling a provider.
+
 ## Trust model
 
 Two kinds of bearer token (#1150), both compared in constant time, neither

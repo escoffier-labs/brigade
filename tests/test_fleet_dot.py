@@ -148,13 +148,13 @@ def test_schema23_migration_preserves_old_snapshots_and_refuses_downgrade(tmp_pa
     conn.commit()
     conn.close()
     conn = fleet_hub.init_db(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 24
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 25
     assert fleet_hub_sessions.list_sessions(conn, include_all=True) == before
     fleet_hub_sessions.handle_session(conn, legacy_body, caller_node=NODE)
     fleet_hub_sessions.init_schema(conn)  # Mixed local writes and idempotent additive migration.
     conn.close()
     monkeypatch.setattr(fleet_hub, "SCHEMA_VERSION", 23)
-    with pytest.raises(fleet_hub.FleetHubError, match="schema version 24"):
+    with pytest.raises(fleet_hub.FleetHubError, match="schema version 25"):
         fleet_hub.init_db(path)
 
 

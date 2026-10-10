@@ -113,7 +113,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -307,6 +307,12 @@ CREATE TABLE IF NOT EXISTS cloud_provider_state (
     reset_at TEXT,
     expires_at TEXT,
     updated_at TEXT NOT NULL
+);
+"""
+_CLOUD_GLOBAL_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS cloud_global_state (
+    singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1),
+    limit_count INTEGER NOT NULL CHECK (limit_count BETWEEN 0 AND 64)
 );
 """
 _MODEL_POLICY_SCHEMA = """
@@ -527,6 +533,9 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_NODES_SCHEMA)
     conn.execute(_CLOUD_LEASES_SCHEMA)
     conn.execute(_CLOUD_PROVIDER_STATE_SCHEMA)
+    # v24 -> v25: an optional durable global limit override. An empty table
+    # preserves the startup configuration default and all existing leases.
+    conn.execute(_CLOUD_GLOBAL_STATE_SCHEMA)
     conn.execute(_MODEL_LEASES_SCHEMA)
     _canonicalize_cloud_provider_rows(conn)
     if _model_policy_table_needs_recreation(conn):
@@ -1373,22 +1382,28 @@ def _validate_cloud_request(raw: Any) -> dict[str, Any]:
         raise FleetHubError("cloud field 'action' must be one of: admit, bind, renew, release, policy")
     request: dict[str, Any] = {"action": action}
     if action == "policy":
-        request["provider"] = _cloud_provider(raw.get("provider"))
+        request["provider"] = _cloud_provider(raw["provider"]) if "provider" in raw else None
+        if request["provider"] is None:
+            if set(raw) != {"action", "global_limit"}:
+                raise FleetHubError("cloud policy requires a provider for provider fields, or a global_limit")
+        for key in ("limit", "global_limit"):
+            if key in raw:
+                value = raw[key]
+                if type(value) is not int or not 0 <= value <= 64:
+                    raise FleetHubError(f"cloud policy field {key!r} must be an integer in 0..64")
+                request[key] = value
         for key in ("enabled", "hosted"):
             value = raw.get(key)
             if value is not None and type(value) is not bool:
                 raise FleetHubError(f"cloud policy field {key!r} must be a boolean")
             request[key] = value
-        limit = raw.get("limit")
-        if limit is not None and (type(limit) is not int or not 0 <= limit <= 64):
-            raise FleetHubError("cloud policy field 'limit' must be an integer in 0..64")
-        request["limit"] = limit
         circuit = raw.get("circuit_state")
         if circuit is not None and circuit not in ("closed", "open"):
             raise FleetHubError("cloud policy field 'circuit_state' must be 'closed' or 'open'")
         request["circuit_state"] = circuit
         for key in ("reason", "subscription_pool", "reset_at", "expires_at"):
-            request[key] = _safe_cloud_text(raw.get(key), key, limit=_CLOUD_TEXT_MAX)
+            if key in raw:
+                request[key] = _safe_cloud_text(raw[key], key, limit=_CLOUD_TEXT_MAX)
         return request
     request["provider"] = _cloud_provider(raw.get("provider")) if action == "admit" else None
     request["lease_id"] = _cloud_lease_id(raw.get("lease_id"))
@@ -1425,15 +1440,24 @@ def _validate_cloud_request(raw: Any) -> dict[str, Any]:
 
 
 def _provider_defaults(config: fleet_command_deck.DeckConfig, provider: str) -> dict[str, Any]:
+    metadata = dict.fromkeys(("reason", "subscription_pool", "reset_at", "expires_at"))
     default = config.cloud.providers.get(provider)
     if default is None:
-        return {"provider": provider, "enabled": False, "limit": 0, "hosted": True, "circuit_state": "closed"}
+        return {
+            "provider": provider,
+            "enabled": False,
+            "limit": 0,
+            "hosted": True,
+            "circuit_state": "closed",
+            **metadata,
+        }
     return {
         "provider": provider,
         "enabled": default.enabled,
         "limit": default.limit,
         "hosted": default.hosted,
         "circuit_state": "closed",
+        **metadata,
     }
 
 
@@ -1455,7 +1479,8 @@ def _cloud_policy(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfi
                 "expires_at": row[8],
             }
         )
-    return {"global_limit": config.cloud.global_limit, "providers": policy}
+    global_row = conn.execute("SELECT limit_count FROM cloud_global_state WHERE singleton = 1").fetchone()
+    return {"global_limit": int(global_row[0]) if global_row else config.cloud.global_limit, "providers": policy}
 
 
 def _cloud_lease_payload(row: tuple[Any, ...], *, now: float | None = None) -> dict[str, Any]:
@@ -1506,34 +1531,9 @@ def _active_cloud_counts(conn: sqlite3.Connection, policy: dict[str, Any]) -> tu
 def _set_cloud_policy(
     conn: sqlite3.Connection, request: dict[str, Any], config: fleet_command_deck.DeckConfig
 ) -> dict[str, Any]:
-    provider = request["provider"]
-    current = _cloud_policy(conn, config)["providers"].get(provider, _provider_defaults(config, provider))
-    enabled = current["enabled"] if request["enabled"] is None else request["enabled"]
-    limit = current["limit"] if request["limit"] is None else request["limit"]
-    hosted = current["hosted"] if request["hosted"] is None else request["hosted"]
-    circuit = current.get("circuit_state", "closed") if request["circuit_state"] is None else request["circuit_state"]
-    conn.execute(
-        "INSERT INTO cloud_provider_state (provider, enabled, limit_count, hosted, circuit_state, reason, subscription_pool, reset_at, expires_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(provider) DO UPDATE SET enabled=excluded.enabled, limit_count=excluded.limit_count, "
-        "hosted=excluded.hosted, circuit_state=excluded.circuit_state, reason=excluded.reason, "
-        "subscription_pool=excluded.subscription_pool, reset_at=excluded.reset_at, expires_at=excluded.expires_at, updated_at=excluded.updated_at",
-        (
-            provider,
-            int(enabled),
-            int(limit),
-            int(hosted),
-            circuit,
-            request["reason"],
-            request["subscription_pool"],
-            request["reset_at"],
-            request["expires_at"],
-            _utc_now(),
-        ),
-    )
-    conn.commit()
-    policy = _cloud_policy(conn, config)["providers"][provider]
-    return {"provider": provider, **policy}
+    from . import fleet_hub_cloud_policy
+
+    return fleet_hub_cloud_policy.set_cloud_policy(conn, request, config)
 
 
 def set_model_policy(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
@@ -1705,6 +1705,7 @@ def cloud_snapshot(
         item["used"] = counts.get(name, 0)
         providers.append(item)
     snapshot: dict[str, Any] = {
+        "schema": "brigade.fleet_cloud.v1",
         "leases": leases,
         "policy": {"global_limit": policy["global_limit"], "providers": providers},
     }

@@ -649,7 +649,7 @@ def _validate(view: RosterView, submission: Submission) -> tuple[str | None, dic
 
 
 def _write_cloud_enabled(conn: sqlite3.Connection, row: CloudRow, enabled: bool) -> None:
-    """Same upsert as ``fleet_hub._set_cloud_policy`` minus its commit; only ``enabled`` differs."""
+    """Upsert the roster toggle without committing, clearing pause metadata when enabling."""
     policy = row.policy
     conn.execute(
         "INSERT INTO cloud_provider_state (provider, enabled, limit_count, hosted, circuit_state, reason, "

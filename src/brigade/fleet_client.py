@@ -158,6 +158,7 @@ _CLOUD_API_EXPORTS = frozenset(
         "release_cloud",
         "release_model_lease",
         "renew_cloud",
+        "set_cloud_limits",
         "set_model_policy",
     }
 )
