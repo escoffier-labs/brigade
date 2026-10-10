@@ -44,6 +44,68 @@ def _make_repo(parent: Path, name: str, origin: str | None) -> Path:
     return repo
 
 
+@pytest.fixture
+def journal_events(monkeypatch):
+    """Capture the transport boundary while appending real journal events."""
+    from brigade import run_journal
+
+    events = []
+
+    def report(event, **kwargs):
+        events.append(event)
+        return True
+
+    monkeypatch.setattr(fleet_client, "report_event", report)
+
+    def append(repo: Path):
+        journal = repo / ".brigade" / "runs" / "example-run" / "events" / "lifecycle.jsonl"
+        run_journal.append_event(
+            journal,
+            run_id="example-run",
+            event_type="run.created",
+            payload={},
+            idempotency_key="created",
+            expected_previous_sequence=0,
+        )
+        return events[-1]
+
+    return append
+
+
+def test_journal_events_from_unrelated_repos_under_one_home_have_distinct_keys(tmp_path, monkeypatch, journal_events):
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    one = _make_repo(home / "repos", "one", "https://github.com/acme/one.git")
+    two = _make_repo(home / "repos", "two", "https://github.com/acme/two.git")
+    assert journal_events(one)["repo"] == "acme/one"
+    assert journal_events(two)["repo"] == "acme/two"
+
+
+def test_journal_events_from_clones_under_different_homes_have_the_same_key(tmp_path, monkeypatch, journal_events):
+    home_a = _make_home(tmp_path, "homeA", monkeypatch)
+    one = _make_repo(home_a / "repos", "one", "https://github.com/acme/project.git")
+    assert journal_events(one)["repo"] == "acme/project"
+    home_b = _make_home(tmp_path, "homeB", monkeypatch)
+    two = _make_repo(home_b / "repos", "two", "git@github.com:acme/project.git")
+    assert journal_events(two)["repo"] == "acme/project"
+
+
+def test_journal_events_fall_back_on_transient_git_failure_and_recover(tmp_path, monkeypatch, journal_events, caplog):
+    from brigade import fleet_claim_target
+
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    repo = _make_repo(home / "repos", "one", "https://github.com/acme/one.git")
+    with monkeypatch.context() as patch:
+
+        def fail(*args, **kwargs):
+            raise ClaimTargetError("temporary git failure")
+
+        patch.setattr(fleet_claim_target, "_git", fail)
+        assert journal_events(repo)["repo"] == "homeA"
+    assert "repo-key-fallback" in caplog.text
+    # A new journal entry must resolve again, rather than caching the fallback.
+    assert journal_events(repo / "nested")["repo"] == "acme/one"
+
+
 def test_repo_under_home_with_only_the_home_identity_gets_its_own_key(tmp_path, monkeypatch):
     home = _make_home(tmp_path, "homeA", monkeypatch)
     repo = _make_repo(home / "repos", "brigade", "git@github.com:escoffier-labs/brigade.git")

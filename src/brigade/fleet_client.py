@@ -57,8 +57,8 @@ its **home** identity, the ``node.toml`` under ``BRIGADE_HOME``, resolved
 by ``resolve_node_id``, which ignores where it is asked. A workspace's own
 ``.brigade/node.toml`` stays local (per-checkout state), and an event
 payload's ``node_id`` can never override the machine: both would let one
-machine masquerade as a fleet of two. ``report_journal_event`` still derives
-``repo`` from the workspace that owns the journal.
+machine masquerade as a fleet of two. ``report_journal_event`` derives
+``repo`` with the same repository key resolver as claims.
 
 Phase 4 (issue #1125) adds hub-arbitrated cross-machine claims:
 ``acquire_claim`` / ``renew_claim`` / ``release_claim`` are one bounded
@@ -930,15 +930,22 @@ def report_event(
 def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None = None) -> bool:
     """Denormalize a run_event.v1 envelope into a fleet event and report it.
 
-    ``repo`` comes from the workspace that owns the journal so the hub view
-    is a plain group-by; ``node_id`` is always this machine's home identity
-    (#1161), never the journal workspace's local one. Never raises
+    ``repo`` uses the claim key for the journal's repository (#1662). A
+    transient git failure falls back to the previous workspace name and logs
+    a ``repo-key-fallback`` warning. ``node_id`` is always this machine's home
+    identity (#1161), never the journal workspace's local one. Never raises
     ``Exception``; see ``report_event`` for the interrupt contract.
     """
     try:
         raw_payload = envelope.get("payload")
         payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
         workspace = find_workspace_for_path(journal_path) if journal_path is not None else None
+        repo = workspace.name if workspace is not None else None
+        if journal_path is not None:
+            try:
+                repo = resolve_claim_target(journal_path)
+            except _claim_target.ClaimTargetError:
+                _LOG.warning("repo-key-fallback: fleet event is using the previous workspace name")
         repo_identity = None
         if workspace is not None:
             try:
@@ -949,7 +956,7 @@ def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None 
                 repo_identity = None
         event = {
             "run_id": envelope.get("run_id"),
-            "repo": workspace.name if workspace is not None else None,
+            "repo": repo,
             "seat": payload.get("seat"),
             "harness": payload.get("harness"),
             "state": envelope.get("event_type"),
