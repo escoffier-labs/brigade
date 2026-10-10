@@ -928,9 +928,8 @@ def report_event(
 
 
 def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None = None) -> bool:
-    """Report a run_event.v1 envelope; git roots use claim keys (#1662).
-    Non-git roots and git failures retain the workspace name; failures log
-    ``repo-key-fallback``. See ``report_event`` for home identity and interrupts.
+    """Report run_event.v1 with git claim keys or the workspace name (#1662).
+    Git failures log ``repo-key-fallback``; see ``report_event`` for identity and interrupts.
     """
     try:
         if not load_fleet_config()["hub_url"]:
