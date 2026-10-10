@@ -893,11 +893,15 @@ class TestNativeContainment:
             assert entered.wait(5)
             release.write_text("exit")
             signaled(native, identity)
-            # Root finishes while termination is pending; observation remains natural.
-            assert natural.wait(0) == 7
+            # The hook holds _LIFECYCLE. Observe the independent identity handle
+            # directly so wrapper handle access cannot block release of the hook.
+            code = job.DWORD()
+            assert native.api.GetExitCodeProcess(identity, C.byref(code)), native.api.error("GetExitCodeProcess")
+            assert code.value == 7
             permit.set()
             competing.join(10)
             assert not competing.is_alive() and not errors
+            assert natural.cause == first and natural.wait(0) == 7
             for reason in job.REASONS:
                 natural.terminate(reason)
             assert natural.wait(0) == 7
@@ -1028,6 +1032,64 @@ class TestNativeContainment:
         with pytest.raises(PermissionError, match="busy record"):
             driver.write_record(record, results=[], status="complete")
         assert record.read_bytes() == previous
+
+
+@pytest.mark.parametrize("first", [job.FILE_TIMEOUT, job.AGGREGATE_DEADLINE, job.DRIVER_ABORT])
+def test_actual_native_natural_exit_barrier_with_injected_kernel(tmp_path, first):
+    release = tmp_path / "natural-release"
+
+    class NaturalExitAPI(FakeAPI):
+        natural_handle = None
+        identity = None
+
+        def WaitForSingleObject(self, handle, timeout):
+            if handle in (self.natural_handle, self.identity):
+                assert release.exists()
+                self.exitcode = 7
+            return super().WaitForSingleObject(handle, timeout)
+
+        def GetExitCodeProcess(self, handle, code):
+            if handle in (self.natural_handle, self.identity):
+                self.record("natural-exit-observed", handle)
+            return super().GetExitCodeProcess(handle, code)
+
+        def TerminateJobObject(self, handle, cause):
+            if self.natural_handle is not None and release.exists():
+                # A kernel termination cannot replace an already completed exit.
+                return self.record("TerminateJobObject", handle, cause)
+            return super().TerminateJobObject(handle, cause)
+
+    api = NaturalExitAPI()
+    tracker = job.ProcessTracker(api)
+    processes = []
+
+    def start(code, *, selected_tracker=None):
+        process = launch(tmp_path, selected_tracker or tracker, ["-c", code])
+        processes.append(process)
+        if selected_tracker is not None:
+            api.natural_handle = process.handle
+            (tmp_path / "natural-ready").write_text("ready")
+        return process
+
+    def open_process(pid):
+        assert pid == processes[-1].pid
+        api.identity = api.handle()
+        return api.identity
+
+    native = SimpleNamespace(api=api, path=tmp_path, start=start, open_process=open_process)
+    try:
+        # Execute the acceptance test's actual syscall hook and release sequence.
+        TestNativeContainment().test_ordered_first_cause_is_immutable_and_natural_failure_survives(native, first)
+        observation = next(i for i, event in enumerate(api.events) if event[0] == "natural-exit-observed")
+        termination = max(i for i, event in enumerate(api.events) if event[0] == "TerminateJobObject")
+        assert api.events[observation][1] == api.identity and observation < termination
+    finally:
+        for process in processes:
+            process.finish(deadline=time.monotonic() + 10)
+            process.close()
+        if api.identity is not None:
+            assert api.CloseHandle(api.identity)
+    assert not api.live
 
 
 def test_actual_breakaway_program_compiles_nested_windows_paths():
