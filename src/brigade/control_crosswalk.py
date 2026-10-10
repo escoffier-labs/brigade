@@ -8,12 +8,15 @@ artifacts.
 
 from __future__ import annotations
 
+import errno
+import glob
 import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -29,6 +32,7 @@ from . import (
     causal_receipt,
     control_readiness,
     cosign_attestation,
+    dirfd,
     evidence_package,
     localio,
     proc,
@@ -83,11 +87,154 @@ def load_crosswalk() -> dict[str, Any]:
     return json.loads(text)
 
 
+_ASSESSMENT_BYTE_BUDGET = 64 * 1024 * 1024
+
+
+class _ReadRefusal(OSError):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _AssessmentReader:
+    """Hold the canonical assessment root and every descended directory.
+
+    Reads and discovery never resolve an artifact pathname again. Bytes copied
+    for delegated verifiers are private, bounded and fixed for this assessment,
+    but observations across files do not constitute an atomic filesystem view.
+    """
+
+    def __init__(self, target: Path):
+        self.target = target
+        self.directories: dict[tuple[str, ...], int] = {(): dirfd.open_directory_nofollow(target, writable=False)}
+        self.errors: dict[Path, str] = {}
+        self.contents: dict[Path, bytes] = {}
+        self.used = 0
+        self.temporary: tempfile.TemporaryDirectory[str] | None = None
+        self.copied: set[Path] = set()
+        self.populations: dict[Path, list[str]] = {}
+        self.approval_context: approval.ApprovalVerificationContext | None = None
+
+    @property
+    def snapshot_target(self) -> Path:
+        if self.temporary is None:
+            self.temporary = tempfile.TemporaryDirectory(prefix="brigade-controls-")
+        return Path(self.temporary.name)
+
+    def close(self) -> None:
+        try:
+            if self.temporary is not None:
+                self.temporary.cleanup()
+        finally:
+            for descriptor in reversed(list(self.directories.values())):
+                os.close(descriptor)
+
+    def directory(self, path: Path) -> int:
+        parts = path.relative_to(self.target).parts
+        parent = self.directories[()]
+        for index, name in enumerate(parts):
+            key = parts[: index + 1]
+            if key not in self.directories:
+                info = dirfd.stat_child(parent, name)
+                if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                    raise _ReadRefusal("symlink_refused")
+                if not stat.S_ISDIR(info.st_mode):
+                    raise _ReadRefusal("discovery_unreadable")
+                try:
+                    self.directories[key] = dirfd.open_child_directory(parent, name, writable=False)
+                except OSError as exc:
+                    # An open racing a new link is still refused. No check is
+                    # used as authorization for a later pathname operation.
+                    if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                        raise _ReadRefusal("symlink_refused") from exc
+                    raise
+            parent = self.directories[key]
+        return parent
+
+    def info(self, path: Path) -> os.stat_result:
+        if path == self.target:
+            return os.fstat(self.directories[()])
+        return dirfd.stat_child(self.directory(path.parent), path.name)
+
+    def refusal(self, path: Path, exc: OSError) -> str:
+        reason = (
+            exc.reason
+            if isinstance(exc, _ReadRefusal)
+            else ("symlink_refused" if "reparse point" in str(exc) else "discovery_unreadable")
+        )
+        self.errors[path] = reason
+        return reason
+
+    def read(self, path: Path, limit: int = attestation_input.MAX_JSON_BYTES) -> bytes:
+        if path in self.contents:
+            cached = self.contents[path]
+            if len(cached) > limit:
+                raise _ReadRefusal("read_limit_exceeded")
+            return cached
+        descriptor = -1
+        try:
+            parent = self.directory(path.parent)
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            descriptor = dirfd.open_child_file(parent, path.name, flags)
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise _ReadRefusal("discovery_unreadable")
+            permitted = min(limit, _ASSESSMENT_BYTE_BUDGET - self.used)
+            if info.st_size > permitted:
+                raise _ReadRefusal("read_limit_exceeded")
+            raw = bytearray()
+            while True:
+                chunk = os.read(descriptor, min(65536, permitted + 1 - len(raw)))
+                if not chunk:
+                    break
+                raw.extend(chunk)
+                if len(raw) > permitted:
+                    raise _ReadRefusal("read_limit_exceeded")
+            result = bytes(raw)
+            self.contents[path] = result
+            self.used += len(result)
+            return result
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                exc = _ReadRefusal("symlink_refused")
+            self.refusal(path, exc)
+            raise exc
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+
+    def copy(self, path: Path, *, limit: int = attestation_input.MAX_JSON_BYTES) -> Path:
+        destination = self.snapshot_target / path.relative_to(self.target)
+        if path in self.copied:
+            return destination
+        try:
+            self.info(path)
+        except FileNotFoundError:
+            return destination  # Preserve absence of optional dependencies.
+        except OSError as exc:
+            self.refusal(path, exc)
+            raise
+        try:
+            raw = self.read(path, limit)
+        except FileNotFoundError as exc:
+            # Disappearance after discovery is not optional-data absence.
+            self.errors[path] = "discovery_unreadable"
+            raise _ReadRefusal("discovery_unreadable") from exc
+        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with destination.open("xb") as stream:
+            stream.write(raw)
+        self.copied.add(path)
+        return destination
+
+
 @dataclass(frozen=True)
 class _Context:
     target: Path
     run_id: str | None
     period: tuple[datetime, datetime] | None
+    reader: _AssessmentReader
 
 
 @dataclass
@@ -125,35 +272,211 @@ def _relpath(ctx: _Context, path: Path) -> str:
 
 
 def _path_refusal(ctx: _Context, path: Path, *, include_leaf: bool = False) -> str | None:
-    """Refuse linked components below the canonical assessed target before I/O.
-
-    Missing components remain absence; metadata errors remain unreadable. The
-    target itself may have been selected through a symlink and is canonicalized
-    at the assessment boundary, so only components beneath it are checked.
-    """
-    parts = path.relative_to(ctx.target).parts
-    current = ctx.target
-    for part in parts if include_leaf else parts[:-1]:
-        current /= part
-        try:
-            mode = current.lstat().st_mode
-        except FileNotFoundError:
-            return None
-        except OSError:
-            return "discovery_unreadable"
-        if stat.S_ISLNK(mode):
+    """Check components using held handles; never authorize pathname I/O."""
+    try:
+        ctx.reader.directory(path.parent)
+        if include_leaf and _is_symlink(ctx, path):
             return "symlink_refused"
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return ctx.reader.refusal(path, exc)
     return None
 
 
 def _read_json_object(ctx: _Context, path: Path) -> dict[str, Any] | None:
-    """Bounded no-follow read of a JSON object; returns None on missing or invalid."""
-    if _path_refusal(ctx, path) is not None:
-        return None
+    """Bounded, regular-file, handle-relative JSON read."""
     try:
-        return attestation_input.read_json_object(path)
-    except (attestation_input.AttestationInputError, FileNotFoundError, IsADirectoryError, OSError):
+        value = attestation_input.strict_json_loads(ctx.reader.read(path))
+        return value if isinstance(value, dict) else None
+    except (attestation_input.AttestationInputError, OSError):
         return None
+
+
+def _is_symlink(ctx: _Context, path: Path) -> bool:
+    try:
+        info = ctx.reader.info(path)
+        return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        ctx.reader.refusal(path, exc)
+        return isinstance(exc, _ReadRefusal) and exc.reason == "symlink_refused"
+
+
+def _is_regular(ctx: _Context, path: Path) -> bool:
+    try:
+        return stat.S_ISREG(ctx.reader.info(path).st_mode)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        ctx.reader.refusal(path, exc)
+        return False
+
+
+def _read_journal(ctx: _Context, path: Path) -> run_journal.JournalReport:
+    from .run_checkpoint import MAX_JOURNAL_BYTES
+
+    try:
+        snapshot = ctx.reader.copy(path, limit=MAX_JOURNAL_BYTES)
+    except _ReadRefusal as exc:
+        if exc.reason == "read_limit_exceeded":
+            raise run_journal.RunJournalError("bound exceeded: journal byte budget") from exc
+        raise
+    return run_journal.read_journal_bounded(snapshot)
+
+
+def _copy_public_trust(ctx: _Context) -> Path:
+    root = ctx.target / ".brigade" / "attestation"
+    for name in (attestation.DEFAULT_ALLOWED_SIGNERS_NAME, attestation.DEFAULT_REVOKED_KEYS_NAME):
+        ctx.reader.copy(root / name)
+    return ctx.reader.snapshot_target
+
+
+def _verify_attestation_snapshot(ctx: _Context, path: Path, **kwargs: Any) -> attestation.AttestationVerifyResult:
+    target = _copy_public_trust(ctx)
+    envelope = ctx.reader.copy(path)
+    ctx.reader.copy(path.parent / "receipt.json")
+    return attestation.verify_attestation(envelope, target=target, **kwargs)
+
+
+def _copy_population(ctx: _Context, root: Path, names: tuple[str, ...] | None = None) -> None:
+    children, truncated, error = _bounded_children(ctx, root)
+    if truncated or error is not None:
+        reason = "read_limit_exceeded" if truncated else error or "discovery_unreadable"
+        ctx.reader.errors[root] = reason
+        raise _ReadRefusal(reason)
+    for child in children:
+        if names is None:
+            if child.name.endswith(".json"):
+                ctx.reader.copy(child)
+                if _read_json_object(ctx, child) is None:
+                    ctx.reader.errors[child] = "invalid_json"
+                    raise _ReadRefusal("invalid_json")
+        elif stat.S_ISDIR(ctx.reader.info(child).st_mode):
+            # Bind the directory before copying even absent children. A linked
+            # population member is a refusal, never silently omitted.
+            ctx.reader.directory(child)
+            for name in names:
+                dependency = child / name
+                ctx.reader.copy(dependency)
+                if (
+                    dependency in ctx.reader.copied
+                    and name.endswith(".json")
+                    and _read_json_object(ctx, dependency) is None
+                ):
+                    ctx.reader.errors[dependency] = "invalid_json"
+                    raise _ReadRefusal("invalid_json")
+        elif _is_symlink(ctx, child):
+            ctx.reader.errors[child] = "symlink_refused"
+            raise _ReadRefusal("symlink_refused")
+
+
+def _approval_live_tree(ctx: _Context, key_path: Path) -> str | None:
+    """Compute the original workspace tree without staging private key bytes.
+
+    Preserve the shared fingerprint's normalization, but explicitly exclude the
+    signing key even if ignore rules change during collection. A key included
+    by the original normalization is a refusal rather than a different tree
+    silently compared against the approval. Git output/time bounds still apply.
+    """
+    relative_key = key_path.relative_to(ctx.target).as_posix()
+    with tempfile.TemporaryDirectory(prefix="brigade-controls-index-") as temporary:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(temporary) / "index")}
+
+        def git(*args: str) -> subprocess.CompletedProcess[str]:
+            return _git(ctx, *args, env=env)
+
+        try:
+            head = git("rev-parse", "HEAD")
+            if head.returncode != 0 or not head.stdout.strip():
+                return None
+            excluded = {relative_key, ".brigade/attestation/" + attestation.DEFAULT_KEY_NAME}
+            for name in sorted(excluded):
+                try:
+                    ctx.reader.info(ctx.target / name)
+                except FileNotFoundError:
+                    continue
+                tracked = git("ls-files", "--error-unmatch", "--", name)
+                ignored = git("check-ignore", "-q", "--", name)
+                if tracked.returncode == 0 or ignored.returncode != 0:
+                    ctx.reader.errors[ctx.target / name] = "discovery_unreadable"
+                    raise _ReadRefusal("discovery_unreadable")
+            if git("read-tree", head.stdout.strip()).returncode != 0:
+                return None
+            patterns = []
+            for name in sorted(excluded):
+                if not name[0].isascii() or not (name[0].isalnum() or name[0] == "."):
+                    raise _ReadRefusal("discovery_unreadable")
+                # An exact exclusion with a literal ignored prefix makes Git
+                # reject add -A. Bracket-quote its first ASCII character to
+                # keep the same match without treating that prefix as input.
+                patterns.append(":(exclude,glob)[" + name[0] + "]" + glob.escape(name[1:]))
+            if git("add", "-A", "--", ".", *patterns).returncode != 0:
+                return None
+            if git("reset", "-q", head.stdout.strip(), "--", *localio.TREE_FINGERPRINT_EVIDENCE_PATHS).returncode != 0:
+                return None
+            value = git("write-tree")
+            return value.stdout.strip() if value.returncode == 0 and value.stdout.strip() else None
+        except _ReadRefusal:
+            raise
+        except (OSError, subprocess.TimeoutExpired, _GitReadLimitExceeded):
+            return None
+
+
+def _verify_approval_snapshot(ctx: _Context, run_dir: Path) -> approval.ApprovalVerification:
+    from .run_checkpoint import MAX_JOURNAL_BYTES
+
+    target = _copy_public_trust(ctx)
+    ctx.reader.copy(run_dir / "run.json")
+    ctx.reader.copy(run_dir / "events" / "lifecycle.jsonl", limit=MAX_JOURNAL_BYTES)
+    for name in ("approvals", "requests"):
+        _copy_population(ctx, run_dir / name)
+    for name in ("request.json", "agent-request.json"):
+        ctx.reader.copy(run_dir / name)
+    _copy_population(
+        ctx, ctx.target / ".brigade/work/verify-runs", ("receipt.json", "attestation.json", "changes.patch")
+    )
+    # Compute the live workspace fact at its original location. Never infer
+    # freshness or SoD identity from the private dependency snapshot.
+    key_path = attestation.resolve_signing_key_path(ctx.target)
+    public_key = Path(str(key_path) + ".pub")
+    try:
+        public_key.relative_to(ctx.target)
+    except ValueError as exc:
+        raise _ReadRefusal("discovery_unreadable") from exc
+    live_tree = (
+        ctx.reader.approval_context.live_tree
+        if ctx.reader.approval_context is not None
+        else _approval_live_tree(ctx, key_path)
+    )
+    public_snapshot = ctx.reader.copy(public_key)
+    workspace_keyid = None
+    if public_key in ctx.reader.copied:
+        workspace_keyid = attestation.get_key_fingerprint(public_snapshot)
+    else:
+        try:
+            ctx.reader.info(key_path)
+        except FileNotFoundError:
+            pass
+        else:
+            # No private key reads, including ssh-keygen's implicit fallback.
+            ctx.reader.errors[public_key] = "discovery_unreadable"
+            raise _ReadRefusal("discovery_unreadable")
+    context = approval.ApprovalVerificationContext(
+        target=ctx.target,
+        live_tree=live_tree,
+        live_tree_state="computed" if live_tree is not None else "unavailable",
+        workspace_keyid=workspace_keyid,
+        workspace_keyid_state="computed" if workspace_keyid is not None else "unavailable",
+        receipts={},
+    )
+    ctx.reader.approval_context = context
+    return approval.verify_run_approval(
+        target,
+        target / run_dir.relative_to(ctx.target),
+        context=context,
+    )
 
 
 def _parse_timestamp(value: object) -> datetime | None:
@@ -186,28 +509,15 @@ def _bounded_children(ctx: _Context, root: Path) -> tuple[list[Path], bool, str 
     empty population; a symlinked or unreadable root is a discovery error, not
     an absence.
     """
-    refusal = _path_refusal(ctx, root)
-    if refusal is not None:
-        return [], False, refusal
     try:
-        mode = root.lstat().st_mode
+        descriptor = ctx.reader.directory(root)
+        if root not in ctx.reader.populations:
+            ctx.reader.populations[root] = dirfd.child_names(descriptor, _MAX + 1)
+        names = ctx.reader.populations[root]
     except FileNotFoundError:
         return [], False, None
-    except OSError:
-        return [], False, "discovery_unreadable"
-    if stat.S_ISLNK(mode):
-        return [], False, "symlink_refused"
-    if not stat.S_ISDIR(mode):
-        return [], False, "discovery_unreadable"
-    names: list[str] = []
-    try:
-        with os.scandir(root) as entries:
-            for entry in entries:
-                names.append(entry.name)
-                if len(names) > _MAX:
-                    break
-    except OSError:
-        return [], False, "discovery_unreadable"
+    except OSError as exc:
+        return [], False, ctx.reader.refusal(root, exc)
     return [root / name for name in sorted(names)[:_MAX]], len(names) > _MAX, None
 
 
@@ -245,7 +555,7 @@ def _discovery_path_present(ctx: _Context, out: _Discovery, path: Path, *, direc
         _record_discovery_error(out, ctx, path, refusal)
         return False
     try:
-        mode = path.lstat().st_mode
+        mode = ctx.reader.info(path).st_mode
     except FileNotFoundError:
         return False
     except OSError:
@@ -264,7 +574,21 @@ def _adapter_observation(
 ) -> control_readiness.ArtifactObservation:
     """Run a verifier adapter and hold its result to the readiness vocabulary."""
     try:
-        obs = control_readiness.validate_observation(adapter(ctx.target, artifact))
+        snapshot_artifact = ctx.reader.snapshot_target / artifact.relative_to(ctx.target)
+        if stat.S_ISDIR(ctx.reader.info(artifact).st_mode):
+            manifest = _read_json_object(ctx, artifact / "manifest.json")
+            ctx.reader.copy(artifact / "manifest.json")
+            if manifest is not None:
+                for entry in manifest.get("entries", []):
+                    name = entry.get("path") if isinstance(entry, dict) else None
+                    if not isinstance(name, str) or not evidence_package._is_safe_entry_path(name):
+                        raise _ReadRefusal("discovery_unreadable")
+                    ctx.reader.copy(artifact / name)
+        else:
+            snapshot_artifact = ctx.reader.copy(artifact)
+            ctx.reader.copy(artifact.parent / "receipt.json")
+        _copy_public_trust(ctx)
+        obs = control_readiness.validate_observation(adapter(ctx.reader.snapshot_target, snapshot_artifact))
     except Exception:
         return _verifier_unavailable(relpath, "verifier_error")
     obs.relpath = relpath
@@ -345,8 +669,8 @@ def _evaluate_verify_receipt_completed(ctx: _Context) -> _Discovery:
     """EC-01: completed verify receipt whose non-empty command list all exited 0."""
     found, out = _verify_receipt_children(ctx, "receipt.json")
     for run_dir, path in found:
-        receipt = None if (run_dir.is_symlink() or path.is_symlink()) else _read_json_object(ctx, path)
-        if run_dir.is_symlink() or path.is_symlink():
+        receipt = None if (_is_symlink(ctx, run_dir) or _is_symlink(ctx, path)) else _read_json_object(ctx, path)
+        if _is_symlink(ctx, run_dir) or _is_symlink(ctx, path):
             obs = _invalid(ctx, path, "symlink_refused")
         elif receipt is None:
             obs = _invalid(ctx, path, "invalid_json")
@@ -503,7 +827,7 @@ def _evaluate_sshsig_test_result_signed_ok(ctx: _Context) -> _Discovery:
     for run_dir, path in found:
         receipt = _read_json_object(ctx, run_dir / "receipt.json")
         relpath = _relpath(ctx, path)
-        if run_dir.is_symlink() or path.is_symlink():
+        if _is_symlink(ctx, run_dir) or _is_symlink(ctx, path):
             obs = _invalid(ctx, path, "symlink_refused")
         elif not _ssh_keygen_available():
             obs = _verifier_unavailable(relpath, "verifier_tool_unavailable")
@@ -511,7 +835,7 @@ def _evaluate_sshsig_test_result_signed_ok(ctx: _Context) -> _Discovery:
         else:
             try:
                 # Pin re-derivation to this directory's own receipt.
-                result = attestation.verify_attestation(path, target=ctx.target, require_receipt=True, receipt=receipt)
+                result = _verify_attestation_snapshot(ctx, path, require_receipt=True, receipt=receipt)
             except Exception:
                 obs = _verifier_unavailable(relpath, "verifier_error")
             else:
@@ -551,8 +875,8 @@ def _evaluate_cosign_bundle_exists(ctx: _Context) -> _Discovery:
     for run_dir, path in found:
         receipt = _read_json_object(ctx, run_dir / "receipt.json")
         relpath = _relpath(ctx, path)
-        bundle = None if (run_dir.is_symlink() or path.is_symlink()) else _read_json_object(ctx, path)
-        if run_dir.is_symlink() or path.is_symlink():
+        bundle = None if (_is_symlink(ctx, run_dir) or _is_symlink(ctx, path)) else _read_json_object(ctx, path)
+        if _is_symlink(ctx, run_dir) or _is_symlink(ctx, path):
             obs = _invalid(ctx, path, "symlink_refused")
         elif bundle is None:
             obs = _invalid(ctx, path, "invalid_json")
@@ -598,7 +922,7 @@ def _run_dirs(ctx: _Context) -> tuple[list[Path], _Discovery]:
         _record_discovery_error(out, ctx, root, refusal)
         return [], out
     try:
-        mode = root.lstat().st_mode
+        mode = ctx.reader.info(root).st_mode
     except FileNotFoundError:
         return [], out
     except OSError:
@@ -613,7 +937,7 @@ def _run_dirs(ctx: _Context) -> tuple[list[Path], _Discovery]:
     if ctx.run_id is not None:
         selected = root / ctx.run_id
         try:
-            mode = selected.lstat().st_mode
+            mode = ctx.reader.info(selected).st_mode
         except FileNotFoundError:
             return [], out
         except OSError:
@@ -628,7 +952,7 @@ def _run_dirs(ctx: _Context) -> tuple[list[Path], _Discovery]:
     directories = []
     for child in children:
         try:
-            mode = child.lstat().st_mode
+            mode = ctx.reader.info(child).st_mode
         except OSError:
             _record_discovery_error(out, ctx, child, "discovery_unreadable")
             continue
@@ -658,7 +982,7 @@ def _agent_request_paths(ctx: _Context, run_dir: Path, out: _Discovery) -> list[
         for name in ("agent-request.json", "request.json")
         if _discovery_path_present(ctx, out, run_dir / name)
     ]
-    if run_dir.is_symlink():
+    if _is_symlink(ctx, run_dir):
         return paths
     root = run_dir / "requests"
     children, truncated, error = _bounded_children(ctx, root)
@@ -676,23 +1000,23 @@ def _evaluate_agent_request_signed(ctx: _Context) -> _Discovery:
     """
     run_dirs, out = _run_dirs(ctx)
     for run_dir in run_dirs:
-        if run_dir.is_symlink():
+        if _is_symlink(ctx, run_dir):
             obs = _invalid(ctx, run_dir, "symlink_refused")
             _run_scope(obs, ctx, run_dir)
             out.observations.append(obs)
             continue
         for path in _agent_request_paths(ctx, run_dir, out):
             relpath = _relpath(ctx, path)
-            if run_dir.is_symlink() or path.is_symlink():
+            if _is_symlink(ctx, run_dir) or _is_symlink(ctx, path):
                 obs = _invalid(ctx, path, "symlink_refused")
             elif not _ssh_keygen_available():
                 obs = _verifier_unavailable(relpath, "verifier_tool_unavailable")
                 out.verifier_unavailable = True
             else:
                 try:
-                    result = attestation.verify_attestation(
+                    result = _verify_attestation_snapshot(
+                        ctx,
                         path,
-                        target=ctx.target,
                         expected_predicate_type=agent_request.AGENT_REQUEST_PREDICATE_TYPE,
                     )
                 except Exception:
@@ -727,7 +1051,7 @@ def _evaluate_human_approval_allow_with_sod(ctx: _Context) -> _Discovery:
     run_dirs, out = _run_dirs(ctx)
     for run_dir in run_dirs:
         relpath = _relpath(ctx, run_dir / "events" / "lifecycle.jsonl")
-        if run_dir.is_symlink():
+        if _is_symlink(ctx, run_dir):
             obs = _invalid(ctx, run_dir, "symlink_refused")
             _run_scope(obs, ctx, run_dir)
             out.observations.append(obs)
@@ -742,13 +1066,24 @@ def _evaluate_human_approval_allow_with_sod(ctx: _Context) -> _Discovery:
         if refused:
             continue
         try:
-            verification = approval.verify_run_approval(ctx.target, run_dir)
+            verification = _verify_approval_snapshot(ctx, run_dir)
+        except _ReadRefusal as exc:
+            if exc.reason == "read_limit_exceeded":
+                obs = _obs(
+                    relpath,
+                    "discovered",
+                    "incomplete",
+                    _dims(integrity="unknown", subject="unknown", population=("unknown", exc.reason)),
+                    [exc.reason],
+                )
+            else:
+                obs = _verifier_unavailable(relpath, "verifier_error")
         except Exception:
             obs = _verifier_unavailable(relpath, "verifier_error")
         else:
             unapproved = verification.status == "UNAPPROVED"
             refusal = (
-                _approval_journal_refusal(run_dir, relpath, unapproved=unapproved)
+                _approval_journal_refusal(ctx, run_dir, relpath, unapproved=unapproved)
                 if verification.status in {"UNAPPROVED", "APPROVAL-INVALID"}
                 else None
             )
@@ -781,7 +1116,7 @@ def _evaluate_human_approval_allow_with_sod(ctx: _Context) -> _Discovery:
 
 
 def _approval_journal_refusal(
-    run_dir: Path, relpath: str, *, unapproved: bool = False
+    ctx: _Context, run_dir: Path, relpath: str, *, unapproved: bool = False
 ) -> control_readiness.ArtifactObservation | None:
     """Recover journal failures and read refusals hidden by approval status.
 
@@ -792,7 +1127,7 @@ def _approval_journal_refusal(
     establish an integrity failure, regardless of signature-tool availability.
     """
     try:
-        report = run_journal.read_journal_bounded(run_dir / "events" / "lifecycle.jsonl")
+        report = _read_journal(ctx, run_dir / "events" / "lifecycle.jsonl")
     except run_journal.RunJournalError as exc:
         if "bound exceeded" not in str(exc):
             if unapproved:
@@ -826,7 +1161,7 @@ def _approval_prerequisite_failure(ctx: _Context, run_dir: Path) -> tuple[str, s
     attestation path and decodable statement.
     """
     try:
-        report = run_journal.read_journal_bounded(run_dir / "events" / "lifecycle.jsonl")
+        report = _read_journal(ctx, run_dir / "events" / "lifecycle.jsonl")
     except run_journal.RunJournalError as exc:
         # A read bound is not a known failure; the claim stays unavailable.
         return None if "bound exceeded" in str(exc) else ("integrity", "journal_chain_error")
@@ -887,11 +1222,11 @@ def _evaluate_run_event_journal_exists(ctx: _Context) -> _Discovery:
         if not _discovery_path_present(ctx, out, path):
             continue
         relpath = _relpath(ctx, path)
-        if run_dir.is_symlink() or path.is_symlink():
+        if _is_symlink(ctx, run_dir) or _is_symlink(ctx, path):
             obs = _invalid(ctx, path, "symlink_refused")
         else:
             try:
-                report = run_journal.read_journal_bounded(path)
+                report = _read_journal(ctx, path)
             except run_journal.RunJournalError as exc:
                 if "bound exceeded" in str(exc):
                     obs = _obs(
@@ -988,8 +1323,8 @@ def _evaluate_governance_inventory_exists(ctx: _Context) -> _Discovery:
     ):
         if not _discovery_path_present(ctx, out, path):
             continue
-        payload = None if path.is_symlink() else _read_json_object(ctx, path)
-        if path.is_symlink():
+        payload = None if _is_symlink(ctx, path) else _read_json_object(ctx, path)
+        if _is_symlink(ctx, path):
             obs = _invalid(ctx, path, "symlink_refused")
         elif payload is None:
             obs = _invalid(ctx, path, "invalid_json")
@@ -1009,10 +1344,10 @@ class _GitReadLimitExceeded(ValueError):
     """Git output crossed the fixed capture or transport byte budget."""
 
 
-def _git(ctx: _Context, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def _git(ctx: _Context | Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """Read both Git pipes under proc's fixed byte budgets and ten-second timeout."""
     argv = ["git", *args]
-    bounded = proc.run(argv, cwd=ctx.target, env=env, timeout=10)
+    bounded = proc.run(argv, cwd=ctx.target if isinstance(ctx, _Context) else ctx, env=env, timeout=10)
     if bounded.output_limit_exceeded or bounded.stream_limit_exceeded:
         raise _GitReadLimitExceeded
     # proc decodes UTF-8 with replacement, as the original Git calls did.
@@ -1035,7 +1370,7 @@ def _is_git_repo(target: Path) -> bool | None:
     """True for a repository, False for a reported non-repository, None for a probe error."""
     try:
         result = _git(
-            _Context(target, None, None),
+            target,
             "rev-parse",
             "--git-dir",
             env={**os.environ, "LC_ALL": "C"},
@@ -1156,13 +1491,13 @@ def _assess_trailer(
     if refusal is not None:
         return _verifier_unavailable(relpath, refusal)
     try:
-        run_mode = run_dir.lstat().st_mode
+        run_mode = ctx.reader.info(run_dir).st_mode
     except FileNotFoundError:
         run_mode = 0
     except OSError:
         return _verifier_unavailable(relpath, "discovery_unreadable")
     try:
-        receipt_mode = run_json.lstat().st_mode
+        receipt_mode = ctx.reader.info(run_json).st_mode
     except FileNotFoundError:
         receipt_mode = 0
     except OSError:
@@ -1234,9 +1569,9 @@ def _evaluate_guard_audit_allow(ctx: _Context) -> _Discovery:
     path = ctx.target / ".brigade" / "work" / "guard" / "audit.json"
     if not _discovery_path_present(ctx, out, path):
         return out
-    payload = None if path.is_symlink() else _read_json_object(ctx, path)
+    payload = None if _is_symlink(ctx, path) else _read_json_object(ctx, path)
     relpath = _relpath(ctx, path)
-    if path.is_symlink():
+    if _is_symlink(ctx, path):
         obs = _invalid(ctx, path, "symlink_refused")
     elif payload is None:
         obs = _invalid(ctx, path, "invalid_json")
@@ -1259,12 +1594,14 @@ def _evaluate_guard_audit_allow(ctx: _Context) -> _Discovery:
 _MAX_JSONL_RECORDS = 10_000
 
 
-def _read_jsonl_records(path: Path) -> tuple[list[dict[str, Any]] | None, str | None]:
+def _read_jsonl_records(ctx: _Context, path: Path) -> tuple[list[dict[str, Any]] | None, str | None]:
     """Bounded strict JSONL read: (records, None) or (None, reason_code)."""
     try:
-        raw = attestation_input.read_bounded_file(path, max_bytes=attestation_input.MAX_JSON_BYTES)
-    except attestation_input.AttestationInputError as exc:
-        return None, "read_limit_exceeded" if "byte limit" in str(exc) else "invalid_json"
+        raw = ctx.reader.read(path)
+    except (attestation_input.AttestationInputError, _ReadRefusal) as exc:
+        return None, "read_limit_exceeded" if "byte limit" in str(exc) or "read_limit_exceeded" in str(
+            exc
+        ) else "invalid_json"
     except OSError:
         return None, "invalid_json"
     records: list[dict[str, Any]] = []
@@ -1291,10 +1628,10 @@ def _evaluate_jsonl_ledger(
         return out
     relpath = _relpath(ctx, path)
     timestamp: datetime | None = None
-    if path.is_symlink():
+    if _is_symlink(ctx, path):
         obs = _invalid(ctx, path, "symlink_refused")
     else:
-        records, reason = _read_jsonl_records(path)
+        records, reason = _read_jsonl_records(ctx, path)
         if records is None and reason == "read_limit_exceeded":
             obs = _obs(
                 relpath,
@@ -1364,8 +1701,8 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
         if not _discovery_path_present(ctx, out, path):
             continue
         relpath = _relpath(ctx, path)
-        manifest = None if (package_dir.is_symlink() or path.is_symlink()) else _read_json_object(ctx, path)
-        if package_dir.is_symlink() or path.is_symlink():
+        manifest = None if (_is_symlink(ctx, package_dir) or _is_symlink(ctx, path)) else _read_json_object(ctx, path)
+        if _is_symlink(ctx, package_dir) or _is_symlink(ctx, path):
             obs = _invalid(ctx, path, "symlink_refused")
         elif manifest is None:
             obs = _invalid(ctx, path, "invalid_json")
@@ -1416,7 +1753,7 @@ def _assess_package_manifest(
             return _obs(relpath, "discovered", "invalid", _dims(population=("unknown", refusal)), [refusal])
         if refusal is not None:
             return _verifier_unavailable(relpath, refusal)
-        if entry_path.is_symlink() or not entry_path.is_file():
+        if _is_symlink(ctx, entry_path) or not _is_regular(ctx, entry_path):
             return _obs(
                 relpath,
                 "structure_observed",
@@ -1533,9 +1870,31 @@ def assess_claim(
         raise ControlCrosswalkError(f"unknown state_rule: {state_rule}")
     if run_id is not None and not receipts_trailer._is_bare_run_id(run_id):
         raise ControlCrosswalkError("run id must be a bare run directory name")
-    ctx = _Context(target=target.expanduser().resolve(), run_id=run_id, period=_normalize_period(period))
-    discovery = rule.evaluate(ctx)
-    required = rule.required | ({"freshness"} if ctx.period is not None else frozenset())
+    canonical = target.expanduser().resolve()
+    normalized_period = _normalize_period(period)
+    try:
+        reader = _AssessmentReader(canonical)
+    except OSError:
+        discovery = _Discovery(observations=[_verifier_unavailable(".", "discovery_unreadable")])
+    else:
+        ctx = _Context(target=canonical, run_id=run_id, period=normalized_period, reader=reader)
+        try:
+            discovery = rule.evaluate(ctx)
+            existing = {(obs.relpath, reason) for obs in discovery.observations for reason in obs.reasons}
+            for path, reason in reader.errors.items():
+                if (_relpath(ctx, path), reason) in existing:
+                    continue
+                if reason == "read_limit_exceeded":
+                    obs = _obs(
+                        _relpath(ctx, path), "discovered", "incomplete", _dims(population=("unknown", reason)), [reason]
+                    )
+                    _claim_wide(obs, ctx)
+                    discovery.observations.append(obs)
+                else:
+                    _record_discovery_error(discovery, ctx, path, reason)
+        finally:
+            reader.close()
+    required = rule.required | ({"freshness"} if normalized_period is not None else frozenset())
     verifier_status = "unavailable" if discovery.verifier_unavailable else rule.verifier_status
     scan_limit = _TRAILER_WINDOW if state_rule == "commit-trailer-receipts" else _MAX
     return control_readiness.aggregate(
@@ -1547,7 +1906,7 @@ def assess_claim(
         truncated=discovery.truncated,
         scan_limit=scan_limit,
         run_scoped=run_id is not None,
-        period_supplied=ctx.period is not None,
+        period_supplied=normalized_period is not None,
         not_applicable_reason=discovery.not_applicable_reason,
         window=discovery.window,
     )

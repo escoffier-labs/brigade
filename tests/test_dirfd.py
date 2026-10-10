@@ -169,3 +169,70 @@ def test_authority_store_availability_aliases_match_dirfd() -> None:
     assert authority_store._posix_dirfd_available() is dirfd.posix_available()
     assert authority_store._nt_dirfd_available() is (sys.platform == "win32")
     assert authority_store._dirfd_available() is dirfd.available()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory rename interleaving")
+def test_child_names_enumerates_the_held_directory_after_ancestor_swap(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    directory = parent / "entries"
+    directory.mkdir(parents=True)
+    (directory / "original").touch()
+    outside = tmp_path / "outside"
+    (outside / "entries").mkdir(parents=True)
+    (outside / "entries/forged").touch()
+    descriptor = dirfd.open_directory_nofollow(directory)
+    try:
+        parent.rename(tmp_path / "moved")
+        parent.symlink_to(outside, target_is_directory=True)
+        assert dirfd.child_names(descriptor, 2) == ["original"]
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize("malformed", [None, "size", "offset", "length", "utf16", "status", "unavailable"])
+def test_nt_directory_enumeration_is_bounded_and_rejects_malformed_replies(monkeypatch, malformed):
+    import ctypes
+    import struct
+    from types import SimpleNamespace
+
+    from brigade.work_cmd import nt_dirfd
+
+    names = iter([".", "..", "original", "not-read"])
+    calls = []
+
+    def query(handle, event, apc, context, block, buffer, capacity, info_class, single, pattern, restart):
+        calls.append((handle, capacity, info_class, single, restart))
+        if malformed == "status":
+            return 0x80000005  # STATUS_BUFFER_OVERFLOW is never a complete entry.
+        raw = next(names).encode("utf-16-le")
+        offset = 1 if malformed == "offset" else 0
+        length = 3 if malformed == "length" else len(raw)
+        if malformed == "utf16":
+            raw = b"\x00\xd8"  # unpaired surrogate
+            length = len(raw)
+        record = struct.pack("<III", offset, 0, length) + raw
+        ctypes.memmove(buffer, record, len(record))
+        iosb = ctypes.cast(block, ctypes.POINTER(nt_dirfd._IO_STATUS_BLOCK)).contents
+        iosb.Information = capacity + 1 if malformed == "size" else len(record)
+        return 0
+
+    api = SimpleNamespace(
+        IO_STATUS_BLOCK=nt_dirfd._IO_STATUS_BLOCK, NtQueryDirectoryFile=None if malformed == "unavailable" else query
+    )
+    monkeypatch.setattr(nt_dirfd, "_require_api", lambda: api)
+    monkeypatch.setattr(nt_dirfd, "_handle_from_fd", lambda fd: 99)
+    if malformed:
+        with pytest.raises(OSError):
+            nt_dirfd.child_names(3, 1)
+    else:
+        assert nt_dirfd.child_names(3, 1) == ["original"]
+        assert len(calls) == 3
+        assert calls[0] == (99, 65548, 12, True, True)
+        assert all(call[-1] is False for call in calls[1:])
+
+
+def test_child_names_never_falls_back_to_a_pathname(monkeypatch):
+    monkeypatch.setattr(dirfd, "posix_available", lambda: False)
+    monkeypatch.setattr(dirfd, "nt_available", lambda: False)
+    with pytest.raises(OSError, match="directory enumeration.*unavailable"):
+        dirfd.child_names(3, 1)
