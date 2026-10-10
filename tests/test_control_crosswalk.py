@@ -1764,6 +1764,97 @@ def test_ec05_known_journal_failure_survives_missing_ssh_keygen(tmp_path, monkey
     assert readiness["reason"] == "verifier_tool_unavailable"
 
 
+@pytest.mark.parametrize(
+    ("journal_case", "outcome", "reason"),
+    [
+        ("malformed_prefix", "rejected", "journal_chain_error"),
+        ("partial_tail", "incomplete", "journal_partial_tail"),
+        ("event_bound", "incomplete", "read_limit_exceeded"),
+        ("byte_bound", "incomplete", "read_limit_exceeded"),
+        ("clean", "absent", "no_artifacts"),
+        ("empty", "absent", "no_artifacts"),
+        ("missing", "absent", "no_artifacts"),
+    ],
+)
+def test_ec05_unapproved_journal_cannot_hide_behind_valid_sibling(tmp_path, monkeypatch, journal_case, outcome, reason):
+    from brigade import approval, run_checkpoint, run_journal
+
+    from tests import test_approval as approval_fixtures
+
+    # Use a real signed approval and real journal reads for both runs. The
+    # existing status-mapping mock cannot expose parser short-circuiting.
+    good_id = "approved-run"
+    target, key, _ = approval_fixtures._workspace(tmp_path, run_id=good_id, requester_principal=None)
+    approval_fixtures._record_v1_approval(target, key, run_id=good_id)
+    good_dir = target / ".brigade/runs" / good_id
+    good_journal = good_dir / "events/lifecycle.jsonl"
+    good_report = run_journal.read_journal_bounded(good_journal)
+    assert approval.verify_run_approval(target, good_dir).status == "APPROVED"
+    assert _assess(target, "EC-05")["outcome"] == "validated"
+
+    bad_dir = target / ".brigade/runs/unapproved-run"
+    _write_json(bad_dir / "run.json", {"run_id": bad_dir.name})
+    journal = bad_dir / "events/lifecycle.jsonl"
+    journal.parent.mkdir()
+    if journal_case == "malformed_prefix":
+        _approval_journal(bad_dir, broken=False)
+        journal.write_bytes(b"null\n" + journal.read_bytes())
+    elif journal_case == "partial_tail":
+        journal.write_bytes(b'{"partial":')
+    elif journal_case == "empty":
+        journal.write_bytes(b"")
+    elif journal_case != "missing":
+        count = 1 if journal_case == "clean" else 3
+        for sequence in range(1, count + 1):
+            run_journal.append_event(
+                journal,
+                run_id=bad_dir.name,
+                event_type="run.created",
+                payload={"status": "started"},
+                idempotency_key=f"created-{sequence}",
+                expected_previous_sequence=sequence - 1,
+                recorded_at="2026-09-03T11:59:00.000000Z",
+            )
+        if journal_case in {"event_bound", "byte_bound"}:
+            run_journal.append_event(
+                journal,
+                run_id=bad_dir.name,
+                event_type="approval",
+                payload=good_report.events[-1].payload,
+                idempotency_key="hidden-approval",
+                expected_previous_sequence=count,
+                recorded_at="2026-09-03T12:01:00.000000Z",
+            )
+            if journal_case == "event_bound":
+                monkeypatch.setattr(run_checkpoint, "MAX_JOURNAL_EVENTS", len(good_report.events))
+            else:
+                limit = good_journal.stat().st_size
+                assert journal.stat().st_size > limit
+                monkeypatch.setattr(run_checkpoint, "MAX_JOURNAL_BYTES", limit)
+
+    expected_status = "APPROVAL-INVALID" if journal_case in {"event_bound", "byte_bound"} else "UNAPPROVED"
+    assert approval.verify_run_approval(target, bad_dir).status == expected_status
+    if journal_case == "malformed_prefix":
+        report = run_journal.read_journal_bounded(journal)
+        assert report.events == []
+        assert report.chain_errors
+
+    scoped = _assess(target, "EC-05", bad_dir.name)
+    assert scoped["outcome"] == outcome
+    assert scoped["reason"] == reason
+    mixed = _assess(target, "EC-05")
+    assert mixed["population"]["validated"] == 1
+    if outcome == "absent":
+        assert mixed["outcome"] == "validated"
+        assert mixed["population"]["discovered"] == 1
+    else:
+        assert mixed["outcome"] == outcome
+        assert mixed["legacy_state"] == ("evidenced_failed" if outcome == "rejected" else "untested")
+        assert mixed["population"][outcome] == 1
+        assert mixed["population"]["discovered"] == 2
+        assert reason in mixed["reason_codes"]
+
+
 @pytest.mark.parametrize("run_record", [None, "{broken", "[]"])
 def test_ec05_invalid_run_record_survives_missing_ssh_keygen(tmp_path, monkeypatch, run_record):
     from brigade import approval
