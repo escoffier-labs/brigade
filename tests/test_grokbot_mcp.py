@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -593,6 +595,61 @@ def test_queue_claim_failure_releases_a_granted_fleet_claim(tmp_path: Path, monk
     assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "queued"
     assert [kind for kind, _payload in calls] == ["claim", "release"]
     assert calls[1][1]["holder"] == grokbot_mcp.fleet_holder(job_id, "lease-rollback")
+
+
+@pytest.mark.skipif(not grokbot_jobs.dirfd_mod.posix_available(), reason="directory fsync requires POSIX storage")
+@pytest.mark.parametrize("failure", ["file-fsync", "replace", "directory-fsync"])
+def test_first_claim_keeps_hub_ownership_after_replace(tmp_path: Path, monkeypatch, caplog, failure):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    releases: list[str] = []
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda _target: "example/brigade")
+    monkeypatch.setattr(
+        fleet_client,
+        "acquire_claim",
+        lambda _target, **kwargs: fleet_client.ClaimDecision(True, "ok", holder=kwargs["holder"]),
+    )
+    monkeypatch.setattr(fleet_client, "release_claim", lambda *_args, **_kwargs: releases.append("fleet"))
+    monkeypatch.setattr(fleet_client, "admit_cloud", lambda *_args, **_kwargs: fleet_client.CloudDecision(True, "ok"))
+    monkeypatch.setattr(fleet_client, "release_cloud", lambda *_args, **_kwargs: releases.append("cloud"))
+    monkeypatch.setattr(fleet_client, "bind_cloud", lambda *_args, **_kwargs: fleet_client.CloudDecision(True, "ok"))
+    monkeypatch.setattr(fleet_client, "report_external_event", lambda **_kwargs: None)
+    real_fsync = os.fsync
+    injected: list[str] = []
+
+    def fail_fsync(descriptor):
+        is_directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
+        if (failure == "directory-fsync" and is_directory) or (failure == "file-fsync" and not is_directory):
+            injected.append(failure)
+            raise OSError("injected fsync failure")
+        real_fsync(descriptor)
+
+    def fail_replace(*_args, **_kwargs):
+        injected.append(failure)
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(os, "fsync", fail_fsync)
+    if failure == "replace":
+        monkeypatch.setattr(os, "replace", fail_replace)
+    arguments = {"job_id": job_id, "lease_id": "lease-a"}
+    if failure == "directory-fsync":
+        # A refusal must not hide a persisted row whose hub ownership was released.
+        try:
+            result = adapter.call_tool("grokbot_queue_claim", arguments)
+        except grokbot_mcp.AdapterError:
+            result = None
+        assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "claimed"
+        assert releases == []
+        assert result is not None and result["lease_id"] == "lease-a"
+        assert "crash durability is uncertain" in caplog.text
+        assert adapter.call_tool("grokbot_queue_claim", arguments)["lease_id"] == "lease-a"
+        assert releases == []
+    else:
+        with pytest.raises(grokbot_mcp.AdapterError):
+            adapter.call_tool("grokbot_queue_claim", arguments)
+        assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "queued"
+        assert releases == ["cloud", "fleet"]
+    assert injected == [failure]
 
 
 def test_fleet_outage_does_not_fail_queue_claim(tmp_path: Path, monkeypatch):
