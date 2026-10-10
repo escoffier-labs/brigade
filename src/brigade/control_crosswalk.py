@@ -225,8 +225,8 @@ def _discovery_path_present(ctx: _Context, out: _Discovery, path: Path, *, direc
         mode = ctx.reader.info(path).st_mode
     except FileNotFoundError:
         return False
-    except OSError:
-        _record_discovery_error(out, ctx, path, "discovery_unreadable")
+    except OSError as exc:
+        _record_discovery_error(out, ctx, path, ctx.reader.refusal(path, exc))
         return False
     if directory:
         if stat.S_ISLNK(mode):
@@ -1091,7 +1091,7 @@ def _assess_trailer(
         return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
     run_dir = ctx.target / ".brigade" / "runs" / run_id_value
     run_json = run_dir / "run.json"
-    refusal = _path_refusal(ctx, run_json)
+    refusal = _path_refusal(ctx, run_json, include_leaf=True)
     if refusal == "symlink_refused":
         return _obs(
             relpath,

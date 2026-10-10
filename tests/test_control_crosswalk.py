@@ -1346,6 +1346,8 @@ def control_readiness_max() -> int:
 def test_directory_scan_reads_a_bounded_number_of_entries(tmp_path, monkeypatch):
     import os
 
+    from brigade import dirfd
+
     target = _ws(tmp_path)
     for index in range(12):
         (_verify_dir(target, f"r{index:02d}")).mkdir(parents=True)
@@ -1369,6 +1371,29 @@ def test_directory_scan_reads_a_bounded_number_of_entries(tmp_path, monkeypatch)
                 yield entry
 
     monkeypatch.setattr(os, "scandir", CountingScandir)
+    if dirfd.nt_available():
+        import ctypes
+        import struct
+
+        from brigade.work_cmd import nt_dirfd
+
+        # NT enumerates the held handle directly, without os.scandir. Count
+        # actual query replies, excluding the two directory pseudoentries.
+        api = nt_dirfd._require_api()
+        real_query = api.NtQueryDirectoryFile
+
+        def counting_query(*args):
+            status = real_query(*args)
+            if int(status) == 0:
+                size = ctypes.cast(args[4], ctypes.POINTER(api.IO_STATUS_BLOCK)).contents.Information
+                raw = ctypes.string_at(args[5], size)
+                length = struct.unpack_from("<III", raw)[2]
+                name = raw[12 : 12 + length].decode("utf-16-le")
+                if name not in {".", ".."}:
+                    pulled.append(name)
+            return status
+
+        monkeypatch.setattr(api, "NtQueryDirectoryFile", counting_query)
     readiness = _assess(target, "EC-01")
     assert len(pulled) == 4
     assert readiness["population"]["truncated"] is True
