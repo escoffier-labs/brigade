@@ -73,7 +73,7 @@ class _AssessmentReader:
             key = parts[: index + 1]
             if key not in self.directories:
                 info = dirfd.stat_child(parent, name)
-                if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                if stat.S_ISLNK(info.st_mode) or (getattr(info, "st_file_attributes", 0) or 0) & 0x400:
                     raise _ReadRefusal("symlink_refused")
                 if not stat.S_ISDIR(info.st_mode):
                     raise _ReadRefusal("discovery_unreadable")
@@ -210,12 +210,13 @@ def _read_json_object(ctx: _ReadContext, path: Path) -> dict[str, Any] | None:
 def _is_symlink(ctx: _ReadContext, path: Path) -> bool:
     try:
         info = ctx.reader.info(path)
-        return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+        return stat.S_ISLNK(info.st_mode) or bool((getattr(info, "st_file_attributes", 0) or 0) & 0x400)
     except FileNotFoundError:
         return False
     except OSError as exc:
-        ctx.reader.refusal(path, exc)
-        return isinstance(exc, _ReadRefusal) and exc.reason == "symlink_refused"
+        # NT metadata opens refuse reparse points instead of returning link
+        # metadata. Preserve that refusal just as POSIX S_IFLNK metadata does.
+        return ctx.reader.refusal(path, exc) == "symlink_refused"
 
 
 def _is_regular(ctx: _ReadContext, path: Path) -> bool:
@@ -495,8 +496,8 @@ def _run_directories(ctx: _ReadContext, run_id: str | None, *, max_children: int
         mode = ctx.reader.info(root).st_mode
     except FileNotFoundError:
         return out
-    except OSError:
-        out.errors.append((root, "discovery_unreadable"))
+    except OSError as exc:
+        out.errors.append((root, ctx.reader.refusal(root, exc)))
         return out
     if stat.S_ISLNK(mode):
         out.errors.append((root, "symlink_refused"))
@@ -510,8 +511,8 @@ def _run_directories(ctx: _ReadContext, run_id: str | None, *, max_children: int
             mode = ctx.reader.info(selected).st_mode
         except FileNotFoundError:
             return out
-        except OSError:
-            out.errors.append((selected, "discovery_unreadable"))
+        except OSError as exc:
+            out.errors.append((selected, ctx.reader.refusal(selected, exc)))
             return out
         out.paths = [selected] if stat.S_ISDIR(mode) or stat.S_ISLNK(mode) else []
         return out
@@ -525,8 +526,8 @@ def _run_directories(ctx: _ReadContext, run_id: str | None, *, max_children: int
     for child in children:
         try:
             mode = ctx.reader.info(child).st_mode
-        except OSError:
-            out.errors.append((child, "discovery_unreadable"))
+        except OSError as exc:
+            out.errors.append((child, ctx.reader.refusal(child, exc)))
             continue
         if stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
             directories.append(child)
