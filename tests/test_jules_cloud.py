@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -286,7 +288,7 @@ class TestInventory:
             "pull_request_url": "https://github.com/owner/repo/pull/7",
             "has_outputs": True,
         }
-        assert opener.calls[0].full_url.endswith("/sessions/sess-1")
+        assert urllib.parse.urlsplit(opener.calls[0].full_url).path.endswith("/sessions/sess-1")
 
     def test_sanitize_session_never_carries_activity_kinds(self):
         # Activity evidence is only reachable via list_activities. A session row
@@ -438,7 +440,7 @@ class TestIdentifierValidation:
     def test_session_id_path_segment_is_percent_encoded(self):
         opener = FakeOpener([_json_response({"id": "weird id?x=1", "state": "QUEUED"})])
         jules_cloud.get_session("weird id?x=1", _FAKE_KEY, opener=opener.open)
-        assert opener.calls[0].full_url.endswith("/sessions/weird%20id%3Fx%3D1")
+        assert urllib.parse.urlsplit(opener.calls[0].full_url).path.endswith("/sessions/weird%20id%3Fx%3D1")
 
     @pytest.mark.parametrize("mode", ["auto_create_pr", "AUTO_MERGE", "", "  ", 1, True])
     def test_invalid_automation_mode_rejected_before_post(self, mode):
@@ -616,6 +618,195 @@ class TestStateAndErrors:
         with pytest.raises(jules_cloud.JulesCloudError) as exc_info:
             jules_cloud.list_sessions(_FAKE_KEY, opener=opener.open)
         assert "valid JSON" in str(exc_info.value)
+
+
+_HUGE = 70 * 1024
+# Supported metadata leaves, independently specified from the API contract.
+# Equivalent field order and whitespace must not change the test outcome.
+_SESSION_FIELDS = {
+    "id",
+    "name",
+    "state",
+    "createTime",
+    "updateTime",
+    "url",
+    "outputs.pullRequest.url",
+    "outputs.changeSet.source",
+}
+_LIST_FIELDS = {f"sessions.{field}" for field in _SESSION_FIELDS} | {"nextPageToken"}
+
+
+def _full_session(session_id: str, *, outputs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """A provider-shaped session whose prompt and outputs dwarf the response cap."""
+    session: dict[str, Any] = {
+        "name": f"sessions/{session_id}",
+        "id": session_id,
+        "state": "COMPLETED",
+        "createTime": "2026-10-01T10:00:00Z",
+        "updateTime": "2026-10-01T11:00:00Z",
+        "url": f"https://jules.google.com/session/{session_id}",
+        "prompt": "PRIVATE-PROMPT " + "p" * _HUGE,
+        "title": "PRIVATE-TITLE",
+        "sourceContext": {"source": "sources/github/owner/repo"},
+        "automationMode": "AUTO_CREATE_PR",
+    }
+    if outputs is not None:
+        session["outputs"] = outputs
+    return session
+
+
+def _pr_output(number: int) -> dict[str, Any]:
+    return {
+        "pullRequest": {
+            "url": f"https://github.com/owner/repo/pull/{number}",
+            "title": "PRIVATE-PR-TITLE",
+            "description": "PRIVATE-PR-DESCRIPTION " + "d" * _HUGE,
+        }
+    }
+
+
+def _changeset_output() -> dict[str, Any]:
+    return {
+        "changeSet": {
+            "source": "sources/github/owner/repo",
+            "gitPatch": {"unidiffPatch": "PRIVATE-PATCH " + "+" * _HUGE, "suggestedCommitMessage": "PRIVATE"},
+        }
+    }
+
+
+def _field_paths(selector: str) -> set[str]:
+    """Flatten nested or slash-separated Google field selections."""
+    paths: set[str] = set()
+    parents: list[str] = []
+    field = ""
+    for token in re.findall(r"[^(),\s]+|[(),]", selector):
+        if token == "(":
+            parents.append(field)
+            field = ""
+        elif token in {",", ")"}:
+            if field:
+                paths.add(".".join([*parents, field]).replace("/", "."))
+                field = ""
+            if token == ")":
+                parents.pop()
+        else:
+            field = token
+    if field:
+        paths.add(".".join([*parents, field]).replace("/", "."))
+    return paths
+
+
+def _project_fields(value: Any, fields: set[str]) -> Any:
+    """Apply the provider's partial-response selection to the full fixture."""
+    if isinstance(value, list):
+        return [_project_fields(item, fields) for item in value]
+    if not isinstance(value, dict):
+        return value
+    projected = {}
+    for key, item in value.items():
+        nested = {field.removeprefix(f"{key}.") for field in fields if field.startswith(f"{key}.")}
+        if key in fields:
+            projected[key] = item
+        elif nested:
+            projected[key] = _project_fields(item, nested)
+    return projected
+
+
+class ProjectingOpener(FakeOpener):
+    """GET-only provider honoring the documented ``fields`` partial response.
+
+    With no selector it returns the full payload, like the live API, so a
+    caller that omits the projection trips the response size cap.
+    """
+
+    def __init__(self, routes: dict[tuple[str, str | None], dict[str, Any]]):
+        super().__init__([])
+        self.routes = routes
+        self.selections: list[tuple[set[str], set[str]]] = []
+
+    def __call__(self, req: urllib_request.Request, timeout: float | None = None):
+        self.calls.append(req)
+        split = urllib.parse.urlsplit(req.full_url)
+        query = urllib.parse.parse_qs(split.query)
+        body = self.routes[(split.path, query.get("pageToken", [None])[0])]
+        selector = query.get("fields", [None])[0]
+        if selector is not None:
+            selected = _field_paths(selector)
+            self.selections.append((selected, _LIST_FIELDS if "sessions" in body else _SESSION_FIELDS))
+            body = _project_fields(body, selected)
+        return _raw_response(json.dumps(body).encode("utf-8"))
+
+    def assert_contract(self):
+        # Assert outside the transport callback so _call cannot sanitize away
+        # the test's useful selector/method mismatch diagnostics.
+        assert len(self.selections) == len(self.calls)
+        assert all(call.method == "GET" for call in self.calls)
+        for selected, expected in self.selections:
+            assert selected == expected
+
+
+def _row(session_id: str, *, pr: int | None = None, has_outputs: bool) -> dict[str, Any]:
+    return {
+        "id": session_id,
+        "state": "completed",
+        "create_time": "2026-10-01T10:00:00Z",
+        "update_time": "2026-10-01T11:00:00Z",
+        "url": f"https://jules.google.com/session/{session_id}",
+        "pull_request_url": f"https://github.com/owner/repo/pull/{pr}" if pr else None,
+        "has_outputs": has_outputs,
+    }
+
+
+class TestSessionFieldProjection:
+    """#1498: real session payloads exceed the cap unless metadata is projected."""
+
+    def test_list_sessions_inventories_oversized_sessions_across_pages(self):
+        page_one = {
+            "sessions": [
+                _full_session("s-pr", outputs=[_pr_output(7), _changeset_output()]),
+                _full_session("s-changes", outputs=[_changeset_output()]),
+            ],
+            "nextPageToken": "p1",
+        }
+        page_two = {"sessions": [_full_session("s-bare")]}
+        opener = ProjectingOpener({("/v1alpha/sessions", None): page_one, ("/v1alpha/sessions", "p1"): page_two})
+
+        sessions = jules_cloud.list_sessions(_FAKE_KEY, opener=opener.open, max_pages=5, max_items=10)
+
+        assert sessions == [
+            _row("s-pr", pr=7, has_outputs=True),
+            _row("s-changes", has_outputs=True),
+            _row("s-bare", has_outputs=False),
+        ]
+        assert len(opener.calls) == 2
+        assert "pageToken=p1" in opener.calls[1].full_url
+        opener.assert_contract()
+
+    def test_get_session_reads_oversized_session(self):
+        session = _full_session("s-pr", outputs=[_changeset_output(), _pr_output(9)])
+        opener = ProjectingOpener({("/v1alpha/sessions/s-pr", None): session})
+
+        assert jules_cloud.get_session("s-pr", _FAKE_KEY, opener=opener.open) == _row("s-pr", pr=9, has_outputs=True)
+        assert len(opener.calls) == 1
+        opener.assert_contract()
+
+    @pytest.mark.parametrize("read", ["get", "list", "list-second-page"])
+    def test_provider_ignoring_projection_hits_size_cap_without_unfiltered_retry(self, read):
+        session = _full_session("s-pr", outputs=[_pr_output(7)])
+        payload = session if read == "get" else {"sessions": [session]}
+        responses = [_raw_response(json.dumps(payload).encode("utf-8"))]
+        if read == "list-second-page":
+            responses.insert(0, _json_response({"sessions": [{"id": "s-first"}], "nextPageToken": "p1"}))
+        opener = FakeOpener(responses)
+        with pytest.raises(jules_cloud.JulesCloudError, match="size limit"):
+            if read == "get":
+                jules_cloud.get_session("s-pr", _FAKE_KEY, opener=opener.open)
+            else:
+                jules_cloud.list_sessions(_FAKE_KEY, opener=opener.open)
+        assert len(opener.calls) == (2 if read == "list-second-page" else 1)
+        for call in opener.calls:
+            selector = urllib.parse.parse_qs(urllib.parse.urlsplit(call.full_url).query)["fields"][0]
+            assert _field_paths(selector) == (_SESSION_FIELDS if read == "get" else _LIST_FIELDS)
 
 
 class TestLaunchGate:
