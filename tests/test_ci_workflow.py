@@ -1147,7 +1147,12 @@ def test_native_windows_containment_is_required_and_rejects_selected_skips():
     assert "runs-on: windows-latest" in section
     assert "continue-on-error" not in section
     install = _workflow_step_section(text, "windows-native-acceptance", "Install containment test dependencies")
-    assert 'python -m pip install -e ".[dev]"' in install
+    assert '$venv = Join-Path $env:RUNNER_TEMP "containment-venv"' in install
+    assert "python -m venv $venv" in install
+    assert '$python = Join-Path $venv "Scripts/python.exe"' in install
+    assert '& $python -m pip install -e ".[dev]"' in install
+    assert install.index("python -m venv $venv") < install.index("& $python -m pip install")
+    assert 'throw "containment venv creation failed"' in install
     assert "$LASTEXITCODE -ne 0" in install
     probe = _workflow_step_section(text, "windows-native-acceptance", "Run native Windows process containment")
     assert 'assert os.name == "nt"' in probe
@@ -1155,6 +1160,24 @@ def test_native_windows_containment_is_required_and_rejects_selected_skips():
     assert "pytest_runtest_logreport" in probe and "pytest_collectreport" in probe
     assert "self.skipped |= report.skipped" in probe
     assert "sys.exit(1 if guard.skipped else int(result))" in probe
-    assert "'@ | python -" in probe and "$LASTEXITCODE -ne 0" in probe
+    assert '$python = Join-Path $env:RUNNER_TEMP "containment-venv/Scripts/python.exe"' in probe
+    assert "'@ | & $python -" in probe and "$LASTEXITCODE -ne 0" in probe
+    for step in (install, probe):
+        assert "Activate.ps1" not in step
+        assert "activate.bat" not in step
+        assert "$env:PATH" not in step
+        assert "$env:GITHUB_PATH" not in step
     assert "continue-on-error" not in probe
     assert "!/scripts/windows_job.py" in (ROOT / ".gitignore").read_text()
+
+
+def test_windows_native_acceptance_has_no_global_editable_install_before_acceptance():
+    """A global brigade.exe shadows the isolated pipx executable on PATH."""
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    section = _workflow_job_section(text, "windows-native-acceptance")
+    before_acceptance = section[: section.index("      - name: Run Windows native acceptance (source install)")]
+    global_editable_install = re.compile(
+        r"(?mi)^\s*(?:&\s+)?(?:python(?:\.exe)?(?:\d+(?:\.\d+)?)?\s+-m\s+pip|py\s+(?:-\d+(?:\.\d+)?\s+)?-m\s+pip|pip(?:\d+)?(?:\.exe)?)"
+        r"\s+install\b[^\n]*(?:\s-e(?:\s|$)|\s--editable(?:[=\s]|$))"
+    )
+    assert global_editable_install.search(before_acceptance) is None

@@ -671,11 +671,16 @@ jobs:
       - name: Install containment test dependencies
         shell: pwsh
         run: |
-          python -m pip install -e ".[dev]"
+          $venv = Join-Path $env:RUNNER_TEMP "containment-venv"
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw "containment venv creation failed" }
+          $python = Join-Path $venv "Scripts/python.exe"
+          & $python -m pip install -e ".[dev]"
           if ($LASTEXITCODE -ne 0) { throw "containment test install failed" }
       - name: Run native Windows process containment
         shell: pwsh
         run: |
+          $python = Join-Path $env:RUNNER_TEMP "containment-venv/Scripts/python.exe"
           @'
           import os
           import sys
@@ -690,7 +695,7 @@ jobs:
           guard = NoNativeSkips()
           result = pytest.main(["-q", "-ra", "-o", "addopts=", "tests/test_windows_job.py::TestNativeContainment"], plugins=[guard])
           sys.exit(1 if guard.skipped else int(result))
-          '@ | python -
+          '@ | & $python -
           if ($LASTEXITCODE -ne 0) { throw "native containment failed or skipped" }
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
