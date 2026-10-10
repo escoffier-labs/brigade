@@ -266,6 +266,7 @@ def console_handler() -> None:
 @dataclass(eq=False)
 class _Entry:
     job: int | None
+    process_handle: int | None = None
     pending_handles: dict[int, str] = field(default_factory=dict)
     cause: int | None = None
     error: CleanupError | None = None
@@ -328,6 +329,8 @@ class ProcessTracker:
         for handle, operation in list(entry.pending_handles.items()):
             if self.api.CloseHandle(handle):
                 del entry.pending_handles[handle]
+                if handle == entry.process_handle:
+                    entry.process_handle = None
             else:
                 entry.error = self.api.error(operation, CleanupError)
         if entry.job is None and not entry.pending_handles:
@@ -401,8 +404,13 @@ class LaunchedProcess:
     def __init__(self, tracker, entry, handle, pid):
         self.tracker = tracker
         self.token = entry
-        self.handle = handle
+        entry.process_handle = handle
         self.pid = pid
+
+    @property
+    def handle(self):
+        with _LIFECYCLE:
+            return self.token.process_handle
 
     @property
     def cause(self):
@@ -428,10 +436,18 @@ class LaunchedProcess:
         self.tracker.finish(self.token, deadline=deadline, natural=natural)
 
     def close(self):
-        if self.handle is not None:
-            if not self.tracker.api.CloseHandle(self.handle):
-                raise self.tracker.api.error("CloseHandle(process)", CleanupError)
-            self.handle = None
+        with _LIFECYCLE:
+            handle = self.token.process_handle
+            if handle is not None:
+                if not self.tracker.api.CloseHandle(handle):
+                    # finish() may already have removed the closed job's entry.
+                    self.token.pending_handles[handle] = "CloseHandle(process)"
+                    self.tracker._entries.add(self.token)
+                    raise self.tracker.api.error("CloseHandle(process)", CleanupError)
+                self.token.process_handle = None
+                self.token.pending_handles.pop(handle, None)
+                if self.token.job is None and not self.token.pending_handles:
+                    self.tracker._entries.discard(self.token)
 
 
 def launch_process(

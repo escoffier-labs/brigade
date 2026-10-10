@@ -1201,3 +1201,68 @@ def test_failed_close_keeps_ownership_until_successful_retry(tmp_path, owner):
         process.finish(deadline=time.monotonic() + 1)
     process.close()
     assert not api.live and not tracker._entries
+
+
+@pytest.mark.parametrize("returncode", [0, 7])
+@pytest.mark.parametrize("retain_wrapper", [False, True], ids=["dropped-owner", "retained-owner"])
+def test_run_file_failed_process_close_remains_retryable_by_tracker(tmp_path, monkeypatch, returncode, retain_wrapper):
+    import gc
+    import weakref
+
+    class ProcessCloseFailureAPI(FakeAPI):
+        process_handle = None
+        allow_cleanup = False
+
+        def CreateProcessW(self, *args):
+            result = super().CreateProcessW(*args)
+            self.process_handle = dereference(args[-1], job.PROCESS_INFORMATION).hProcess
+            return result
+
+        def CloseHandle(self, handle):
+            if handle == self.process_handle and not self.allow_cleanup:
+                self.events.append(("CloseHandle", handle))
+                return False
+            return super().CloseHandle(handle)
+
+    api = ProcessCloseFailureAPI()
+    api.exitcode = returncode
+    tracker = job.ProcessTracker(api)
+    wrappers, references = [], []
+    real_launch = driver.launch_process
+
+    def observed_launch(**kwargs):
+        process = real_launch(**kwargs)
+        references.append(weakref.ref(process))
+        if retain_wrapper:
+            wrappers.append(process)
+        return process
+
+    monkeypatch.setattr(driver, "launch_process", observed_launch)
+    result = driver.run_file(
+        "test_close_retry.py",
+        repo=tmp_path,
+        python=Path(sys.executable),
+        output_dir=tmp_path / "out",
+        temp_root=tmp_path,
+        timeout_seconds=1,
+        tracker=tracker,
+    )
+    assert (result.status, result.returncode) == (
+        ("cleanup-unconfirmed", None) if returncode == 0 else ("failed", returncode)
+    )
+    assert result.diagnostic == "[Errno 5] CloseHandle(process) failed (winerror=5)"
+    if returncode:
+        assert result.cleanup_error == result.diagnostic
+        assert driver.regressions([result], set()) == [result]
+    assert driver.infrastructure_results([result]) == [result]
+    gc.collect()
+    assert (references[0]() is not None) == retain_wrapper
+    assert api.live == {api.process_handle}
+    api.allow_cleanup = True
+    tracker.kill_all(deadline=time.monotonic())
+    for process in wrappers:
+        assert process.handle is None
+        process.close()
+    tracker.kill_all()
+    assert not api.live and not tracker._entries
+    assert sum(event == ("CloseHandle", api.process_handle) for event in api.events) == 2
