@@ -318,7 +318,8 @@ def _request(
     return result
 
 
-def test_cloud_cli_sets_limits_with_admin_token_and_survives_restart(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("json_before_set", [False, True])
+def test_cloud_cli_sets_limits_with_admin_token_and_survives_restart(tmp_path, monkeypatch, capsys, json_before_set):
     from brigade import fleet_client_cloud
 
     with _hub(tmp_path) as hub:
@@ -341,10 +342,10 @@ def test_cloud_cli_sets_limits_with_admin_token_and_survives_restart(tmp_path, m
             "load_fleet_config",
             lambda: {"hub_url": f"http://{hub[0]}:{hub[1]}", "token": node_token},
         )
-        assert (
-            cli.main(["fleet", "cloud", "set", "--global-limit", "8", "--provider", "codex", "--limit", "8", "--json"])
-            == 0
-        )
+        arguments = ["fleet", "cloud", *(["--json"] if json_before_set else []), "set"]
+        arguments += ["--global-limit", "8", "--provider", "codex", "--limit", "8"]
+        arguments += [] if json_before_set else ["--json"]
+        assert cli.main(arguments) == 0
         updated = json.loads(capsys.readouterr().out)
         assert updated["policy"]["global_limit"] == 8
         assert cli.main(["fleet", "cloud", "--all", "--json"]) == 0
@@ -384,6 +385,48 @@ def test_cloud_cli_sets_limits_with_admin_token_and_survives_restart(tmp_path, m
             body={"action": "renew", "lease_id": "limit-0", "node_id": NODE_A, "holder": "holder-0"},
         )
         assert status == 200 and renewed["renewed"] is True
+
+
+def test_cloud_set_can_lower_limits_when_lease_snapshot_exceeds_response_cap(tmp_path, monkeypatch):
+    from brigade import fleet_client_cloud
+
+    with _hub(tmp_path) as hub:
+        db = fleet_hub.open_db(hub[2])
+        try:
+            _node, node_token = fleet_hub.add_node(db, NODE_A, "node-a")
+            fleet_hub.handle_cloud(db, {"action": "policy", "global_limit": 64, "provider": "codex", "limit": 64})
+            for index in range(64):
+                status, payload = fleet_hub.handle_cloud(
+                    db,
+                    _admit("codex", lease_id=f"large-{index}", label="l" * 256, repo="r" * 256, conductor="c" * 256),
+                    caller_node=NODE_A,
+                )
+                assert status == 200 and payload["admitted"] is True
+        finally:
+            db.close()
+        settings = {"hub_url": f"http://{hub[0]}:{hub[1]}", "admin_token": ADMIN_TOKEN, "node_token": node_token}
+        monkeypatch.setattr(fleet_client_cloud, "load_fleet_settings", lambda: settings)
+        monkeypatch.setattr(
+            fleet_client_cloud, "load_fleet_config", lambda: {"hub_url": settings["hub_url"], "token": ADMIN_TOKEN}
+        )
+        status, before = _request(hub, "GET", "/cloud", token=ADMIN_TOKEN)
+        assert status == 200 and len(before["leases"]) == 64
+        assert len(json.dumps(before).encode("utf-8")) > fleet_client.MAX_CLOUD_RESPONSE_BYTES
+        with pytest.raises(fleet_client.FleetClientError, match="exceeded the size limit"):
+            fleet_client.fetch_cloud()
+
+        updated = fleet_client.set_cloud_limits(global_limit=0, provider="codex", limit=0)
+        assert updated["policy"]["global_limit"] == updated["policy"]["limit"] == 0
+        status, after = _request(hub, "GET", "/cloud", token=ADMIN_TOKEN)
+        assert status == 200 and after["leases"] == before["leases"]
+        assert after["policy"]["global_limit"] == 0
+        assert _request(hub, "GET", "/cloud?view=capabilities")[0] == 401
+        assert _request(hub, "GET", "/cloud?view=capabilities", token="unknown-token")[0] == 401
+        for token in (ADMIN_TOKEN, node_token):
+            status, capabilities = _request(hub, "GET", "/cloud?view=capabilities", token=token)
+            assert status == 200 and capabilities == {"schema": "brigade.fleet_cloud.v1"}
+        with pytest.raises(fleet_client.FleetClientError, match="exceeded the size limit"):
+            fleet_client.fetch_cloud()
 
 
 def test_cloud_limit_updates_preserve_omitted_policy_and_retirements(conn):

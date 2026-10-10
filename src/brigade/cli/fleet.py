@@ -208,7 +208,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_cloud_set.add_argument("--global-limit", type=int, help="Global hosted worker limit (0..64).")
     p_cloud_set.add_argument("--provider", help="Provider whose limit to change, such as codex or cursor.")
     p_cloud_set.add_argument("--limit", type=int, help="Provider worker limit (0..64).")
-    p_cloud_set.add_argument("--json", action="store_true", help="Emit the updated policy as JSON.")
+    p_cloud_set.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="Emit the updated policy as JSON."
+    )
     p_cloud_set.set_defaults(func=_dispatch_cloud_set)
 
     p_models = fleet_sub.add_parser("models", help="Read the fleet hub's sanitized model policy.")

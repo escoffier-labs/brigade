@@ -1256,7 +1256,13 @@ def make_handler(
                             )
                         }
                     elif path == "/cloud":
-                        payload = cloud_snapshot(conn, frozen_deck, include_all=include_all, include_grokbot=is_admin)
+                        if parse_qs(query).get("view", [""])[0] == "capabilities":
+                            # Fixed-size preflight, independent of leases and provider policy rows.
+                            payload = {"schema": "brigade.fleet_cloud.v1"}
+                        else:
+                            payload = cloud_snapshot(
+                                conn, frozen_deck, include_all=include_all, include_grokbot=is_admin
+                            )
                     elif path == "/models":
                         payload = fleet_hub_model_roster.project_roster(
                             conn,

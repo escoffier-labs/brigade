@@ -360,7 +360,7 @@ def set_cloud_limits(
         )
     try:
         snapshot = _run_with_deadline(
-            lambda: _get_cloud_blocking(hub, "/cloud", token, timeout=CLOUD_TIMEOUT_SECONDS),
+            lambda: _get_cloud_blocking(hub, "/cloud?view=capabilities", token, timeout=CLOUD_TIMEOUT_SECONDS),
             timeout=CLOUD_TIMEOUT_SECONDS,
         )
         if not isinstance(snapshot, dict) or snapshot.get("schema") != "brigade.fleet_cloud.v1":
