@@ -4,7 +4,19 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Bumped when the on-disk schema changes; surfaced in JSON packs from Phase 2 on.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
+
+/// v9 assignment rows are filled by the Python extractor fingerprint bump.
+const MODULE_ASSIGNMENTS_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS module_assignments (
+        file_path TEXT NOT NULL,
+        name TEXT NOT NULL,
+        line INTEGER NOT NULL,
+        conditional INTEGER NOT NULL DEFAULT 0,
+        preceding_imports INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(file_path, name, line)
+    );
+";
 
 /// What sync must redo after a schema upgrade, from nothing to everything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -140,6 +152,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         "#,
     )?;
     conn.execute_batch(SKIPPED_FILES_TABLE)?;
+    conn.execute_batch(MODULE_ASSIGNMENTS_TABLE)?;
     ensure_import_columns(conn)?;
     Ok(())
 }
@@ -148,6 +161,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
 /// returning how much derived state the caller must rebuild.
 pub fn upgrade_for_sync(conn: &Connection) -> Result<SchemaUpgrade> {
     let mut upgrade = SchemaUpgrade::None;
+    conn.execute_batch(MODULE_ASSIGNMENTS_TABLE)?;
     if !table_has_column(conn, "symbols", "body_hash")? {
         conn.execute("ALTER TABLE symbols ADD COLUMN body_hash TEXT", [])?;
         upgrade = upgrade.max(SchemaUpgrade::FullReindex);

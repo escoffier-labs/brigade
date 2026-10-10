@@ -34,6 +34,17 @@ pub struct Import {
     pub conditional: bool,
 }
 
+/// A Python module assignment binds a name without claiming a callable target.
+#[derive(Debug, Clone)]
+pub struct ModuleAssignment {
+    pub name: String,
+    pub line: usize,
+    pub conditional: bool,
+    /// Count of imports encountered before this assignment in the AST walk.
+    /// Interleaves assignments with imports when statements share a line.
+    pub preceding_imports: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallKind {
     Bare,
@@ -122,6 +133,7 @@ pub struct FileGraph {
     /// Ids of top-level symbols defined under an `if`, `try`, `with`, loop, or
     /// `match`, so their definition may not run.
     pub conditional_symbols: Vec<String>,
+    pub module_assignments: Vec<ModuleAssignment>,
 }
 
 #[derive(Debug, Serialize)]
