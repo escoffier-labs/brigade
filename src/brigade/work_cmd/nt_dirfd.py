@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import struct
 import sys
 from ctypes import wintypes
 from pathlib import Path
@@ -211,6 +212,65 @@ def open_child_directory(parent: int, name: str, *, writable: bool = True) -> in
     except BaseException:
         api.CloseHandle(handle)
         raise
+
+
+def child_names(parent: int, limit: int) -> list[str]:
+    """Bounded FILE_NAMES_INFORMATION enumeration on the held directory.
+
+    Single-entry queries avoid allocating a population-sized buffer. Refuse
+    incomplete, malformed or unsupported replies instead of pathname fallback.
+    The cursor belongs to this handle; callers must serialize its use.
+    """
+    if limit < 1:
+        raise ValueError("directory name limit must be positive")
+    api = _require_api()
+    query = getattr(api, "NtQueryDirectoryFile", None)
+    if not callable(query):
+        raise OSError("handle-relative directory enumeration is unavailable")
+    handle = _handle_from_fd(parent)
+    names: list[str] = []
+    restart = True
+    queries = 0
+    # One Windows component is at most 32767 UTF-16 code units.
+    buffer = ctypes.create_string_buffer(65548)
+    while len(names) < limit:
+        queries += 1
+        if queries > limit + 2:
+            raise OSError("directory enumeration query bound exceeded")
+        iosb = api.IO_STATUS_BLOCK()
+        status = query(
+            handle,
+            None,
+            None,
+            None,
+            ctypes.byref(iosb),
+            buffer,
+            len(buffer),
+            12,
+            True,
+            None,
+            restart,
+        )
+        restart = False
+        status = int(status) & 0xFFFFFFFF
+        if status == 0x80000006:  # STATUS_NO_MORE_FILES
+            break
+        if status != 0:
+            _raise_ntstatus(status)
+        size = int(iosb.Information or 0)
+        if size < 12 or size > len(buffer):
+            raise OSError("invalid directory enumeration size")
+        offset, _index, length = struct.unpack_from("<III", buffer.raw)
+        if offset != 0 or length == 0 or length % 2 or length > size - 12:
+            raise OSError("invalid directory enumeration record")
+        try:
+            name = buffer.raw[12 : 12 + length].decode("utf-16-le")
+        except UnicodeError as exc:
+            raise OSError("invalid directory enumeration name") from exc
+        if name in {".", ".."}:
+            continue
+        names.append(validate_component(name))
+    return names
 
 
 def mkdir_child(parent: int, name: str) -> None:
@@ -427,8 +487,24 @@ def unlink_child(parent: int, name: str) -> None:
 
 
 def stat_child(parent: int, name: str) -> os.stat_result:
-    """Return ``lstat``-equivalent metadata for ``name`` under the held parent."""
-    descriptor = open_file(parent, name, os.O_RDONLY)
+    """Read file or directory metadata under the held parent, refusing reparse points."""
+    api = _require_api()
+    handle = _nt_create(
+        api,
+        parent,
+        name,
+        access=_FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
+        disposition=_FILE_OPEN,
+        options=_FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
+        attributes=_FILE_ATTRIBUTE_NORMAL,
+    )
+    try:
+        _reject_reparse(api, handle, expected_directory=None)
+    except BaseException:
+        api.CloseHandle(handle)
+        raise
+    # Conversion closes on failure and transfers ownership to the fd on success.
+    descriptor = _handle_to_fd(api, handle, os.O_RDONLY)
     try:
         return os.fstat(descriptor)
     finally:
@@ -496,7 +572,7 @@ def _handle_from_fd(fd: int) -> int:
     return int(msvcrt.get_osfhandle(fd))  # type: ignore[attr-defined]
 
 
-def _reject_reparse(api: Any, handle: Any, *, expected_directory: bool) -> None:
+def _reject_reparse(api: Any, handle: Any, *, expected_directory: bool | None) -> None:
     info = api.BY_HANDLE_FILE_INFORMATION()
     if not api.GetFileInformationByHandle(handle, ctypes.byref(info)):
         raise _win_error()
@@ -506,7 +582,7 @@ def _reject_reparse(api: Any, handle: Any, *, expected_directory: bool) -> None:
     is_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
     if expected_directory and not is_directory:
         raise OSError("path component is not a directory")
-    if not expected_directory and is_directory:
+    if expected_directory is False and is_directory:
         raise OSError("path component is a directory")
 
 
@@ -631,6 +707,20 @@ def _bind_api_namespace(*, kernel32: Any = None, ntdll: Any = None) -> SimpleNam
             wintypes.ULONG,
         ]
         ntdll.NtCreateFile.restype = ctypes.c_long
+        ntdll.NtQueryDirectoryFile.argtypes = [
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+            wintypes.LPVOID,
+            wintypes.LPVOID,
+            ctypes.POINTER(_IO_STATUS_BLOCK),
+            wintypes.LPVOID,
+            wintypes.ULONG,
+            wintypes.ULONG,
+            wintypes.BOOLEAN,
+            ctypes.POINTER(_UNICODE_STRING),
+            wintypes.BOOLEAN,
+        ]
+        ntdll.NtQueryDirectoryFile.restype = ctypes.c_long
         ntdll.NtSetInformationFile.argtypes = [
             wintypes.HANDLE,
             ctypes.POINTER(_IO_STATUS_BLOCK),
@@ -649,6 +739,7 @@ def _bind_api_namespace(*, kernel32: Any = None, ntdll: Any = None) -> SimpleNam
         GetFileInformationByHandle=None if kernel32 is None else kernel32.GetFileInformationByHandle,
         NtCreateFile=None if ntdll is None else ntdll.NtCreateFile,
         NtSetInformationFile=None if ntdll is None else ntdll.NtSetInformationFile,
+        NtQueryDirectoryFile=None if ntdll is None else ntdll.NtQueryDirectoryFile,
         make_unicode=_make_unicode,
         make_rename_class=_make_rename_class,
     )

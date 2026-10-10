@@ -1,6 +1,6 @@
 {
   "schema": "brigade.control_crosswalk.v1",
-  "crosswalk_version": 1,
+  "crosswalk_version": 2,
   "generated_by": "brigade",
   "claims": [
     {
@@ -32,7 +32,7 @@
       "title": "Change request signed before dispatch",
       "artifact_family": "agent-request/v1",
       "producer_command": "brigade run --requester-key",
-      "verifier_command": "brigade receipts verify-attestation",
+      "verifier_command": "brigade evidence controls",
       "state_rule": "agent-request-signed"
     },
     {
@@ -40,12 +40,12 @@
       "title": "Human approval bound to the final tree with segregation of duties",
       "artifact_family": "human-approval/v2",
       "producer_command": "brigade run approve",
-      "verifier_command": "brigade receipts verify-attestation --strict-approvals",
+      "verifier_command": "brigade receipts verify --strict-approvals",
       "state_rule": "human-approval-allow-with-sod"
     },
     {
       "id": "EC-06",
-      "title": "Append-only hash-chained run lifecycle journal",
+      "title": "Hash-chained run lifecycle journal",
       "artifact_family": "brigade.run_event.v1",
       "producer_command": "brigade run",
       "verifier_command": "brigade run audit",
@@ -71,7 +71,7 @@
       "id": "EC-09",
       "title": "Content-guard redaction verdict",
       "artifact_family": "brigade.guard.audit",
-      "producer_command": "brigade guard audit",
+      "producer_command": "brigade guard audit --json (operator saves output)",
       "verifier_command": "brigade guard audit --strict",
       "state_rule": "guard-audit-allow"
     },
@@ -95,9 +95,10 @@
       "id": "EC-12",
       "title": "Evidence package with detached manifest",
       "artifact_family": "brigade.evidence_package.v1",
-      "producer_command": "brigade evidence package",
-      "verifier_command": "brigade evidence package verify",
-      "state_rule": "artifact-absent-until-merged"
+      "producer_command": "brigade receipts export package --run-id <id> --out .brigade/evidence-packages/<name>",
+      "verifier_command": "brigade receipts verify-package <dir>",
+      "state_rule": "evidence-package-manifest",
+      "note": "brigade evidence controls only inspects packages exported under .brigade/evidence-packages/ and recomputes the unsigned manifest entries_sha256; it does not rehash entry files. brigade receipts verify-package rehashes each entry."
     }
   ],
   "frameworks": [
@@ -108,16 +109,19 @@
       "publication_date": "2023-12",
       "jurisdiction": "international",
       "source_locator": "https://www.iso.org/standard/42001",
-      "licensing": "licensed"
+      "licensing": "licensed",
+      "clause_text_status": "unverified",
+      "note": "Licensed clause text was not reviewed for this crosswalk. Control identifiers and rationales are unverified against the licensed text and are not reconstructed from secondary summaries."
     },
     {
       "id": "nist-ai-rmf-1.0",
       "name": "NIST AI Risk Management Framework",
-      "edition": "1.0",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
       "publication_date": "2023-01-26",
       "jurisdiction": "US",
-      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework",
-      "licensing": "public"
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf",
+      "licensing": "public",
+      "note": "Rows cite the final NIST AI 100-1 Core tables (Section 5, Tables 1 to 4). The AI RMF Playbook is mutable and is not the normative source. Claims with no direct subcategory are listed as unmapped evidence properties; no control identifier is assigned to them."
     },
     {
       "id": "nist-ai-600-1",
@@ -128,7 +132,7 @@
       "source_locator": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence",
       "licensing": "public",
       "mapping_status": "identifiers-not-sourced",
-      "note": "NIST AI 600-1 action identifiers were not sourced in the research files; related AI RMF subcategory mappings are retained under nist-ai-rmf-1.0."
+      "note": "NIST AI 600-1 action identifiers were not sourced from the final NIST AI 600-1 text, so no rows are assigned; related AI RMF subcategory mappings are retained under nist-ai-rmf-1.0."
     },
     {
       "id": "nist-sp-800-218",
@@ -155,7 +159,8 @@
       "publication_date": "2024-07-12",
       "jurisdiction": "EU",
       "source_locator": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689",
-      "licensing": "public"
+      "licensing": "public",
+      "note": "Edition source verification: the European Commission notice at https://digital-strategy.ec.europa.eu/en/news/ai-omnibus-enters-force reports entry into force of the amending regulation, and the AI Act Service Desk reproduces consolidated Article 113 at https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-113. The Official Journal text at https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=OJ:L_202601744 could not be read directly during review, so the edition line rests on those Commission sources. Rows do not quote amended clause text."
     },
     {
       "id": "iso-27001-2022",
@@ -164,7 +169,9 @@
       "publication_date": "2022-10 amended 2024-02",
       "jurisdiction": "international",
       "source_locator": "https://www.iso.org/standard/27001",
-      "licensing": "licensed"
+      "licensing": "licensed",
+      "clause_text_status": "unverified",
+      "note": "Licensed clause text was not reviewed for this crosswalk. Control identifiers and rationales are unverified against the licensed text and are not reconstructed from secondary summaries."
     },
     {
       "id": "soc2-tsc-2017",
@@ -173,7 +180,9 @@
       "publication_date": "2022",
       "jurisdiction": "US",
       "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022",
-      "licensing": "licensed"
+      "licensing": "licensed",
+      "clause_text_status": "unverified",
+      "note": "Licensed clause text was not reviewed for this crosswalk. Control identifiers and rationales are unverified against the licensed text and are not reconstructed from secondary summaries."
     },
     {
       "id": "owasp-agentic-2026",
@@ -204,18 +213,211 @@
       "relationship": "supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Verify receipts capture per-command exit status and are immutable, supporting AI system event log recording.",
+      "rationale": "Receipts record command results. Digests and optional local HMACs support consistency checks. The evaluator does not verify HMACs or establish independent custody or key-management effectiveness.",
       "source_locator": "https://www.iso.org/standard/42001"
     },
     {
       "claim_id": "EC-01",
       "framework_id": "nist-ai-rmf-1.0",
-      "control_id": "MEASURE-1.1",
+      "control_id": "MEASURE 1.1",
       "relationship": "supports",
       "obligation_bearer": "deployer",
-      "applicability_condition": "any",
-      "rationale": "Test execution evidence with captured exit codes supports valid and reliable measurement.",
-      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
+      "applicability_condition": "The organization has selected measurement approaches and metrics for AI risks enumerated in MAP, prioritized the most significant risks, and documented risks it will not or cannot measure.",
+      "rationale": "A completed receipt can corroborate that a selected check was executed with a recorded result. It does not select the approach or metric, and MEASURE 1.1 sets no numerical threshold.",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.3, Table 3, MEASURE 1.1",
+      "disposition": "conditional-support",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "artifact_contract": "brigade.work_verify_receipt from brigade work verify run: per-command argv and exit status.",
+      "responsible_actor": "Adopting organization AI risk owner; Brigade only produces the artifact.",
+      "verification_limit": "The evaluator checks receipt structure, ordered planned-command matching and run binding, but does not yet rederive the stored digest or verify an optional local HMAC. Brigade cannot judge whether the check measures a mapped risk. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-01",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "MEASURE 2.1",
+      "relationship": "partially-supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "The executed commands are the organization's documented TEVV test sets, and metrics and tool details are documented outside the receipt.",
+      "rationale": "Receipts can supply execution details for documented TEVV tooling. They do not document test sets or metrics.",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.3, Table 3, MEASURE 2.1",
+      "disposition": "conditional-support",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "artifact_contract": "brigade.work_verify_receipt: recorded commands, exit status and captured logs.",
+      "responsible_actor": "Adopting organization AI risk owner; Brigade only produces the artifact.",
+      "verification_limit": "State does not inspect test-set or metric documentation. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-02",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "MEASURE 2.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "The attested commands are documented TEVV test sets with documented metrics and tool details.",
+      "rationale": "A signed, rederivable Test Result can corroborate which TEVV commands ran and their results. Adjudicated-feedback outcomes under GOVERN 5.2 are not addressed by a test signature.",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.3, Table 3, MEASURE 2.1",
+      "disposition": "corrected-mismatch",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "artifact_contract": "brigade.attestation.sshsig-dsse.v1 Test Result attestation from brigade receipts export attestation, rederived against its receipt.",
+      "responsible_actor": "Adopting organization AI risk owner; Brigade only produces the artifact.",
+      "verification_limit": "Signature validity depends on the configured signer key and allowed-signers trust. State does not inspect TEVV documentation. A Brigade artifact does not establish that an organizational control or process operated.",
+      "superseded_control_id": "GOVERN 5.2"
+    },
+    {
+      "claim_id": "EC-04",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "GOVERN 2.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "Roles, responsibilities and lines of communication for mapping, measuring and managing AI risk are documented, and requester identities are bound to those roles.",
+      "rationale": "A signed request can corroborate which documented identity requested a change. It does not integrate trustworthiness characteristics into policy, which is GOVERN 1.2.",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.1, Table 1, GOVERN 2.1",
+      "disposition": "corrected-mismatch",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "artifact_contract": "agent-request/v1 envelope from brigade run --requester-key, verified by the request-specific adapter in brigade evidence controls. The standalone Test Result verifier CLI does not accept this request predicate.",
+      "responsible_actor": "Adopting organization, which assigns AI risk roles and binds requester keys to them.",
+      "verification_limit": "Verification proves possession of the requester key, not that the role assignment is documented or understood. A Brigade artifact does not establish that an organizational control or process operated.",
+      "superseded_control_id": "GOVERN 1.2"
+    },
+    {
+      "claim_id": "EC-05",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "GOVERN 2.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "Approver responsibilities and lines of communication are documented and understood, and approver identities are bound to that context.",
+      "rationale": "An approval bound to the final tree with a passed segregation-of-duties check can corroborate that a documented approver role acted on a change.",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.1, Table 1, GOVERN 2.1",
+      "disposition": "conditional-support",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "artifact_contract": "human-approval/v2 events from brigade run approve, verified with brigade receipts verify --strict-approvals.",
+      "responsible_actor": "Adopting organization, which documents approver responsibilities and binds approver identities to them.",
+      "verification_limit": "The SOD check compares identities recorded in Brigade artifacts only. It does not show that responsibilities are documented or clear to staff. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "MANAGE 4.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "The organization has implemented post-deployment monitoring or change-management plans and designates the journal as typed operational or change evidence under them.",
+      "rationale": "A chain-valid journal can corroborate that run lifecycle events were recorded under such a plan. It does not document TEVV test sets, which is MEASURE 2.1.",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.4, Table 4, MANAGE 4.1",
+      "disposition": "corrected-mismatch",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "artifact_contract": "brigade.run_event.v1 lifecycle journal from brigade run, read with brigade run audit.",
+      "responsible_actor": "Adopting organization, which owns its post-deployment monitoring, change and incident procedures.",
+      "verification_limit": "The hash chain detects edits relative to the recorded digests only. It does not prevent deletion, and it does not detect a consistent rewrite of the whole journal without a digest or copy held outside the file. A Brigade artifact does not establish that an organizational control or process operated.",
+      "superseded_control_id": "MEASURE 2.1"
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "MANAGE 4.3",
+      "relationship": "partially-supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "The organization follows documented incident and error tracking processes that consume typed journal events.",
+      "rationale": "Journal failure events can feed incident and error tracking. Communication to relevant AI actors and affected communities is outside the artifact.",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.4, Table 4, MANAGE 4.3",
+      "disposition": "corrected-mismatch",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "artifact_contract": "brigade.run_event.v1 lifecycle journal from brigade run.",
+      "responsible_actor": "Adopting organization incident owner.",
+      "verification_limit": "State checks chain validity only, not incident classification, response or communication. A Brigade artifact does not establish that an organizational control or process operated.",
+      "superseded_control_id": "MEASURE 2.1"
+    },
+    {
+      "claim_id": "EC-07",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "GOVERN 1.6",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "The organization defines the inventory scope and the Brigade inventory covers the agents, models and tools within that scope.",
+      "rationale": "A point-in-time inventory can corroborate an inventory mechanism within the defined scope. It does not collect external feedback, which is GOVERN 5.1.",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.1, Table 1, GOVERN 1.6",
+      "disposition": "corrected-mismatch",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "artifact_contract": "brigade.governance_inventory.v1 point-in-time inventory from brigade governance inventory.",
+      "responsible_actor": "Adopting organization, which defines inventory scope and resources it by risk priority.",
+      "verification_limit": "The evaluator checks the supported inventory schema, not completeness or resourcing. Without an assessment period it makes no freshness determination. A Brigade artifact does not establish that an organizational control or process operated.",
+      "superseded_control_id": "GOVERN 5.1"
+    },
+    {
+      "claim_id": "EC-08",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "MANAGE 4.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "The organization has an actual change-management or post-deployment procedure that requires commits to resolve to receipts.",
+      "rationale": "Trailers that resolve to a matching receipt digest can corroborate traceability under that change procedure. They do not supersede, disengage or deactivate AI systems, which is MANAGE 2.4.",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.4, Table 4, MANAGE 4.1",
+      "disposition": "corrected-mismatch",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "artifact_contract": "Brigade-Run and Brigade-Receipt commit trailers from brigade receipts trailer, resolved with brigade receipts verify --commit.",
+      "responsible_actor": "Adopting organization change-management owner.",
+      "verification_limit": "State requires every Brigade-trailered commit among the 20 most recent to resolve to a matching local receipt digest. A Brigade artifact does not establish that an organizational control or process operated. A Git probe error is unavailable; only a confirmed non-repository is not applicable.",
+      "superseded_control_id": "MANAGE 2.4"
+    },
+    {
+      "claim_id": "EC-09",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "MEASURE 2.7",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "Security and resilience risks were identified in MAP, and the organization documents its evaluation of those risks using guard verdicts.",
+      "rationale": "A non-blocked guard verdict can corroborate one documented evaluation of mapped leakage risk. It does not identify TEVV considerations, which is MAP 2.3.",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.3, Table 3, MEASURE 2.7",
+      "disposition": "corrected-mismatch",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "artifact_contract": "Operator-saved JSON stdout from brigade guard audit --json at .brigade/work/guard/audit.json; this command does not create the staged file or record a producer timestamp.",
+      "responsible_actor": "Adopting organization AI risk owner; Brigade only produces the artifact.",
+      "verification_limit": "State reflects the summary blocked flag in .brigade/work/guard/audit.json only. Guard rules cover configured patterns, not all security risk. A Brigade artifact does not establish that an organizational control or process operated.",
+      "superseded_control_id": "MAP 2.3"
+    },
+    {
+      "claim_id": "EC-09",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "MEASURE 2.10",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "Privacy risks were identified in MAP, and the organization documents its examination of those risks using guard verdicts.",
+      "rationale": "A non-blocked guard verdict can corroborate one documented examination of mapped personal-data leakage risk.",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.3, Table 3, MEASURE 2.10",
+      "disposition": "corrected-mismatch",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "artifact_contract": "Operator-saved JSON stdout from brigade guard audit --json at .brigade/work/guard/audit.json; this command does not create the staged file or record a producer timestamp.",
+      "responsible_actor": "Adopting organization AI risk owner; Brigade only produces the artifact.",
+      "verification_limit": "Pattern-based redaction does not establish that privacy risk is examined in full. A Brigade artifact does not establish that an organizational control or process operated.",
+      "superseded_control_id": "MAP 2.3"
+    },
+    {
+      "claim_id": "EC-10",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "MEASURE 1.1",
+      "relationship": "supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "The organization has selected measurement approaches and metrics for AI risks enumerated in MAP, prioritized the most significant risks, and documented risks it will not or cannot measure.",
+      "rationale": "Outcome records can corroborate that selected measurements were recorded. They do not select approaches or metrics, and MEASURE 1.1 sets no numerical threshold.",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.3, Table 3, MEASURE 1.1",
+      "disposition": "conditional-support",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "artifact_contract": "brigade.outcome_record ledger from brigade outcome record.",
+      "responsible_actor": "Adopting organization AI risk owner; Brigade only produces the artifact.",
+      "verification_limit": "The evaluator checks bounded JSONL records for integer schema_version, not what they measure. A supplied period uses the latest recorded timestamp for the ledger, without validating each record timestamp. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-10",
+      "framework_id": "nist-ai-rmf-1.0",
+      "control_id": "MEASURE 3.1",
+      "relationship": "partially-supports",
+      "obligation_bearer": "deployer",
+      "applicability_condition": "The organization has documented approaches and personnel for regularly tracking existing, unanticipated and emergent AI risks, and uses outcome records within them.",
+      "rationale": "Outcome records can corroborate documented risk tracking over time.",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.3, Table 3, MEASURE 3.1",
+      "disposition": "conditional-support",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "artifact_contract": "brigade.outcome_record ledger from brigade outcome record.",
+      "responsible_actor": "Adopting organization AI risk owner; Brigade only produces the artifact.",
+      "verification_limit": "State does not inspect tracking approaches, personnel or cadence. A Brigade artifact does not establish that an organizational control or process operated."
     },
     {
       "claim_id": "EC-01",
@@ -289,16 +491,6 @@
     },
     {
       "claim_id": "EC-02",
-      "framework_id": "nist-ai-rmf-1.0",
-      "control_id": "GOVERN-5.2",
-      "relationship": "supports",
-      "obligation_bearer": "provider",
-      "applicability_condition": "any",
-      "rationale": "Signed verification results manage supply-chain risks.",
-      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
-    },
-    {
-      "claim_id": "EC-02",
       "framework_id": "nist-sp-800-218",
       "control_id": "PS.2",
       "relationship": "supports",
@@ -366,16 +558,6 @@
       "applicability_condition": "any",
       "rationale": "Cosign bundle supports external verification of documented information.",
       "source_locator": "https://www.iso.org/standard/42001"
-    },
-    {
-      "claim_id": "EC-03",
-      "framework_id": "nist-ai-rmf-1.0",
-      "control_id": "GOVERN-5.2",
-      "relationship": "supports",
-      "obligation_bearer": "provider",
-      "applicability_condition": "any",
-      "rationale": "Cross-organizational verification through Sigstore bundle.",
-      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
     },
     {
       "claim_id": "EC-03",
@@ -449,16 +631,6 @@
     },
     {
       "claim_id": "EC-04",
-      "framework_id": "nist-ai-rmf-1.0",
-      "control_id": "GOVERN-1.2",
-      "relationship": "supports",
-      "obligation_bearer": "deployer",
-      "applicability_condition": "any",
-      "rationale": "Roles and responsibilities for change requests are defined.",
-      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
-    },
-    {
-      "claim_id": "EC-04",
       "framework_id": "nist-sp-800-218",
       "control_id": "PO.5",
       "relationship": "supports",
@@ -529,16 +701,6 @@
     },
     {
       "claim_id": "EC-05",
-      "framework_id": "nist-ai-rmf-1.0",
-      "control_id": "GOVERN-2.1",
-      "relationship": "supports",
-      "obligation_bearer": "deployer",
-      "applicability_condition": "any",
-      "rationale": "Human oversight and accountability for AI risks.",
-      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
-    },
-    {
-      "claim_id": "EC-05",
       "framework_id": "nist-sp-800-218",
       "control_id": "PW.7",
       "relationship": "supports",
@@ -604,18 +766,8 @@
       "relationship": "supports",
       "obligation_bearer": "deployer",
       "applicability_condition": "any",
-      "rationale": "Append-only lifecycle journal records AI system events.",
+      "rationale": "Hash-chained lifecycle journal records events. It detects broken links; a consistent rewrite is undetectable without an external anchor.",
       "source_locator": "https://www.iso.org/standard/42001"
-    },
-    {
-      "claim_id": "EC-06",
-      "framework_id": "nist-ai-rmf-1.0",
-      "control_id": "MEASURE-2.1",
-      "relationship": "supports",
-      "obligation_bearer": "deployer",
-      "applicability_condition": "any",
-      "rationale": "Monitor AI systems for risks and incidents through lifecycle logs.",
-      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
     },
     {
       "claim_id": "EC-06",
@@ -699,16 +851,6 @@
     },
     {
       "claim_id": "EC-07",
-      "framework_id": "nist-ai-rmf-1.0",
-      "control_id": "GOVERN-5.1",
-      "relationship": "supports",
-      "obligation_bearer": "deployer",
-      "applicability_condition": "any",
-      "rationale": "Inventory AI systems and supply chain.",
-      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
-    },
-    {
-      "claim_id": "EC-07",
       "framework_id": "nist-sp-800-218",
       "control_id": "PS.3",
       "relationship": "supports",
@@ -776,16 +918,6 @@
       "applicability_condition": "any",
       "rationale": "Commit trailers link documented information to code changes.",
       "source_locator": "https://www.iso.org/standard/42001"
-    },
-    {
-      "claim_id": "EC-08",
-      "framework_id": "nist-ai-rmf-1.0",
-      "control_id": "MANAGE-2.4",
-      "relationship": "supports",
-      "obligation_bearer": "deployer",
-      "applicability_condition": "any",
-      "rationale": "Track changes and communicate risks through commit linkage.",
-      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
     },
     {
       "claim_id": "EC-08",
@@ -859,16 +991,6 @@
     },
     {
       "claim_id": "EC-09",
-      "framework_id": "nist-ai-rmf-1.0",
-      "control_id": "MAP-2.3",
-      "relationship": "supports",
-      "obligation_bearer": "deployer",
-      "applicability_condition": "any",
-      "rationale": "Categorize risks and impacts including data leakage.",
-      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
-    },
-    {
-      "claim_id": "EC-09",
       "framework_id": "nist-sp-800-218",
       "control_id": "PS.1",
       "relationship": "supports",
@@ -929,16 +1051,6 @@
     },
     {
       "claim_id": "EC-10",
-      "framework_id": "nist-ai-rmf-1.0",
-      "control_id": "MEASURE-1.1",
-      "relationship": "supports",
-      "obligation_bearer": "deployer",
-      "applicability_condition": "any",
-      "rationale": "Valid and reliable measurement through outcome records.",
-      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
-    },
-    {
-      "claim_id": "EC-10",
       "framework_id": "nist-sp-800-218",
       "control_id": "PW.8",
       "relationship": "supports",
@@ -974,7 +1086,7 @@
       "relationship": "supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Log content protection for outcome records.",
+      "rationale": "Outcome records are logged; storage protection belongs to the adopting organization.",
       "source_locator": "https://www.iso.org/standard/27001"
     },
     {
@@ -1004,18 +1116,8 @@
       "relationship": "supports",
       "obligation_bearer": "deployer",
       "applicability_condition": "any",
-      "rationale": "Archive index ensures verification evidence is preserved before pruning.",
+      "rationale": "Archive index records verification evidence before pruning; preservation depends on the adopting organization storage and retention controls.",
       "source_locator": "https://www.iso.org/standard/42001"
-    },
-    {
-      "claim_id": "EC-11",
-      "framework_id": "nist-ai-rmf-1.0",
-      "control_id": "MANAGE-2.4",
-      "relationship": "supports",
-      "obligation_bearer": "deployer",
-      "applicability_condition": "any",
-      "rationale": "Change management and record retention through archive index.",
-      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
     },
     {
       "claim_id": "EC-11",
@@ -1034,7 +1136,7 @@
       "relationship": "supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Audit record retention through archive index.",
+      "rationale": "Archive index records verification evidence before pruning; audit record retention periods and storage protection belong to the adopting organization.",
       "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads"
     },
     {
@@ -1054,7 +1156,7 @@
       "relationship": "supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Log retention and protection through archive index.",
+      "rationale": "Archive index records verification evidence before pruning; log protection and retention belong to the adopting organization storage controls.",
       "source_locator": "https://www.iso.org/standard/27001"
     },
     {
@@ -1064,7 +1166,7 @@
       "relationship": "supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Log retention for monitoring through archive index.",
+      "rationale": "Archive index keeps verification evidence available for monitoring after pruning; log retention belongs to the adopting organization.",
       "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
     },
     {
@@ -1084,18 +1186,8 @@
       "relationship": "supports",
       "obligation_bearer": "provider",
       "applicability_condition": "any",
-      "rationale": "Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; entries_sha256 recomputes.",
+      "rationale": "Package export supplies an unsigned manifest. The evaluator checks entries-list digest self-consistency, not file contents; verify-package rehashes files.",
       "source_locator": "https://www.iso.org/standard/42001"
-    },
-    {
-      "claim_id": "EC-12",
-      "framework_id": "nist-ai-rmf-1.0",
-      "control_id": "GOVERN-5.2",
-      "relationship": "supports",
-      "obligation_bearer": "provider",
-      "applicability_condition": "any",
-      "rationale": "Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; entries_sha256 recomputes.",
-      "source_locator": "https://www.nist.gov/itl/ai-risk-management-framework"
     },
     {
       "claim_id": "EC-12",
@@ -1104,7 +1196,7 @@
       "relationship": "supports",
       "obligation_bearer": "supplier",
       "applicability_condition": "any",
-      "rationale": "Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; entries_sha256 recomputes.",
+      "rationale": "Package export supplies an unsigned manifest. The evaluator checks entries-list digest self-consistency, not file contents; verify-package rehashes files.",
       "source_locator": "https://csrc.nist.gov/projects/ssdf"
     },
     {
@@ -1114,7 +1206,7 @@
       "relationship": "supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; entries_sha256 recomputes.",
+      "rationale": "Package export supplies an unsigned manifest. The evaluator checks entries-list digest self-consistency, not file contents; verify-package rehashes files.",
       "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads"
     },
     {
@@ -1124,7 +1216,7 @@
       "relationship": "supports",
       "obligation_bearer": "provider",
       "applicability_condition": "provider of a high-risk AI system",
-      "rationale": "Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; entries_sha256 recomputes.",
+      "rationale": "Package export supplies an unsigned manifest. The evaluator checks entries-list digest self-consistency, not file contents; verify-package rehashes files.",
       "source_locator": "https://artificialintelligenceact.eu/article/11/"
     },
     {
@@ -1134,7 +1226,7 @@
       "relationship": "supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; entries_sha256 recomputes.",
+      "rationale": "Package export supplies an unsigned manifest. The evaluator checks entries-list digest self-consistency, not file contents; verify-package rehashes files.",
       "source_locator": "https://www.iso.org/standard/27001"
     },
     {
@@ -1144,7 +1236,7 @@
       "relationship": "partially-supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; not operational monitoring.",
+      "rationale": "Package export supplies an unsigned manifest. The evaluator checks entries-list digest self-consistency, not file contents; verify-package rehashes files. Not operational monitoring.",
       "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
     },
     {
@@ -1154,7 +1246,7 @@
       "relationship": "supports",
       "obligation_bearer": "deployer",
       "applicability_condition": "any",
-      "rationale": "Staged evidence package under .brigade/evidence-packages/ with a detached manifest and integrity verifier; entries_sha256 recomputes.",
+      "rationale": "Package export supplies an unsigned manifest. The evaluator checks entries-list digest self-consistency, not file contents; verify-package rehashes files.",
       "source_locator": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/"
     },
     {
@@ -1166,6 +1258,52 @@
       "applicability_condition": "provider of a high-risk AI system",
       "rationale": "Risk management system records are outside Brigade evidence scope.",
       "source_locator": "https://artificialintelligenceact.eu/article/9/"
+    }
+  ],
+  "relationship_semantics": "supports and partially-supports mean conditional corroboration of an outcome when the row's applicability condition holds. Neither means the control is fulfilled, and no Brigade artifact establishes that an organizational control operated. Scope and control operation belong to the adopting organization and its assessor.",
+  "integrity_boundary": "Local receipts, journals, archive indexes and package manifests are ordinary files on a writable filesystem, not immutable records. They are tamper-evident only where a verifier recomputes a digest, hash chain or signature, and only relative to a trusted reference copy or key. A consistent rewrite of a whole file, including its recorded digests, is not detectable without a digest, signature or copy held outside that file. Custody, storage protection and retention periods belong to the adopting organization.",
+  "unmapped_evidence_properties": [
+    {
+      "claim_id": "EC-03",
+      "framework_id": "nist-ai-rmf-1.0",
+      "property": "signature integrity",
+      "artifact_contract": "brigade.attestation.cosign-dsse.v1 Sigstore bundle (attestation.sigstore.json) from brigade receipts export attestation --profile cosign, checked locally for media type and DSSE envelope.",
+      "responsible_actor": "Adopting organization, which operates cosign verification and its trust root; Brigade only records the bundle.",
+      "applicability_condition": "Not applicable: no AI RMF 1.0 subcategory is assigned to this property, so no applicability condition is claimed.",
+      "disposition": "unmapped-evidence-property",
+      "superseded_control_id": "GOVERN 5.2",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.1, Table 1, GOVERN 5.2",
+      "rationale": "A cosign bundle supports the integrity of other evidence. No AI RMF 1.0 subcategory addresses signature integrity directly, and GOVERN 5.2 concerns adjudicated feedback.",
+      "verification_limit": "Bundle presence and media type are checked locally; signature verification needs cosign and an external trust root. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-11",
+      "framework_id": "nist-ai-rmf-1.0",
+      "property": "evidence retention and availability",
+      "artifact_contract": "brigade.verify_archive_index.v1 index written by brigade work verify run before verify-run receipts are pruned.",
+      "responsible_actor": "Adopting organization, which owns storage protection and retention periods; Brigade only writes the index.",
+      "applicability_condition": "Not applicable: no AI RMF 1.0 subcategory is assigned to this property, so no applicability condition is claimed.",
+      "disposition": "unmapped-evidence-property",
+      "superseded_control_id": "MANAGE 2.4",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.4, Table 4, MANAGE 2.4",
+      "rationale": "The archive index supports availability of verification evidence after pruning. No AI RMF 1.0 subcategory requires it directly, and MANAGE 2.4 concerns superseding or deactivating AI systems.",
+      "verification_limit": "State checks that a parseable index exists; it assumes no retention period and does not verify archived content. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-12",
+      "framework_id": "nist-ai-rmf-1.0",
+      "property": "evidence packaging",
+      "artifact_contract": "brigade.evidence_package.v1 package from brigade receipts export package (--run-id and --out), with an unsigned manifest checked by brigade receipts verify-package.",
+      "responsible_actor": "Adopting organization, which decides custody and distribution of packages; Brigade only assembles the package.",
+      "applicability_condition": "Not applicable: no AI RMF 1.0 subcategory is assigned to this property, so no applicability condition is claimed.",
+      "disposition": "unmapped-evidence-property",
+      "superseded_control_id": "GOVERN 5.2",
+      "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
+      "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.1, Table 1, GOVERN 5.2",
+      "rationale": "Packaging alone supplies no adjudicated feedback process. Map the constituent receipt and attestation evidence through EC-01 and EC-02 instead; EC-03 signature integrity is itself an unmapped evidence property.",
+      "verification_limit": "The evaluator checks the manifest schema, recomputes its unsigned entries-list digest and checks safe, present regular entries. Entry contents and packaged source are not yet revalidated by this index layer. A Brigade artifact does not establish that an organizational control or process operated."
     }
   ]
 }

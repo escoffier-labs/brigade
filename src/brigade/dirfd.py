@@ -177,12 +177,12 @@ def _nt_stat_child(parent: int, name: str) -> os.stat_result:
     return _nt_dirfd().stat_child(parent, name)
 
 
-def open_directory_nofollow(path: Path) -> int:
+def open_directory_nofollow(path: Path, *, writable: bool = True) -> int:
     """Open a directory without following a final symlink or reparse point."""
     if posix_available():
         return _posix_open_directory(path)
     if nt_available():
-        return _nt_open_directory(path)
+        return _nt_open_directory(path) if writable else _nt_dirfd().open_root_directory(path, writable=False)
     raise unavailable("directory operations")
 
 
@@ -196,12 +196,16 @@ def open_file_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
     raise OSError("no-follow file open is unavailable")
 
 
-def open_child_directory(parent: int, name: str) -> int:
+def open_child_directory(parent: int, name: str, *, writable: bool = True) -> int:
     validate_component(name)
     if posix_available():
         return _posix_open_child_directory(parent, name)
     if nt_available():
-        return _nt_open_child_directory(parent, name)
+        return (
+            _nt_open_child_directory(parent, name)
+            if writable
+            else _nt_dirfd().open_child_directory(parent, name, writable=False)
+        )
     raise unavailable("directory operations")
 
 
@@ -275,3 +279,20 @@ def fsync_directory(descriptor: int) -> None:
         if sys.platform == "win32" and getattr(exc, "winerror", None) in {1, 5}:
             return
         raise
+
+
+def child_names(parent: int, limit: int) -> list[str]:
+    """Read at most ``limit`` names from a held directory, never its pathname."""
+    if limit < 1:
+        raise ValueError("directory name limit must be positive")
+    if posix_available():
+        names: list[str] = []
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                names.append(entry.name)
+                if len(names) == limit:
+                    break
+        return names
+    if nt_available():
+        return list(_nt_dirfd().child_names(parent, limit))
+    raise unavailable("directory enumeration")
