@@ -1033,6 +1033,7 @@ def append_event(
     idempotency_key: str,
     expected_previous_sequence: int,
     recorded_at: str | None = None,
+    workspace: Path | None = None,
 ) -> RunEvent:
     """Append one event to the journal under the slice-1 contract.
 
@@ -1043,6 +1044,8 @@ def append_event(
     tail sequence (0 for an empty journal) else StaleSequenceError, no write.
     The write is a single bounded ``os.write`` to an ``O_APPEND`` descriptor
     with returned-byte-count verification and ``fsync`` before return.
+    ``workspace`` carries the verified run owner's location to fleet reporting
+    without adding filesystem paths to the durable event envelope.
     """
     journal_path = Path(journal_path)
     ensure_journal(journal_path)
@@ -1122,7 +1125,7 @@ def append_event(
     try:
         from brigade import fleet_client
 
-        fleet_client.report_journal_event(envelope, journal_path=journal_path)
+        fleet_client.report_journal_event(envelope, journal_path=journal_path, workspace=workspace)
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException:  # pragma: no cover - reporting must never break journaling

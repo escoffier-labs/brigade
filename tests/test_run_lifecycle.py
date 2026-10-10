@@ -293,6 +293,43 @@ def test_custom_output_dir_appends_under_matching_lock(enabled, tmp_path):
     assert [e.event_type for e in events] == ["run.snapshot.checkpointed", "run.created"]
 
 
+def test_relocated_artifacts_report_the_owning_repository(enabled, tmp_path, monkeypatch):
+    from brigade import fleet_client, node
+
+    identity = node.NodeIdentity(
+        node_id="11111111-1111-4111-8111-111111111111", hostname="fleet-test", roles=(), platform="test"
+    )
+    home_identity = node.node_path(tmp_path)
+    home_identity.parent.mkdir()
+    home_identity.write_text(node._format_node_toml(identity))
+    monkeypatch.setenv("BRIGADE_HOME", str(home_identity.parent))
+    owner = _repo(tmp_path)
+    _git(owner, "remote", "add", "origin", "https://github.com/acme/owner.git")
+    artifact_parent = tmp_path / "artifact-parent"
+    artifact_parent.mkdir()
+    artifacts = _repo(artifact_parent)
+    _git(artifacts, "remote", "add", "origin", "https://github.com/acme/artifacts.git")
+    run_dir = _run_dir(artifacts)
+    reports = []
+
+    def report(event, **kwargs):
+        reports.append((event, kwargs["base_path"]))
+        return True
+
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "https://hub.example.invalid")
+    monkeypatch.setattr(fleet_client, "report_event", report)
+    _write_run_json(run_dir, "started", lock_workspace=owner)
+    with runguard.run_lock(owner, run_dir=run_dir):
+        _write_run_json(run_dir, "started", lock_workspace=owner)
+        run_lifecycle.record_dispatch_fact(run_dir, workspace=owner, event_type="run.dispatch.requested", seat="chef")
+        _write_run_json(run_dir, "completed", lock_workspace=owner)
+
+    assert fleet_client.resolve_claim_target(owner) == "acme/owner"
+    assert [event["state"] for event, _ in reports] == [event.event_type for event in _events(run_dir)]
+    assert {event["repo"] for event, _ in reports} == {"acme/owner"}
+    assert {base_path for _, base_path in reports} == {owner}
+
+
 def test_long_custom_output_dir_final_component_journals(enabled, tmp_path):
     repo = _repo(tmp_path)
     long_run_id = "x" * 200
