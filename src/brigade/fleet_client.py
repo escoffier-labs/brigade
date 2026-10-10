@@ -928,13 +928,10 @@ def report_event(
 
 
 def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None = None) -> bool:
-    """Denormalize a run_event.v1 envelope into a fleet event and report it.
+    """Denormalize and report a run_event.v1 envelope without raising ``Exception``.
 
-    ``repo`` uses the claim key for the journal's repository (#1662). A
-    transient git failure falls back to the previous workspace name and logs
-    a ``repo-key-fallback`` warning. ``node_id`` is always this machine's home
-    identity (#1161), never the journal workspace's local one. Never raises
-    ``Exception``; see ``report_event`` for the interrupt contract.
+    ``repo`` shares claim keys (#1662); git failures retain ``workspace.name`` and log
+    ``repo-key-fallback``. ``node_id`` uses home identity; see ``report_event`` for interrupts.
     """
     try:
         if not load_fleet_config()["hub_url"]:
