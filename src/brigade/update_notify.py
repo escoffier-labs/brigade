@@ -138,6 +138,9 @@ def maybe_notify(
         spawn_refresh = _spawn_refresh if spawn is None else spawn
         command_argv = list(argv)
 
+        if _refresh_gated(command_argv, environment):
+            return
+
         path = cache_path(environment)
         state = localio.read_json_dict(path) or {}
 

@@ -6,6 +6,8 @@ import io
 import json
 from pathlib import Path
 
+import pytest
+
 from brigade import __version__, update_notify
 from tests._home import set_home
 
@@ -46,7 +48,11 @@ def test_is_newer_table():
     assert not update_notify.is_newer("0.26.0", "garbage")
 
 
-def test_optout_and_ci_skip_notice_and_refresh(tmp_path):
+def test_optout_and_ci_skip_notice_and_refresh(tmp_path, monkeypatch):
+    def forbidden_cache_path(env):
+        pytest.fail("disabled update notifier resolved its cache path")
+
+    monkeypatch.setattr(update_notify, "cache_path", forbidden_cache_path)
     err = _Tty()
     calls: list[str] = []
 
