@@ -2,7 +2,10 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from functools import partial
 import json
+import platform
+import sys
 
 import pytest
 
@@ -40,6 +43,16 @@ def test_default_cli_adoption_label_discards_url_tracking(tmp_path, capsys, flag
     assert entry["label"] == "cse_fixture"
     assert "private-fixture" not in cloud_tracker.registry_path(tmp_path).read_text()
     assert "tracking" not in repr(cloud_tracker.status_payload(tmp_path))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="exercises the native Windows platform fallback")
+def test_cli_adoption_with_cold_platform_cache_and_unavailable_wmi(tmp_path, capsys, monkeypatch):
+    def unavailable_wmi(*args):
+        raise OSError("fixture WMI unavailable")
+
+    monkeypatch.setattr(platform, "_uname_cache", None)
+    monkeypatch.setattr(platform, "_wmi_query", unavailable_wmi, raising=False)
+    test_default_cli_adoption_label_discards_url_tracking(tmp_path, capsys, "--task-id")
 
 
 @pytest.mark.parametrize("task_id", ["legacy-task", None, "cse_other"])
@@ -166,13 +179,13 @@ def test_observer_retains_explicit_refs_and_scopes_branch_evidence(tmp_path, mon
 
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
-    def forbidden(*args, **kwargs):
-        pytest.fail("adoption/status/doctor invoked a provider or holder operation")
+    def forbidden(operation, *args, **kwargs):
+        pytest.fail(f"adoption/status/doctor invoked {operation}: args={args!r}, kwargs={kwargs!r}")
 
-    monkeypatch.setattr(cloud_tracker.subprocess, "run", forbidden)
-    monkeypatch.setattr(claude_cloud, "list_agents", forbidden)
+    monkeypatch.setattr(cloud_tracker.subprocess, "run", partial(forbidden, "subprocess.run"))
+    monkeypatch.setattr(claude_cloud, "list_agents", partial(forbidden, "claude_cloud.list_agents"))
     for name in ("admit_cloud", "bind_cloud", "renew_cloud", "release_cloud", "fetch_cloud"):
-        monkeypatch.setattr(fleet_client, name, forbidden)
+        monkeypatch.setattr(fleet_client, name, partial(forbidden, f"fleet_client.{name}"))
     monkeypatch.setattr(cloud_tracker, "observe_github", lambda target: {"branches": [], "prs": []})
     monkeypatch.setattr(cloud_tracker, "jules_cloud_wired", lambda: False)
     from brigade import grokbot_jobs
