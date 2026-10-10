@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import secrets
 import stat
@@ -1109,7 +1110,16 @@ def _write_bytes_file(directory: _Directory, name: str, data: bytes) -> None:
         descriptor = None
         os.replace(temporary, name, src_dir_fd=directory.descriptor, dst_dir_fd=directory.descriptor)
         temporary_created = False
-        os.fsync(directory.descriptor)
+        try:
+            os.fsync(directory.descriptor)
+        except OSError:
+            # Replacement committed the visible storage file. This applies to
+            # queue rows, reports, snapshots, and authority markers alike. A
+            # failed directory fsync leaves crash durability uncertain, but must
+            # not report no mutation and trigger rollback of granted ownership.
+            logging.getLogger(__name__).warning(
+                "GrokBot storage file replaced, but directory fsync failed; crash durability is uncertain"
+            )
     except OSError as exc:
         raise GrokbotJobError("unsafe-storage") from exc
     finally:
