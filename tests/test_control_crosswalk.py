@@ -1036,7 +1036,9 @@ def test_approval_statuses_map_to_distinct_outcomes(tmp_path, monkeypatch):
         ("UNAPPROVED", None): ("absent", "untested"),
     }
     for (status, sod), (outcome, state) in expected.items():
-        verification = approval.ApprovalVerification("run-1", status, None, {"result": sod} if sod else None)
+        verification = approval.ApprovalVerification(
+            "run-1", status, None, {"result": sod} if sod else None, live_tree="1" * 40
+        )
         monkeypatch.setattr(approval, "verify_run_approval", lambda *a, _v=verification, **k: _v)
         readiness = _assess(target, "EC-05")
         assert (readiness["outcome"], readiness["legacy_state"]) == (outcome, state), status
@@ -1899,7 +1901,7 @@ def test_ec05_unapproved_journal_cannot_hide_behind_valid_sibling(tmp_path, monk
     # Use a real signed approval and real journal reads for both runs. The
     # existing status-mapping mock cannot expose parser short-circuiting.
     good_id = "approved-run"
-    target, key, _ = approval_fixtures._workspace(tmp_path, run_id=good_id, requester_principal=None)
+    target, key, _ = _signed_control_approval_workspace(tmp_path, monkeypatch, run_id=good_id)
     approval_fixtures._record_v1_approval(target, key, run_id=good_id)
     good_dir = target / ".brigade/runs" / good_id
     good_journal = good_dir / "events/lifecycle.jsonl"
@@ -2648,7 +2650,11 @@ def test_signed_delegation_uses_held_dependency_snapshot(tmp_path, monkeypatch, 
     from brigade import approval, attestation
     from tests import test_approval as fixtures
 
-    target, key, _ = fixtures._workspace(tmp_path, requester_principal=None)
+    target, key, _ = (
+        fixtures._workspace(tmp_path, requester_principal=None)
+        if claim == "EC-02"
+        else _signed_control_approval_workspace(tmp_path, monkeypatch)
+    )
     if claim == "EC-02":
         fixtures._write_verify_receipt(target, producer_key=key)
         delegate = attestation.verify_attestation
@@ -2685,7 +2691,7 @@ def test_signed_delegation_uses_held_dependency_snapshot(tmp_path, monkeypatch, 
 def test_approval_dependency_refusals_cannot_validate_a_signed_claim(tmp_path, monkeypatch, dependency):
     from tests import test_approval as fixtures
 
-    target, key, _ = fixtures._workspace(tmp_path, requester_principal=None)
+    target, key, _ = _signed_control_approval_workspace(tmp_path, monkeypatch)
     fixtures._record_v1_approval(target, key)
     assert _assess(target, "EC-05")["outcome"] == "validated"
     if dependency == "budget":
@@ -2718,7 +2724,7 @@ def test_assessment_refuses_nonregular_trust_without_reading_private_keys(tmp_pa
     from brigade import dirfd
     from tests import test_approval as fixtures
 
-    target, key, _ = fixtures._workspace(tmp_path, requester_principal=None)
+    target, key, _ = _signed_control_approval_workspace(tmp_path, monkeypatch)
     fixtures._record_v1_approval(target, key)
     original_open = dirfd.open_child_file
     opened = []
@@ -2765,6 +2771,83 @@ def test_approval_assessment_never_stages_an_unignored_private_signing_key(tmp_p
     subprocess.run(["git", "-C", str(target), "config", "filter.private-key-refusal.required", "true"], check=True)
     _assess(target, "EC-05")
     assert not marker.exists()
+
+
+def _signed_control_approval_workspace(tmp_path, monkeypatch, *, run_id="approval-run-001"):
+    import subprocess
+
+    from tests import test_approval as fixtures
+
+    target, key, signers = fixtures._workspace(tmp_path, run_id=run_id, requester_principal=None)
+    (target / ".gitignore").write_text(".brigade/\n")
+    (target / "tracked.txt").write_text("approved workspace\n")
+    subprocess.run(["git", "init", "-q", str(target)], check=True)
+    subprocess.run(["git", "-C", str(target), "add", ".gitignore", "tracked.txt"], check=True)
+    _git_commit(target, "fixture")
+    tree = localio.tree_fingerprint(target)
+    assert tree is not None
+    monkeypatch.setattr(fixtures, "TREE", tree)
+    run_path = target / ".brigade/runs" / run_id / "run.json"
+    metadata = json.loads(run_path.read_text())
+    metadata["tree_fingerprint"] = tree
+    _write_json(run_path, metadata)
+    fixtures._write_verify_receipt(
+        target,
+        producer_run_id=run_id,
+        producer_key=tmp_path / "verifier/.brigade/attestation/signing-key",
+        tree_fingerprint=tree,
+    )
+    return target, key, signers
+
+
+@pytest.mark.parametrize("git_failure", ["nonzero", "timeout"])
+def test_ec05_unavailable_live_tree_cannot_validate_changed_workspace(tmp_path, monkeypatch, git_failure):
+    import subprocess
+
+    from tests import test_approval as fixtures
+
+    target, key, _ = _signed_control_approval_workspace(tmp_path, monkeypatch)
+    fixtures._record_v1_approval(target, key)
+    assert _assess(target, "EC-05")["outcome"] == "validated"
+    (target / "tracked.txt").write_text("workspace changed after approval\n")
+    original_git = control_crosswalk._git
+
+    def failing_git(ctx, *args, **kwargs):
+        if args[0] == "write-tree":
+            if git_failure == "timeout":
+                raise subprocess.TimeoutExpired("git write-tree", 1)
+            return subprocess.CompletedProcess(args, 1, "", "tree unavailable")
+        return original_git(ctx, *args, **kwargs)
+
+    monkeypatch.setattr(control_crosswalk, "_git", failing_git)
+    readiness = _assess(target, "EC-05")
+    assert readiness["outcome"] == "unavailable"
+    assert readiness["legacy_state"] == "untested"
+    assert readiness["dimensions"]["subject"] == {"status": "unavailable", "reason": "live_tree_unavailable"}
+
+
+@pytest.mark.parametrize(
+    "period,expected_outcome,out_of_period",
+    [
+        (("2026-09-03T12:00:30Z", "2026-09-03T12:01:30Z"), "validated", 0),
+        (("2026-09-03T11:59:30Z", "2026-09-03T12:00:30Z"), "absent", 1),
+    ],
+)
+def test_ec05_period_uses_authenticated_approval_decision(
+    tmp_path, monkeypatch, period, expected_outcome, out_of_period
+):
+    from tests import test_approval as fixtures
+
+    target, key, _ = _signed_control_approval_workspace(tmp_path, monkeypatch)
+    fixtures._record_v1_approval(target, key)  # Signed decision: 12:01 UTC.
+    run_path = target / ".brigade/runs" / fixtures.RUN_ID / "run.json"
+    metadata = json.loads(run_path.read_text())
+    metadata["started_at"] = "2026-09-03T12:00:00Z"
+    metadata["approval"] = {"decided_at": "2026-09-03T12:00:00Z"}
+    _write_json(run_path, metadata)
+    readiness = _assess(target, "EC-05", period=period)
+    assert readiness["outcome"] == expected_outcome
+    assert readiness["population"]["out_of_period"] == out_of_period
 
 
 def test_approval_snapshot_preserves_original_git_tree_and_workspace_key_identity(tmp_path, monkeypatch):

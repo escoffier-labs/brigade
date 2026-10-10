@@ -85,6 +85,7 @@ REASON_CODES = frozenset(
         "journal_chain_error",
         "journal_empty",
         "journal_partial_tail",
+        "live_tree_unavailable",
         "media_type_mismatch",
         "no_artifacts",
         "no_explicit_verdict",
