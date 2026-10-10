@@ -960,6 +960,64 @@ fn python_conditional_module_assignment_keeps_uncertain_definition() {
 }
 
 #[test]
+fn python_conditional_external_import_keeps_earlier_definition_uncertain() {
+    for import in ["from fastlib import helper", "import fastlib as helper"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_resolution_file(
+            root,
+            "core.py",
+            &format!(
+                "def helper():\n    pass\ntry:\n    {import}\nexcept ImportError:\n    pass\n"
+            ),
+        );
+        write_resolution_file(
+            root,
+            "use.py",
+            "from core import helper\n\ndef run():\n    return helper()\n",
+        );
+        let conn = resolution_db(root);
+        assert_uncertain_external_import_candidate(&conn);
+    }
+}
+
+#[test]
+fn python_conditional_external_import_keeps_fallback_definition_uncertain() {
+    for import in ["from ext import helper", "import ext as helper"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_resolution_file(
+            root,
+            "core.py",
+            &format!("try:\n    {import}\nexcept ImportError:\n    def helper():\n        pass\n"),
+        );
+        write_resolution_file(
+            root,
+            "use.py",
+            "from core import helper\n\ndef run():\n    return helper()\n",
+        );
+        let conn = resolution_db(root);
+        assert_uncertain_external_import_candidate(&conn);
+    }
+}
+
+fn assert_uncertain_external_import_candidate(conn: &rusqlite::Connection) {
+    assert_resolves_to(conn, "run", "helper", "unique-name", "core.py");
+    let rows = graphtrail::store::explain_calls(conn, "run", "helper").unwrap();
+    assert_eq!(rows[0].targets[0].confidence, 0.7, "{rows:?}");
+    let edge_confidence: f64 = conn
+        .query_row(
+            "SELECT e.confidence FROM edges e
+             JOIN symbols src ON src.id = e.source JOIN symbols dst ON dst.id = e.target
+             WHERE src.name = 'run' AND dst.name = 'helper' AND dst.file_path = 'core.py'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(edge_confidence, 0.7);
+}
+
+#[test]
 fn python_module_assignment_preserves_later_and_nonbinding_definitions() {
     for core in [
         "helper = 42\ndef helper():\n    pass\n",
