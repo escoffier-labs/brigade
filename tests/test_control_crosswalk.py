@@ -1653,7 +1653,7 @@ def test_ec04_discovers_record_request_nonce_path(tmp_path, monkeypatch):
     seen: list[str] = []
 
     def fake_verify(path, **kwargs):
-        seen.append(Path(path).relative_to(run_dir).as_posix())
+        seen.append(Path(path).relative_to(kwargs["target"] / ".brigade/runs/run-1").as_posix())
         return attestation.AttestationVerifyResult(status=attestation.STATUS_SIGNED_OK, run_id="run-1")
 
     monkeypatch.setattr(attestation, "verify_attestation", fake_verify)
@@ -1696,8 +1696,9 @@ def test_ec04_refuses_linked_run_with_only_producer_requests(tmp_path, monkeypat
     seen = []
 
     def verify(path, **kwargs):
-        assert Path(path) == sibling
-        seen.append(Path(path))
+        live_path = target / Path(path).relative_to(kwargs["target"])
+        assert live_path == sibling
+        seen.append(live_path)
         return attestation.AttestationVerifyResult(status=attestation.STATUS_SIGNED_OK, run_id="valid-run")
 
     monkeypatch.setattr(attestation, "verify_attestation", verify)
@@ -1916,14 +1917,7 @@ def test_run_discovery_root_stat_error_is_unavailable(tmp_path, monkeypatch, cla
     target = _ws(tmp_path)
     root = target / ".brigade" / "runs"
     root.mkdir(parents=True)
-    original_lstat = Path.lstat
-
-    def unreadable(path):
-        if path == root:
-            raise PermissionError("fixture denies run discovery metadata")
-        return original_lstat(path)
-
-    monkeypatch.setattr(Path, "lstat", unreadable)
+    _deny_artifact_metadata(monkeypatch, root)
     readiness = _assess(target, claim_id, run_id)
     assert readiness["outcome"] == "unavailable"
     assert readiness["reason"] == "discovery_unreadable"
@@ -1993,29 +1987,10 @@ def test_trailer_requires_receipt_identity(tmp_path, receipt, expected, reason, 
     ],
 )
 def test_shared_discovery_stat_refusal_is_unavailable(tmp_path, monkeypatch, claim, relative):
-    import os
-
     target = _ws(tmp_path)
     root = target / relative
     root.mkdir(parents=True)
-    original = os.lstat
-
-    def refused(path, *args, **kwargs):
-        if Path(path) == root:
-            raise PermissionError("synthetic discovery metadata refusal")
-        return original(path, *args, **kwargs)
-
-    original_path_lstat = Path.lstat
-
-    def path_refused(path):
-        if path == root:
-            raise PermissionError("synthetic discovery metadata refusal")
-        return original_path_lstat(path)
-
-    # os.path.lexists and Path.lstat use different metadata APIs. The fixture
-    # denies the same root at both seams, matching a real metadata refusal.
-    monkeypatch.setattr(os, "lstat", refused)
-    monkeypatch.setattr(Path, "lstat", path_refused)
+    _deny_artifact_metadata(monkeypatch, root)
     result = _assess(target, claim)
     assert result["outcome"] == "unavailable"
     assert result["reason"] == "discovery_unreadable"
@@ -2053,7 +2028,7 @@ def test_approval_journal_read_error_is_unavailable(tmp_path, monkeypatch, ssh_a
     journal = run_dir / "events" / "lifecycle.jsonl"
 
     def refused(path, *args, **kwargs):
-        if Path(path) == journal:
+        if Path(path).parts[-4:] == journal.parts[-4:]:
             raise PermissionError("synthetic journal read refusal")
         return original(path, *args, **kwargs)
 
@@ -2067,8 +2042,6 @@ def test_approval_journal_read_error_is_unavailable(tmp_path, monkeypatch, ssh_a
 
 @pytest.mark.parametrize("run_id", [None, "run-a"])
 def test_valid_legacy_request_does_not_hide_unreadable_request_population(tmp_path, monkeypatch, run_id):
-    import os
-
     from brigade import attestation
 
     target = _ws(tmp_path)
@@ -2076,21 +2049,7 @@ def test_valid_legacy_request_does_not_hide_unreadable_request_population(tmp_pa
     _write_json(run_dir / "request.json", {})
     root = run_dir / "requests"
     root.mkdir()
-    original_os_lstat = os.lstat
-    original_path_lstat = Path.lstat
-
-    def os_refused(path, *args, **kwargs):
-        if Path(path) == root:
-            raise PermissionError("synthetic request population refusal")
-        return original_os_lstat(path, *args, **kwargs)
-
-    def path_refused(path):
-        if path == root:
-            raise PermissionError("synthetic request population refusal")
-        return original_path_lstat(path)
-
-    monkeypatch.setattr(os, "lstat", os_refused)
-    monkeypatch.setattr(Path, "lstat", path_refused)
+    _deny_artifact_metadata(monkeypatch, root)
     monkeypatch.setattr(control_crosswalk, "_ssh_keygen_available", lambda: True)
     _stub_attestation(
         monkeypatch,
@@ -2106,8 +2065,6 @@ def test_valid_legacy_request_does_not_hide_unreadable_request_population(tmp_pa
 @pytest.mark.parametrize("claim_id", ["EC-02", "EC-12"])
 @pytest.mark.parametrize("run_id", [None, RUN])
 def test_unreadable_artifact_sibling_cannot_be_omitted(tmp_path, monkeypatch, claim_id, run_id):
-    import os
-
     from brigade import attestation, control_readiness
 
     target = _ws(tmp_path)
@@ -2146,21 +2103,7 @@ def test_unreadable_artifact_sibling_cannot_be_omitted(tmp_path, monkeypatch, cl
             )
 
         monkeypatch.setitem(control_crosswalk._VERIFIER_ADAPTERS, "evidence-package", adapter)
-    original_os_lstat = os.lstat
-    original_path_lstat = Path.lstat
-
-    def os_refused(path, *args, **kwargs):
-        if Path(path) == denied:
-            raise PermissionError("synthetic artifact metadata refusal")
-        return original_os_lstat(path, *args, **kwargs)
-
-    def path_refused(path):
-        if path == denied:
-            raise PermissionError("synthetic artifact metadata refusal")
-        return original_path_lstat(path)
-
-    monkeypatch.setattr(os, "lstat", os_refused)
-    monkeypatch.setattr(Path, "lstat", path_refused)
+    _deny_artifact_metadata(monkeypatch, denied)
     readiness = _assess(target, claim_id, run_id)
     assert readiness["outcome"] == "unavailable"
     assert readiness["reason"] == "discovery_unreadable"
@@ -2169,19 +2112,21 @@ def test_unreadable_artifact_sibling_cannot_be_omitted(tmp_path, monkeypatch, cl
 
 
 def _deny_artifact_metadata(monkeypatch, denied: Path) -> None:
-    """Deny the same path/ancestor at both metadata APIs without relying on uid."""
+    """Deny metadata for the same object at the held-parent stat boundary."""
     import os
 
-    for owner, attribute in ((Path, "stat"), (Path, "lstat"), (os, "stat"), (os, "lstat")):
-        original = getattr(owner, attribute)
+    from brigade import dirfd
 
-        def refused(path, *args, _original=original, **kwargs):
-            candidate = Path(path)
-            if candidate == denied or denied in candidate.parents:
-                raise PermissionError("synthetic artifact metadata refusal")
-            return _original(path, *args, **kwargs)
+    parent = denied.parent.stat()
+    original = dirfd.stat_child
 
-        monkeypatch.setattr(owner, attribute, refused)
+    def refused(descriptor, name):
+        held = os.fstat(descriptor)
+        if (held.st_dev, held.st_ino) == (parent.st_dev, parent.st_ino) and name == denied.name:
+            raise PermissionError("synthetic artifact metadata refusal")
+        return original(descriptor, name)
+
+    monkeypatch.setattr(dirfd, "stat_child", refused)
 
 
 @pytest.mark.parametrize("run_id", [None, "b-unreadable"])
@@ -2526,3 +2471,219 @@ def test_assessed_target_symlink_remains_canonical(tmp_path):
     result = _assess(alias, "EC-06", "run-a")
     assert result["outcome"] == "validated"
     assert result["artifacts"][0]["relpath"] == ".brigade/runs/run-a/events/lifecycle.jsonl"
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="deterministic POSIX syscall interleaving")
+@pytest.mark.parametrize("operation", ["read", "scan", "read-aba", "scan-aba"])
+def test_ancestor_swap_cannot_redirect_assessment(tmp_path, monkeypatch, operation):
+    import os
+
+    target = _ws(tmp_path)
+    run = _verify_dir(target, "original-run")
+    _write_verify_receipt(run, run_id=run.name, status="failed")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _write_verify_receipt(outside / "work/verify-runs/forged-run", run_id="forged-run")
+    ancestor = target / ".brigade"
+    held = target / "original-brigade"
+    swapped = False
+
+    def swap():
+        nonlocal swapped
+        if not swapped:
+            ancestor.rename(held)
+            ancestor.symlink_to(outside, target_is_directory=True)
+            swapped = True
+
+    original_open = os.open
+    original_scan = os.scandir
+
+    def restore():
+        if operation.endswith("-aba") and ancestor.is_symlink():
+            ancestor.unlink()
+            held.rename(ancestor)
+
+    def intercepted_open(path, flags, *args, **kwargs):
+        if operation.startswith("read") and Path(path).name == "receipt.json":
+            swap()
+        descriptor = original_open(path, flags, *args, **kwargs)
+        restore()
+        return descriptor
+
+    def intercepted_scan(path):
+        if operation.startswith("scan"):
+            swap()
+        iterator = original_scan(path)
+        restore()
+        return iterator
+
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {intercepted_open})
+    monkeypatch.setattr(os, "open", intercepted_open)
+    monkeypatch.setattr(os, "scandir", intercepted_scan)
+    result = _assess(target, "EC-01")
+    assert swapped
+    assert result["outcome"] == "failed"
+    assert all("forged-run" not in artifact["relpath"] for artifact in result["artifacts"])
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="deterministic POSIX ancestor swap")
+@pytest.mark.parametrize("claim", ["EC-02", "EC-05"])
+def test_signed_delegation_uses_held_dependency_snapshot(tmp_path, monkeypatch, claim):
+    import shutil
+
+    from brigade import approval, attestation
+    from tests import test_approval as fixtures
+
+    target, key, _ = fixtures._workspace(tmp_path, requester_principal=None)
+    if claim == "EC-02":
+        fixtures._write_verify_receipt(target, producer_key=key)
+        delegate = attestation.verify_attestation
+    else:
+        fixtures._record_v1_approval(target, key)
+        delegate = approval.verify_run_approval
+    assert _assess(target, claim)["outcome"] == "validated"
+    ancestor = target / ".brigade"
+    outside = tmp_path / "outside"
+    shutil.copytree(ancestor, outside)
+    (outside / "attestation/allowed_signers").write_text("")
+    moved = target / "original-brigade"
+    swapped = False
+
+    def intercepted(*args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            ancestor.rename(moved)
+            ancestor.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return delegate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        attestation if claim == "EC-02" else approval,
+        "verify_attestation" if claim == "EC-02" else "verify_run_approval",
+        intercepted,
+    )
+    result = _assess(target, claim)
+    assert swapped
+    assert result["outcome"] == "validated"
+
+
+@pytest.mark.parametrize("dependency", ["truncated", "budget", "linked", "malformed"])
+def test_approval_dependency_refusals_cannot_validate_a_signed_claim(tmp_path, monkeypatch, dependency):
+    from tests import test_approval as fixtures
+
+    target, key, _ = fixtures._workspace(tmp_path, requester_principal=None)
+    fixtures._record_v1_approval(target, key)
+    assert _assess(target, "EC-05")["outcome"] == "validated"
+    if dependency == "budget":
+        monkeypatch.setattr(control_crosswalk, "_ASSESSMENT_BYTE_BUDGET", 1)
+    elif dependency == "truncated":
+        _verify_dir(target, "extra-run").mkdir()
+        monkeypatch.setattr(control_crosswalk, "_MAX", 1)
+    elif dependency == "linked":
+        outside = tmp_path / "outside.json"
+        outside.write_text("{}")
+        (_verify_dir(target, fixtures.VERIFY_ID) / "attestation.json").unlink(missing_ok=True)
+        (_verify_dir(target, fixtures.VERIFY_ID) / "attestation.json").symlink_to(outside)
+    else:
+        _write_json(_verify_dir(target, "unparseable-run") / "receipt.json", [])
+    result = _assess(target, "EC-05")
+    assert result["outcome"] != "validated"
+    expected = {
+        "truncated": "read_limit_exceeded",
+        "budget": "read_limit_exceeded",
+        "linked": "symlink_refused",
+        "malformed": "invalid_json",
+    }[dependency]
+    assert expected in result["reason_codes"]
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX FIFO safety")
+def test_assessment_refuses_nonregular_trust_without_reading_private_keys(tmp_path, monkeypatch):
+    import os
+
+    from brigade import dirfd
+    from tests import test_approval as fixtures
+
+    target, key, _ = fixtures._workspace(tmp_path, requester_principal=None)
+    fixtures._record_v1_approval(target, key)
+    original_open = dirfd.open_child_file
+    opened = []
+
+    def observe(parent, name, flags, mode=0o600):
+        opened.append(name)
+        assert name != "signing-key"
+        return original_open(parent, name, flags, mode)
+
+    monkeypatch.setattr(dirfd, "open_child_file", observe)
+    assert _assess(target, "EC-05")["outcome"] == "validated"
+    assert "signing-key.pub" in opened
+    signers = target / ".brigade/attestation/allowed_signers"
+    signers.unlink()
+    os.mkfifo(signers)
+    assert _assess(target, "EC-05")["outcome"] == "unavailable"
+
+
+def test_approval_assessment_never_stages_an_unignored_private_signing_key(tmp_path):
+    import subprocess
+
+    from tests import test_approval as fixtures
+
+    target, key, _ = fixtures._workspace(tmp_path, requester_principal=None)
+    fixtures._record_v1_approval(target, key)
+    subprocess.run(["git", "init", "-q", str(target)], check=True)
+    _git_commit(target, "fixture")
+    # A failing clean filter detects Git attempting to read/stage this path.
+    # Keep it unignored so a blanket add -A actually exercises the regression.
+    attributes = target / ".gitattributes"
+    attributes.write_text(".brigade/attestation/signing-key filter=private-key-refusal\n")
+    marker = target / "private-key-read-attempt"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(target),
+            "config",
+            "filter.private-key-refusal.clean",
+            f'echo attempted > "{marker}"; exit 1',
+        ],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(target), "config", "filter.private-key-refusal.required", "true"], check=True)
+    _assess(target, "EC-05")
+    assert not marker.exists()
+
+
+def test_approval_snapshot_preserves_original_git_tree_and_workspace_key_identity(tmp_path, monkeypatch):
+    import subprocess
+
+    from brigade import approval, attestation
+    from tests import test_approval as fixtures
+
+    target, key, _ = fixtures._workspace(tmp_path, requester_principal=None)
+    fixtures._record_v1_approval(target, key)
+    (target / ".gitignore").write_text(".brigade/\n")
+    (target / "tracked.txt").write_text("original tree\n")
+    subprocess.run(["git", "init", "-q", str(target)], check=True)
+    subprocess.run(["git", "-C", str(target), "add", ".gitignore", "tracked.txt"], check=True)
+    _git_commit(target, "fixture")
+    (target / "tracked.txt").write_text("changed live tree\n")
+    expected_tree = localio.tree_fingerprint(target)
+    expected_key = attestation.get_key_fingerprint(attestation.default_key_path(target))
+    delegate = approval.verify_run_approval
+    seen = []
+
+    def verify(snapshot_target, run_dir, **kwargs):
+        context = kwargs["context"]
+        assert snapshot_target != target
+        assert context.target == target
+        assert context.live_tree == expected_tree
+        assert context.workspace_keyid == expected_key
+        assert not (snapshot_target / ".brigade/attestation/signing-key").exists()
+        seen.append(context)
+        return delegate(snapshot_target, run_dir, **kwargs)
+
+    monkeypatch.setattr(approval, "verify_run_approval", verify)
+    result = _assess(target, "EC-05")
+    assert seen
+    assert result["outcome"] == "rejected"
+    assert "approval_stale" in result["reason_codes"]
