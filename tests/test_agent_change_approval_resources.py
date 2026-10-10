@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import tracemalloc
 from collections.abc import Mapping
@@ -63,9 +64,14 @@ def _peak_verification_memory(
     index_path = run_dir / "agent-change.json"
     index_path.write_text(json.dumps(envelope, indent=2, sort_keys=True), encoding="utf-8")
     was_tracing = tracemalloc.is_tracing()
-    if not was_tracing:
-        tracemalloc.start()
+    was_collecting = gc.isenabled()
+    # Both runs must retain argparse's cyclic parser graph for the same window.
+    # Otherwise collection timing can dwarf the approval-padding allocation.
+    gc.collect()
     try:
+        gc.disable()
+        if not was_tracing:
+            tracemalloc.start()
         baseline, _previous_peak = tracemalloc.get_traced_memory()
         tracemalloc.reset_peak()
         result = cli.main(["receipts", "verify-agent-change", str(index_path), "--target", str(target), "--json"])
@@ -73,6 +79,10 @@ def _peak_verification_memory(
     finally:
         if not was_tracing:
             tracemalloc.stop()
+        if was_collecting:
+            gc.enable()
+        else:
+            gc.disable()
     return result, json.loads(capsys.readouterr().out), peak - baseline
 
 
