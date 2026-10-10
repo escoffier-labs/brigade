@@ -746,9 +746,14 @@ def _evaluate_human_approval_allow_with_sod(ctx: _Context) -> _Discovery:
         except Exception:
             obs = _verifier_unavailable(relpath, "verifier_error")
         else:
-            if verification.status == "UNAPPROVED":
+            unapproved = verification.status == "UNAPPROVED"
+            refusal = (
+                _approval_journal_refusal(run_dir, relpath, unapproved=unapproved)
+                if verification.status in {"UNAPPROVED", "APPROVAL-INVALID"}
+                else None
+            )
+            if unapproved and refusal is None:
                 continue
-            refusal = _approval_journal_refusal(run_dir, relpath) if verification.status == "APPROVAL-INVALID" else None
             obs = refusal if refusal is not None else _approval_observation(relpath, verification)
             if refusal is None and obs.proposed in {"rejected", "invalid"} and not _ssh_keygen_available():
                 # Without ssh-keygen the verifier reports APPROVAL-INVALID for
@@ -775,23 +780,34 @@ def _evaluate_human_approval_allow_with_sod(ctx: _Context) -> _Discovery:
     return out
 
 
-def _approval_journal_refusal(run_dir: Path, relpath: str) -> control_readiness.ArtifactObservation | None:
-    """Recover read-capability refusals hidden by APPROVAL-INVALID.
+def _approval_journal_refusal(
+    run_dir: Path, relpath: str, *, unapproved: bool = False
+) -> control_readiness.ArtifactObservation | None:
+    """Recover journal failures and read refusals hidden by approval status.
 
-    Approval verification uses the same status for malformed journals and read
-    refusals. A bounded-read refusal cannot establish an integrity failure,
-    regardless of signature-tool availability. Other journal failures keep the
-    approval verifier's rejection and existing prerequisite checks.
+    UNAPPROVED means no approval was parsed, which can also happen when parsing
+    stops at a malformed prefix or partial tail. Only a clean journal permits
+    treating that status as absence. APPROVAL-INVALID uses the same status for
+    malformed journals and read refusals; a bounded-read refusal cannot
+    establish an integrity failure, regardless of signature-tool availability.
     """
     try:
         report = run_journal.read_journal_bounded(run_dir / "events" / "lifecycle.jsonl")
     except run_journal.RunJournalError as exc:
         if "bound exceeded" not in str(exc):
+            if unapproved:
+                return _obs(relpath, "discovered", "rejected", _dims(integrity=("failed", "journal_chain_error")))
             return None
     except OSError:
         return _verifier_unavailable(relpath, "verifier_error")
     else:
         if not any("bound exceeded" in error for error in report.chain_errors):
+            if unapproved and (
+                report.chain_errors
+                or report.partial_tail is not None
+                or any(event.run_id != run_dir.name for event in report.events)
+            ):
+                return _journal_observation(relpath, report, run_dir.name)
             return None
     return _obs(
         relpath,
