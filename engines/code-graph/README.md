@@ -64,6 +64,8 @@ DB=.graphtrail/graphtrail.db
 graphtrail --db "$DB" callers serve
 graphtrail --db "$DB" callees serve
 graphtrail --db "$DB" impact serve --depth 2
+graphtrail --db "$DB" outline src/app.py --json
+graphtrail --db "$DB" callers helper --all-matches
 graphtrail --db "$DB" context "handoff lint" --json
 graphtrail --db "$DB" doctor . --json
 ```
@@ -86,7 +88,7 @@ main --calls@19 hops=1--> serve  (src/bin/graphtrail-mcp.rs -> src/mcp.rs)
 | | Job | What you get |
 |---|---|---|
 | **Index** | Parse the repo with tree-sitter | Symbols, imports, and call edges in `.graphtrail/graphtrail.db` |
-| **Ask** | Query structure, not text | `search`, `callers`, `callees`, `impact`, `file_neighbors`, `dead_code`, `cycles`, `affected`, `diff`, `explain` |
+| **Ask** | Query structure, not text | `search`, `outline`, `callers`, `callees`, `impact`, `file_neighbors`, `dead_code`, `cycles`, `affected`, `diff`, `explain` |
 | **Brief** | Pack neighborhood for agents | `context` over CLI or MCP. Brigade can attach it to runs |
 
 <p align="center">
@@ -122,11 +124,12 @@ Register it with an MCP client. For Claude Code, add to `.mcp.json` (project sco
 
 ### Tools
 
-The server exposes fourteen tools. This list is verified against the live `tools/list` response from `graphtrail-mcp`:
+The server exposes fifteen tools. This list is verified against the live `tools/list` response from `graphtrail-mcp`:
 
 | Tool | Required args | What it returns |
 |---|---|---|
 | `search` | `query` (`limit` optional, default 20, `path` optional) | Full-text search of code symbols (functions, classes, methods) by name, optionally filtered by indexed file path. |
+| `outline` | `path` | One file's symbols in source order: id, kind, name, qualified name, file path, line span and first signature line. |
 | `callers` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Symbols that call the given symbol (incoming call edges), with `hops` on each edge, plus how `symbol` resolved (see [Symbol resolution](#symbol-resolution)). |
 | `callees` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Symbols called by the given symbol (outgoing call edges), with `hops` on each edge, plus how `symbol` resolved. |
 | `impact` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Combined callers and callees of a symbol (the blast radius of a change), with `hops` on each edge, plus how `symbol` resolved. |
@@ -149,7 +152,7 @@ Call-edge tools cap each direction at 500 real edges. When a traversal is capped
 
 `callers`, `callees`, and `impact` (CLI and MCP) resolve `symbol` to seed symbols by exact match, in this order: symbol id, qualified name (`run`, `Class.method`), name path (`src/app.py::helper` or `src/app.py:helper`, matching the qualified or bare name in that file), then bare name. Only when nothing matches exactly do they fall back to the fuzzy prefix search that `search` and `context` use. `search` and `context` stay fuzzy.
 
-When an exact step matches several symbols (the same name in two files, for example), the edges of all of those symbols are returned and the result is marked ambiguous. Narrow it with a name path. Prefix neighbors (`run_journal` for `run`) are never merged into an exact result.
+When the winning resolution step matches several symbols, the result is marked ambiguous and returns its candidates with empty `selected` and `edges` arrays. This applies to exact matches and fuzzy fallback. Narrow the query with a symbol id or name path, or explicitly merge candidates with `--all-matches` on the CLI or `all_matches: true` over MCP. Prefix neighbors (`run_journal` for `run`) are never merged into an exact result, even with this flag. A single fuzzy match remains usable and is reported as fuzzy.
 
 `--json` output and the MCP result are an object:
 
@@ -158,12 +161,14 @@ When an exact step matches several symbols (the same name in two files, for exam
 | `query` | The `symbol` string as given. |
 | `resolution` | `id`, `qualified_name`, `name_path`, `name`, `fuzzy`, or `none`. |
 | `fuzzy` | `true` only when no exact match existed and the fuzzy fallback seeded the query. |
-| `ambiguous` | `true` when more than one symbol was selected. |
-| `selected` | Symbols whose edges are in `edges` (`id`, `kind`, `name`, `qualified_name`, `file_path`, `start_line`, `end_line`). |
+| `ambiguous` | `true` when more than one candidate matched, whether or not traversal was requested. |
+| `selected` | Symbols selected for traversal, empty for unresolved ambiguity (`id`, `kind`, `name`, `qualified_name`, `file_path`, `start_line`, `end_line`). |
 | `candidates` | Every symbol the winning resolution step matched, with the same fields. |
 | `edges` | The edge rows. |
 
-Text output is unchanged for a single exact match. An ambiguous or fuzzy result starts with a `resolution:` line and a `candidates:` block. When there are no edges, that note goes to stderr and stdout stays empty.
+Text output is unchanged for a single exact match. An ambiguous or fuzzy result starts with a `resolution:` line and a `candidates:` block. Opted-in merging also lists `selected:` symbols. When there are no edges, that note goes to stderr and stdout stays empty.
+
+`outline <path>` uses exact repo-relative file addressing, accepts a leading `./`, and returns an empty array for unindexed files. `--json` and MCP return an array with `id`, `kind`, `name`, `qualified_name`, `file_path`, `start_line`, `end_line`, and `signature`. Text output lists kind, qualified name, `path:start-end`, and the first signature line. The Brigade facade exposes the same command as `brigade code outline <path>`.
 
 Builds compiled with `--features codesearch` also expose the Code Search integration over MCP:
 

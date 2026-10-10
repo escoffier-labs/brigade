@@ -12,9 +12,10 @@ use crate::query::{
     DEFAULT_AFFECTED_DEPTH, DEFAULT_IMPACT_DEPTH, ExportFormat, ExportScope, affected,
     build_context_pack,
     context::{edge_location, symbol_location},
-    cycles, dead_code, diff_graphs, doctor, export_graph, file_neighbors, graph_query,
-    impact_query, missing_db_report, normalize_depth, personalize_context_pack, render_markdown,
-    render_markdown_budgeted, search_symbols_with_path, stats,
+    cycles, dead_code, diff_graphs, doctor, export_graph, file_neighbors, graph_query_with_matches,
+    impact_query_with_matches, missing_db_report, normalize_depth, outline,
+    personalize_context_pack, render_markdown, render_markdown_budgeted, search_symbols_with_path,
+    stats,
 };
 use crate::store::{
     db_path, init_schema, open_db, open_default_read_only, open_read_only, sync_repo_force,
@@ -57,8 +58,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List a file's symbols in source order.
+    Outline {
+        path: String,
+        #[arg(long)]
+        json: bool,
+    },
     Callers {
         symbol: String,
+        /// Merge every candidate instead of requiring a unique symbol.
+        #[arg(long)]
+        all_matches: bool,
         #[arg(long, default_value_t = DEFAULT_IMPACT_DEPTH)]
         depth: usize,
         #[arg(long)]
@@ -66,6 +76,9 @@ enum Command {
     },
     Callees {
         symbol: String,
+        /// Merge every candidate instead of requiring a unique symbol.
+        #[arg(long)]
+        all_matches: bool,
         #[arg(long, default_value_t = DEFAULT_IMPACT_DEPTH)]
         depth: usize,
         #[arg(long)]
@@ -73,6 +86,9 @@ enum Command {
     },
     Impact {
         symbol: String,
+        /// Merge every candidate instead of requiring a unique symbol.
+        #[arg(long)]
+        all_matches: bool,
         #[arg(long, default_value_t = DEFAULT_IMPACT_DEPTH)]
         depth: usize,
         #[arg(long)]
@@ -284,31 +300,67 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Command::Outline { path, json } => {
+            let conn = open_default_read_only(cli.db)?;
+            let rows = outline(&conn, &path)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else {
+                for row in rows {
+                    let symbol = row.symbol;
+                    println!(
+                        "{} {} {}:{}-{} {}",
+                        symbol.kind,
+                        symbol.qualified_name,
+                        symbol.file_path,
+                        symbol.start_line,
+                        symbol.end_line,
+                        row.signature
+                    );
+                }
+            }
+        }
         Command::Callers {
             symbol,
+            all_matches,
             depth,
             json,
         } => {
             let conn = open_default_read_only(cli.db)?;
-            let result = graph_query(&conn, &symbol, Direction::Incoming, normalize_depth(depth))?;
+            let result = graph_query_with_matches(
+                &conn,
+                &symbol,
+                Direction::Incoming,
+                normalize_depth(depth),
+                all_matches,
+            )?;
             print_graph_query(json, &result)?;
         }
         Command::Callees {
             symbol,
+            all_matches,
             depth,
             json,
         } => {
             let conn = open_default_read_only(cli.db)?;
-            let result = graph_query(&conn, &symbol, Direction::Outgoing, normalize_depth(depth))?;
+            let result = graph_query_with_matches(
+                &conn,
+                &symbol,
+                Direction::Outgoing,
+                normalize_depth(depth),
+                all_matches,
+            )?;
             print_graph_query(json, &result)?;
         }
         Command::Impact {
             symbol,
+            all_matches,
             depth,
             json,
         } => {
             let conn = open_default_read_only(cli.db)?;
-            let result = impact_query(&conn, &symbol, normalize_depth(depth))?;
+            let result =
+                impact_query_with_matches(&conn, &symbol, normalize_depth(depth), all_matches)?;
             print_graph_query(json, &result)?;
         }
         Command::Context {
@@ -706,13 +758,17 @@ fn graph_resolution_note(result: &GraphQueryResult) -> Option<String> {
         format!("resolution: none (no symbol matches {:?})\n", result.query)
     } else if result.fuzzy {
         format!(
-            "resolution: fuzzy (no exact symbol matches {:?}; edges merged from {count} prefix matches)\n",
-            result.query
+            "resolution: fuzzy{} (no exact symbol matches {:?}; {} of {count} prefix matches selected, narrow with path::name or opt in with --all-matches)\n",
+            if result.ambiguous { " ambiguous" } else { "" },
+            result.query,
+            result.selected.len()
         )
     } else if result.ambiguous {
         format!(
-            "resolution: {} ambiguous ({count} symbols match {:?}; edges merged from all of them, narrow with path::name)\n",
-            result.resolution, result.query
+            "resolution: {} ambiguous ({count} symbols match {:?}; {} selected, narrow with path::name or opt in with --all-matches)\n",
+            result.resolution,
+            result.query,
+            result.selected.len()
         )
     } else {
         return None;
@@ -723,6 +779,15 @@ fn graph_resolution_note(result: &GraphQueryResult) -> Option<String> {
             note.push_str(&format!(
                 "  {} {} {}:{}\n",
                 candidate.kind, candidate.qualified_name, candidate.file_path, candidate.start_line
+            ));
+        }
+    }
+    if !result.selected.is_empty() {
+        note.push_str("selected:\n");
+        for candidate in &result.selected {
+            note.push_str(&format!(
+                "  {} {}:{}\n",
+                candidate.qualified_name, candidate.file_path, candidate.start_line
             ));
         }
     }

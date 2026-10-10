@@ -10,6 +10,7 @@ pub mod graph;
 #[cfg(test)]
 mod graph_tests;
 pub mod health;
+pub mod outline;
 pub mod resolve;
 pub mod search;
 pub mod stats;
@@ -25,9 +26,11 @@ pub use doctor::{DoctorReport, doctor, missing_db_report};
 pub use export::{ExportFormat, ExportScope, export_graph};
 pub use graph::{
     DEFAULT_IMPACT_DEPTH, file_neighbors, graph_edges, graph_edges_with_depth, graph_query,
-    impact_edges, impact_query, limit_edges, normalize_depth,
+    graph_query_with_matches, impact_edges, impact_query, impact_query_with_matches, limit_edges,
+    normalize_depth,
 };
 pub use health::{CycleReport, DeadCodeReport, cycles, dead_code};
+pub use outline::outline;
 pub use resolve::{ResolutionMethod, SymbolResolution, resolve_graph_symbol};
 pub use search::{search_symbols, search_symbols_with_path};
 pub use stats::stats;

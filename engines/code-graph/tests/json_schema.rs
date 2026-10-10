@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use graphtrail::model::{ContextPack, GraphQueryResult, SymbolCandidate};
+use graphtrail::model::{ContextPack, GraphQueryResult, OutlineRow, SymbolCandidate};
 use graphtrail::store::{SCHEMA_VERSION, init_schema, meta, open_db, sync_repo};
 
 #[test]
@@ -31,6 +31,42 @@ fn context_pack_json_has_versioned_stable_shape() {
         assert!(obj.contains_key(key), "missing key: {key}");
     }
     assert_eq!(obj["schema_version"], serde_json::json!(SCHEMA_VERSION));
+}
+
+#[test]
+fn outline_json_has_symbol_address_span_and_signature() {
+    let row = OutlineRow {
+        symbol: SymbolCandidate {
+            id: "abc".to_string(),
+            kind: "function".to_string(),
+            name: "run".to_string(),
+            qualified_name: "run".to_string(),
+            file_path: "src/a.py".to_string(),
+            start_line: 1,
+            end_line: 2,
+        },
+        signature: "def run():".to_string(),
+    };
+    let value = serde_json::to_value(row).unwrap();
+    let keys: Vec<_> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            "end_line",
+            "file_path",
+            "id",
+            "kind",
+            "name",
+            "qualified_name",
+            "signature",
+            "start_line"
+        ]
+    );
 }
 
 #[test]

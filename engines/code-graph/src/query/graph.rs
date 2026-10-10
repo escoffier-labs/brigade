@@ -5,7 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
-use crate::model::{Direction, EdgeRow, FileNeighbor, GraphQueryResult};
+use crate::model::{Direction, EdgeRow, FileNeighbor, GraphQueryResult, SymbolCandidate};
 use crate::query::resolve::{SymbolResolution, resolve_graph_symbol};
 
 pub const DEFAULT_IMPACT_DEPTH: usize = 1;
@@ -43,9 +43,21 @@ pub fn graph_query(
     direction: Direction,
     depth: usize,
 ) -> Result<GraphQueryResult> {
+    graph_query_with_matches(conn, symbol_query, direction, depth, false)
+}
+
+/// Merge seed candidates only when the caller explicitly opts in.
+pub fn graph_query_with_matches(
+    conn: &Connection,
+    symbol_query: &str,
+    direction: Direction,
+    depth: usize,
+    all_matches: bool,
+) -> Result<GraphQueryResult> {
     let resolution = resolve_graph_symbol(conn, symbol_query)?;
-    let edges = resolved_edges(conn, &resolution, symbol_query, direction, depth)?;
-    Ok(query_result(symbol_query, resolution, edges))
+    let selected = selected_candidates(&resolution, all_matches);
+    let edges = resolved_edges(conn, &selected, symbol_query, direction, depth)?;
+    Ok(query_result(symbol_query, resolution, selected, edges))
 }
 
 /// `impact`: callers then callees of one resolved seed, sorted by hops.
@@ -54,28 +66,46 @@ pub fn impact_query(
     symbol_query: &str,
     depth: usize,
 ) -> Result<GraphQueryResult> {
+    impact_query_with_matches(conn, symbol_query, depth, false)
+}
+
+pub fn impact_query_with_matches(
+    conn: &Connection,
+    symbol_query: &str,
+    depth: usize,
+    all_matches: bool,
+) -> Result<GraphQueryResult> {
     let resolution = resolve_graph_symbol(conn, symbol_query)?;
-    let mut edges = resolved_edges(conn, &resolution, symbol_query, Direction::Incoming, depth)?;
+    let selected = selected_candidates(&resolution, all_matches);
+    let mut edges = resolved_edges(conn, &selected, symbol_query, Direction::Incoming, depth)?;
     edges.extend(resolved_edges(
         conn,
-        &resolution,
+        &selected,
         symbol_query,
         Direction::Outgoing,
         depth,
     )?);
     sort_impact_edges(&mut edges);
-    Ok(query_result(symbol_query, resolution, edges))
+    Ok(query_result(symbol_query, resolution, selected, edges))
+}
+
+fn selected_candidates(resolution: &SymbolResolution, all_matches: bool) -> Vec<SymbolCandidate> {
+    if all_matches || !resolution.is_ambiguous() {
+        resolution.candidates.clone()
+    } else {
+        Vec::new()
+    }
 }
 
 fn resolved_edges(
     conn: &Connection,
-    resolution: &SymbolResolution,
+    selected: &[SymbolCandidate],
     symbol_query: &str,
     direction: Direction,
     depth: usize,
 ) -> Result<Vec<EdgeRow>> {
     let mut edges = Vec::new();
-    for symbol in &resolution.candidates {
+    for symbol in selected {
         edges.extend(edges_for_symbol_id_with_depth(
             conn, &symbol.id, direction, depth,
         )?);
@@ -86,6 +116,7 @@ fn resolved_edges(
 fn query_result(
     symbol_query: &str,
     resolution: SymbolResolution,
+    selected: Vec<SymbolCandidate>,
     edges: Vec<EdgeRow>,
 ) -> GraphQueryResult {
     GraphQueryResult {
@@ -93,7 +124,7 @@ fn query_result(
         resolution: resolution.method.as_str().to_string(),
         fuzzy: resolution.is_fuzzy(),
         ambiguous: resolution.is_ambiguous(),
-        selected: resolution.candidates.clone(),
+        selected,
         candidates: resolution.candidates,
         edges,
     }
