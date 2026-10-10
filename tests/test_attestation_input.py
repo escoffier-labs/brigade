@@ -22,6 +22,15 @@ class _ScalarSubclass(str):
     def encode(self, *args: object, **kwargs: object) -> bytes:
         raise AssertionError("validator must use base string operations")
 
+    def isascii(self) -> bool:
+        raise AssertionError("validator must use base string operations")
+
+    def __len__(self) -> int:
+        raise AssertionError("validator must use base string operations")
+
+    def __getitem__(self, key: object) -> str:
+        raise AssertionError("validator must use base string operations")
+
     def __eq__(self, other: object) -> bool:
         raise AssertionError("validator must not compare subclass values")
 
@@ -149,6 +158,51 @@ def test_mapping_input_cannot_bypass_document_byte_limit(monkeypatch: pytest.Mon
     assert attestation_input.validate_json_value({"x": "ab"}) == {"x": "ab"}
     with pytest.raises(attestation_input.AttestationInputError, match="byte limit"):
         attestation_input.validate_json_value({"x": "abc"})
+
+
+@pytest.mark.parametrize("scalar_type", [str, _ScalarSubclass])
+@pytest.mark.parametrize(
+    ("value", "json_bytes"),
+    [
+        ("", 2),
+        ("x" * (128 * 1024), 128 * 1024 + 2),
+        ('"', 4),
+        ("\\", 4),
+        ("\n", 4),
+        ("\x00", 8),
+        ("\x1f", 8),
+        ("\x7f", 3),
+        ("\u00e9", 4),
+        ("\u20ac", 5),
+        ("\U0001f600", 6),
+    ],
+    ids=[
+        "empty",
+        "padding",
+        "quote",
+        "backslash",
+        "newline",
+        "nul",
+        "control",
+        "del",
+        "two-byte",
+        "three-byte",
+        "four-byte",
+    ],
+)
+def test_string_byte_limits_include_escaping_and_utf8_without_subclass_hooks(
+    monkeypatch: pytest.MonkeyPatch, scalar_type: type[str], value: str, json_bytes: int
+) -> None:
+    source = scalar_type(value)
+    monkeypatch.setattr(attestation_input, "MAX_JSON_BYTES", json_bytes)
+
+    snapshot = attestation_input.validate_json_value(source)
+
+    assert type(snapshot) is str
+    assert snapshot == value
+    monkeypatch.setattr(attestation_input, "MAX_JSON_BYTES", json_bytes - 1)
+    with pytest.raises(attestation_input.AttestationInputError, match="byte limit"):
+        attestation_input.validate_json_value(source)
 
 
 def test_integer_byte_limit_includes_exact_boundary_value(monkeypatch: pytest.MonkeyPatch) -> None:

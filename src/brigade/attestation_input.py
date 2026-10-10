@@ -22,6 +22,7 @@ MAX_JSON_DEPTH = 64
 MAX_JSON_NODES = 100_000
 
 _BASE64_RE = re.compile(r"[A-Za-z0-9+/_-]*={0,2}\Z")
+_JSON_STRING_ESCAPE_RE = re.compile(r'["\\\x00-\x1f]')
 
 
 class AttestationInputError(ValueError):
@@ -57,6 +58,14 @@ def _bounded_json_string_size(value: str, *, limit: int, label: str) -> int:
     size = 2
     if size > limit:
         raise AttestationInputError("JSON document exceeds byte limit")
+    # Unescaped ASCII needs one byte per character. Check the lower bound
+    # before scanning, without allocating a copy or invoking subclass hooks.
+    if str.isascii(value):
+        ascii_size = size + str.__len__(value)
+        if ascii_size > limit:
+            raise AttestationInputError("JSON document exceeds byte limit")
+        if _JSON_STRING_ESCAPE_RE.search(value) is None:
+            return ascii_size
     for char in _base_string_characters(value):
         codepoint = ord(char)
         if 0xD800 <= codepoint <= 0xDFFF:
