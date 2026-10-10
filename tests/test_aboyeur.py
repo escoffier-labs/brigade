@@ -774,6 +774,37 @@ def test_drift_impact_brief_attaches_pending_drift_and_graph_impact(tmp_path, mo
     ]
 
 
+def test_drift_impact_brief_keeps_report_when_graph_candidates_have_no_edges(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    db = work / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir(parents=True)
+    db.touch()
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"fixture": {"consecutiveFailures": 3}}))
+    reports = tmp_path / "reports"
+    report_dir = reports / "fixture"
+    report_dir.mkdir(parents=True)
+    (report_dir / "report.md").write_text("`helper` and `missing_symbol` changed dispatch wiring.\n")
+    monkeypatch.setenv("UPSTREAM_DRIFT_STATE_PATH", str(state))
+    monkeypatch.setenv("UPSTREAM_DRIFT_REPORTS_DIR", str(reports))
+    monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "graphtrail")
+    queries = []
+
+    def fake_run(argv, **kwargs):
+        queries.append(argv[4])
+        # Ambiguity and no-match diagnostics go to stderr, with no edge rows.
+        return proc.Result(0, "", "candidates: helper pkg/one.py:1, helper pkg/two.py:1")
+
+    monkeypatch.setattr(aboyeur.proc, "run", fake_run)
+    brief = aboyeur.drift_impact_brief(work)
+    assert brief.attached is True
+    assert brief.pending_count == 1
+    assert brief.bytes == len(brief.text.encode())
+    assert "changed dispatch wiring" in brief.text
+    assert "GraphTrail impact for" not in brief.text
+    assert queries == ["fixture", "helper", "missing_symbol"]
+
+
 def test_drift_impact_brief_missing_state_is_not_attached(tmp_path, monkeypatch):
     work = tmp_path / "work"
     db = work / ".graphtrail" / "graphtrail.db"

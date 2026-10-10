@@ -68,6 +68,16 @@ def test_query_verbs_use_short_timeout(monkeypatch):
     assert calls[0]["timeout"] == 30.0
 
 
+def test_outline_forwards_file_and_target(monkeypatch, tmp_path):
+    calls: list[dict] = []
+    _patch_graphtrail(monkeypatch, run_calls=calls)
+
+    assert cli.main(["code", "outline", "pkg/one.py", "--json", "--target", str(tmp_path)]) == 0
+    assert calls[0]["args"] == ["/fake/graphtrail", "outline", "pkg/one.py", "--json"]
+    assert calls[0]["kwargs"] == {"cwd": tmp_path}
+    assert calls[0]["timeout"] == 30.0
+
+
 def test_evaluate_uses_long_timeout_with_env_override(monkeypatch, tmp_path):
     calls: list[dict] = []
     _patch_graphtrail(monkeypatch, run_calls=calls)
