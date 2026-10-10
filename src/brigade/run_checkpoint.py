@@ -1123,6 +1123,7 @@ def write_checkpoint(
             payload=payload,
             idempotency_key=idempotency_key,
             expected_previous_sequence=report.events[-1].sequence if report.events else 0,
+            workspace=workspace,
         )
     except CheckpointError:
         raise

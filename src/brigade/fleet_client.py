@@ -52,13 +52,10 @@ working until each machine is enrolled. Empty environment values count as
 unset. When no hub is configured the client is a no-op: zero behavior
 change for existing users.
 
-Identity (#1161): everything this machine sends to the hub is stamped with
-its **home** identity, the ``node.toml`` under ``BRIGADE_HOME``, resolved
-by ``resolve_node_id``, which ignores where it is asked. A workspace's own
-``.brigade/node.toml`` stays local (per-checkout state), and an event
-payload's ``node_id`` can never override the machine: both would let one
-machine masquerade as a fleet of two. ``report_journal_event`` still derives
-``repo`` from the workspace that owns the journal.
+Identity (#1161): ``resolve_node_id`` always stamps the machine's **home**
+identity under ``BRIGADE_HOME``. Workspace identities stay local, and event
+payloads cannot override the machine. ``report_journal_event`` resolves the
+owning workspace with the claim key resolver, independently of artifact paths.
 
 Phase 4 (issue #1125) adds hub-arbitrated cross-machine claims:
 ``acquire_claim`` / ``renew_claim`` / ``release_claim`` are one bounded
@@ -927,29 +924,38 @@ def report_event(
     return delivered
 
 
-def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None = None) -> bool:
-    """Denormalize a run_event.v1 envelope into a fleet event and report it.
-
-    ``repo`` comes from the workspace that owns the journal so the hub view
-    is a plain group-by; ``node_id`` is always this machine's home identity
-    (#1161), never the journal workspace's local one. Never raises
-    ``Exception``; see ``report_event`` for the interrupt contract.
-    """
+def report_journal_event(
+    envelope: dict[str, Any], *, journal_path: Path | None = None, workspace: Path | None = None
+) -> bool:
+    """Report durable events using the trusted run workspace when supplied."""
     try:
+        if not load_fleet_config()["hub_url"]:
+            return False
         raw_payload = envelope.get("payload")
         payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
-        workspace = find_workspace_for_path(journal_path) if journal_path is not None else None
+        base_path = workspace if workspace is not None else journal_path
+        event_workspace = find_workspace_for_path(base_path) if base_path is not None else None
+        repo = event_workspace.name if event_workspace is not None else None
+        root = workspace
+        if root is None and journal_path is not None:
+            root = next((p.parent for p in journal_path.parents if p.name == ".brigade" and p.is_dir()), None)
+        if root is not None:
+            try:
+                if workspace is not None or _claim_target.git_claim_key(root) is not None:
+                    repo = resolve_claim_target(root)
+            except _claim_target.ClaimTargetError:
+                _LOG.warning("repo-key-fallback: fleet event is using the previous workspace name")
         repo_identity = None
-        if workspace is not None:
+        if event_workspace is not None:
             try:
                 from .fleet_session_presence import repository_identity
 
-                repo_identity = repository_identity(workspace).value
+                repo_identity = repository_identity(event_workspace).value
             except Exception:
                 repo_identity = None
         event = {
             "run_id": envelope.get("run_id"),
-            "repo": workspace.name if workspace is not None else None,
+            "repo": repo,
             "seat": payload.get("seat"),
             "harness": payload.get("harness"),
             "state": envelope.get("event_type"),
@@ -962,7 +968,7 @@ def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None 
             return False
     except Exception:
         return False
-    return report_event(event, base_path=journal_path)
+    return report_event(event, base_path=base_path)
 
 
 def report_external_event(

@@ -478,6 +478,7 @@ def record_dispatch_fact(
                 recovered = _recover_authoritative_dispatch_checkpoint(
                     run_dir,
                     journal_path=journal_path,
+                    workspace=workspace,
                     journal_report=report,
                     snapshot=snapshot,
                     snapshot_obj=snapshot_obj,
@@ -511,6 +512,7 @@ def record_dispatch_fact(
                 raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
             event = _append_owner_event(
                 journal_path,
+                workspace=workspace,
                 run_id=_run_id_from_dir(run_dir),
                 event_type=event_type,
                 payload=payload,
@@ -530,6 +532,7 @@ def _recover_authoritative_dispatch_checkpoint(
     run_dir: Path,
     *,
     journal_path: Path,
+    workspace: Path,
     journal_report: run_journal.JournalReport,
     snapshot: bytes,
     snapshot_obj: dict[str, object],
@@ -609,6 +612,7 @@ def _recover_authoritative_dispatch_checkpoint(
         payload=payload,
         idempotency_key=idempotency_key,
         expected_previous_sequence=checkpoint.sequence,
+        workspace=workspace,
     )
     run_shadow.record_shadow_comparison(run_dir, snapshot_obj)
     return event
@@ -713,6 +717,7 @@ def _append_owner_event(
     journal_path: Path,
     *,
     run_id: str,
+    workspace: Path,
     event_type: str,
     payload: Mapping[str, Any],
     idempotency_key: str,
@@ -731,6 +736,7 @@ def _append_owner_event(
                 payload=dict(payload),
                 idempotency_key=idempotency_key,
                 expected_previous_sequence=report.events[-1].sequence if report.events else 0,
+                workspace=workspace,
             )
         except run_journal.StaleSequenceError as exc:
             last_stale = exc
@@ -825,6 +831,7 @@ def record_lifecycle_event(
             if existing is not None:
                 return _append_owner_event(
                     journal_path,
+                    workspace=workspace,
                     run_id=run_id,
                     event_type=event_type,
                     payload=payload,
@@ -852,6 +859,7 @@ def record_lifecycle_event(
                     recovered = _recover_authoritative_dispatch_checkpoint(
                         run_dir,
                         journal_path=journal_path,
+                        workspace=workspace,
                         journal_report=report,
                         snapshot=snapshot,
                         snapshot_obj=snapshot_obj,
@@ -882,6 +890,7 @@ def record_lifecycle_event(
                 raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
             event = _append_owner_event(
                 journal_path,
+                workspace=workspace,
                 run_id=run_id,
                 event_type=event_type,
                 payload=dict(payload),
@@ -978,6 +987,7 @@ def record_lifecycle_transition(
             original = status_events[-1]
             return _append_owner_event(
                 journal_path,
+                workspace=workspace,
                 run_id=run_id,
                 event_type=original.event_type,
                 payload=original.payload,
@@ -1002,6 +1012,7 @@ def record_lifecycle_transition(
         idempotency_key = f"{_IDEMPOTENCY_PREFIX}:{key_digest[:32]}"
         return _append_owner_event(
             journal_path,
+            workspace=workspace,
             run_id=run_id,
             event_type=event_type,
             payload=payload,
