@@ -124,8 +124,10 @@ class FakeAPI:
 
     def CloseHandle(self, handle):
         assert handle in self.live, f"double close: {handle}"
+        if not self.record("CloseHandle", handle):
+            return False
         self.live.remove(handle)
-        return self.record("CloseHandle", handle)
+        return True
 
     def TerminateJobObject(self, handle, cause):
         assert handle in self.live
@@ -1056,3 +1058,146 @@ def test_actual_breakaway_program_compiles_nested_windows_paths():
         return 1 + sum(compile_program(program) for program in nested)
 
     assert compile_program(captured[0]) == 3
+
+
+@pytest.mark.parametrize(
+    ("failure", "cleanup_failures", "expected_operation"),
+    [
+        *[
+            (
+                operation,
+                (),
+                {
+                    "CreateFileW": "CreateFileW(NUL)",
+                    f"Update:{job.JOB_LIST}": "UpdateProcThreadAttribute",
+                    f"Update:{job.HANDLE_LIST}": "UpdateProcThreadAttribute",
+                }.get(operation, operation),
+            )
+            for operation in (
+                "CreateJobObjectW",
+                "SetHandleInformation",
+                "SetInformationJobObject",
+                "DuplicateHandle",
+                "CreateFileW",
+                "InitializeProcThreadAttributeList",
+                f"Update:{job.JOB_LIST}",
+                f"Update:{job.HANDLE_LIST}",
+                "CreateProcessW",
+            )
+        ],
+        (KeyboardInterrupt, (), "CreateProcessW"),
+        (SystemExit, (), "CreateProcessW"),
+        (None, ("temporary",), "CloseHandle(launch temporary)"),
+        (None, ("temporary", "process"), "CloseHandle(process)"),
+        ("CreateProcessW", ("temporary",), "CloseHandle(launch temporary)"),
+        ("CreateProcessW", ("terminate",), "TerminateJobObject"),
+        ("CreateProcessW", ("job",), "CloseHandle(job)"),
+    ],
+)
+def test_failed_launch_releases_closed_log_without_gc(tmp_path, failure, cleanup_failures, expected_operation):
+    import gc
+    import traceback
+    import weakref
+
+    class RetentionAPI(FakeAPI):
+        def __init__(self):
+            super().__init__(failure if isinstance(failure, str) else None)
+            self.error_ids = {}
+            self.job_handle = None
+            self.process_handle = None
+            self.allow_cleanup = False
+
+        def error(self, operation, kind=job.JobError):
+            error = super().error(operation, kind)
+            self.error_ids[operation] = id(error)
+            return error
+
+        def CreateJobObjectW(self, *args):
+            self.job_handle = super().CreateJobObjectW(*args)
+            return self.job_handle
+
+        def CreateProcessW(self, *args):
+            if failure in (KeyboardInterrupt, SystemExit):
+                raise self.error("CreateProcessW", failure)
+            result = super().CreateProcessW(*args)
+            self.process_handle = dereference(args[-1], job.PROCESS_INFORMATION).hProcess
+            return result
+
+        def CloseHandle(self, handle):
+            kind = "job" if handle == self.job_handle else "process" if handle == self.process_handle else "temporary"
+            if kind in cleanup_failures and not self.allow_cleanup:
+                self.events.append(("CloseHandle", handle))
+                return False
+            return super().CloseHandle(handle)
+
+        def TerminateJobObject(self, *args):
+            return super().TerminateJobObject(*args) and "terminate" not in cleanup_failures
+
+    api = RetentionAPI()
+    tracker = job.ProcessTracker(api)
+    expected_type = job.CleanupError if cleanup_failures else failure if isinstance(failure, type) else job.LaunchError
+
+    def fail_and_drop_caught_context():
+        with (tmp_path / "log").open("ab") as log:
+            log_ref = weakref.ref(log)
+            with pytest.raises(expected_type) as caught:
+                job.launch_process(
+                    python=Path(sys.executable).absolute(), args=[], cwd=tmp_path, env={}, log=log, tracker=tracker
+                )
+        assert log.closed
+        assert caught.type is expected_type
+        # The original object and traceback survive cleanup and propagation.
+        assert id(caught.value) == api.error_ids[expected_operation]
+        if isinstance(caught.value, job.JobError):
+            assert caught.value.winerror == 5
+        frames = traceback.extract_tb(caught.value.__traceback__)
+        assert any(frame.name == "launch_process" for frame in frames)
+        if not cleanup_failures:
+            assert sum(frame.name == "launch_process" for frame in frames) == 2
+        if failure in (KeyboardInterrupt, SystemExit):
+            assert frames[-1].name == "CreateProcessW"
+        del caught
+        return log_ref
+
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        log_ref = fail_and_drop_caught_context()
+        assert log_ref() is None, "failed launch retained its closed buffered log after the caught context was dropped"
+        assert bool(api.live) == bool(set(cleanup_failures) - {"terminate"})
+        assert bool(tracker._entries) == bool(api.live)
+        closed = [event[1] for event in api.events if event[0] == "CloseHandle"]
+        assert len(closed) == len(set(closed))
+        api.allow_cleanup = True
+        tracker.kill_all()
+        assert not api.live and not tracker._entries
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
+@pytest.mark.parametrize("owner", ["job", "process"])
+def test_failed_close_keeps_ownership_until_successful_retry(tmp_path, owner):
+    api = FakeAPI()
+    tracker = job.ProcessTracker(api)
+    process = launch(tmp_path, tracker)
+    handle = process.token.job if owner == "job" else process.handle
+    api.failure = "CloseHandle"
+    with pytest.raises(job.CleanupError, match="CloseHandle"):
+        if owner == "job":
+            process.finish(deadline=time.monotonic() + 1)
+        else:
+            process.close()
+    assert handle in api.live
+    if owner == "job":
+        assert process.token.job == handle and process.token in tracker._entries
+    else:
+        assert process.handle == handle
+    api.failure = None
+    if owner == "job":
+        tracker.kill_all()
+    else:
+        process.close()
+        process.finish(deadline=time.monotonic() + 1)
+    process.close()
+    assert not api.live and not tracker._entries

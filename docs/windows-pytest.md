@@ -128,8 +128,10 @@ One lifecycle mutex covers job registration, temporary handle creation,
 attribute setup, process creation, publication, and temporary handle cleanup.
 Shutdown takes the same mutex. It cannot terminate an empty job and then
 allow a process to launch into it. The tracker alone owns job handles, and
-workers own process handles. Job unregister and close are atomic and
-idempotent. Waiting never holds the lifecycle mutex.
+workers own process handles. Job unregister follows a successful close.
+Failed closes retain ownership for a later cleanup attempt, including temporary
+handles from failed launches. Successful closes are idempotent. Waiting never
+holds the lifecycle mutex.
 
 File timeout, aggregate deadline, and driver abort use distinct nonzero exit
 codes. The first termination cause is immutable. A natural exit code keeps
@@ -141,11 +143,16 @@ kernel, which triggers kill-on-close for descendants whose parent exited.
 
 Aggregate shutdown initiates termination of every active job before waiting
 for any job. Job emptiness, root waits, and worker finalization share one
-15-second cleanup deadline. Every job closes once, even after query or
+15-second cleanup deadline. Every job receives a close attempt, even after query or
 termination failures. Unconfirmed emptiness, failed kernel operations, or
 unfinished workers are infrastructure errors and retain the temporary target.
 Cleanup uncertainty aborts the whole sweep. The driver launches no further
 files while process ownership or cleanup is uncertain.
+After workers finish and containment is confirmed, removal of an owned temporary
+target retries an access-denied unlink once for a regular Windows read-only file.
+It clears only that file's read-only attribute. Links, reparse points, paths outside
+the owned target, other permission failures, and failed retries retain the target
+and remain driver errors.
 The coordinator finalizes its record after bounded cleanup. Workers do not
 publish records, so late worker completion cannot replace the final snapshot.
 
@@ -154,6 +161,9 @@ APIs, incompatible ambient job restrictions, invalid handles, or executable
 errors cannot trigger an uncontained fallback. Breakaway attempts are denied.
 Tests requiring incompatible process limits need an explicit compatibility
 disposition. The driver does not loosen containment or allowlist entries.
+Failed-launch exceptions preserve their original object and traceback, while
+releasing local exception aliases so closed log streams do not wait for cyclic
+garbage collection.
 
 The existing required `windows-native-acceptance` job selects
 `tests/test_windows_job.py::TestNativeContainment` and rejects any skip.

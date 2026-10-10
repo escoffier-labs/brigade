@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 import subprocess
 import threading
 import time
@@ -1658,3 +1660,133 @@ def test_keyboard_interrupt_during_deadline_cleanup_remains_interrupted(tmp_path
         )
     assert caught.value is failure
     assert caught.value.windows_pytest_results[0].status == "unstarted"
+
+
+@pytest.mark.parametrize("failure", [None, "writable", "retry"])
+def test_main_owned_readonly_cleanup_preserves_honest_outcome(tmp_path, monkeypatch, failure):
+    root = tmp_path / "outside"
+    root.mkdir()
+    target = root / "object"
+    target.write_text("git object")
+    original_mode = target.stat().st_mode
+    original_lstat = os.lstat
+    original_unlink = os.unlink
+    original_rmtree = windows_pytest.shutil.rmtree
+    error = PermissionError("access denied")
+    error.winerror = 5
+    changes, retries = [], []
+
+    def attrs(path, *args, **kwargs):
+        info = original_lstat(path, *args, **kwargs)
+        if Path(path) == target:
+            return SimpleNamespace(
+                st_mode=info.st_mode,
+                st_dev=info.st_dev,
+                st_ino=info.st_ino,
+                st_file_attributes=32 | (0 if failure == "writable" or changes else 1),
+            )
+        return info
+
+    def unlink(path, *args, **kwargs):
+        if Path(path) != target:
+            return original_unlink(path, *args, **kwargs)
+        retries.append(Path(path))
+        if failure == "retry":
+            raise error
+        return original_unlink(path, *args, **kwargs)
+
+    def remove(path, *, onerror=None):
+        assert Path(path) == root
+        if onerror is None:
+            raise error
+        onerror(os.unlink, str(target), (PermissionError, error, None))
+        original_rmtree(path)
+
+    monkeypatch.setattr(windows_pytest.os, "lstat", attrs)
+    monkeypatch.setattr(windows_pytest.os, "chmod", lambda path, mode: changes.append((Path(path), mode)))
+    monkeypatch.setattr(windows_pytest.os, "unlink", unlink)
+    monkeypatch.setattr(windows_pytest.shutil, "rmtree", remove)
+    code, payload = _main_to_completion(
+        tmp_path, monkeypatch, allowlisted=[], results=[_result("test_ok.py", "passed")]
+    )
+    if failure is None:
+        assert code == 0
+        assert payload["status"] == "complete"
+        assert "driver_error" not in payload and "retained_temp_root" not in payload
+        assert not root.exists()
+    else:
+        assert code == 2
+        assert payload["status"] == "error"
+        assert payload["driver_error"] == "access denied"
+        assert payload["retained_temp_root"] == str(root)
+        assert target.read_text() == "git object"
+    assert retries == ([] if failure == "writable" else [target])
+    assert len(changes) == (0 if failure == "writable" else 1)
+    if changes:
+        assert changes[0] == (target, original_mode | stat.S_IWRITE)
+
+
+@pytest.mark.parametrize("invalid", ["outside", "directory", "operation", "error", "non-windows", "reparse"])
+def test_owned_cleanup_rejects_unsafe_repairs(tmp_path, monkeypatch, invalid):
+    root = tmp_path / "owned"
+    root.mkdir()
+    target = (tmp_path if invalid == "outside" else root) / "sentinel"
+    target.write_text("preserved")
+    original_lstat = os.lstat
+    callback_started = False
+    error = PermissionError("unrepaired")
+    error.winerror = 32 if invalid == "error" else 5
+
+    def attrs(path, *args, **kwargs):
+        info = original_lstat(path, *args, **kwargs)
+        if Path(path) == target:
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR if invalid == "directory" else info.st_mode,
+                st_dev=info.st_dev,
+                st_ino=info.st_ino,
+                st_file_attributes=1
+                | (stat.FILE_ATTRIBUTE_REPARSE_POINT if invalid == "reparse" and callback_started else 0),
+            )
+        return info
+
+    def arbitrary(path):
+        pytest.fail("arbitrary callback function executed")
+
+    def remove(path, *, onerror):
+        nonlocal callback_started
+        callback_started = True
+        onerror(arbitrary if invalid == "operation" else os.unlink, str(target), (PermissionError, error, None))
+
+    monkeypatch.setattr(windows_pytest, "is_windows", lambda: invalid != "non-windows")
+    monkeypatch.setattr(windows_pytest.os, "lstat", attrs)
+    monkeypatch.setattr(windows_pytest.os, "chmod", lambda *args: pytest.fail("unsafe chmod"))
+    monkeypatch.setattr(windows_pytest.shutil, "rmtree", remove)
+    with pytest.raises((PermissionError, ValueError)) as rejected:
+        windows_pytest._remove_owned_temp_root(root)
+    if invalid not in {"outside", "reparse"}:
+        assert rejected.value is error
+    assert target.read_text() == "preserved"
+
+
+@pytest.mark.parametrize("location", ["root", "ancestor", "entry"])
+def test_owned_cleanup_never_traverses_links(tmp_path, monkeypatch, location):
+    outside = tmp_path / "external"
+    outside.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_text("preserved")
+    root = tmp_path / "owned"
+    if location == "root":
+        root.symlink_to(outside, target_is_directory=True)
+    elif location == "ancestor":
+        alias = tmp_path / "alias"
+        alias.symlink_to(outside, target_is_directory=True)
+        root = alias / "subdir"
+        root.mkdir()
+    else:
+        root.mkdir()
+        (root / "link").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(windows_pytest.shutil, "rmtree", lambda *args, **kwargs: pytest.fail("link traversal"))
+    monkeypatch.setattr(windows_pytest.os, "chmod", lambda *args: pytest.fail("link permission repair"))
+    with pytest.raises(ValueError, match="link or reparse point"):
+        windows_pytest._remove_owned_temp_root(root)
+    assert sentinel.read_text() == "preserved"

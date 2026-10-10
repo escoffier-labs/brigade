@@ -8,6 +8,7 @@ import json
 import math
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -198,6 +199,54 @@ def make_temp_root(repo: Path) -> Path:
         else:
             shutil.rmtree(created, ignore_errors=True)
         raise
+
+
+def _cleanup_path(root: Path, path: Path) -> os.stat_result:
+    """Reject lexical escapes and links/reparse points, including ancestors."""
+    if not path.is_relative_to(root) or ".." in path.parts:
+        raise ValueError("temporary cleanup path escapes owned root")
+    info = os.lstat(path)
+    for current in (path, *path.parents):
+        metadata = info if current == path else os.lstat(current)
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise ValueError("temporary cleanup path contains a link or reparse point")
+    return info
+
+
+def _remove_owned_temp_root(root: Path) -> None:
+    """Strict removal after shutdown, with one Windows read-only unlink retry."""
+    root = root.absolute()
+    _cleanup_path(root, root)
+    # No worker is alive here. Check traversal before rmtree, including 3.10.
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        for name in (*dirs, *files):
+            _cleanup_path(root, Path(directory) / name)
+
+    def onerror(function, filename, exc_info):
+        error = exc_info[1]
+        if (
+            not is_windows()
+            or (function is not os.unlink and function is not os.remove)
+            or not isinstance(error, PermissionError)
+            or getattr(error, "winerror", None) != 5
+        ):
+            raise error
+        path = Path(filename).absolute()
+        info = _cleanup_path(root, path)
+        if not stat.S_ISREG(info.st_mode) or not getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_READONLY:
+            raise error
+        # On Windows chmod changes only FILE_ATTRIBUTE_READONLY, not ACLs.
+        os.chmod(path, info.st_mode | stat.S_IWRITE)
+        after = _cleanup_path(root, path)
+        if (after.st_dev, after.st_ino) != (info.st_dev, info.st_ino) or not stat.S_ISREG(after.st_mode):
+            raise ValueError("temporary cleanup file changed during read-only repair")
+        # Never execute the callback-supplied function. Retry our unlink once.
+        os.unlink(path)
+
+    shutil.rmtree(root, onerror=onerror)
 
 
 def _status(returncode: int) -> str:
@@ -724,7 +773,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             temp_root = make_temp_root(repo)
             if not files:
-                shutil.rmtree(temp_root)
+                _remove_owned_temp_root(temp_root)
                 raise RuntimeError("no test files discovered")
             results = run_files(
                 files=files,
@@ -742,7 +791,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if any(result.status == "cleanup-unconfirmed" or result.cleanup_error is not None for result in results):
                 raise CleanupUnconfirmed("cleanup unconfirmed; retaining temporary target")
             # run_files returns only after its worker writers have finished.
-            shutil.rmtree(temp_root)
+            _remove_owned_temp_root(temp_root)
         if not files:
             raise RuntimeError("no test files discovered")
         status = (

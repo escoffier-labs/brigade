@@ -11,7 +11,7 @@ import math
 import os
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
 from typing import BinaryIO
@@ -266,6 +266,7 @@ def console_handler() -> None:
 @dataclass(eq=False)
 class _Entry:
     job: int | None
+    pending_handles: dict[int, str] = field(default_factory=dict)
     cause: int | None = None
     error: CleanupError | None = None
     leaked_descendants: int = 0
@@ -320,10 +321,17 @@ class ProcessTracker:
 
     def _close(self, entry):
         if entry.job is not None:
-            job, entry.job = entry.job, None
-            self._entries.discard(entry)
-            if not self.api.CloseHandle(job):
+            if self.api.CloseHandle(entry.job):
+                entry.job = None
+            else:
                 entry.error = self.api.error("CloseHandle(job)", CleanupError)
+        for handle, operation in list(entry.pending_handles.items()):
+            if self.api.CloseHandle(handle):
+                del entry.pending_handles[handle]
+            else:
+                entry.error = self.api.error(operation, CleanupError)
+        if entry.job is None and not entry.pending_handles:
+            self._entries.discard(entry)
 
     def _active(self, entry):
         info = BASIC_ACCOUNTING()
@@ -333,6 +341,9 @@ class ProcessTracker:
 
     def finish(self, entry, *, deadline, cause=DRIVER_ABORT, natural=False):
         with _LIFECYCLE:
+            # A reported close failure is retryable while ownership is retained.
+            if entry.error is not None and entry.error.operation.startswith("CloseHandle("):
+                entry.error = None
             if natural and entry.job is not None:
                 try:
                     entry.leaked_descendants = self._active(entry)
@@ -418,9 +429,9 @@ class LaunchedProcess:
 
     def close(self):
         if self.handle is not None:
-            handle, self.handle = self.handle, None
-            if not self.tracker.api.CloseHandle(handle):
+            if not self.tracker.api.CloseHandle(self.handle):
                 raise self.tracker.api.error("CloseHandle(process)", CleanupError)
+            self.handle = None
 
 
 def launch_process(
@@ -514,20 +525,32 @@ def launch_process(
         except BaseException as exc:
             launch_error = exc
         finally:
-            # Keep attributes, jobs, handles and buffers alive through deletion.
-            if initialized:
-                api.DeleteProcThreadAttributeList(attributes)
-            for handle in [pi.hThread, *temporary]:
-                if handle and not api.CloseHandle(handle):
-                    cleanup_error = api.error("CloseHandle(launch temporary)", CleanupError)
-            if launch_error or cleanup_error:
-                tracker._terminate(entry, DRIVER_ABORT)
-                tracker._close(entry)
-                if pi.hProcess and not api.CloseHandle(pi.hProcess):
-                    cleanup_error = api.error("CloseHandle(process)", CleanupError)
-                cleanup_error = cleanup_error or entry.error
-        if cleanup_error:
-            raise cleanup_error
-        if launch_error:
-            raise launch_error
+            try:
+                # Keep attributes, jobs, handles and buffers alive through deletion.
+                if initialized:
+                    api.DeleteProcThreadAttributeList(attributes)
+                for handle in [pi.hThread, *temporary]:
+                    if handle and not api.CloseHandle(handle):
+                        cleanup_error = api.error("CloseHandle(launch temporary)", CleanupError)
+                        entry.pending_handles[handle] = "CloseHandle(launch temporary)"
+                if launch_error or cleanup_error:
+                    tracker._terminate(entry, DRIVER_ABORT)
+                    if pi.hProcess and not api.CloseHandle(pi.hProcess):
+                        cleanup_error = api.error("CloseHandle(process)", CleanupError)
+                        entry.pending_handles[pi.hProcess] = "CloseHandle(process)"
+                    # Failed closes remain owned for the driver's shutdown retry.
+                    pending = entry.pending_handles
+                    entry.pending_handles = {}
+                    tracker._close(entry)
+                    entry.pending_handles = pending
+                    if entry.pending_handles:
+                        tracker._entries.add(entry)
+                    cleanup_error = cleanup_error or entry.error
+                if cleanup_error:
+                    raise cleanup_error
+                if launch_error:
+                    raise launch_error
+            finally:
+                # Like an except target, release aliases that would retain this frame.
+                launch_error = cleanup_error = entry.error = None
         return LaunchedProcess(tracker, entry, pi.hProcess, pi.dwProcessId)
