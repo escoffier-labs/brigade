@@ -2261,3 +2261,16 @@ def test_external_expired_is_terminal_and_releases_hub_capacity(conn):
     ).fetchone()[0]
     assert event_count == 3
     assert queued["job_id"] == job_id
+
+
+def test_cloud_v24_upgrade_refuses_unsupported_downgrade(tmp_path, monkeypatch):
+    db_path = tmp_path / "fleet.db"
+    conn = fleet_hub.init_db(db_path)
+    conn.execute("DROP TABLE IF EXISTS cloud_global_state")
+    conn.execute("PRAGMA user_version=24")
+    conn.commit()
+    conn.close()
+    fleet_hub.init_db(db_path).close()
+    monkeypatch.setattr(fleet_hub, "SCHEMA_VERSION", 24)
+    with pytest.raises(fleet_hub.FleetHubError, match="schema version 25"):
+        fleet_hub.init_db(db_path)
