@@ -129,6 +129,19 @@ pub(super) fn write_file_graph(
             params![symbol_id, graph.path],
         )?;
     }
+    for assignment in &graph.module_assignments {
+        tx.execute(
+            "INSERT OR REPLACE INTO module_assignments(file_path, name, line, conditional, preceding_imports)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                graph.path,
+                assignment.name,
+                assignment.line as i64,
+                assignment.conditional,
+                assignment.preceding_imports as i64
+            ],
+        )?;
+    }
     if let Some(names) = &graph.exports {
         tx.execute(
             "INSERT OR REPLACE INTO module_exports(file_path, names) VALUES (?1, ?2)",
@@ -163,6 +176,10 @@ pub(super) fn purge_file_graph(tx: &Connection, path: &str) -> Result<()> {
     )?;
     tx.execute("DELETE FROM symbols WHERE file_path = ?1", params![path])?;
     tx.execute("DELETE FROM imports WHERE file_path = ?1", params![path])?;
+    tx.execute(
+        "DELETE FROM module_assignments WHERE file_path = ?1",
+        params![path],
+    )?;
     tx.execute(
         "DELETE FROM module_exports WHERE file_path = ?1",
         params![path],

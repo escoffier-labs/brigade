@@ -913,6 +913,189 @@ fn resolution_db(root: &std::path::Path) -> rusqlite::Connection {
     conn
 }
 
+#[test]
+fn python_module_assignment_shadows_exported_definition() {
+    for assignment in [
+        "helper = 42",
+        "helper: int = 42",
+        "helper, other = (42, 0)",
+        "(other, [helper]) = (0, [42])",
+        "other = helper = 42",
+        "helper += 1",
+        "helper = other_helper",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_resolution_file(
+            root,
+            "core.py",
+            &format!("def helper():\n    pass\n\n{assignment}\n"),
+        );
+        write_resolution_file(
+            root,
+            "use.py",
+            "from core import helper\n\ndef run():\n    return helper()\n",
+        );
+        let conn = resolution_db(root);
+        assert_unresolved_call(&conn, "run", "helper", "unresolved-external");
+    }
+}
+
+#[test]
+fn python_conditional_module_assignment_keeps_uncertain_definition() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(
+        root,
+        "core.py",
+        "def helper():\n    pass\n\nif FLAG:\n    helper = 42\n",
+    );
+    write_resolution_file(
+        root,
+        "use.py",
+        "from core import helper\n\ndef run():\n    return helper()\n",
+    );
+    let conn = resolution_db(root);
+    assert_resolves_to(&conn, "run", "helper", "unique-name", "core.py");
+}
+
+#[test]
+fn python_module_assignment_preserves_later_and_nonbinding_definitions() {
+    for core in [
+        "helper = 42\ndef helper():\n    pass\n",
+        "def helper():\n    pass\nhelper: int\n",
+        "def helper():\n    pass\ndef local():\n    helper = 42\n",
+        "def helper():\n    pass\nclass Local:\n    helper = 42\n",
+        "def helper():\n    pass\nhelper.attribute = 42\nhelper[0] = 42\n",
+        "from seed import helper\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_resolution_file(root, "seed.py", "def helper():\n    pass\n");
+        write_resolution_file(root, "core.py", core);
+        write_resolution_file(
+            root,
+            "use.py",
+            "from core import helper\n\ndef run():\n    return helper()\n",
+        );
+        let conn = resolution_db(root);
+        let target = if core.starts_with("from seed") {
+            "seed.py"
+        } else {
+            "core.py"
+        };
+        assert_resolves_to(&conn, "run", "helper", "import-strict", target);
+    }
+}
+
+#[test]
+fn python_module_assignment_survives_reopen_and_incremental_removal() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let original = "def helper():\n    pass\n";
+    write_resolution_file(root, "core.py", original);
+    write_resolution_file(root, "facade.py", "from core import helper\nhelper = 42\n");
+    write_resolution_file(
+        root,
+        "use.py",
+        "from facade import helper\n\ndef run():\n    return helper()\n",
+    );
+    let conn = resolution_db(root);
+    assert_unresolved_call(&conn, "run", "helper", "unresolved-external");
+    drop(conn);
+    let conn = open_db(&root.join("g.db")).unwrap();
+    // Only the caller changes: the unchanged assignment must come from storage.
+    write_resolution_file(
+        root,
+        "use.py",
+        "from facade import helper\n\ndef run():\n    return helper()\n\n# changed caller\n",
+    );
+    sync_repo(&conn, root).unwrap();
+    assert_unresolved_call(&conn, "run", "helper", "unresolved-external");
+    write_resolution_file(root, "facade.py", "from core import helper\n");
+    sync_repo(&conn, root).unwrap();
+    assert_resolves_to(&conn, "run", "helper", "import-strict", "core.py");
+    // Emulate an old index: no assignment table and the previous fingerprint.
+    write_resolution_file(root, "core.py", &format!("{original}helper = 42\n"));
+    sync_repo(&conn, root).unwrap();
+    conn.execute("DROP TABLE module_assignments", []).unwrap();
+    conn.execute(
+        "UPDATE files SET extractor_fingerprint = 'python-extractor-v6' WHERE language = 'python'",
+        [],
+    )
+    .unwrap();
+    sync_repo(&conn, root).unwrap();
+    assert_unresolved_call(&conn, "run", "helper", "unresolved-external");
+    fs::remove_file(root.join("core.py")).unwrap();
+    sync_repo(&conn, root).unwrap();
+    let assignments: i64 = conn
+        .query_row("SELECT COUNT(*) FROM module_assignments", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(assignments, 0);
+}
+
+#[test]
+fn python_module_assignment_obeys_same_line_import_order() {
+    for (facade, callable) in [
+        ("helper = 42; from seed import helper\n", true),
+        ("from seed import helper; helper = 42\n", false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_resolution_file(root, "seed.py", "def helper():\n    pass\n");
+        write_resolution_file(root, "facade.py", facade);
+        write_resolution_file(
+            root,
+            "use.py",
+            "from facade import helper\n\ndef run():\n    return helper()\n",
+        );
+        let conn = resolution_db(root);
+        if callable {
+            assert_resolves_to(&conn, "run", "helper", "import-strict", "seed.py");
+        } else {
+            assert_unresolved_call(&conn, "run", "helper", "unresolved-external");
+        }
+    }
+}
+
+#[test]
+fn python_conditional_module_assignment_keeps_reexported_alias_candidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_resolution_file(root, "seed.py", "def original():\n    pass\n");
+    write_resolution_file(
+        root,
+        "facade.py",
+        "from seed import original as helper\nif FLAG:\n    helper = 42\n",
+    );
+    write_resolution_file(root, "api.py", "from facade import helper\n");
+    write_resolution_file(
+        root,
+        "use.py",
+        "from api import helper\n\ndef run():\n    return helper()\n",
+    );
+    let conn = resolution_db(root);
+    let rows = graphtrail::store::explain_calls(&conn, "run", "helper").unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].resolution, "import-fallback", "{rows:?}");
+    assert_eq!(rows[0].targets.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].targets[0].qualified_name, "original");
+    assert_eq!(rows[0].targets[0].file_path, "seed.py");
+    assert_eq!(rows[0].targets[0].confidence, 0.55);
+    let edge: (String, String, f64) = conn
+        .query_row(
+            "SELECT dst.qualified_name, dst.file_path, e.confidence FROM edges e
+         JOIN symbols src ON src.id = e.source JOIN symbols dst ON dst.id = e.target
+         WHERE src.name = 'run'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(edge, ("original".to_string(), "seed.py".to_string(), 0.55));
+}
+
 fn assert_unresolved_call(conn: &rusqlite::Connection, source: &str, target: &str, path: &str) {
     let rows = graphtrail::store::explain_calls(conn, source, target).unwrap();
     assert_eq!(rows.len(), 1, "{rows:?}");

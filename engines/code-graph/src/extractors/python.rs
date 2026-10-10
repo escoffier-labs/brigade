@@ -4,7 +4,7 @@ use anyhow::Result;
 use tree_sitter::Node as TsNode;
 
 use crate::extractors::common::{LangSpec, extract_with, node_text};
-use crate::model::{CallTarget, FileGraph, Import};
+use crate::model::{CallTarget, FileGraph, Import, ModuleAssignment};
 
 /// Bump when Python extraction output can change for the same file content.
 /// v3: module-level calls belong to a `<module>` pseudo-symbol, decorated
@@ -12,7 +12,8 @@ use crate::model::{CallTarget, FileGraph, Import};
 /// v4: literal `__all__` lists, import scope, and a stable `<module>` span.
 /// v5: conditional module-scope imports and definitions are recorded.
 /// v6: stored signatures are capped at 256 bytes.
-pub const EXTRACTOR_FINGERPRINT: &str = "python-extractor-v6";
+/// v7: module-scope assignment targets are recorded as non-callable bindings.
+pub const EXTRACTOR_FINGERPRINT: &str = "python-extractor-v7";
 
 /// `imported_name` of a `from x import *` row.
 pub const WILDCARD_IMPORT: &str = "*";
@@ -67,6 +68,19 @@ impl LangSpec for PythonSpec {
                 | "while_statement"
                 | "match_statement"
         )
+    }
+
+    fn collect_assignment(&self, node: TsNode<'_>, source: &[u8], out: &mut Vec<ModuleAssignment>) {
+        if !matches!(node.kind(), "assignment" | "augmented_assignment") {
+            return;
+        }
+        // A bare annotation (`name: T`) does not bind a value at runtime.
+        if node.child_by_field_name("right").is_none() {
+            return;
+        }
+        if let Some(left) = node.child_by_field_name("left") {
+            collect_assignment_names(left, source, node.start_position().row + 1, out);
+        }
     }
 
     fn module_exports(&self, root: TsNode<'_>, source: &[u8]) -> Option<Vec<String>> {
@@ -228,6 +242,30 @@ impl LangSpec for PythonSpec {
 }
 
 const DUNDER_ALL: &str = "__all__";
+
+fn collect_assignment_names(
+    node: TsNode<'_>,
+    source: &[u8],
+    line: usize,
+    out: &mut Vec<ModuleAssignment>,
+) {
+    match node.kind() {
+        "identifier" => out.push(ModuleAssignment {
+            name: node_text(node, source),
+            line,
+            conditional: false,
+            preceding_imports: 0,
+        }),
+        "pattern_list" | "tuple_pattern" | "list_pattern" | "list_splat_pattern" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                collect_assignment_names(child, source, line, out);
+            }
+        }
+        // Attribute and subscript writes mutate a value, not its module binding.
+        _ => {}
+    }
+}
 
 /// The strings of a list or tuple literal made only of plain string literals.
 fn literal_string_sequence(node: TsNode<'_>, source: &[u8]) -> Option<Vec<String>> {

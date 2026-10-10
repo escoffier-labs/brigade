@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow};
 use sha2::{Digest, Sha256};
 use tree_sitter::{Language, Node as TsNode, Parser as TsParser};
 
-use crate::model::{CallTarget, FileGraph, Import, PendingCall, Symbol};
+use crate::model::{CallTarget, FileGraph, Import, ModuleAssignment, PendingCall, Symbol};
 
 /// Per-language plugin describing how to recognize symbols, imports, and calls in an AST.
 pub trait LangSpec {
@@ -45,6 +45,14 @@ pub trait LangSpec {
     fn conditional_block(&self, _kind: &str) -> bool {
         false
     }
+    /// Append plain-name assignment targets when visiting module scope.
+    fn collect_assignment(
+        &self,
+        _node: TsNode<'_>,
+        _source: &[u8],
+        _out: &mut Vec<ModuleAssignment>,
+    ) {
+    }
 }
 
 /// Whether `node` sits under a block that may not run its body.
@@ -71,6 +79,7 @@ struct SymbolState {
     symbols: Vec<Symbol>,
     /// Ids of module-level symbols defined under a conditional block.
     conditional: Vec<String>,
+    assignments: Vec<ModuleAssignment>,
 }
 
 struct Ctx<'a> {
@@ -145,6 +154,7 @@ pub fn extract_with<L: LangSpec>(
         parse_errors,
         exports: spec.module_exports(tree.root_node(), ctx.source),
         conditional_symbols: symbol_state.conditional,
+        module_assignments: symbol_state.assignments,
     })
 }
 
@@ -176,6 +186,17 @@ fn visit<L: LangSpec>(
     imports: &mut Vec<Import>,
     calls: &mut Vec<PendingCall>,
 ) {
+    if stack.is_empty() {
+        let first = symbol_state.assignments.len();
+        spec.collect_assignment(node, ctx.source, &mut symbol_state.assignments);
+        if symbol_state.assignments.len() > first {
+            let conditional = under_conditional_block(spec, node);
+            for assignment in &mut symbol_state.assignments[first..] {
+                assignment.conditional = conditional;
+                assignment.preceding_imports = imports.len();
+            }
+        }
+    }
     let first_new_import = imports.len();
     spec.collect_import(node, ctx.source, imports);
     if ctx.module_id.is_some() && imports.len() > first_new_import {

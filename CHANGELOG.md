@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Python code-graph module assignments shadow earlier definitions and imports. Conditional assignments retain lower-confidence candidates, and existing indexes refresh assignment bindings on sync. (#1658)
 - Managed Claude review timestamp comparisons accept normalized UTC timestamps on Python 3.10, retaining stale, superseded and future-timestamp uncertainty. (#1601)
 - Claude cloud register/adopt accepts explicit session and repository bindings with local replay/conflict checks. Unsupported provider lifecycle remains unknown separately from GitHub artifact landing, local continuation and lease evidence. (#1600)
 - Local worker preflight preserves bounded model-seat denial reasons for disabled seats and exhausted capacity, and identifies the selected provider. Unknown remote errors remain generic, with admission and fenced lease behavior unchanged. (#1573)
