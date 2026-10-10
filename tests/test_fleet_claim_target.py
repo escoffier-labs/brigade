@@ -56,6 +56,7 @@ def journal_events(monkeypatch):
         return True
 
     monkeypatch.setattr(fleet_client, "report_event", report)
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "https://hub.example.invalid")
 
     def append(repo: Path):
         journal = repo / ".brigade" / "runs" / "example-run" / "events" / "lifecycle.jsonl"
@@ -70,6 +71,32 @@ def journal_events(monkeypatch):
         return events[-1]
 
     return append
+
+
+def test_journal_events_without_a_hub_skip_claim_key_resolution(tmp_path, monkeypatch, caplog):
+    from brigade import fleet_claim_target, run_journal
+
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    repo = _make_repo(home / "repos", "one", "https://github.com/acme/one.git")
+    calls = []
+
+    def fail(*args, **kwargs):
+        calls.append(args)
+        raise ClaimTargetError("temporary git failure")
+
+    monkeypatch.setattr(fleet_claim_target, "_git", fail)
+    journal = repo / ".brigade" / "runs" / "example-run" / "events" / "lifecycle.jsonl"
+    event = run_journal.append_event(
+        journal,
+        run_id="example-run",
+        event_type="run.created",
+        payload={},
+        idempotency_key="created",
+        expected_previous_sequence=0,
+    )
+    assert event.sequence == 1
+    assert calls == []
+    assert "repo-key-fallback" not in caplog.text
 
 
 def test_journal_events_from_unrelated_repos_under_one_home_have_distinct_keys(tmp_path, monkeypatch, journal_events):

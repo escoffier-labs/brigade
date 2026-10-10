@@ -937,6 +937,8 @@ def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None 
     ``Exception``; see ``report_event`` for the interrupt contract.
     """
     try:
+        if not load_fleet_config()["hub_url"]:
+            return False
         raw_payload = envelope.get("payload")
         payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
         workspace = find_workspace_for_path(journal_path) if journal_path is not None else None
