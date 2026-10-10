@@ -20,7 +20,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade care`: 3 command path(s)
 - `brigade center` (extras): 30 command path(s)
 - `brigade chat` (extras): 7 command path(s)
-- `brigade code`: 16 command path(s)
+- `brigade code`: 17 command path(s)
 - `brigade completions`: 1 command path(s)
 - `brigade context` (extras): 9 command path(s)
 - `brigade daily`: 26 command path(s)
@@ -136,6 +136,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade code export`
 - `brigade code impact`
 - `brigade code neighbors`
+- `brigade code outline`
 - `brigade code search`
 - `brigade code stats`
 - `brigade code sync`

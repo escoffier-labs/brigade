@@ -26,9 +26,9 @@ use crate::model::Direction;
 use crate::query::build_context_pack_from_entry_points;
 use crate::query::{
     DEFAULT_AFFECTED_DEPTH, DEFAULT_IMPACT_DEPTH, affected, build_context_pack, cycles, dead_code,
-    diff_graphs, doctor, file_neighbors, graph_query, impact_query, limit_edges, normalize_depth,
-    personalize_context_pack, render_markdown, render_markdown_budgeted, search_symbols_with_path,
-    stats,
+    diff_graphs, doctor, file_neighbors, graph_query_with_matches, impact_query_with_matches,
+    limit_edges, normalize_depth, outline, personalize_context_pack, render_markdown,
+    render_markdown_budgeted, search_symbols_with_path, stats,
 };
 use crate::store::{init_schema, open_db, open_read_only, sync_repo};
 
@@ -42,6 +42,7 @@ const SEMANTIC_SEARCH_MAX_LIMIT: usize = 50;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ToolId {
     Search,
+    Outline,
     Callers,
     Callees,
     Impact,
@@ -206,10 +207,23 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
         ToolId::Callers | ToolId::Callees | ToolId::Impact => {
             let symbol = str_arg(args, "symbol");
             let depth = normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH));
+            let all_matches = bool_arg(args, "all_matches", false);
             let mut result = match spec.id {
-                ToolId::Callers => graph_query(&conn, &symbol, Direction::Incoming, depth)?,
-                ToolId::Callees => graph_query(&conn, &symbol, Direction::Outgoing, depth)?,
-                _ => impact_query(&conn, &symbol, depth)?,
+                ToolId::Callers => graph_query_with_matches(
+                    &conn,
+                    &symbol,
+                    Direction::Incoming,
+                    depth,
+                    all_matches,
+                )?,
+                ToolId::Callees => graph_query_with_matches(
+                    &conn,
+                    &symbol,
+                    Direction::Outgoing,
+                    depth,
+                    all_matches,
+                )?,
+                _ => impact_query_with_matches(&conn, &symbol, depth, all_matches)?,
             };
             result.edges = limit_edges(result.edges, optional_usize_arg(args, "limit"));
             to_pretty(&result)
@@ -269,6 +283,7 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
                 other => Err(anyhow!("unknown context format '{other}'")),
             }
         }
+        ToolId::Outline => to_pretty(&outline(&conn, &str_arg(args, "path"))?),
         ToolId::FileNeighbors => to_pretty(&file_neighbors(&conn, &str_arg(args, "path"))?),
         ToolId::DeadCode => to_pretty(&dead_code(&conn, usize_arg(args, "limit", 100))?),
         ToolId::Cycles => to_pretty(&cycles(&conn)?),
@@ -306,6 +321,7 @@ fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), Strin
         }
         ToolId::Callers | ToolId::Callees | ToolId::Impact => {
             require_string(args, "symbol")?;
+            optional_bool(args, "all_matches")?;
             require_usize(args, "depth")?;
             require_usize(args, "limit")?;
         }
@@ -330,7 +346,7 @@ fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), Strin
                 optional_number(args, "graph_weight")?;
             }
         }
-        ToolId::FileNeighbors => {
+        ToolId::FileNeighbors | ToolId::Outline => {
             require_string(args, "path")?;
         }
         ToolId::DeadCode => {
@@ -391,7 +407,8 @@ fn build_tool_specs() -> Vec<ToolSpec> {
     let symbol_tool = |desc: &str| {
         with_location(
             with_refresh(json!({
-                "symbol": { "type": "string", "description": format!("{desc} Resolved exactly first: symbol id, qualified name (Class.method), path::name, then bare name. Falls back to fuzzy prefix search only when nothing matches exactly. The result reports resolution, fuzzy, ambiguous, selected and candidates alongside edges.") },
+                "symbol": { "type": "string", "description": format!("{desc} Resolved exactly first: symbol id, qualified name (Class.method), path::name, then bare name. Falls back to fuzzy prefix search only when nothing matches exactly. Ambiguous queries select nothing by default: narrow with path::name or set all_matches to true to merge candidates. The result reports resolution, fuzzy, ambiguous, selected and candidates alongside edges.") },
+                "all_matches": { "type": "boolean", "description": "Default false. Explicitly merge all resolution candidates, including fuzzy candidates when no exact match exists." },
                 "depth": { "type": "integer", "description": "Traversal depth, clamped to 1..5 (default 1)." },
                 "limit": { "type": "integer", "description": "Optional max edges returned; omit for all (up to the internal 500-per-direction cap). Truncated results append a marker row." }
             })),
@@ -475,6 +492,15 @@ fn build_tool_specs() -> Vec<ToolSpec> {
         )
     });
     tools.extend([
+        tool(
+            ToolId::Outline,
+            "outline",
+            "List one file's symbols in source order, with kind, qualified name, line span and first signature line.",
+            with_location(with_refresh(json!({
+                "path": { "type": "string", "description": "Exact repo-relative file path." }
+            })), json!(["path"])),
+            true,
+        ),
         tool(
             ToolId::Callers,
             "callers",
@@ -983,6 +1009,7 @@ mod tests {
 
         let mut expected = BTreeSet::from([
             "search",
+            "outline",
             "callers",
             "callees",
             "impact",
@@ -1003,6 +1030,7 @@ mod tests {
 
         let mut refresh_tools = BTreeSet::from([
             "search",
+            "outline",
             "callers",
             "callees",
             "impact",

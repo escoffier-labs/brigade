@@ -93,6 +93,8 @@ fn tools_list_exposes_the_query_tools_with_location_args() {
     ];
     #[cfg(feature = "codesearch")]
     expected.insert(1, "semantic_search");
+    let callers_index = expected.iter().position(|name| *name == "callers").unwrap();
+    expected.insert(callers_index, "outline");
     assert_eq!(names, expected);
     // Every single-db tool advertises the optional repo/db selector. `diff` is the
     // exception: it takes two explicit db paths (`before`/`after`) instead.

@@ -11,6 +11,7 @@ ENGINE_VERBS: dict[str, str] = {
     "sync": "Index or refresh the repo's code graph.",
     "search": "Search indexed symbols by name.",
     "neighbors": "List a file's incoming and outgoing graph neighbors.",
+    "outline": "List one file's symbols in source order.",
     "callers": "List callers of a symbol.",
     "callees": "List callees of a symbol.",
     "impact": "Show the blast radius of changing a symbol.",

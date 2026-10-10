@@ -760,6 +760,8 @@ def _impact_section(binary: str, db_path: Path, target: Path, query: str) -> dic
     ]
     resolved = search_hits[0] if search_hits and isinstance(search_hits[0], dict) else None
     impact_query = str((resolved or {}).get("qualified_name") or query)
+    if resolved and resolved.get("file_path"):
+        impact_query = f"{resolved['file_path']}::{impact_query}"
 
     impact_result = proc.run(_impact_argv(binary, db, "impact", impact_query), timeout=_GRAPH_TIMEOUT, cwd=target)
     impact_edges = _graph_edges(impact_result)
