@@ -194,7 +194,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade extras status`
 - `brigade fleet campaign preview`
 - `brigade fleet claims`
-- `brigade fleet cloud`
+- `brigade fleet cloud set`
 - `brigade fleet dot report`
 - `brigade fleet enroll`
 - `brigade fleet export`

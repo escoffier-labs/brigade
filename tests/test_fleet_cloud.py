@@ -318,6 +318,239 @@ def _request(
     return result
 
 
+def test_cloud_cli_sets_limits_with_admin_token_and_survives_restart(tmp_path, monkeypatch, capsys):
+    from brigade import fleet_client_cloud
+
+    with _hub(tmp_path) as hub:
+        db = fleet_hub.open_db(hub[2])
+        try:
+            _node, node_token = fleet_hub.add_node(db, NODE_A, "node-a")
+        finally:
+            db.close()
+        monkeypatch.setattr(
+            fleet_client_cloud,
+            "load_fleet_settings",
+            lambda: {
+                "hub_url": f"http://{hub[0]}:{hub[1]}",
+                "admin_token": ADMIN_TOKEN,
+                "node_token": node_token,
+            },
+        )
+        monkeypatch.setattr(
+            fleet_client_cloud,
+            "load_fleet_config",
+            lambda: {"hub_url": f"http://{hub[0]}:{hub[1]}", "token": node_token},
+        )
+        assert (
+            cli.main(["fleet", "cloud", "set", "--global-limit", "8", "--provider", "codex", "--limit", "8", "--json"])
+            == 0
+        )
+        updated = json.loads(capsys.readouterr().out)
+        assert updated["policy"]["global_limit"] == 8
+        assert cli.main(["fleet", "cloud", "--all", "--json"]) == 0
+        snapshot = json.loads(capsys.readouterr().out)
+        assert snapshot["policy"]["global_limit"] == 8
+        codex = next(row for row in snapshot["policy"]["providers"] if row["provider"] == "codex")
+        assert codex["limit"] == 8 and codex["enabled"] is True
+
+    with _hub(tmp_path) as hub:
+        status, snapshot = _request(hub, "GET", "/cloud", token=ADMIN_TOKEN)
+        assert status == 200 and snapshot["policy"]["global_limit"] == 8
+        for index in range(8):
+            status, payload = _request(
+                hub,
+                "POST",
+                "/cloud",
+                token=node_token,
+                body=_admit("codex", lease_id=f"limit-{index}", holder=f"holder-{index}"),
+            )
+            assert status == 200 and payload["admitted"] is True
+        status, payload = _request(hub, "POST", "/cloud", token=node_token, body=_admit("codex", lease_id="overflow"))
+        assert status == 409 and payload["error"] == "provider cloud capacity is exhausted"
+        status, payload = _request(
+            hub, "POST", "/cloud", token=node_token, body=_admit("cursor", lease_id="global-overflow")
+        )
+        assert status == 409 and payload["error"] == "global hosted cloud capacity is exhausted"
+        assert (
+            _request(hub, "POST", "/cloud", token=ADMIN_TOKEN, body={"action": "policy", "global_limit": 0})[0] == 200
+        )
+        status, snapshot = _request(hub, "GET", "/cloud", token=ADMIN_TOKEN)
+        assert status == 200 and len(snapshot["leases"]) == 8
+        status, renewed = _request(
+            hub,
+            "POST",
+            "/cloud",
+            token=node_token,
+            body={"action": "renew", "lease_id": "limit-0", "node_id": NODE_A, "holder": "holder-0"},
+        )
+        assert status == 200 and renewed["renewed"] is True
+
+
+def test_cloud_limit_updates_preserve_omitted_policy_and_retirements(conn):
+    config = deck.DeckConfig()
+    fleet_hub.handle_cloud(conn, _admit(), caller_node=NODE_A, config=config)
+    retired = conn.execute("SELECT * FROM retired_models ORDER BY provider, family").fetchall()
+    fleet_hub.handle_cloud(
+        conn,
+        {
+            "action": "policy",
+            "provider": "cursor",
+            "enabled": False,
+            "hosted": False,
+            "limit": 3,
+            "circuit_state": "open",
+            "reason": "operator pause",
+            "subscription_pool": "test-pool",
+            "reset_at": "later",
+            "expires_at": "future",
+        },
+        config=config,
+    )
+    before = fleet_hub.cloud_snapshot(conn, config)
+    status, _payload = fleet_hub.handle_cloud(
+        conn,
+        {"action": "policy", "provider": "cursor", "limit": 8, "global_limit": 6},
+        config=config,
+    )
+    assert status == 200
+    after = fleet_hub.cloud_snapshot(conn, config)
+    assert after["policy"]["global_limit"] == 6
+    expected = [dict(row, limit=8) if row["provider"] == "cursor" else row for row in before["policy"]["providers"]]
+    assert after["policy"]["providers"] == expected
+    assert after["leases"] == before["leases"]
+    assert conn.execute("SELECT * FROM retired_models ORDER BY provider, family").fetchall() == retired
+    assert fleet_hub.handle_cloud(conn, _admit(lease_id="disabled"), caller_node=NODE_A, config=config)[0] == 409
+    fleet_hub.handle_cloud(conn, {"action": "policy", "provider": "codex", "limit": 64}, config=config)
+    assert fleet_hub.cloud_snapshot(conn, config)["policy"]["global_limit"] == 6
+    expected = [dict(row, limit=64) if row["provider"] == "codex" else row for row in expected]
+    fleet_hub.handle_cloud(conn, {"action": "policy", "global_limit": 9}, config=config)
+    assert fleet_hub.cloud_snapshot(conn, config)["policy"]["providers"] == expected
+
+
+@pytest.mark.parametrize("bad", [-1, 65, True, 1.5, "8", None])
+@pytest.mark.parametrize("field", ["limit", "global_limit"])
+def test_cloud_limit_validation_is_atomic_over_http(tmp_path, field, bad):
+    with _hub(tmp_path) as hub:
+        before = _request(hub, "GET", "/cloud", token=ADMIN_TOKEN)[1]
+        body = {"action": "policy", "provider": "codex", "limit": 8, "global_limit": 8, field: bad}
+        status, payload = _request(hub, "POST", "/cloud", token=ADMIN_TOKEN, body=body)
+        assert status == 400 and "0..64" in payload["error"]
+        assert _request(hub, "GET", "/cloud", token=ADMIN_TOKEN)[1] == before
+
+
+def test_cloud_limits_require_admin_authority_and_reject_unscoped_provider_fields(tmp_path):
+    with _hub(tmp_path) as hub:
+        db = fleet_hub.open_db(hub[2])
+        try:
+            _node, node_token = fleet_hub.add_node(db, NODE_A, "node-a")
+        finally:
+            db.close()
+        before = _request(hub, "GET", "/cloud", token=ADMIN_TOKEN)[1]
+        body = {"action": "policy", "provider": "codex", "limit": 8, "global_limit": 8}
+        assert _request(hub, "POST", "/cloud", body=body)[0] == 401
+        assert _request(hub, "POST", "/cloud", token=node_token, body=body)[0] == 403
+        assert (
+            _request(
+                hub, "POST", "/cloud", token=ADMIN_TOKEN, body={"action": "policy", "global_limit": 8, "limit": 4}
+            )[0]
+            == 400
+        )
+        assert _request(hub, "GET", "/cloud", token=ADMIN_TOKEN)[1] == before
+
+
+@pytest.mark.parametrize("arguments", [[], ["--limit", "8"], ["--provider", "codex"], ["--global-limit", "65"]])
+def test_cloud_set_cli_rejects_incomplete_or_invalid_updates(arguments, monkeypatch, capsys):
+    from brigade import fleet_client_cloud
+
+    def unexpected_settings():
+        pytest.fail("invalid CLI input must not reach the transport")
+
+    monkeypatch.setattr(fleet_client_cloud, "load_fleet_settings", unexpected_settings)
+    assert cli.main(["fleet", "cloud", "set", *arguments]) == 1
+    assert "error:" in capsys.readouterr().err
+
+
+def test_cloud_limit_migration_preserves_v24_leases_and_startup_default(tmp_path):
+    db_path = tmp_path / "fleet.db"
+    conn = fleet_hub.init_db(db_path)
+    fleet_hub.handle_cloud(conn, _admit(), caller_node=NODE_A)
+    before = fleet_hub.list_cloud_leases(conn)
+    conn.execute("DROP TABLE IF EXISTS cloud_global_state")
+    conn.execute("PRAGMA user_version=24")
+    conn.commit()
+    conn.close()
+    conn = fleet_hub.init_db(db_path)
+    try:
+        config = deck.DeckConfig(
+            cloud=deck.CloudConfig(global_limit=12, providers=deck.default_cloud_config().providers)
+        )
+        assert fleet_hub.cloud_snapshot(conn, config)["policy"]["global_limit"] == 12
+        assert fleet_hub.list_cloud_leases(conn) == before
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
+    finally:
+        conn.close()
+
+
+def test_cloud_set_requires_configured_admin_token_without_using_node_token(monkeypatch):
+    from brigade import fleet_client_cloud
+
+    monkeypatch.setattr(
+        fleet_client_cloud,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.example.com", "admin_token": "", "node_token": "test-node-token"},
+    )
+    with pytest.raises(fleet_client.FleetClientError, match="no fleet admin token configured"):
+        fleet_client.set_cloud_limits(global_limit=8)
+
+
+def test_cloud_set_refuses_older_hub_before_any_write(monkeypatch):
+    from brigade import fleet_client_cloud
+
+    monkeypatch.setattr(
+        fleet_client_cloud,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.example.com", "admin_token": ADMIN_TOKEN, "node_token": ""},
+    )
+    monkeypatch.setattr(
+        fleet_client_cloud,
+        "_get_cloud_blocking",
+        lambda *args, **kwargs: {"leases": [], "policy": {"global_limit": 4, "providers": []}},
+    )
+    writes = []
+
+    def old_hub_post(_hub, _token, body, **kwargs):
+        writes.append(body)
+        return 200, {"updated": True, "policy": {"provider": "codex", "limit": 8}}
+
+    monkeypatch.setattr(fleet_client, "_post_cloud_blocking", old_hub_post)
+    with pytest.raises(fleet_client.FleetClientError, match="upgrade the hub"):
+        fleet_client.set_cloud_limits(global_limit=8, provider="codex", limit=8)
+    assert writes == []
+
+
+@pytest.mark.parametrize("policy", [{}, {"global_limit": 4, "limit": 8}, {"global_limit": 8, "limit": 2}])
+def test_cloud_set_does_not_report_success_for_unapplied_limits(policy, monkeypatch):
+    from brigade import fleet_client_cloud
+
+    monkeypatch.setattr(
+        fleet_client_cloud,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.example.com", "admin_token": ADMIN_TOKEN, "node_token": ""},
+    )
+    monkeypatch.setattr(
+        fleet_client_cloud,
+        "_get_cloud_blocking",
+        lambda *args, **kwargs: {"schema": "brigade.fleet_cloud.v1", "leases": [], "policy": {}},
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "_post_cloud_blocking",
+        lambda *args, **kwargs: (200, {"updated": True, "policy": policy}),
+    )
+    with pytest.raises(fleet_client.FleetClientError, match="did not confirm"):
+        fleet_client.set_cloud_limits(global_limit=8, provider="codex", limit=8)
+
+
 def _models_revision(hub, *, token: str = ADMIN_TOKEN) -> int:
     status, payload = _request(hub, "GET", "/models", token=token)
     assert status == 200

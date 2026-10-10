@@ -334,6 +334,63 @@ def release_cloud(lease_id: str, *, state: str = "released", **kwargs: Any) -> C
     return _cloud_op("release", lease_id=lease_id, state=state, **kwargs)
 
 
+def set_cloud_limits(
+    *, global_limit: int | None = None, provider: str | None = None, limit: int | None = None
+) -> dict[str, Any]:
+    """Update hosted admission limits with the configured administrator token."""
+    if (provider is None) != (limit is None):
+        raise FleetClientError("--provider and --limit must be supplied together")
+    if global_limit is None and limit is None:
+        raise FleetClientError("supply --global-limit or --provider with --limit")
+    body: dict[str, Any] = {"action": "policy"}
+    for key, value in (("global_limit", global_limit), ("limit", limit)):
+        if value is not None:
+            if type(value) is not int or not 0 <= value <= 64:
+                raise FleetClientError(f"cloud {key} must be an integer in 0..64")
+            body[key] = value
+    if provider is not None:
+        body["provider"] = provider
+    settings = load_fleet_settings()
+    hub, token = settings["hub_url"], settings["admin_token"]
+    if not hub:
+        raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
+    if not token:
+        raise FleetClientError(
+            "no fleet admin token configured (~/.brigade/fleet.toml [fleet] token_file or BRIGADE_FLEET_TOKEN)"
+        )
+    try:
+        snapshot = _run_with_deadline(
+            lambda: _get_cloud_blocking(hub, "/cloud", token, timeout=CLOUD_TIMEOUT_SECONDS),
+            timeout=CLOUD_TIMEOUT_SECONDS,
+        )
+        if not isinstance(snapshot, dict) or snapshot.get("schema") != "brigade.fleet_cloud.v1":
+            raise FleetClientError("fleet hub does not support cloud limit updates; upgrade the hub")
+        status, payload = _run_with_deadline(
+            lambda: _client._post_cloud_blocking(hub, token, body, timeout=CLOUD_TIMEOUT_SECONDS),
+            timeout=CLOUD_TIMEOUT_SECONDS,
+        )
+    except FleetClientError:
+        raise
+    except Exception as exc:
+        raise FleetClientError("fleet hub cloud limit update failed") from exc
+    if status != 200:
+        raise FleetClientError(f"fleet hub cloud limit update refused: HTTP {status}")
+    if (
+        not isinstance(payload, dict)
+        or payload.get("updated") is not True
+        or not isinstance(payload.get("policy"), dict)
+    ):
+        raise FleetClientError("fleet hub cloud limit update returned an invalid response")
+    policy = payload["policy"]
+    effective_global = policy.get("global_limit")
+    if type(effective_global) is not int or not 0 <= effective_global <= 64:
+        raise FleetClientError("fleet hub did not confirm global_limit")
+    for key in ("global_limit", "limit"):
+        if key in body and (type(policy.get(key)) is not int or policy[key] != body[key]):
+            raise FleetClientError(f"fleet hub did not confirm {key}")
+    return payload
+
+
 def fetch_cloud(*, hub_url: str | None = None, include_all: bool = False) -> dict[str, Any]:
     """Return the hub's sanitized cloud snapshot, never holder capabilities."""
     config = load_fleet_config()

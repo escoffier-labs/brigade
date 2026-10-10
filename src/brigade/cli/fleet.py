@@ -203,6 +203,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_cloud.add_argument("--all", action="store_true", help="Include released and expired cloud leases.")
     p_cloud.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
     p_cloud.set_defaults(func=_dispatch_cloud)
+    cloud_sub = p_cloud.add_subparsers(dest="cloud_command", metavar="<cloud-command>")
+    p_cloud_set = cloud_sub.add_parser("set", help="Set hosted cloud concurrency limits (admin token).")
+    p_cloud_set.add_argument("--global-limit", type=int, help="Global hosted worker limit (0..64).")
+    p_cloud_set.add_argument("--provider", help="Provider whose limit to change, such as codex or cursor.")
+    p_cloud_set.add_argument("--limit", type=int, help="Provider worker limit (0..64).")
+    p_cloud_set.add_argument("--json", action="store_true", help="Emit the updated policy as JSON.")
+    p_cloud_set.set_defaults(func=_dispatch_cloud_set)
 
     p_models = fleet_sub.add_parser("models", help="Read the fleet hub's sanitized model policy.")
     p_models.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
@@ -1304,6 +1311,26 @@ def _dispatch_cloud(args: argparse.Namespace) -> int:
         print("  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)))
     if not rows:
         print("(no cloud leases)")
+    return 0
+
+
+def _dispatch_cloud_set(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import fleet_client
+
+    try:
+        result = fleet_client.set_cloud_limits(global_limit=args.global_limit, provider=args.provider, limit=args.limit)
+    except fleet_client.FleetClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(_json.dumps(result, indent=2, sort_keys=True))
+    else:
+        policy = result["policy"]
+        print(f"global hosted cloud limit: {policy['global_limit']}")
+        if "provider" in policy:
+            print(f"{policy['provider']} cloud limit: {policy['limit']}")
     return 0
 
 

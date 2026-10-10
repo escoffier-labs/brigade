@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Honor update-notifier opt-outs before resolving the cache path, avoiding Windows platform subprocess probes during offline CLI adoption. (#1664)
+- `brigade fleet cloud set` updates global and provider hosted-worker concurrency with administrator authorization. Limits persist across hub restarts and preserve omitted policy fields and active leases. The writer requires an upgraded hub, and explicit null policy limits are rejected. (#1576)
+
 - Add a local CRA actor and incident worksheet separating applicability, incident triggers, reporting deadlines, and actual filing evidence, with three synthetic drills. (#1625)
 - Add coordinated journal process qualification for locked same-key tail/index reads, replay/conflict, stale-head rejection, and deliberate termination at complete or partial write boundaries, with an inventory of durability limits. (#1565)
 - `brigade doctor --operator` checks the Grok CLI against the reviewed 1.0.13 JSON-envelope floor when that harness is selected, with bounded probing and safe missing/uncertain-version diagnostics. (Refs #1351 item 7)
