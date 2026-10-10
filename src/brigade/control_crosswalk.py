@@ -675,7 +675,8 @@ def _evaluate_human_approval_allow_with_sod(ctx: _Context) -> _Discovery:
         relpath = _relpath(ctx, run_dir / "events" / "lifecycle.jsonl")
         if _is_symlink(ctx, run_dir):
             obs = _invalid(ctx, run_dir, "symlink_refused")
-            _run_scope(obs, ctx, run_dir)
+            _bind(obs, ctx, {"run_dir": run_dir.name})
+            _apply_period(obs, ctx)
             out.observations.append(obs)
             continue
         refused = False
@@ -687,6 +688,7 @@ def _evaluate_human_approval_allow_with_sod(ctx: _Context) -> _Discovery:
                 break
         if refused:
             continue
+        decision_timestamp = None
         try:
             verification = _verify_approval_snapshot(ctx, run_dir)
         except _ReadRefusal as exc:
@@ -703,6 +705,7 @@ def _evaluate_human_approval_allow_with_sod(ctx: _Context) -> _Discovery:
         except Exception:
             obs = _verifier_unavailable(relpath, "verifier_error")
         else:
+            decision_timestamp = _parse_timestamp(verification.decided_at)
             unapproved = verification.status == "UNAPPROVED"
             refusal = (
                 _approval_journal_refusal(ctx, run_dir, relpath, unapproved=unapproved)
@@ -732,7 +735,9 @@ def _evaluate_human_approval_allow_with_sod(ctx: _Context) -> _Discovery:
                     }
                     dim_values[dimension] = ("failed", reason)
                     obs = _obs(relpath, "structure_observed", "rejected", _dims(**dim_values))
-        _run_scope(obs, ctx, run_dir)
+        _bind(obs, ctx, {"run_dir": run_dir.name})
+        obs.timestamp = decision_timestamp
+        _apply_period(obs, ctx)
         out.observations.append(obs)
     return out
 
@@ -818,8 +823,15 @@ def _approval_observation(
 ) -> control_readiness.ArtifactObservation:
     if verification.status == "APPROVED":
         sod = verification.sod or {}
-        signed = {"integrity": "passed", "signature": "passed", "subject": "passed", "population": "not_applicable"}
+        signed = {
+            "integrity": "passed",
+            "signature": "passed",
+            "subject": "passed" if verification.live_tree is not None else ("unavailable", "live_tree_unavailable"),
+            "population": "not_applicable",
+        }
         if sod.get("result") == "PASSED":
+            if verification.live_tree is None:
+                return _obs(relpath, "structure_observed", "unavailable", _dims(authorization="passed", **signed))
             return _obs(relpath, "claim_validated", "validated", _dims(authorization="passed", **signed))
         return _obs(relpath, "claim_validated", "failed", _dims(authorization=("failed", "sod_failed"), **signed))
     proposed, overrides = _APPROVAL_OUTCOMES.get(

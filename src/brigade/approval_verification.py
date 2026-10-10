@@ -346,6 +346,7 @@ def evaluate_current_approval(
         prior_approvals=prior_approvals,
         detail=detail,
         binding=binding,
+        decided_at=artifact.predicate["decidedAt"],
     )
 
 

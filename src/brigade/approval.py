@@ -103,6 +103,7 @@ class ApprovalVerification:
     prior_approvals: tuple[dict[str, str | None], ...] = ()
     detail: str | None = None
     binding: str | None = None
+    decided_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
