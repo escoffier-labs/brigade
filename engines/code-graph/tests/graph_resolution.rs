@@ -189,10 +189,10 @@ fn callers_of_evaluate_exclude_evaluated() {
 }
 
 #[test]
-fn ambiguous_exact_name_restricts_to_candidates_and_lists_them() {
+fn all_matches_merges_only_exact_candidates_and_lists_them() {
     let (_dir, db) = fixture();
 
-    let value = json_cli(&db, &["callers", "helper"]);
+    let value = json_cli(&db, &["callers", "helper", "--all-matches"]);
 
     assert_eq!(value["ambiguous"], true);
     assert_eq!(value["fuzzy"], false);
@@ -214,11 +214,39 @@ fn ambiguous_exact_name_restricts_to_candidates_and_lists_them() {
         ]
     );
 
-    let text = String::from_utf8(run_cli(&db, &["callers", "helper"]).stdout).unwrap();
+    let text =
+        String::from_utf8(run_cli(&db, &["callers", "helper", "--all-matches"]).stdout).unwrap();
     assert!(text.contains("ambiguous"), "{text}");
     assert!(text.contains("candidates:"), "{text}");
     assert!(text.contains("pkg/one.py:2"), "{text}");
     assert!(text.contains("pkg/two.py:2"), "{text}");
+}
+
+#[test]
+fn ambiguous_graph_queries_require_selection_before_traversal() {
+    let (_dir, db) = fixture();
+
+    for query in ["helper", "hel"] {
+        for verb in ["callers", "callees", "impact"] {
+            let value = json_cli(&db, &[verb, query]);
+            assert_eq!(value["ambiguous"], true, "{verb}: {value}");
+            assert_eq!(value["fuzzy"], query == "hel", "{verb}: {value}");
+            assert_eq!(value["selected"], json!([]), "{verb}: {value}");
+            assert_eq!(value["edges"], json!([]), "{verb}: {value}");
+            assert_eq!(
+                candidate_files(&value),
+                vec!["pkg/one.py".to_string(), "pkg/two.py".to_string()],
+                "{verb}: {value}"
+            );
+        }
+    }
+
+    let output = run_cli(&db, &["callers", "helper"]);
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let note = String::from_utf8(output.stderr).unwrap();
+    assert!(note.contains("candidates:"), "{note}");
+    assert!(note.contains("pkg/one.py:2"), "{note}");
+    assert!(note.contains("pkg/two.py:2"), "{note}");
 }
 
 #[test]
@@ -353,6 +381,20 @@ fn mcp_graph_tools_report_resolution_and_accept_name_paths() {
         candidate_files(&callers),
         vec!["pkg/one.py".to_string(), "pkg/two.py".to_string()]
     );
+    for verb in ["callers", "callees", "impact"] {
+        for query in ["helper", "hel"] {
+            let default = mcp_call(&db, verb, json!({"symbol": query}));
+            assert_eq!(default["selected"], json!([]), "{verb}: {default}");
+            assert_eq!(default["edges"], json!([]), "{verb}: {default}");
+            let merged = mcp_call(&db, verb, json!({"symbol": query, "all_matches": true}));
+            assert_eq!(merged["fuzzy"], query == "hel", "{verb}: {merged}");
+            assert_eq!(merged["selected"], merged["candidates"], "{verb}: {merged}");
+            assert_eq!(merged["selected"].as_array().unwrap().len(), 2);
+            if verb != "callees" {
+                assert_eq!(edge_pairs(&merged).len(), 2, "{verb}: {merged}");
+            }
+        }
+    }
 
     let narrowed = mcp_call(&db, "callers", json!({"symbol": "pkg/two.py::helper"}));
     assert_eq!(narrowed["resolution"], "name_path");
@@ -369,4 +411,58 @@ fn mcp_graph_tools_report_resolution_and_accept_name_paths() {
         edge_pairs(&impact),
         vec![("call_evaluate".to_string(), "evaluate".to_string())]
     );
+}
+
+#[test]
+fn outline_lists_one_files_symbols_in_source_order_over_cli_and_mcp() {
+    let (_dir, db) = fixture();
+    let rows = json_cli(&db, &["outline", "./pkg/one.py"]);
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+    assert_eq!(rows[0]["qualified_name"], "helper");
+    assert_eq!(rows[0]["kind"], "function");
+    assert_eq!(rows[0]["file_path"], "pkg/one.py");
+    assert_eq!(rows[0]["start_line"], 2);
+    assert_eq!(rows[0]["end_line"], 3);
+    assert!(rows[0]["signature"].as_str().unwrap().contains("helper"));
+    assert_eq!(rows[1]["qualified_name"], "use_one");
+    assert_eq!(rows[1]["start_line"], 5);
+    let mcp = mcp_call(&db, "outline", json!({"path": "pkg/one.py"}));
+    assert_eq!(mcp, rows);
+    assert_eq!(json_cli(&db, &["outline", "pkg"]), json!([]));
+    let text = String::from_utf8(run_cli(&db, &["outline", "pkg/one.py"]).stdout).unwrap();
+    assert!(text.contains("function helper pkg/one.py:2-3"), "{text}");
+}
+
+#[test]
+fn outline_preserves_preorder_for_symbols_on_the_same_line() {
+    let (dir, db) = fixture();
+    fs::write(
+        dir.path().join("same.ts"),
+        "class C { method() {}\n}\nfunction z() {} function a() {}\n",
+    )
+    .unwrap();
+    let conn = open_db(&db).unwrap();
+    sync_repo(&conn, dir.path()).unwrap();
+    let rows = json_cli(&db, &["outline", "same.ts"]);
+    let names: Vec<_> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["qualified_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["C", "C.method", "z", "a"]);
+}
+
+#[test]
+fn mcp_rejects_non_boolean_merge_opt_in() {
+    let (_dir, db) = fixture();
+    for verb in ["callers", "callees", "impact"] {
+        let response = handle_request(
+            &db,
+            &json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":verb,"arguments":{"symbol":"helper","all_matches":"true"}}}),
+        )
+        .unwrap();
+        assert!(response["error"].is_object(), "{response}");
+    }
 }

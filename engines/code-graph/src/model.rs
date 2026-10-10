@@ -166,14 +166,23 @@ pub struct SymbolCandidate {
     pub end_line: usize,
 }
 
+/// One file's source-ordered symbol overview.
+#[derive(Debug, Serialize)]
+pub struct OutlineRow {
+    #[serde(flatten)]
+    pub symbol: SymbolCandidate,
+    pub signature: String,
+}
+
 /// JSON shape of `callers`, `callees` and `impact`: the edges plus how the
 /// query string was resolved to seed symbols.
 ///
 /// `resolution` is one of `id`, `qualified_name`, `name_path`, `name`,
 /// `fuzzy` or `none`. `fuzzy` is true only for the prefix-search fallback.
-/// `ambiguous` is true when more than one symbol was selected; `candidates`
+/// `ambiguous` is true when more than one symbol matched; `candidates`
 /// lists every symbol the resolution step matched and `selected` the ones
-/// whose edges are in `edges`.
+/// whose edges are in `edges`. Ambiguous queries select nothing unless merging
+/// was explicitly requested.
 #[derive(Debug, Serialize)]
 pub struct GraphQueryResult {
     pub query: String,
