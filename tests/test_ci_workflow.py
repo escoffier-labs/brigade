@@ -330,11 +330,21 @@ def test_ci_workflow_runs_per_file_windows_pytest_and_uploads_results():
     assert "git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}" in section
     assert 'python -m pip install -e ".[dev]"' in section
     assert "|| exit /b 1" in section
-    assert (
-        'python scripts/windows_pytest.py --record "%RUNNER_TEMP%\\windows-pytest-results\\summary.json" '
-        "--job-timeout 3300 --base-ref ${{ github.event.pull_request.base.sha }}"
-    ) in section
-    assert "--serial" not in section
+    budget = _workflow_step_section(text, "windows-pytest", "Capture job budget")
+    assert section.index("Capture job budget") < section.index("actions/checkout")
+    assert "shell: pwsh" in budget
+    assert "ToUnixTimeSeconds()" in budget
+    assert "$env:GITHUB_ENV" in budget
+    driver = _workflow_step_section(text, "windows-pytest", "Run per-file pytest ratchet")
+    assert "timeout-minutes: 55" in driver
+    assert '--record "%RUNNER_TEMP%\\windows-pytest-results\\summary.json"' in driver
+    assert '--job-started-at "%WINDOWS_PYTEST_JOB_STARTED_AT%"' in driver
+    assert "--job-limit 3600 --startup-reserve 120 --finalize-reserve 300" in driver
+    assert "--job-timeout 3300" in driver
+    assert "--base-ref ${{ github.event.pull_request.base.sha }}" in driver
+    assert driver.count("--serial ") == 1
+    assert "--serial test_runs_serve.py" in driver
+    assert "--serial test_aboyeur.py" not in driver
     artifact = _workflow_step_section(text, "windows-pytest", "Upload per-file pytest results")
     assert "if: ${{ always() }}" in artifact
     assert "uses: actions/upload-artifact@v7" in artifact
@@ -1129,3 +1139,45 @@ def test_ci_windows_native_acceptance_builds_and_pins_same_commit_engines():
     assert "./cmd/sessionfind" in section
     assert "-EngineBinDir" in section
     assert "-InstallMode source" in section
+
+
+def test_native_windows_containment_is_required_and_rejects_selected_skips():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    section = _workflow_job_section(text, "windows-native-acceptance")
+    assert "runs-on: windows-latest" in section
+    assert "continue-on-error" not in section
+    install = _workflow_step_section(text, "windows-native-acceptance", "Install containment test dependencies")
+    assert '$venv = Join-Path $env:RUNNER_TEMP "containment-venv"' in install
+    assert "python -m venv $venv" in install
+    assert '$python = Join-Path $venv "Scripts/python.exe"' in install
+    assert '& $python -m pip install -e ".[dev]"' in install
+    assert install.index("python -m venv $venv") < install.index("& $python -m pip install")
+    assert 'throw "containment venv creation failed"' in install
+    assert "$LASTEXITCODE -ne 0" in install
+    probe = _workflow_step_section(text, "windows-native-acceptance", "Run native Windows process containment")
+    assert 'assert os.name == "nt"' in probe
+    assert '"tests/test_windows_job.py::TestNativeContainment"' in probe
+    assert "pytest_runtest_logreport" in probe and "pytest_collectreport" in probe
+    assert "self.skipped |= report.skipped" in probe
+    assert "sys.exit(1 if guard.skipped else int(result))" in probe
+    assert '$python = Join-Path $env:RUNNER_TEMP "containment-venv/Scripts/python.exe"' in probe
+    assert "'@ | & $python -" in probe and "$LASTEXITCODE -ne 0" in probe
+    for step in (install, probe):
+        assert "Activate.ps1" not in step
+        assert "activate.bat" not in step
+        assert "$env:PATH" not in step
+        assert "$env:GITHUB_PATH" not in step
+    assert "continue-on-error" not in probe
+    assert "!/scripts/windows_job.py" in (ROOT / ".gitignore").read_text()
+
+
+def test_windows_native_acceptance_has_no_global_editable_install_before_acceptance():
+    """A global brigade.exe shadows the isolated pipx executable on PATH."""
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    section = _workflow_job_section(text, "windows-native-acceptance")
+    before_acceptance = section[: section.index("      - name: Run Windows native acceptance (source install)")]
+    global_editable_install = re.compile(
+        r"(?mi)^\s*(?:&\s+)?(?:python(?:\.exe)?(?:\d+(?:\.\d+)?)?\s+-m\s+pip|py\s+(?:-\d+(?:\.\d+)?\s+)?-m\s+pip|pip(?:\d+)?(?:\.exe)?)"
+        r"\s+install\b[^\n]*(?:\s-e(?:\s|$)|\s--editable(?:[=\s]|$))"
+    )
+    assert global_editable_install.search(before_acceptance) is None

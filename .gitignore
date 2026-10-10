@@ -64,6 +64,7 @@ Thumbs.db
 !/scripts/verify-fast
 !/scripts/ci_pytest_shard.py
 !/scripts/windows_pytest.py
+!/scripts/windows_job.py
 !/scripts/verify_lock.py
 !/scripts/check_size_ratchet_baseline.py
 !/scripts/benchmark_issue266_work_status_memory.py

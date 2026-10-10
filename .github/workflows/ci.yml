@@ -339,6 +339,10 @@ jobs:
       run:
         shell: cmd
     steps:
+      - name: Capture job budget
+        shell: pwsh
+        run: |
+          "WINDOWS_PYTEST_JOB_STARTED_AT=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" >> $env:GITHUB_ENV
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
@@ -355,7 +359,8 @@ jobs:
       - name: Fetch pull request base
         run: git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }} || exit /b 1
       - name: Run per-file pytest ratchet
-        run: python scripts/windows_pytest.py --record "%RUNNER_TEMP%\windows-pytest-results\summary.json" --job-timeout 3300 --base-ref ${{ github.event.pull_request.base.sha }}
+        timeout-minutes: 55
+        run: python scripts/windows_pytest.py --record "%RUNNER_TEMP%\windows-pytest-results\summary.json" --job-started-at "%WINDOWS_PYTEST_JOB_STARTED_AT%" --job-limit 3600 --startup-reserve 120 --finalize-reserve 300 --job-timeout 3300 --base-ref ${{ github.event.pull_request.base.sha }} --serial test_runs_serve.py
       - name: Upload per-file pytest results
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
@@ -663,6 +668,35 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - name: Install containment test dependencies
+        shell: pwsh
+        run: |
+          $venv = Join-Path $env:RUNNER_TEMP "containment-venv"
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw "containment venv creation failed" }
+          $python = Join-Path $venv "Scripts/python.exe"
+          & $python -m pip install -e ".[dev]"
+          if ($LASTEXITCODE -ne 0) { throw "containment test install failed" }
+      - name: Run native Windows process containment
+        shell: pwsh
+        run: |
+          $python = Join-Path $env:RUNNER_TEMP "containment-venv/Scripts/python.exe"
+          @'
+          import os
+          import sys
+          import pytest
+          assert os.name == "nt", "native Windows runner required"
+          class NoNativeSkips:
+              skipped = False
+              def pytest_runtest_logreport(self, report):
+                  self.skipped |= report.skipped
+              def pytest_collectreport(self, report):
+                  self.skipped |= report.skipped
+          guard = NoNativeSkips()
+          result = pytest.main(["-q", "-ra", "-o", "addopts=", "tests/test_windows_job.py::TestNativeContainment"], plugins=[guard])
+          sys.exit(1 if guard.skipped else int(result))
+          '@ | & $python -
+          if ($LASTEXITCODE -ne 0) { throw "native containment failed or skipped" }
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
