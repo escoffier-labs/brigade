@@ -105,6 +105,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import fleet_command_deck, fleet_hub_preference, worklore_store
+from .fleet_hub_server import BoundedThreadingHTTPServer
 from .fleet_hub_status import (
     ACTIVE_EVENT_TTL_SECONDS as ACTIVE_EVENT_TTL_SECONDS,
     BOARD_LIMIT as BOARD_LIMIT,
@@ -1923,7 +1924,7 @@ def make_server(
     else:
         deck_config = fleet_command_deck.DeckConfig()
     init_db(Path(db_path)).close()
-    return ThreadingHTTPServer(
+    return BoundedThreadingHTTPServer(
         (host, port),
         make_handler(
             token,
