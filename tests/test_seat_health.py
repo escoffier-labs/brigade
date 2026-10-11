@@ -373,7 +373,10 @@ def test_codex_cloud_model_reachability_skips_provider_smoke(monkeypatch):
     assert all(item.status == "passed" or item.cause_code == "probe-incomplete" for item in endpoint_result.checks)
 
 
-def test_overall_deadline_returns_timeout_results_without_serial_wait():
+@pytest.mark.parametrize("positive_budget", (False, True), ids=("already-expired", "positive-budget"))
+def test_overall_deadline_returns_timeout_results_without_serial_wait(monkeypatch, positive_budget):
+    if positive_budget:
+        monkeypatch.setattr(seat_health, "OVERALL_TIMEOUT_SECONDS", 0.1)
     watchdog_seconds = 5.0
     entered = {name: threading.Event() for name in ("primary", "backup")}
     release = threading.Event()
@@ -384,17 +387,19 @@ def test_overall_deadline_returns_timeout_results_without_serial_wait():
     errors = []
     started = 100.0
     expired = started + seat_health.OVERALL_TIMEOUT_SECONDS + 1.0
-    clock_started = False
+    coordinator_clock_calls = 0
 
     def clock():
-        nonlocal clock_started
+        nonlocal coordinator_clock_calls
         if threading.current_thread() is coordinator:
-            if not clock_started:
-                clock_started = True
+            coordinator_clock_calls += 1
+            if coordinator_clock_calls == 1:
                 return started
-            # Exhaust the fixed global budget only after both real workers block.
+            # Enter the real completion wait only after both real workers block.
             for event in entered.values():
-                assert event.wait(watchdog_seconds), "seat workers did not enter in parallel"
+                assert event.wait(1.0), "seat workers did not enter in parallel"
+            if positive_budget and coordinator_clock_calls == 2:
+                return started + seat_health.OVERALL_TIMEOUT_SECONDS / 2
             deadline_exhausted.set()
         return expired if deadline_exhausted.is_set() else started
 
