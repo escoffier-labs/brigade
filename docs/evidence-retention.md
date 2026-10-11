@@ -10,7 +10,8 @@ delete evidence.
 
 The caller obtains `AckAcceptance` through the existing acknowledgement
 composition and admits its provenance. An accepted acknowledgement is an
-authorized receipt assertion. This evaluator also requires its custody evidence
+authorized receipt assertion with an exact empty tuple of reasons. This evaluator
+also requires its custody evidence
 to supply the exact destination reference and object version. It reconciles that
 evidence with the acceptance summary and `AckAssociation`, including the request,
 envelope, nonce, destination, audience, manifest, verification run and receipt.
@@ -38,14 +39,15 @@ retention enforcement nor successful restoration.
 | `EnforcementObservation` | Independently observed retention horizon | `enforced` with `retain_until` |
 | `HoldObservation` | Hold state under the supplied current revision | `unheld` or explicitly `released` |
 | `RecoveryObservation` as `archive` | Existing archive result reconciled with the subject | `verified` |
-| `RecoveryObservation` as `restore` | Actual restoration evidence reconciled with the subject | `verified` |
+| `RecoveryObservation` as `restore` | Actual restoration evidence reconciled with the subject and linked archive | `verified` |
 | `OperationAuthority` | A principal's explicit write, hold, restore or delete permission | `allowed` or `denied` |
 
 Controls also preserve `unknown`, `unavailable`, `indeterminate`, and `failed`
 observations. An `active` hold blocks the prerequisite. Assessment states
 `mismatch`, `stale`, and `indeterminate` describe binding or validation failures.
-`observed_state` preserves the supplied bounded control state when the binding is
-stale or mismatched. Missing controls report `unavailable`. Malformed outer input
+`observed_state` preserves only exact known control state strings, including when
+the binding is stale or mismatched. Arbitrary text and string subclasses are
+discarded. Missing controls report `unavailable`. Malformed outer input
 types raise the bounded error `invalid retention input type`. Malformed nested
 values cannot produce a supported prerequisite or inject diagnostic text.
 
@@ -57,6 +59,16 @@ old observations, including an old released hold. A released observation is
 caller-admitted evidence of release at that revision, not an inferred transition.
 The evaluator does not maintain hold history or discover a newer revision.
 
+A verified restore supplies `archive_evidence_sha256`, equal to the verified
+archive binding's `evidence_sha256`, and must be observed at or after that archive.
+The archive observation may omit this optional field. Missing or malformed links
+are `indeterminate`. Another valid archive digest or a restore observed before
+the archive is `mismatch`. Link comparison applies only when both controls have
+verified states and valid bindings, preserving existing binding and failure
+causes. The verified restore assessment proves this link to its accompanying
+archive assessment. The restore's own evidence digest identifies a separate
+observation.
+
 The result retains each validated binding, operation authority, selected period
 and start, declared expiry, observed retention date, and assessment reasons.
 It preserves a writer with explicit denied delete authority alongside a separate
@@ -66,6 +78,9 @@ and operation are ambiguous. Unknown, stale, mismatched or malformed supplied
 authority observations block the prerequisite, even when another principal has
 an allowed permission. Write and hold permissions are recorded explicitly.
 Allowed restore and delete observations are required for the prerequisite.
+Any principal separation rule is adopter policy enforced by the caller or prune
+integration. Supplied allowed write and delete permissions for the same principal
+are not certified as separated.
 
 ## Calendar periods and expiry
 
@@ -86,8 +101,12 @@ assert calendar_expiry("2024-08-31T12:34:56Z", "P6M") == "2025-02-28T12:34:56Z"
 The organization selects the period and start. There is no default period or
 universal floor. An observed enforced date earlier than the declaration is a
 mismatch. A later observed date extends `expires_at`. The result keeps
-`declared_expires_at` and `observed_retain_until` separate. `retention_state`
-reports `retained`, `expired` at or after `expires_at`, or `indeterminate` when
+`declared_expires_at` and `observed_retain_until` separate. An effective expiry
+requires a current valid declaration. Invalid or missing declarations suppress
+the start, period, declared and effective expiry.
+`observed_retain_until` is supplied only when enforcement remains `enforced`
+after date checks, and can be reported independently of a valid declaration.
+`retention_state` reports `retained`, `expired` at or after `expires_at`, or `indeterminate` when
 the dates cannot be evaluated. Expired retention and stale observation evidence
 are separate states. Expired retention cannot compensate for stale controls.
 
@@ -129,7 +148,10 @@ result = evaluate_retention(
     enforcement=EnforcementObservation(binding, "enforced", "2025-02-28T00:00:00Z"),
     hold=HoldObservation(binding, "unheld"),
     archive=RecoveryObservation(binding, "verified"),
-    restore=RecoveryObservation(binding, "verified"),
+    restore=RecoveryObservation(
+        replace(binding, evidence_sha256="a" * 64), "verified",
+        archive_evidence_sha256=binding.evidence_sha256,
+    ),
     authorities=(
         OperationAuthority(binding, "writer-a", "write", "allowed"),
         OperationAuthority(binding, "writer-a", "delete", "denied"),

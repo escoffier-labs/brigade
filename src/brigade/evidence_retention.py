@@ -62,10 +62,12 @@ class RecoveryObservation:
 
     'verified' requires adopter evidence of the actual operation and integrity
     reconciliation with this subject. A package digest alone is insufficient.
+    A verified restore must identify the archive evidence it proves.
     """
 
     binding: ObservationBinding
     state: str
+    archive_evidence_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +206,8 @@ def _ack_bound(accepted: ack.AckAcceptance, subject: RetentionSubject, now: date
             )
         )
         or accepted.state != "accepted"
+        or type(accepted.reasons) is not tuple
+        or accepted.reasons != ()
         or accepted.signature != "VALID"
         or accepted.authorization != "authorized"
         or accepted.asserted_result != "received"
@@ -339,16 +343,15 @@ def evaluate_retention(
     declaration_state = "unavailable"
     if declaration is not None:
         declaration_state = binding_state(declaration.binding, "declared")
-        try:
-            declared_expiry = calendar_expiry(declaration.starts_at, declaration.period)
-            start = ack._time(declaration.starts_at)
-            if now is None or start is None or start > now:
-                declared_expiry = None
-                declaration_state = "indeterminate"
-        except ValueError:
-            declaration_state = "indeterminate"
         if declaration_state == "current":
-            declaration_state = "declared"
+            try:
+                start = ack._time(declaration.starts_at)
+                if now is None or start is None or start > now:
+                    raise ValueError
+                declared_expiry = calendar_expiry(declaration.starts_at, declaration.period)
+                declaration_state = "declared"
+            except ValueError:
+                declaration_state = "indeterminate"
     declared = ControlAssessment(
         "declaration",
         declaration_state,
@@ -361,7 +364,7 @@ def evaluate_retention(
     ) -> ControlAssessment:
         if item is None:
             return ControlAssessment(kind, "unavailable", None, None)
-        observed_state = item.state if ack._text(item.state) else None
+        observed_state = item.state if type(item.state) is str and item.state in allowed else None
         state = binding_state(item.binding)
         if state == "current":
             state = observed_state if observed_state in allowed else "indeterminate"
@@ -372,6 +375,15 @@ def evaluate_retention(
     held = control("hold", hold, unknown | {"active", "unheld", "released"})
     archived = control("archive", archive, unknown | {"verified"})
     restored = control("restore", restore, unknown | {"verified"})
+    if archived.state == restored.state == "verified":
+        assert restore is not None and archived.binding is not None and restored.binding is not None
+        link = restore.archive_evidence_sha256
+        recovery_state = "verified"
+        if not ack._digest(link):
+            recovery_state = "indeterminate"
+        elif link != archived.binding.evidence_sha256 or restored.binding.observed_at < archived.binding.observed_at:
+            recovery_state = "mismatch"
+        restored = ControlAssessment("restore", recovery_state, restored.binding, restored.observed_state)
     expiry = declared_expiry
     if enforced.state == "enforced":
         assert enforcement is not None
@@ -452,9 +464,7 @@ def evaluate_retention(
         declaration.starts_at if declaration is not None and declared_expiry is not None else None,
         declaration.period if declaration is not None and declared_expiry is not None else None,
         declared_expiry,
-        enforcement.retain_until
-        if enforcement is not None and ack._time(enforcement.retain_until) is not None
-        else None,
+        enforcement.retain_until if enforcement is not None and enforced.state == "enforced" else None,
         expiry,
         retention_state,
         "blocked" if reasons else "supported",

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Run the full local verification gate in deterministic pytest shards with combined coverage and counted concurrency slots shared by linked worktrees. Shard and slot counts are configurable, and contention can wait for a bounded deadline.
 
+- Record caller-admitted retention, hold, recovery and operation-authority observations for acknowledged evidence batches with calendar periods and conservative prune prerequisites. (#1621)
 - Speed up strict JSON validation of unescaped ASCII strings while preserving byte limits, Unicode checks, and string-subclass isolation. (#1674)
 - Honor update-notifier opt-outs before resolving the cache path, avoiding Windows platform subprocess probes during offline CLI adoption. (#1664)
 - `brigade fleet cloud set` updates global and provider hosted-worker concurrency with administrator authorization. Limits persist across hub restarts and preserve omitted policy fields and active leases. The writer requires an upgraded hub, and explicit null policy limits are rejected. (#1576)

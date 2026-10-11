@@ -64,7 +64,9 @@ def case():
         enforcement=retention.EnforcementObservation(binding, "enforced", OBSERVED),
         hold=retention.HoldObservation(binding, "unheld"),
         archive=retention.RecoveryObservation(binding, "verified"),
-        restore=retention.RecoveryObservation(binding, "verified"),
+        restore=retention.RecoveryObservation(
+            replace(binding, evidence_sha256="a" * 64), "verified", binding.evidence_sha256
+        ),
         authorities=tuple(
             retention.OperationAuthority(binding, principal, operation, state)
             for principal, operation, state in (
@@ -342,3 +344,151 @@ def test_ack_summary_requires_exact_string_types(case, field):
     accepted = case["acknowledgement"]
     result = evaluate(case, acknowledgement=replace(accepted, **{field: Lookalike(getattr(accepted, field))}))
     assert result.prune_prerequisite == "blocked" and "acknowledgement-binding" in result.reasons
+
+
+@pytest.mark.parametrize("reasons", [("signature-invalid",), [], "", None])
+def test_acknowledgement_requires_exact_empty_reasons_tuple(case, reasons):
+    result = evaluate(case, acknowledgement=replace(case["acknowledgement"], reasons=reasons))
+    assert result.prune_prerequisite == "blocked"
+    assert "acknowledgement-binding" in result.reasons
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        ({"state": "unknown"}, "unknown"),
+        ({"state": "failed"}, "failed"),
+        ({"state": "unavailable"}, "unavailable"),
+        ({"state": "indeterminate"}, "indeterminate"),
+        ({"source_class": "declared"}, "indeterminate"),
+        ({"policy_revision": "old"}, "mismatch"),
+        ({"valid_until": NOW}, "stale"),
+        ({"retain_until": START}, "mismatch"),
+        ({"retain_until": "bad"}, "indeterminate"),
+    ],
+)
+def test_only_enforced_horizon_is_reported_as_observed(case, changes, expected):
+    item = case["enforcement"]
+    binding_changes = {key: value for key, value in changes.items() if key not in {"state", "retain_until"}}
+    item_changes = {key: value for key, value in changes.items() if key in {"state", "retain_until"}}
+    item = replace(item, binding=replace(item.binding, **binding_changes), **item_changes)
+    result = evaluate(case, enforcement=item)
+    assert result.enforcement.state == expected
+    assert result.enforcement.binding == item.binding
+    assert result.enforcement.observed_state == item.state
+    assert result.observed_retain_until is None
+    assert result.prune_prerequisite == "blocked"
+
+
+@pytest.mark.parametrize(
+    ("binding_changes", "payload_changes", "evaluated_at", "expected"),
+    [
+        ({"policy_revision": "old"}, {}, NOW, "mismatch"),
+        ({"valid_until": NOW}, {}, NOW, "stale"),
+        ({"policy_revision": "old"}, {}, None, "mismatch"),
+        ({"policy_revision": "old"}, {"starts_at": "bad", "period": "bad"}, NOW, "mismatch"),
+        ({"valid_until": NOW}, {"starts_at": "bad", "period": "bad"}, NOW, "stale"),
+        ({}, {"period": "bad"}, NOW, "indeterminate"),
+        ({}, {"starts_at": "bad"}, NOW, "indeterminate"),
+        ({}, {}, None, "unavailable"),
+        ({}, {"starts_at": UNTIL}, NOW, "indeterminate"),
+    ],
+)
+def test_invalid_declaration_suppresses_dates_and_preserves_binding_cause(
+    case, binding_changes, payload_changes, evaluated_at, expected
+):
+    item = case["declaration"]
+    item = replace(item, binding=replace(item.binding, **binding_changes), **payload_changes)
+    result = evaluate(case, declaration=item, evaluated_at=evaluated_at)
+    assert result.declaration.state == expected
+    assert result.declaration.binding == item.binding
+    assert (result.starts_at, result.period, result.declared_expires_at, result.expires_at) == (None,) * 4
+    assert result.retention_state == "indeterminate"
+    assert result.prune_prerequisite == "blocked"
+    if evaluated_at == NOW:
+        assert result.observed_retain_until == OBSERVED
+
+
+def test_missing_declaration_can_report_observed_horizon_without_effective_expiry(case):
+    result = evaluate(case, declaration=None)
+    assert (result.starts_at, result.period, result.declared_expires_at, result.expires_at) == (None,) * 4
+    assert result.observed_retain_until == OBSERVED
+    assert result.retention_state == "indeterminate" and result.prune_prerequisite == "blocked"
+
+
+@pytest.mark.parametrize("control", ["enforcement", "hold", "archive", "restore"])
+@pytest.mark.parametrize("state", ["unheld per synthetic private memo 42", "lookalike"])
+def test_control_observed_state_discards_arbitrary_text_and_string_subclasses(case, control, state):
+    class Lookalike(str):
+        pass
+
+    item = case[control]
+    value = Lookalike(item.state) if state == "lookalike" else state
+    result = evaluate(case, **{control: replace(item, state=value)})
+    assert getattr(result, control).observed_state is None
+    assert getattr(result, control).state == "indeterminate"
+    assert result.reasons == (control + "-indeterminate",)
+
+
+@pytest.mark.parametrize("control", ["enforcement", "hold", "archive", "restore"])
+@pytest.mark.parametrize(
+    ("field", "value", "expected"), [("policy_revision", "old", "mismatch"), ("valid_until", NOW, "stale")]
+)
+def test_known_observed_state_survives_binding_failure(case, control, field, value, expected):
+    item = case[control]
+    result = evaluate(case, **{control: replace(item, binding=replace(item.binding, **{field: value}))})
+    assert getattr(result, control).state == expected
+    assert getattr(result, control).observed_state == item.state
+
+
+def test_verified_restore_requires_explicit_archive_link(case):
+    # The original two-argument observation remains valid input but cannot prove an archive.
+    result = evaluate(case, restore=retention.RecoveryObservation(case["restore"].binding, "verified"))
+    assert result.restore.state == "indeterminate"
+    assert result.prune_prerequisite == "blocked"
+    assert "restore-indeterminate" in result.reasons
+
+
+@pytest.mark.parametrize(
+    ("link", "expected"), [(None, "indeterminate"), ("bad", "indeterminate"), ("9" * 64, "mismatch")]
+)
+def test_restore_rejects_missing_malformed_or_other_archive_digest(case, link, expected):
+    restored = replace(case["restore"], archive_evidence_sha256=link)
+    result = evaluate(case, restore=restored)
+    assert result.restore.state == expected and result.prune_prerequisite == "blocked"
+    assert result.restore.binding == restored.binding
+
+
+@pytest.mark.parametrize(
+    ("archive_at", "restore_at", "expected"),
+    [(NOW, OBSERVED, "mismatch"), (OBSERVED, OBSERVED, "verified"), (OBSERVED, NOW, "verified")],
+)
+def test_restore_must_follow_the_linked_archive_observation(case, archive_at, restore_at, expected):
+    archived = replace(case["archive"], binding=replace(case["archive"].binding, observed_at=archive_at))
+    restored = replace(
+        case["restore"],
+        binding=replace(case["restore"].binding, observed_at=restore_at, evidence_sha256="a" * 64),
+        archive_evidence_sha256=archived.binding.evidence_sha256,
+    )
+    result = evaluate(case, archive=archived, restore=restored)
+    assert result.restore.state == expected
+    assert result.prune_prerequisite == ("supported" if expected == "verified" else "blocked")
+    assert result.archive.binding.evidence_sha256 != result.restore.binding.evidence_sha256
+
+
+@pytest.mark.parametrize("control", ["archive", "restore"])
+@pytest.mark.parametrize("state", ["failed", "unknown", "unavailable", "indeterminate", "stale", "mismatch"])
+def test_archive_link_comparison_preserves_unverified_control_cause(case, control, state):
+    restored = replace(case["restore"], archive_evidence_sha256="9" * 64)
+    changes = {"restore": restored}
+    item = changes.get(control, case[control])
+    if state == "stale":
+        changes[control] = replace(item, binding=replace(item.binding, valid_until=NOW))
+    elif state == "mismatch":
+        subject = replace(item.binding.subject, object_version="other")
+        changes[control] = replace(item, binding=replace(item.binding, subject=subject))
+    else:
+        changes[control] = replace(item, state=state)
+    result = evaluate(case, **changes)
+    assert getattr(result, control).state == state
+    assert result.prune_prerequisite == "blocked"
