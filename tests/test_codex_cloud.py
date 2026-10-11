@@ -166,7 +166,7 @@ def _grant_hub(monkeypatch, *, lease_id: str | None = "lease-1", granted: bool =
     return recorded
 
 
-def test_run_cloud_task_happy_path(monkeypatch):
+def test_run_cloud_task_happy_path(monkeypatch, tmp_path):
     fake = FakeRuns(
         {
             "exec": [_result(stdout="Submitted https://chatgpt.com/codex/tasks/task_ok1")],
@@ -183,7 +183,8 @@ def test_run_cloud_task_happy_path(monkeypatch):
         "fix it",
         env_id="env-123",
         timeout=600,
-        cwd=Path("."),
+        # The registry lives under cwd; never record this fake task in the real checkout.
+        cwd=tmp_path,
         poll_interval=0,
         sleep=lambda s: None,
         clock=lambda: 0,
