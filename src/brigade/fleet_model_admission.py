@@ -1501,7 +1501,7 @@ def _local_roster_projection() -> dict[str, Any]:
 
 def _audit_spool_label() -> str:
     if not nofollow_supported():
-        return "unsafe"
+        return "unsupported-platform"
     if not _node_token():
         return "unavailable"
     try:

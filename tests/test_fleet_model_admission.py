@@ -1816,7 +1816,10 @@ def test_windows_without_nofollow_fails_closed(tmp_path, monkeypatch):
         node_token = _enroll(hub)
         _seed_hub(hub, node_token)
         _configure_client(monkeypatch, tmp_path, hub, node_token)
-        monkeypatch.setattr(fleet_model_admission, "nofollow_supported", lambda: False)
+        if os.name == "nt":
+            assert not fleet_model_admission.nofollow_supported()
+        else:
+            monkeypatch.setattr(fleet_model_admission, "nofollow_supported", lambda: False)
 
         def file_access_is_forbidden():
             raise AssertionError("cache or audit spool must not be accessed")
@@ -1832,6 +1835,18 @@ def test_windows_without_nofollow_fails_closed(tmp_path, monkeypatch):
         assert online.ok is True
         assert online.payload["source"] == "hub"
 
+        doctor = fleet_model_admission.doctor_model_roster(consumer="t3-fleet")
+        assert doctor.ok is True
+        assert doctor.payload["hub"] == "reachable"
+        assert doctor.payload["cache_valid"] is False
+        assert doctor.payload["audit_spool"] == "unsupported-platform"
+        _secret_free(doctor.payload, node_token, ADMIN_TOKEN, str(tmp_path))
+
+        with pytest.raises(fleet_client.FleetClientError, match="^cache-unsafe-platform$"):
+            fleet_model_admission._read_audit_spool()
+        with pytest.raises(fleet_client.FleetClientError, match="^cache-unsafe-platform$"):
+            fleet_model_admission._append_audit_spool({})
+
         monkeypatch.setattr(
             fleet_client,
             "_run_with_deadline",
@@ -1844,6 +1859,12 @@ def test_windows_without_nofollow_fails_closed(tmp_path, monkeypatch):
         )
         assert offline.ok is False
         assert offline.reason == "cache-unsafe-platform"
+
+        offline_doctor = fleet_model_admission.doctor_model_roster(consumer="t3-fleet")
+        assert offline_doctor.ok is False
+        assert offline_doctor.payload["cache_valid"] is False
+        assert offline_doctor.payload["audit_spool"] == "unsupported-platform"
+        _secret_free(offline_doctor.payload, node_token, ADMIN_TOKEN, str(tmp_path))
 
 
 @REQUIRES_SAFE_CACHE
@@ -3097,6 +3118,10 @@ def test_audit_spool_bounds_replay_and_fails_closed_on_corrupt(tmp_path, monkeyp
         )
         assert corrupt.ok is False
         assert corrupt.reason in {"lkg-unsafe", "malformed-roster"}
+
+        doctor = fleet_model_admission.doctor_model_roster(consumer="t3-fleet")
+        assert doctor.ok is False
+        assert doctor.payload["audit_spool"] == "unsafe"
 
 
 def test_admin_mutation_constructs_safe_output_and_maps_get_style_409(tmp_path, monkeypatch):

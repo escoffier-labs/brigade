@@ -424,6 +424,15 @@ age and validity, selected consumer default, exact provider/model/reasoning,
 binding presence, retired-model status, local Brigade roster drift, and last
 admission spool state.
 
+`audit_spool: "unsupported-platform"` means the client cannot prove safe local
+storage on this platform. Windows currently reports this state with
+`cache_valid: false`. Doctor does not inspect cache or audit files in this state.
+Direct Hub admission remains available. Offline LKG admission and audit replay
+remain refused with `cache-unsafe-platform` until the required storage invariants
+are proven. `audit_spool: "unsafe"` instead means storage inspection failed on a
+platform with supported primitives, including corrupt audit content. Missing node
+credentials report `unavailable`, and inspected spools report `present` or `empty`.
+
 `t3-fleet doctor --json` calls the Brigade doctor and adds T3 observations:
 
 - project default instance/model
