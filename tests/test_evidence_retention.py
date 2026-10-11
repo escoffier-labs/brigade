@@ -449,6 +449,19 @@ def test_verified_restore_requires_explicit_archive_link(case):
     assert "restore-indeterminate" in result.reasons
 
 
+def test_restore_rejects_reused_archive_evidence(case):
+    archived = case["archive"]
+    restored = replace(
+        case["restore"],
+        binding=replace(case["restore"].binding, evidence_sha256=archived.binding.evidence_sha256),
+        archive_evidence_sha256=archived.binding.evidence_sha256,
+    )
+    result = evaluate(case, restore=restored)
+    assert result.restore.state == "mismatch"
+    assert result.prune_prerequisite == "blocked"
+    assert "restore-mismatch" in result.reasons
+
+
 @pytest.mark.parametrize(
     ("link", "expected"), [(None, "indeterminate"), ("bad", "indeterminate"), ("9" * 64, "mismatch")]
 )

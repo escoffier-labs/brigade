@@ -381,7 +381,11 @@ def evaluate_retention(
         recovery_state = "verified"
         if not ack._digest(link):
             recovery_state = "indeterminate"
-        elif link != archived.binding.evidence_sha256 or restored.binding.observed_at < archived.binding.observed_at:
+        elif (
+            link != archived.binding.evidence_sha256
+            or restored.binding.evidence_sha256 == archived.binding.evidence_sha256
+            or restored.binding.observed_at < archived.binding.observed_at
+        ):
             recovery_state = "mismatch"
         restored = ControlAssessment("restore", recovery_state, restored.binding, restored.observed_state)
     expiry = declared_expiry
