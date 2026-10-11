@@ -37,9 +37,16 @@ def _lock_path() -> Path:
     return git_common_dir / "brigade-full-verify.lock"
 
 
+def slot_path(prefix: Path, index: int) -> str:
+    # Slot 0 is the pre-slot lock path, so a gate from an older checkout still
+    # contends with new gates, and slot i >= 1 matches the old per-slot
+    # BRIGADE_VERIFY_LOCK_PATH=<lock>.<i> operator override.
+    return str(prefix) if index == 0 else f"{prefix}.{index}"
+
+
 def acquire_slot(prefix: Path, slots: int) -> int | None:
     for index in range(slots):
-        fd = os.open(f"{prefix}.{index}", os.O_RDWR | os.O_CREAT, 0o600)
+        fd = os.open(slot_path(prefix, index), os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

@@ -94,7 +94,8 @@ def test_verify_full_gate_fails_fast_when_another_gate_holds_the_lock(tmp_path, 
     lock_path = tmp_path / "full.lock"
     monkeypatch.setenv("BRIGADE_VERIFY_SLOTS", "1")
     monkeypatch.setenv("BRIGADE_VERIFY_WAIT", "0")
-    slot_path = Path(f"{lock_path}.0")
+    # Slot 0 is the unsuffixed path that pre-slot gates lock.
+    slot_path = lock_path
     slot_path.touch()
     monkeypatch.setenv("PY", str(tool_dir))
     monkeypatch.setenv("VERIFY_LOG", str(log_path))
@@ -322,7 +323,7 @@ def test_verify_slots_allow_k_gates_then_reject_k_plus_one(tmp_path, monkeypatch
         BRIGADE_VERIFY_WAIT="0",
     )
     env.pop("BRIGADE_VERIFY_LOCK_HELD", None)
-    with Path(f"{prefix}.0").open("w") as first, Path(f"{prefix}.1").open("w") as second:
+    with prefix.open("w") as first, Path(f"{prefix}.1").open("w") as second:
         fcntl.flock(first, fcntl.LOCK_EX | fcntl.LOCK_NB)
         available = subprocess.run([str(ROOT / "scripts/verify")], env=env, capture_output=True, text=True, timeout=15)
         assert available.returncode == 0, available.stderr
@@ -349,7 +350,7 @@ def test_verify_slot_wait_acquires_after_release_or_expires(tmp_path, wait, expe
         BRIGADE_VERIFY_WAIT=wait,
     )
     env.pop("BRIGADE_VERIFY_LOCK_HELD", None)
-    with Path(f"{prefix}.0").open("w") as slot:
+    with prefix.open("w") as slot:
         fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
         child = subprocess.Popen(
             [str(ROOT / "scripts/verify")], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
