@@ -1821,7 +1821,10 @@ def test_windows_without_nofollow_fails_closed(tmp_path, monkeypatch):
         else:
             monkeypatch.setattr(fleet_model_admission, "nofollow_supported", lambda: False)
 
+        file_access_attempts = []
+
         def file_access_is_forbidden():
+            file_access_attempts.append(True)
             raise AssertionError("cache or audit spool must not be accessed")
 
         monkeypatch.setattr(fleet_model_admission, "lkg_path", file_access_is_forbidden)
@@ -1840,7 +1843,9 @@ def test_windows_without_nofollow_fails_closed(tmp_path, monkeypatch):
         assert doctor.payload["hub"] == "reachable"
         assert doctor.payload["cache_valid"] is False
         assert doctor.payload["audit_spool"] == "unsupported-platform"
-        _secret_free(doctor.payload, node_token, ADMIN_TOKEN, str(tmp_path))
+        assert file_access_attempts == []
+        private_paths = (str(tmp_path), json.dumps(str(tmp_path))[1:-1], tmp_path.as_posix())
+        _secret_free(doctor.payload, node_token, ADMIN_TOKEN, *private_paths)
 
         with pytest.raises(fleet_client.FleetClientError, match="^cache-unsafe-platform$"):
             fleet_model_admission._read_audit_spool()
@@ -1864,7 +1869,8 @@ def test_windows_without_nofollow_fails_closed(tmp_path, monkeypatch):
         assert offline_doctor.ok is False
         assert offline_doctor.payload["cache_valid"] is False
         assert offline_doctor.payload["audit_spool"] == "unsupported-platform"
-        _secret_free(offline_doctor.payload, node_token, ADMIN_TOKEN, str(tmp_path))
+        assert file_access_attempts == []
+        _secret_free(offline_doctor.payload, node_token, ADMIN_TOKEN, *private_paths)
 
 
 @REQUIRES_SAFE_CACHE

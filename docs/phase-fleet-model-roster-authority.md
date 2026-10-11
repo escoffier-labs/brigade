@@ -430,8 +430,9 @@ storage on this platform. Windows currently reports this state with
 Direct Hub admission remains available. Offline LKG admission and audit replay
 remain refused with `cache-unsafe-platform` until the required storage invariants
 are proven. `audit_spool: "unsafe"` instead means storage inspection failed on a
-platform with supported primitives, including corrupt audit content. Missing node
-credentials report `unavailable`, and inspected spools report `present` or `empty`.
+platform with supported primitives, including corrupt audit content. On supported
+platforms, missing node credentials report `unavailable`, and inspected spools
+report `present` or `empty`.
 
 `t3-fleet doctor --json` calls the Brigade doctor and adds T3 observations:
 
