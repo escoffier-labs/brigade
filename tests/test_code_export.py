@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from brigade import code_export
 
 
@@ -170,11 +172,27 @@ def test_export_impact_section_skips_module_pseudo_symbol(monkeypatch, tmp_path)
     assert graph_queries == ["app.py::create_app", "app.py::create_app"]
 
 
-def test_export_impact_queries_selected_file_when_names_are_duplicated(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("paths", "symbol_ids", "selected_query"),
+    [
+        (["pkg/one.py", "pkg/two.py"], [None, None], "pkg/one.py::helper"),
+        (["pkg/one.py", "pkg/one.py"], ["first-helper-id", "second-helper-id"], "first-helper-id"),
+    ],
+    ids=["legacy-file-selection", "same-file-symbol-selection"],
+)
+def test_export_impact_queries_selected_symbol_when_names_are_duplicated(
+    monkeypatch, tmp_path, paths, symbol_ids, selected_query
+):
     _write_fake_db(tmp_path)
     hits = [
-        {"qualified_name": "helper", "name": "helper", "file_path": path, "kind": "function"}
-        for path in ["pkg/one.py", "pkg/two.py"]
+        {
+            "qualified_name": "helper",
+            "name": "helper",
+            "file_path": path,
+            "kind": "function",
+            **({"id": symbol_id} if symbol_id else {}),
+        }
+        for path, symbol_id in zip(paths, symbol_ids, strict=True)
     ]
     queries: list[str] = []
     edge = {"source": "use_one", "target": "helper", "source_file": "pkg/one.py"}
@@ -187,13 +205,13 @@ def test_export_impact_queries_selected_file_when_names_are_duplicated(monkeypat
         if "impact" in argv or "callers" in argv:
             query = argv[argv.index("--db") + 3]
             queries.append(query)
-            # The engine now refuses to merge an ambiguous bare name.
-            return proc.Result(0, json.dumps({"edges": [edge] if query == "pkg/one.py::helper" else []}), "")
+            # The engine refuses to merge a query that still matches both symbols.
+            return proc.Result(0, json.dumps({"edges": [edge] if query == selected_query else []}), "")
         return proc.Result(0, "{}", "")
 
     monkeypatch.setattr(code_export.proc, "run", fake_run)
     impact = code_export._impact_section("graphtrail", tmp_path / ".graphtrail/graphtrail.db", tmp_path, "helper")
-    assert queries == ["pkg/one.py::helper", "pkg/one.py::helper"]
+    assert queries == [selected_query, selected_query]
     assert impact["edges"] == [edge]
     assert impact["callers"] == [edge]
     assert impact["resolved_symbol"] == hits[0]
