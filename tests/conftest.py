@@ -94,6 +94,16 @@ def _isolate_hermes_home(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_orchestrator_run_id(monkeypatch):
+    """Sandbox receipts must not inherit attribution from the worker's live run.
+
+    Tests exercising attribution set their own run id explicitly. This also
+    keeps an absent-id assertion independent of the harness launching pytest.
+    """
+    monkeypatch.delenv("BRIGADE_RUN_ID", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_live_fleet_hub(monkeypatch):
     """Never let an operator's exported fleet hub leak into the suite.
 

@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Hold a nonblocking exclusive lock, then exec scripts/verify."""
+"""Acquire a bounded per-clone verification slot, then exec scripts/verify."""
 
 from __future__ import annotations
 
 import fcntl
+import math
 import os
 import subprocess
 import sys
+import time
+
 from pathlib import Path
+
+from verify_parallel import positive_setting, shard_count
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTENTION_MESSAGE = (
@@ -32,13 +37,41 @@ def _lock_path() -> Path:
     return git_common_dir / "brigade-full-verify.lock"
 
 
+def acquire_slot(prefix: Path, slots: int) -> int | None:
+    for index in range(slots):
+        fd = os.open(f"{prefix}.{index}", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+        else:
+            return fd
+    return None
+
+
 def main() -> None:
-    fd = os.open(_lock_path(), os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        print(CONTENTION_MESSAGE, file=sys.stderr)
-        raise SystemExit(75) from None
+        slots = positive_setting("BRIGADE_VERIFY_SLOTS", max(1, (os.cpu_count() or 1) // shard_count()))
+        wait = float(os.environ.get("BRIGADE_VERIFY_WAIT", "0"))
+        if not math.isfinite(wait) or wait < 0:
+            raise ValueError("BRIGADE_VERIFY_WAIT must be finite and nonnegative")
+    except ValueError as exc:
+        print(f"verify: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
+    prefix = _lock_path()
+    if prefix.is_dir():
+        prefix = prefix / "brigade-full-verify.lock"
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + wait
+    while True:
+        fd = acquire_slot(prefix, slots)
+        if fd is not None:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(CONTENTION_MESSAGE, file=sys.stderr)
+            raise SystemExit(75)
+        time.sleep(min(0.1, remaining))
     os.set_inheritable(fd, True)
     env = os.environ.copy()
     env["BRIGADE_VERIFY_LOCK_HELD"] = "1"

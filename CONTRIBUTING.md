@@ -133,11 +133,34 @@ brigade guard scan README.md --policy src/brigade/guard/policies/public-repo.jso
 ./scripts/verify
 ```
 
-While iterating, `./scripts/verify-fast` runs the same gates with the pytest phase parallelized through pytest-xdist (roughly 4 minutes instead of 50 on a 24-core machine). The canonical gate stays serial `./scripts/verify`; a handful of timing-sensitive tests flake under CPU contention, so re-run any parallel-only failure serially before acting on it. `JOBS=8 ./scripts/verify-fast` caps the worker count on smaller machines.
+The full gate runs deterministic hash shards using `scripts/ci_pytest_shard.py`,
+the same splitter used in CI. Every shard has separate coverage data. The gate
+prints each shard's pytest output, aggregates results, then combines coverage
+and enforces the 78% floor once. A failing shard fails the gate.
+
+`BRIGADE_VERIFY_SHARDS` sets the shard count (N). The default is half the CPU
+count, rounded down, with a minimum of one and a maximum of eight.
+`BRIGADE_VERIFY_SLOTS` sets concurrent full gates per Git common directory (K).
+Its default is max(1, CPU count / N, rounded down), so a 24-CPU host runs up to
+three gates of eight shards. Set consistent overrides across linked worktrees.
+Slot files are `brigade-full-verify.lock.<i>` under the Git common directory.
+`BRIGADE_VERIFY_LOCK_PATH` overrides their prefix or names an existing directory.
+All slots busy means exit 75. `BRIGADE_VERIFY_WAIT=<seconds>` optionally waits
+for a free slot until that deadline. Do not retry contention with a larger
+Brigade verification timeout or `--no-reuse`.
+
+While iterating, use the focused gate through Brigade. It runs lint, format,
+type and snapshot checks plus only the named tests. It does not acquire a full
+slot or enforce coverage. Use it for bounded development slices, then run the
+full gate for PRs and verification-infrastructure changes:
 
 ```bash
-JOBS=auto ./scripts/verify-fast
+brigade work verify run --target . --argv-json '["./scripts/verify-focused","tests/test_verify_script.py"]' --capture brigade-work
+brigade work verify run --target . --command "./scripts/verify" --timeout 3600 --capture brigade-work
 ```
+
+`./scripts/verify-fast` remains an optional pytest-xdist development helper.
+`JOBS=8` caps its worker count. It does not replace the full coverage gate.
 
 To smoke-test an install end-to-end the same way CI does:
 

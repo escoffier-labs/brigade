@@ -24,4 +24,4 @@ PY=${PY:-.venv/bin}
 "$PY/python" scripts/version_sync.py --check
 "$PY/python" scripts/managed_snapshot.py --check
 "$PY/python" scripts/template_profile_snapshot.py --check
-"$PY/pytest" -q --cov=brigade --cov-report=term --cov-fail-under=78
+"$PY/python" scripts/verify_parallel.py

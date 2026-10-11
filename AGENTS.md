@@ -32,10 +32,21 @@ brigade work verify run --target . --argv-json '["./scripts/verify"]' --timeout 
 `--timeout 3600` bounds the known-long integration gate and is not permission
 to retry status 75.
 
-Do not pass `--no-reuse` for a full gate. Status 75 means another full
-verification is already running for this checkout. It must not be retried
-with a larger timeout. Use `./scripts/verify-focused` or wait for the active
-Brigade receipt.
+Do not pass `--no-reuse` for a full gate. Status 75 means all full
+verification slots for this Git common directory are occupied. It must not be retried
+with a larger timeout. Use `./scripts/verify-focused` or wait for an active
+Brigade receipt. Set `BRIGADE_VERIFY_WAIT=<seconds>` before starting a gate
+to wait for a slot within a bounded deadline.
+
+The full gate reuses CI's deterministic pytest hash shards, combines their
+coverage, and enforces the 78% floor once. `BRIGADE_VERIFY_SHARDS` overrides
+N (default: CPU count / 2, rounded down, bounded to 1 through 8).
+`BRIGADE_VERIFY_SLOTS` overrides K (default: max(1, CPU count / N, rounded
+down)). On 24 CPUs this permits three full gates with eight shards each.
+Overrides must be positive integers. Coordinate overrides across linked
+worktrees: each caller must use the same K to preserve the shared limit.
+`BRIGADE_VERIFY_LOCK_PATH` names an existing slot directory or a file prefix.
+The focused gate runs only named selectors, without coverage or full-gate slots.
 
 CI-only jobs still cover work that is slower, platform-oriented, or depends on
 extra checkout/install context: `content-guard`, `repo-metadata`,
@@ -130,7 +141,7 @@ See AGENTS.md Definition of Done and CONTRIBUTING.md. Day-to-day:
 - Fast full gate while iterating: `./scripts/verify-fast` (same checks, pytest
   parallelized via pytest-xdist, ~4 minutes). A few timing-sensitive tests flake
   under parallel CPU load; re-run any parallel-only failure serially before
-  acting on it. Reserve the serial `./scripts/verify` completion gate for pull
+  acting on it. Reserve the sharded `./scripts/verify` completion gate for pull
   requests, merges, releases, and verification-infrastructure changes.
 - End-to-end smoke (same shape as CI `install-from-source`):
 

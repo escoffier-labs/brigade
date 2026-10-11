@@ -31,7 +31,7 @@ def test_verify_script_runs_mypy_and_coverage_floor():
     text = (ROOT / "scripts/verify").read_text()
 
     assert '"$PY/mypy"' in text
-    assert '"$PY/pytest" -q --cov=brigade --cov-report=term --cov-fail-under=78' in text
+    assert '"$PY/python" scripts/verify_parallel.py' in text
 
 
 def test_verify_script_documents_full_coverage_gate():
@@ -92,12 +92,15 @@ def test_verify_full_gate_fails_fast_when_another_gate_holds_the_lock(tmp_path, 
     monkeypatch.delenv("BRIGADE_VERIFY_LOCK_HELD", raising=False)
     tool_dir, log_path = _fake_tool_dir(tmp_path)
     lock_path = tmp_path / "full.lock"
-    lock_path.touch()
+    monkeypatch.setenv("BRIGADE_VERIFY_SLOTS", "1")
+    monkeypatch.setenv("BRIGADE_VERIFY_WAIT", "0")
+    slot_path = Path(f"{lock_path}.0")
+    slot_path.touch()
     monkeypatch.setenv("PY", str(tool_dir))
     monkeypatch.setenv("VERIFY_LOG", str(log_path))
     monkeypatch.setenv("BRIGADE_VERIFY_LOCK_PATH", str(lock_path))
     monkeypatch.setenv("BRIGADE_VERIFY_LOCK_PYTHON", sys.executable)
-    with lock_path.open("w") as lock_file:
+    with slot_path.open("w") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         completed = subprocess.run(
             [str(ROOT / "scripts/verify")],
@@ -125,6 +128,8 @@ def test_verify_full_gate_does_not_invoke_external_flock(tmp_path, monkeypatch):
     flock_shim.write_text(f'#!/bin/sh\nprintf invoked >> "{flock_log}"\nexit 1\n')
     flock_shim.chmod(0o755)
     lock_path = tmp_path / "full.lock"
+    monkeypatch.setenv("BRIGADE_VERIFY_SLOTS", "1")
+    monkeypatch.setenv("BRIGADE_VERIFY_WAIT", "0")
     monkeypatch.setenv("PY", str(tool_dir))
     monkeypatch.setenv("VERIFY_LOG", str(log_path))
     monkeypatch.setenv("BRIGADE_VERIFY_LOCK_PATH", str(lock_path))
@@ -149,7 +154,7 @@ def test_verify_full_gate_does_not_invoke_external_flock(tmp_path, monkeypatch):
         "python\tscripts/version_sync.py\t--check",
         "python\tscripts/managed_snapshot.py\t--check",
         "python\tscripts/template_profile_snapshot.py\t--check",
-        "pytest\t-q\t--cov=brigade\t--cov-report=term\t--cov-fail-under=78",
+        "python\tscripts/verify_parallel.py",
     ]
     assert not flock_log.exists()
 
@@ -166,6 +171,8 @@ def test_verify_full_gate_keeps_lock_after_execvpe_into_verify(tmp_path, monkeyp
     ready_marker = tmp_path / "ready"
     release_marker = tmp_path / "release"
     lock_path = tmp_path / "full.lock"
+    monkeypatch.setenv("BRIGADE_VERIFY_SLOTS", "1")
+    monkeypatch.setenv("BRIGADE_VERIFY_WAIT", "0")
     (holder_dir / "ruff").write_text(
         """#!/bin/sh
 printf '%s' "$(basename "$0")" >> "$VERIFY_LOG"
@@ -296,3 +303,66 @@ def test_verify_scripts_run_the_env_guard_before_linting(script):
     guard = '"$PY/python" scripts/verify_env.py'
     assert guard in text
     assert text.index(guard) < text.index('"$PY/ruff"')
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fcntl is POSIX")
+def test_verify_slots_allow_k_gates_then_reject_k_plus_one(tmp_path, monkeypatch):
+    import fcntl
+
+    tools, log = _fake_tool_dir(tmp_path)
+    prefix = tmp_path / "slots" / "full.lock"
+    prefix.parent.mkdir()
+    env = dict(
+        os.environ,
+        PY=str(tools),
+        VERIFY_LOG=str(log),
+        BRIGADE_VERIFY_LOCK_PATH=str(prefix),
+        BRIGADE_VERIFY_LOCK_PYTHON=sys.executable,
+        BRIGADE_VERIFY_SLOTS="2",
+        BRIGADE_VERIFY_WAIT="0",
+    )
+    env.pop("BRIGADE_VERIFY_LOCK_HELD", None)
+    with Path(f"{prefix}.0").open("w") as first, Path(f"{prefix}.1").open("w") as second:
+        fcntl.flock(first, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        available = subprocess.run([str(ROOT / "scripts/verify")], env=env, capture_output=True, text=True, timeout=15)
+        assert available.returncode == 0, available.stderr
+        fcntl.flock(second, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        busy = subprocess.run([str(ROOT / "scripts/verify")], env=env, capture_output=True, text=True, timeout=15)
+        assert busy.returncode == 75
+        assert "full verification already running" in busy.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fcntl is POSIX")
+@pytest.mark.parametrize("wait,expected", [("5", 0), ("0.1", 75)])
+def test_verify_slot_wait_acquires_after_release_or_expires(tmp_path, wait, expected):
+    import fcntl
+
+    tools, log = _fake_tool_dir(tmp_path)
+    prefix = tmp_path / "full.lock"
+    env = dict(
+        os.environ,
+        PY=str(tools),
+        VERIFY_LOG=str(log),
+        BRIGADE_VERIFY_LOCK_PATH=str(prefix),
+        BRIGADE_VERIFY_LOCK_PYTHON=sys.executable,
+        BRIGADE_VERIFY_SLOTS="1",
+        BRIGADE_VERIFY_WAIT=wait,
+    )
+    env.pop("BRIGADE_VERIFY_LOCK_HELD", None)
+    with Path(f"{prefix}.0").open("w") as slot:
+        fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        child = subprocess.Popen(
+            [str(ROOT / "scripts/verify")], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        try:
+            time.sleep(0.3)
+            assert not log.exists()
+            if expected == 0:
+                assert child.poll() is None
+            fcntl.flock(slot, fcntl.LOCK_UN)
+            _, stderr = child.communicate(timeout=15)
+            assert child.returncode == expected, stderr
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.communicate()
