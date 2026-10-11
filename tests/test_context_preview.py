@@ -849,3 +849,177 @@ def test_partial_scope_is_revalidated_when_project_mutates_global_then_fails(tre
     assert all(total["consumed_raw_bytes"] is None for total in result["totals"].values())
     assert all(row["contribution"] == "unknown" for row in result["files"])
     assert str(repo) not in json.dumps(result)
+
+
+@pytest.mark.parametrize("mutation", ["deeper", "remove", "replace", "symlink"])
+@pytest.mark.parametrize("marker_kind", ["directory", "file"])
+def test_final_root_marker_observations_revalidated_without_body_reads(tree, monkeypatch, mutation, marker_kind):
+    repo, cwd = tree
+    marker = repo / ".git"
+    if marker_kind == "file":
+        marker.rmdir()
+        marker.write_bytes(b"PRIVATE_MARKER_BODY")
+    (cwd / "AGENTS.md").write_bytes(b"project")
+    original_read = os.read
+    reads = []
+    changed = False
+
+    def racing_read(fd, count):
+        nonlocal changed
+        data = original_read(fd, count)
+        reads.append(data)
+        if data == b"project" and not changed:
+            changed = True
+            if mutation == "deeper":
+                (cwd / ".git").write_bytes(b"PRIVATE_NEW_MARKER_BODY")
+            else:
+                marker.rename(repo / "old-marker")
+                if mutation == "replace":
+                    if marker_kind == "directory":
+                        marker.mkdir()
+                    else:
+                        marker.write_bytes(b"PRIVATE_MARKER_BODY")
+                elif mutation == "symlink":
+                    marker.symlink_to("old-marker")
+        return data
+
+    monkeypatch.setattr(os, "read", racing_read)
+    result = inspect(repo, cwd)
+    assert changed
+    assert result["status"] == "not_evaluated"
+    assert result["totals"]["project"]["selected_bytes"] is None
+    assert all(row["contribution"] == "unknown" for row in result["files"])
+    assert reads == [b"project", b""]
+    assert str(repo) not in json.dumps(result) and "PRIVATE" not in json.dumps(result)
+    if mutation == "symlink":
+        assert result["matches_codex"] is False
+
+
+@pytest.mark.parametrize("displaced", ["project", "ancestor", "cwd", "prefix", "global", "global_then_failure"])
+def test_final_directory_bindings_reject_displaced_lexical_paths(tmp_path, monkeypatch, displaced):
+    prefix = tmp_path / "prefix"
+    repo = prefix / "repo"
+    ancestor = repo / "sub"
+    cwd = ancestor / "deep"
+    cwd.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (cwd / "AGENTS.md").write_bytes(b"project")
+    home = tmp_path / "global"
+    home.mkdir()
+    (home / "AGENTS.md").write_bytes(b"global")
+    path = {"project": repo, "ancestor": ancestor, "cwd": cwd, "prefix": prefix}.get(displaced, home)
+    original_read = os.read
+    changed = False
+
+    def racing_read(fd, count):
+        nonlocal changed
+        data = original_read(fd, count)
+        if data == b"project" and not changed:
+            changed = True
+            path.rename(path.with_name(path.name + "-held"))
+            path.mkdir()
+            if displaced == "global_then_failure":
+                raise PermissionError("opaque failure")
+        return data
+
+    monkeypatch.setattr(os, "read", racing_read)
+    result = inspect(repo, cwd, codex_home=home, global_max_bytes=100)
+    assert changed
+    assert result["status"] == ("not_evaluated" if displaced == "global_then_failure" else "partial")
+    failed = "global" if displaced.startswith("global") else "project"
+    assert result["totals"][failed]["consumed_raw_bytes"] is None
+    assert all(row["contribution"] == "unknown" for row in result["files"] if row["scope"] == failed)
+    if displaced != "global_then_failure":
+        retained = "project" if failed == "global" else "global"
+        assert result["totals"][retained]["consumed_raw_bytes"] == (7 if retained == "project" else 6)
+    assert "directory_changed" in result["limitations"]
+    assert str(tmp_path) not in json.dumps(result)
+
+
+@pytest.mark.parametrize("shortcut", ["untrusted", "zero_cap"])
+def test_final_shortcut_directory_binding_revalidated(tree, monkeypatch, shortcut):
+    repo, cwd = tree
+    identity = cwd.stat()
+    original_fstat = os.fstat
+    changed = False
+
+    def racing_fstat(fd):
+        nonlocal changed
+        info = original_fstat(fd)
+        if (info.st_dev, info.st_ino) == (identity.st_dev, identity.st_ino) and not changed:
+            changed = True
+            cwd.rename(repo / "held")
+            cwd.mkdir()
+        return info
+
+    monkeypatch.setattr(os, "fstat", racing_fstat)
+    monkeypatch.setattr(os, "read", lambda *args: pytest.fail("shortcut read content"))
+    result = preview(
+        target=repo,
+        cwd=cwd,
+        codex_version="0.160.0",
+        trust="untrusted" if shortcut == "untrusted" else "trusted",
+        read_access="full",
+        assume_codex_defaults=True,
+        project_doc_max_bytes=0 if shortcut == "zero_cap" else 32768,
+    )
+    assert changed
+    assert result["status"] == "not_evaluated"
+    assert "directory_changed" in result["limitations"]
+    assert result["totals"]["project"]["consumed_raw_bytes"] is None
+    assert result["files"] == []
+
+
+@pytest.mark.parametrize("setting", ["fallback_filenames", "root_markers"])
+@pytest.mark.parametrize("entry", ["TEAM.md", "../private", "\ud800"])
+def test_oversized_raw_filename_lists_refuse_before_normalization_or_filesystem(tree, monkeypatch, setting, entry):
+    repo, cwd = tree
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("oversized raw list must refuse before normalization or filesystem access")
+
+    with monkeypatch.context() as guard:
+        for primitive in ["fsencode", "open", "stat", "fstat", "read"]:
+            guard.setattr(os, primitive, forbidden)
+        result = inspect(repo, cwd, codex_home=repo / "global", global_max_bytes=100, **{setting: [entry] * 65})
+    assert result["status"] == "not_evaluated"
+    assert result["files"] == []
+    assert "filename_list_resource_limit_not_evaluated" in result["limitations"]
+    assert result["settings"][setting] == {"value": None, "source": "caller-supplied"}
+    assert result["settings"]["brigade_resource_max_list_entries"] == {"value": 64, "source": "brigade-safety-limit"}
+    assert "private" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("entry", [" TEAM.md ", "../ignored"])
+def test_raw_filename_list_limit_accepts_boundary_with_existing_normalization(tree, entry):
+    repo, cwd = tree
+    (cwd / "TEAM.md").write_bytes(b"team")
+    markers = [".missing"] * 63 + [".git"]
+    result = inspect(repo, cwd, fallback_filenames=[entry] * 63 + [" TEAM.md "], root_markers=markers)
+    assert result["status"] == "complete"
+    assert result["totals"]["project"]["consumed_raw_bytes"] == 4
+    assert result["settings"]["root_markers"] == {"value": markers, "source": "caller-supplied"}
+    assert result["settings"]["fallback_filenames"] == {
+        "value": ["TEAM.md"] * (64 if entry == " TEAM.md " else 1),
+        "source": "caller-supplied",
+    }
+    assert ("invalid_fallback_entries_ignored" in result["limitations"]) == (entry == "../ignored")
+
+
+def test_directory_identity_allows_unrelated_additions_during_reads(tree, monkeypatch):
+    repo, cwd = tree
+    (cwd / "AGENTS.md").write_bytes(b"project")
+    original_read = os.read
+
+    def racing_read(fd, count):
+        data = original_read(fd, count)
+        if data == b"project":
+            (repo / "unrelated").write_bytes(b"unrelated")
+            (cwd / "unrelated").write_bytes(b"unrelated")
+            (repo / ".git" / "unrelated").write_bytes(b"unrelated")
+        return data
+
+    monkeypatch.setattr(os, "read", racing_read)
+    result = inspect(repo, cwd)
+    assert result["status"] == "complete"
+    assert result["totals"]["project"]["consumed_raw_bytes"] == 7

@@ -27,6 +27,16 @@ unknown or unsupported version, unknown trust, or unknown read access produces
 `not_evaluated` before any document content read. Public errors contain opaque
 reason codes. Rejected path-bearing settings are never echoed.
 
+Each raw fallback and root-marker list may contain at most 64 entries. Brigade
+checks both counts before encoding checks, trimming, invalid-entry filtering or
+filesystem discovery. Repeated and invalid entries count toward that limit.
+Exceeding either count refuses the entire preview with
+`filename_list_resource_limit_not_evaluated`, including any requested global
+scope. Filename-list settings values become null. The setting
+`brigade_resource_max_list_entries` records 64 with `brigade-safety-limit`
+provenance. This is a Brigade resource limit, independent of the pinned Codex
+contract. Accepted lists retain their existing normalization and ordering.
+
 The caller must supply effective values after configuration resolution. Codex
 0.160.0 applies enabled layers by source rank: packaged defaults, MDM, system,
 enterprise managed, user base, active user profile, project, session flags,
@@ -108,7 +118,12 @@ descriptors and `O_NOFOLLOW`, then opens only regular documents with
 held-file device, inode, ctime, mtime and size before and after reading, and
 checks that the name still identifies that file. Before completion it rechecks
 every discovered project winner or absence, including cap-exhausted rows, and
-every examined global candidate. These final checks use nofollow metadata only.
+every examined global candidate. It also rechecks every marker observation used
+to select the project root: absent markers below the root and the selected
+marker, including earlier absent markers at that directory. Adding a deeper
+marker, removing or replacing the selected marker, or changing observed file
+marker metadata makes project accounting unknown. Marker bodies are never read.
+These final checks use nofollow metadata only.
 Changed sizes, replacements, missing winners, new higher-priority overrides and
 new candidates in previously empty directories make the affected accounting
 unknown. Final checks never read cap-exhausted content or select a replacement
@@ -117,7 +132,16 @@ rewrites can escape detection when the filesystem preserves both timestamps
 within its timestamp granularity. Changes after a final check can also escape.
 
 Scope and cwd directory chains are validated even when untrusted settings or
-a zero cap suppress project content reads. Native POSIX support must include
+a zero cap suppress project content reads. Final validation compares every held
+directory's device, inode and file type against its name in the retained parent
+directory. This includes absolute scope prefixes and all descendants through
+cwd. A rename, removal, replacement or new symlink invalidates the affected
+scope, including a global scope otherwise retained after project failure.
+Directory timestamps are excluded from identity comparisons, including directory
+markers, so adding unrelated files does not by itself invalidate accounting.
+Each component is checked separately. A path changed after its final check, or
+displaced and restored between observations, can escape detection.
+Native POSIX support must include
 directory-relative open and stat, nofollow stat, `O_DIRECTORY`, `O_NONBLOCK`
 and `O_NOFOLLOW`. Missing capabilities or unsupported runtime calls produce
 `posix_nofollow_required` without filesystem error details.
