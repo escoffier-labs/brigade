@@ -17,6 +17,7 @@ from .budgets import bootstrap_budget
 
 SOURCE_COMMIT = "a956835d020762cb2b570053af06f643a11c0ecc"
 RESOURCE_MAX_BYTES = 1024 * 1024  # Brigade ceiling, never a consumer-cap clamp.
+RESOURCE_MAX_LIST_ENTRIES = 64  # Raw counts, before normalization or discovery.
 RUST_WHITESPACE = "\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
 
 # Native capabilities are fixed at import, independent of later instrumentation.
@@ -28,6 +29,8 @@ _POSIX_NOFOLLOW_SUPPORTED = (
     and all(hasattr(os, flag) for flag in ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK"))
 )
 _Selection = tuple[int, list[str], tuple[str, os.stat_result] | None]
+_DirectoryBinding = tuple[int | None, str, int]
+_MarkerObservation = tuple[int, str, os.stat_result | None]
 
 
 class _Boundary(Exception):
@@ -67,7 +70,12 @@ def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int, int]:
     return info.st_dev, info.st_ino, info.st_ctime_ns, info.st_mtime_ns, info.st_size
 
 
-def _metadata(fd: int, name: str) -> os.stat_result | None:
+def _identity(info: os.stat_result) -> tuple[int, int, int]:
+    # Directory timestamps change when unrelated children are added or removed.
+    return info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)
+
+
+def _metadata(fd: int | None, name: str) -> os.stat_result | None:
     try:
         info = os.stat(name, dir_fd=fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -81,13 +89,14 @@ def _metadata(fd: int, name: str) -> os.stat_result | None:
     return info
 
 
-def _directory(stack: ExitStack, name: str, parent: int | None = None) -> int:
+def _directory(stack: ExitStack, bindings: list[_DirectoryBinding], name: str, parent: int | None = None) -> int:
     try:
-        before = _metadata(parent, name) if parent is not None else None
+        before = _metadata(parent, name)
         fd = os.open(name, dirfd.directory_flags(nofollow=True) | os.O_NONBLOCK, dir_fd=parent)
         stack.callback(os.close, fd)
-        if before is not None and _fingerprint(before) != _fingerprint(os.fstat(fd)):
+        if before is None or _identity(before) != _identity(os.fstat(fd)):
             raise _Boundary("directory_changed")
+        bindings.append((parent, name, fd))
         return fd
     except _Boundary:
         raise
@@ -100,12 +109,37 @@ def _directory(stack: ExitStack, name: str, parent: int | None = None) -> int:
         raise _Boundary("directory_not_evaluated") from None
 
 
-def _scope(stack: ExitStack, root: str) -> int:
-    fd = _directory(stack, "/")
+def _scope(stack: ExitStack, bindings: list[_DirectoryBinding], root: str) -> int:
+    fd = _directory(stack, bindings, "/")
     for part in root.split("/")[1:]:
         if part:
-            fd = _directory(stack, part, fd)
+            fd = _directory(stack, bindings, part, fd)
     return fd
+
+
+def _revalidate_directories(bindings: list[_DirectoryBinding]) -> None:
+    """Verify every held path component still has its lexical binding."""
+    try:
+        for parent, name, fd in bindings:
+            named = _metadata(parent, name)
+            if named is None or _identity(named) != _identity(os.fstat(fd)):
+                raise _Boundary("directory_changed")
+    except (TypeError, NotImplementedError):
+        raise _Boundary("posix_nofollow_required") from None
+    except (OSError, UnicodeError, ValueError):
+        raise _Boundary("directory_not_evaluated") from None
+
+
+def _revalidate_markers(observations: list[_MarkerObservation]) -> None:
+    """Recheck the marker search's absences and selected presence, never bodies."""
+    for fd, name, before in observations:
+        after = _metadata(fd, name)
+        if before is None and after is None:
+            continue
+        if before is None or after is None or _identity(before) != _identity(after):
+            raise _Boundary("root_marker_changed")
+        if not stat.S_ISDIR(before.st_mode) and _fingerprint(before) != _fingerprint(after):
+            raise _Boundary("root_marker_changed")
 
 
 def _candidate(fd: int, names: list[str]) -> tuple[str, os.stat_result] | None:
@@ -185,28 +219,41 @@ def _totals(rows: list[dict[str, Any]], scope: str) -> dict[str, int | None]:
     }
 
 
-def _project_directories(stack: ExitStack, target: str, cwd: str) -> list[tuple[str, int]]:
-    scope_fd = _scope(stack, target)
+def _project_directories(
+    stack: ExitStack, bindings: list[_DirectoryBinding], target: str, cwd: str
+) -> list[tuple[str, int]]:
+    scope_fd = _scope(stack, bindings, target)
     directories: list[tuple[str, int]] = [("", scope_fd)]
     relative = os.path.relpath(cwd, target)
     if relative != ".":
         for part in relative.split("/"):
             prefix, parent = directories[-1]
-            fd = _directory(stack, part, parent)
+            fd = _directory(stack, bindings, part, parent)
             directories.append((f"{prefix}/{part}".lstrip("/"), fd))
     return directories
 
 
 def _project(
-    result: dict[str, Any], directories: list[tuple[str, int]], markers: list[str], names: list[str], cap: int
+    result: dict[str, Any],
+    directories: list[tuple[str, int]],
+    observations: list[_MarkerObservation],
+    markers: list[str],
+    names: list[str],
+    cap: int,
 ) -> list[_Selection]:
     start = len(directories) - 1
     if markers:
         found = False
         for index in range(len(directories) - 1, -1, -1):
-            if any(_metadata(directories[index][1], marker) is not None for marker in markers):
+            fd = directories[index][1]
+            for marker in markers:
+                info = _metadata(fd, marker)
+                observations.append((fd, marker, info))
+                if info is not None:
+                    found = True
+                    break
+            if found:
                 start = index
-                found = True
                 break
         if not found:
             raise _Boundary("root_outside_scope_or_unknown")
@@ -244,8 +291,10 @@ def _project(
     return selections
 
 
-def _global(stack: ExitStack, result: dict[str, Any], root: str, cap: int) -> list[_Selection]:
-    fd = _scope(stack, root)
+def _global(
+    stack: ExitStack, bindings: list[_DirectoryBinding], result: dict[str, Any], root: str, cap: int
+) -> list[_Selection]:
+    fd = _scope(stack, bindings, root)
     cumulative = 0
     selections: list[_Selection] = []
     for name in ["AGENTS.override.md", "AGENTS.md"]:
@@ -338,6 +387,10 @@ def preview(
         "fallback_filenames": fallback_filenames,
         "root_markers": root_markers,
     }
+    list_limit_exceeded = any(
+        isinstance(value, list) and len(value) > RESOURCE_MAX_LIST_ENTRIES
+        for value in (fallback_filenames, root_markers)
+    )
     encoding_unknown = False
     for key, value in supplied.items():
         source = "caller-supplied"
@@ -346,7 +399,7 @@ def preview(
             value = defaults[key] if assume_codex_defaults else None
         # Invalid filename settings must never echo absolute/private inputs.
         if key in {"fallback_filenames", "root_markers"}:
-            if not isinstance(value, list):
+            if list_limit_exceeded or not isinstance(value, list):
                 value = None
             elif any(isinstance(name, str) and not _encodable(name) for name in value):
                 encoding_unknown = True
@@ -381,12 +434,18 @@ def preview(
                 "source": "caller-supplied" if global_max_bytes is not None else "unknown",
             },
             "brigade_resource_max_bytes": {"value": RESOURCE_MAX_BYTES, "source": "brigade-safety-limit"},
+            "brigade_resource_max_list_entries": {
+                "value": RESOURCE_MAX_LIST_ENTRIES,
+                "source": "brigade-safety-limit",
+            },
         }
     )
     scope = "global" if codex_home is not None else "project"
     requested = {"project", "global"} if codex_home is not None else {"project"}
     completed: set[str] = set()
     try:
+        if list_limit_exceeded:
+            raise _Boundary("filename_list_resource_limit_not_evaluated")
         if not _POSIX_NOFOLLOW_SUPPORTED:
             raise _Boundary("posix_nofollow_required")
         if encoding_unknown:
@@ -418,16 +477,18 @@ def preview(
         global_root = _absolute(codex_home) if codex_home is not None else None
         with ExitStack() as stack:
             selections: dict[str, list[_Selection]] = {}
+            bindings: dict[str, list[_DirectoryBinding]] = {"global": [], "project": []}
+            marker_observations: list[_MarkerObservation] = []
             try:
                 if global_root is not None and global_max_bytes is not None:
-                    selections["global"] = _global(stack, result, global_root, global_max_bytes)
+                    selections["global"] = _global(stack, bindings["global"], result, global_root, global_max_bytes)
                 else:
                     result["totals"]["global"] = dict.fromkeys(
                         ["selected_bytes", "consumed_raw_bytes", "rendered_utf8_bytes"], 0
                     )
                     result["limitations"].append("global_not_requested")
                 scope = "project"
-                directories = _project_directories(stack, project_root, working)
+                directories = _project_directories(stack, bindings["project"], project_root, working)
                 if trust == "untrusted" or cap == 0:
                     result["totals"]["project"] = dict.fromkeys(
                         ["selected_bytes", "consumed_raw_bytes", "rendered_utf8_bytes"], 0
@@ -435,7 +496,12 @@ def preview(
                     selections["project"] = []
                 else:
                     selections["project"] = _project(
-                        result, directories, markers, ["AGENTS.override.md", "AGENTS.md", *fallbacks], cap
+                        result,
+                        directories,
+                        marker_observations,
+                        markers,
+                        ["AGENTS.override.md", "AGENTS.md", *fallbacks],
+                        cap,
                     )
             except _Boundary as exc:
                 _invalidate(result, scope, exc)
@@ -443,6 +509,9 @@ def preview(
             # failure in the other scope. Empty requested scopes count too.
             for scope, snapshots in selections.items():
                 try:
+                    _revalidate_directories(bindings[scope])
+                    if scope == "project":
+                        _revalidate_markers(marker_observations)
                     _revalidate(snapshots)
                 except _Boundary as exc:
                     _invalidate(result, scope, exc)
