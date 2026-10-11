@@ -17,6 +17,7 @@ from brigade import (
     aboyeur,
     dirfd,
     run_checkpoint,
+    run_control_journal,
     run_dirfd,
     run_events,
     run_journal,
@@ -728,9 +729,10 @@ def test_failed_fsync_leaves_snapshot_unchanged_but_complete_journal_line_visibl
     with runguard.run_lock(repo, run_dir=run_dir):
         with monkeypatch.context() as patch:
             patch.setattr(os, "fsync", fail_journal_fsync)
-            with pytest.raises(run_lifecycle.LifecycleJournalError):
+            with pytest.raises(run_lifecycle.LifecycleJournalError) as failure_info:
                 aboyeur._write_json(snapshot_path, {**payload, "status": "planning"})
 
+    assert getattr(failure_info.value, "outcome", None) == "indeterminate"
     assert snapshot_path.read_bytes() == before_snapshot
     # This is the confirmed gap in the stronger failed-append invariant.
     # No successful return occurred, yet the complete checkpoint line is
@@ -739,6 +741,257 @@ def test_failed_fsync_leaves_snapshot_unchanged_but_complete_journal_line_visibl
     report = run_journal.read_journal_bounded(path)
     assert report.chain_errors == [] and report.partial_tail is None
     assert len(report.events) == len(before_journal.splitlines()) + 1
+
+
+@pytest.mark.parametrize("failure", ["file", "directory"])
+def test_failed_append_reports_indeterminate_outcome_without_discarding_history(tmp_path, monkeypatch, failure):
+    """The approved contract retains bytes without reporting definite rejection."""
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    first = _append(path)
+    base = {"status": "started"}
+    before = path.read_bytes()
+
+    def fail_sync(*args):
+        raise OSError(errno.EIO, "injected journal sync failure")
+
+    with monkeypatch.context() as patch:
+        if failure == "file":
+            patch.setattr(os, "fsync", fail_sync)
+        else:
+            patch.setattr(run_journal, "_fsync_directory", fail_sync)
+        with pytest.raises((OSError, run_journal.RunJournalError)) as failure_info:
+            _append(path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1)
+
+    report = run_journal.read_journal_bounded(path)
+    assert report.chain_errors == [] and report.partial_tail is None
+    assert path.read_bytes() != before
+    assert report.events[0] == first and len(report.events) == 2
+    forensic = run_projector.project_run_snapshot(base, report.events, journal_present=True)
+    assert forensic.status == "planning" and forensic.last_sequence == 2
+    assert getattr(failure_info.value, "outcome", None) == "indeterminate"
+
+
+@pytest.mark.parametrize("failure", ["file", "directory"])
+def test_recovery_cannot_publish_projection_when_fresh_journal_sync_fails(tmp_path, monkeypatch, failure):
+    """A recovered projection needs its own barrier, independent of old receipts."""
+    repo = tmp_path / "repo"
+    run_dir = repo / ".brigade" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    snapshot_path = run_dir / "run.json"
+    bootstrap = {"schema": "brigade.run.v1", "status": "started", "lifecycle_journal_requested": True}
+    snapshot_path.write_bytes(run_projector.encode_snapshot_bytes(bootstrap))
+    base = {**bootstrap, "status": "planning", "run_journal_authority_requested": True}
+    with runguard.run_lock(repo, run_dir=run_dir):
+        checkpoint = run_checkpoint.write_checkpoint(
+            run_dir,
+            run_projector.encode_snapshot_bytes(base),
+            workspace=repo,
+            paired_event_type="run.planning.started",
+            body_kind="base-stripped",
+        )
+    assert checkpoint is not None
+    path = run_dir / "events" / "lifecycle.jsonl"
+    journal_inode = path.stat()
+    real_fsync = os.fsync
+    real_directory_sync = run_journal._fsync_directory
+
+    def fail_file_sync(fd):
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) == (journal_inode.st_dev, journal_inode.st_ino):
+            raise OSError(errno.EIO, "injected journal recovery sync failure")
+        return real_fsync(fd)
+
+    def fail_directory_sync(directory):
+        if directory == path.parent:
+            raise run_journal.RunJournalError("injected journal recovery directory sync failure")
+        return real_directory_sync(directory)
+
+    with monkeypatch.context() as patch:
+        if failure == "file":
+            patch.setattr(os, "fsync", fail_file_sync)
+        else:
+            patch.setattr(run_journal, "_fsync_directory", fail_directory_sync)
+        with pytest.raises((OSError, run_journal.RunJournalError)):
+            _append(
+                path,
+                event_type="run.planning.started",
+                payload={"detail": "planning"},
+                key="plan",
+                previous=checkpoint.sequence,
+            )
+        uncertain = path.read_bytes()
+        snapshot_path.unlink()
+        report = run_journal.read_journal_bounded(path)
+        assert report.chain_errors == [] and report.partial_tail is None
+        assert report.events[-1].event_type == "run.planning.started"
+        with pytest.raises(run_checkpoint.CheckpointError) as failure_info:
+            run_checkpoint.recover_from_checkpoint(run_dir, None)
+        assert failure_info.value.category == "journal-sync-indeterminate"
+        assert not snapshot_path.exists()
+        assert path.read_bytes() == uncertain
+
+    syncs = []
+    directory_inode = path.parent.stat()
+
+    def track_sync(fd):
+        info = os.fstat(fd)
+        identity = (info.st_dev, info.st_ino)
+        if identity == (journal_inode.st_dev, journal_inode.st_ino):
+            syncs.append("file")
+        elif identity == (directory_inode.st_dev, directory_inode.st_ino):
+            syncs.append("directory")
+        return real_fsync(fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fsync", track_sync)
+        recovered = run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert syncs == (["file", "directory"] if os.name == "posix" else ["file"])
+    assert recovered["status"] == "planning"
+    assert recovered["journal_last_sequence"] == report.events[-1].sequence
+    assert recovered["journal_last_event_digest"] == report.events[-1].event_digest
+    assert json.loads(snapshot_path.read_bytes()) == recovered
+    assert path.read_bytes() == uncertain
+
+
+@pytest.mark.parametrize("phase", ["claim", "terminal"])
+def test_control_sync_failure_preserves_code_and_exposes_indeterminate_outcome(tmp_path, monkeypatch, phase):
+    run_dir = tmp_path / RUN_ID
+    path = run_dir / "events" / "lifecycle.jsonl"
+    _append(path)
+    calls = []
+    real_fsync = os.fsync
+
+    def fail_sync(fd):
+        raise OSError(errno.EIO, "injected control sync failure")
+
+    def send(payload):
+        calls.append(payload)
+        monkeypatch.setattr(os, "fsync", fail_sync)
+        return {"ok": True}
+
+    if phase == "claim":
+        monkeypatch.setattr(os, "fsync", fail_sync)
+    with pytest.raises(run_control_journal.ControlJournalError) as failure_info:
+        run_control_journal.execute_control_request(run_dir, op="interrupt", request_id="sync-uncertain", send=send)
+    assert failure_info.value.code == "control_append_failed"
+    assert getattr(failure_info.value, "outcome", None) == "indeterminate"
+    assert len(calls) == (0 if phase == "claim" else 1)
+    before = path.read_bytes()
+    report = run_journal.read_journal_bounded(path)
+    assert report.chain_errors == [] and report.partial_tail is None
+    assert report.events[-1].event_type == ("control.requested" if phase == "claim" else "control.observed")
+    with pytest.raises(run_control_journal.ControlJournalError) as retry_info:
+        run_control_journal.execute_control_request(run_dir, op="interrupt", request_id="sync-uncertain", send=send)
+    assert retry_info.value.code == ("indeterminate" if phase == "claim" else "control_append_failed")
+    if phase == "terminal":
+        assert retry_info.value.outcome == "indeterminate"
+        monkeypatch.setattr(os, "fsync", real_fsync)
+        replay = run_control_journal.execute_control_request(
+            run_dir, op="interrupt", request_id="sync-uncertain", send=send
+        )
+        assert replay.replayed is True
+    assert len(calls) == (0 if phase == "claim" else 1)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("failure", ["sequence", "digest", "partial", "close"])
+def test_recovery_barrier_refuses_unverified_head_or_close_failure(tmp_path, monkeypatch, failure):
+    repo = tmp_path / "repo"
+    run_dir = repo / ".brigade" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    snapshot = run_dir / "run.json"
+    base = {"schema": "brigade.run.v1", "status": "started", "lifecycle_journal_requested": True}
+    snapshot.write_bytes(run_projector.encode_snapshot_bytes(base))
+    with runguard.run_lock(repo, run_dir=run_dir):
+        assert (
+            run_checkpoint.write_checkpoint(
+                run_dir, run_projector.encode_snapshot_bytes(base), workspace=repo, paired_event_type=None
+            )
+            is not None
+        )
+    snapshot.unlink()
+    path = run_dir / "events" / "lifecycle.jsonl"
+    before = path.read_bytes()
+    real_tail = run_journal._read_tail_state
+    real_close, real_fsync = os.close, os.fsync
+    journal_identity = path.stat()
+
+    def changed_tail(journal_path):
+        sequence, digest, index, partial, size = real_tail(journal_path)
+        if failure == "sequence":
+            sequence += 1
+        elif failure == "digest":
+            digest = "0" * 64
+        elif failure == "partial":
+            partial = b"incomplete"
+        return sequence, digest, index, partial, size
+
+    def fail_close(fd):
+        info = os.fstat(fd)
+        real_close(fd)
+        if (info.st_dev, info.st_ino) == (journal_identity.st_dev, journal_identity.st_ino):
+            raise OSError(errno.EIO, "injected recovery close failure")
+
+    with monkeypatch.context() as patch:
+        if failure == "close":
+
+            def at_sync(fd):
+                patch.setattr(os, "close", fail_close)
+                return real_fsync(fd)
+
+            patch.setattr(os, "fsync", at_sync)
+        else:
+            patch.setattr(run_journal, "_read_tail_state", changed_tail)
+        with pytest.raises(run_checkpoint.CheckpointError) as failure_info:
+            run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert failure_info.value.category == ("journal-sync-indeterminate" if failure == "close" else "journal-sync")
+    assert not snapshot.exists()
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("operation", ["append-sync", "append-close", "replay-close"])
+def test_complete_append_or_replay_close_failure_keeps_indeterminate_outcome(tmp_path, monkeypatch, operation):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    original = _append(path)
+    journal_inode = path.stat()
+    real_close, real_fsync = os.close, os.fsync
+
+    def is_journal(fd):
+        info = os.fstat(fd)
+        return (info.st_dev, info.st_ino) == (journal_inode.st_dev, journal_inode.st_ino)
+
+    def fail_close(fd):
+        journal = is_journal(fd)
+        real_close(fd)
+        if journal:
+            raise OSError(errno.EIO, "injected journal close failure")
+
+    def fail_sync(fd):
+        if is_journal(fd):
+            raise OSError(errno.EIO, "injected journal sync failure")
+        return real_fsync(fd)
+
+    with monkeypatch.context() as patch:
+        # The tail reader closes a read-only journal descriptor first. Inject
+        # only after that real read, at the append/replay sync boundary.
+        def at_sync(fd):
+            patch.setattr(os, "close", fail_close)
+            return fail_sync(fd) if operation == "append-sync" else real_fsync(fd)
+
+        patch.setattr(os, "fsync", at_sync)
+        with pytest.raises((OSError, run_journal.RunJournalError)) as failure_info:
+            if operation == "replay-close":
+                _append(path)
+            else:
+                _append(path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1)
+    assert getattr(failure_info.value, "outcome", None) == "indeterminate"
+    assert (
+        "durability barrier failed" if operation == "append-sync" else "close failed"
+    ) in failure_info.value.diagnostic
+    report = run_journal.read_journal_bounded(path)
+    assert report.chain_errors == [] and report.partial_tail is None
+    assert report.events[0] == original
+    assert len(report.events) == (1 if operation == "replay-close" else 2)
 
 
 @pytest.mark.parametrize("failure", ["file", "directory"])

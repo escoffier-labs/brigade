@@ -47,6 +47,16 @@ class ControlJournalError(RuntimeError):
         )
 
 
+class IndeterminateControlJournalError(ControlJournalError):
+    """A failed barrier leaves journal acceptance uncertain, with the old code.
+
+    This outcome differs from code="indeterminate" for a request with no
+    recorded terminal result: it describes this operation's sync observation.
+    """
+
+    outcome = "indeterminate"
+
+
 class ControlFailureClass(str, Enum):
     TRANSPORT_EXCEPTION = "transport_exception"
     TRANSPORT_REJECTED = "transport_rejected"
@@ -287,6 +297,10 @@ def _append_control_event(
                     raise ControlJournalError(_bound(str(exc)), code="control_payload_invalid") from exc
                 _sync_shadow_after_control(run_dir)
                 return event
+        except (run_journal.IndeterminateOutcomeError, run_lifecycle.IndeterminateLifecycleError) as exc:
+            raise IndeterminateControlJournalError(
+                _bound(str(run_lifecycle._bound_journal_failure(exc))), code="control_append_failed"
+            ) from exc
         except OSError as exc:
             raise ControlJournalError(
                 _bound(str(run_lifecycle._bound_journal_failure(exc))), code="control_append_failed"
@@ -356,6 +370,10 @@ def _claim_control_request(
         raise ControlJournalError(_bound(exc.diagnostic), code="control_fingerprint_conflict") from exc
     except run_events.CanonicalizationError as exc:
         raise ControlJournalError(_bound(str(exc)), code="control_payload_invalid") from exc
+    except (run_journal.IndeterminateOutcomeError, run_lifecycle.IndeterminateLifecycleError) as exc:
+        raise IndeterminateControlJournalError(
+            _bound(str(run_lifecycle._bound_journal_failure(exc))), code="control_append_failed"
+        ) from exc
     except OSError as exc:
         raise ControlJournalError(
             _bound(str(run_lifecycle._bound_journal_failure(exc))), code="control_append_failed"
@@ -558,6 +576,7 @@ __all__ = [
     "CONTROL_OBSERVED",
     "CONTROL_REQUESTED",
     "ControlJournalError",
+    "IndeterminateControlJournalError",
     "ControlFailureClass",
     "ControlResult",
     "control_fingerprint_payload",

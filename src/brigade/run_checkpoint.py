@@ -1369,6 +1369,13 @@ def recover_from_checkpoint(
     validated mapping parsed from the selected restore bytes. Raises
     ``CheckpointError`` (bounded, categorized) on any validation or
     restoration failure; nothing is restored on failure.
+
+    Before restoration or return, synchronize the exact verified journal head
+    under its writer lock. This is a fresh platform durability barrier, not
+    evidence of a previous writer's acknowledgment. A failed barrier reports
+    ``journal-sync-indeterminate`` without publishing the recovered mapping.
+    The caller must hold the recovery run lock across this function so an owner
+    append cannot interleave between the barrier and snapshot restoration.
     """
     from brigade import localio  # noqa: F401  (kept for symmetry with the restore helper)
     from brigade import run_lifecycle  # lazy: avoid circular import
@@ -1481,6 +1488,23 @@ def recover_from_checkpoint(
             raise CheckpointError(
                 _bound("could not normalize truncated checkpoint body"), category="json-object"
             ) from exc
+    # Forensic validity alone cannot certify an earlier append's sync or its
+    # caller's receipt of success. Recovery establishes its own exact-head
+    # barrier before publishing or returning the recovered projection.
+    tail = report.events[-1]
+    try:
+        run_journal.sync_journal_head(
+            journal_path,
+            expected_sequence=tail.sequence,
+            expected_event_digest=tail.event_digest,
+        )
+    except run_journal.IndeterminateOutcomeError as exc:
+        raise CheckpointError(
+            _bound("recovery outcome indeterminate: journal durability barrier failed"),
+            category="journal-sync-indeterminate",
+        ) from exc
+    except (OSError, run_journal.RunJournalError) as exc:
+        raise CheckpointError(_bound("journal recovery barrier failed"), category="journal-sync") from exc
     return _restore_run_json_from_checkpoint(run_dir, restore_bytes, run_meta=run_meta)
 
 
