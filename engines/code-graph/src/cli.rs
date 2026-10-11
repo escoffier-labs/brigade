@@ -757,8 +757,13 @@ fn graph_resolution_note(result: &GraphQueryResult) -> Option<String> {
     let mut note = if result.resolution == "none" {
         format!("resolution: none (no symbol matches {:?})\n", result.query)
     } else if result.fuzzy {
+        let hint = if result.ambiguous {
+            ", narrow with path::name or opt in with --all-matches"
+        } else {
+            ""
+        };
         format!(
-            "resolution: fuzzy{} (no exact symbol matches {:?}; {} of {count} prefix matches selected, narrow with path::name or opt in with --all-matches)\n",
+            "resolution: fuzzy{} (no exact symbol matches {:?}; {} of {count} prefix matches selected{hint})\n",
             if result.ambiguous { " ambiguous" } else { "" },
             result.query,
             result.selected.len()

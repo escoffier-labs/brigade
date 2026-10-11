@@ -335,6 +335,7 @@ fn missing_exact_symbol_falls_back_to_fuzzy_and_says_so() {
     let text = String::from_utf8(run_cli(&db, &["callers", "run_jour"]).stdout).unwrap();
     assert!(text.contains("fuzzy"), "{text}");
     assert!(text.contains("call_journal"), "{text}");
+    assert!(!text.contains("--all-matches"), "{text}");
 }
 
 #[test]

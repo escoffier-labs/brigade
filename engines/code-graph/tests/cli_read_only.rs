@@ -25,6 +25,7 @@ fn command_args<'a>(db: &'a Path, command: &'a str) -> Vec<String> {
         "impact" => vec!["--db".into(), db, "impact".into(), "helper".into()],
         "context" => vec!["--db".into(), db, "context".into(), "helper".into()],
         "neighbors" => vec!["--db".into(), db, "neighbors".into(), "app.py".into()],
+        "outline" => vec!["--db".into(), db, "outline".into(), "app.py".into()],
         "stats" => vec!["--db".into(), db, "stats".into()],
         "doctor" => vec!["--db".into(), db, "doctor".into()],
         other => panic!("unknown query command: {other}"),
@@ -231,6 +232,7 @@ fn query_commands_do_not_create_default_db_state_when_missing() {
         "impact",
         "context",
         "neighbors",
+        "outline",
         "stats",
         "doctor",
     ] {
@@ -244,6 +246,7 @@ fn query_commands_do_not_create_default_db_state_when_missing() {
             "impact" => cmd.args(["impact", "helper"]),
             "context" => cmd.args(["context", "helper"]),
             "neighbors" => cmd.args(["neighbors", "app.py"]),
+            "outline" => cmd.args(["outline", "app.py"]),
             "stats" => cmd.arg("stats"),
             "doctor" => cmd.arg("doctor"),
             other => panic!("unknown query command: {other}"),
@@ -271,6 +274,7 @@ fn query_commands_do_not_mutate_existing_db_state() {
         "impact",
         "context",
         "neighbors",
+        "outline",
         "stats",
         "doctor",
     ] {
