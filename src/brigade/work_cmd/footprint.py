@@ -293,6 +293,20 @@ def _run_graphtrail_impact(target: Path, binary: str, db_path: Path, query: str)
     data = result.json()
     if isinstance(data, dict) and isinstance(data.get("edges"), list) and "resolution" in data:
         # Graph-verb object (#1646): the edge rows are the payload items.
+        candidates = data.get("candidates")
+        if data.get("ambiguous") is True and isinstance(candidates, list):
+            # Predict every candidate's footprint without selecting one for traversal.
+            return {
+                "items": data["edges"],
+                "related_files": [
+                    row["file_path"]
+                    for row in candidates
+                    if isinstance(row, dict) and isinstance(row.get("file_path"), str)
+                ],
+                "symbol_ids": [
+                    row["id"] for row in candidates if isinstance(row, dict) and isinstance(row.get("id"), str)
+                ],
+            }
         return {"items": data["edges"]}
     if isinstance(data, dict):
         return data

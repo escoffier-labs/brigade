@@ -6,6 +6,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from brigade import work_cmd
 from brigade.work_cmd import footprint as footprint_mod
 
@@ -263,3 +265,39 @@ def test_run_graphtrail_impact_unwraps_graph_query_object(tmp_path, monkeypatch)
     monkeypatch.setattr(footprint_mod.proc, "run", fake_run)
 
     assert footprint_mod._run_graphtrail_impact(tmp_path, "/bin/graphtrail", db, "b") == {"items": [edge]}
+
+
+@pytest.mark.parametrize("resolution", ["qualified_name", "fuzzy"])
+def test_prediction_preserves_ambiguous_graph_candidates(tmp_path, monkeypatch, resolution):
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir()
+    db.write_bytes(b"fake-graphtrail-index")
+    monkeypatch.setattr(footprint_mod.component_bins, "resolve", lambda _name: "/fake/graphtrail")
+    payload = {
+        "query": "helper",
+        "resolution": resolution,
+        "fuzzy": resolution == "fuzzy",
+        "ambiguous": True,
+        "selected": [],
+        "edges": [],
+        "candidates": [
+            {"id": "helper-one", "qualified_name": "helper", "file_path": "pkg/one.py"},
+            {"id": "helper-two", "qualified_name": "helper", "file_path": "pkg/two.py"},
+        ],
+    }
+    queries: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        from brigade import proc
+
+        queries.append(list(argv))
+        assert kwargs["timeout"] == 10.0
+        return proc.Result(0, json.dumps(payload), "")
+
+    monkeypatch.setattr(footprint_mod.proc, "run", fake_run)
+    predicted = footprint_mod.predict_footprint(tmp_path, symbols=["helper"])
+
+    assert predicted["files"] == ["pkg/one.py", "pkg/two.py"]
+    assert predicted["symbol_ids"] == ["helper", "helper-one", "helper-two"]
+    assert predicted["phase"] == "predicted"
+    assert queries == [["/fake/graphtrail", "--db", str(db), "impact", "helper", "--json"]]
