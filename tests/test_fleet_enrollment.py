@@ -38,12 +38,40 @@ def hub(tmp_path):
 
 
 def request(hub, method, path, *, headers=None, body=None):
-    conn = http.client.HTTPConnection(*hub[0].server_address, timeout=5)
-    conn.request(method, path, body=body, headers=headers or {})
-    response = conn.getresponse()
-    result = response.status, dict(response.getheaders()), response.read().decode()
-    conn.close()
-    return result
+    parts = []
+
+    class CompleteFixtureConnection(http.client.HTTPConnection):
+        def send(self, data):
+            parts.append(data)
+
+    conn = CompleteFixtureConnection(*hub[0].server_address, timeout=5)
+    try:
+        # Keep the stdlib encoder, but send the already-complete fixture in one
+        # write. body=None still omits declared bytes for the early-auth probe.
+        conn.request(method, path, body=body, headers=headers or {})
+        http.client.HTTPConnection.send(conn, b"".join(parts))
+        response = conn.getresponse()
+        return response.status, dict(response.getheaders()), response.read().decode()
+    finally:
+        conn.close()
+
+
+def test_complete_fixture_request_has_no_late_body_send(hub, monkeypatch):
+    sent = []
+    original_send = http.client.HTTPConnection.send
+
+    def capture_send(conn, data):
+        sent.append(data)
+        original_send(conn, data)
+
+    monkeypatch.setattr(http.client.HTTPConnection, "send", capture_send)
+    status, _, _ = request(hub, "POST", "/events", headers={"Content-Type": "application/json"}, body="{}")
+    assert status == 401
+    # This fixture already has its whole tiny body. Do not send it after a
+    # server that authenticates before reading the body can close the socket.
+    assert len(sent) == 1
+    assert b"Content-Length: 2\r\n" in sent[0]
+    assert sent[0].endswith(b"\r\n\r\n{}")
 
 
 @pytest.fixture(params=["native", "python310-empty"])
