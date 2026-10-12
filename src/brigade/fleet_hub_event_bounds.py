@@ -6,24 +6,29 @@ holder could otherwise bloat SQLite with multi-megabyte values inside the
 8 MiB body limit. Limits are measured on the raw value, before any strip,
 because the raw value is what gets stored.
 
-Each bound sits well above anything a well-behaved client produces: node ids
+Each bound admits everything a well-behaved client can forward: node ids
 follow the 128-character claim identity pattern, digests and capability
-fingerprints are SHA-256 hex, and opaque labels share the claim label bound.
+fingerprints are SHA-256 hex, and journal-sourced seat and harness labels
+inherit the run-event payload string bound. Journal run ids have no length
+rule of their own, but they name run directories, which most filesystems cap
+at 255 bytes, so the run id bound leaves ample room.
 """
 
 from __future__ import annotations
 
 from typing import Any, Mapping
 
+from .run_events import MAX_PAYLOAD_STR_LEN
+
 EVENT_FIELD_MAX_CHARS: Mapping[str, int] = {
     "node_id": 128,
-    "run_id": 256,
+    "run_id": 1024,
     "state": 128,
     "ts": 64,
     "digest": 128,
     "repo": 1024,
-    "seat": 128,
-    "harness": 128,
+    "seat": MAX_PAYLOAD_STR_LEN,
+    "harness": MAX_PAYLOAD_STR_LEN,
     "capability_fingerprint": 128,
     "repo_identity": 512,
 }

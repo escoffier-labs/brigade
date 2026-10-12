@@ -10,7 +10,7 @@ import urllib.request
 
 import pytest
 
-from brigade import fleet_hub
+from brigade import fleet_client, fleet_hub, run_events
 from brigade.fleet_hub_event_bounds import EVENT_FIELD_MAX_CHARS
 
 NODE = "11111111-1111-4111-8111-111111111111"
@@ -57,6 +57,23 @@ def test_field_at_limit_is_stored_and_one_over_is_rejected(conn, field):
     with pytest.raises(fleet_hub.FleetHubUnprocessable, match=f"{field}.*{limit}"):
         fleet_hub.store_events(conn, _event(seq=2, **{field: "a" * (limit + 1)}))
     assert _count(conn) == 1
+
+
+def test_largest_journal_event_a_client_forwards_is_stored(conn, monkeypatch):
+    envelope = run_events.build_event(
+        run_id="r" * 255,
+        sequence=1,
+        event_type="run.dispatch.requested",
+        payload={"seat": "s" * run_events.MAX_PAYLOAD_STR_LEN, "attempt": 1},
+        idempotency_key="k1",
+        recorded_at="2026-10-12T15:00:00.000000Z",
+        previous_digest=None,
+    )
+    forwarded: list[dict] = []
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub.invalid"})
+    monkeypatch.setattr(fleet_client, "report_event", lambda event, **_kw: forwarded.append(event) or True)
+    assert fleet_client.report_journal_event(envelope)
+    assert fleet_hub.store_events(conn, {**forwarded[0], "node_id": NODE})["accepted"] == 1
 
 
 def test_node_id_bound_applies_before_caller_match(conn):

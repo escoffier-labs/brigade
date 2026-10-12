@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Jules cloud status preserves explicit empty-output evidence, so completed sessions with a recorded plan but no work are labeled for plan approval.
 - The fleet hub rejects `/events` posts with HTTP 422 when any string event field exceeds its length bound (128 characters for node, state, seat, harness, digest and capability fingerprint, 64 for the timestamp, 256 for the run id, 512 for the repository identity and 1024 for the repository). Bounds are measured before trimming, and one oversized event rejects the whole batch. Body, claim, retention and result-set bounds remain open. (Refs #1151)
+- The fleet hub rejects `/events` posts with HTTP 422 when any string event field exceeds its length bound (64 characters for the timestamp, 128 for node, state, digest and capability fingerprint, 512 for seat, harness and repository identity, matching the run-event payload bound, and 1024 for run id and repository). Bounds are measured before trimming, and one oversized event rejects the whole batch. Body, claim, retention and result-set bounds remain open. (Refs #1151)
 
 - Run the full local verification gate in deterministic pytest shards with combined coverage and counted concurrency slots shared by linked worktrees. Shard and slot counts are configurable, and contention can wait for a bounded deadline.
 
