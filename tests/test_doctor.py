@@ -3419,3 +3419,41 @@ def test_doctor_codex_instruction_chain_does_not_write(tmp_path: Path):
     before = sorted(str(p.relative_to(repo)) for p in repo.rglob("*"))
     _codex_chain_check(repo)
     assert sorted(str(p.relative_to(repo)) for p in repo.rglob("*")) == before
+
+
+def test_doctor_codex_instruction_chain_remedy_command_roundtrips(tmp_path: Path):
+    import shlex
+
+    from brigade import doctor_agent
+
+    repo = tmp_path / "my repo's"
+    repo.mkdir()
+    (repo / ".git").write_text("gitdir: /nonexistent/common\n", encoding="utf-8")
+    (repo / "AGENTS.md").write_text("x" * 40_000, encoding="utf-8")
+    status, _name, detail = _codex_chain_check(repo)
+    assert status == doctor_mod.WARN
+    commands = doctor_agent.extract_commands(detail)
+    assert len(commands) == 1
+    argv = shlex.split(commands[0])
+    assert argv[:3] == ["brigade", "context", "preview"]
+    assert argv[argv.index("--target") + 1] == str(repo)
+    assert argv[argv.index("--cwd") + 1] == str(repo)
+
+
+@pytest.mark.parametrize("unsafe", ["new\nline", "esc\x1b[31m", "back`tick"])
+def test_doctor_codex_instruction_chain_unsafe_target_omits_path(tmp_path: Path, unsafe: str):
+    import shlex
+
+    from brigade import doctor_agent
+
+    repo = tmp_path / unsafe
+    repo.mkdir()
+    (repo / ".git").write_text("gitdir: /nonexistent/common\n", encoding="utf-8")
+    (repo / "AGENTS.md").write_text("x" * 40_000, encoding="utf-8")
+    status, _name, detail = _codex_chain_check(repo)
+    assert status == doctor_mod.WARN
+    assert unsafe not in detail
+    assert detail.isprintable()
+    assert "--target and --cwd set to this target" in detail
+    for command in doctor_agent.extract_commands(detail):
+        shlex.split(command)

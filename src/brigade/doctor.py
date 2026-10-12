@@ -1270,11 +1270,21 @@ def _check_codex_instruction_chain(target: Path) -> CheckResult:
         f"estimate, not observed (codex {_CODEX_CHAIN_VERSION} contract; assumed trust=trusted, "
         "read_access=full, cwd=target, no global scope"
     )
-    command = (
-        f"brigade context preview --target {shlex.quote(str(target))} --cwd {shlex.quote(str(target))} "
-        f"--codex-version {_CODEX_CHAIN_VERSION} --trust trusted --read-access full --assume-codex-defaults"
-    )
-    remedy = f"replace assumptions with effective settings and run `{command}`"
+    flags = f"--codex-version {_CODEX_CHAIN_VERSION} --trust trusted --read-access full --assume-codex-defaults"
+    target_text = str(target)
+    # Controls would reach the terminal and backticks would split agent command
+    # extraction, so only display-safe targets are spelled out.
+    if target_text.isprintable() and "`" not in target_text:
+        quoted = shlex.quote(target_text)
+        remedy = (
+            "replace assumptions with effective settings and run "
+            f"`brigade context preview --target {quoted} --cwd {quoted} {flags}`"
+        )
+    else:
+        remedy = (
+            "replace assumptions with effective settings and run brigade context preview "
+            f"with --target and --cwd set to this target and {flags}"
+        )
     try:
         result = context_preview.preview(
             target=target,

@@ -203,8 +203,10 @@ Codex 0.160.0 contract, trust `trusted`, read access `full`, cwd equal to the
 doctor target, Codex defaults for omitted settings, and no global scope. The
 detail labels the result `estimate, not observed` and names the cap source,
 which is `default-assumption`. Doctor reads no Codex configuration, so it does
-not apply a configured `project_doc_max_bytes`; it prints a preview command
-for rerunning with effective settings.
+not apply a configured `project_doc_max_bytes`. `WARN` and `MANUAL` results
+print a preview command for rerunning with effective settings. The command
+spells out the target only when the path has no control characters or
+backticks.
 
 Each selected file shows its byte count, contribution and Brigade advisory
 budget, and the detail repeats that the consumer cap is separate from those
