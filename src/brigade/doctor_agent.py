@@ -176,7 +176,8 @@ def extract_commands(detail: str) -> list[str]:
 
     for match in _RUN_PREFIX_RE.finditer(detail):
         _add(match.group(1))
-    for match in _FIX_PREFIX_RE.finditer(detail):
+    # Prose prefixes inside a backtick command are argument text, not remediation.
+    for match in _FIX_PREFIX_RE.finditer(_COMMAND_RE.sub(" ", detail)):
         _add(match.group(1))
     for match in _COMMAND_RE.finditer(detail):
         _add(match.group(1))

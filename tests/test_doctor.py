@@ -3457,3 +3457,19 @@ def test_doctor_codex_instruction_chain_unsafe_target_omits_path(tmp_path: Path,
     assert "--target and --cwd set to this target" in detail
     for command in doctor_agent.extract_commands(detail):
         shlex.split(command)
+
+
+def test_doctor_codex_instruction_chain_fix_prefix_inside_path_roundtrips(tmp_path: Path):
+    import shlex
+
+    from brigade import doctor_agent
+
+    repo = tmp_path / "a fix: brigade foo"
+    repo.mkdir()
+    (repo / ".git").write_text("gitdir: /nonexistent/common\n", encoding="utf-8")
+    (repo / "AGENTS.md").write_text("x" * 40_000, encoding="utf-8")
+    _status, _name, detail = _codex_chain_check(repo)
+    commands = doctor_agent.extract_commands(detail)
+    assert len(commands) == 1
+    argv = shlex.split(commands[0])
+    assert argv[argv.index("--target") + 1] == str(repo)
