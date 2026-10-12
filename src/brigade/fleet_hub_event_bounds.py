@@ -10,19 +10,19 @@ Each bound admits everything a well-behaved client can forward: node ids
 follow the 128-character claim identity pattern, digests and capability
 fingerprints are SHA-256 hex, and journal-sourced seat and harness labels
 inherit the run-event payload string bound. Journal run ids have no length
-rule of their own, but they name run directories, which most filesystems cap
-at 255 bytes, so the run id bound leaves ample room.
+rule of their own; they are ASCII and must fit in one journal line, so the
+journal line bound is the tightest limit no valid envelope can exceed.
 """
 
 from __future__ import annotations
 
 from typing import Any, Mapping
 
-from .run_events import MAX_PAYLOAD_STR_LEN
+from .run_events import MAX_LINE_BYTES, MAX_PAYLOAD_STR_LEN
 
 EVENT_FIELD_MAX_CHARS: Mapping[str, int] = {
     "node_id": 128,
-    "run_id": 1024,
+    "run_id": MAX_LINE_BYTES,
     "state": 128,
     "ts": 64,
     "digest": 128,

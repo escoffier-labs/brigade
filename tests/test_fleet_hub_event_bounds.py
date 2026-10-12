@@ -61,7 +61,7 @@ def test_field_at_limit_is_stored_and_one_over_is_rejected(conn, field):
 
 def test_largest_journal_event_a_client_forwards_is_stored(conn, monkeypatch):
     envelope = run_events.build_event(
-        run_id="r" * 255,
+        run_id="r" * 2000,
         sequence=1,
         event_type="run.dispatch.requested",
         payload={"seat": "s" * run_events.MAX_PAYLOAD_STR_LEN, "attempt": 1},
