@@ -73,6 +73,11 @@ _EXPLANATIONS: tuple[tuple[str, str], ...] = (
         "truncate context or leave the agent without Brigade guidance.",
     ),
     (
+        "instruction-chain:",
+        "Estimated harness instruction chain and consumer truncation cap, kept "
+        "separate from Brigade's advisory per-file bootstrap budgets.",
+    ),
+    (
         "agents-quality:",
         "AGENTS.md quality so agents see an explicit definition of done and a memory-handoff path.",
     ),

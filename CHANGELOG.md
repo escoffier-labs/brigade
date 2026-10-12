@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persist bounded sanitized managed Claude review history in caller-owned SQLite transactions, with exact replay, revision snapshots and conservative caller-head projections across pushes and reruns. (#1601)
 
 - Jules cloud status preserves explicit empty-output evidence, so completed sessions with a recorded plan but no work are labeled for plan approval.
+- `brigade doctor` reports an `instruction-chain: codex` check for codex-harness targets. It estimates the Codex 0.160.0 project instruction chain at the target under stated default assumptions, warns on consumer-cap truncation separately from Brigade advisory budgets, and reports reason codes when it cannot evaluate. Results are fresh-disk estimates, never observed session consumption. (Refs #1564)
+
 - Run the full local verification gate in deterministic pytest shards with combined coverage and counted concurrency slots shared by linked worktrees. Shard and slot counts are configurable, and contention can wait for a bounded deadline.
 
 - Speed up strict JSON validation of unescaped ASCII strings while preserving byte limits, Unicode checks, and string-subclass isolation. (#1674)
