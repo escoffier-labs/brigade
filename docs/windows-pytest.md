@@ -69,8 +69,8 @@ is 900 seconds and the default parallel worker count is six.
 
 ## Isolation phase
 
-CI explicitly selects only `test_runs_serve.py` with `--serial`.
-`test_aboyeur.py` runs in the parallel phase. The driver validates portable
+CI explicitly selects `test_runs_serve.py` and `test_aboyeur.py` with `--serial`.
+The driver validates portable
 names, discovery membership, and duplicates before launching any child. Nested names such as
 `nested/test_example.py` are supported.
 
@@ -78,7 +78,7 @@ Selected files run first, one at a time, with no parallel workers active.
 The bounded parallel phase starts after the isolated phase has drained.
 If the budget expires during either phase, remaining files are incomplete.
 This scheduling guarantees isolation from other file workers. It has not
-been shown to fix flakiness or improve duration for the selected file.
+been shown to fix flakiness or improve duration for the selected files.
 
 ## Record format
 
