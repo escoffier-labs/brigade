@@ -6,9 +6,9 @@ import json
 from pathlib import Path
 from typing import cast
 
-from brigade import message_envelope, proc, provenance
-from brigade.run_receipts import worker_payload, write_agent_logs, write_worker_logs
-from brigade.run_transport import WorkerResult
+from brigade import agents, message_envelope, proc, provenance
+from brigade.run_receipts import agent_result_payload, worker_payload, write_agent_logs, write_worker_logs
+from brigade.run_transport import WorkerAttempt, WorkerResult
 
 
 def test_message_receipt_omits_body_and_absolute_paths(tmp_path: Path):
@@ -183,22 +183,62 @@ def test_worker_payload_drops_invalid_metadata_provenance_blocks():
 
 
 def test_worker_payload_bounds_model_and_adapter_version_labels():
+    credential_shaped_model = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"
     result = WorkerResult(
         worker="cursor-worker",
         task="inspect metadata",
         text="done",
         ok=True,
         transport="acpx",
-        requested_model="m" * 129,
+        requested_model=credential_shaped_model,
         effective_model="Bearer private-value",
         acpx_version="v" * 129,
+        attempts=(
+            WorkerAttempt(
+                kind="retry",
+                worker="cursor-worker",
+                task="inspect metadata",
+                transport="acpx",
+                model=credential_shaped_model,
+                reasoning=None,
+                started_at="2026-10-13T12:00:00+00:00",
+                finished_at="2026-10-13T12:00:01+00:00",
+                exit_code=1,
+                terminal_reason="failed",
+                failure_phase="dispatch",
+                failure_kind="provider-error",
+                session_id=None,
+            ),
+        ),
     )
 
     entry = worker_payload([result])[0]
+    synthesis = agent_result_payload(agents.AgentResult(text="done", ok=True, requested_model=credential_shaped_model))
 
     assert "requested_model" not in entry
     assert "effective_model" not in entry
     assert "acpx_version" not in entry
+    assert "model" not in entry["attempts"][0]
+    assert "requested_model" not in synthesis
+
+    documented_model_id = "grok-4.5[effort=high,fast=true]"
+    observed = worker_payload(
+        [
+            WorkerResult(
+                worker="cursor-worker",
+                task="inspect metadata",
+                text="done",
+                ok=True,
+                transport="acpx",
+                requested_model=documented_model_id,
+                effective_model=documented_model_id,
+                acpx_version="0.12.0",
+            )
+        ]
+    )[0]
+    assert observed["requested_model"] == documented_model_id
+    assert observed["effective_model"] == documented_model_id
+    assert observed["acpx_version"] == "0.12.0"
 
 
 def test_legacy_run_message_displays_unknown_provenance_and_is_not_replayed():

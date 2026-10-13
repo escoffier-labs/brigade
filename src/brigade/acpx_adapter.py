@@ -22,6 +22,15 @@ _EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 _AUTH_IDENTITY = re.compile(r"(?i)(\blogged in as)\s+[^\r\n]+")
 _SENSITIVE_VALUE = re.compile(r"(?i)\b(token|secret|password|api[_ -]?key)\b(?:\s*[:=]\s*|\s+)[^\s,;]+")
 _BEARER = re.compile(r"(?i)\b(bearer)\s+[^\s,;]+")
+_MODEL_ID = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}"
+    r"(?:\[[A-Za-z][A-Za-z0-9._-]{0,31}=[A-Za-z0-9._:+/-]{1,64}"
+    r"(?:,[A-Za-z][A-Za-z0-9._-]{0,31}=[A-Za-z0-9._:+/-]{1,64}){0,7}\])?"
+)
+_MODEL_CREDENTIAL = re.compile(
+    r"(?i)(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{20,}|sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,})"
+)
 _UNAUTHENTICATED_LINE = re.compile(
     r"^(?:[x✗✘]\s*)?(?:not logged in|not authenticated|unauthenticated|authentication required)[.!]?$",
     re.IGNORECASE,
@@ -264,13 +273,19 @@ def _model_from(update: dict[str, Any]) -> str | None:
     if update.get("sessionUpdate") != "config_option_update":
         return None
     model = update.get("modelId")
-    if (
-        not isinstance(model, str)
-        or len(model) > 128
-        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}", model)
-    ):
+    if not is_safe_model_id(model):
         return None
     return model
+
+
+def is_safe_model_id(value: object) -> bool:
+    """Accept bounded ACP model identifiers and reject common credential shapes."""
+    return (
+        isinstance(value, str)
+        and len(value) <= 128
+        and _MODEL_ID.fullmatch(value) is not None
+        and _MODEL_CREDENTIAL.search(value) is None
+    )
 
 
 def parse_stream(stdout: str | None) -> tuple[dict[str, Any] | None, str]:

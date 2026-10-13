@@ -460,12 +460,27 @@ def test_parse_stream_ignores_model_like_values_outside_config_updates():
             {
                 "jsonrpc": "2.0",
                 "method": "session/update",
-                "params": {"update": {"sessionUpdate": "config_option_update", "modelId": "composer-2.5"}},
+                "params": {
+                    "update": {
+                        "sessionUpdate": "config_option_update",
+                        "modelId": "grok-4.5[effort=high,fast=true]",
+                    }
+                },
             },
             {
                 "jsonrpc": "2.0",
                 "method": "session/update",
                 "params": {"update": {"sessionUpdate": "config_option_update", "modelId": "m" * 129}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "config_option_update",
+                        "modelId": "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz",
+                    }
+                },
             },
             {
                 "jsonrpc": "2.0",
@@ -482,7 +497,7 @@ def test_parse_stream_ignores_model_like_values_outside_config_updates():
     )
 
     assert error == ""
-    assert parsed is not None and parsed["effective_model"] == "composer-2.5"
+    assert parsed is not None and parsed["effective_model"] == "grok-4.5[effort=high,fast=true]"
 
 
 def test_run_rejects_in_band_provider_error_with_protocol_evidence(monkeypatch, tmp_path):

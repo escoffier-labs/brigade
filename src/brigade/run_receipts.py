@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import agents, localio, message_envelope, proc
+from .acpx_adapter import is_safe_model_id
 from .run_transport import Assignment, WorkerAttempt, WorkerResult
 from .worker_failure import normalized_failure
 
@@ -42,11 +43,17 @@ _ALLOWED_METADATA_PROVENANCE: dict[str, set[tuple[str, str, str | None]]] = {
     },
 }
 _METADATA_EVIDENCE_KEYS = {"source", "locator", "digest", "unknown_reason"}
-_SAFE_METADATA_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}")
+_SAFE_ACPX_VERSION = re.compile(
+    r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+    r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
+)
 
 
-def _safe_metadata_label(value: object) -> str | None:
-    if isinstance(value, str) and _SAFE_METADATA_LABEL.fullmatch(value):
+def _safe_metadata_label(key: str, value: object) -> str | None:
+    if key in {"requested_model", "effective_model", "model"} and is_safe_model_id(value):
+        assert isinstance(value, str)
+        return value
+    if key == "acpx_version" and isinstance(value, str) and len(value) <= 128 and _SAFE_ACPX_VERSION.fullmatch(value):
         return value
     return None
 
@@ -196,7 +203,7 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
         ):
             if value is not None:
                 if key in {"requested_model", "effective_model", "acpx_version"}:
-                    value = _safe_metadata_label(value)
+                    value = _safe_metadata_label(key, value)
                     if value is None:
                         continue
                 entry[key] = value
@@ -223,7 +230,6 @@ def _attempt_payload(attempt: WorkerAttempt, *, attempt_number: int) -> dict[str
         "worker": attempt.worker,
         "task": attempt.task,
         "transport": attempt.transport,
-        "model": attempt.model,
         "reasoning": attempt.reasoning,
         "started_at": attempt.started_at,
         "finished_at": attempt.finished_at,
@@ -234,6 +240,10 @@ def _attempt_payload(attempt: WorkerAttempt, *, attempt_number: int) -> dict[str
         "session_id": attempt.session_id,
         "selected": attempt.selected,
     }
+    if attempt.model is not None:
+        model = _safe_metadata_label("model", attempt.model)
+        if model is not None:
+            payload["model"] = model
     if attempt.stdout_log is not None:
         payload["stdout_log"] = attempt.stdout_log
     if attempt.stderr_log is not None:
@@ -289,7 +299,7 @@ def agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
     ):
         if value is not None:
             if key in {"requested_model", "effective_model", "acpx_version"}:
-                value = _safe_metadata_label(value)
+                value = _safe_metadata_label(key, value)
                 if value is None:
                     continue
             payload[key] = value
