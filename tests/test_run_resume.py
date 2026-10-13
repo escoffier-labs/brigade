@@ -200,7 +200,21 @@ def test_roster_snapshot_rejects_colliding_env_targets():
         run_resume._roster_from_snapshot(snapshot)
 
 
-def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "requested_model",
+    [
+        "cursor-auto",
+        "ghp_" + "A" * 24,
+        "github_pat_" + "A" * 24,
+        "xoxb-" + "A" * 16,
+        "sk-" + "A" * 24,
+        "AKIA" + "A" * 16,
+        "AIza" + "a" * 30,
+        "glpat-" + "a" * 20,
+        "eyJ" + "A" * 8 + "." + "B" * 8 + "." + "C" * 8,
+    ],
+)
+def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys, requested_model):
     run_dir = _write_run_dir(
         tmp_path,
         results=[
@@ -219,7 +233,7 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
                 "ok": True,
                 "text": "prior result",
                 "transport": "acpx",
-                "requested_model": "cursor-auto",
+                "requested_model": requested_model,
                 "effective_model": "composer-2.5",
                 "acpx_version": "0.12.0",
                 "metadata_provenance": {
@@ -277,7 +291,10 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
     assert results[0]["ok"] is True and results[0]["text"] == "finished now"
     assert results[0]["status"] == "complete"
     assert results[1]["transport"] == "acpx"
-    assert results[1]["requested_model"] == "cursor-auto"
+    if requested_model == "cursor-auto":
+        assert results[1]["requested_model"] == "cursor-auto"
+    else:
+        assert "requested_model" not in results[1]
     assert results[1]["effective_model"] == "composer-2.5"
     assert results[1]["acpx_version"] == "0.12.0"
     assert results[1]["metadata_provenance"]["fields"]["effective_model"]["source"] == "observed"

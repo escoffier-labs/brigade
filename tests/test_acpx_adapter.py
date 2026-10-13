@@ -500,6 +500,43 @@ def test_parse_stream_ignores_model_like_values_outside_config_updates():
     assert parsed is not None and parsed["effective_model"] == "grok-4.5[effort=high,fast=true]"
 
 
+def test_parse_stream_rejects_known_credential_families_as_model_ids():
+    credential_models = (
+        "ghp_" + "A" * 24,
+        "github_pat_" + "A" * 24,
+        "xoxb-" + "A" * 16,
+        "sk-" + "A" * 24,
+        "AKIA" + "A" * 16,
+        "AIza" + "a" * 30,
+        "glpat-" + "a" * 20,
+        "eyJ" + "A" * 8 + "." + "B" * 8 + "." + "C" * 8,
+    )
+    for model_id in credential_models:
+        parsed, error = acpx_adapter.parse_stream(
+            _stream(
+                {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {"update": {"sessionUpdate": "config_option_update", "modelId": model_id}},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": "done"},
+                        }
+                    },
+                },
+                {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+            )
+        )
+        assert error == ""
+        assert parsed is not None and parsed["effective_model"] is None
+
+
 def test_run_rejects_in_band_provider_error_with_protocol_evidence(monkeypatch, tmp_path):
     diagnostic = (
         "I will check the provider first.\n"

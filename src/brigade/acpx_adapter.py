@@ -13,6 +13,7 @@ from typing import Any, Literal
 from . import proc
 from .agents import AgentResult
 from .result_integrity import validate_final_output
+from .worklore_validate import contains_credential
 
 SUPPORTED_VERSION = "0.12.0"
 CURSOR_AUTH_TIMEOUT_SECONDS = 10.0
@@ -26,10 +27,6 @@ _MODEL_ID = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}"
     r"(?:\[[A-Za-z][A-Za-z0-9._-]{0,31}=[A-Za-z0-9._:+/-]{1,64}"
     r"(?:,[A-Za-z][A-Za-z0-9._-]{0,31}=[A-Za-z0-9._:+/-]{1,64}){0,7}\])?"
-)
-_MODEL_CREDENTIAL = re.compile(
-    r"(?i)(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
-    r"xox[baprs]-[A-Za-z0-9-]{20,}|sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,})"
 )
 _UNAUTHENTICATED_LINE = re.compile(
     r"^(?:[x✗✘]\s*)?(?:not logged in|not authenticated|unauthenticated|authentication required)[.!]?$",
@@ -284,7 +281,7 @@ def is_safe_model_id(value: object) -> bool:
         isinstance(value, str)
         and len(value) <= 128
         and _MODEL_ID.fullmatch(value) is not None
-        and _MODEL_CREDENTIAL.search(value) is None
+        and not contains_credential(value)
     )
 
 

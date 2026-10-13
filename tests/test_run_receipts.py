@@ -167,6 +167,17 @@ def test_worker_payload_drops_invalid_metadata_provenance_blocks():
                 }
             },
         },
+        {
+            "observed_at": timestamp,
+            "fields": {
+                "effective_model": {
+                    "source": "observed",
+                    "locator": "acp-config-option-update",
+                    "digest": "a" * 64,
+                    "unknown_reason": "backend-revision-unavailable",
+                }
+            },
+        },
     )
 
     for metadata_provenance in invalid_blocks:
@@ -239,6 +250,58 @@ def test_worker_payload_bounds_model_and_adapter_version_labels():
     assert observed["requested_model"] == documented_model_id
     assert observed["effective_model"] == documented_model_id
     assert observed["acpx_version"] == "0.12.0"
+
+
+def test_worker_receipt_sinks_drop_known_credential_families_and_version_metadata():
+    credential_models = (
+        "ghp_" + "A" * 24,
+        "github_pat_" + "A" * 24,
+        "xoxb-" + "A" * 16,
+        "sk-" + "A" * 24,
+        "AKIA" + "A" * 16,
+        "AIza" + "a" * 30,
+        "glpat-" + "a" * 20,
+        "eyJ" + "A" * 8 + "." + "B" * 8 + "." + "C" * 8,
+    )
+    for model_id in credential_models:
+        result = WorkerResult(
+            worker="cursor-worker",
+            task="inspect metadata",
+            text="done",
+            ok=True,
+            transport="acpx",
+            requested_model=model_id,
+            effective_model=model_id,
+            acpx_version="1.2.3+sk-proj-" + "A" * 24,
+            attempts=(
+                WorkerAttempt(
+                    kind="retry",
+                    worker="cursor-worker",
+                    task="inspect metadata",
+                    transport="acpx",
+                    model=model_id,
+                    reasoning=None,
+                    started_at="2026-10-13T12:00:00+00:00",
+                    finished_at="2026-10-13T12:00:01+00:00",
+                    exit_code=1,
+                    terminal_reason="failed",
+                    failure_phase="dispatch",
+                    failure_kind="provider-error",
+                    session_id=None,
+                ),
+            ),
+        )
+
+        entry = worker_payload([result])[0]
+        synthesis = agent_result_payload(
+            agents.AgentResult(text="done", ok=True, requested_model=model_id, effective_model=model_id)
+        )
+        assert "requested_model" not in entry
+        assert "effective_model" not in entry
+        assert "acpx_version" not in entry
+        assert "model" not in entry["attempts"][0]
+        assert "requested_model" not in synthesis
+        assert "effective_model" not in synthesis
 
 
 def test_legacy_run_message_displays_unknown_provenance_and_is_not_replayed():

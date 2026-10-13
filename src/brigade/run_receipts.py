@@ -43,10 +43,7 @@ _ALLOWED_METADATA_PROVENANCE: dict[str, set[tuple[str, str, str | None]]] = {
     },
 }
 _METADATA_EVIDENCE_KEYS = {"source", "locator", "digest", "unknown_reason"}
-_SAFE_ACPX_VERSION = re.compile(
-    r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
-    r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
-)
+_SAFE_ACPX_VERSION = re.compile(r"\d+\.\d+\.\d+")
 
 
 def _safe_metadata_label(key: str, value: object) -> str | None:
@@ -100,12 +97,12 @@ def _safe_metadata_provenance(value: object) -> dict[str, object] | None:
             return None
         if (source, locator, unknown_reason) not in allowed_claims:
             return None
-        if digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest)):
+        if digest is not None:
             return None
         safe_fields[name] = {
             "source": source,
             "locator": locator,
-            "digest": digest.lower() if isinstance(digest, str) else None,
+            "digest": None,
             "unknown_reason": unknown_reason,
         }
     if not safe_fields:
