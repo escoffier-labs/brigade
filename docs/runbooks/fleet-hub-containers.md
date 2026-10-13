@@ -12,15 +12,17 @@ recipe proposal pending operator acceptance.
 
 The image installs Brigade from reviewed source commit
 `e6009f6969dc6e45db2ab93790aa3e407c791409` (CLI version 0.28.0) on
-`python:3.12.7-slim-bookworm` (Debian 12). This immutable ref includes the
+`python:3.12.14-slim-bookworm` (Debian 12). This immutable ref includes the
 loopback proxy trust option; released 0.27.0 does not. The CI acceptance check
-prints the OS, architecture, Python version, and linked SQLite version for
-each built `linux/amd64` and `linux/arm64` image. For a local image, record its
-immutable manifest digest before deployment:
+prints the OS, architecture, Python, OpenSSL, and linked SQLite versions for
+each built `linux/amd64` and `linux/arm64` image. It requires OpenSSL 3.0.20 or
+newer. Debian's DSA-6015-1 marks Bookworm's 3.0.20 package fixed; the pinned
+image reports OpenSSL 3.0.20. For a local image, record its immutable manifest
+digest before deployment:
 
 The Linux/amd64 smoke run on 2026-10-13 reported Debian GNU/Linux 12
-(bookworm), x86_64, Python 3.12.7, and linked SQLite 3.40.1. The Linux/arm64
-values are recorded by the matching CI matrix run.
+(bookworm), x86_64, Python 3.12.14, OpenSSL 3.0.20, and linked SQLite 3.40.1.
+The Linux/arm64 values are printed by the matching CI matrix run.
 
 ```bash
 podman image inspect --format '{{.Digest}}' localhost/brigade-fleet-hub:0.28.0-e6009f6
@@ -32,6 +34,15 @@ Deploy the recorded `localhost/brigade-fleet-hub@sha256:<REVIEWED_DIGEST>`,
 not a mutable tag. This repository does not publish the image to a registry.
 
 ## Docker Compose
+
+Docker Engine 28.0.0 or newer is required for the localhost-only port
+publication below. Older releases can expose localhost-published ports to
+hosts on the same layer-2 network. Check the server version before deployment:
+
+```bash
+engine_version="$(docker version --format '{{.Server.Version}}')"
+python -c 'import re,sys; m=re.match(r"^(\d+)\.(\d+)\.(\d+)", sys.argv[1]); assert m and tuple(map(int, m.groups())) >= (28, 0, 0), f"Docker Engine 28.0.0 or newer is required, found {sys.argv[1]}"' "$engine_version"
+```
 
 Create a random token without putting it in command arguments, then protect the
 file. Compose file-backed secrets are read-only bind mounts, so the container
@@ -71,7 +82,7 @@ save the current image locally. This preserves its bytes if the tag is
 retargeted or Docker later prunes unused images:
 
 ```bash
-previous_id="$(docker image inspect --format '{{.Id}}' localhost/brigade-fleet-hub:0.28.0-e6009f6)"
+previous_id="$(sed -n 's/^[[:space:]]*image: //p' secrets/compose.image-id.yaml)"
 case "$previous_id" in sha256:*) ;; *) echo "Expected a sha256 image ID" >&2; exit 1 ;; esac
 archive="secrets/brigade-fleet-hub-${previous_id#sha256:}.tar"
 docker image save --output "$archive" "$previous_id"
@@ -142,6 +153,45 @@ systemctl --user start brigade-fleet.service
 curl --fail http://127.0.0.1:3774/health
 ```
 
+Before rebuilding the versioned tag, archive the image referenced by the
+installed unit. Podman's image archive preserves the image layers, history,
+and tags so loading it restores the original local image:
+
+```bash
+unit="$HOME/.config/containers/systemd/brigade-fleet.container"
+previous_ref="$(sed -n 's/^Image=//p' "$unit")"
+previous_digest="${previous_ref##*@}"
+case "$previous_digest" in sha256:*) ;; *) echo "Expected a sha256 image digest" >&2; exit 1 ;; esac
+previous_id="$(podman image inspect --format '{{.Id}}' "$previous_ref")"
+archive_dir="$HOME/.local/share/brigade-fleet-hub/archives"
+install -d -m 0700 "$archive_dir"
+archive="$archive_dir/brigade-fleet-hub-${previous_digest#sha256:}.tar"
+podman image save --format oci-archive --output "$archive" "$previous_ref"
+chmod 0600 "$archive"
+```
+
+Build and deploy the candidate image using the steps above, recording its new
+digest and replacing the digest in the installed unit. To roll back, load the
+archive, verify the restored image ID, render the old digest into the unit, and
+start the generated service again:
+
+```bash
+# Set these from the saved archive name and recorded previous digest.
+archive="$HOME/.local/share/brigade-fleet-hub/archives/brigade-fleet-hub-REPLACE_WITH_RECORDED_DIGEST.tar"
+previous_digest="sha256:REPLACE_WITH_RECORDED_DIGEST"
+previous_ref="localhost/brigade-fleet-hub@${previous_digest}"
+previous_id="sha256:REPLACE_WITH_RECORDED_IMAGE_ID"
+podman image load --input "$archive"
+restored_id="$(podman image inspect --format '{{.Id}}' "$previous_ref")"
+test "$restored_id" = "$previous_id"
+sed "s|REPLACE_WITH_RECORDED_DIGEST|${previous_digest}|" \
+  ops/fleet-hub/quadlet/brigade-fleet.container \
+  > "$HOME/.config/containers/systemd/brigade-fleet.container"
+chmod 0644 "$HOME/.config/containers/systemd/brigade-fleet.container"
+systemctl --user daemon-reload
+systemctl --user start brigade-fleet.service
+```
+
 Rootless UID mapping must make volume UID 10001 writable; the volume Quadlet
 declares owner UID and group GID. Confirm it on the target Podman version before
 use. Quadlet generates this service, so start it with `systemctl --user start`;
@@ -155,7 +205,9 @@ must address that VM's storage rather than assuming a native host path.
 ## Security and operations boundary
 
 Both recipes publish only on host loopback and mount the token as a protected
-file. Plain HTTP is therefore local-only. The smoke check proves HTTPS
+file. Docker Compose requires Engine 28.0.0 or newer for localhost publication
+to remain inaccessible from same-L2 hosts. Plain HTTP is therefore local-only
+under that requirement. The smoke check proves HTTPS
 enrollment and Secure cookies with a TLS proxy sharing the Hub's network
 namespace. The Hub binds to numeric loopback with `--trust-forwarded-proto`,
 and the proxy overwrites `X-Forwarded-Proto`; this makes its Hub-side peer

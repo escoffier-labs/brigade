@@ -50,7 +50,7 @@ def test_hub_image_is_non_root_and_has_a_single_writable_state_directory():
 
     assert "ARG BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409" in text
     assert (
-        "FROM python:3.12.7-slim-bookworm@sha256:60d9996b6a8a3689d36db740b49f4327be3be09a21122bd02fb8895abb38b50d"
+        "FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e"
         in text
     )
     assert "ARG BRIGADE_SHA256=68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168" in text
@@ -82,6 +82,7 @@ def test_compose_runbook_pins_the_built_local_image_id():
 
     assert "docker image inspect --format '{{.Id}}'" in runbook
     assert "image: ${image_id}" in runbook
+    assert "previous_id=\"$(sed -n 's/^[[:space:]]*image: //p' secrets/compose.image-id.yaml)\"" in runbook
     assert "secrets/compose.image-id.yaml up -d --no-build" in runbook
     assert "rebuild the versioned tag, record its new local image ID" in runbook
     assert 'docker image save --output "$archive" "$previous_id"' in runbook
@@ -89,6 +90,17 @@ def test_compose_runbook_pins_the_built_local_image_id():
     assert 'test "$restored_id" = "$previous_id"' in runbook
     assert "image: ${previous_id}" in runbook
     assert "secrets/compose.image-id.yaml up -d --no-build" in runbook
+    assert "Docker Engine 28.0.0 or newer" in runbook
+    assert "docker version --format '{{.Server.Version}}'" in runbook
+
+
+def test_quadlet_runbook_archives_and_restores_the_recorded_image():
+    runbook = (ROOT / "docs" / "runbooks" / "fleet-hub-containers.md").read_text()
+
+    assert 'podman image save --format oci-archive --output "$archive" "$previous_ref"' in runbook
+    assert 'podman image load --input "$archive"' in runbook
+    assert 'test "$restored_id" = "$previous_id"' in runbook
+    assert "REPLACE_WITH_RECORDED_DIGEST" in runbook
 
 
 def test_quadlet_recipe_has_equivalent_persistence_health_and_restart_policy():

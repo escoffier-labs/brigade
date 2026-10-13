@@ -190,9 +190,16 @@ def main() -> None:
                 containers[0],
                 "python",
                 "-c",
-                "import json,platform,sqlite3,sys; print(json.dumps({'os': platform.freedesktop_os_release()['PRETTY_NAME'], 'architecture': platform.machine(), 'python': sys.version.split()[0], 'sqlite': sqlite3.sqlite_version}))",
+                "import json,platform,sqlite3,ssl,sys; print(json.dumps({'os': platform.freedesktop_os_release()['PRETTY_NAME'], 'architecture': platform.machine(), 'python': sys.version.split()[0], 'openssl': ssl.OPENSSL_VERSION, 'sqlite': sqlite3.sqlite_version}))",
             )
             print(f"container runtime: {runtime.stdout.strip()}")
+            docker(
+                "exec",
+                containers[0],
+                "python",
+                "-c",
+                "import ssl; assert ssl.OPENSSL_VERSION_INFO >= (3, 0, 0, 20, 0), ssl.OPENSSL_VERSION",
+            )
             assert docker("exec", containers[0], "id", "-u").stdout.strip() == "10001"
             assert request(url, "/nodes", token)[0] == 200
 
