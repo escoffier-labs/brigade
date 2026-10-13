@@ -1523,6 +1523,32 @@ def test_valid_legacy_isolation_marker_schema_still_governs(tmp_path: Path) -> N
     assert authority_marker._isolation_marker_governs(legacy, fingerprint, fingerprint, None) is True
 
 
+def test_isolation_marker_validation_uses_recorded_path_after_old_path_becomes_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_home(monkeypatch, tmp_path / "home")
+    source = tmp_path / "source"
+    source.mkdir()
+    _bind_workspace(source)
+    source_fingerprint = authority_marker.target_fingerprint(source)
+    source_marker = authority_marker.isolation_marker_path(source_fingerprint)
+    identity = ledger._workspace_directory_identity(source)
+
+    destination = tmp_path / "destination"
+    source.rename(destination)
+    try:
+        source.symlink_to(destination, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    governing = authority_marker.governing_isolation_marker_paths(
+        destination, workspace_identity=ledger._workspace_directory_identity(destination)
+    )
+
+    assert source_marker in governing
+    assert identity == ledger._workspace_directory_identity(destination)
+
+
 def test_authority_downgrade_lock_serializes_posture_marker_writers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

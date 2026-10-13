@@ -356,7 +356,7 @@ def _isolation_marker_payload_is_well_formed(payload: Mapping[str, Any], filenam
     ):
         return False
     try:
-        if target_fingerprint(Path(target)) != filename:
+        if not Path(target).is_absolute() or hashlib.sha256(target.encode("utf-8")).hexdigest() != filename:
             return False
     except (OSError, RuntimeError, ValueError):
         return False
