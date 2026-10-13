@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import hashlib
 from pathlib import Path
 
 import pytest
 
-from brigade import attestation_input, cli, control_crosswalk, localio
+from brigade import attestation, attestation_input, cli, control_crosswalk, cosign_attestation, localio
 from brigade.control_crosswalk import (
     EVIDENCE_CONTROLS_SCHEMA,
     HEADER_NOTICE,
@@ -905,6 +906,127 @@ def _fixture_ec03(target: Path) -> None:
         _verify_dir(target, "v1") / "attestation.sigstore.json",
         {"mediaType": cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE, "dsseEnvelope": {}},
     )
+
+
+def _write_cosign_assessment_fixture(target: Path, *, wrong_run: bool = False) -> Path:
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-b" if wrong_run else "verify-a")
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["tree_fingerprint"] = "1" * 40
+    receipt["changes_patch_sha256"] = "2" * 64
+    _write_json(receipt_path, receipt)
+    statement = attestation.build_statement(receipt)
+    payload = attestation.canonical_statement_bytes(statement)
+    bundle = {
+        "mediaType": cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE,
+        "verificationMaterial": {"publicKey": {"hint": "fixture"}, "tlogEntries": []},
+        "dsseEnvelope": {
+            "payloadType": attestation.DSSE_PAYLOAD_TYPE,
+            "payload": base64.b64encode(payload).decode("ascii"),
+            "signatures": [{"sig": base64.b64encode(b"signature").decode("ascii")}],
+        },
+    }
+    _write_json(run_dir / "attestation.sigstore.json", bundle)
+    key_path = target / ".brigade" / "attestation" / "cosign.pub"
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text("fixture public key", encoding="utf-8")
+    return run_dir
+
+
+def test_ec03_cosign_bundle_is_cryptographically_verified_and_receipt_bound(tmp_path, monkeypatch):
+    from brigade import control_crosswalk_cosign
+
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    calls = []
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+    monkeypatch.setattr(
+        control_crosswalk_cosign.subprocess,
+        "run",
+        lambda command, **_kwargs: calls.append(command) or type("Result", (), {"returncode": 0})(),
+    )
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "validated"
+    assert (
+        result["artifacts"][0]["source_digest_sha256"]
+        == hashlib.sha256((run_dir / "attestation.sigstore.json").read_bytes()).hexdigest()
+    )
+    assert calls and "--insecure-ignore-tlog=true" in calls[0]
+    assert "--digest=1111111111111111111111111111111111111111" in calls[0]
+
+
+def test_ec03_cosign_bundle_rejects_wrong_run_binding(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    _write_cosign_assessment_fixture(target, wrong_run=True)
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "run_binding_mismatch"
+
+
+def test_ec03_cosign_bundle_preserves_unavailable_verifier_state(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    (target / ".brigade" / "attestation" / "cosign.pub").unlink()
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "unavailable"
+    assert result["reason"] == "verifier_tool_unavailable"
+    assert not run_dir.joinpath("attestation.sigstore.json").is_symlink()
+
+
+def test_ec03_cosign_bundle_requires_terminal_nonempty_check_results(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["commands"][0]["status"] = "running"
+    _write_json(receipt_path, receipt)
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "incomplete"
+    assert result["reason"] == "command_not_terminal"
+
+
+def test_ec03_cosign_bundle_rejects_signature_failure(tmp_path, monkeypatch):
+    from brigade import control_crosswalk_cosign
+
+    target = _ws(tmp_path)
+    _write_cosign_assessment_fixture(target)
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+    monkeypatch.setattr(
+        control_crosswalk_cosign.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 1})(),
+    )
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "signature_mismatch"
+    assert result["dimensions"]["signature"]["status"] == "failed"
+
+
+def test_ec03_cosign_bundle_marks_missing_cosign_tool_unavailable(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    _write_cosign_assessment_fixture(target)
+
+    def unavailable():
+        raise cosign_attestation.CosignAttestationError("cosign is absent")
+
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", unavailable)
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "unavailable"
+    assert result["reason"] == "verifier_tool_unavailable"
 
 
 def _fixture_ec07(target: Path) -> None:

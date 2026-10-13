@@ -1267,15 +1267,15 @@
       "claim_id": "EC-03",
       "framework_id": "nist-ai-rmf-1.0",
       "property": "signature integrity",
-      "artifact_contract": "brigade.attestation.cosign-dsse.v1 Sigstore bundle (attestation.sigstore.json) from brigade receipts export attestation --profile cosign, checked locally for media type and DSSE envelope.",
-      "responsible_actor": "Adopting organization, which operates cosign verification and its trust root; Brigade only records the bundle.",
+      "artifact_contract": "brigade.attestation.cosign-dsse.v1 Sigstore bundle (attestation.sigstore.json) from brigade receipts export attestation --profile cosign, checked against the run receipt and the configured .brigade/attestation/cosign.pub key.",
+      "responsible_actor": "Adopting organization, which configures and protects the cosign public key trust root; Brigade verifies the bundle against that key.",
       "applicability_condition": "Not applicable: no AI RMF 1.0 subcategory is assigned to this property, so no applicability condition is claimed.",
       "disposition": "unmapped-evidence-property",
       "superseded_control_id": "GOVERN 5.2",
       "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
       "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.1, Table 1, GOVERN 5.2",
       "rationale": "A cosign bundle supports the integrity of other evidence. No AI RMF 1.0 subcategory addresses signature integrity directly, and GOVERN 5.2 concerns adjudicated feedback.",
-      "verification_limit": "Bundle presence and media type are checked locally; signature verification needs cosign and an external trust root. A Brigade artifact does not establish that an organizational control or process operated."
+      "verification_limit": "The local cosign public key is treated as the configured trust root; its authority and custody remain the adopting organization's responsibility. A Brigade artifact does not establish that an organizational control or process operated."
     },
     {
       "claim_id": "EC-11",

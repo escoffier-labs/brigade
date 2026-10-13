@@ -29,6 +29,7 @@ from . import (
     attestation_input,
     attestation_receipt,
     causal_receipt,
+    control_crosswalk_cosign,
     control_crosswalk_package,
     control_readiness,
     cosign_attestation,
@@ -127,13 +128,13 @@ class _Discovery:
     window: dict[str, Any] | None = None
 
 
-# Adapter seam for dedicated verifiers that are not wired yet (#1618).  An
-# adapter takes ``(target, artifact_path)`` (EC-12 passes the package
-# directory) and returns an ArtifactObservation with level, proposed outcome,
-# dimensions and reasons.  The result is checked against the fixed readiness
-# vocabulary; anything else is reported as ``verifier_error``.  The evaluator
-# still applies relpath, run binding and period.  ``None`` means not wired: the evaluator stops
-# at structural observation and reports ``verifier_not_wired``.
+# Adapter seam for dedicated verifiers. An adapter takes ``(target,
+# artifact_path)`` (EC-12 passes the package directory) and returns an
+# ArtifactObservation with level, proposed outcome, dimensions and reasons.
+# The result is checked against the fixed readiness vocabulary; anything else
+# is reported as ``verifier_error``. The evaluator still applies relpath, run
+# binding and period. ``None`` means the evaluator stops at structural
+# observation and reports ``verifier_not_wired``.
 VerifierAdapter = Callable[[Path, Path], control_readiness.ArtifactObservation]
 _VERIFIER_ADAPTERS: dict[str, VerifierAdapter | None] = {
     "cosign-bundle": None,
@@ -304,8 +305,13 @@ def _adapter_observation(
                 return _invalid(ctx, artifact, "schema_missing")
             snapshot_artifact = ctx.reader.copy(artifact)
             ctx.reader.copy(artifact.parent / "receipt.json")
-        if adapter is not _verify_evidence_package:
+        if adapter not in {_verify_evidence_package, _verify_cosign_bundle}:
             _copy_public_trust(ctx)
+        elif adapter is _verify_cosign_bundle:
+            try:
+                ctx.reader.copy(ctx.target / ".brigade" / "attestation" / "cosign.pub")
+            except OSError:
+                return _verifier_unavailable(relpath, "verifier_tool_unavailable")
         obs = control_readiness.validate_observation(adapter(ctx.reader.snapshot_target, snapshot_artifact))
     except evidence_package_snapshot.PackageSnapshotError as exc:
         if exc.code == "malformed":
@@ -567,6 +573,8 @@ def _verifier_unavailable(relpath: str, reason: str) -> control_readiness.Artifa
 
 _verify_evidence_package = control_crosswalk_package.verify_evidence_package
 _VERIFIER_ADAPTERS["evidence-package"] = _verify_evidence_package
+_verify_cosign_bundle = control_crosswalk_cosign.verify_cosign_bundle
+_VERIFIER_ADAPTERS["cosign-bundle"] = _verify_cosign_bundle
 
 
 def _ssh_keygen_available() -> bool:
@@ -621,7 +629,7 @@ def _cosign_bundle_shape_ok(bundle: dict[str, Any]) -> bool:
 
 
 def _evaluate_cosign_bundle_exists(ctx: _Context) -> _Discovery:
-    """EC-03: cosign Sigstore bundle; structural only until a verifier adapter is wired."""
+    """EC-03: verify a run-bound cosign Test Result against the configured public key."""
     found, out = _verify_receipt_children(ctx, "attestation.sigstore.json")
     adapter = _VERIFIER_ADAPTERS.get("cosign-bundle")
     for run_dir, path in found:
@@ -1481,7 +1489,7 @@ _EVALUATORS: dict[str, _Rule] = {
         _evaluate_sshsig_test_result_signed_ok, "delegated", "attestation.verify_attestation", "wired", _SIGNED_REQUIRED
     ),
     "cosign-bundle-exists": _Rule(
-        _evaluate_cosign_bundle_exists, "structural", "cosign-bundle", "not_wired", _SIGNED_REQUIRED
+        _evaluate_cosign_bundle_exists, "delegated", "cosign-bundle", "wired", _SIGNED_REQUIRED
     ),
     "agent-request-signed": _Rule(
         _evaluate_agent_request_signed, "delegated", "attestation.verify_attestation", "wired", _SIGNED_REQUIRED
@@ -1823,8 +1831,8 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "the template schema remains `brigade.control_crosswalk.v1`. New root keys are `relationship_semantics`, "
     "`integrity_boundary`, `unmapped_evidence_properties`, `readiness_contract`, `assessment_period` and "
     "`evidence_readiness`. Mapping rows add `validation_level`, `evidence_outcome` and provenance fields. "
-    "Validated EC-01 and EC-12 artifact observations include `source_digest_sha256`. `evidenced_passed` is stricter. "
-    "Claims checked only for presence or structure (EC-03, EC-04, EC-07, EC-09, EC-10 and EC-11) report `untested` "
+    "Validated EC-01, EC-03 and EC-12 artifact observations include `source_digest_sha256`. `evidenced_passed` is stricter. "
+    "Claims checked only for presence or structure (EC-04, EC-07, EC-09, EC-10 and EC-11) report `untested` "
     "with `structure_observed` until a dedicated verifier is wired. An EC-01 receipt with an empty command list or "
     "commands that do not match `planned_commands` is no longer a pass, and legacy receipts without "
     "`planned_commands` report `untested`. Artifacts now classified `invalid` (for example a previously accepted "
