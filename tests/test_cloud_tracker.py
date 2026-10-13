@@ -1281,7 +1281,25 @@ def test_jules_plan_only_session_is_not_ready_to_land(tmp_path: Path):
     assert row["url"] == "https://jules.google.com/session/14361725569735593935"
 
 
-def test_jules_completed_session_with_explicitly_empty_outputs_needs_investigation(tmp_path: Path):
+def test_jules_completed_plan_only_session_is_observed_and_needs_approval(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("JULES_API_KEY", "fake-jules-key")
+    monkeypatch.setattr(
+        jules_cloud,
+        "list_sessions",
+        lambda *a, **k: [
+            {
+                "id": "sess-empty-output",
+                "state": "COMPLETED",
+                "url": "https://jules.google.com/session/sess-empty-output",
+                "has_outputs": False,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        jules_cloud,
+        "list_activities",
+        lambda *a, **k: [{"kind": "userMessaged"}, {"kind": "planGenerated"}],
+    )
     cloud_tracker.register(
         tmp_path,
         provider="jules",
@@ -1290,21 +1308,16 @@ def test_jules_completed_session_with_explicitly_empty_outputs_needs_investigati
         prompt_hash=_prompt_hash("x"),
         dispatched_at=_iso(NOW),
     )
+    observation = cloud_tracker._jules_cloud_observation(tmp_path)
     payload = cloud_tracker.status_payload(
         tmp_path,
         now=NOW,
-        provider_tasks={
-            "sess-empty-output": {
-                "state": "completed",
-                "url": "https://jules.google.com/session/sess-empty-output",
-                "has_outputs": False,
-            }
-        },
+        provider_observations={"jules": observation},
         github={"branches": [], "prs": []},
         cursor_wired=False,
     )
     row = next(r for r in payload["entries"] if r["task_id"] == "sess-empty-output")
-    assert row["classification"] == "needs-investigation"
+    assert row["classification"] == "needs-plan-approval"
     assert row["url"] == "https://jules.google.com/session/sess-empty-output"
 
 
@@ -1549,7 +1562,7 @@ def test_jules_activity_fetch_failure_never_manufactures_plan_approval(monkeypat
         provider_observations={"jules": observation},
     )
     rows = {row["task_id"]: row["classification"] for row in payload["entries"]}
-    assert rows["sess-broken"] == "ready-to-land"
+    assert rows["sess-broken"] == "needs-investigation"
     assert rows["sess-plan"] == "needs-plan-approval"
 
 

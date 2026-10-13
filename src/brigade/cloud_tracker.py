@@ -1663,8 +1663,9 @@ def _jules_cloud_observation(target: Path) -> ProviderObservation:
         url = session.get("url")
         if isinstance(url, str):
             info["url"] = url
-        if session.get("has_outputs") is True:
-            info["has_outputs"] = True
+        has_outputs = session.get("has_outputs")
+        if isinstance(has_outputs, bool):
+            info["has_outputs"] = has_outputs
         pull_request_url = session.get("pull_request_url")
         if isinstance(pull_request_url, str):
             info["pull_request_url"] = pull_request_url
