@@ -22,7 +22,7 @@ _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _MODEL_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _EXPLANATORY_SECRET_VALUE = (
-    r"(?:required|optional|needed|necessary|available|configured(?!\s+as\b)|set(?!\s+to\b)|missing|unset|unavailable|"
+    r"(?:required|optional|needed|necessary|available|configured(?!\s+(?:as|to)\b)|set(?!\s+to\b)|missing|unset|unavailable|"
     r"not\s+(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable)|"
     r"confidential|managed(?:\s+by\s+Vault)?|provided|stored(?:\s+securely)?|encrypted|protected|"
     r"handled|generated|rotated|masked|redacted)(?=$|\s|[.,;!?](?:\s|$))"
@@ -102,7 +102,10 @@ def _has_url_userinfo(value: str) -> bool:
 def _has_filesystem_path_in_url_query(value: str) -> bool:
     for match in _HTTP_URL.finditer(value):
         try:
-            query_pairs = parse_qsl(urlsplit(match.group()).query, keep_blank_values=True)
+            parsed = urlsplit(match.group())
+            query_pairs = parse_qsl(parsed.query, keep_blank_values=True) + parse_qsl(
+                parsed.fragment, keep_blank_values=True
+            )
         except ValueError:
             continue
         for key, query_value in query_pairs:
@@ -128,6 +131,14 @@ _PATH_CONTEXT = re.compile(
 )
 _QUOTED_PATH_CONTEXT = re.compile(
     r"\b(?:run|execute|inspect|open|read|write|load|save)\s+[\"'“‘][^\"'“”‘’]*$",
+    re.IGNORECASE,
+)
+_SPACED_PATH_CONTEXT = re.compile(
+    r"(?:\b(?:run|execute|inspect|open|read|write|load|save)\s+"
+    r"(?:(?:from|at|in|to|into|under)\s+)?|"
+    r"\b(?:path|file|directory|folder|script|repository|repo)\s*"
+    r"(?:is|was|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s+)"
+    r"(?:[A-Za-z0-9_.~-]+\s+)+$",
     re.IGNORECASE,
 )
 _FILESYSTEM_COMPONENTS = frozenset(
@@ -232,7 +243,9 @@ _SURROGATE = re.compile("[\\ud800-\\udfff]")
 
 def _has_path_context(text: str, position: int) -> bool:
     prefix = text[:position]
-    return _PATH_CONTEXT.search(prefix) is not None or _QUOTED_PATH_CONTEXT.search(prefix) is not None
+    return any(
+        pattern.search(prefix) is not None for pattern in (_PATH_CONTEXT, _QUOTED_PATH_CONTEXT, _SPACED_PATH_CONTEXT)
+    )
 
 
 _TOP_FIELDS = frozenset({"schema", "revision", "seats"})

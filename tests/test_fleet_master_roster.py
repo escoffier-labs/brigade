@@ -160,6 +160,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "password is [hunter 2]",
         "password is required-secret",
         "Password is configured as hunter2",
+        "Password is configured to hunter2",
         "token: optional-token",
         "password is x",
         "Password set to hunter2",
@@ -477,6 +478,8 @@ def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None
         "Path = foo/bar",
         "Path set to foo/bar",
         "The path is set to foo/bar",
+        "The path is Shared Folder/file",
+        "Open Shared Folder/file for instructions",
         "GET /etc/passwd",
         "GET /users/../etc/passwd",
         "foo/bar",
@@ -578,9 +581,10 @@ def test_parse_accepts_lowercase_key_value_prose(field: str, text: str) -> None:
     [
         "See https://example.com/download?path=/opt/example.",
         "See https://example.com/download?file=~example/.ssh/config.",
+        "See https://example.com/callback#path=/home/example.",
     ],
 )
-def test_parse_rejects_filesystem_paths_in_url_queries(field: str, text: str) -> None:
+def test_parse_rejects_filesystem_paths_in_url_parameters(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 
