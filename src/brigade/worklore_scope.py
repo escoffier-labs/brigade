@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import hmac
 import json
 import re
 import sqlite3
@@ -43,11 +42,9 @@ class ScopeAdmissionError(store.WorkloreConflict):
             self.details.update(conflicts=conflicts, truncated=truncated)
 
 
-def _reject_reflection(digest: str, texts: list[str]) -> None:
-    """Reject private metadata in bounded strings before appending their record."""
+def _reject_reflection(digests: set[str], texts: list[str]) -> None:
+    """Scan bounded output once against every active holder's private fingerprints."""
     for text in set(texts):
-        if digest in text.lower():
-            raise ValueError("private reservation metadata")
         for match in _NONCE_CANDIDATES.finditer(text):
             candidate = match[1]
             decoded = base64.b64decode(candidate + "=", altchars=b"-_", validate=True)
@@ -56,19 +53,22 @@ def _reject_reflection(digest: str, texts: list[str]) -> None:
                 base64.b64encode(decoded).decode().rstrip("="),
             }:
                 continue
-            if len(decoded) == 32 and hmac.compare_digest(hashlib.sha256(decoded).hexdigest(), digest):
+            if len(decoded) == 32 and hashlib.sha256(decoded).hexdigest() in digests:
                 raise ValueError("private reservation metadata")
         for match in _HEX_CANDIDATES.finditer(text):
-            if hmac.compare_digest(hashlib.sha256(bytes.fromhex(match[1])).hexdigest(), digest):
+            if match[1].lower() in digests or hashlib.sha256(bytes.fromhex(match[1])).hexdigest() in digests:
                 raise ValueError("private reservation metadata")
 
 
-def admit_checkpoint(conn: sqlite3.Connection, work_id: str, body: Mapping[str, Any]) -> None:
+def admit_checkpoint(
+    conn: sqlite3.Connection, work_id: str, body: Mapping[str, Any], *, current_holder_digest: str
+) -> None:
     """Check latest declarations without presence/status inference or modifying holders.
 
     The ownership caller holds BEGIN IMMEDIATE and has already fenced authority,
     CAS, replay, event capacity and serialized byte size. LIMIT bounds snapshot processing, not SQLite's
-    underlying index traversal. Empty scopes have no writer to admit.
+    underlying index traversal. Empty scopes have no writer to admit. The trusted
+    current holder digest covers the item excluded from the peer query.
     """
     # Reuse the ownership contract without a module-initialization import cycle.
     from . import worklore_ownership as ownership
@@ -104,6 +104,7 @@ def admit_checkpoint(conn: sqlite3.Connection, work_id: str, body: Mapping[str, 
         ),
     )
     conflicts: list[dict[str, str]] = []
+    digests = {current_holder_digest}
     truncated = False
     conflicted = False
     conflict_bytes = 2  # JSON list brackets
@@ -128,6 +129,7 @@ def admit_checkpoint(conn: sqlite3.Connection, work_id: str, body: Mapping[str, 
             digest = snapshot["holder_hash"]
             if not isinstance(digest, str) or not _DIGEST_RE.fullmatch(digest):
                 raise ValueError("invalid reservation digest")
+            digests.add(digest)
             raw_paths = ownership._array(snapshot["write_scope"], ownership.SCOPE_MAX_ITEMS)
             if not raw_paths:
                 continue
@@ -137,7 +139,6 @@ def admit_checkpoint(conn: sqlite3.Connection, work_id: str, body: Mapping[str, 
             if repo.casefold() != body["repo_identity"].casefold():
                 continue
             paths = [ownership._path(path) for path in raw_paths]
-            checked: set[str] = set()
             for path in requested:
                 for held in paths:
                     if path != held and not path.startswith(held + "/") and not held.startswith(path + "/"):
@@ -157,12 +158,22 @@ def admit_checkpoint(conn: sqlite3.Connection, work_id: str, body: Mapping[str, 
                     ):
                         truncated = True
                         continue
-                    unchecked = {identifier, owner, path, held} - checked
-                    _reject_reflection(digest, list(unchecked))
-                    checked.update(unchecked)
                     conflicts.append(record)
                     conflict_bytes += record_bytes
         except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, WorkloreValidationError):
             raise ScopeAdmissionError("path-scope-unavailable") from None
     if conflicted:
+        try:
+            # A protected holder can follow its carrier in the ordered scan, or
+            # have no paths in this repository. Check only the bounded output.
+            _reject_reflection(
+                digests,
+                [
+                    record[field]
+                    for record in conflicts
+                    for field in ("work_id", "owner_node", "requested_path", "held_path")
+                ],
+            )
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, WorkloreValidationError):
+            raise ScopeAdmissionError("path-scope-unavailable") from None
         raise ScopeAdmissionError("path-scope-conflict", conflicts=conflicts, truncated=truncated)

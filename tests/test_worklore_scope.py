@@ -13,6 +13,7 @@ from tests.test_worklore_ownership import (
     CHECKPOINT,
     NONCE_A,
     NONCE_B,
+    NONCE_C,
     OFFER,
     dot_report,
     event_count,
@@ -660,3 +661,131 @@ def test_malformed_holder_digest_refuses_even_empty_or_other_repository_scope(le
     status, reply = checkpoint(conn, work_id, ["src"])
     assert status == 409 and reply["code"] == "path-scope-unavailable", reply
     assert "conflicts" not in reply and event_count(conn, work_id) == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "encoding", "protected"),
+    [
+        ("held_path", "url", "late"),  # Primary: B accepts A's nonce through B's real fenced API.
+        ("held_path", "url", "early"),
+        ("requested_path", "url", "late"),
+        ("work_id", "url", "late"),
+        ("owner_node", "url", "late"),
+        ("held_path", "hex", "late"),
+        ("held_path", "digest", "late"),
+        ("requested_path", "digest-upper", "other-repo"),
+        ("requested_path", "hex-upper", "empty"),
+        ("work_id", "digest-upper", "other-repo"),
+        ("owner_node", "digest", "handoff"),
+        ("held_path", "url-padded", "empty"),
+        ("held_path", "standard", "other-repo"),
+        ("requested_path", "standard-unpadded", "handoff"),
+        ("owner_node", "hex", "empty"),
+        ("work_id", "hex-upper", "handoff"),
+        ("held_path", "url", "caller"),
+        ("requested_path", "digest-upper", "caller"),
+        ("work_id", "hex", "caller"),
+        ("owner_node", "digest", "caller"),
+        ("held_path", "ascii", "late"),
+        ("held_path", "ascii", "caller"),
+        ("held_path", "url", "full-output"),
+        ("held_path", "ascii", "invalid-after-full"),
+    ],
+)
+def test_cross_holder_conflict_privacy_at_fenced_http_boundary(ledger, field, encoding, protected):
+    conn, work_id, _ = ledger
+
+    def rename_item(old, new):
+        # Fixture identities force scan order and otherwise unwritable identity fields.
+        conn.execute("PRAGMA defer_foreign_keys=ON")
+        conn.execute("UPDATE work_items SET work_id=? WHERE work_id=?", (new, old))
+        conn.execute("UPDATE work_events SET work_id=? WHERE work_id=?", (new, old))
+        conn.commit()
+        return new
+
+    work_id = rename_item(work_id, "fixture-a-protected" if protected == "early" else "fixture-z-protected")
+    owned(conn, work_id)
+    if protected != "empty":
+        assert (
+            checkpoint(
+                conn,
+                work_id,
+                ["protected"],
+                repo="example/other" if protected in {"other-repo", "handoff"} else "example/project",
+            )[0]
+            == 200
+        )
+    if protected == "handoff":
+        post(
+            conn,
+            work_id,
+            {"action": "handoff", "generation": 1, "target_node": "node-b"},
+            revision=3,
+            key="handoff-protected",
+            nonce=NONCE_A,
+        )
+    # C owns a different item as A's authenticated node, with a distinct capability.
+    caller = store.create_item(conn, {"title": "Caller fixture", "kind": "repo"}, actor_id="admin")["work_id"]
+    post(conn, caller, OFFER, admin=True, key="offer-caller")
+    post(conn, caller, {"action": "accept", "generation": 0}, revision=1, key="accept-caller", nonce=NONCE_C)
+    nonce = NONCE_C if protected == "caller" else NONCE_A
+    decoded = base64.urlsafe_b64decode(nonce + "=")
+    digest = hashlib.sha256(decoded).hexdigest()
+    private = {
+        "url": nonce,
+        "url-padded": nonce + "=",
+        "standard": base64.b64encode(decoded).decode(),
+        "standard-unpadded": base64.b64encode(decoded).decode().rstrip("="),
+        "hex": decoded.hex(),
+        "hex-upper": decoded.hex().upper(),
+        "digest": digest,
+        "digest-upper": digest.upper(),
+        "ascii": "q" * 80,
+    }[encoding]
+    embedded = "fixture-b-" + private + "-tail"
+    carrier_node = embedded if field == "owner_node" else "node-b"
+    if carrier_node != "node-b":
+        fleet_hub.add_node(conn, carrier_node, carrier_node)
+    carrier = another_owner(conn, node=carrier_node)
+    carrier = rename_item(carrier, embedded if field == "work_id" else "fixture-b-carrier")
+    held = "src/" + embedded + "/module.py" if field == "held_path" else "src"
+    # No forged carrier snapshot: B legitimately checkpoints foreign private metadata.
+    held_paths = (
+        [held.replace("/module.py", f"/module-{index}.py") for index in range(9)]
+        if protected in {"full-output", "invalid-after-full"}
+        else [held]
+    )
+    assert checkpoint(conn, carrier, held_paths, node=carrier_node, nonce=NONCE_B)[0] == 200
+    if protected == "invalid-after-full":
+        row = conn.execute(
+            "SELECT seq, detail_json FROM work_events WHERE work_id=? ORDER BY seq DESC LIMIT 1", (work_id,)
+        ).fetchone()
+        detail = json.loads(row[1])
+        detail["ownership"]["holder_hash"] = "invalid-fixture-digest"
+        conn.execute("UPDATE work_events SET detail_json=? WHERE seq=?", (json.dumps(detail), row[0]))
+        conn.commit()
+    requested = "src/" + embedded + "/module.py" if field == "requested_path" else "src"
+    before, count = snapshot(conn, caller), event_count(conn, caller)
+    protected_before, protected_count = snapshot(conn, work_id), event_count(conn, work_id)
+    status, reply = checkpoint(conn, caller, [requested], nonce=NONCE_C)
+    assert status == 409
+    if encoding == "ascii" and protected != "invalid-after-full":
+        assert reply["code"] == "path-scope-conflict"
+        assert reply["conflicts"][0]["held_path"] == held
+    else:
+        assert reply["code"] == "path-scope-unavailable"
+        assert "conflicts" not in reply and "truncated" not in reply
+        assert all(secret not in json.dumps(reply) for secret in (private, digest, NONCE_A, NONCE_B, NONCE_C))
+    assert len(json.dumps(reply).encode()) < 8192
+    assert snapshot(conn, caller) == before and event_count(conn, caller) == count
+    # Same-node authentication plus C's legitimate nonce cannot mutate A.
+    status, reply = request(
+        conn,
+        work_id,
+        {"action": "release", "generation": 1},
+        revision=protected_before["revision"],
+        key="release-by-caller",
+        nonce=NONCE_C,
+    )
+    assert status == 403 and reply["code"] == "holder-mismatch"
+    assert snapshot(conn, work_id) == protected_before and event_count(conn, work_id) == protected_count

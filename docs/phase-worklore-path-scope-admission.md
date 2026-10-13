@@ -75,16 +75,28 @@ active events refuse admission rather than freeing a reservation.
 Future validator changes must preserve compatibility with legitimately persisted
 ownership events or use a reviewed versioned migration.
 
-Every reflected identity and path passes the same private-data guard before
-its conflict record is appended. Count and escaped-byte bounds are checked first,
-so omitted records and disjoint paths require no reflection scanning. It refuses
-case-equivalent holder digests and embedded
-32-byte nonce candidates whose SHA256 matches the stored digest, including
-canonical base64url, standard base64 and hex spellings. Each bounded string is
-scanned at most once per snapshot, without returning the digest or nonce. Generic
+Admission collects canonical digests from every validated active holder before
+empty-scope and other-repository shortcuts. The ownership caller also supplies
+the trusted current holder digest after its existing fences, covering the item
+excluded from the peer query. This set contains at most 1,024 peer digests plus
+one current holder digest. It requires no additional history query or cache.
+
+Conflict records remain private until the complete bounded scan finishes. Count
+and escaped-byte bounds apply before a record enters this buffer. Then every
+distinct work ID, owner node, requested path and held path in the buffered output
+passes the private-data guard against the full digest set. A carrier cannot
+reflect another holder's capability even when the protected holder appears later
+in scan order, has empty scope or holds paths in another repository. The guard
+refuses case-equivalent holder digests and embedded 32-byte nonce candidates
+whose SHA256 matches any active digest, including canonical base64url, standard
+base64 and hex spellings. Each distinct bounded output string is scanned once.
+Each candidate is decoded and hashed once before set membership comparison,
+independent of holder count. Authentication and CAS keep their existing checks.
+Omitted records and disjoint paths require no reflection scanning. Generic
 active-event and scope validation still applies before overlap comparison, even
-after the output budget is exhausted. An incomplete
-assessment never admits a writer.
+after the output budget is exhausted. Malformed data or a reflection failure
+returns the fixed `path-scope-unavailable` refusal without buffered output. An
+incomplete assessment never admits a writer.
 Resolution codes describe an end state for ownership review. They do not
 instruct callers to release another holder automatically.
 

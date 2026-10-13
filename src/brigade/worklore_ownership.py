@@ -520,7 +520,7 @@ def ownership_action(
             raise _invalid("ownership event exceeds serialized byte bound; ownership unchanged")
         placeholders = ",".join(["?"] * len(store._EVENT_COLUMNS) + [store._EVENT_SEQ_SQL])
         if action == "checkpoint":
-            scope.admit_checkpoint(conn, work_id, body)
+            scope.admit_checkpoint(conn, work_id, body, current_holder_digest=result["holder_hash"])
         conn.execute(
             f"INSERT INTO work_events ({','.join(store._EVENT_INSERT_COLUMNS)}) VALUES ({placeholders})",
             (
