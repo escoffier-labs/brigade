@@ -1,4 +1,4 @@
 [Volume]
 VolumeName=brigade-fleet-state
-UID=10001
-GID=10001
+User=10001
+Group=10001

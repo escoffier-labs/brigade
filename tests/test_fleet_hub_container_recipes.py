@@ -42,6 +42,7 @@ def test_quadlet_recipe_has_equivalent_persistence_health_and_restart_policy():
     assert "Secret=brigade-fleet-admin-token,target=admin_token" in container
     assert "HealthCmd=" in container
     assert "Restart=on-failure" in container
-    assert "UID=10001" in volume
-    assert "GID=10001" in volume
-    assert "User=10001:10001" not in volume
+    assert "User=10001" in volume
+    assert "Group=10001" in volume
+    assert "UID=10001" not in volume
+    assert "GID=10001" not in volume

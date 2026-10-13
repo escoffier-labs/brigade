@@ -83,7 +83,7 @@ curl --fail http://127.0.0.1:3774/health
 ```
 
 Rootless UID mapping must make volume UID 10001 writable; the volume Quadlet
-declares UID and GID ownership. Confirm it on the target Podman version before
+declares owner UID and group GID. Confirm it on the target Podman version before
 use. Quadlet generates this service, so start it with `systemctl --user start`;
 do not enable the generated unit directly. Its `[Install]` section supplies the
 generator's startup wiring.
