@@ -176,6 +176,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "auth token is abcdefghijklmnop",
         "export service_mode=production",
         "Set environment variable service_mode=production",
+        "env service_mode=production",
+        "Set env service_mode=production",
     ],
 )
 def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
@@ -455,6 +457,7 @@ def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None
         "The path was foo/bar",
         "The path will be foo/bar",
         "The path has been foo/bar",
+        "Path = foo/bar",
         "foo/bar",
         "tools/build",
     ],
@@ -504,6 +507,17 @@ def test_parse_accepts_standalone_slash_prose(field: str, text: str) -> None:
     parsed = fleet_master_roster.parse(document)
 
     assert parsed["seats"][0][field] == ([text] if field == "caveats" else text)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize("url", ["https://account%3Avalue@example.com/path"])
+def test_parse_rejects_url_userinfo(field: str, url: str) -> None:
+    document = _document()
+    text = f"See {url} for the guide."
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
 
 
 @pytest.mark.parametrize("field", ["purpose", "caveats"])

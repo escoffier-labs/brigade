@@ -63,7 +63,7 @@ _URL_CREDENTIAL_QUERY = re.compile(
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
-    r"\b(?:export\s+|set\s+environment\s+variable\s+)"
+    r"\b(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+)"
     r"[A-Za-z_][A-Za-z0-9_]*\s*=(?!=|>)",
     re.IGNORECASE,
 )
@@ -75,6 +75,17 @@ _API_ROUTE_CONTEXT = re.compile(
 )
 _HTTP_URL = re.compile(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE)
 _URL_PATH_QUERY_KEYS = frozenset({"dir", "directory", "file", "filename", "filepath", "path", "root"})
+
+
+def _has_url_userinfo(value: str) -> bool:
+    for match in _HTTP_URL.finditer(value):
+        try:
+            parsed = urlsplit(match.group())
+            if parsed.username is not None or parsed.password is not None:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def _has_filesystem_path_in_url_query(value: str) -> bool:
@@ -100,7 +111,7 @@ _RELATIVE_PATH = re.compile(
 _PATH_CONTEXT = re.compile(
     r"(?:\b(?:run|execute|inspect|open|read|write|load|save|path|file|directory|folder|script|repository|repo)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?|"
-    r"\b(?:path|file|directory|folder|script|repository|repo)\s*(?:is|was|equals|will\s+be|has\s+been|:)\s*)[\"'“‘`()\[{]*\s*$",
+    r"\b(?:path|file|directory|folder|script|repository|repo)\s*(?:is|was|equals|will\s+be|has\s+been|:|=)\s*)[\"'“‘`()\[{]*\s*$",
     re.IGNORECASE,
 )
 _FILESYSTEM_COMPONENTS = frozenset(
@@ -260,6 +271,7 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     if (
         _DANGEROUS_VALUE.search(value)
         or _URL_CREDENTIAL_QUERY.search(value)
+        or _has_url_userinfo(value)
         or _has_filesystem_path_in_url_query(value)
         or _ENVIRONMENT_ASSIGNMENT.search(_without_api_route_references(value))
         or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(_without_api_route_references(value))
