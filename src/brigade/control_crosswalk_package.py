@@ -151,7 +151,7 @@ def binding_candidates(
     strict_package: bool,
 ) -> dict[str, object]:
     if strict_package and obs.proposed in {"invalid", "rejected", "unavailable"}:
-        return {f"receipt.{name}": value for name, value in receipt.items()}
+        return receipt
     candidates = (
         {
             "source.producer_run_id": source.get("producer_run_id"),

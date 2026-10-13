@@ -1772,6 +1772,7 @@ def test_ec12_binds_malformed_package_from_staged_receipt_identity(tmp_path):
     assert result["outcome"] == "invalid"
     artifact = next(item for item in result["artifacts"] if "pkg-malformed" in item["relpath"])
     assert artifact["scope"] == "in_scope"
+    assert artifact["run_binding"] == "receipt.run_id"
     assert artifact["reason_codes"] == ["schema_missing"]
 
 
@@ -1851,6 +1852,7 @@ def test_ec12_preserves_read_limit_refusal_during_package_staging(tmp_path, monk
     assert result["population"]["out_of_period"] == 0
     assert artifact["outcome"] == "unavailable"
     assert artifact["scope"] == "in_scope"
+    assert artifact["run_binding"] == "receipt.producer_run_id"
     assert artifact["reason_codes"] == ["read_limit_exceeded", "timestamp_missing"]
 
 
