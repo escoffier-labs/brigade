@@ -1834,8 +1834,9 @@ def list_links_page(
     params: list[object] = [work_id]
     predicate = ""
     if cursor_values is not None:
-        predicate = " AND (synced_at > ? OR (synced_at = ? AND link_id > ?))"
-        params.extend([cursor_values["synced_at"], cursor_values["synced_at"], cursor_values["link_id"]])
+        # Seek past the cursor on work_links_work_order instead of filtering the item's range.
+        predicate = " AND (synced_at, link_id) > (?, ?)"
+        params.extend([cursor_values["synced_at"], cursor_values["link_id"]])
     rows = conn.execute(
         f"SELECT {', '.join(_LINK_COLUMNS)} FROM work_links WHERE work_id = ?{predicate} "
         "ORDER BY synced_at ASC, link_id ASC LIMIT ?",

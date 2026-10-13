@@ -1,0 +1,72 @@
+[
+  {
+    "id": "linked-one",
+    "cwd": "lane-7ac9",
+    "repo": "orbit-kit",
+    "task": null,
+    "candidate": "orbit kit",
+    "gold": [
+      "orbit-deploy"
+    ]
+  },
+  {
+    "id": "linked-two",
+    "cwd": "lane-4bd8",
+    "repo": "orbit-kit",
+    "task": null,
+    "candidate": "orbit kit",
+    "gold": [
+      "orbit-deploy"
+    ]
+  },
+  {
+    "id": "explicit-task",
+    "cwd": "lane-a129",
+    "repo": "orbit-kit",
+    "task": "token refresh",
+    "candidate": "token refresh",
+    "gold": [
+      "active-token"
+    ]
+  },
+  {
+    "id": "plain-fallback",
+    "cwd": "comet-notes",
+    "repo": null,
+    "task": null,
+    "candidate": "comet notes",
+    "gold": [
+      "comet"
+    ]
+  },
+  {
+    "id": "blank-task",
+    "cwd": "lane-0ed3",
+    "repo": "orbit-kit",
+    "task": "   ",
+    "candidate": "orbit kit",
+    "gold": [
+      "orbit-deploy"
+    ]
+  },
+  {
+    "id": "vague-task",
+    "cwd": "lane-2af0",
+    "repo": "orbit-kit",
+    "task": "fix thing",
+    "candidate": "fix thing",
+    "gold": [
+      "active-token"
+    ]
+  },
+  {
+    "id": "stale-scope",
+    "cwd": "lane-9ac1",
+    "repo": "orbit-kit",
+    "task": "token refresh",
+    "candidate": "token refresh",
+    "gold": [
+      "active-token"
+    ]
+  }
+]

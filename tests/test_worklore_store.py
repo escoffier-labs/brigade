@@ -806,6 +806,27 @@ def test_filtered_item_listing_stops_at_its_candidate_budget_and_paginates_past_
     assert second["next_cursor"]
 
 
+@pytest.mark.parametrize("filtered", [False, True])
+def test_item_cursor_seeks_within_timestamp_ties_and_crosses_timestamp_boundary(tmp_path, monkeypatch, filtered):
+    conn = _conn(tmp_path)
+    _legacy_items(conn, 25_000)
+    conn.execute("UPDATE work_items SET created_at = CASE WHEN work_id < 'wl-legacy-012500' THEN 'a' ELSE 'b' END")
+    conn.execute("UPDATE work_items SET status = 'ready' WHERE work_id IN ('wl-legacy-012497', 'wl-legacy-012500')")
+    conn.commit()
+    monkeypatch.setattr(store, "LIST_SCAN_MAX", 2)
+    cursor = store._encode_cursor("items", {"created_at": "a", "work_id": "wl-legacy-012495"})
+    expected_pages = [[12497], [], [12500]] if filtered else [[12496, 12497], [12498, 12499], [12500, 12501]]
+
+    for expected in expected_pages:
+        page = _within_sqlite_budget(
+            conn,
+            lambda cursor=cursor: store.list_items(conn, status="ready" if filtered else None, limit=2, cursor=cursor),
+        )
+        assert [item["work_id"] for item in page["items"]] == [f"wl-legacy-{index:06d}" for index in expected]
+        cursor = page["next_cursor"]
+        assert cursor
+
+
 def test_missing_source_sets_stale_and_appends_sync_stale(tmp_path):
     conn = _conn(tmp_path)
     observation = {
@@ -1026,6 +1047,34 @@ def test_filtered_event_listing_stops_at_its_candidate_budget_and_paginates_past
     assert first["events"] == [] and first["next_cursor"]
     assert [event["event_id"] for event in second["events"]] == ["evt-legacy-024997"]
     assert second["next_cursor"]
+
+
+@pytest.mark.parametrize("filtered", [False, True])
+def test_event_cursor_seeks_within_timestamp_ties_and_crosses_timestamp_boundary(tmp_path, monkeypatch, filtered):
+    conn = _conn(tmp_path)
+    item = store.create_item(conn, {"title": "Tied event ledger", "kind": "fleet"}, actor_id="admin")
+    _legacy_events(conn, item["work_id"], 25_000)
+    conn.execute("UPDATE work_events SET occurred_at = CASE WHEN seq < 112500 THEN 'a' ELSE 'b' END")
+    conn.execute("UPDATE work_events SET event_type = 'target' WHERE seq IN (112502, 112499)")
+    conn.commit()
+    monkeypatch.setattr(store, "LIST_SCAN_MAX", 2)
+    cursor = store._encode_cursor("events", {"occurred_at": "b", "seq": "112504"})
+    expected_pages = [[12502], [], [12499]] if filtered else [[12503, 12502], [12501, 12500], [12499, 12498]]
+
+    for expected in expected_pages:
+        page = _within_sqlite_budget(
+            conn,
+            lambda cursor=cursor: store.list_all_events(
+                conn,
+                work_id=item["work_id"] if filtered else None,
+                event_type="target" if filtered else None,
+                limit=2,
+                cursor=cursor,
+            ),
+        )
+        assert [event["event_id"] for event in page["events"]] == [f"evt-legacy-{index:06d}" for index in expected]
+        cursor = page["next_cursor"]
+        assert cursor
 
 
 def test_event_pagination_rejects_a_cursor_that_lost_its_sequence(tmp_path):
@@ -1731,6 +1780,24 @@ def test_link_pages_walk_a_high_cardinality_item_with_a_stable_cursor(tmp_path):
     assert cursor is None and pages == 3
     assert seen == [link["link_id"] for link in store.list_links(conn, work_id)]
     assert len(set(seen)) == 7
+
+
+def test_link_pages_seek_within_synced_at_ties(tmp_path):
+    conn = _conn(tmp_path)
+    work_id = store.create_item(conn, {"title": "Tied links", "kind": "fleet"}, actor_id="admin")["work_id"]
+    for number in range(5):
+        _url_link(conn, work_id, number)
+    conn.execute("UPDATE work_links SET synced_at = 'a' WHERE work_id = ?", (work_id,))
+    conn.commit()
+    expected = [row[0] for row in conn.execute("SELECT link_id FROM work_links ORDER BY link_id")]
+    seen = []
+    cursor = None
+    for _ in range(3):
+        page = store.list_links_page(conn, work_id, limit=2, cursor=cursor)
+        seen.extend(link["link_id"] for link in page["links"])
+        cursor = page["next_cursor"]
+    assert cursor is None
+    assert seen == expected
 
 
 def test_link_page_rejects_a_bad_limit_or_cursor_and_an_unknown_item(tmp_path):

@@ -7,13 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Seek current-work and change-history pages from composite continuation keys so bounded filtered reads continue past sparse matches without rescanning earlier pages. (Refs #1595)
-
 - Fenced Worklore checkpoints atomically refuse overlapping repository path declarations with bounded, structured conflicts. Handoff, terminal and unchecked historical scopes remain reserved until explicit replacement or release. Ownership reads expose historical `path-admission` while retaining unknown liveness. (Refs #1595)
+- `brigade memory recall --query` accepts bounded caller-supplied task context using the existing fail-open recall API. Task/worktree fixtures compare relevance against basename queries and report stale/scope limits. Search status adds read-only repeat-query/result counts from the existing local log, separate from verification scores. (#1563)
 
 - Run the full local verification gate in deterministic pytest shards with combined coverage and counted concurrency slots shared by linked worktrees. Shard and slot counts are configurable, and contention can wait for a bounded deadline.
 
 - Speed up strict JSON validation of unescaped ASCII strings while preserving byte limits, Unicode checks, and string-subclass isolation. (#1674)
+- Keep Worklore item, fleet-event, and link cursor reads within their SQLite work budget by seeking existing ordering indexes, preserving filtered pagination and timestamp ties. (Related #1259, #1601)
 - Honor update-notifier opt-outs before resolving the cache path, avoiding Windows platform subprocess probes during offline CLI adoption. (#1664)
 - `brigade fleet cloud set` updates global and provider hosted-worker concurrency with administrator authorization. Limits persist across hub restarts and preserve omitted policy fields and active leases. The writer requires an upgraded hub, and explicit null policy limits are rejected. (#1576)
 - Fleet journal events use the same repository key as claims, so repositories sharing a home identity appear in separate status groups. Transient git failures retain event reporting with a workspace-name fallback warning. (#1662)

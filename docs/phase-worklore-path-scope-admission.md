@@ -93,12 +93,6 @@ client exposes the refusal's error code and sanitized message, discarding
 `conflicts`, `resolution` and `truncated`. Bounded client propagation remains
 epic work.
 
-## Current-work paging
-
-Current-work and change-history paging seek from the composite continuation
-keys on their existing ordered indexes. Bounded filtered reads can continue
-past sparse matches without scanning earlier pages again.
-
 ## Historical observation and limits
 
 Successful new checkpoints record `conflict_check=path-admission`. Subsequent

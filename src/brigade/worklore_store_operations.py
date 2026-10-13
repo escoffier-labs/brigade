@@ -342,6 +342,7 @@ def _item_candidates(conn: sqlite3.Connection, *, after: Mapping[str, str] | Non
     predicate = ""
     params: tuple[object, ...] = ()
     if after is not None:
+        # Match the ordering index in one range seek, without an OR merge and sort.
         predicate = " WHERE (created_at, work_id) > (?, ?)"
         params = (after["created_at"], after["work_id"])
     return list(
@@ -486,6 +487,7 @@ def _event_candidates(conn: sqlite3.Connection, *, after: Mapping[str, str] | No
     predicate = ""
     params: tuple[object, ...] = ()
     if after is not None:
+        # Keep the descending timestamp/sequence scan on its composite index.
         predicate = " WHERE (occurred_at, seq) < (?, ?)"
         params = (after["occurred_at"], _cursor_seq(after))
     return list(

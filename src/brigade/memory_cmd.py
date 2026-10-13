@@ -25,6 +25,7 @@ from .localio import (
     utc_now_iso_z as _utc_iso,
 )
 from .memory_doctor.safety import atomic_write_text
+from .memory_search_diagnostics import _normalize_search_query, redundancy_from_entries
 from .card_identity import (
     CardIdentity,
     IdentityIndex,
@@ -1649,10 +1650,6 @@ SEARCH_LOG_MAX_ENTRIES = 500
 _SEARCH_LOG_SKIP_QUERIES = frozenset({":"})
 
 
-def _normalize_search_query(query: str) -> str:
-    return " ".join(str(query or "").lower().split())
-
-
 def _search_log_path(target: Path) -> Path:
     return target.expanduser().resolve() / SEARCH_LOG_REL
 
@@ -1767,6 +1764,7 @@ def search_recall_status(target: Path) -> dict[str, Any]:
     except OSError:
         entries = []
     stats = followup_rate_from_entries(entries)
+    stats.update(redundancy_from_entries(entries, window_s=SEARCH_FOLLOWUP_WINDOW_S))
     # Do not emit log_path here: center report build harvests path-like strings
     # from health payloads as receipt references, and a missing (or non-receipt)
     # search log would false-alarm as operator_report_missing_receipt.
@@ -1880,11 +1878,11 @@ def search(*, target: Path, query: str, limit: int = 20, json_output: bool = Fal
     return 0
 
 
-def recall(*, target: Path, cwd: Path, limit: int = 5, json_output: bool = False) -> int:
+def recall(*, target: Path, cwd: Path, limit: int = 5, json_output: bool = False, query: str | None = None) -> int:
     """Bounded session-start recall over deterministic card search (#466 Slice 1)."""
     from . import memory_hooks
 
-    return memory_hooks.recall(target=target, cwd=cwd, limit=limit, json_output=json_output)
+    return memory_hooks.recall(target=target, cwd=cwd, limit=limit, json_output=json_output, query=query)
 
 
 # --- read-only MCP server exposing memory cards over card:// ---
