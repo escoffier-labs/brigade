@@ -550,7 +550,9 @@ _UNSUPPORTED_FENCE_TABLES = {
 
 
 def fence_ddl(conn):
-    return conn.execute("SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'claim_fences'").fetchall()
+    return conn.execute(
+        "SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'claim_fences' COLLATE NOCASE"
+    ).fetchall()
 
 
 @pytest.mark.parametrize("version", [None, 25], ids=["current", "schema25"])
@@ -590,9 +592,44 @@ def test_fence_table_with_extra_index_or_trigger_refuses(authority, extra):
     conn.execute(extra)
     conn.commit()
     before = (snapshot(conn), fence_ddl(conn))
+    if extra.startswith("CREATE TRIGGER"):
+        # The unchanged-state comparison must cover the trigger row, whatever its case.
+        assert any(row[:2] == ("trigger", "fake_trg") for row in before[1])
     with pytest.raises(hub.FleetHubError, match="fence"):
         hub.init_db(path)
     assert (snapshot(conn), fence_ddl(conn)) == before
+
+
+def test_old_schema_uppercase_fence_table_refuses_as_unsupported_without_repair(tmp_path):
+    from brigade import fleet_hub_claims
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.execute(hub._CLAIMS_SCHEMA)
+    conn.execute(
+        "INSERT INTO claims (target, owner_node, holder_token, acquired_at, renewed_at, ttl_seconds, expires_at) "
+        "VALUES ('fake-target', 'fake-node', 'fake-holder', 'original', 'renewed', 900, 9999999999)"
+    )
+    # SQLite identifiers are ASCII case-insensitive, so this is the same table name.
+    conn.execute(fleet_hub_claims._FENCE_SCHEMA.replace("claim_fences", "CLAIM_FENCES"))
+    conn.execute("INSERT INTO CLAIM_FENCES (target, generation) VALUES ('fake-target', 7)")
+    conn.execute("PRAGMA user_version=25")
+    conn.commit()
+    catalog = "SELECT type, name, sql FROM sqlite_master ORDER BY name"
+    before = (
+        conn.execute("SELECT * FROM claims").fetchall(),
+        conn.execute("SELECT * FROM CLAIM_FENCES").fetchall(),
+        conn.execute(catalog).fetchall(),
+    )
+    with pytest.raises(fleet_hub_claims.ClaimFenceError, match="unsupported definition"):
+        hub.init_db(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 25
+    assert (
+        conn.execute("SELECT * FROM claims").fetchall(),
+        conn.execute("SELECT * FROM CLAIM_FENCES").fetchall(),
+        conn.execute(catalog).fetchall(),
+    ) == before
+    conn.close()
 
 
 @pytest.mark.parametrize("action", ["acquire", "renew", "release", "inspect"])

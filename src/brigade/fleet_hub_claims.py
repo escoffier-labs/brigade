@@ -111,7 +111,9 @@ def validate_schema(conn: sqlite3.Connection) -> None:
 
 def migrate_schema(conn: sqlite3.Connection) -> None:
     """One-time migration; caller owns schema transaction and version update."""
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'claim_fences'").fetchone():
+    # NOCASE: SQLite treats CLAIM_FENCES and claim_fences as one name, so an existing
+    # differently-cased object must reach validation rather than collide with CREATE.
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'claim_fences' COLLATE NOCASE").fetchone():
         # Existing history is authoritative even when user_version is old.
         # Validate its definition and rows without resetting generations or
         # backfilling missing rows.
