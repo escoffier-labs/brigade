@@ -1281,6 +1281,33 @@ def test_jules_plan_only_session_is_not_ready_to_land(tmp_path: Path):
     assert row["url"] == "https://jules.google.com/session/14361725569735593935"
 
 
+def test_jules_completed_session_with_explicitly_empty_outputs_needs_investigation(tmp_path: Path):
+    cloud_tracker.register(
+        tmp_path,
+        provider="jules",
+        task_id="sess-empty-output",
+        label="jules:owner/repo@112233445566",
+        prompt_hash=_prompt_hash("x"),
+        dispatched_at=_iso(NOW),
+    )
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks={
+            "sess-empty-output": {
+                "state": "completed",
+                "url": "https://jules.google.com/session/sess-empty-output",
+                "has_outputs": False,
+            }
+        },
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+    )
+    row = next(r for r in payload["entries"] if r["task_id"] == "sess-empty-output")
+    assert row["classification"] == "needs-investigation"
+    assert row["url"] == "https://jules.google.com/session/sess-empty-output"
+
+
 def test_jules_completed_session_with_outputs_is_ready_to_land(tmp_path: Path):
     cloud_tracker.register(
         tmp_path,
