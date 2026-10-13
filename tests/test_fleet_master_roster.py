@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -276,6 +277,7 @@ def test_parse_rejects_whitespace_only_required_text(field: str) -> None:
         fleet_master_roster.parse(document)
 
 
+@pytest.mark.skipif(sys.version_info < (3, 10, 7), reason="requires Python's integer-string digit limit")
 def test_parse_normalizes_oversized_mapping_revision() -> None:
     document = _document()
     document["revision"] = 10**5000
@@ -284,6 +286,7 @@ def test_parse_normalizes_oversized_mapping_revision() -> None:
         fleet_master_roster.parse(document)
 
 
+@pytest.mark.skipif(sys.version_info < (3, 10, 7), reason="requires Python's integer-string digit limit")
 def test_parse_normalizes_json_integer_digit_limit() -> None:
     raw = b'{"schema":"brigade.fleet_master_roster.v1","revision":' + b"9" * 5000 + b',"seats":[]}'
 
