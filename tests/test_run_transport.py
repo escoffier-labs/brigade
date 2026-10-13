@@ -1193,6 +1193,7 @@ def _interrupted_resume_run(
                         "detail": "timeout",
                         "text": "partial",
                         "thread_id": "t-sandbox",
+                        "transport": "codex-app-server",
                         "status": "interrupted",
                     }
                 ],

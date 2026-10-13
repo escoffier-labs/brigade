@@ -327,7 +327,8 @@ def parse_stream(stdout: str | None) -> tuple[dict[str, Any] | None, str]:
             if isinstance(status, str):
                 safe_event["status"] = status
             safe_events.append(safe_event)
-            effective_model = _model_from(update) or effective_model
+            if kind == "config_option_update" and "modelId" in update:
+                effective_model = _model_from(update)
             if not stream_finalized and kind == "agent_message_chunk":
                 content = update.get("content")
                 if isinstance(content, dict) and content.get("type") == "text" and isinstance(content.get("text"), str):

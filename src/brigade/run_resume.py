@@ -880,6 +880,14 @@ def _resume_locked(
             entry["detail"] = "" if entry["ok"] else redact_approval_token(turn.detail or f"turn {turn.status}")[:200]
             entry["status"] = turn.status
             entry["transport"] = "codex-app-server"
+            for stale_key in (
+                "failure_kind",
+                "timed_out",
+                "output_truncated",
+                "output_bytes",
+                "output_cap_bytes",
+            ):
+                entry.pop(stale_key, None)
             if agent is not None and isinstance(agent.model, str):
                 entry["requested_model"] = agent.model
             else:

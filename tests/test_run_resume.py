@@ -231,7 +231,13 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys, requ
                 "detail": "timeout",
                 "text": "part",
                 "thread_id": "t-1",
+                "transport": "codex-app-server",
                 "status": "interrupted",
+                "failure_kind": "output-limit",
+                "timed_out": True,
+                "output_truncated": True,
+                "output_bytes": 16384,
+                "output_cap_bytes": 16384,
             },
             {
                 "worker": "cursor-worker",
@@ -296,6 +302,11 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys, requ
     results = json.loads((run_dir / "worker-results.json").read_text())["results"]
     assert results[0]["ok"] is True and results[0]["text"] == "finished now"
     assert results[0]["status"] == "complete"
+    assert "failure_kind" not in results[0]
+    assert results[0].get("timed_out", False) is False
+    assert "output_truncated" not in results[0]
+    assert "output_bytes" not in results[0]
+    assert "output_cap_bytes" not in results[0]
     assert results[1]["transport"] == "acpx"
     if requested_model == "cursor-auto":
         assert results[1]["requested_model"] == "cursor-auto"
@@ -1169,8 +1180,8 @@ _RESUMABLE_COOK = {
     "detail": "timeout",
     "text": "part",
     "thread_id": "t-1",
-    "status": "interrupted",
     "transport": "codex-app-server",
+    "status": "interrupted",
 }
 
 

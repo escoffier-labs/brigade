@@ -470,7 +470,29 @@ def test_parse_stream_ignores_model_like_values_outside_config_updates():
             {
                 "jsonrpc": "2.0",
                 "method": "session/update",
-                "params": {"update": {"sessionUpdate": "config_option_update", "modelId": "m" * 129}},
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "hello", "model": "PRIVATE_MARKER"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["effective_model"] == "grok-4.5[effort=high,fast=true]"
+
+
+def test_parse_stream_clears_stale_model_after_rejected_explicit_update():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"update": {"sessionUpdate": "config_option_update", "modelId": "model-a"}},
             },
             {
                 "jsonrpc": "2.0",
@@ -488,16 +510,15 @@ def test_parse_stream_ignores_model_like_values_outside_config_updates():
                 "params": {
                     "update": {
                         "sessionUpdate": "agent_message_chunk",
-                        "content": {"type": "text", "text": "hello", "model": "PRIVATE_MARKER"},
+                        "content": {"type": "text", "text": "hello"},
                     }
                 },
             },
-            {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
         )
     )
 
     assert error == ""
-    assert parsed is not None and parsed["effective_model"] == "grok-4.5[effort=high,fast=true]"
+    assert parsed is not None and parsed["effective_model"] is None
 
 
 def test_parse_stream_rejects_known_credential_families_as_model_ids():
