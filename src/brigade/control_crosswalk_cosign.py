@@ -18,6 +18,11 @@ def binding_candidates(obs: control_readiness.ArtifactObservation, candidates: d
 
 def receipt_claims_untrusted(obs: control_readiness.ArtifactObservation) -> bool:
     """Return whether receipt fields failed integrity or signed-payload checks."""
+    if obs.proposed == "invalid" and any(
+        reason in {"invalid_json", "media_type_mismatch", "dsse_signatures_missing", "symlink_refused"}
+        for reason in obs.reasons
+    ):
+        return True
     return obs.proposed == "rejected" and any(
         reason in {"receipt_digest_mismatch", "signature_mismatch"} for reason in obs.reasons
     )
@@ -169,7 +174,8 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
         return _observation(
             relpath,
             "rejected",
-            integrity="unknown",
+            integrity="passed",
+            signature="passed",
             subject=("failed", "run_binding_mismatch"),
             reason="run_binding_mismatch",
             source_digest=digest,

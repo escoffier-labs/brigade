@@ -160,8 +160,8 @@ def trusted_timestamp_manifest(
     *,
     strict_package: bool,
 ) -> dict[str, object] | None:
-    """Discard manifest timestamps when strict-package integrity failed."""
-    return None if strict_package and obs.proposed == "rejected" else manifest
+    """Discard manifest timestamps until strict-package validation succeeds."""
+    return None if strict_package and obs.proposed in {"invalid", "rejected"} else manifest
 
 
 def _unavailable(relpath: str, reason: str) -> control_readiness.ArtifactObservation:

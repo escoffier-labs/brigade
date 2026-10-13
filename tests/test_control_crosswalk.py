@@ -726,6 +726,29 @@ def test_ec12_does_not_period_filter_rejected_package_from_manifest_timestamp(tm
     assert result["artifacts"][0]["reason_codes"] == ["package_snapshot_mismatch", "timestamp_missing"]
 
 
+def test_ec12_does_not_period_filter_schema_invalid_package_from_manifest_timestamp(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-invalid-period"
+    _write_strict_package(package_dir, producer_run_id=RUN)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["limitations"] = ["unsupported"]
+    manifest["created_at"] = "2020-01-01T00:00:00Z"
+    _write_json(manifest_path, manifest)
+
+    result = _assess(
+        target,
+        "EC-12",
+        RUN,
+        period=("2026-01-01T00:00:00Z", "2026-12-31T23:59:59Z"),
+    )
+
+    assert result["outcome"] == "invalid"
+    assert result["population"]["out_of_period"] == 0
+    assert result["artifacts"][0]["outcome"] == "invalid"
+    assert result["artifacts"][0]["scope"] == "in_scope"
+
+
 def test_ec12_reserves_manifest_reads_for_the_discovered_package_population(tmp_path, monkeypatch):
     target = _ws(tmp_path)
     package_root = target / ".brigade" / "evidence-packages"
@@ -1462,6 +1485,28 @@ def test_ec03_cosign_bundle_rejects_wrong_run_binding(tmp_path, monkeypatch):
 
     assert result["outcome"] == "rejected"
     assert result["reason"] == "run_binding_mismatch"
+    assert result["dimensions"]["integrity"]["status"] == "passed"
+    assert result["dimensions"]["signature"]["status"] == "passed"
+
+
+def test_ec03_does_not_bind_preverification_invalid_bundle_from_receipt(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    bundle_path = run_dir / "attestation.sigstore.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle["mediaType"] = "application/invalid"
+    _write_json(bundle_path, bundle)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["producer_run_id"] = "tampered-run"
+    _write_json(receipt_path, receipt)
+
+    result = _assess(target, "EC-03", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "invalid"
+    assert result["artifacts"][0]["scope"] == "unbound"
 
 
 def test_ec03_cosign_bundle_preserves_unavailable_verifier_state(tmp_path, monkeypatch):
@@ -1896,7 +1941,7 @@ def _fixture_ec12(target: Path) -> None:
 # claim -> (fixture, workspace outcome, workspace reason, run-scoped outcome)
 _ISSUE_FIXTURES = {
     "EC-01": (_fixture_ec01, "invalid", "schema_missing", "invalid"),
-    "EC-03": (_fixture_ec03, "invalid", "dsse_signatures_missing", "invalid"),
+    "EC-03": (_fixture_ec03, "invalid", "dsse_signatures_missing", "incomplete"),
     "EC-07": (_fixture_ec07, "invalid", "schema_missing", "incomplete"),
     "EC-09": (_fixture_ec09, "incomplete", "no_explicit_verdict", "incomplete"),
     "EC-10": (_fixture_ec10, "invalid", "invalid_jsonl_line", "incomplete"),
