@@ -210,6 +210,7 @@ def package_source_issue(
     reader: _AssessmentReader,
     artifact: Path,
     package_fd: int,
+    initial_directory_metadata: tuple[int, int, int, int, int, int],
     expected_names: set[str],
     metadata: dict[str, tuple[int, int, int, int, int, int] | None],
     *,
@@ -238,7 +239,10 @@ def package_source_issue(
     if not stat.S_ISDIR(current_directory.st_mode):
         return "unsafe"
     held_directory = os.fstat(package_fd)
-    if (current_directory.st_dev, current_directory.st_ino) != (held_directory.st_dev, held_directory.st_ino):
+    if (
+        _package_entry_metadata(held_directory) != initial_directory_metadata
+        or _package_entry_metadata(current_directory) != initial_directory_metadata
+    ):
         return "changed"
     return None
 

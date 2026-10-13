@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 from collections.abc import Callable
 from pathlib import Path
@@ -29,6 +30,8 @@ def stage_source_package(
 ) -> Path:
     """Stage a package and reject source changes during the bounded copy."""
     package_fd = reader.directory(artifact)
+    initial_directory_metadata = _control_crosswalk_io._package_entry_metadata(os.fstat(package_fd))
+    assert initial_directory_metadata is not None
     max_children = len(evidence_package.PACKAGE_FILES) + 2
     actual_names = set(_control_crosswalk_io.dirfd.child_names(package_fd, max_children))
     manifest_path = artifact / "manifest.json"
@@ -85,7 +88,13 @@ def stage_source_package(
                 raise evidence_package_snapshot.PackageSnapshotError("unsafe") from exc
             raise
     source_issue = _control_crosswalk_io.package_source_issue(
-        reader, artifact, package_fd, actual_names, source_metadata, max_children=max_children
+        reader,
+        artifact,
+        package_fd,
+        initial_directory_metadata,
+        actual_names,
+        source_metadata,
+        max_children=max_children,
     )
     if source_issue is not None:
         raise evidence_package_snapshot.PackageSnapshotError(source_issue)

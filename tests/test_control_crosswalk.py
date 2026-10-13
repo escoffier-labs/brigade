@@ -702,6 +702,30 @@ def test_ec12_rejects_package_directory_replaced_while_staging(tmp_path, monkeyp
     assert package_dir.is_dir()
 
 
+def test_ec12_rejects_package_directory_metadata_changed_while_staging(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    transient_path = package_dir / "transient-entry"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def copy_then_change_directory(reader, path, *args, **kwargs):
+        result = original_copy(reader, path, *args, **kwargs)
+        if path == manifest_path:
+            transient_path.write_text("temporary", encoding="utf-8")
+            transient_path.unlink()
+        return result
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_then_change_directory)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "unavailable"
+    assert readiness["reason"] == "verifier_error"
+    assert readiness["artifacts"][0]["outcome"] == "unavailable"
+
+
 def test_ec12_rejects_manifest_changed_after_its_initial_read(tmp_path, monkeypatch):
     target = _ws(tmp_path)
     package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
@@ -1235,6 +1259,7 @@ def test_ec03_classifies_signed_nonterminal_receipt_as_incomplete(tmp_path, monk
     [
         ("failed", "failed", 1, "status_failed"),
         ("failed", "timed_out", 124, "status_failed"),
+        ("failed", "timed_out", None, "status_failed"),
         ("rejected", "rejected", 2, "status_rejected"),
     ],
 )
