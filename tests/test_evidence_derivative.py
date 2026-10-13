@@ -166,6 +166,35 @@ def test_derivative_rejects_receipt_rewritten_with_recomputed_package_hashes(tmp
         raise AssertionError("derivative accepted a rewritten receipt with recomputed package hashes")
 
 
+def test_derivative_rejects_duplicate_json_properties(tmp_path: Path) -> None:
+    for name in ("manifest.json", "receipt.json"):
+        target = tmp_path / name.replace(".", "-")
+        _, receipt = _fabricated_run_dir(target)
+        source = target / "source"
+        assert evidence_package.export_package(target=target, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+        malformed = b'{"schema":"brigade.evidence_package.v1","schema":"brigade.evidence_package.v1"}'
+        if name == "receipt.json":
+            malformed = b'{"run_id":"first","run_id":"second"}'
+            (source / name).write_bytes(malformed)
+            _refresh_package_entry(source, name, malformed)
+        else:
+            (source / name).write_bytes(malformed)
+
+        try:
+            evidence_derivative.export_derivative(
+                source=source,
+                out=target / "derivative",
+                recipient="recipient-42",
+                authority="approved-case-7",
+                lawful_basis="contract",
+                necessity="review",
+            )
+        except evidence_derivative.DerivativeExportError as exc:
+            assert str(exc) == f"source {name.removesuffix('.json')} is malformed"
+        else:
+            raise AssertionError(f"derivative accepted duplicate properties in {name}")
+
+
 def test_derivative_rejects_blank_authorization_metadata(tmp_path: Path) -> None:
     _, receipt = _fabricated_run_dir(tmp_path)
     source = tmp_path / "source"
@@ -185,6 +214,29 @@ def test_derivative_rejects_blank_authorization_metadata(tmp_path: Path) -> None
             assert str(exc) == f"authorization metadata cannot be blank: {key}"
         else:
             raise AssertionError(f"derivative accepted blank {key} authorization metadata")
+
+
+def test_derivative_counts_redaction_matches_separately_from_removed_fields(tmp_path: Path) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    out = tmp_path / "derivative"
+
+    report = evidence_derivative.export_derivative(
+        source=source,
+        out=out,
+        recipient='contact operator@contoso.example api_key="sk-test-abcdefghijklmnopqrstuv"',
+        authority="approved-case-7",
+        lawful_basis="contract",
+        necessity="review",
+    )
+
+    raw = (out / "derivative.json").read_text(encoding="utf-8")
+    transformation = json.loads(raw)["transformation"]
+    assert report.removed_fields == transformation["removed_fields"] == 3
+    assert report.redaction_occurrences == transformation["redaction_occurrences"] == 2
+    assert "operator@contoso.example" not in raw
+    assert "sk-test-abcdefghijklmnopqrstuv" not in raw
 
 
 def test_derivative_refuses_export_inside_source_package(tmp_path: Path) -> None:

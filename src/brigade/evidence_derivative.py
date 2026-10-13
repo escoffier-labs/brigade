@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import attestation_receipt, evidence_package, evidence_redaction, localio
+from . import attestation_input, attestation_receipt, evidence_package, evidence_redaction, localio
 
 SCHEMA = "brigade.evidence_package_derivative.v1"
 SCHEMA_VERSION = 1
@@ -40,6 +40,7 @@ class DerivativeExportError(ValueError):
 @dataclass(frozen=True)
 class DerivativeReport:
     removed_fields: int
+    redaction_occurrences: int
     excluded_artifacts: int
     derivative_sha256: str
 
@@ -54,8 +55,8 @@ def _read(path: Path) -> bytes:
 
 def _json_object(data: bytes, name: str) -> dict[str, Any]:
     try:
-        value = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        value = attestation_input.strict_json_loads(data)
+    except attestation_input.AttestationInputError as exc:
         raise DerivativeExportError(f"source {name} is malformed") from exc
     if not isinstance(value, dict):
         raise DerivativeExportError(f"source {name} is not an object")
@@ -71,19 +72,19 @@ def _safe_text(value: object) -> tuple[str, int]:
     return verdict.persisted_text, verdict.count
 
 
-def _minimize_receipt(receipt: dict[str, Any]) -> tuple[dict[str, Any], int]:
+def _minimize_receipt(receipt: dict[str, Any]) -> tuple[dict[str, Any], int, int]:
     kept: dict[str, Any] = {}
-    redacted = 0
+    redaction_occurrences = 0
     for key in sorted(_RECEIPT_FIELDS & receipt.keys()):
         value = receipt[key]
         if value is None or isinstance(value, (int, bool)):
             kept[key] = value
         elif isinstance(value, str):
             kept[key], count = _safe_text(value)
-            redacted += count
+            redaction_occurrences += count
         else:
             raise DerivativeExportError(f"allowlisted receipt field has an invalid type: {key}")
-    return kept, len(set(receipt) - _RECEIPT_FIELDS) + redacted
+    return kept, len(set(receipt) - _RECEIPT_FIELDS), redaction_occurrences
 
 
 def _validate_manifest_entries(manifest: dict[str, Any], raw: dict[str, bytes]) -> None:
@@ -161,7 +162,7 @@ def export_derivative(
     source_metadata = manifest.get("source")
     if not isinstance(source_metadata, dict) or source_metadata.get("receipt_sha256") != receipt_snapshot.digest:
         raise DerivativeExportError("source manifest receipt digest does not match receipt")
-    minimized, removed = _minimize_receipt(receipt)
+    minimized, removed, redaction_occurrences = _minimize_receipt(receipt)
     excluded = len(names) - len(known_names)
     safe_authorization: dict[str, Any] = {}
     for key, value in (
@@ -175,7 +176,7 @@ def export_derivative(
         if not value.strip():
             raise DerivativeExportError(f"authorization metadata cannot be blank: {key}")
         safe_authorization[key], redacted = _safe_text(value)
-        removed += redacted
+        redaction_occurrences += redacted
     safe_authorization.update(
         {
             "organization_supplied": True,
@@ -196,6 +197,7 @@ def export_derivative(
         "transformation": {
             "policy_version": POLICY_VERSION,
             "removed_fields": removed,
+            "redaction_occurrences": redaction_occurrences,
             "excluded_artifacts": excluded,
             "unknown_artifact_policy": "excluded",
         },
@@ -222,4 +224,4 @@ def export_derivative(
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
-    return DerivativeReport(removed, excluded, hashlib.sha256(encoded).hexdigest())
+    return DerivativeReport(removed, redaction_occurrences, excluded, hashlib.sha256(encoded).hexdigest())
