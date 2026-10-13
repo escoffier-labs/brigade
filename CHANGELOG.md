@@ -108,6 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The fleet boards at `/view/machines` and `/view/repos` render in the Command Deck theme through a shared `ui_theme` module, and Deck forms gain a spacing scale (16px panels, 36px controls, 8px helper-text gap, 40px buttons). Routes are unchanged. (#1495)
 - Declared version and beta preview base move to 0.28.0 after the v0.27.0 tag so publish-dev wheels sort above stable. (#1468)
 
+- `brigade receipts export journal` exports one fully validated lifecycle journal as canonical JSONL, with inclusive UTC time filtering, original sequence order and digests, exclusive file creation, and no source mutation. Filtered subsets require original journal context for chain verification. This is the journal-export slice of #1407, following shipped trailers, packages and acknowledgement. Retention (#1621) and prune (#1622) remain separate, and the parent stays open.
+
 ## [0.27.0] - 2026-09-06
 
 ### Fixed
