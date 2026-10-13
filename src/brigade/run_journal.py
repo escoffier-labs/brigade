@@ -209,11 +209,12 @@ def _append_critical_section(journal_path: Path | None = None) -> Iterator[None]
 def journal_mutation(journal_path: Path) -> Iterator[None]:
     """Serialize a journal read-verify-mutate window across processes."""
     with _append_critical_section(Path(journal_path)):
+        previous_reentry = getattr(_APPEND_TLS, "allow_journal_reentry", False)
         _APPEND_TLS.allow_journal_reentry = True
         try:
             yield
         finally:
-            _APPEND_TLS.allow_journal_reentry = False
+            _APPEND_TLS.allow_journal_reentry = previous_reentry
 
 
 class RunJournalError(RuntimeError):

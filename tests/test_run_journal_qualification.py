@@ -1337,6 +1337,111 @@ def test_caller_terminalization_holds_journal_until_terminal_receipt(tmp_path, m
     assert evidence["forensic_recovery"] == "covered"
 
 
+def test_runs_recovery_completes_with_two_matching_stale_claims(tmp_path):
+    """Sibling recovery callbacks retain the outer journal mutation's reentry permission."""
+    from brigade import doctor
+
+    repo = tmp_path / "repo"
+    run_dir = repo / ".brigade" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    snapshot = run_dir / "run.json"
+    base = {"schema": "brigade.run.v1", "status": "started", "lifecycle_journal_requested": True}
+    snapshot.write_bytes(run_projector.encode_snapshot_bytes(base))
+    with runguard.run_lock(repo, run_dir=run_dir):
+        checkpoint = run_checkpoint.write_checkpoint(
+            run_dir,
+            run_projector.encode_snapshot_bytes({**base, "run_journal_authority_requested": True}),
+            workspace=repo,
+            paired_event_type=None,
+            body_kind="base-stripped",
+        )
+    assert checkpoint is not None
+    lock = runguard.lock_path(repo)
+    claims = [lock.with_name(f".{lock.name}.{name}.stale") for name in ("first", "second")]
+    for index, claim in enumerate(claims):
+        claim.mkdir()
+        dead_pid = 99999999
+        (claim / "pid").write_text(f"{dead_pid}\n", encoding="utf-8")
+        (claim / "owner.json").write_text(
+            json.dumps(
+                {
+                    "schema": "brigade.run_lock.v1",
+                    "owner_token": f"dead-owner-{index}",
+                    "pid": dead_pid,
+                    "run_dir": str(run_dir.resolve()),
+                    "acquired_at": "2026-10-12T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+    snapshot.unlink()
+    child_root = tmp_path / "child"
+    child_root.mkdir()
+    environment = {
+        "HOME": str(child_root),
+        "USERPROFILE": str(child_root),
+        "TMP": str(child_root),
+        "TEMP": str(child_root),
+        "TMPDIR": str(child_root),
+        "PATH": os.defpath,
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "BRIGADE_HOME": str(child_root / "operator" / ".brigade"),
+        "BRIGADE_USER_DIR": str(child_root / "operator" / ".brigade"),
+        "BRIGADE_NO_UPDATE_CHECK": "1",
+    }
+    if os.name == "nt":
+        for key in ("SYSTEMROOT", "WINDIR"):
+            if key in os.environ:
+                environment[key] = os.environ[key]
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from pathlib import Path; from brigade import runs_cmd; "
+            "sys.exit(runs_cmd.recover(Path(sys.argv[1]), cwd=Path(sys.argv[2])))",
+            str(run_dir),
+            str(repo),
+        ],
+        cwd=child_root,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    try:
+        try:
+            stdout, stderr = child.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            stdout, stderr = child.communicate(timeout=5)
+            pytest.fail(f"recovery timed out with two matching stale claims\nstdout:\n{stdout}\nstderr:\n{stderr}")
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=5)
+    assert child.returncode == 0, f"recovery stdout:\n{stdout}\nstderr:\n{stderr}"
+    assert not lock.exists()
+    assert all(not claim.exists() for claim in claims)
+    assert not list(lock.parent.glob(f".{lock.name}.*.stale"))
+    terminal = json.loads(snapshot.read_bytes())
+    assert terminal["status"] == "failed"
+    assert terminal["failure_phase"] == "stale-lock-recovery"
+    tail = run_journal.read_journal_bounded(run_dir / "events" / "lifecycle.jsonl").events[-1]
+    assert (terminal["journal_last_sequence"], terminal["journal_last_event_digest"]) == (
+        tail.sequence,
+        tail.event_digest,
+    )
+    assert doctor._recovery_checkpoint_run_verdict(repo, run_dir) == (
+        "ok",
+        "stale-lock-recovery receipt matches projection reconstruction",
+    )
+
+
 @pytest.mark.parametrize("operation", ["append-sync", "append-close", "replay-close"])
 def test_complete_append_or_replay_close_failure_keeps_indeterminate_outcome(tmp_path, monkeypatch, operation):
     path = tmp_path / "events" / "lifecycle.jsonl"

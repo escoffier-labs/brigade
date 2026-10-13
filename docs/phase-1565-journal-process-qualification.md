@@ -1,5 +1,7 @@
 # Journal process qualification: bounded #1565 slice
 
+## Historical test-only producer handoff
+
 This slice adds independent process tests for the existing journal kernel at
 base `da3d4db6d448d1ed82aa6153c38d01d3a1e2276b`. It changes no production
 behavior. Issue #1565 remains open. The producer ran no tests or fixture
@@ -173,5 +175,6 @@ version sync and both snapshots, with `494 passed in 24.15s`. It selected
 `tests/test_run_events_cursor_control.py` through
 `brigade work verify run` with `./scripts/verify-focused`. It includes unchanged
 identical-event retry, pure forensic reads, killed-writer recovery and the new
-sync/close uncertainty and recovery-publication regressions. Full verification,
-current-head independent implementation review and required CI remain pending.
+sync/close uncertainty and recovery-publication regressions. At that receipt,
+full verification, current-head independent implementation review and required
+CI remained pending.
