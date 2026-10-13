@@ -32,7 +32,7 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:Proxy-)?Authorization\s*:\s*Bearer\s+\S+|\bBearer\s+[A-Za-z0-9._~+/-]{20,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
-    r"\bauth(?:entication)?[ _-]profiles?\s+(?:(?:is\s+)?provided\s+(?:as|with)|is|are|was|equals|will\s+be|has\s+been|set\s+to|configured\s+(?:as|to|with))\s+"
+    r"\bauth(?:entication)?[ _-]profiles?\s+(?:(?:is\s+)?provided\s+(?:as|with)|is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|configured\s+(?:as|to|with))\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s*[:=]\s*" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
@@ -71,10 +71,15 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*\s*=(?!=|>)",
     re.IGNORECASE,
 )
+_PATH_LABEL = (
+    r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositories|repos?|locations?)"
+)
+_PATH_DECLARATION_LINKER = (
+    r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)"
+)
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
 _EXPLICIT_TERMINAL_PATH = re.compile(
-    r"\b(?:home\s+directory|path|file(?:\s+names?)?|filenames?|directory|folder|script|repository|repo|location)\s*"
-    r"(?:is|are|was|were|equals|will\s+be|has\s+been|set\s+to|:|=)\s*[\"'“‘`()\[{]*\s*"
+    r"\b(?:home\s+directory|" + _PATH_LABEL + r")\s*" + _PATH_DECLARATION_LINKER + r"\s*[\"'“‘`()\[{]*\s*"
     r"(?:~|/|\\|\.{1,2})(?=$|[\s,;!?\"'”’)\]}])",
     re.IGNORECASE,
 )
@@ -146,15 +151,14 @@ _RELATIVE_PATH = re.compile(
     r"(?<![A-Za-z0-9_.-])(?P<path>(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+)(?![A-Za-z0-9_.~-])"
 )
 _PATH_CONTEXT = re.compile(
-    r"(?:\b(?:run|execute|inspect|open|read|write|load|save|path|file(?:\s+names?)?|filenames?|directory|folder|script|repository|repo|location)\s+"
+    r"(?:\b(?:run|execute|inspect|open|read|write|load|save|" + _PATH_LABEL + r")\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?"
     r"[\"'“‘]*\s*(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?|"
-    r"\b(?:path|file(?:\s+names?)?|filenames?|directory|folder|script|repository|repo|location)\s*(?:is|are|was|were|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s*)[\"'“‘`()\[{]*\s*$",
+    r"\b" + _PATH_LABEL + r"\s*" + _PATH_DECLARATION_LINKER + r"\s*)[\"'“‘`()\[{]*\s*$",
     re.IGNORECASE,
 )
 _EXPLICIT_PATH_DECLARATION = re.compile(
-    r"\b(?:path|file(?:\s+names?)?|filenames?|directory|folder|script|repository|repo|location)\s*"
-    r"(?:is|are|was|were|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s*$",
+    r"\b" + _PATH_LABEL + r"\s*" + _PATH_DECLARATION_LINKER + r"\s*$",
     re.IGNORECASE,
 )
 _QUOTED_PATH_CONTEXT = re.compile(
@@ -164,8 +168,7 @@ _QUOTED_PATH_CONTEXT = re.compile(
 _SPACED_PATH_CONTEXT = re.compile(
     r"(?:\b(?:run|execute|inspect|open|read|write|load|save)\s+"
     r"(?:(?:from|at|in|to|into|under)\s+)?|"
-    r"\b(?:path|file(?:\s+names?)?|filenames?|directory|folder|script|repository|repo|location)\s*"
-    r"(?:is|are|was|were|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s+)"
+    r"\b" + _PATH_LABEL + r"\s*" + _PATH_DECLARATION_LINKER + r"\s+)"
     r"(?:[A-Za-z0-9_.~-]+\s+)+$",
     re.IGNORECASE,
 )
