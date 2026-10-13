@@ -413,7 +413,7 @@ def open_file(parent: int, name: str, flags: int, mode: int = 0o600, *, share_wr
     fd_flags = os.O_WRONLY if write and not (flags & os.O_RDWR) else os.O_RDONLY
     if flags & os.O_RDWR:
         fd_flags = os.O_RDWR
-    fd_flags |= flags & os.O_APPEND
+    fd_flags |= flags & (os.O_APPEND | getattr(os, "O_BINARY", 0))
     try:
         _reject_reparse(api, handle, expected_directory=False)
         return _handle_to_fd(api, handle, fd_flags)

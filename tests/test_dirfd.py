@@ -334,6 +334,7 @@ def nt_metadata_kernel(monkeypatch):
     live = set()
     closed = []
     opens = []
+    conversions = []
     failures = set()
     real_fstat, real_close = os.fstat, os.close
 
@@ -378,6 +379,7 @@ def nt_metadata_kernel(monkeypatch):
     def convert(handle, flags):
         if "convert" in failures:
             raise OSError("CRT conversion failed")
+        conversions.append(flags)
         return handle
 
     def fstat(handle):
@@ -400,7 +402,7 @@ def nt_metadata_kernel(monkeypatch):
     monkeypatch.setattr(os, "close", close)
     monkeypatch.setattr(dirfd, "posix_available", lambda: False)
     monkeypatch.setattr(dirfd, "nt_available", lambda: True)
-    return SimpleNamespace(opens=opens, live=live, closed=closed, failures=failures)
+    return SimpleNamespace(opens=opens, live=live, closed=closed, failures=failures, conversions=conversions)
 
 
 def test_assessment_reader_descends_directories_with_nt_metadata(tmp_path, nt_metadata_kernel):
@@ -451,6 +453,20 @@ def test_nt_open_child_file_can_deny_write_sharing(tmp_path, nt_metadata_kernel)
     descriptor = dirfd.open_child_file(parent, "receipt.json", os.O_RDONLY, share_write=False)
     try:
         assert kernel.opens[-1][-1] == nt_dirfd._FILE_SHARE_READ | nt_dirfd._FILE_SHARE_DELETE
+    finally:
+        os.close(descriptor)
+        os.close(parent)
+
+
+def test_nt_open_child_file_preserves_binary_mode_for_crt_descriptor(tmp_path, monkeypatch, nt_metadata_kernel):
+    from brigade.work_cmd import nt_dirfd
+
+    binary_flag = 0x8000
+    monkeypatch.setattr(os, "O_BINARY", binary_flag, raising=False)
+    parent = nt_dirfd.open_root_directory(tmp_path, writable=False)
+    descriptor = dirfd.open_child_file(parent, "receipt.json", os.O_RDONLY | binary_flag)
+    try:
+        assert nt_metadata_kernel.conversions[-1] & binary_flag
     finally:
         os.close(descriptor)
         os.close(parent)
