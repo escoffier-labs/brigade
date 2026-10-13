@@ -135,7 +135,13 @@ def test_worker_payload_distinguishes_declared_and_observed_model_evidence():
                     "locator": "x" * 500,
                     "digest": "not-a-digest",
                     "unknown_reason": "private provider error",
-                }
+                },
+                "effective_model": {
+                    "source": ["Bearer secret-token"],
+                    "locator": {"error": "private"},
+                    "digest": ["not-a-digest"],
+                    "unknown_reason": {"error": "private"},
+                },
             },
         },
     )
@@ -144,6 +150,7 @@ def test_worker_payload_distinguishes_declared_and_observed_model_evidence():
 
     assert "observed_at" not in untrusted_entry
     assert "requested_model" not in untrusted_entry["fields"]
+    assert "effective_model" not in untrusted_entry["fields"]
     assert "secret" not in str(untrusted_entry)
 
 

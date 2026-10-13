@@ -50,15 +50,19 @@ def _safe_metadata_provenance(value: dict[str, object]) -> dict[str, object]:
             unknown_reason = evidence.get("unknown_reason")
             digest = evidence.get("digest")
             safe_evidence: dict[str, object] = {}
-            if source in {"declared", "observed", "inferred"}:
+            if isinstance(source, str) and source in {"declared", "observed", "inferred"}:
                 safe_evidence["source"] = source
-            if locator in {"launch-argument", "acp-session-update", "acpx-version-output"}:
+            if isinstance(locator, str) and locator in {
+                "launch-argument",
+                "acp-session-update",
+                "acpx-version-output",
+            }:
                 safe_evidence["locator"] = locator
             if isinstance(digest, str) and re.fullmatch(r"[0-9a-fA-F]{64}", digest):
                 safe_evidence["digest"] = digest.lower()
             elif digest is None:
                 safe_evidence["digest"] = None
-            if unknown_reason in {
+            if isinstance(unknown_reason, str) and unknown_reason in {
                 "mutable-alias-not-backend-identity",
                 "launched-argument-not-backend-observation",
                 "backend-revision-unavailable",
