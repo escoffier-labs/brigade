@@ -18,6 +18,8 @@ ACTIVE_EVENT_TTL_SECONDS = 30 * 60
 STALE_HISTORY_AFTER_SECONDS = 24 * 60 * 60
 BOARD_LIMIT = 200
 BOARD_OFFSET_MAX = 1_000_000
+MACHINE_RUN_LIMIT = 100
+MACHINE_PAGE_RUN_LIMIT = 2_000
 
 _LATEST_COLUMNS = (
     "node_id, run_id, repo, seat, harness, state, ts, sequence, digest, "
@@ -78,7 +80,8 @@ def _latest_sql(
     if received_after:
         predicates.append("e.received_at >= ?")
     if node_ids:
-        predicates.append(f"e.node_id IN ({','.join('?' for _ in node_ids)})")
+        placeholders = ",".join("?" for _ in node_ids)
+        predicates.append(f"(e.harness = 'grokbot' OR e.node_id IN ({placeholders}))")
     if predicates:
         inner = inner.replace(" FROM events e", f" FROM events e WHERE {' AND '.join(predicates)}")
     columns = _LATEST_COLUMNS
@@ -90,7 +93,10 @@ def _latest_sql(
             "AND e2.seat IS NOT NULL AND trim(e2.seat) != '' AND e2.seat != '-' "
             "ORDER BY e2.sequence DESC, e2.received_at DESC, e2.digest DESC LIMIT 1) END AS last_known_seat"
         )
-    return f"SELECT {columns} FROM ({inner}) AS latest WHERE rn = 1"
+    outer = f"SELECT {columns} FROM ({inner}) AS latest WHERE rn = 1"
+    if node_ids:
+        outer += f" AND node_id IN ({','.join('?' for _ in node_ids)})"
+    return outer
 
 
 def board_latest_sql(*, windowed: bool) -> str:
@@ -218,10 +224,10 @@ def board_status_for_nodes(
     history_window_seconds: int = STALE_HISTORY_AFTER_SECONDS,
     stale_history_after_seconds: int = STALE_HISTORY_AFTER_SECONDS,
     resolve_last_known_seat: bool = False,
-) -> list[dict[str, Any]]:
-    """Return all latest run rows for one bounded page of machine identities."""
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """Return a bounded latest-run view and identities with truncated history."""
     if not node_ids:
-        return []
+        return [], set()
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     windowed = not include_all
     sql = _latest_sql(
@@ -236,18 +242,48 @@ def board_status_for_nodes(
         ).isoformat()
         params.append(cutoff)
     params.extend(node_ids)
-    rows = conn.execute(sql, params).fetchall()
-    return [
+    params.extend(node_ids)
+    columns = _LATEST_COLUMNS.split(", ")
+    if resolve_last_known_seat:
+        columns.append("last_known_seat")
+    ranked_sql = (
+        f"WITH latest AS ({sql}), "
+        "node_ranked AS ("
+        "SELECT latest.*, ROW_NUMBER() OVER (PARTITION BY node_id "
+        "ORDER BY received_at DESC, run_id) AS machine_rank FROM latest), "
+        "page_ranked AS ("
+        "SELECT node_ranked.*, ROW_NUMBER() OVER ("
+        "ORDER BY machine_rank, received_at DESC, node_id, run_id) AS page_rank "
+        "FROM node_ranked), "
+        "marked AS ("
+        "SELECT page_ranked.*, MAX(CASE WHEN machine_rank > ? OR page_rank > ? THEN 1 ELSE 0 END) "
+        "OVER (PARTITION BY node_id) AS node_truncated FROM page_ranked) "
+    )
+    run_columns = ", ".join(columns)
+    empty_columns = ", ".join("node_id" if name == "node_id" else f"NULL AS {name}" for name in columns)
+    ranked_sql += (
+        f"SELECT 'run' AS row_kind, {run_columns}, node_truncated FROM marked "
+        "WHERE machine_rank <= ? AND page_rank <= ? "
+        "UNION ALL "
+        f"SELECT 'truncated' AS row_kind, {empty_columns}, 1 AS node_truncated "
+        "FROM (SELECT DISTINCT node_id FROM marked WHERE node_truncated = 1)"
+    )
+    params.extend((MACHINE_RUN_LIMIT, MACHINE_PAGE_RUN_LIMIT, MACHINE_RUN_LIMIT, MACHINE_PAGE_RUN_LIMIT))
+    rows = conn.execute(ranked_sql, params).fetchall()
+    truncated = {str(row[1]) for row in rows if row[0] == "truncated" and row[1]}
+    runs = [
         _status_entry(
             conn,
-            row,
+            row[1 : len(columns) + 1],
             now=current,
             age_stale=include_all,
             stale_history_after_seconds=stale_history_after_seconds,
             resolve_last_known_seat=resolve_last_known_seat,
         )
         for row in rows
+        if row[0] == "run"
     ]
+    return runs, truncated
 
 
 def board_machine_page(

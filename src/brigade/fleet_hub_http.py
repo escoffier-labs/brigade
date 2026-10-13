@@ -663,6 +663,7 @@ def make_handler(
                     else None
                 )
                 complete_base_node_ids: set[str] = set()
+                truncated_node_ids: set[str] = set()
                 if query_model is not None:
 
                     def machine_priority(entry: dict[str, Any]) -> int:
@@ -694,14 +695,14 @@ def make_handler(
                         priority=machine_priority,
                     )
                     machine_limit = fleet_hub_status.BOARD_LIMIT
-                    board_runs = fleet_hub_status.board_status_for_nodes(
+                    board_runs, truncated_node_ids = fleet_hub_status.board_status_for_nodes(
                         conn,
                         machine_node_ids,
                         include_all=include_all,
                         now=current,
                         history_window_seconds=frozen_deck.stale_history_after_seconds,
                         stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
-                        resolve_last_known_seat=bool(query_model.seat),
+                        resolve_last_known_seat=True,
                     )
                     board = fleet_hub_status.BoardStatus(
                         runs=board_runs,
@@ -867,6 +868,7 @@ def make_handler(
                 unread_offset=unread_offset,
                 unread_only_page=unread_only_page,
                 complete_base_node_ids=complete_base_node_ids,
+                truncated_node_ids=truncated_node_ids,
             )
             # The legacy board used ``/`` as its machines route. Root now
             # belongs to the Command Deck, so keep every legacy navigation

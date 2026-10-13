@@ -528,6 +528,7 @@ def _machine_card(
     now: datetime,
     sort: str,
     unread_count: int = 0,
+    truncated_history: bool = False,
 ) -> str:
     last_seen = _parse_stamp((node_info or {}).get("last_received_at"))
     last_age = (now - last_seen).total_seconds() if last_seen is not None else None
@@ -542,6 +543,11 @@ def _machine_card(
     if held:
         items = "".join(f"<li>{esc(claim.target)}: {esc(_claim_text(claim))}</li>" for claim in held)
         holds = f'<div class="fleet-holds">{esc("holds")}<ul>{items}</ul></div>'
+    history_note = (
+        f'<p class="fleet-history-truncated">{esc("older runs omitted; showing a bounded recent history")}</p>'
+        if truncated_history
+        else ""
+    )
     table = _run_table(sort_rows(rows, sort), f"node-{short_node(node_id)}", with_node=False)
     return (
         f'<article class="machine-card" data-node="{esc(node_id)}">'
@@ -550,7 +556,7 @@ def _machine_card(
         f'<h2 class="machine-card-title" title="{esc(node_id)}">{esc(short_node(node_id))}</h2>'
         f'<div class="machine-card-line">{esc(" · ".join(meta))}</div>'
         f"{_count_strip(rows)}</div></header>"
-        f"{holds}{table}</article>"
+        f"{holds}{history_note}{table}</article>"
     )
 
 
@@ -604,6 +610,7 @@ def _machine_board(
     unread_offset: int = 0,
     unread_only_page: bool = False,
     complete_base_node_ids: set[str] | None = None,
+    truncated_node_ids: set[str] | None = None,
 ) -> str:
     info = {str(node.get("node_id") or ""): node for node in nodes}
     by_node: dict[str, list[RunRow]] = {}
@@ -636,6 +643,7 @@ def _machine_board(
                 now=now,
                 sort=query.sort,
                 unread_count=unread_counts.get(node_id, 0),
+                truncated_history=node_id in (truncated_node_ids or set()),
             )
         )
     if not cards:
@@ -772,6 +780,7 @@ def render_page(
     unread_offset: int = 0,
     unread_only_page: bool = False,
     complete_base_node_ids: set[str] | None = None,
+    truncated_node_ids: set[str] | None = None,
 ) -> str:
     """Render the full dashboard document for one board.
 
@@ -804,6 +813,7 @@ def render_page(
             unread_offset=unread_offset,
             unread_only_page=unread_only_page,
             complete_base_node_ids=complete_base_node_ids,
+            truncated_node_ids=truncated_node_ids,
         )
         title = "Fleet: Machines"
     stamp = current.astimezone(timezone.utc).strftime("%H:%M:%S UTC")

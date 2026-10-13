@@ -350,6 +350,20 @@ class TestBoards:
         assert "succeeded" in all_text
         assert "holder-secret" not in all_text
 
+    def test_machine_page_does_not_resurrect_old_grokbot_revision(self, hub):
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(NODE_A, "stable-machine-run", 1, "run.started", repo="repo", harness="codex", ts=stamp),
+            _event(NODE_A, "shared-grok", 1, "external.queued", repo="repo", harness="grokbot", ts=stamp),
+            _event(NODE_B, "shared-grok", 2, "external.completed", repo="repo", harness="grokbot", ts=stamp),
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+
+        _status, _headers, page = _request(hub, "GET", f"/view/machines?all=1&node={NODE_A}", headers=_bearer())
+
+        assert "shared-grok" not in page
+
     def test_finished_verify_buckets_use_exit_status(self, hub):
         now = datetime.now(timezone.utc).isoformat()
         events = [
@@ -1087,19 +1101,6 @@ class TestBoardBounds:
         _status, _headers, all_repos = _request(hub, "GET", "/view/repos?all=1", headers=_bearer())
         assert "repo-old" in all_repos
 
-    def test_all_machine_board_keeps_each_nodes_runs_together(self, hub):
-        now = datetime.now(timezone.utc).isoformat()
-        events = [
-            _event(NODE_A, f"page-{index}", 1, "run.completed", repo=f"repo-{index}", harness="claude", ts=now)
-            for index in range(fleet_hub.BOARD_LIMIT + 1)
-        ]
-        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
-        assert status == 200, text
-        _status, _headers, first = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
-        first_ids = {f"page-{index}" for index in range(fleet_hub.BOARD_LIMIT + 1) if f'title="page-{index}"' in first}
-        assert 'class="fleet-more"' not in first
-        assert len(first_ids) == fleet_hub.BOARD_LIMIT + 1
-
     def test_unread_candidates_do_not_repeat_across_event_pages(self, hub, monkeypatch):
         now = datetime.now(timezone.utc).isoformat()
         node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
@@ -1143,14 +1144,17 @@ class TestBoardBounds:
         assert f'data-node="{NODE_A}"' in page
         assert "1 unread messages" in page
 
-    def test_machine_pages_keep_all_runs_for_each_node(self, hub, monkeypatch):
-        run_ids = [f"run-{index:03d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
+    def test_machine_pages_bound_runs_per_node_without_splitting_machine(self, hub, monkeypatch):
+        run_ids = [f"run-{index:03d}" for index in range(201)]
         stamp = datetime.now(timezone.utc).isoformat()
         events = [
-            _event(NODE_A, run_id, 1, "run.started", repo="repo", harness="codex", ts=stamp) for run_id in run_ids
+            _event(NODE_A, run_id, 1, "run.completed", repo="repo", harness="codex", ts=stamp) for run_id in run_ids
         ]
-        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
-        assert status == 200, text
+        for start in range(0, len(events), 1000):
+            status, _headers, text = _request(
+                hub, "POST", "/events", headers=_bearer(), body=events[start : start + 1000]
+            )
+            assert status == 200, text
 
         node_queries = []
         original_node_query = fleet_hub_status.board_machine_page
@@ -1172,11 +1176,42 @@ class TestBoardBounds:
 
         assert status == 200
         assert page.count(f'data-node="{NODE_A}"') == 1
-        assert all(run_id in page for run_id in run_ids)
+        assert 'class="fleet-more"' not in page
+        shown_run_ids = {run_id for run_id in run_ids if f'title="{run_id}"' in page}
+        assert len(shown_run_ids) == 100
+        assert "older runs omitted" in page
         assert node_queries == [True]
         assert page_queries == [[NODE_A]]
 
-    def test_machine_seat_filter_resolves_history_without_per_run_queries(self, hub, monkeypatch):
+    def test_machine_page_caps_total_runs_and_marks_truncation(self, hub):
+        node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(21)]
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(
+                node_id,
+                f"n{node_index:02d}-r{run_index:03d}",
+                1,
+                "run.completed",
+                repo="repo",
+                harness="codex",
+                ts=stamp,
+            )
+            for node_index, node_id in enumerate(node_ids)
+            for run_index in range(100)
+        ]
+        for start in range(0, len(events), 1000):
+            status, _headers, text = _request(
+                hub, "POST", "/events", headers=_bearer(), body=events[start : start + 1000]
+            )
+            assert status == 200, text
+
+        status, _headers, page = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
+
+        assert status == 200
+        assert page.count("<tr data-bucket=") == 2000
+        assert "older runs omitted" in page
+
+    def test_machine_pages_resolve_history_seats_without_per_run_queries(self, hub, monkeypatch):
         stamp = datetime.now(timezone.utc).isoformat()
         events = [
             _event(NODE_A, "historical-seat", 1, "run.started", repo="repo", harness="codex", ts=stamp),
@@ -1195,10 +1230,15 @@ class TestBoardBounds:
 
         monkeypatch.setattr(fleet_hub_http, "open_db", trace_open_db)
 
-        status, _headers, page = _request(hub, "GET", "/view/machines?all=1&seat=worker", headers=_bearer())
+        status, _headers, filtered_page = _request(hub, "GET", "/view/machines?all=1&seat=worker", headers=_bearer())
 
         assert status == 200
-        assert "historical-seat" in page
+        assert "historical-seat" in filtered_page
+        assert "worker/codex" in filtered_page
+        status, _headers, unfiltered_page = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
+        assert status == 200
+        assert "historical-seat" in unfiltered_page
+        assert "worker/codex" in unfiltered_page
         assert not any("SELECT seat FROM events WHERE node_id" in statement for statement in statements)
 
     def test_claim_only_machine_cards_are_bounded_and_paginated(self, hub, monkeypatch):
