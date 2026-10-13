@@ -468,6 +468,11 @@ def test_doctor_projects_named_browser_preflight_states(monkeypatch, tmp_path: P
         ({**base, "browser_identity": ""}, "ambiguous-browser-profile", "warn"),
         ({**base, "lane": "another_lane"}, "wrong-lane", "warn"),
         ({**base, "owner": "another-owner"}, "ownership-conflict", "warn"),
+        (
+            {**base, "owner": "token-owner-a", "expected_owner": "token-owner-b"},
+            "ownership-conflict",
+            "warn",
+        ),
         ({**base, "login_status": "verification-required"}, "human-verification-required", "warn"),
         ({**base, "login_status": "quota-exhausted"}, "provider-quota", "warn"),
         ({**base, "mode": "standard"}, "mode-unavailable", "warn"),
@@ -494,6 +499,66 @@ def test_doctor_projects_named_browser_preflight_states(monkeypatch, tmp_path: P
             assert lane["browser_preflight"]["session_ref"] == "conversation-42"
             if "output_receipt" in evidence:
                 assert lane["browser_preflight"]["output_receipt"] == evidence["output_receipt"]
+
+
+def test_doctor_surfaces_blocker_from_oracle_fallback(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("brigade.research.doctor.shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr("brigade.research.llm.shutil.which", lambda name: f"/usr/bin/{name}")
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(
+                name="chef",
+                cli="codex",
+                role="orchestrator",
+                capabilities=("research.plan", "research.extract", "research.review"),
+            ),
+            "luna": Agent(
+                name="luna",
+                cli="codex",
+                role="researcher",
+                model="gpt-5.6-luna",
+                capabilities=("research.synthesize",),
+            ),
+            "gemini_browser": Agent(
+                name="gemini_browser",
+                cli="oracle",
+                role="browser researcher",
+                model="gemini-3.1-pro",
+                capabilities=("research.synthesize",),
+                read_only_capable=True,
+            ),
+        },
+    )
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "research.toml").write_text(
+        '[research]\ndefault_profile = "grounded"\n\n[profiles.grounded]\nsynthesizer = ["luna", "gemini_browser"]\n',
+        encoding="utf-8",
+    )
+
+    def probe(agent: Agent) -> dict[str, object]:
+        evidence = {
+            "browser_identity": "research-browser",
+            "lane": "gemini_browser",
+            "owner": "token-owner-a",
+            "expected_owner": "token-owner-b",
+            "login_status": "authenticated",
+            "mode": "deep-research",
+            "model": "gemini-3.1-pro",
+            "collector_status": "available",
+        }
+        return {
+            "auth_status": "authenticated",
+            "detail": "healthy",
+            "executable": f"/usr/bin/{agent.cli}",
+            **({"browser_preflight": evidence} if agent.cli == "oracle" else {}),
+        }
+
+    payload = doctor_payload(tmp_path, roster=roster, profile_name="grounded", probe=probe)
+    synth = next(lane for lane in payload["lanes"] if lane["capability"] == "research.synthesize")
+    assert synth["status"] == "warn"
+    assert synth["fallback_browser_preflight"]["blocker"] == "ownership-conflict"
+    assert "fallback browser preflight blocker: ownership-conflict" in synth["detail"]
 
 
 def test_doctor_redacts_secret_keys_recursively(monkeypatch, tmp_path: Path) -> None:

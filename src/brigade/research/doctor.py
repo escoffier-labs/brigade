@@ -180,11 +180,13 @@ def _probe_healthy(
     if not executable:
         return False
     if browser_lane is not None:
-        projection = browser_preflight.project(
-            probe_result.get("browser_preflight"),
-            lane=browser_lane,
-            requested_model=browser_model,
-        )
+        projection = probe_result.get("_browser_preflight_projection")
+        if not isinstance(projection, dict):
+            projection = browser_preflight.project(
+                probe_result.get("browser_preflight"),
+                lane=browser_lane,
+                requested_model=browser_model,
+            )
         return browser_preflight.ready(projection)
     return True
 
@@ -214,6 +216,7 @@ def _build_lane(
     failure_kind: str | None = None,
     fallback_seat: str | None = None,
     fallback_status: str | None = None,
+    fallback_browser_preflight: dict[str, object] | None = None,
 ) -> dict[str, object]:
     cli_ref = agent.cli if agent is not None else None
     command = agents.command_for(cli_ref) if cli_ref else None
@@ -252,16 +255,24 @@ def _build_lane(
         "detail": detail,
     }
     if agent is not None and agent.cli == "oracle":
-        projection = browser_preflight.project(
-            probe_result.get("browser_preflight"),
-            lane=agent.name,
-            requested_model=agent.model,
-        )
+        projection = probe_result.get("_browser_preflight_projection")
+        if not isinstance(projection, dict):
+            projection = browser_preflight.project(
+                probe_result.get("browser_preflight"),
+                lane=agent.name,
+                requested_model=agent.model,
+            )
         lane["browser_preflight"] = projection
         blocker = projection.get("blocker")
         if isinstance(blocker, str):
             prefix = f"{detail}; " if detail else ""
             lane["detail"] = f"{prefix}browser preflight blocker: {blocker}"
+    if fallback_browser_preflight is not None:
+        lane["fallback_browser_preflight"] = fallback_browser_preflight
+        blocker = fallback_browser_preflight.get("blocker")
+        if isinstance(blocker, str):
+            prefix = f"{lane['detail']}; " if lane["detail"] else ""
+            lane["detail"] = f"{prefix}fallback browser preflight blocker: {blocker}"
     if failure_kind:
         lane["failure_kind"] = failure_kind
     if fallback_seat is not None:
@@ -294,7 +305,15 @@ def doctor_payload(
         cached = probe_cache.get(agent.name)
         if cached is not None:
             return cached
-        normalized = _normalize_probe(probe(agent))
+        raw_probe = probe(agent)
+        normalized = _normalize_probe(raw_probe)
+        if agent.cli == "oracle":
+            projection = browser_preflight.project(
+                raw_probe.get("browser_preflight"),
+                lane=agent.name,
+                requested_model=agent.model,
+            )
+            normalized["_browser_preflight_projection"] = _redact_value(projection)
         probe_cache[agent.name] = normalized
         return normalized
 
@@ -397,6 +416,7 @@ def doctor_payload(
 
         fallback_seat: str | None = None
         fallback_status: str | None = None
+        fallback_browser_preflight: dict[str, object] | None = None
         allowed_fallback_healthy = False
         allow_fallback = True
         if capability == "research.synthesize":
@@ -422,10 +442,14 @@ def doctor_payload(
                 if fallback_seat is None:
                     fallback_seat = name
                     fallback_status = "ok" if healthy else "fail"
+                    projection = fallback_probe.get("_browser_preflight_projection")
+                    if isinstance(projection, dict):
+                        fallback_browser_preflight = projection
                 if healthy:
                     allowed_fallback_healthy = True
                     fallback_seat = name
                     fallback_status = "ok"
+                    fallback_browser_preflight = None
                     break
 
         if primary_healthy:
@@ -462,6 +486,7 @@ def doctor_payload(
                 failure_kind=failure_kind,
                 fallback_seat=fallback_seat,
                 fallback_status=fallback_status,
+                fallback_browser_preflight=fallback_browser_preflight,
             )
         )
 
