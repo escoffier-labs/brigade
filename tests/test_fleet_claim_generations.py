@@ -115,7 +115,7 @@ def test_schema25_migration_preserves_live_rows_and_seeds_once(tmp_path):
     conn.commit()
     conn.close()
     with hub.init_db(path) as migrated:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 26
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == hub.SCHEMA_VERSION
         assert migrated.execute("SELECT * FROM claims").fetchall() == original
         assert fence(migrated) == 1
         claim = hub.list_claims(migrated)[0]
@@ -332,13 +332,14 @@ def test_response_uses_decision_snapshot_before_commit(authority, action, wrong)
 def test_newer_schema_refuses_without_changes(authority):
     conn, path, _ = authority
     request(conn)
-    conn.execute("PRAGMA user_version=27")
+    newer_version = hub.SCHEMA_VERSION + 1
+    conn.execute(f"PRAGMA user_version={newer_version}")
     conn.commit()
-    with pytest.raises(hub.FleetHubError, match="schema version 27"):
+    with pytest.raises(hub.FleetHubError, match=f"schema version {newer_version}"):
         hub.init_db(path)
-    with pytest.raises(hub.FleetHubError, match="schema version 27"):
+    with pytest.raises(hub.FleetHubError, match=f"schema version {newer_version}"):
         hub.open_db(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 27
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == newer_version
 
 
 @pytest.mark.parametrize("target", ["x" * 1025, "é" * 513], ids=["ascii", "multibyte"])
