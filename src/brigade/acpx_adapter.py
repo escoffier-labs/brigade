@@ -320,6 +320,7 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
     late_permission: dict[str, object] | None = None
     stream_finalized = False
     has_structured_jsonrpc_error = False
+    permission_error_detail: str | None = None
     config_option_request_ids: dict[tuple[str, str | int], str] = {}
     effective_model_locator: str | None = None
     for message in messages:
@@ -390,7 +391,10 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
                     late_permission = permission_error
                 stream_finalized = True
             else:
-                return None, str(permission_error["detail"])
+                if not allow_empty_text:
+                    return None, str(permission_error["detail"])
+                permission_error_detail = str(permission_error["detail"])
+                break
     if request_id is not None:
         stop_reason = stop_reasons.get(request_id)
     elif len(stop_reasons) == 1:
@@ -414,6 +418,8 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
     }
     if late_permission is not None:
         parsed["late_permission"] = late_permission
+    if permission_error_detail is not None:
+        return parsed, permission_error_detail
     return parsed, "" if text else "ACP stream contained no final assistant text"
 
 

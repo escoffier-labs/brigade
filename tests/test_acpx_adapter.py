@@ -761,6 +761,34 @@ def test_failed_run_preserves_observed_model_and_session_metadata(monkeypatch, t
     assert result.safe_events
 
 
+def test_structured_permission_failure_preserves_prior_model_evidence(monkeypatch, tmp_path):
+    stream = _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "session-1",
+                "update": {"sessionUpdate": "config_option_update", "modelId": "composer-2.5"},
+            },
+        },
+        {"jsonrpc": "2.0", "id": "perm-1", "error": {"code": -32072, "message": "PERMISSION_PROMPT_UNAVAILABLE"}},
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter([proc.Result(0, "acpx 0.12.0\n", ""), proc.Result(5, stream, "")])
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.failure_kind == "provider-startup"
+    assert result.effective_model == "composer-2.5"
+    assert result.effective_model_locator == "acp-config-option-update"
+
+
 def test_parse_stream_rejects_known_credential_families_as_model_ids():
     credential_models = (
         "ghp_" + "A" * 24,
