@@ -25,14 +25,14 @@ _EXPLANATORY_SECRET_VALUE = (
     r"(?:required|optional|needed|necessary|available|configured(?!\s+(?:as|to|with)\b)|set(?!\s+to\b)|missing|unset|unavailable|"
     r"not\s+(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable)|"
     r"confidential|managed(?:\s+by\s+Vault)?|provided|stored(?:\s+securely)?|encrypted|protected|"
-    r"handled|generated|rotated|masked|redacted)(?!\s+(?:as|to)\b)(?=$|\s|[.,;!?](?:\s|$))"
+    r"handled|generated|rotated|masked|redacted)(?!\s+(?:as|to|with)\b)(?=$|\s|[.,;!?](?:\s|$))"
 )
 _DANGEROUS_VALUE = re.compile(
     r"(?:(?<![A-Za-z0-9_])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|(?<![A-Za-z0-9_])xapp-[A-Za-z0-9-]{12,}|(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{20,}|(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{36}\b|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Bearer\s+\S+|\bBearer\s+[A-Za-z0-9._~+/-]{20,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
-    r"\bauth(?:entication)?[ _-]profiles?\s+(?:is|was|equals|will\s+be|has\s+been|set\s+to)\s+"
+    r"\bauth(?:entication)?[ _-]profiles?\s+(?:is|was|equals|will\s+be|has\s+been|set\s+to|configured\s+(?:as|to|with))\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s*[:=]\s*" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
@@ -205,7 +205,10 @@ _FILESYSTEM_COMPONENTS = frozenset(
 def _without_api_route_references(value: str) -> str:
     def remove_route(match: re.Match[str]) -> str:
         route = match.group("path")
-        first_component = route[1:].split("/", maxsplit=1)[0].casefold()
+        components = route.split("?", maxsplit=1)[0].strip("/").split("/")
+        first_component = components[0].casefold()
+        if any(component in {".", ".."} for component in components):
+            return match.group(0)
         if first_component in _FILESYSTEM_COMPONENTS:
             return match.group(0)
         return match.group(0).replace(route, "")
