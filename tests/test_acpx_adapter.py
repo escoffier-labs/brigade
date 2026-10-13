@@ -523,6 +523,33 @@ def test_parse_stream_ignores_model_like_values_outside_config_updates():
     assert parsed is not None and parsed["effective_model"] == "grok-4.5[effort=high,fast=true]"
 
 
+def test_parse_stream_accepts_default_model_with_empty_options():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"update": {"sessionUpdate": "config_option_update", "modelId": "default[]"}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "answer"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["effective_model"] == "default[]"
+
+
 def test_parse_stream_clears_stale_model_after_rejected_explicit_update():
     parsed, error = acpx_adapter.parse_stream(
         _stream(
@@ -942,7 +969,6 @@ def test_parse_stream_rejects_same_direction_request_id_collision():
         {"id": "extra", "error": "not-an-error-object"},
         {"id": "extra", "error": {"code": "bad", "message": "failure"}},
         {"id": "extra", "error": {"code": -32000, "message": 4}},
-        {"id": None, "error": {"code": -32000, "message": "failure"}},
         {"id": True, "error": {"code": -32000, "message": "failure"}},
     ),
 )
@@ -966,11 +992,33 @@ def test_parse_stream_rejects_invalid_jsonrpc_error_responses(response):
     assert "malformed JSON-RPC response" in error
 
 
+def test_parse_stream_accepts_null_id_jsonrpc_error():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "req", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "answer"}}
+                },
+            },
+            {"jsonrpc": "2.0", "id": "req", "result": {"stopReason": "end_turn"}},
+            {"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": "provider failed"}},
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["has_structured_jsonrpc_error"] is True
+
+
 @pytest.mark.parametrize(
     "response",
     (
         {"id": "req", "result": {"stopReason": "end_turn"}, "error": {"code": -32072}},
         {"id": "req", "method": "session/prompt", "result": {"stopReason": "end_turn"}},
+        {"id": None, "result": {"stopReason": "end_turn"}},
     ),
 )
 def test_parse_stream_rejects_malformed_jsonrpc_responses(response):

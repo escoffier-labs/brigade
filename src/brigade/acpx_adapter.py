@@ -25,8 +25,8 @@ _SENSITIVE_VALUE = re.compile(r"(?i)\b(token|secret|password|api[_ -]?key)\b(?:\
 _BEARER = re.compile(r"(?i)\b(bearer)\s+[^\s,;]+")
 _MODEL_ID = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}"
-    r"(?:\[[A-Za-z][A-Za-z0-9._-]{0,31}=[A-Za-z0-9._:+/-]{1,64}"
-    r"(?:,[A-Za-z][A-Za-z0-9._-]{0,31}=[A-Za-z0-9._:+/-]{1,64}){0,7}\])?"
+    r"(?:\[(?:[A-Za-z][A-Za-z0-9._-]{0,31}=[A-Za-z0-9._:+/-]{1,64}"
+    r"(?:,[A-Za-z][A-Za-z0-9._-]{0,31}=[A-Za-z0-9._:+/-]{1,64}){0,7})?\])?"
 )
 _SAFE_EVENT_TYPES = frozenset(
     {
@@ -295,13 +295,12 @@ def _objects(stdout: str | None) -> tuple[list[dict[str, Any]] | None, str]:
         has_error = "error" in message
         if has_result or has_error:
             response_id = message.get("id")
-            if (
-                has_result == has_error
-                or "method" in message
-                or not (
-                    isinstance(response_id, str) or isinstance(response_id, int) and not isinstance(response_id, bool)
-                )
-            ):
+            valid_response_id = (
+                (has_error and response_id is None)
+                or isinstance(response_id, str)
+                or (isinstance(response_id, int) and not isinstance(response_id, bool))
+            )
+            if has_result == has_error or "method" in message or not valid_response_id:
                 return None, f"invalid ACP NDJSON at line {line_number}: malformed JSON-RPC response"
             if has_error:
                 error_object = message["error"]
