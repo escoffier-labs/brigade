@@ -128,9 +128,10 @@ database support.
 
 ## Rootless Podman Quadlet
 
-Build the pinned image locally and record its digest. Create the Podman secret
-over standard input, render the Quadlet with that digest, and copy the volume
-unit to `~/.config/containers/systemd/`:
+Build the pinned image locally and record its digest. Keep an operator copy of
+the admin token in a private file, import that file as a Podman secret, render
+the Quadlet with the digest, and copy the volume unit to
+`~/.config/containers/systemd/`:
 
 ```bash
 podman build -f ops/fleet-hub/Containerfile \
@@ -139,8 +140,19 @@ podman build -f ops/fleet-hub/Containerfile \
 image_digest="$(podman image inspect --format '{{.Digest}}' localhost/brigade-fleet-hub:0.28.0-e6009f6)"
 case "$image_digest" in sha256:*) ;; *) echo "Expected a sha256 image digest" >&2; exit 1 ;; esac
 umask 077
-python -c 'import secrets; print(secrets.token_urlsafe(32))' | \
-  podman secret create brigade-fleet-admin-token -
+token_dir="$HOME/.local/share/brigade-fleet-hub"
+install -d -m 0700 "$token_dir"
+token_file="$token_dir/admin-token"
+python -c 'import secrets; print(secrets.token_urlsafe(32))' > "$token_file"
+chmod 0600 "$token_file"
+podman secret create brigade-fleet-admin-token "$token_file"
+install -d -m 0700 ~/.brigade
+cat > ~/.brigade/fleet.toml <<EOF
+[fleet]
+hub_url = "http://127.0.0.1:3774"
+token_file = "$token_file"
+EOF
+chmod 0600 ~/.brigade/fleet.toml
 install -d ~/.config/containers/systemd
 sed "s|REPLACE_WITH_RECORDED_DIGEST|${image_digest}|" \
   ops/fleet-hub/quadlet/brigade-fleet.container \
@@ -180,7 +192,7 @@ start the generated service again:
 archive="$HOME/.local/share/brigade-fleet-hub/archives/brigade-fleet-hub-REPLACE_WITH_RECORDED_DIGEST.tar"
 previous_digest="sha256:REPLACE_WITH_RECORDED_DIGEST"
 previous_ref="localhost/brigade-fleet-hub@${previous_digest}"
-previous_id="sha256:REPLACE_WITH_RECORDED_IMAGE_ID"
+previous_id="REPLACE_WITH_RECORDED_IMAGE_ID"
 podman image load --input "$archive"
 restored_id="$(podman image inspect --format '{{.Id}}' "$previous_ref")"
 test "$restored_id" = "$previous_id"
