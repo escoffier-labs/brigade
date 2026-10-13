@@ -794,6 +794,64 @@ def test_parse_stream_rejects_duplicate_outstanding_prompt_id():
     assert "duplicate outstanding prompt id" in error
 
 
+def test_parse_stream_ignores_permission_error_for_superseded_prompt():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "old", "params": {}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "new", "params": {}},
+            {"jsonrpc": "2.0", "id": "old", "error": {"code": -32072, "message": "PERMISSION_PROMPT_UNAVAILABLE"}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "new answer"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "new", "result": {"stopReason": "end_turn"}},
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None
+    assert parsed["request_id"] == "new"
+    assert parsed["text"] == "new answer"
+    assert parsed["prompt_completed"] is True
+    assert parsed["stop_reason"] == "end_turn"
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        {"id": "extra", "error": "not-an-error-object"},
+        {"id": "extra", "error": {"code": "bad", "message": "failure"}},
+        {"id": "extra", "error": {"code": -32000, "message": 4}},
+        {"id": None, "error": {"code": -32000, "message": "failure"}},
+        {"id": True, "error": {"code": -32000, "message": "failure"}},
+    ),
+)
+def test_parse_stream_rejects_invalid_jsonrpc_error_responses(response):
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "req", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "answer"}}
+                },
+            },
+            {"jsonrpc": "2.0", "id": "req", "result": {"stopReason": "end_turn"}},
+            {"jsonrpc": "2.0", **response},
+        )
+    )
+
+    assert parsed is None
+    assert "malformed JSON-RPC response" in error
+
+
 @pytest.mark.parametrize(
     "response",
     (

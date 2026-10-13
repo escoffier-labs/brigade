@@ -294,8 +294,24 @@ def _objects(stdout: str | None) -> tuple[list[dict[str, Any]] | None, str]:
         has_result = "result" in message
         has_error = "error" in message
         if has_result or has_error:
-            if has_result == has_error or "id" not in message or "method" in message:
+            response_id = message.get("id")
+            if (
+                has_result == has_error
+                or "method" in message
+                or not (
+                    isinstance(response_id, str) or isinstance(response_id, int) and not isinstance(response_id, bool)
+                )
+            ):
                 return None, f"invalid ACP NDJSON at line {line_number}: malformed JSON-RPC response"
+            if has_error:
+                error_object = message["error"]
+                if (
+                    not isinstance(error_object, dict)
+                    or not isinstance(error_object.get("code"), int)
+                    or isinstance(error_object.get("code"), bool)
+                    or not isinstance(error_object.get("message"), str)
+                ):
+                    return None, f"invalid ACP NDJSON at line {line_number}: malformed JSON-RPC response"
         messages.append(message)
     if not messages:
         return None, "empty ACP NDJSON stream"
@@ -386,6 +402,8 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
             )
         is_response = "result" in message or "error" in message
         matched_prompt_request = is_response and message_id_key is not None and message_id_key == active_prompt_id
+        known_prompt_request = is_response and message_id_key is not None and message_id_key in outstanding_prompt_ids
+        superseded_prompt_response = known_prompt_request and not matched_prompt_request
         if is_response and message_id_key is not None:
             outstanding_prompt_ids.discard(message_id_key)
         if matched_prompt_request and message_id_key is not None:
@@ -445,9 +463,9 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
                 if isinstance(content, dict) and content.get("type") == "text" and isinstance(content.get("text"), str):
                     text_parts.append(content["text"])
         rpc_error = message.get("error")
-        if isinstance(rpc_error, dict):
+        if isinstance(rpc_error, dict) and not superseded_prompt_response:
             has_structured_jsonrpc_error = True
-        permission_error = _permission_prompt_diagnostic(rpc_error)
+        permission_error = None if superseded_prompt_response else _permission_prompt_diagnostic(rpc_error)
         if permission_error is not None:
             if prompt_completed:
                 if "".join(text_parts).strip():

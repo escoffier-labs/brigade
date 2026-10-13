@@ -37,7 +37,7 @@ from .aboyeur.direct_worker_finish import (
 from .aboyeur.planning import resolve_run_sandbox
 from .roster import Agent, Roster, _as_bool, _as_capabilities, _as_command, _as_env
 from .run_receipts import agent_result_from_worker, agent_result_payload
-from .run_transport import Assignment
+from .run_transport import Assignment, WorkerAttempt
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
 _NONTERMINAL_RUN_STATUSES = frozenset(
@@ -63,6 +63,57 @@ def _load_json(run_dir: Path, name: str) -> dict | None:
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _worker_attempts_from_payload(value: object) -> tuple[WorkerAttempt, ...]:
+    if not isinstance(value, list):
+        return ()
+    attempts: list[WorkerAttempt] = []
+    for row in value:
+        if not isinstance(row, dict) or not all(
+            isinstance(row.get(key), str)
+            for key in ("kind", "worker", "task", "transport", "started_at", "finished_at", "terminal_reason")
+        ):
+            continue
+        exit_code = row.get("exit_code")
+        if exit_code is not None and (not isinstance(exit_code, int) or isinstance(exit_code, bool)):
+            continue
+        selected = row.get("selected", False)
+        if not isinstance(selected, bool):
+            continue
+        failure = row.get("failure")
+        failure = failure if isinstance(failure, dict) else {}
+        failure_detail = failure.get("detail")
+        if not isinstance(failure_detail, str):
+            failure_detail = ""
+        attempts.append(
+            WorkerAttempt(
+                kind=row["kind"],
+                worker=row["worker"],
+                task=row["task"],
+                transport=row["transport"],
+                model=row.get("model") if isinstance(row.get("model"), str) else None,
+                reasoning=row.get("reasoning") if isinstance(row.get("reasoning"), str) else None,
+                started_at=row["started_at"],
+                finished_at=row["finished_at"],
+                exit_code=exit_code,
+                terminal_reason=row["terminal_reason"],
+                failure_phase=row.get("failure_phase") if isinstance(row.get("failure_phase"), str) else None,
+                failure_kind=row.get("failure_kind") if isinstance(row.get("failure_kind"), str) else None,
+                session_id=row.get("session_id") if isinstance(row.get("session_id"), str) else None,
+                selected=selected,
+                stdout_log=row.get("stdout_log") if isinstance(row.get("stdout_log"), str) else None,
+                stderr_log=row.get("stderr_log") if isinstance(row.get("stderr_log"), str) else None,
+                detail=failure_detail,
+                ok=not bool(failure),
+                timed_out=(
+                    failure.get("timed_out") is True
+                    or failure.get("class") == "timeout"
+                    or row.get("failure_kind") == "timeout"
+                ),
+            )
+        )
+    return tuple(attempts)
 
 
 def _utc_now() -> datetime:
@@ -971,6 +1022,30 @@ def _resume_locked(
             failure_phase=(
                 r.get("failure_phase") if not r.get("ok") and isinstance(r.get("failure_phase"), str) else None
             ),
+            transport_warning=(r.get("transport_warning") if isinstance(r.get("transport_warning"), dict) else None),
+            cloud_environment=(
+                {
+                    key: item
+                    for key, item in r["cloud_environment"].items()
+                    if isinstance(key, str) and isinstance(item, str)
+                }
+                if isinstance(r.get("cloud_environment"), dict)
+                else None
+            ),
+            reasoning=r.get("reasoning") if isinstance(r.get("reasoning"), str) else None,
+            stdout_log=r.get("stdout_log") if isinstance(r.get("stdout_log"), str) else None,
+            stderr_log=r.get("stderr_log") if isinstance(r.get("stderr_log"), str) else None,
+            exit_code=(
+                r.get("exit_code")
+                if isinstance(r.get("exit_code"), int) and not isinstance(r.get("exit_code"), bool)
+                else None
+            ),
+            duration_seconds=(
+                r.get("duration_seconds")
+                if isinstance(r.get("duration_seconds"), (int, float))
+                and not isinstance(r.get("duration_seconds"), bool)
+                else None
+            ),
             stop_reason=r.get("stop_reason") if isinstance(r.get("stop_reason"), str) else None,
             protocol_version=(
                 r.get("protocol_version")
@@ -986,6 +1061,12 @@ def _resume_locked(
             safe_events=tuple(event for event in r.get("events", []) if isinstance(event, dict))
             if isinstance(r.get("events"), list)
             else (),
+            attempts=_worker_attempts_from_payload(r.get("attempts")),
+            env_overrides=tuple(item for item in r.get("env_overrides", []) if isinstance(item, str))
+            if isinstance(r.get("env_overrides"), list)
+            else (),
+            endpoint_host=r.get("endpoint_host") if isinstance(r.get("endpoint_host"), str) else None,
+            remote=r.get("remote") if isinstance(r.get("remote"), dict) else None,
             timed_out=bool(r.get("timed_out")),
             output_truncated=bool(r.get("output_truncated")),
             output_bytes=int(r.get("output_bytes") or 0),

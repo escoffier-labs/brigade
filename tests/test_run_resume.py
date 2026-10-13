@@ -263,6 +263,44 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys, requ
                 "session_id": "acp-session",
                 "request_id": "req-2",
                 "events": [{"type": "agent_message_chunk"}],
+                "transport_warning": {
+                    "phase": "post-final",
+                    "kind": "permission-prompt-unavailable",
+                    "detail": "late permission prompt unavailable",
+                },
+                "exit_code": 7,
+                "duration_seconds": 3.25,
+                "reasoning": "medium",
+                "stdout_log": "worker-logs/cursor.stdout.log",
+                "stderr_log": "worker-logs/cursor.stderr.log",
+                "attempts": [
+                    {
+                        "kind": "initial",
+                        "worker": "cursor-worker",
+                        "task": "inspect changes",
+                        "transport": "acpx",
+                        "reasoning": "medium",
+                        "started_at": "2026-10-13T12:00:00+00:00",
+                        "finished_at": "2026-10-13T12:00:01+00:00",
+                        "exit_code": 7,
+                        "terminal_reason": "permission-prompt-unavailable",
+                        "failure_phase": "inference",
+                        "failure_kind": "permission-prompt-unavailable",
+                        "session_id": "acp-session",
+                        "selected": True,
+                        "failure": {
+                            "schema": "brigade.worker_failure.v1",
+                            "class": "unclassified",
+                            "domain": "infrastructure",
+                            "phase": "inference",
+                            "retry": "none",
+                            "detected_by": "legacy-failure-kind",
+                            "detail": "late permission prompt unavailable",
+                            "cause_code": "permission-prompt-unavailable",
+                            "attempt": 1,
+                        },
+                    }
+                ],
                 "metadata_provenance": {
                     "observed_at": "2026-10-13T12:00:00+00:00",
                     "fields": {
@@ -334,6 +372,15 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys, requ
     assert results[1]["session_id"] == "acp-session"
     assert results[1]["request_id"] == "req-2"
     assert results[1]["events"] == [{"type": "agent_message_chunk"}]
+    assert results[1]["transport_warning"]["kind"] == "permission-prompt-unavailable"
+    assert results[1]["exit_code"] == 7
+    assert results[1]["duration_seconds"] == 3.25
+    assert results[1]["reasoning"] == "medium"
+    assert results[1]["stdout_log"] == "worker-logs/cursor.stdout.log"
+    assert results[1]["stderr_log"] == "worker-logs/cursor.stderr.log"
+    assert results[1]["attempts"][0]["terminal_reason"] == "permission-prompt-unavailable"
+    assert results[1]["attempts"][0]["failure_kind"] == "permission-prompt-unavailable"
+    assert results[1]["attempts"][0]["failure"]["detail"] == "late permission prompt unavailable"
     assert results[1]["metadata_provenance"]["fields"]["effective_model"]["source"] == "observed"
     assert (run_dir / "final.txt").read_text().strip() == "final synthesis"
     run_json = json.loads((run_dir / "run.json").read_text())
