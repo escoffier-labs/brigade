@@ -16,7 +16,7 @@ journal line bound is the tightest limit no valid envelope can exceed.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .run_events import MAX_LINE_BYTES, MAX_PAYLOAD_STR_LEN
 
@@ -40,3 +40,17 @@ def oversized_event_field(field: str, value: Any) -> str | None:
     if limit is None or not isinstance(value, str) or len(value) <= limit:
         return None
     return f"event field {field!r} must be at most {limit} characters"
+
+
+def validate_claim_target(
+    value: str,
+    reject_controls: Callable[..., None],
+    error_type: type[Exception],
+) -> str:
+    """Return a normalized claim target, raising the caller's API error when oversized."""
+    reject_controls(value, "target", kind="claim")
+    target = value.strip()
+    limit = EVENT_FIELD_MAX_CHARS["repo"]
+    if len(target) > limit:
+        raise error_type(f"claim field 'target' must be at most {limit} characters")
+    return target

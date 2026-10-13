@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from brigade import fleet_client, fleet_hub
+from brigade.fleet_hub_event_bounds import EVENT_FIELD_MAX_CHARS
 from brigade import fleet_hub_sessions as sessions
 from tests import thread_sync
 
@@ -439,7 +440,7 @@ class TestHubClaims:
 
     def test_claim_target_uses_event_repository_bound(self, hub):
         url, token, _db = hub
-        target_limit = fleet_hub.EVENT_FIELD_MAX_CHARS["repo"]
+        target_limit = EVENT_FIELD_MAX_CHARS["repo"]
 
         status, _payload = _post(url, token, _claim(target="r" * target_limit))
         assert status == 200
