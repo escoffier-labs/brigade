@@ -377,6 +377,7 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
     stop_reason: str | None = None
     active_prompt_id: tuple[str, str | int] | None = None
     outstanding_prompt_ids: set[tuple[str, str | int]] = set()
+    outstanding_agent_request_ids: set[tuple[str, str | int]] = set()
     effective_model: str | None = None
     safe_events: list[dict[str, Any]] = []
     prompt_completed = False
@@ -401,11 +402,31 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
                 "acp-session-new-response" if method == "session/new" else "acp-set-config-option-response"
             )
         is_response = "result" in message or "error" in message
-        matched_prompt_request = is_response and message_id_key is not None and message_id_key == active_prompt_id
+        if (
+            isinstance(method, str)
+            and method not in {"session/new", "session/prompt", "session/set_config_option"}
+            and message_id_key is not None
+        ):
+            outstanding_agent_request_ids.add(message_id_key)
+        result = message.get("result")
+        agent_request_response = (
+            is_response
+            and message_id_key is not None
+            and message_id_key in outstanding_agent_request_ids
+            and not (isinstance(result, dict) and "stopReason" in result)
+        )
+        matched_prompt_request = (
+            is_response
+            and not agent_request_response
+            and message_id_key is not None
+            and message_id_key == active_prompt_id
+        )
         known_prompt_request = is_response and message_id_key is not None and message_id_key in outstanding_prompt_ids
         superseded_prompt_response = known_prompt_request and not matched_prompt_request
-        if is_response and message_id_key is not None:
+        if is_response and message_id_key is not None and not agent_request_response:
             outstanding_prompt_ids.discard(message_id_key)
+        if agent_request_response and message_id_key is not None:
+            outstanding_agent_request_ids.discard(message_id_key)
         if matched_prompt_request and message_id_key is not None:
             active_prompt_id = None
         matched_config_request = (
@@ -414,7 +435,6 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
         response_locator = config_option_request_ids.get(message_id_key) if message_id_key is not None else None
         if is_response and message_id_key is not None:
             config_option_request_ids.pop(message_id_key, None)
-        result = message.get("result")
         if isinstance(result, dict):
             version = result.get("protocolVersion")
             if isinstance(version, int):

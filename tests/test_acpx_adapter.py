@@ -727,6 +727,43 @@ def test_parse_stream_only_completes_matching_active_prompt_ids():
         assert parsed["stop_reason"] is None
 
 
+@pytest.mark.parametrize("agent_response_first", (True, False))
+def test_parse_stream_keeps_prompt_active_when_agent_request_reuses_its_id(agent_response_first):
+    messages = [
+        {"jsonrpc": "2.0", "method": "session/prompt", "id": "shared", "params": {}},
+        {"jsonrpc": "2.0", "method": "session/request_permission", "id": "shared", "params": {}},
+    ]
+    agent_response = {"jsonrpc": "2.0", "id": "shared", "result": {}}
+    if agent_response_first:
+        messages.append(agent_response)
+    messages.extend(
+        (
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "answer"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "shared", "result": {"stopReason": "end_turn"}},
+        )
+    )
+    if not agent_response_first:
+        messages.append(agent_response)
+
+    parsed, error = acpx_adapter.parse_stream(_stream(*messages))
+
+    assert error == ""
+    assert parsed is not None
+    assert parsed["request_id"] == "shared"
+    assert parsed["text"] == "answer"
+    assert parsed["prompt_completed"] is True
+    assert parsed["stop_reason"] == "end_turn"
+
+
 def test_parse_stream_completion_is_bound_to_latest_prompt():
     parsed, error = acpx_adapter.parse_stream(
         _stream(
