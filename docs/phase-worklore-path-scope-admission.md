@@ -84,8 +84,8 @@ one current holder digest. It requires no additional history query or cache.
 Conflict records remain private until the complete bounded scan finishes. Count
 and escaped-byte bounds apply before a record enters this buffer. Then every
 distinct work ID, owner node, requested path and held path in the buffered output
-passes the private-data guard against the full digest set. A carrier cannot
-reflect another holder's capability even when the protected holder appears later
+passes the private-data guard against the full digest set. Conflict output cannot
+reflect another active holder's capability even when that holder appears later
 in scan order, has empty scope or holds paths in another repository. The guard
 refuses case-equivalent holder digests and embedded 32-byte nonce candidates
 whose SHA256 matches any active digest, including canonical base64url, standard
@@ -97,6 +97,12 @@ active-event and scope validation still applies before overlap comparison, even
 after the output budget is exhausted. Malformed data or a reflection failure
 returns the fixed `path-scope-unavailable` refusal without buffered output. An
 incomplete assessment never admits a writer.
+
+This guard covers conflict responses. The existing ownership GET read policy
+still returns stored scope metadata. Rejecting foreign holder capabilities at
+metadata ingestion and addressing previously stored values remain follow-up
+work under #1595.
+
 Resolution codes describe an end state for ownership review. They do not
 instruct callers to release another holder automatically.
 
