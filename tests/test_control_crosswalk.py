@@ -328,6 +328,7 @@ def test_completed_verify_receipt_with_rederived_digest_is_validated(tmp_path):
     assert readiness["outcome"] == "validated"
     assert readiness["dimensions"]["integrity"] == {"status": "passed", "reason": None}
     assert readiness["artifacts"][0]["source_digest_sha256"] == receipt["digests"]["receipt_sha256"]
+    assert readiness["verifier"]["name"] == "attestation_receipt.snapshot_receipt"
 
 
 def test_completed_verify_receipt_rejects_unsupported_schema_version(tmp_path):

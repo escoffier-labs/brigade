@@ -1478,7 +1478,7 @@ _EVALUATORS: dict[str, _Rule] = {
     "verify-receipt-completed": _Rule(
         _evaluate_verify_receipt_completed,
         "in_module",
-        "attestation_receipt.snapshot_stored_receipt",
+        "attestation_receipt.snapshot_receipt",
         "wired",
         frozenset({"integrity", "subject", "population"}),
     ),
