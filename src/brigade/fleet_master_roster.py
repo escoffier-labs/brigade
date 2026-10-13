@@ -47,13 +47,13 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with))\s+"
     r"(?:the\s+)?(?:\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\)|(?!(?:the)\b)[A-Za-z0-9_.-]+)\s+"
     r"auth(?:entication)?[ _-]profiles?\b|"
-    r"\b(?:password|passwd|passphrase|secret|credential|credentials|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)\s*[:=]\s*"
+    r"\b(?:password|passwd|passphrase|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s*[:=]\s*"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
-    r"\b(?:password|passwd|passphrase|secret|credential|credentials|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
+    r"\b(?:password|passwd|passphrase|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
     r"\s+(?:provided\s+(?:as|with)|stored\s+as|generated\s+as|configured\s+(?:as|with|to))\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
-    r"\b(?:password|passwd|passphrase|secret|credential|credentials|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
-    r"\s+(?:is|was|equals|will\s+be|has\s+been|set\s+to)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
+    r"\b(?:password|passwd|passphrase|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
+    r"\s+(?:is|are|was|equals|will\s+be|has\s+been|set\s+to)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%[A-Za-z_][A-Za-z0-9_]*%|"
     r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][^}]*\})"
     r"(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))",
@@ -72,7 +72,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
 )
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
 _EXPLICIT_TERMINAL_PATH = re.compile(
-    r"\b(?:home\s+directory|path|file|directory|folder|script|repository|repo|location)\s*"
+    r"\b(?:home\s+directory|path|file|filename|directory|folder|script|repository|repo|location)\s*"
     r"(?:is|was|equals|will\s+be|has\s+been|set\s+to|:|=)\s*[\"'“‘`()\[{]*\s*"
     r"(?:~|/|\\|\.{1,2})(?=$|[\s,;!?\"'”’)\]}])",
     re.IGNORECASE,
@@ -106,7 +106,12 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
     for match in _HTTP_URL.finditer(value):
         try:
             parsed = urlsplit(match.group())
-            if _DANGEROUS_VALUE.search(unquote(parsed.path)):
+            decoded_path = unquote(parsed.path)
+            if (
+                _DANGEROUS_VALUE.search(decoded_path)
+                or _ENVIRONMENT_ASSIGNMENT.search(decoded_path)
+                or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_path)
+            ):
                 return True
             fragment_query = parsed.fragment.partition("?")[2] or parsed.fragment
             query_pairs = parse_qsl(parsed.query, keep_blank_values=True) + parse_qsl(
@@ -133,14 +138,14 @@ _RELATIVE_PATH = re.compile(
     r"(?<![A-Za-z0-9_.-])(?P<path>(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+)(?![A-Za-z0-9_.~-])"
 )
 _PATH_CONTEXT = re.compile(
-    r"(?:\b(?:run|execute|inspect|open|read|write|load|save|path|file|directory|folder|script|repository|repo|location)\s+"
+    r"(?:\b(?:run|execute|inspect|open|read|write|load|save|path|file|filename|directory|folder|script|repository|repo|location)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?"
     r"[\"'“‘]*\s*(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?|"
-    r"\b(?:path|file|directory|folder|script|repository|repo|location)\s*(?:is|was|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s*)[\"'“‘`()\[{]*\s*$",
+    r"\b(?:path|file|filename|directory|folder|script|repository|repo|location)\s*(?:is|was|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s*)[\"'“‘`()\[{]*\s*$",
     re.IGNORECASE,
 )
 _EXPLICIT_PATH_DECLARATION = re.compile(
-    r"\b(?:path|file|directory|folder|script|repository|repo|location)\s*"
+    r"\b(?:path|file|filename|directory|folder|script|repository|repo|location)\s*"
     r"(?:is|was|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s*$",
     re.IGNORECASE,
 )
@@ -151,7 +156,7 @@ _QUOTED_PATH_CONTEXT = re.compile(
 _SPACED_PATH_CONTEXT = re.compile(
     r"(?:\b(?:run|execute|inspect|open|read|write|load|save)\s+"
     r"(?:(?:from|at|in|to|into|under)\s+)?|"
-    r"\b(?:path|file|directory|folder|script|repository|repo|location)\s*"
+    r"\b(?:path|file|filename|directory|folder|script|repository|repo|location)\s*"
     r"(?:is|was|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s+)"
     r"(?:[A-Za-z0-9_.~-]+\s+)+$",
     re.IGNORECASE,
