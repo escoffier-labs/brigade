@@ -190,6 +190,32 @@ def board_status(
     return BoardStatus(runs=mapped, more=more, offset=page_offset, limit=page_limit)
 
 
+def board_node_ids(
+    conn: sqlite3.Connection,
+    *,
+    include_all: bool = False,
+    now: datetime | None = None,
+    history_window_seconds: int = STALE_HISTORY_AFTER_SECONDS,
+) -> set[str]:
+    """Return node identities represented by the complete board result set.
+
+    This is used to keep supplemental dashboard cards stable across pages.
+    It shares the board's history window and latest-state projection, without
+    materializing run rows or applying a page limit.
+    """
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    windowed = not include_all
+    sql = _latest_sql(received_after=windowed)
+    params: tuple[str, ...] = ()
+    if windowed:
+        cutoff = datetime.fromtimestamp(
+            current.timestamp() - max(1, int(history_window_seconds)),
+            tz=timezone.utc,
+        ).isoformat()
+        params = (cutoff,)
+    return {str(row[0]) for row in conn.execute(f"SELECT DISTINCT node_id FROM ({sql})", params) if row[0]}
+
+
 def _status_entry(
     conn: sqlite3.Connection,
     row: tuple[Any, ...],

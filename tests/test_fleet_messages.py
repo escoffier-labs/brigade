@@ -103,6 +103,15 @@ def test_ack_requires_matching_response_message_id(monkeypatch):
     with pytest.raises(fleet_client.FleetClientError, match="did not confirm the requested message"):
         fleet_client_messages.ack(42)
 
+    for invalid_id in (True, 42.0):
+        monkeypatch.setattr(
+            fleet_client_messages,
+            "_request",
+            lambda *_args, invalid_id=invalid_id, **_kwargs: (200, {"message": {"id": invalid_id}}),
+        )
+        with pytest.raises(fleet_client.FleetClientError, match="did not confirm the requested message"):
+            fleet_client_messages.ack(42)
+
     monkeypatch.setattr(
         fleet_client_messages,
         "_request",
@@ -716,6 +725,17 @@ def test_principal_add_keeps_retry_state_until_response_matches_request(tmp_path
     with pytest.raises(fleet_client.FleetClientError, match="did not confirm the enrolled principal"):
         fleet_client_messages.manage_principal("add", name="researcher")
     path = fleet_client_messages._principal_pending_path("researcher", "admin-token")
+    assert fleet_client._read_spool(path)[0]["request_id"] == requests[0]["request_id"]
+
+    monkeypatch.setattr(
+        fleet_client,
+        "_read_bounded_response",
+        lambda *_args, **_kwargs: json.dumps(
+            {"principal": {"principal_id": "agent:researcher", "name": "researcher", "token": "é"}}
+        ).encode(),
+    )
+    with pytest.raises(fleet_client.FleetClientError, match="did not confirm the enrolled principal"):
+        fleet_client_messages.manage_principal("add", name="researcher")
     assert fleet_client._read_spool(path)[0]["request_id"] == requests[0]["request_id"]
 
     monkeypatch.setattr(

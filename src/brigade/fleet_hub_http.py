@@ -645,13 +645,21 @@ def make_handler(
                 return
             try:
                 include_all = _board_include_all(params)
+                current = datetime.now(timezone.utc)
                 offset = fleet_hub_status.clamp_board_offset(params.get("offset", ["0"])[0])
                 board = board_status(
                     conn,
                     include_all=include_all,
                     offset=offset,
+                    now=current,
                     history_window_seconds=frozen_deck.stale_history_after_seconds,
                     stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                )
+                complete_base_node_ids = fleet_hub_status.board_node_ids(
+                    conn,
+                    include_all=include_all,
+                    now=current,
+                    history_window_seconds=frozen_deck.stale_history_after_seconds,
                 )
                 claims = fleet_claim_display.list_display_claims(conn, include_all=include_all)
                 started_at = run_started_at(
@@ -680,14 +688,16 @@ def make_handler(
             unread_only_page = params.get("unread_only", [""])[0] == "1"
             if view == "machines":
                 query_model = fleet_dashboard.parse_query(urlencode(params, doseq=True), view=view)
-                current = datetime.now(timezone.utc)
                 page_rows = fleet_dashboard.filter_rows(
                     fleet_dashboard.build_rows(board.runs, started_at, now=current), query_model
                 )
                 page_claims = fleet_dashboard.build_claims(claims, now=current)
                 base_node_ids = fleet_dashboard._machine_base_node_ids(page_rows, nodes, page_claims, query_model)
+                excluded_node_ids = fleet_dashboard._machine_unread_exclusions(
+                    query_model, base_node_ids, complete_base_node_ids
+                )
                 unread_ids = fleet_dashboard._machine_unread_candidates(
-                    query_model, unread_counts, excluded_node_ids=base_node_ids
+                    query_model, unread_counts, excluded_node_ids=excluded_node_ids
                 )
                 room = (
                     fleet_dashboard.MACHINE_CARD_LIMIT
@@ -729,6 +739,7 @@ def make_handler(
                 unread_counts=unread_counts,
                 unread_offset=unread_offset,
                 unread_only_page=unread_only_page,
+                complete_base_node_ids=complete_base_node_ids,
             )
             # The legacy board used ``/`` as its machines route. Root now
             # belongs to the Command Deck, so keep every legacy navigation

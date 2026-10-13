@@ -582,6 +582,17 @@ def _machine_unread_candidates(
     )
 
 
+def _machine_unread_exclusions(
+    query: DashboardQuery, current_base_node_ids: set[str], complete_base_node_ids: set[str]
+) -> set[str]:
+    excluded = set(current_base_node_ids)
+    if not query.node and not query.attention_only and not query.seat and not query.state and not query.repo:
+        excluded |= complete_base_node_ids
+    elif query.node:
+        excluded |= {node_id for node_id in complete_base_node_ids if _contains(node_id, query.node)}
+    return excluded
+
+
 def _machine_board(
     rows: list[RunRow],
     nodes: list[dict[str, Any]],
@@ -592,6 +603,7 @@ def _machine_board(
     unread_counts: dict[str, int] | None = None,
     unread_offset: int = 0,
     unread_only_page: bool = False,
+    complete_base_node_ids: set[str] | None = None,
 ) -> str:
     info = {str(node.get("node_id") or ""): node for node in nodes}
     by_node: dict[str, list[RunRow]] = {}
@@ -602,7 +614,8 @@ def _machine_board(
 
     node_ids = set() if unread_only_page else base_node_ids
     room = max(0, MACHINE_CARD_LIMIT - len(node_ids))
-    unread_ids = _machine_unread_candidates(query, unread_counts, excluded_node_ids=base_node_ids)
+    excluded_ids = _machine_unread_exclusions(query, base_node_ids, complete_base_node_ids or set())
+    unread_ids = _machine_unread_candidates(query, unread_counts, excluded_node_ids=excluded_ids)
     node_ids.update(unread_ids[unread_offset : unread_offset + room])
 
     def card_key(node_id: str) -> tuple[int, str]:
@@ -756,6 +769,7 @@ def render_page(
     unread_counts: dict[str, int] | None = None,
     unread_offset: int = 0,
     unread_only_page: bool = False,
+    complete_base_node_ids: set[str] | None = None,
 ) -> str:
     """Render the full dashboard document for one board.
 
@@ -787,6 +801,7 @@ def render_page(
             unread_counts=unread_counts,
             unread_offset=unread_offset,
             unread_only_page=unread_only_page,
+            complete_base_node_ids=complete_base_node_ids,
         )
         title = "Fleet: Machines"
     stamp = current.astimezone(timezone.utc).strftime("%H:%M:%S UTC")

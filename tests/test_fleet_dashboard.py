@@ -1090,6 +1090,31 @@ class TestBoardBounds:
         assert first_ids.isdisjoint(second_ids)
         assert len(first_ids | second_ids) == fleet_hub.BOARD_LIMIT + 1
 
+    def test_unread_candidates_do_not_repeat_across_event_pages(self, hub, monkeypatch):
+        now = datetime.now(timezone.utc).isoformat()
+        node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
+        events = [
+            _event(node_id, f"run-{index}", 1, "run.dispatch.observed", repo="repo", harness="codex", ts=now)
+            for index, node_id in enumerate(node_ids)
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        monkeypatch.setattr(
+            fleet_hub_http.fleet_hub_messages,
+            "unread_counts",
+            lambda _conn: {node_id: 1 for node_id in node_ids},
+        )
+
+        _status, _headers, first = _request(hub, "GET", "/view/machines", headers=_bearer())
+        assert "offset=200" in first
+        _status, _headers, second = _request(hub, "GET", "/view/machines?offset=200", headers=_bearer())
+        first_ids = {node_id for node_id in node_ids if f'data-node="{node_id}"' in first}
+        second_ids = {node_id for node_id in node_ids if f'data-node="{node_id}"' in second}
+        assert len(first_ids) == fleet_hub.BOARD_LIMIT
+        assert len(second_ids) == 1
+        assert first_ids.isdisjoint(second_ids)
+        assert first_ids | second_ids == set(node_ids)
+
     def test_unread_only_machine_cards_are_bounded_and_paginated(self):
         unread = {f"unread-node-{index:03d}": 1 for index in range(300)}
         existing_nodes = [{"node_id": f"existing-node-{index:03d}"} for index in range(100)]

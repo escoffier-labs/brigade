@@ -210,7 +210,8 @@ def ack(message_id: int) -> dict[str, Any]:
     _validate_sqlite_integer(message_id, "message id")
     payload = _online({"action": "ack", "id": message_id})
     message = payload.get("message")
-    if not isinstance(message, dict) or message.get("id") != message_id:
+    response_id = message.get("id") if isinstance(message, dict) else None
+    if isinstance(response_id, bool) or not isinstance(response_id, int) or response_id != message_id:
         raise fleet_client.FleetClientError("fleet hub acknowledgement response did not confirm the requested message")
     return payload
 
@@ -301,6 +302,9 @@ def manage_principal(action: str, *, name: str, label: str | None = None) -> dic
             or principal.get("principal_id") != f"agent:{name}"
             or principal.get("name") != name
             or not isinstance(returned_token, str)
+            or len(returned_token) != len(body["token"])
+            or not returned_token.isascii()
+            or any(char not in "0123456789abcdef" for char in returned_token)
             or not hmac.compare_digest(returned_token, body["token"])
         ):
             raise fleet_client.FleetClientError("fleet hub did not confirm the enrolled principal and token")
