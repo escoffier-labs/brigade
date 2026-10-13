@@ -534,6 +534,83 @@ def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
     assert not fleet_client_messages._spool_path(NODE_A).exists()
 
 
+def test_queued_messages_are_not_replayed_with_replaced_node_credentials(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    token = "node-token-a"
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": token, "admin_token": ""},
+    )
+    attempts = []
+
+    def request(_hub: str, request_token: str, message: dict):
+        attempts.append((request_token, message.copy()))
+        if len(attempts) == 1:
+            return 503, {"error": "temporarily unavailable"}
+        return 201, {"message": {"client_id": message["client_id"]}}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+    queued = fleet_client_messages.send(
+        recipient=NODE_B,
+        subject="Offline under first credential",
+        body="Keep the auth scope",
+        reference=None,
+        priority="normal",
+    )
+    first_path = fleet_client_messages._spool_path(NODE_A)
+    assert queued["queued"] is True
+    assert first_path.is_file()
+
+    token = "node-token-b"
+    sent = fleet_client_messages.send(
+        recipient=NODE_B,
+        subject="Online under replacement credential",
+        body="Do not replay the older request",
+        reference=None,
+        priority="normal",
+    )
+
+    assert sent["message"]["client_id"] == attempts[-1][1]["client_id"]
+    assert attempts[-1][0] == "node-token-b"
+    assert all(request_token != "node-token-b" for request_token, _message in attempts[:-1])
+    assert first_path.is_file()
+
+
+def test_flush_reports_legacy_unscoped_message_spool(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub.invalid"})
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    legacy_path = fleet_client.spool_path(NODE_A).with_name(f"{NODE_A}.messages.jsonl")
+    legacy_message = {
+        "action": "send",
+        "to": NODE_B,
+        "subject": "Legacy",
+        "body": "Keep this queued for operator review",
+        "client_id": "legacy-message",
+        "enqueued_at": datetime.now(timezone.utc).isoformat(),
+    }
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text(json.dumps(legacy_message) + "\n", encoding="utf-8")
+    attempts = []
+    monkeypatch.setattr(
+        fleet_client_messages,
+        "_request",
+        lambda _hub, _token, message: attempts.append(message) or (201, {}),
+    )
+
+    assert fleet_client_messages.flush(NODE_A) == 0
+
+    assert attempts == []
+    assert fleet_client._read_spool(legacy_path) == [legacy_message]
+    assert "no credential scope" in caplog.text
+
+
 def test_new_send_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
@@ -584,6 +661,59 @@ def test_new_send_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
 
     assert newest["message"]["client_id"] == attempts[-1]["client_id"]
     assert [message["subject"] for message in attempts[2:]] == ["Older", "Newer", "Newest"]
+
+
+@pytest.mark.parametrize("action", ["send", "reply"])
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_interrupted_spool_drain_preserves_new_message(tmp_path, monkeypatch, action, interrupt):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub.invalid"})
+    attempts = []
+
+    def request(_hub: str, _token: str, message: dict):
+        attempts.append(message.copy())
+        if len(attempts) == 1:
+            return 503, {"error": "temporarily unavailable"}
+        raise interrupt()
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+    older = fleet_client_messages.send(
+        recipient=NODE_B,
+        subject="Older",
+        body="Already queued",
+        reference=None,
+        priority="normal",
+    )
+    assert older["queued"] is True
+
+    with pytest.raises(interrupt):
+        if action == "send":
+            fleet_client_messages.send(
+                recipient=NODE_B,
+                subject="Newer",
+                body="Preserve through interrupted backlog drain",
+                reference=None,
+                priority="normal",
+            )
+        else:
+            fleet_client_messages.reply(
+                17,
+                body="Preserve through interrupted backlog drain",
+                subject="Re: task",
+                reference=None,
+                priority="normal",
+            )
+
+    pending = fleet_client._read_spool(fleet_client_messages._spool_path(NODE_A))
+    assert len(pending) == 2
+    assert pending[0]["client_id"] == older["client_id"]
+    assert pending[1]["action"] == action
 
 
 def test_reply_flushes_older_spooled_messages_first(tmp_path, monkeypatch):

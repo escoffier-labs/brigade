@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import urllib.error
@@ -19,8 +20,18 @@ MESSAGE_RESPONSE_LIMIT = 8 * 1024 * 1024
 MESSAGE_BATCH_SIZE = 100
 
 
-def _spool_path(node_id: str) -> Path:
-    return fleet_client.spool_path(node_id).with_name(f"{node_id}.messages.jsonl")
+def _spool_path(node_id: str, token: str | None = None) -> Path:
+    if token is None:
+        token = fleet_client.load_fleet_settings()["node_token"]
+    # Scope queued requests to their sender without persisting the bearer token.
+    token_scope = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return fleet_client.spool_path(node_id).with_name(f"{node_id}.messages-{token_scope}.jsonl")
+
+
+def _warn_legacy_spool(node_id: str) -> None:
+    path = fleet_client.spool_path(node_id).with_name(f"{node_id}.messages.jsonl")
+    if path.is_file() and not path.is_symlink():
+        _LOG.warning("legacy fleet message spool %s has no credential scope; leaving it untouched", path)
 
 
 def _request(hub: str, token: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -71,27 +82,35 @@ def _queue_locked(path: Path, message: dict[str, Any], *, dir_fd: int | None = N
 
 
 def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -> dict[str, Any]:
-    path = _spool_path(node_id)
-    with fleet_client._spool_lock(path) as dir_fd:
-        if path.exists() and not path.is_symlink():
-            _flush_locked(path, hub, token, max_messages=MESSAGE_BATCH_SIZE, dir_fd=dir_fd)
-            if fleet_client._read_spool(path, dir_fd=dir_fd):
-                return _queue_locked(path, message, dir_fd=dir_fd)
-        try:
-            status, payload = _request(hub, token, message)
-        except (KeyboardInterrupt, SystemExit):
+    _warn_legacy_spool(node_id)
+    path = _spool_path(node_id, token)
+    try:
+        with fleet_client._spool_lock(path) as dir_fd:
+            if path.exists() and not path.is_symlink():
+                _flush_locked(path, hub, token, max_messages=MESSAGE_BATCH_SIZE, dir_fd=dir_fd)
+                if fleet_client._read_spool(path, dir_fd=dir_fd):
+                    return _queue_locked(path, message, dir_fd=dir_fd)
             try:
-                _queue_locked(path, message, dir_fd=dir_fd)
-            except Exception as exc:
-                _LOG.warning("interrupted fleet message could not be persisted to the spool: %s", type(exc).__name__)
-            raise
-        except fleet_client.FleetClientError:
-            return _queue_locked(path, message, dir_fd=dir_fd)
-        if status in (408, 429) or status >= 500:
-            return _queue_locked(path, message, dir_fd=dir_fd)
-        if status >= 400:
-            raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
-        return payload
+                status, payload = _request(hub, token, message)
+            except fleet_client.FleetClientError:
+                return _queue_locked(path, message, dir_fd=dir_fd)
+            if status in (408, 429) or status >= 500:
+                return _queue_locked(path, message, dir_fd=dir_fd)
+            if status >= 400:
+                raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
+            return payload
+    except (KeyboardInterrupt, SystemExit):
+        try:
+            with fleet_client._spool_lock(path) as dir_fd:
+                already_queued = any(
+                    entry.get("client_id") == message["client_id"]
+                    for entry in fleet_client._read_spool(path, dir_fd=dir_fd)
+                )
+                if not already_queued:
+                    _queue_locked(path, message, dir_fd=dir_fd)
+        except BaseException as exc:
+            _LOG.warning("interrupted fleet message could not be persisted to the spool: %s", type(exc).__name__)
+        raise
 
 
 def _validate_sqlite_integer(value: Any, field: str, *, allow_zero: bool = False) -> None:
@@ -203,7 +222,8 @@ def flush(node_id: str, *, hub_url: str | None = None, token: str | None = None)
     config = fleet_client.load_fleet_config()
     hub = hub_url or config["hub_url"]
     auth = token or fleet_client.load_fleet_settings()["node_token"]
-    path = _spool_path(node_id)
+    _warn_legacy_spool(node_id)
+    path = _spool_path(node_id, auth)
     if not hub or not path.is_file():
         return 0
     with fleet_client._spool_lock(path) as dir_fd:
