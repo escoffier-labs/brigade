@@ -693,7 +693,7 @@ jobs:
               def pytest_collectreport(self, report):
                   self.skipped |= report.skipped
           guard = NoNativeSkips()
-          result = pytest.main(["-q", "-ra", "-o", "addopts=", "tests/test_windows_job.py::TestNativeContainment"], plugins=[guard])
+          result = pytest.main(["-q", "-ra", "-o", "addopts=", "tests/test_windows_job.py::TestNativeContainment", "tests/test_skills_state_windows.py"], plugins=[guard])
           sys.exit(1 if guard.skipped else int(result))
           '@ | & $python -
           if ($LASTEXITCODE -ne 0) { throw "native containment failed or skipped" }

@@ -135,8 +135,8 @@ def _nt_open_child_directory(parent: int, name: str) -> int:
     return _nt_dirfd().open_child_directory(parent, name)
 
 
-def _posix_mkdir_child(parent: int, name: str) -> None:
-    os.mkdir(name, 0o700, dir_fd=parent)
+def _posix_mkdir_child(parent: int, name: str, mode: int = 0o700) -> None:
+    os.mkdir(name, mode, dir_fd=parent)
 
 
 def _nt_mkdir_child(parent: int, name: str) -> None:
@@ -209,10 +209,10 @@ def open_child_directory(parent: int, name: str, *, writable: bool = True) -> in
     raise unavailable("directory operations")
 
 
-def mkdir_child(parent: int, name: str) -> None:
+def mkdir_child(parent: int, name: str, mode: int = 0o700) -> None:
     validate_component(name)
     if posix_available():
-        _posix_mkdir_child(parent, name)
+        _posix_mkdir_child(parent, name, mode)
         return
     if nt_available():
         _nt_mkdir_child(parent, name)
@@ -251,24 +251,56 @@ def replace_children(parent: int, source: str, destination: str) -> None:
     raise unavailable("import inbox operations")
 
 
-def unlink_child(parent: int, name: str) -> None:
+def unlink_child(parent: int, name: str, *, allow_reparse: bool = False) -> None:
     validate_component(name)
     if posix_available():
         _posix_unlink_child(parent, name)
         return
     if nt_available():
-        _nt_unlink_child(parent, name)
+        if allow_reparse:
+            _nt_dirfd().unlink_child(parent, name, allow_reparse=True)
+        else:
+            _nt_unlink_child(parent, name)
         return
     raise unavailable("import inbox operations")
 
 
-def stat_child(parent: int, name: str) -> os.stat_result:
+def stat_child(parent: int, name: str, *, allow_reparse: bool = False) -> os.stat_result:
     validate_component(name)
     if posix_available():
         return _posix_stat_child(parent, name)
     if nt_available():
+        if allow_reparse:
+            return _nt_dirfd().stat_child(parent, name, allow_reparse=True)
         return _nt_stat_child(parent, name)
     raise unavailable("import inbox validation")
+
+
+def rmdir_child(parent: int, name: str) -> None:
+    """Remove an empty plain directory relative to its held parent."""
+    validate_component(name)
+    if posix_available():
+        os.rmdir(name, dir_fd=parent)
+        return
+    if nt_available():
+        _nt_dirfd().unlink_child(parent, name, directory=True)
+        return
+    raise unavailable("directory removal")
+
+
+def rename_child(source_parent: int, source: str, destination_parent: int, destination: str) -> None:
+    """Move a plain child directory between two held parents."""
+    validate_component(source)
+    validate_component(destination)
+    if posix_available():
+        os.rename(source, destination, src_dir_fd=source_parent, dst_dir_fd=destination_parent)
+        return
+    if nt_available():
+        _nt_dirfd().replace_children(
+            source_parent, source, destination, replace=False, destination_parent=destination_parent, directory=True
+        )
+        return
+    raise unavailable("directory moves")
 
 
 def fsync_directory(descriptor: int) -> None:

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 
 from .. import __version__ as BRIGADE_VERSION
+from .. import dirfd
 from .. import mcp_server
 from ..localio import slugify, utc_now_iso as _now
 from ..projection import kernel as projection
@@ -391,37 +392,15 @@ def _plain_files_under_anchor(anchor: _registry_mod._StateRootAnchor, *relative:
     directory, refusal for symlinked components, symlinked entries skipped.
     """
     if not _registry_mod._HAS_DESCRIPTOR_ANCHOR:
-        base = (anchor.workspace / ".brigade").joinpath(*relative)
-        current = anchor.workspace / ".brigade"
-        for part in relative:
-            current = current / part
-            if not current.exists():
-                return None
-            if current.is_symlink() or _registry_mod._is_reparse_point(current) or not current.is_dir():
-                raise _registry_mod.SkillsStatePathError(f"skills state path must be plain directories: {current}")
-        names: list[str] = []
-        for entry in sorted(base.iterdir(), key=lambda item: item.name):
-            if entry.is_symlink():
-                continue
-            try:
-                st = entry.lstat()
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise _registry_mod.SkillsStatePathError(
-                    f"skills state entry could not be inspected safely: {entry}"
-                ) from exc
-            if stat_module.S_ISREG(st.st_mode):
-                names.append(entry.name)
-        return names
+        raise _registry_mod._fallback_mutation_refusal("reads", anchor.workspace / ".brigade")
     fd, opened = _registry_mod._anchor_open_chain(anchor, *relative, missing_ok=True)
     if fd is None:
         return None
     try:
         names = []
-        for name in sorted(os.listdir(fd)):
+        for name in sorted(dirfd.child_names(fd, sys.maxsize)):
             try:
-                st = os.lstat(name, dir_fd=fd)
+                st = dirfd.stat_child(fd, name, allow_reparse=True)
             except FileNotFoundError:
                 continue
             except OSError as exc:
@@ -431,6 +410,8 @@ def _plain_files_under_anchor(anchor: _registry_mod._StateRootAnchor, *relative:
             if stat_module.S_ISREG(st.st_mode):
                 names.append(name)
         return names
+    except OSError as exc:
+        raise _registry_mod.SkillsStatePathError("skills state directory could not be listed safely") from exc
     finally:
         for held_fd in reversed(opened):
             os.close(held_fd)

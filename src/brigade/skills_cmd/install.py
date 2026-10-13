@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterator, Literal, cast
 
 from .. import __version__ as BRIGADE_VERSION
+from .. import dirfd
 from .. import mcp_server
 from ..localio import slugify, utc_now_iso as _now
 from ..projection import kernel as projection
@@ -245,16 +246,16 @@ def _previous_install_receipt(anchor: registry._StateRootAnchor, *, skill_id: st
 
 
 def _dir_fd_subtree_plain(fd: int) -> bool:
-    for name in os.listdir(fd):
+    for name in dirfd.child_names(fd, sys.maxsize):
         try:
-            st = os.lstat(name, dir_fd=fd)
+            st = dirfd.stat_child(fd, name, allow_reparse=True)
         except OSError:
             return False
         if stat_module.S_ISLNK(st.st_mode):
             return False
         if stat_module.S_ISDIR(st.st_mode):
             try:
-                child = os.open(name, registry._DIR_OPEN_FLAGS, dir_fd=fd)
+                child = dirfd.open_child_directory(fd, name, writable=False)
             except OSError:
                 return False
             try:
@@ -275,7 +276,7 @@ def _anchor_subtree_is_plain(anchor: registry._StateRootAnchor, *relative: str) 
     destination instead of writing over or around the planted entry.
     """
     if not registry._HAS_DESCRIPTOR_ANCHOR:
-        return True
+        raise registry._fallback_mutation_refusal("reads", anchor.workspace / ".brigade")
     try:
         fd, opened = registry._anchor_open_chain(anchor, *relative, missing_ok=True)
     except registry.SkillsStatePathError:
