@@ -95,6 +95,41 @@ def test_mixed_case_source_url_survives_canonical_repository_replay():
     assert replay["duplicate"] is True
 
 
+def _dict_row(cursor, row):
+    return {column[0]: value for column, value in zip(cursor.description, row, strict=True)}
+
+
+@pytest.mark.parametrize("row_factory", [None, sqlite3.Row, _dict_row], ids=["tuple", "row", "dict"])
+@pytest.mark.parametrize("text_factory", [str, bytes], ids=["str", "bytes"])
+@pytest.mark.parametrize("encoding", ["UTF-8", "UTF-16"])
+def test_read_preserves_caller_factories_and_returns_json(row_factory, text_factory, encoding):
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute(f"PRAGMA encoding='{encoding}'")
+        conn.row_factory = row_factory
+        conn.text_factory = text_factory
+        conn.execute("PRAGMA user_version=19")
+        first = ingest(conn)
+        caller_cursor = conn.cursor()
+        settings = (conn.in_transaction, conn.isolation_level, conn.total_changes)
+        result = read(conn)
+        assert json.loads(json.dumps(result)) == result
+        assert result["history"][0]["observation_id"] == first["observation_id"]
+        assert result["checks"][0]["current_zero_findings"] is True
+        assert conn.row_factory is row_factory and conn.text_factory is text_factory
+        assert (conn.in_transaction, conn.isolation_level, conn.total_changes) == settings
+        for cursor in (caller_cursor, conn.cursor()):
+            row = cursor.execute("SELECT 'caller' AS value").fetchone()
+            if row_factory is None:
+                assert isinstance(row, tuple)
+                value = row[0]
+            else:
+                assert isinstance(row, dict if row_factory is _dict_row else sqlite3.Row)
+                value = row["value"]
+            assert value == (b"caller" if text_factory is bytes else "caller")
+        version = conn.execute("PRAGMA user_version").fetchone()
+        assert version[0 if row_factory is None else "user_version"] == 19
+
+
 def test_caller_head_survives_delayed_old_completion_and_insertion_order():
     conn = sqlite3.connect(":memory:")
     ingest(conn, FixtureGet([check(11)]), observed="2026-01-04T00:00:00Z")

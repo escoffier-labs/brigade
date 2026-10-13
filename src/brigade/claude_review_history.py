@@ -6,6 +6,7 @@ import hashlib
 import json
 import sqlite3
 from collections import defaultdict
+from contextlib import closing
 from typing import Any
 
 from brigade.claude_review_evidence import _head, _object_id, _timestamp
@@ -236,18 +237,28 @@ def read_managed_review_history(
     repository, current = _subject(owner, repo, pr_number, expected_app_id, expected_app_slug, current_head)
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError("history limit must be an integer from 1 through 100")
-    exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (_TABLE,)).fetchone()
-    rows = (
-        conn.execute(
-            f"SELECT observation_id, payload FROM {_TABLE} WHERE {_SUBJECT} "
-            "ORDER BY observed_sort DESC, observation_id LIMIT ?",
-            (repository, pr_number, expected_app_id, expected_app_slug, limit + 1),
-        ).fetchall()
-        if exists is not None
-        else []
-    )
+    with closing(conn.cursor()) as cursor:
+        cursor.row_factory = None
+        exists = cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (_TABLE,)
+        ).fetchone()
+        rows = (
+            cursor.execute(
+                f"SELECT observation_id, payload FROM {_TABLE} WHERE {_SUBJECT} "
+                "ORDER BY observed_sort DESC, observation_id LIMIT ?",
+                (repository, pr_number, expected_app_id, expected_app_slug, limit + 1),
+            ).fetchall()
+            if exists is not None
+            else []
+        )
     truncated = len(rows) > limit
-    history = [dict(json.loads(payload), observation_id=identity) for identity, payload in rows[:limit]]
+    history = [
+        dict(
+            json.loads(payload.decode("utf-8") if isinstance(payload, bytes) else payload),
+            observation_id=identity.decode("utf-8") if isinstance(identity, bytes) else identity,
+        )
+        for identity, payload in rows[:limit]
+    ]
     projection, complete = _project(history, current, truncated)
     projected_checks = {c["identity_key"]: c for c in projection["checks"]}
     for snapshot in history:
