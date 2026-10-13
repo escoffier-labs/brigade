@@ -49,8 +49,9 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)\s*[:=]\s*"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
-    r"\s+is\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
-    r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%USERPROFILE%|\$env:[A-Za-z_][A-Za-z0-9_]*))",
+    r"\s+(?:is|equals)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
+    r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%USERPROFILE%|"
+    r"\$[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))",
     re.IGNORECASE,
 )
 _URL_CREDENTIAL_QUERY = re.compile(
@@ -61,7 +62,7 @@ _URL_CREDENTIAL_QUERY = re.compile(
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)", re.IGNORECASE)
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
 _API_ROUTE_CONTEXT = re.compile(
-    r"\b(?:call|invoke|serve|expose|request|hit)\s+(?:the\s+)?"
+    r"\b(?:call|invoke|serve|expose|request|hit|get|head|post|put|patch|delete|connect|options|trace)\s+(?:the\s+)?"
     r"(?P<path>/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)(?:\?[^\s<>\"']*)?)",
     re.IGNORECASE,
 )

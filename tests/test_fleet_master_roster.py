@@ -86,6 +86,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Load config from C:\\Users\\operator\\.config\\secret.toml",
         r"Read $env:USERPROFILE\Vendor\Product",
         r"Read $env:APPDATA\Vendor\Product",
+        r"Read $PWD/foo",
+        r"Read $XDG_CONFIG_HOME/tool",
         "Use C:Users\\alice",
         "Read D:projects\\acme",
         "Read /etc/credentials.",
@@ -124,6 +126,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Use `production-admin` auth profile.",
         "Use the production-admin auth profile.",
         "password: actual-secret",
+        "password equals hunter2",
+        "API key equals shortkey",
         "password is actual-secret",
         "API key is abcdefghijklmnop",
         "password is p@ssw0rd!",
@@ -230,6 +234,8 @@ def test_parse_accepts_prose_that_mentions_auth_profiles(text: str) -> None:
         "Support HTTP/2.0 requests.",
         "Target Python/3.12 runtimes.",
         "Handle TLS/1.3 connections.",
+        "GET /health endpoint",
+        "POST /v1/jobs",
     ],
 )
 def test_parse_accepts_known_api_routes_in_descriptive_text(field: str, text: str) -> None:
