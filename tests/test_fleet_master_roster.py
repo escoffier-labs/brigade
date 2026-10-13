@@ -69,6 +69,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Use Slack token " + "xoxb-" + "A" * 20,
         "Use GitLab token " + "glpat-" + "A" * 20,
         "OPENAI_API_KEY=placeholder-secret",
+        "CI=production",
+        "X=private-value",
         "Load config from C:\\Users\\operator\\.config\\secret.toml",
         "Read /etc/credentials.",
         "Write ./private/output.json.",
@@ -104,7 +106,10 @@ def test_parse_rejects_fine_grained_github_pat() -> None:
         fleet_master_roster.parse(document)
 
 
-@pytest.mark.parametrize("model", ["openai/gpt-5.6", "opencode-go/glm-5.2"])
+@pytest.mark.parametrize(
+    "model",
+    ["openai/gpt-5.6", "opencode-go/glm-5.2", "openrouter/x-ai/grok", "anthropic/claude"],
+)
 def test_parse_accepts_provider_qualified_model_identifiers(model: str) -> None:
     document = _document()
     document["seats"][0]["model"] = model  # type: ignore[index]

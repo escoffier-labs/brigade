@@ -20,7 +20,7 @@ _SEAT_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _DANGEROUS_VALUE = re.compile(
     r"(?:sk-[A-Za-z0-9_-]{12,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
-    r"\bBearer\s+\S+|\b[A-Z][A-Z0-9_]{2,}\s*=|"
+    r"\bBearer\s+\S+|\b[A-Z][A-Z0-9_]*\s*=|"
     r"\bauth(?:entication)?[ -]profile(?:\s*[:=]\s*|\s+)(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+')|"
     r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
@@ -29,7 +29,7 @@ _DANGEROUS_VALUE = re.compile(
 )
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~[/\\]|[/\\]|\.{1,2}[/\\])")
 _RELATIVE_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+(?=$|[^A-Za-z0-9_.~-])")
-_VERSIONED_PROVIDER_MODEL = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\.\d+$")
+_PROVIDER_MODEL = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+$")
 _SURROGATE = re.compile("[\\ud800-\\udfff]")
 
 _TOP_FIELDS = frozenset({"schema", "revision", "seats"})
@@ -60,7 +60,7 @@ def _text(value: Any, field: str) -> str:
         raise MasterRosterError(f"{field} must contain valid Unicode scalar values")
     if len(value) > MAX_TEXT or _has_control(value):
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
-    provider_model = field.endswith(".model") and _VERSIONED_PROVIDER_MODEL.fullmatch(value)
+    provider_model = field.endswith(".model") and _PROVIDER_MODEL.fullmatch(value)
     relative_path = not provider_model and _RELATIVE_PATH.search(value)
     if _DANGEROUS_VALUE.search(value) or contains_credential(value) or _ROOTED_PATH.search(value) or relative_path:
         raise MasterRosterError(f"{field} contains a credential, environment assignment, or home path")
