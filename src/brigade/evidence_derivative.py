@@ -92,16 +92,28 @@ def _validate_manifest_entries(manifest: dict[str, Any], raw: dict[str, bytes]) 
         raise DerivativeExportError("source manifest entries are malformed")
     declared: set[str] = set()
     for entry in entries:
-        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"path", "sha256", "bytes", "media_type", "kind"}
+            or not isinstance(entry.get("path"), str)
+        ):
             raise DerivativeExportError("source manifest entry is malformed")
         name = entry["path"]
         if name not in _SUPPORTED or name == "manifest.json":
             raise DerivativeExportError("source manifest declares an unsupported artifact class")
         data = raw.get(name)
-        if data is None or entry.get("sha256") != hashlib.sha256(data).hexdigest():
+        if (
+            name in declared
+            or data is None
+            or type(entry.get("bytes")) is not int
+            or entry["bytes"] != len(data)
+            or entry.get("sha256") != hashlib.sha256(data).hexdigest()
+        ):
             raise DerivativeExportError(f"source artifact digest mismatch: {name}")
         declared.add(name)
-    if declared != set(raw) - {"manifest.json"}:
+    if declared != set(raw) - {"manifest.json"} or manifest.get("entries_sha256") != localio.canonical_json_digest(
+        entries
+    ):
         raise DerivativeExportError("source package contents do not match its manifest")
 
 
@@ -115,12 +127,22 @@ def export_derivative(
     necessity: str,
 ) -> DerivativeReport:
     """Create one local, integrity-only derivative without changing its source."""
-    source = source.expanduser().resolve()
-    out = out.expanduser().resolve()
-    if not source.is_dir() or source.is_symlink():
+    source = source.expanduser()
+    out = out.expanduser()
+    if source.is_symlink() or not source.is_dir():
         raise DerivativeExportError("source package is not a directory")
+    if out.is_symlink():
+        raise DerivativeExportError("derivative output cannot be a symlink")
+    source = source.resolve()
+    out = out.parent.resolve() / out.name
     if out.exists():
         raise DerivativeExportError("derivative output already exists")
+    try:
+        out.relative_to(source)
+    except ValueError:
+        pass
+    else:
+        raise DerivativeExportError("derivative output cannot be inside its source package")
 
     names = sorted(path.name for path in source.iterdir())
     if "manifest.json" not in names or "receipt.json" not in names:
@@ -134,13 +156,20 @@ def export_derivative(
     receipt = _json_object(raw["receipt.json"], "receipt")
     minimized, removed = _minimize_receipt(receipt)
     excluded = len(names) - len(known_names)
-    safe_authorization = {
-        "recipient": _safe_text(recipient)[0],
-        "authority": _safe_text(authority)[0],
-        "lawful_basis": _safe_text(lawful_basis)[0],
-        "necessity": _safe_text(necessity)[0],
-        "organization_supplied": True,
-    }
+    safe_authorization: dict[str, Any] = {}
+    for key, value in (
+        ("recipient", recipient),
+        ("authority", authority),
+        ("lawful_basis", lawful_basis),
+        ("necessity", necessity),
+    ):
+        safe_authorization[key], redacted = _safe_text(value)
+        removed += redacted
+    safe_authorization.update(
+        {
+            "organization_supplied": True,
+        }
+    )
 
     source_artifacts = [
         {"path": name, "sha256": hashlib.sha256(raw[name]).hexdigest(), "bytes": len(raw[name])} for name in known_names
@@ -175,6 +204,7 @@ def export_derivative(
     encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
     staging = out.parent / f".{out.name}.staging-{secrets.token_hex(4)}"
     try:
+        out.parent.mkdir(parents=True, exist_ok=True)
         staging.mkdir(parents=True, mode=0o700)
         localio.write_bytes_atomic(staging / "derivative.json", encoded)
         os.replace(staging, out)

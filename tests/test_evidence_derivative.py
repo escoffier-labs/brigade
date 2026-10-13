@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from brigade import evidence_derivative, evidence_package, localio
+from brigade import cli, evidence_derivative, evidence_package, localio
 
 
 def _stamp_receipt(receipt: dict[str, object]) -> None:
@@ -30,8 +30,8 @@ def _fabricated_run_dir(tmp_path: Path) -> tuple[Path, dict[str, object]]:
     }
     _stamp_receipt(receipt)
     (run_dir / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
-    (run_dir / "changes.patch").write_text("private patch", encoding="utf-8")
-    (run_dir / "summary.md").write_text("private summary", encoding="utf-8")
+    (run_dir / "changes.patch").write_text("private patch fixture-derivative-value", encoding="utf-8")
+    (run_dir / "summary.md").write_text("private summary fixture-derivative-value", encoding="utf-8")
     return run_dir, receipt
 
 
@@ -76,12 +76,19 @@ def test_derivative_minimizes_payloads_and_records_original_provenance(tmp_path:
     } == originals
 
 
-def test_derivative_excludes_unknown_source_files_without_leaking_values(tmp_path: Path) -> None:
+def test_derivative_excludes_inventory_logs_worker_checkpoint_and_prior_exports(tmp_path: Path) -> None:
     _, receipt = _fabricated_run_dir(tmp_path)
     source = tmp_path / "source"
     assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
-    planted = "private-previous-export-value"
-    (source / "previous-export.json").write_text(planted, encoding="utf-8")
+    planted = "private-unsupported-artifact-value"
+    for name in (
+        "inventory.json",
+        "logs.jsonl",
+        "worker-events.json",
+        "checkpoint.json",
+        "previous-export.json",
+    ):
+        (source / name).write_text(f"{name}: {planted}", encoding="utf-8")
 
     out = tmp_path / "derivative"
     report = evidence_derivative.export_derivative(
@@ -95,5 +102,57 @@ def test_derivative_excludes_unknown_source_files_without_leaking_values(tmp_pat
 
     raw = (out / "derivative.json").read_text(encoding="utf-8")
     assert planted not in raw
-    assert report.excluded_artifacts == 1
-    assert json.loads(raw)["transformation"]["excluded_artifacts"] == 1
+    assert report.excluded_artifacts == 5
+    assert json.loads(raw)["transformation"]["excluded_artifacts"] == 5
+
+
+def test_derivative_refuses_export_inside_source_package(tmp_path: Path) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+
+    try:
+        evidence_derivative.export_derivative(
+            source=source,
+            out=source / "derivative",
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == "derivative output cannot be inside its source package"
+    else:
+        raise AssertionError("derivative export inside source package was accepted")
+
+
+def test_derivative_export_cli_writes_local_json(tmp_path: Path, capsys) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    out = tmp_path / "nested" / "derivative"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+
+    assert (
+        cli.main(
+            [
+                "receipts",
+                "export",
+                "derivative",
+                "--source",
+                str(source),
+                "--out",
+                str(out),
+                "--recipient",
+                "recipient-42",
+                "--authority",
+                "approved-case-7",
+                "--lawful-basis",
+                "contract",
+                "--necessity",
+                "verification-result review",
+            ]
+        )
+        == 0
+    )
+    assert (out / "derivative.json").is_file()
+    assert "evidence derivative exported" in capsys.readouterr().out
