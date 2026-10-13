@@ -378,6 +378,22 @@ def test_parse_rejects_qualified_compact_credential_assignments(field: str, text
 @pytest.mark.parametrize(
     "text",
     [
+        "This seat uses API key shortkey",
+        "Reviewer uses the password hunter2",
+    ],
+)
+def test_parse_rejects_subject_first_credential_disclosures(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
         'The "auth profile" is production-admin',
         '"Environment variable" SERVICE_MODE is production',
         'The "path" is foo/bar',
@@ -411,6 +427,7 @@ def test_parse_rejects_quoted_protected_labels(field: str, text: str) -> None:
         "Authentication token: managed by Vault.",
         "Password: required.",
         "API key: configured.",
+        "This seat uses API key authentication for request signing.",
         "Client secret: stored securely.",
         "Password is required.",
         "Auth profiles are required.",
