@@ -536,7 +536,7 @@ def test_parse_accepts_lowercase_key_value_prose(field: str, text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "See https://example.com/download?path=/home/example.",
+        "See https://example.com/download?path=/opt/example.",
         "See https://example.com/download?file=~example/.ssh/config.",
     ],
 )
