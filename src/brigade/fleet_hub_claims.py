@@ -14,6 +14,7 @@ from . import fleet_hub as hub
 # Fences are never evicted. At capacity, existing targets remain usable but
 # an unseen target must fail closed, including a missing legacy release.
 MAX_CLAIM_TARGETS = 100_000
+MAX_CLAIM_TARGET_BYTES = 1024
 MAX_GENERATION = 2**63 - 1
 CLAIM_COLUMNS = (
     "target, owner_node, owner_conductor, harness, role, job, session, acquired_at, renewed_at, ttl_seconds, expires_at"
@@ -29,6 +30,33 @@ CREATE TABLE claim_fences (
 
 class ClaimFenceError(hub.FleetHubError):
     """Authoritative fencing storage cannot safely serve this operation."""
+
+
+class ClaimTargetError(hub.FleetHubUnprocessable):
+    """A target cannot be represented within new fence storage bounds."""
+
+    def __init__(self, message: str, *, limit: int | None = None) -> None:
+        super().__init__(message)
+        self.limit = limit
+
+    def payload(self) -> dict[str, Any]:
+        error: dict[str, Any] = {"code": "invalid-field", "field": "target", "message": str(self)}
+        if self.limit is not None:
+            error.update(limit=self.limit, unit="utf8-bytes")
+        return {"error": error}
+
+
+def _target_bytes(target: str) -> bytes:
+    try:
+        return target.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ClaimTargetError("claim target must be valid UTF-8") from exc
+
+
+def _refuse_missing_schema(exc: sqlite3.OperationalError) -> None:
+    # Lock contention and I/O failures retain SQLite's error and retry policy.
+    if str(exc).startswith(("no such table:", "no such column:")):
+        raise ClaimFenceError("claim generation fence storage is missing or corrupt") from exc
 
 
 def _checked_generation(value: Any) -> int:
@@ -50,7 +78,8 @@ def validate_schema(conn: sqlite3.Connection) -> None:
         ).fetchone()
         count = conn.execute("SELECT COUNT(*) FROM claim_fences").fetchone()[0]
     except sqlite3.OperationalError as exc:
-        raise ClaimFenceError("claim generation fence storage is missing or corrupt") from exc
+        _refuse_missing_schema(exc)
+        raise
     if invalid or missing:
         raise ClaimFenceError("claim generation fence is missing or corrupt")
     if count > MAX_CLAIM_TARGETS:
@@ -59,11 +88,14 @@ def validate_schema(conn: sqlite3.Connection) -> None:
 
 def migrate_schema(conn: sqlite3.Connection) -> None:
     """One-time migration; caller owns schema transaction and version update."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'claim_fences'").fetchone():
+        # Existing history is authoritative even when user_version is old.
+        # Validate it without resetting generations or backfilling missing rows.
+        validate_schema(conn)
+        return
     targets = conn.execute("SELECT target FROM claims ORDER BY target LIMIT ?", (MAX_CLAIM_TARGETS + 1,)).fetchall()
     if len(targets) > MAX_CLAIM_TARGETS:
         raise ClaimFenceError("claim generation fence capacity exceeded during migration")
-    # Deliberately not IF NOT EXISTS: preexisting unknown fencing state must
-    # not be replaced or silently interpreted as the legacy migration.
     conn.execute(_FENCE_SCHEMA)
     conn.executemany("INSERT INTO claim_fences (target, generation) VALUES (?, 1)", targets)
 
@@ -72,7 +104,8 @@ def generation(conn: sqlite3.Connection, target: str, *, has_claim: bool) -> int
     try:
         row = conn.execute("SELECT generation FROM claim_fences WHERE target = ?", (target,)).fetchone()
     except sqlite3.OperationalError as exc:
-        raise ClaimFenceError("claim generation fence storage is missing or corrupt") from exc
+        _refuse_missing_schema(exc)
+        raise
     if row is None:
         if has_claim:
             raise ClaimFenceError("claim generation fence is missing or corrupt")
@@ -84,6 +117,8 @@ def _advance(conn: sqlite3.Connection, target: str, current: int) -> int:
     if current == MAX_GENERATION:
         raise ClaimFenceError("claim generation fence exhausted")
     if current == 0:
+        if len(_target_bytes(target)) > MAX_CLAIM_TARGET_BYTES:
+            raise ClaimTargetError("claim target exceeds UTF-8 byte limit", limit=MAX_CLAIM_TARGET_BYTES)
         count = conn.execute("SELECT COUNT(*) FROM claim_fences").fetchone()[0]
         if count >= MAX_CLAIM_TARGETS:
             raise ClaimFenceError("claim generation fence capacity exceeded")
@@ -261,7 +296,9 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
         raise hub.FleetHubForbidden(
             f"claim node_id {request['node_id']!r} does not match the caller's node token ({caller_node})"
         )
-    hub._refuse_newer_schema(conn, hub.Path("fleet hub"))
+    _target_bytes(request["target"])
+    if conn.execute("PRAGMA user_version").fetchone()[0] > hub.SCHEMA_VERSION:
+        raise hub.FleetHubUnsupportedSchema(hub.FleetHubUnsupportedSchema.public_message)
     conn.execute("BEGIN" if request["action"] == "inspect" else "BEGIN IMMEDIATE")
     try:
         # Read time only after acquiring the transaction. Never re-read an
@@ -285,7 +322,8 @@ def list_claims(conn: sqlite3.Connection, *, include_all: bool = False) -> list[
             "FROM claims c LEFT JOIN claim_fences f ON f.target = c.target ORDER BY c.target"
         ).fetchall()
     except sqlite3.OperationalError as exc:
-        raise ClaimFenceError("claim generation fence storage is missing or corrupt") from exc
+        _refuse_missing_schema(exc)
+        raise
     result = []
     for row in rows:
         _checked_generation(row[15])

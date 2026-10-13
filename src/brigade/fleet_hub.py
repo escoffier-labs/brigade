@@ -407,6 +407,12 @@ class FleetHubError(RuntimeError):
     """Hub configuration or request failure with an operator-readable message."""
 
 
+class FleetHubUnsupportedSchema(FleetHubError):
+    """A newer schema requires an upgraded hub before serving requests."""
+
+    public_message = "fleet hub database schema is newer than supported"
+
+
 class FleetHubForbidden(FleetHubError):
     """An authenticated caller asked to act as a node_id its token does not own (HTTP 403)."""
 
@@ -668,7 +674,7 @@ def _refuse_newer_schema(conn: sqlite3.Connection, db_path: Path) -> None:
     """Raise ``FleetHubError`` when ``conn``'s database is from a newer hub."""
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     if not isinstance(current, int) or current > SCHEMA_VERSION:
-        raise FleetHubError(
+        raise FleetHubUnsupportedSchema(
             f"fleet hub database {db_path} has schema version {current}; this brigade supports {SCHEMA_VERSION}"
         )
 

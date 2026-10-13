@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPConnection
 
 import pytest
@@ -338,3 +339,200 @@ def test_newer_schema_refuses_without_changes(authority):
     with pytest.raises(hub.FleetHubError, match="schema version 27"):
         hub.open_db(path)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 27
+
+
+@pytest.mark.parametrize("target", ["x" * 1025, "é" * 513], ids=["ascii", "multibyte"])
+@pytest.mark.parametrize("action", ["acquire", "release"])
+def test_new_target_byte_limit_rolls_back_all_state(authority, target, action):
+    conn, _, clock = authority
+    request(conn, ttl_seconds=1)
+    clock["now"] += 2
+    before = snapshot(conn)
+    with pytest.raises(hub.FleetHubUnprocessable, match="UTF-8 byte limit"):
+        request(conn, action, target=target)
+    assert snapshot(conn) == before
+    assert not conn.in_transaction
+
+
+@pytest.mark.parametrize("target", ["x" * 1024, "é" * 512], ids=["ascii", "multibyte"])
+def test_new_target_accepts_exact_utf8_byte_limit(authority, target):
+    conn, _, _ = authority
+    assert request(conn, target=target)[1]["claim"]["generation"] == 1
+    assert request(conn, "release", target=target) == (200, {"released": True})
+    assert fence(conn, target) == 2
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["é" * 513, "fake-secret-" + "x" * 1024, "fake-secret-\ud800"],
+    ids=["multibyte", "secret", "invalid-utf8"],
+)
+def test_http_invalid_target_is_sanitized_422(http_authority, target):
+    conn, clock, address = http_authority
+    request(conn, ttl_seconds=1)
+    clock["now"] += 2
+    before = snapshot(conn)
+    status, payload = http_claim(address, "POST", target=target)
+    assert status == 422
+    error = payload["error"]
+    assert error["code"] == "invalid-field"
+    assert error["field"] == "target"
+    if "\ud800" not in target:
+        assert error["limit"] == 1024
+        assert error["unit"] == "utf8-bytes"
+    assert "fake-secret" not in json.dumps(payload)
+    assert snapshot(conn) == before
+
+
+def test_migration_preserves_oversize_legacy_target_and_its_operability(authority):
+    conn, path, _ = authority
+    request(conn)
+    target = "é" * 1025
+    conn.execute("UPDATE claims SET target = ?", (target,))
+    conn.execute("DROP TABLE claim_fences")
+    conn.execute("PRAGMA user_version=25")
+    conn.commit()
+    original = conn.execute("SELECT * FROM claims").fetchall()
+    with hub.init_db(path) as migrated:
+        assert migrated.execute("SELECT * FROM claims").fetchall() == original
+        assert fence(migrated, target) == 1
+        assert request(migrated, "renew", target=target)[0] == 200
+        assert request(migrated, "release", target=target)[0] == 200
+        assert request(migrated, target=target)[1]["claim"]["generation"] == 3
+
+
+@pytest.mark.parametrize("path", ["/view/machines", "/view/repos", "/", "/deck", "/deck/repos"])
+def test_authenticated_html_fence_refusal_is_structured_503(http_authority, path):
+    conn, _, address = http_authority
+    request(conn)
+    conn.execute("DELETE FROM claim_fences")
+    conn.commit()
+    before = snapshot(conn)
+    client = HTTPConnection(*address, timeout=5)
+    try:
+        client.request("GET", path, headers={"Authorization": "Bearer fake-admin-token"})
+        response = client.getresponse()
+        assert response.status == 503
+        assert json.loads(response.read()) == {"error": "claim generation fence is missing or corrupt"}
+    finally:
+        client.close()
+    assert snapshot(conn) == before
+
+
+@pytest.mark.parametrize("reader", ["validate_schema", "generation", "list_claims"])
+def test_real_sqlite_read_lock_remains_operational_error(authority, reader):
+    from brigade import fleet_hub_claims
+
+    conn, path, _ = authority
+    request(conn)
+    conn.execute("PRAGMA journal_mode=DELETE")
+    other = sqlite3.connect(path, timeout=0)
+    conn.execute("BEGIN EXCLUSIVE")
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            if reader == "generation":
+                fleet_hub_claims.generation(other, "fake-target", has_claim=True)
+            else:
+                getattr(fleet_hub_claims, reader)(other)
+    finally:
+        conn.rollback()
+        other.close()
+
+
+@pytest.mark.parametrize("version", [22, 24, 25])
+def test_old_schema_preserves_and_validates_existing_fence_history(authority, version):
+    conn, path, _ = authority
+    request(conn)
+    request(conn, "release")
+    request(conn)
+    request(conn, "release", target="fake-free-history")
+    conn.execute(f"PRAGMA user_version={version}")
+    conn.commit()
+    before = snapshot(conn)
+    with hub.init_db(path) as migrated:
+        assert snapshot(migrated) == before
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == hub.SCHEMA_VERSION
+    with hub.init_db(path) as reopened:
+        assert snapshot(reopened) == before
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "missing-column"])
+def test_old_schema_never_backfills_unknown_existing_fences(authority, damage):
+    conn, path, _ = authority
+    request(conn)
+    if damage == "missing":
+        conn.execute("DELETE FROM claim_fences")
+    elif damage == "corrupt":
+        conn.execute("PRAGMA ignore_check_constraints=ON")
+        conn.execute("UPDATE claim_fences SET generation=-1")
+    else:
+        conn.execute("ALTER TABLE claim_fences RENAME COLUMN generation TO unknown_history")
+    conn.execute("PRAGMA user_version=25")
+    conn.commit()
+    before = snapshot(conn)
+    with pytest.raises(hub.FleetHubError, match="fence"):
+        hub.init_db(path)
+    assert snapshot(conn) == before
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 25
+
+
+def test_two_connections_compete_for_one_new_target(authority):
+    conn, path, _ = authority
+    barrier = threading.Barrier(2)
+
+    def acquire(holder):
+        with hub.open_db(path) as other:
+            barrier.wait(timeout=5)
+            return request(other, holder=holder)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(acquire, holder) for holder in ("fake-one", "fake-two")]
+        results = [future.result(timeout=10) for future in futures]
+    assert sorted(status for status, _ in results) == [200, 409]
+    assert fence(conn) == 1
+    assert len(hub.list_claims(conn)) == 1
+    assert all(payload.get("claim", payload.get("owner"))["generation"] == 1 for _, payload in results)
+
+
+def test_two_connections_migrate_schema25_once(authority):
+    conn, path, _ = authority
+    request(conn)
+    original = conn.execute("SELECT * FROM claims").fetchall()
+    conn.execute("DROP TABLE claim_fences")
+    conn.execute("PRAGMA user_version=25")
+    conn.commit()
+    barrier = threading.Barrier(2)
+
+    def migrate():
+        with sqlite3.connect(path, timeout=5) as other:
+            barrier.wait(timeout=5)
+            # Use the production transaction owner without init_db's process-local lock.
+            hub._init_schema(other, path)
+            return other.execute("PRAGMA user_version").fetchone()[0], snapshot(other)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(migrate) for _ in range(2)]
+        results = [future.result(timeout=15) for future in futures]
+    assert all(version == hub.SCHEMA_VERSION for version, _ in results)
+    assert results[0][1] == results[1][1] == (original, [("fake-target", 1)])
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_http_newer_schema_is_static_503_without_mutation(http_authority, method):
+    conn, _, address = http_authority
+    request(conn)
+    before = snapshot(conn)
+    conn.execute(f"PRAGMA user_version={hub.SCHEMA_VERSION + 1}")
+    conn.commit()
+    assert http_claim(address, method) == (503, {"error": "fleet hub database schema is newer than supported"})
+    assert snapshot(conn) == before
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == hub.SCHEMA_VERSION + 1
+
+
+def test_claim_request_newer_schema_uses_static_refusal(authority):
+    conn, _, _ = authority
+    conn.execute(f"PRAGMA user_version={hub.SCHEMA_VERSION + 1}")
+    conn.commit()
+    with pytest.raises(hub.FleetHubError, match="^fleet hub database schema is newer than supported$"):
+        request(conn)
+    assert snapshot(conn) == ([], [])

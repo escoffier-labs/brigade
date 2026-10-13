@@ -49,17 +49,49 @@ lock tokens remain private. Owned inspection retains the existing node-local
 `lock_run_dir` recovery field.
 
 Fences persist indefinitely, including free, renamed, and retired targets.
-Distinct stored targets are capped at 100,000. A new target at capacity fails
-closed, while existing targets remain usable. Migration exceeding that bound
-refuses without changing schema25 or its claims. Capacity, signed-64-bit
-exhaustion, and any pre-commit failure roll back the entire operation, including
-expiry pruning. A fence must be an integer in `[1, 9223372036854775807]` once
-stored. Missing or corrupt fences on existing rows refuse reads and mutations.
-The `/claims` HTTP adapter reports fence corruption, capacity refusal, and
-generation exhaustion as structured 503 errors without committing mutations.
-Startup validates current-schema fencing state without recreating it, and a
-newer schema refuses startup and request opens. Deleted current-schema fence
-storage is never silently rebuilt.
+Distinct stored targets are capped at 100,000. Each newly inserted target is
+limited to 1,024 UTF-8 bytes, including multibyte input. The byte limit applies
+only to new fences: migration preserves longer legacy targets, and those targets
+remain operable. Invalid UTF-8 refuses cleanly. An overlong new target returns
+HTTP 422 with an `invalid-field` error naming `target`, `limit: 1024`, and
+`unit: utf8-bytes`, without echoing the submitted value.
+
+A new target at capacity fails closed with structured HTTP 503 and the static
+message `claim generation fence capacity exceeded`, while existing targets
+remain usable. Migration exceeding the row bound refuses without changing the
+old schema or its claims. Capacity, signed-64-bit exhaustion, byte-limit
+rejection, and any pre-commit failure roll back the entire operation, including
+expiry pruning. No fence is automatically purged or evicted to admit new targets.
+
+At capacity, investigate enrolled-node activity and revoke an abusive node
+through the supported operator workflow, `brigade fleet nodes revoke <node_id>`.
+Preserve a backup and every fence while investigating. Revocation prevents that
+node's future writes but does not free fence capacity. Recovery requires a
+reviewed capacity increase, or a future verified epoch-reset procedure after
+that authority is implemented. There is no destructive inline remediation or
+automatic reset in this slice. The byte bound limits future target storage,
+but an enrolled node can still consume the remaining row budget.
+
+A fence must be an integer in `[1, 9223372036854775807]` once stored. Missing or
+corrupt fences on existing rows refuse reads and mutations. This refusal can
+reach the whole fleet: startup validation prevents the hub from starting,
+claim listings fail in dashboards and routing occupancy, and a corrupt expired
+claim can block acquisition of other targets during global pruning. The
+`/claims`, authenticated HTML dashboard, and Command Deck readers return
+structured, sanitized HTTP 503 for fence refusal. SQLite lock and I/O errors
+retain their SQLite error classification and existing startup retry policy.
+
+Startup validates current-schema fencing state without recreating it. An
+old-schema upgrade also preserves and validates any existing fence history,
+without resetting generations or backfilling missing fences. Only an absent
+fence table in an old schema is created and seeded from legacy claims. Deleted
+current-schema fence storage is never silently rebuilt. A newer schema refuses
+startup and request opens, with a static HTTP 503 response that discloses no
+database path.
+
+Legacy clients still treat HTTP 503 as a hub-unavailable outcome and may fall
+back to a local-only lock. That fallback does not provide cross-machine
+exclusion. Explicit client handling of these refusal responses remains open.
 
 These generations alone do not fix delayed legacy acquire, same-holder ABA,
 or backup restore and rollback. A missing release can advance the fence and a
