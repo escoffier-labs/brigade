@@ -54,7 +54,7 @@ _DANGEROUS_VALUE = re.compile(
     r"(?:provided\s+(?:as|with)|stored\s+(?:as|with)|generated\s+(?:as|with)|configured\s+(?:as|with|to))\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
-    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|assigned\s+to\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|used\s+by\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|value)(?:\s+|(?=:)))?"
+    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|assigned\s+to\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|used\s+by\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|value)(?:\s+|(?=[:=])))?"
     r"(?:(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to)\s+|[:=]\s*)"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:set|configure(?:d)?|store(?:d)?|provide(?:d)?|generate(?:d)?)\s+"
@@ -194,15 +194,12 @@ def _has_disallowed_api_route_query(value: str) -> bool:
         decoded_components = [
             component.casefold() for component in decoded_path.replace("\\", "/").split("/") if component
         ]
-        if route_path != decoded_path and (
-            any(component in {".", ".."} for component in decoded_components)
-            or any(
-                component in _FILESYSTEM_COMPONENTS - _HTTP_METHOD_ROUTE_ROOTS
-                or component.startswith(".")
-                or component == "~"
-                or component in _PRIVATE_KEY_FILES
-                for component in decoded_components
-            )
+        if any(component in {".", ".."} for component in decoded_components) or any(
+            component in _FILESYSTEM_COMPONENTS - _HTTP_METHOD_ROUTE_ROOTS
+            or component.startswith(".")
+            or component == "~"
+            or component in _PRIVATE_KEY_FILES
+            for component in decoded_components
         ):
             return True
         if (

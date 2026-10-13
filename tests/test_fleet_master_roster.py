@@ -343,6 +343,23 @@ def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str)
 @pytest.mark.parametrize(
     "text",
     [
+        "Password value=hunter2",
+        "The API key for this seat=shortkey",
+        "The API key used by implementer=shortkey",
+    ],
+)
+def test_parse_rejects_qualified_compact_credential_assignments(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
         'The "auth profile" is production-admin',
         '"Environment variable" SERVICE_MODE is production',
         'The "path" is foo/bar',
@@ -832,9 +849,12 @@ def test_parse_rejects_encoded_assignments_in_api_route_paths(field: str, text: 
         "Call /api/%2Fetc/passwd",
         "Call /api/foo/%65tc/passwd",
         "Call /api/%7E/.ssh/id_rsa",
+        "Call /api/etc/passwd",
+        "Call /api/foo/etc/passwd",
+        "GET /users/.ssh/id_rsa",
     ],
 )
-def test_parse_rejects_encoded_filesystem_paths_in_api_routes(field: str, text: str) -> None:
+def test_parse_rejects_filesystem_paths_in_api_routes(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 
