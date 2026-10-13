@@ -43,7 +43,7 @@ _DANGEROUS_VALUE = re.compile(
     r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
     r"\s+is\s+(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential)\b)"
-    r"(?:\"[^\s\"]{7,}\"|'[^\s']{7,}'|`[^\s`]{7,}`|"
+    r"(?:\"[^\s\"]{7,}\"|'[^\s']{7,}'|`[^\s`]{7,}`|“[^\s“”]{7,}”|‘[^\s‘’]{7,}’|"
     r"[A-Za-z0-9_-]{16,}|(?=[A-Za-z0-9_-]{8,}\b)(?=[A-Za-z0-9_-]*[-_])[A-Za-z0-9_-]{8,}|"
     r"(?=[^\s]{8,})(?=[^\s]*[.@!#$%^&*+=~?][A-Za-z0-9])\S+|"
     r"(?=[^\s]{7,}[.!?](?:\s|$))\S+)|"
@@ -129,6 +129,7 @@ _EXTENSIONLESS_FILES = frozenset(
 )
 _PRIVATE_KEY_FILES = frozenset({"id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"})
 _PROSE_SLASH_TERMS = frozenset({"and/or", "ci/cd", "input/output", "planner/reviewer", "read/write"})
+_VERSION_REFERENCE = re.compile(r"\b[A-Z][A-Za-z0-9.+-]*/\d+(?:\.\d+)+")
 _FILE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 _MODEL_PATH_SUFFIX = re.compile(
     r"\.(?:7z|avif|bmp|bz2|c|cfg|conf|cpp|cs|css|csv|docx|exe|gif|go|gz|h|hpp|html|ico|ini|java|jpe?g|js|json|jsx|lock|md|mov|mp3|mp4|pdf|png|pptx|py|rar|rst|rs|sh|so|sql|svg|tar|tiff?|toml|ts|tsx|txt|wav|webp|woff2|xml|xlsx|yaml|yml|zip)$",
@@ -150,7 +151,7 @@ def _has_control(value: str) -> bool:
 
 
 def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -> bool:
-    path_text = _HTTP_URL.sub("", value)
+    path_text = _VERSION_REFERENCE.sub("", _HTTP_URL.sub("", value))
     for match in _STANDALONE_FILE.finditer(path_text):
         filename = match.group("file").rstrip(".,;:!?")
         sensitive_name = filename.casefold() in _EXTENSIONLESS_FILES | _PRIVATE_KEY_FILES | {"credentials"}

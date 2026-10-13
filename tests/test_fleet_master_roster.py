@@ -128,6 +128,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "token is abcdefg.",
         'password is "abcdefghijklmnop"',
         'token is "hunter2!"',
+        "password is “abcdefghijklmnop”",
+        "token is ‘hunter2!’",
         "token is abcdefghijklmnop",
         "auth token is abcdefghijklmnop",
     ],
@@ -196,6 +198,9 @@ def test_parse_accepts_prose_that_mentions_auth_profiles(text: str) -> None:
         "Invoke /health for readiness.",
         "Call /v1/chat/completions endpoint.",
         "Call /search?lang=en endpoint.",
+        "Support HTTP/2.0 requests.",
+        "Target Python/3.12 runtimes.",
+        "Handle TLS/1.3 connections.",
     ],
 )
 def test_parse_accepts_known_api_routes_in_descriptive_text(field: str, text: str) -> None:
