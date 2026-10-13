@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Fenced Worklore checkpoints atomically refuse overlapping repository path declarations with bounded, structured conflicts. Handoff, terminal and unchecked historical scopes remain reserved until explicit replacement or release. Ownership reads expose historical `path-admission` while retaining unknown liveness. (Refs #1595)
+- Windows skills state reads and mutations use held native handles, reject reparse escapes, and fail closed when anchoring is unavailable. Read-only commands retain traversal and read access without requesting mutation rights. (#1213)
 - `brigade memory recall --query` accepts bounded caller-supplied task context using the existing fail-open recall API. Task/worktree fixtures compare relevance against basename queries and report stale/scope limits. Search status adds read-only repeat-query/result counts from the existing local log, separate from verification scores. (#1563)
 - Persist bounded sanitized managed Claude review history in caller-owned SQLite transactions, with exact replay, revision snapshots and conservative caller-head projections across pushes and reruns. (#1601)
 
