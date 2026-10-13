@@ -547,13 +547,15 @@ def _verify_evidence_package(_target: Path, package_dir: Path) -> control_readin
             )
         if exc.code == "malformed":
             return _obs(package_dir.name, "discovered", "invalid", _dims(), ["schema_missing"])
-        return _obs(
-            package_dir.name,
-            "claim_validated",
-            "rejected",
-            _dims(integrity=("failed", "receipt_digest_mismatch"), subject="unknown", population="passed"),
-            ["receipt_digest_mismatch"],
-        )
+        if exc.code == "mismatch":
+            return _obs(
+                package_dir.name,
+                "claim_validated",
+                "rejected",
+                _dims(integrity=("failed", "package_snapshot_mismatch"), subject="unknown", population="passed"),
+                ["package_snapshot_mismatch"],
+            )
+        return _verifier_unavailable(package_dir.name, "verifier_error")
     return _obs(
         package_dir.name,
         "claim_validated",

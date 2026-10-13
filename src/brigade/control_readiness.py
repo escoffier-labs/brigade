@@ -92,6 +92,7 @@ REASON_CODES = frozenset(
         "no_records",
         "not_git_repository",
         "only_out_of_scope",
+        "package_snapshot_mismatch",
         "period_not_supplied",
         "planned_commands_mismatch",
         "planned_commands_missing",

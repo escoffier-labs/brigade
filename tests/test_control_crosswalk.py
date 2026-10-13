@@ -475,7 +475,7 @@ def test_ec12_strict_package_snapshot_validates_and_rejects_tampering(tmp_path):
         m for m in evaluated["mappings"] if m["claim_id"] == "EC-12" and m["relationship"] != "no-relationship"
     ]
     assert all(m["state"] == "evidenced_failed" for m in ec12_rows), [m["state"] for m in ec12_rows]
-    assert evaluated["evidence_readiness"]["EC-12"]["reason"] == "receipt_digest_mismatch"
+    assert evaluated["evidence_readiness"]["EC-12"]["reason"] == "package_snapshot_mismatch"
 
 
 def test_ec12_rejects_unlisted_package_children(tmp_path):
@@ -924,7 +924,7 @@ def test_mixed_population_valid_and_rejected_package_manifests(tmp_path):
 
     readiness = _assess(target, "EC-12")
     assert readiness["outcome"] == "rejected"
-    assert readiness["reason"] == "receipt_digest_mismatch"
+    assert readiness["reason"] == "package_snapshot_mismatch"
     assert readiness["population"]["validated"] == 1
     assert readiness["population"]["rejected"] == 1
     assert readiness["dimensions"]["integrity"]["status"] == "failed"
@@ -1768,7 +1768,7 @@ def test_ec12_uses_strict_package_snapshot_and_retains_source_run_binding(tmp_pa
     assert control_crosswalk._verify_evidence_package(target, package_dir).proposed == "validated"
 
 
-def test_ec12_snapshot_mismatch_is_rejected_with_bounded_reason(tmp_path, monkeypatch):
+def test_ec12_snapshot_mismatch_is_rejected_with_package_reason(tmp_path, monkeypatch):
     from brigade import evidence_package_snapshot
 
     target = _ws(tmp_path)
@@ -1785,7 +1785,26 @@ def test_ec12_snapshot_mismatch_is_rejected_with_bounded_reason(tmp_path, monkey
     result = _assess(target, "EC-12")
 
     assert result["outcome"] == "rejected"
-    assert result["reason"] == "receipt_digest_mismatch"
+    assert result["reason"] == "package_snapshot_mismatch"
+
+
+def test_ec12_unknown_snapshot_code_is_unavailable(tmp_path, monkeypatch):
+    from brigade import evidence_package_snapshot
+
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+
+    def unknown_code(_directory: Path):
+        error = evidence_package_snapshot.PackageSnapshotError("mismatch")
+        error.code = "future_code"
+        raise error
+
+    monkeypatch.setattr(evidence_package_snapshot, "snapshot_package", unknown_code)
+    result = _assess(target, "EC-12")
+
+    assert result["outcome"] == "unavailable"
+    assert result["reason"] == "verifier_error"
 
 
 @pytest.mark.parametrize(
