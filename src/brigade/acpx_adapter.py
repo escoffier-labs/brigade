@@ -376,7 +376,7 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
     request_id: str | None = None
     stop_reason: str | None = None
     active_prompt_id: tuple[str, str | int] | None = None
-    outstanding_prompt_ids: set[tuple[str, str | int]] = set()
+    client_request_types: dict[tuple[str, str | int], str] = {}
     outstanding_agent_request_ids: set[tuple[str, str | int]] = set()
     effective_model: str | None = None
     safe_events: list[dict[str, Any]] = []
@@ -385,7 +385,6 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
     stream_finalized = False
     has_structured_jsonrpc_error = False
     permission_error_detail: str | None = None
-    config_option_request_ids: dict[tuple[str, str | int], str] = {}
     effective_model_locator: str | None = None
     for message in messages:
         method = message.get("method")
@@ -397,47 +396,63 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
             message_id_key = ("integer", message_id)
         else:
             message_id_key = None
-        if method in ("session/new", "session/set_config_option") and message_id_key is not None:
-            config_option_request_ids[message_id_key] = (
-                "acp-session-new-response" if method == "session/new" else "acp-set-config-option-response"
-            )
+        client_request_methods = {"initialize", "session/new", "session/prompt", "session/set_config_option"}
+        if method == "session/prompt" and active_prompt_id is not None:
+            return None, "malformed ACP stream: overlapping session/prompt requests"
+        if method in client_request_methods and message_id_key is not None:
+            if message_id_key in client_request_types:
+                return None, "malformed ACP stream: duplicate outstanding JSON-RPC request id"
+            client_request_types[message_id_key] = str(method)
         is_response = "result" in message or "error" in message
-        if (
-            isinstance(method, str)
-            and method not in {"session/new", "session/prompt", "session/set_config_option"}
-            and message_id_key is not None
-        ):
+        if isinstance(method, str) and method not in client_request_methods and message_id_key is not None:
             outstanding_agent_request_ids.add(message_id_key)
         result = message.get("result")
+        client_request_type = client_request_types.get(message_id_key) if message_id_key is not None else None
+        client_response_shape = isinstance(result, dict) and (
+            (client_request_type == "initialize" and "protocolVersion" in result)
+            or (client_request_type == "session/new" and "sessionId" in result)
+            or (client_request_type == "session/prompt" and "stopReason" in result)
+            or (client_request_type == "session/set_config_option" and "configOptions" in result)
+        )
         agent_request_response = (
             is_response
             and message_id_key is not None
             and message_id_key in outstanding_agent_request_ids
-            and not (isinstance(result, dict) and "stopReason" in result)
+            and not client_response_shape
         )
         matched_prompt_request = (
             is_response
             and not agent_request_response
-            and message_id_key is not None
+            and client_request_type == "session/prompt"
             and message_id_key == active_prompt_id
         )
-        known_prompt_request = is_response and message_id_key is not None and message_id_key in outstanding_prompt_ids
-        superseded_prompt_response = known_prompt_request and not matched_prompt_request
-        if is_response and message_id_key is not None and not agent_request_response:
-            outstanding_prompt_ids.discard(message_id_key)
+        superseded_prompt_response = False
         if agent_request_response and message_id_key is not None:
             outstanding_agent_request_ids.discard(message_id_key)
         if matched_prompt_request and message_id_key is not None:
             active_prompt_id = None
         matched_config_request = (
-            is_response and message_id_key is not None and message_id_key in config_option_request_ids
+            is_response
+            and not agent_request_response
+            and client_request_type in {"session/new", "session/set_config_option"}
         )
-        response_locator = config_option_request_ids.get(message_id_key) if message_id_key is not None else None
-        if is_response and message_id_key is not None:
-            config_option_request_ids.pop(message_id_key, None)
+        response_locator = (
+            "acp-session-new-response"
+            if client_request_type == "session/new"
+            else "acp-set-config-option-response"
+            if client_request_type == "session/set_config_option"
+            else None
+        )
+        matched_initialize_request = is_response and not agent_request_response and client_request_type == "initialize"
+        if is_response and message_id_key is not None and not agent_request_response:
+            client_request_types.pop(message_id_key, None)
         if isinstance(result, dict):
-            version = result.get("protocolVersion")
-            if isinstance(version, int):
+            if "protocolVersion" in result:
+                version = result["protocolVersion"]
+                if not matched_initialize_request:
+                    return None, "malformed ACP stream: protocolVersion outside initialize response"
+                if type(version) is not int:
+                    return None, "malformed ACP stream: malformed ACP protocol version"
                 protocol_version = version
             if "error" not in message and "configOptions" in result and matched_config_request:
                 effective_model = _model_from_config_options(result["configOptions"])
@@ -453,8 +468,6 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
             if isinstance(candidate_session, str):
                 session_id = candidate_session
             if message.get("method") == "session/prompt" and isinstance(message.get("id"), (str, int)):
-                if message_id_key is not None and message_id_key in outstanding_prompt_ids:
-                    return None, "malformed ACP stream: duplicate outstanding prompt id"
                 text_parts = []
                 stop_reason = None
                 prompt_completed = False
@@ -465,7 +478,6 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
                 request_id = str(message["id"])
                 if message_id_key is not None:
                     active_prompt_id = message_id_key
-                    outstanding_prompt_ids.add(message_id_key)
         update = _update(message)
         if update is not None:
             kind = update.get("sessionUpdate")

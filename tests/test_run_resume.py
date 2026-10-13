@@ -1945,6 +1945,55 @@ def test_resume_resets_stale_failure_phase_before_retry(tmp_path, monkeypatch):
     assert "failure_phase" not in results[0]
 
 
+def test_resume_success_clears_stale_execution_metadata_and_keeps_attempt_history(tmp_path, monkeypatch):
+    stale = {
+        **_RESUMABLE_COOK,
+        "exit_code": 124,
+        "duration_seconds": 9.5,
+        "transport_warning": {"kind": "permission-prompt-unavailable", "detail": "old warning"},
+        "stdout_log": "old.stdout.log",
+        "stderr_log": "old.stderr.log",
+        "reasoning": "old reasoning",
+        "attempts": [
+            {
+                "kind": "initial",
+                "worker": "cook",
+                "task": "write code",
+                "transport": "codex-app-server",
+                "started_at": "2026-10-13T12:00:00+00:00",
+                "finished_at": "2026-10-13T12:00:01+00:00",
+                "exit_code": 124,
+                "terminal_reason": "timeout",
+                "selected": True,
+                "failure_kind": "timeout",
+                "failure": {"class": "timeout", "detail": "old timeout"},
+            }
+        ],
+    }
+    run_dir = _write_run_dir(tmp_path, results=[stale])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["worker"] = "cook"
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda *a, **k: _StatusServer(turn_text="resumed", turn_ok=True, turn_status="complete"),
+    )
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="final synthesis", ok=True),
+    )
+
+    assert run_resume.resume(run_dir) == 0
+    result = json.loads((run_dir / "worker-results.json").read_text())["results"][0]
+    assert result["ok"] is True
+    assert result["status"] == "complete"
+    for key in ("transport_warning", "exit_code", "duration_seconds", "stdout_log", "stderr_log", "reasoning"):
+        assert key not in result
+    assert result["attempts"][0]["failure"]["detail"] == "old timeout"
+
+
 def test_resume_clears_stale_attempt_metadata_when_provider_raises(tmp_path, monkeypatch):
     stale = {
         **_RESUMABLE_COOK,

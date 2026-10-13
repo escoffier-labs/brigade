@@ -895,6 +895,12 @@ def _resume_locked(
                 "protocol_version",
                 "events",
                 "safe_events",
+                "transport_warning",
+                "exit_code",
+                "duration_seconds",
+                "stdout_log",
+                "stderr_log",
+                "reasoning",
             ):
                 entry.pop(stale_key, None)
             if agent is not None and isinstance(agent.model, str):

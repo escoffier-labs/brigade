@@ -9,6 +9,13 @@ from brigade import proc
 
 
 def _stream(*messages: dict) -> str:
+    if any(
+        isinstance(message.get("result"), dict)
+        and "protocolVersion" in message["result"]
+        and message.get("id") == "init-1"
+        for message in messages
+    ) and not any(message.get("method") == "initialize" and message.get("id") == "init-1" for message in messages):
+        messages = ({"jsonrpc": "2.0", "method": "initialize", "id": "init-1", "params": {}}, *messages)
     return "\n".join(json.dumps(message) for message in messages) + "\n"
 
 
@@ -764,7 +771,7 @@ def test_parse_stream_keeps_prompt_active_when_agent_request_reuses_its_id(agent
     assert parsed["stop_reason"] == "end_turn"
 
 
-def test_parse_stream_completion_is_bound_to_latest_prompt():
+def test_parse_stream_rejects_overlapping_prompts_before_uncorrelated_chunks():
     parsed, error = acpx_adapter.parse_stream(
         _stream(
             {"jsonrpc": "2.0", "method": "session/prompt", "id": "old", "params": {}},
@@ -783,11 +790,8 @@ def test_parse_stream_completion_is_bound_to_latest_prompt():
         )
     )
 
-    assert error == ""
-    assert parsed is not None
-    assert parsed["request_id"] == "current"
-    assert parsed["prompt_completed"] is False
-    assert parsed["stop_reason"] is None
+    assert parsed is None
+    assert "overlapping session/prompt requests" in error
 
 
 def test_parse_stream_new_prompt_resets_previous_completion_and_text():
@@ -828,10 +832,10 @@ def test_parse_stream_rejects_duplicate_outstanding_prompt_id():
     )
 
     assert parsed is None
-    assert "duplicate outstanding prompt id" in error
+    assert "overlapping session/prompt requests" in error
 
 
-def test_parse_stream_ignores_permission_error_for_superseded_prompt():
+def test_parse_stream_rejects_overlapping_prompt_before_superseded_permission_error():
     parsed, error = acpx_adapter.parse_stream(
         _stream(
             {"jsonrpc": "2.0", "method": "session/prompt", "id": "old", "params": {}},
@@ -851,12 +855,85 @@ def test_parse_stream_ignores_permission_error_for_superseded_prompt():
         )
     )
 
-    assert error == ""
-    assert parsed is not None
-    assert parsed["request_id"] == "new"
-    assert parsed["text"] == "new answer"
-    assert parsed["prompt_completed"] is True
-    assert parsed["stop_reason"] == "end_turn"
+    assert parsed is None
+    assert "overlapping session/prompt requests" in error
+
+
+@pytest.mark.parametrize("protocol_version", (True, "2"))
+def test_parse_stream_rejects_malformed_protocol_version(protocol_version):
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "initialize", "id": "init", "params": {}},
+            {"jsonrpc": "2.0", "id": "init", "result": {"protocolVersion": protocol_version}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "prompt", "params": {}},
+            {"jsonrpc": "2.0", "id": "prompt", "result": {"stopReason": "end_turn"}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "answer"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert parsed is None
+    assert "malformed ACP protocol version" in error
+
+
+def test_parse_stream_rejects_protocol_version_outside_initialize_response():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "initialize", "id": "init", "params": {}},
+            {"jsonrpc": "2.0", "id": "init", "result": {}},
+            {"jsonrpc": "2.0", "id": "other", "result": {"protocolVersion": 1}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "prompt", "params": {}},
+            {"jsonrpc": "2.0", "id": "prompt", "result": {"stopReason": "end_turn"}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "answer"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert parsed is None
+    assert "protocolVersion outside initialize response" in error
+
+
+def test_parse_stream_rejects_same_direction_request_id_collision():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/new", "id": "same", "params": {}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "same", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": "same",
+                "result": {"configOptions": [{"id": "model", "value": "forged-model"}], "stopReason": "end_turn"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "answer"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert parsed is None
+    assert "duplicate outstanding JSON-RPC request id" in error
 
 
 @pytest.mark.parametrize(
