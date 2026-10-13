@@ -10,6 +10,8 @@ import unicodedata
 from collections.abc import Mapping
 from typing import Any
 
+from .worklore_validate import contains_credential
+
 SCHEMA = "brigade.fleet_master_roster.v1"
 MAX_DOCUMENT_BYTES = 262144
 MAX_SEATS = 128
@@ -22,12 +24,12 @@ _DANGEROUS_VALUE = re.compile(
     r"\bauth(?:entication)?[ -]profile(?:\s*[:=]\s*|\s+)(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+')|"
     r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
-    r"(?:^|[^A-Za-z0-9_.-])(?:~[/\\]|[/\\]|\.{1,2}[/\\]|"
-    r"[A-Za-z]:[/\\]|%USERPROFILE%)|"
-    r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z0-9_.~-]+[/\\])+"
-    r"[A-Za-z0-9_.~-]+\.[A-Za-z0-9]{1,8}(?=$|[^A-Za-z0-9]))",
+    r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:[/\\]|%USERPROFILE%))",
     re.IGNORECASE,
 )
+_ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~[/\\]|[/\\]|\.{1,2}[/\\])")
+_RELATIVE_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+(?=$|[^A-Za-z0-9_.~-])")
+_VERSIONED_PROVIDER_MODEL = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\.\d+$")
 _SURROGATE = re.compile("[\\ud800-\\udfff]")
 
 _TOP_FIELDS = frozenset({"schema", "revision", "seats"})
@@ -58,7 +60,9 @@ def _text(value: Any, field: str) -> str:
         raise MasterRosterError(f"{field} must contain valid Unicode scalar values")
     if len(value) > MAX_TEXT or _has_control(value):
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
-    if _DANGEROUS_VALUE.search(value):
+    provider_model = field.endswith(".model") and _VERSIONED_PROVIDER_MODEL.fullmatch(value)
+    relative_path = not provider_model and _RELATIVE_PATH.search(value)
+    if _DANGEROUS_VALUE.search(value) or contains_credential(value) or _ROOTED_PATH.search(value) or relative_path:
         raise MasterRosterError(f"{field} contains a credential, environment assignment, or home path")
     return value
 
