@@ -57,6 +57,8 @@ def _text(value: Any, field: str) -> str:
 def _unknown_fields(value: Mapping[str, Any], allowed: frozenset[str], where: str) -> None:
     if any(not isinstance(key, str) for key in value):
         raise MasterRosterError(f"{where} keys must be strings")
+    if any(_CONTROL.search(key) for key in value):
+        raise MasterRosterError(f"{where} keys must not contain controls")
     unknown = sorted(set(value).difference(allowed))
     if unknown:
         raise MasterRosterError(f"unknown {where} field(s): {', '.join(unknown)}")
@@ -65,14 +67,14 @@ def _unknown_fields(value: Mapping[str, Any], allowed: frozenset[str], where: st
 def parse(raw: Mapping[str, Any] | bytes | str) -> dict[str, Any]:
     """Validate and copy a bounded v1 roster, returning its canonical SHA-256."""
     if isinstance(raw, (bytes, str)):
-        encoded = raw.encode("utf-8") if isinstance(raw, str) else raw
-        if len(encoded) > MAX_DOCUMENT_BYTES:
-            raise MasterRosterError(f"document must be at most {MAX_DOCUMENT_BYTES} bytes")
         try:
+            encoded = raw.encode("utf-8") if isinstance(raw, str) else raw
+            if len(encoded) > MAX_DOCUMENT_BYTES:
+                raise MasterRosterError(f"document must be at most {MAX_DOCUMENT_BYTES} bytes")
             decoded = json.loads(encoded.decode("utf-8"), object_pairs_hook=_object_without_duplicate_keys)
         except MasterRosterError:
             raise
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+        except (UnicodeError, ValueError, RecursionError) as exc:
             raise MasterRosterError("document must be valid UTF-8 JSON") from exc
         if not isinstance(decoded, dict):
             raise MasterRosterError("document must be a JSON object")

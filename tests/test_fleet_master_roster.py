@@ -112,6 +112,18 @@ def test_parse_rejects_non_string_mapping_keys() -> None:
         fleet_master_roster.parse(document)
 
 
+def test_parse_rejects_control_characters_in_json_property_names() -> None:
+    raw = b'{"schema":"brigade.fleet_master_roster.v1","revision":1,"seats":[],"\\u001b[2Jforged error":true}'
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="keys must not contain controls"):
+        fleet_master_roster.parse(raw)
+
+
+def test_parse_normalizes_unpaired_surrogate_string_input() -> None:
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="valid UTF-8 JSON"):
+        fleet_master_roster.parse("\ud800")
+
+
 @pytest.mark.parametrize("field", ["model", "purpose"])
 def test_parse_rejects_whitespace_only_required_text(field: str) -> None:
     document = _document()
