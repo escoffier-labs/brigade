@@ -39,7 +39,7 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with))\s+"
     r"(?:the\s+)?(?:\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\)|(?!(?:the)\b)[A-Za-z0-9_.-]+)\s+"
     r"auth(?:entication)?[ _-]profiles?\b|"
-    r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|"
+    r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
     r"\s+is\s+(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\b)"
@@ -70,7 +70,7 @@ _RELATIVE_PATH = re.compile(
 )
 _PATH_CONTEXT = re.compile(
     r"\b(?:run|execute|inspect|open|read|write|load|save|path|file|directory|folder|script|repository|repo)\s+"
-    r"(?:(?:the|a|an)\s+)?$",
+    r"(?:(?:the|a|an)\s+)?(?:(?:from|at|in|to|into|under)\s+)?$",
     re.IGNORECASE,
 )
 _FILESYSTEM_COMPONENTS = frozenset(
