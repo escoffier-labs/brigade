@@ -500,6 +500,138 @@ def test_named_external_principal_uses_its_own_revocable_identity(message_hub):
     assert _request(base, new_token, {"action": "list"})[0] == 200
 
 
+def test_principal_enrollment_replays_the_same_token_and_revocation_is_idempotent(message_hub):
+    base, _token_a, _token_b, db = message_hub
+    request = {
+        "action": "add",
+        "name": "recoverable",
+        "request_id": "a" * 32,
+        "token": "client-generated-token-for-retry",
+    }
+    first = _post_path(base, ADMIN, "/message-principals", request)
+    replay = _post_path(base, ADMIN, "/message-principals", request)
+
+    assert first[0] == replay[0] == 201
+    assert first[1]["principal"] == replay[1]["principal"]
+    assert first[1]["principal"]["token"] == request["token"]
+    changed = _post_path(base, ADMIN, "/message-principals", {**request, "label": "changed"})
+    assert changed[0] == 409
+
+    revoke = {"action": "revoke", "name": "recoverable"}
+    assert _post_path(base, ADMIN, "/message-principals", revoke)[0] == 200
+    assert _post_path(base, ADMIN, "/message-principals", request)[0] == 409
+    assert _post_path(base, ADMIN, "/message-principals", revoke)[0] == 200
+    assert _post_path(base, ADMIN, "/message-principals", {"action": "revoke", "name": "missing"})[0] == 404
+
+    with sqlite3.connect(db) as conn:
+        stored = conn.execute("SELECT token_hash FROM fleet_message_principals WHERE name='recoverable'").fetchone()[0]
+    assert stored != request["token"]
+
+
+@pytest.mark.parametrize("action", ["list", "ack"])
+def test_online_message_operations_reject_redirects(action, monkeypatch):
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "node-token", "admin_token": ""},
+    )
+    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (302, {"error": "redirected"}))
+
+    with pytest.raises(fleet_client.FleetClientError, match="redirected"):
+        if action == "list":
+            fleet_client_messages.list_messages()
+        else:
+            fleet_client_messages.ack(1)
+
+
+@pytest.mark.parametrize("action", ["add", "revoke"])
+def test_principal_management_rejects_redirects(action, monkeypatch):
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "", "admin_token": "admin-token"},
+    )
+
+    class Response:
+        status = 302
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(fleet_client, "_hub_open", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(fleet_client, "_read_bounded_response", lambda *_args, **_kwargs: b'{"error":"redirected"}')
+
+    with pytest.raises(fleet_client.FleetClientError, match="redirected"):
+        fleet_client_messages.manage_principal(action, name="researcher")
+
+
+def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "", "admin_token": "admin-token"},
+    )
+    requests = []
+
+    class Response:
+        status = 201
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def hub_open(request, **_kwargs):
+        requests.append(json.loads(request.data))
+        return Response()
+
+    monkeypatch.setattr(fleet_client, "_hub_open", hub_open)
+    monkeypatch.setattr(
+        fleet_client,
+        "_read_bounded_response",
+        lambda *_args, **_kwargs: json.dumps({"principal": {"token": requests[-1]["token"]}}).encode(),
+    )
+    calls = 0
+
+    def run_with_deadline(request, *, timeout):
+        nonlocal calls
+        calls += 1
+        result = request()
+        if calls == 1:
+            raise TimeoutError("response lost after commit")
+        return result
+
+    monkeypatch.setattr(fleet_client, "_run_with_deadline", run_with_deadline)
+    with pytest.raises(fleet_client.FleetClientError, match="TimeoutError"):
+        fleet_client_messages.manage_principal("add", name="researcher")
+
+    assert fleet_client_messages.manage_principal("add", name="researcher")["principal"]["token"]
+    assert requests[0]["request_id"] == requests[1]["request_id"]
+    assert requests[0]["token"] == requests[1]["token"]
+    assert not fleet_client_messages._principal_pending_path("researcher", "admin-token").exists()
+
+
+def test_unacked_recipient_index_supports_count_queries(message_hub):
+    _base, _token_a, _token_b, db = message_hub
+    with sqlite3.connect(db) as conn:
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(fleet_messages)")}
+        plan = " ".join(
+            str(row[3])
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM fleet_messages WHERE recipient=? AND acked_at IS NULL",
+                (NODE_A,),
+            )
+        )
+    assert "fleet_messages_unacked_recipient" in indexes
+    assert "fleet_messages_unacked_recipient" in plan
+
+
 def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)

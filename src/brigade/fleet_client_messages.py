@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 from time import monotonic
@@ -111,7 +112,7 @@ def _settings() -> tuple[str, str, str]:
 def _online(body: dict[str, Any]) -> dict[str, Any]:
     hub, token, _node_id = _settings()
     status, payload = _request(hub, token, body)
-    if status >= 400:
+    if not 200 <= status < 300:
         raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
     return payload
 
@@ -236,6 +237,16 @@ def manage_principal(action: str, *, name: str, label: str | None = None) -> dic
     body: dict[str, Any] = {"action": action, "name": name}
     if label is not None:
         body["label"] = label
+    pending_path: Path | None = None
+    if action == "add":
+        request_id = _pending_principal_request_id(name, settings["admin_token"])
+        body["request_id"] = request_id
+        body["token"] = hmac.new(
+            settings["admin_token"].encode("utf-8"),
+            f"brigade-message-principal:{name}:{request_id}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        pending_path = _principal_pending_path(name, settings["admin_token"])
     request = urllib.request.Request(
         settings["hub_url"].rstrip("/") + "/message-principals",
         data=json.dumps(body).encode("utf-8"),
@@ -266,9 +277,39 @@ def manage_principal(action: str, *, name: str, label: str | None = None) -> dic
         raise
     except Exception as exc:
         raise fleet_client.FleetClientError(f"fleet hub principal management failed: {type(exc).__name__}") from exc
-    if status >= 400:
+    if not 200 <= status < 300:
+        if pending_path is not None and 400 <= status < 500:
+            _clear_principal_request(pending_path)
         raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
+    if pending_path is not None:
+        _clear_principal_request(pending_path)
     return payload
+
+
+def _principal_pending_path(name: str, admin_token: str) -> Path:
+    node_id = fleet_client.resolve_node_id()
+    token_scope = hashlib.sha256(admin_token.encode("utf-8")).hexdigest()
+    name_scope = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+    base = _spool_path(node_id, admin_token)
+    return base.with_name(f"{node_id}.principal-{name_scope}-{token_scope}.jsonl")
+
+
+def _pending_principal_request_id(name: str, admin_token: str) -> str:
+    path = _principal_pending_path(name, admin_token)
+    with fleet_client._spool_lock(path) as dir_fd:
+        pending = fleet_client._read_spool(path, dir_fd=dir_fd)
+        for item in pending:
+            request_id = item.get("request_id")
+            if item.get("name") == name and isinstance(request_id, str) and request_id:
+                return request_id
+        request_id = uuid4().hex
+        fleet_client._write_spool_atomic(path, [{"name": name, "request_id": request_id}], dir_fd=dir_fd)
+        return request_id
+
+
+def _clear_principal_request(path: Path) -> None:
+    with fleet_client._spool_lock(path) as dir_fd:
+        fleet_client._write_spool_atomic(path, [], dir_fd=dir_fd)
 
 
 def flush(node_id: str, *, hub_url: str | None = None, token: str | None = None) -> int:

@@ -21,6 +21,7 @@ MAX_LIST_RESPONSE_BYTES = 7 * 1024 * 1024
 MAX_FUTURE_SKEW = timedelta(minutes=5)
 MAX_SQLITE_INTEGER = (1 << 63) - 1
 _PRINCIPAL_NAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,62}$")
+_ENROLLMENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 _PRINCIPAL_SCHEMA = """CREATE TABLE IF NOT EXISTS fleet_message_principals (
     principal_id TEXT PRIMARY KEY,
@@ -28,7 +29,8 @@ _PRINCIPAL_SCHEMA = """CREATE TABLE IF NOT EXISTS fleet_message_principals (
     label TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL,
-    revoked_at TEXT
+    revoked_at TEXT,
+    enrollment_id TEXT
 )"""
 
 
@@ -94,6 +96,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             "SELECT id,recipient,subject,body,reference,priority,reply_to FROM fleet_messages WHERE payload_hash IS NULL"
         ).fetchmany(1000)
     conn.execute(_PRINCIPAL_SCHEMA)
+    principal_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(fleet_message_principals)")}
+    if "enrollment_id" not in principal_columns:
+        conn.execute("ALTER TABLE fleet_message_principals ADD COLUMN enrollment_id TEXT")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS fleet_message_sends (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,6 +112,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "SELECT 1 FROM fleet_message_sends AS s WHERE s.sender=m.sender AND s.client_id=m.client_id)"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS fleet_messages_inbox ON fleet_messages (recipient, id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS fleet_messages_unacked_recipient "
+        "ON fleet_messages (recipient) WHERE acked_at IS NULL"
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS fleet_messages_created_at ON fleet_messages (created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS fleet_messages_reply_to ON fleet_messages (reply_to)")
     conn.execute(
@@ -254,7 +263,7 @@ def _enqueued_at(value: Any) -> str:
 
 
 def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str]:
-    if not isinstance(raw, dict) or set(raw) - {"name", "label"}:
+    if not isinstance(raw, dict) or set(raw) - {"name", "label", "request_id", "token"}:
         raise MessageError("principal enrollment requires only name and optional label")
     name = _text(raw.get("name"), "name", 63)
     label = _text(raw.get("label", name), "label", 128)
@@ -264,25 +273,46 @@ def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str]:
             "name must start with a lowercase letter and contain only lowercase letters, digits, dots, underscores, or hyphens"
         )
     principal_id = f"agent:{name}"
-    secret = secrets.token_urlsafe(32)
+    request_id = raw.get("request_id")
+    secret = raw.get("token")
+    if (request_id is None) != (secret is None):
+        raise MessageError("principal enrollment request_id and token must be provided together")
+    if request_id is None:
+        secret = secrets.token_urlsafe(32)
+    elif (
+        not isinstance(request_id, str)
+        or _ENROLLMENT_ID_RE.fullmatch(request_id) is None
+        or not isinstance(secret, str)
+        or len(secret) < 32
+        or len(secret) > 128
+    ):
+        raise MessageError("principal enrollment request_id or token is invalid")
+    assert isinstance(secret, str)
     token_hash = hashlib.sha256(secret.encode("utf-8")).hexdigest()
     conn.execute("BEGIN IMMEDIATE")
     try:
         existing = conn.execute(
-            "SELECT revoked_at FROM fleet_message_principals WHERE principal_id=?", (principal_id,)
+            "SELECT revoked_at,enrollment_id,token_hash,label FROM fleet_message_principals WHERE principal_id=?",
+            (principal_id,),
         ).fetchone()
         created_at = datetime.now(timezone.utc).isoformat()
         if existing is None:
             conn.execute(
-                "INSERT INTO fleet_message_principals(principal_id,name,label,token_hash,created_at) VALUES(?,?,?,?,?)",
-                (principal_id, name, label, token_hash, created_at),
+                "INSERT INTO fleet_message_principals(principal_id,name,label,token_hash,created_at,enrollment_id) "
+                "VALUES(?,?,?,?,?,?)",
+                (principal_id, name, label, token_hash, created_at, request_id),
             )
         elif existing[0] is not None:
+            if request_id is not None and existing[1] == request_id:
+                raise MessageConflict("revoked principal enrollment cannot be replayed")
             conn.execute(
-                "UPDATE fleet_message_principals SET label=?,token_hash=?,created_at=?,revoked_at=NULL "
+                "UPDATE fleet_message_principals SET label=?,token_hash=?,created_at=?,revoked_at=NULL,enrollment_id=? "
                 "WHERE principal_id=?",
-                (label, token_hash, created_at, principal_id),
+                (label, token_hash, created_at, request_id, principal_id),
             )
+        elif request_id is not None and existing[1] == request_id:
+            if existing[2] != token_hash or existing[3] != label:
+                raise MessageConflict("request_id was already used for a different principal enrollment")
         else:
             raise MessageError("message principal already exists")
         conn.commit()
@@ -306,12 +336,18 @@ def revoke_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str] | 
     name = _text(raw.get("name"), "name", 63)
     assert name is not None
     principal_id = f"agent:{name}"
-    cursor = conn.execute(
-        "UPDATE fleet_message_principals SET revoked_at=? WHERE principal_id=? AND revoked_at IS NULL",
-        (datetime.now(timezone.utc).isoformat(), principal_id),
-    )
-    conn.commit()
-    return {"principal_id": principal_id, "name": name} if cursor.rowcount else None
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(
+            "UPDATE fleet_message_principals SET revoked_at=? WHERE principal_id=? AND revoked_at IS NULL",
+            (datetime.now(timezone.utc).isoformat(), principal_id),
+        )
+        exists = conn.execute("SELECT 1 FROM fleet_message_principals WHERE principal_id=?", (principal_id,)).fetchone()
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return {"principal_id": principal_id, "name": name} if exists else None
 
 
 def handle_principal_admin(conn: sqlite3.Connection, raw: object) -> tuple[int, dict[str, Any]]:
