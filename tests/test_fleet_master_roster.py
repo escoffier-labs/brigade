@@ -109,6 +109,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Auth profile (production-admin).",
         "Use auth profiles: production-admin.",
         "Connect through auth profiles (production-admin).",
+        "Auth profile is production-admin.",
         "Use auth profile: production-admin",
         "Use auth-profile production-admin",
         "Use auth_profile production-admin",
@@ -117,6 +118,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "password: actual-secret",
         "password is actual-secret",
         "API key is abcdefghijklmnop",
+        "token is abcdefghijklmnop",
+        "auth token is abcdefghijklmnop",
     ],
 )
 def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
@@ -144,6 +147,7 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Plan A: review changes",
         "Use option B: fast mode",
         "Password is required.",
+        "Auth profile is required.",
     ],
 )
 def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> None:
