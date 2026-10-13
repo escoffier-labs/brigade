@@ -40,13 +40,13 @@ _DANGEROUS_VALUE = re.compile(
     r"(?:the\s+)?(?:\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\)|(?!(?:the)\b)[A-Za-z0-9_.-]+)\s+"
     r"auth(?:entication)?[ _-]profiles?\b|"
     r"\b(?:token|auth[_ -]?token)\s*[:=]\s*"
-    r"(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\b)\S+|"
+    r"(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)(?=$|[\s.,;!?]))\S+|"
     r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
-    r"\s+is\s+(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\b)"
-    r"(?:\[(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\])[A-Za-z0-9_-]{3,}\]|"
-    r"\((?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\))[A-Za-z0-9_-]{3,}\)|"
-    r"\"[^\"]{7,}\"|'[^']{7,}'|`[^`]{7,}`|“[^“”]{7,}”|‘[^‘’]{7,}’|"
+    r"\s+is\s+(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)(?=$|[\s.,;!?]))"
+    r"(?:\[(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\])[A-Za-z0-9_ -]+\]|"
+    r"\((?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\))[^)]+\)|"
+    r"\"[^\"]+\"|'[^']+'|`[^`]+`|“[^“”]+”|‘[^‘’]+’|"
     r"[A-Za-z0-9_-]{3,}|"
     r"(?=[^\s]{8,})(?=[^\s]*[.@!#$%^&*+=~?][A-Za-z0-9])\S+|"
     r"(?=[^\s]{7,}[.!?](?:\s|$))\S+)|"
@@ -70,8 +70,9 @@ _RELATIVE_PATH = re.compile(
     r"(?<![A-Za-z0-9_.-])(?P<path>(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+)(?![A-Za-z0-9_.~-])"
 )
 _PATH_CONTEXT = re.compile(
-    r"\b(?:run|execute|inspect|open|read|write|load|save|path|file|directory|folder|script|repository|repo)\s+"
-    r"(?:(?:the|a|an)\s+)?(?:(?:from|at|in|to|into|under)\s+)?$",
+    r"(?:\b(?:run|execute|inspect|open|read|write|load|save|path|file|directory|folder|script|repository|repo)\s+"
+    r"(?:(?:the|a|an)\s+)?(?:(?:from|at|in|to|into|under)\s+)?|"
+    r"\b(?:path|file|directory|folder|script|repository|repo)\s*(?:is|:)\s*)$",
     re.IGNORECASE,
 )
 _FILESYSTEM_COMPONENTS = frozenset(

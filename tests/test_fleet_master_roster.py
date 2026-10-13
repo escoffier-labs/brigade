@@ -134,6 +134,10 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "password is hunter2",
         'passphrase is "correct horse battery staple"',
         'password is "hunter 2"',
+        'password is "abc123"',
+        "password is [hunter 2]",
+        "password is required-secret",
+        "token: optional-token",
         "token: hunter2",
         "auth token: hunter2",
         "token is abcdefgh",
@@ -407,6 +411,8 @@ def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None
         "Execute the foo/bar helper",
         "Read from tools/build",
         "Use the file at tools/build",
+        "The path is foo/bar.",
+        "Repository path: foo/bar",
     ],
 )
 def test_parse_rejects_unenumerated_paths_in_descriptive_text(field: str, text: str) -> None:
