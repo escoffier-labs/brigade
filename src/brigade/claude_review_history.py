@@ -212,13 +212,19 @@ def _order_checks(
     history: list[dict[str, Any]], checks: list[dict[str, Any]], enumerated: set[str], truncated: bool
 ) -> None:
     heads: dict[int, set[str]] = defaultdict(set)
+    listed: dict[int, set[str]] = defaultdict(set)
     starts: dict[int, set[str]] = defaultdict(set)
+    missing_starts: set[int] = set()
     for snapshot in history:
         for record in snapshot["checks"]:
             if record["reviewed_head"] is not None:
                 heads[record["check_id"]].add(record["reviewed_head"])
+            else:
+                listed[record["check_id"]].add(snapshot["current_head"])
             if record["started_at"] is not None:
                 starts[record["check_id"]].add(_sort_time(record["started_at"]))
+            else:
+                missing_starts.add(record["check_id"])
     uncertain = set()
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in checks:
@@ -236,8 +242,8 @@ def _order_checks(
             record["superseded_by"] = None
             record["current_findings_known"] = False
             record["current_zero_findings"] = False
-        # Keep older known-head claims even when the selected revision lost its head.
-        for head in heads[identity]:
+        # Listing context adds uncertain rivals, never proven reviewed-head claims.
+        for head in heads[identity] | (listed[identity] if identity in uncertain else set()):
             groups[head].append(record)
     if truncated:
         return
@@ -256,7 +262,9 @@ def _order_checks(
         for round_start, records in rounds.items():
             # A digest-selected start cannot prove a peer latest or name its next run.
             blocked = any(
-                r["started_at"] is None or not starts[r["check_id"]] or max(starts[r["check_id"]]) >= round_start
+                r["check_id"] in missing_starts
+                or not starts[r["check_id"]]
+                or max(starts[r["check_id"]]) >= round_start
                 for r in rivals
             )
             newer = [] if blocked else next_round.get(round_start, [])

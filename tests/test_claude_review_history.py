@@ -654,3 +654,117 @@ def test_rerun_after_all_uncertain_starts_can_establish_current_zero():
     assert rows[10]["supersession_disposition"] == "unknown" and rows[10]["superseded_by"] is None
     assert rows[11]["superseded_by"] == 12 and rows[11]["current_zero_findings"] is False
     assert rows[12]["supersession_disposition"] == "latest-observed" and rows[12]["current_zero_findings"] is True
+
+
+@pytest.mark.parametrize(
+    "identity,selected_missing", [(10, False), (11, True)], ids=["selected-valid", "selected-missing"]
+)
+@pytest.mark.parametrize("omitted", [False, True], ids=["present", "omitted"])
+def test_tied_missing_start_blocks_peer_for_both_selected_revisions(identity, selected_missing, omitted):
+    conn = sqlite3.connect(":memory:")
+    peer = check(100, started_at="2026-01-02T00:00:00Z")
+    for start in (None, "2026-01-01T00:00:00Z"):
+        ingest(
+            conn,
+            FixtureGet([check(identity, started_at=start), *([] if omitted else [peer])]),
+            observed="2026-01-04T00:00:00Z",
+        )
+    if omitted:
+        ingest(conn, FixtureGet([peer]), observed="2026-01-05T00:00:00Z")
+    result = read(conn)
+    rows = {r["check_id"]: r for r in result["checks"]}
+    assert (rows[identity]["started_at"] is None) is selected_missing
+    assert rows[identity]["history_disposition"] == "conflicting-observations"
+    assert {c["started_at"] for s in result["history"] for c in s["checks"] if c["check_id"] == identity} == {
+        None,
+        "2026-01-01T00:00:00Z",
+    }
+    for row in (*result["checks"], *(c for s in result["history"] for c in s["checks"])):
+        assert row["supersession_disposition"] == "unknown" and row["superseded_by"] is None
+        assert row["current_findings_known"] is False and row["current_zero_findings"] is False
+
+
+@pytest.mark.parametrize("omitted", [False, True], ids=["present", "omitted"])
+def test_historical_missing_start_on_contradicted_run_blocks_later_peer(omitted):
+    conn = sqlite3.connect(":memory:")
+    ingest(conn, FixtureGet([check(10, started_at=None)]))
+    ingest(conn, FixtureGet([check(10, head_sha=OLD)]), head=OLD, observed="2026-01-04T00:00:00Z")
+    peer = check(100, started_at="2026-01-02T00:00:00Z")
+    ingest(conn, FixtureGet([peer] if omitted else [check(10), peer]), observed="2026-01-05T00:00:00Z")
+    result = read(conn)
+    uncertain = {r["check_id"]: r for r in result["checks"]}[10]
+    assert uncertain["history_disposition"] == "conflicting-observations" and uncertain["reviewed_head"] is None
+    assert {c["started_at"] for s in result["history"] for c in s["checks"] if c["check_id"] == 10} == {
+        None,
+        "2026-01-01T00:00:00Z",
+    }
+    for row in (*result["checks"], *(c for s in result["history"] for c in s["checks"])):
+        assert row["supersession_disposition"] == "unknown" and row["superseded_by"] is None
+        assert row["current_findings_known"] is False and row["current_zero_findings"] is False
+
+
+@pytest.mark.parametrize("initial_head", [HEAD, None], ids=["known-head", "missing-head"])
+def test_unique_latest_valid_start_recovers_certain_run_metadata(initial_head):
+    conn = sqlite3.connect(":memory:")
+    ingest(conn, FixtureGet([check(10, head_sha=initial_head, started_at=None)]))
+    ingest(conn, FixtureGet([check(10)]), observed="2026-01-04T00:00:00Z")
+    recovered = read(conn)["checks"][0]
+    assert recovered["history_disposition"] == "latest-observed" and recovered["reviewed_head"] == HEAD
+    assert recovered["supersession_disposition"] == "latest-observed" and recovered["current_zero_findings"] is True
+    ingest(conn, FixtureGet([check(100, started_at="2026-01-02T00:00:00Z")]), observed="2026-01-05T00:00:00Z")
+    result = read(conn)
+    rows = {r["check_id"]: r for r in result["checks"]}
+    assert rows[10]["supersession_disposition"] == "superseded" and rows[10]["superseded_by"] == 100
+    assert rows[100]["supersession_disposition"] == "latest-observed" and rows[100]["current_zero_findings"] is True
+    historical = [c for s in result["history"] for c in s["checks"] if c["check_id"] == 10 and c["started_at"] is None]
+    assert len(historical) == 1 and historical[0]["superseded_by"] == 100
+    assert historical[0]["current_findings_known"] is False and historical[0]["current_zero_findings"] is False
+
+
+@pytest.mark.parametrize("missing_head", [None, "not-a-sha"], ids=["missing", "malformed"])
+@pytest.mark.parametrize("omitted", [False, True], ids=["present", "omitted"])
+@pytest.mark.parametrize("peer_later", [False, True], ids=["older-peer", "known-later-peer"])
+def test_headless_listing_is_only_an_uncertain_rival(missing_head, omitted, peer_later):
+    conn = sqlite3.connect(":memory:")
+    headless = check(10, head_sha=missing_head, started_at="2026-01-01T12:00:00Z")
+    peer = check(11, started_at=f"2026-01-0{2 if peer_later else 1}T00:00:00Z")
+    ingest(conn, FixtureGet([headless, peer]))
+    ingest(conn, FixtureGet([peer] if omitted else [headless, peer]), observed="2026-01-05T00:00:00Z")
+    result = read(conn)
+    rows = {r["check_id"]: r for r in result["checks"]}
+    for row in (*result["checks"], *(c for s in result["history"] for c in s["checks"])):
+        if row["check_id"] == 10:
+            _unknown_check(row)
+            assert row["reviewed_head"] is None
+            assert row["supersession_disposition"] == "unknown" and row["superseded_by"] is None
+        else:
+            assert row["reviewed_head"] == HEAD and row["coverage"] == "current"
+            assert row["supersession_disposition"] == ("latest-observed" if peer_later else "unknown")
+            assert row["superseded_by"] is None
+            if not peer_later:
+                assert row["current_findings_known"] is False and row["current_zero_findings"] is False
+    assert result["latest_check_enumeration_complete"] is omitted
+    assert rows[11]["current_findings_known"] is (peer_later and omitted)
+    assert rows[11]["current_zero_findings"] is (peer_later and omitted)
+
+
+@pytest.mark.parametrize("missing_head", [None, "not-a-sha"], ids=["missing", "malformed"])
+def test_headless_listing_does_not_taint_unrelated_head_or_app(missing_head):
+    conn = sqlite3.connect(":memory:")
+    headless = check(10, head_sha=missing_head, started_at="2026-01-01T12:00:00Z")
+    ingest(conn, FixtureGet([headless]), head=OLD)
+    ingest(conn, FixtureGet([check(11)]), observed="2026-01-05T00:00:00Z")
+    rows = {r["check_id"]: r for r in read(conn)["checks"]}
+    assert rows[11]["supersession_disposition"] == "latest-observed" and rows[11]["current_zero_findings"] is True
+    assert rows[10]["reviewed_head"] is None and rows[10]["superseded_by"] is None
+    _unknown_check(rows[10])
+    ingest(
+        conn,
+        FixtureGet([headless | {"app": {"id": 456, "slug": APP["slug"]}}]),
+        observed="2026-01-06T00:00:00Z",
+        expected_app_id=456,
+    )
+    assert read(conn, expected_app_id=456)["checks"][0]["reviewed_head"] is None
+    rows = {r["check_id"]: r for r in read(conn)["checks"]}
+    assert rows[11]["supersession_disposition"] == "latest-observed" and rows[11]["current_zero_findings"] is True
+    assert len(read(conn)["history"]) == 2

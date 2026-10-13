@@ -117,11 +117,17 @@ An uncertain check has unknown supersession, null `superseded_by`, and false
 current finding flags, even when one selected revision appears to order it safely.
 Checks with no known head claim never establish supersession. If the newest
 revision has no head, older known head claims still affect peers on those heads.
+A headless run also remains an uncertain rival on each commit-specific listing
+head where its missing or malformed reviewed head was observed. That listing
+context cannot supply a reviewed head, current coverage or positive supersession.
 A contradicted check also retains every claimed head for peer ordering.
 Affected peers have unknown supersession and false current finding flags unless
 every possible rival start is strictly earlier than the peer's start. Missing
-rival start evidence cannot establish that ordering. A known later check can
-remain current when all uncertain rival starts are earlier. These rules also
+rival start evidence in any loaded observation blocks ordering against an
+uncertain rival, independently of the digest-selected revision. A unique latest
+valid start can recover an otherwise certain run's metadata after an older missing
+start. A known later check can remain current when all uncertain rival starts are
+earlier. These rules also
 apply when the latest enumeration omits the uncertain run, and to supersession
 metadata rebound into historical snapshots. Digest selection cannot establish
 ordering or raise current finding confidence. Historical missing heads followed
