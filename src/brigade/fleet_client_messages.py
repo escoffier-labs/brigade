@@ -79,6 +79,12 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                 return _queue_locked(path, message, dir_fd=dir_fd)
         try:
             status, payload = _request(hub, token, message)
+        except (KeyboardInterrupt, SystemExit):
+            try:
+                _queue_locked(path, message, dir_fd=dir_fd)
+            except Exception as exc:
+                _LOG.warning("interrupted fleet message could not be persisted to the spool: %s", type(exc).__name__)
+            raise
         except fleet_client.FleetClientError:
             return _queue_locked(path, message, dir_fd=dir_fd)
         if status in (408, 429) or status >= 500:

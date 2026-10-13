@@ -418,12 +418,19 @@ def list_messages(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: s
         (recipient, after),
     ).fetchall()
     messages: list[dict[str, Any]] = []
+    serialized_messages_size = 0
     for row in rows:
         candidate = _row(row)
-        response = {"messages": [*messages, candidate], "next_cursor": candidate["id"]}
-        if len(json.dumps(response).encode("utf-8")) > MAX_LIST_RESPONSE_BYTES:
+        serialized_candidate = json.dumps(candidate).encode("utf-8")
+        response_overhead = len(json.dumps({"messages": [], "next_cursor": candidate["id"]}).encode("utf-8")) - 2
+        separator_size = 2 if messages else 0
+        if (
+            response_overhead + serialized_messages_size + separator_size + len(serialized_candidate)
+            > MAX_LIST_RESPONSE_BYTES
+        ):
             break
         messages.append(candidate)
+        serialized_messages_size += separator_size + len(serialized_candidate)
     if opened:
         conn.commit()
     return {"messages": messages, "next_cursor": messages[-1]["id"] if messages else after}

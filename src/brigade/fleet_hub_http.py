@@ -610,7 +610,10 @@ def make_handler(
                 self._send_html(404, "Not found.\n", content_type=plain)
                 return
             params = parse_qs(query, keep_blank_values=False)
-            if not (self._authorized() or self._cookie_authorized() or self._tailscale_identity_authorized()):
+            dashboard_authorized = (
+                self._authorized() or self._cookie_authorized() or self._tailscale_identity_authorized()
+            )
+            if not dashboard_authorized:
                 self._send_html(
                     401,
                     "Unauthorized: use brigade fleet enroll for read-only dashboard access.\n",
@@ -650,7 +653,7 @@ def make_handler(
                     ],
                 )
                 nodes = node_summary(board.runs)
-                unread_counts = fleet_hub_messages.unread_counts(conn) if self._authorized() else {}
+                unread_counts = fleet_hub_messages.unread_counts(conn) if dashboard_authorized else {}
             except ClaimFenceError as exc:
                 self._send_json(503, {"error": str(exc)})
                 return

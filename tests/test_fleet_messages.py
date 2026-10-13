@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, fleet_client, fleet_client_messages, fleet_hub, fleet_hub_messages
+from brigade import cli, fleet_client, fleet_client_messages, fleet_hub, fleet_hub_enrollment, fleet_hub_messages
 from brigade.cli import fleet_messages as fleet_messages_cli
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
@@ -164,6 +164,41 @@ def test_message_pages_stay_below_client_response_limit(message_hub):
     assert len(first["messages"]) + len(second["messages"]) == 22
 
 
+def test_message_page_serialization_work_is_linear(message_hub, monkeypatch):
+    _base, _token_a, _token_b, db = message_hub
+    body = "x" * fleet_hub_messages.BODY_LIMIT
+    with sqlite3.connect(db) as conn:
+        for index in range(100):
+            fleet_hub_messages.send(
+                conn,
+                {
+                    "to": NODE_B,
+                    "subject": f"Large {index}",
+                    "body": body,
+                    "client_id": f"linear-page-{index}",
+                },
+                sender=NODE_A,
+            )
+
+    original_dumps = json.dumps
+    serialization_work = 0
+
+    def measure_serialization(value, *args, **kwargs):
+        nonlocal serialization_work
+        serialized = original_dumps(value, *args, **kwargs)
+        serialization_work += len(serialized.encode("utf-8"))
+        return serialized
+
+    monkeypatch.setattr(fleet_hub_messages.json, "dumps", measure_serialization)
+    with sqlite3.connect(db) as conn:
+        page = fleet_hub_messages.list_messages(conn, {"action": "list"}, recipient=NODE_B)
+
+    response_size = len(original_dumps(page).encode("utf-8"))
+    assert len(page["messages"]) == 100
+    assert response_size <= fleet_hub_messages.MAX_LIST_RESPONSE_BYTES
+    assert serialization_work <= response_size * 2
+
+
 def test_retry_deduplication_quota_and_dashboard_unread_count(message_hub, monkeypatch):
     base, token_a, token_b, _db = message_hub
     first_body = {
@@ -203,6 +238,29 @@ def test_retry_deduplication_quota_and_dashboard_unread_count(message_hub, monke
     )
     assert sender_limited[0] == 429
     assert "sender" in sender_limited[1]["error"]
+
+
+def test_dashboard_cookie_user_sees_unread_message_count(message_hub):
+    base, token_a, _token_b, db = message_hub
+    assert (
+        _request(
+            base,
+            token_a,
+            {"action": "send", "to": NODE_B, "subject": "Dashboard", "body": "Unread"},
+        )[0]
+        == 201
+    )
+    with sqlite3.connect(db) as conn:
+        code = fleet_hub_enrollment.mint(conn)["code"]
+        credential = fleet_hub_enrollment.redeem(conn, code)
+
+    request = urllib.request.Request(
+        base + "/view/machines",
+        headers={"Cookie": f"{fleet_hub.DASHBOARD_COOKIE}={credential}"},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        page = response.read().decode("utf-8")
+    assert "1 unread messages" in page
 
 
 def test_revoked_recipient_exact_retry_returns_existing_before_active_check(message_hub):
@@ -612,6 +670,42 @@ def test_new_send_bounds_opportunistic_spool_drain(tmp_path, monkeypatch):
     assert [message["subject"] for message in pending] == ["Queued 100", "New request"]
     assert fleet_client_messages.flush(NODE_A) == 2
     assert [message["subject"] for message in attempts[-2:]] == ["Queued 100", "New request"]
+
+
+@pytest.mark.parametrize("action", ["send", "reply"])
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_interrupted_send_is_spooled_before_reraising(tmp_path, monkeypatch, action, interrupt):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub.invalid"})
+    attempted = []
+
+    def interrupted_request(_hub: str, _token: str, message: dict):
+        attempted.append(message.copy())
+        raise interrupt()
+
+    monkeypatch.setattr(fleet_client_messages, "_request", interrupted_request)
+    with pytest.raises(interrupt):
+        if action == "send":
+            fleet_client_messages.send(
+                recipient=NODE_B,
+                subject="Interrupted",
+                body="Preserve this request",
+                reference=None,
+                priority="normal",
+            )
+        else:
+            fleet_client_messages.reply(
+                17, body="Preserve this request", subject="Re: interrupted", reference=None, priority="normal"
+            )
+
+    spool = fleet_client_messages._spool_path(NODE_A)
+    assert fleet_client._read_spool(spool) == attempted
 
 
 def test_ambiguous_reply_is_spooled_and_retried_with_same_client_id(tmp_path, monkeypatch):
