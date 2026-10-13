@@ -665,16 +665,52 @@ def make_handler(
                     history_window_seconds=frozen_deck.stale_history_after_seconds,
                     stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
                 )
-                complete_base_node_ids = (
-                    fleet_hub_status.board_node_ids(
-                        conn,
-                        include_all=include_all,
-                        now=current,
-                        history_window_seconds=frozen_deck.stale_history_after_seconds,
-                    )
+                query_model = (
+                    fleet_dashboard.parse_query(urlencode(params, doseq=True), view=view)
                     if view == "machines"
-                    else set()
+                    else None
                 )
+                complete_base_node_ids: set[str] = set()
+                if query_model is not None:
+                    page = board
+                    if offset:
+                        page = board_status(
+                            conn,
+                            include_all=include_all,
+                            offset=0,
+                            now=current,
+                            history_window_seconds=frozen_deck.stale_history_after_seconds,
+                            stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                        )
+                    while True:
+                        page_started = run_started_at(
+                            conn,
+                            [
+                                (
+                                    str(row["node_id"]),
+                                    str(row["run_id"]),
+                                    row["harness"] if isinstance(row.get("harness"), str) else None,
+                                )
+                                for row in page.runs
+                            ],
+                        )
+                        visible_rows = fleet_dashboard.filter_rows(
+                            fleet_dashboard.build_rows(page.runs, page_started, now=current), query_model
+                        )
+                        complete_base_node_ids.update(row.node_id for row in visible_rows if row.node_id)
+                        if not page.more:
+                            break
+                        next_offset = fleet_hub_status.clamp_board_offset(page.offset + page.limit)
+                        if next_offset <= page.offset:
+                            break
+                        page = board_status(
+                            conn,
+                            include_all=include_all,
+                            offset=next_offset,
+                            now=current,
+                            history_window_seconds=frozen_deck.stale_history_after_seconds,
+                            stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                        )
                 claims = fleet_claim_display.list_display_claims(conn, include_all=include_all)
                 started_at = run_started_at(
                     conn,
@@ -708,7 +744,7 @@ def make_handler(
             render_started_at = started_at
             render_unread_counts = unread_counts
             if view == "machines":
-                query_model = fleet_dashboard.parse_query(urlencode(params, doseq=True), view=view)
+                assert query_model is not None
                 page_rows = fleet_dashboard.filter_rows(
                     fleet_dashboard.build_rows(board.runs, started_at, now=current), query_model
                 )
@@ -1754,6 +1790,9 @@ def make_handler(
                 return
             except fleet_hub_messages.MessageQuotaError as exc:
                 self._send_json(429, {"error": str(exc)})
+                return
+            except fleet_hub_messages.MessageRecipientInactive as exc:
+                self._send_json(400, {"error": str(exc), "code": "message_recipient_inactive"})
                 return
             except fleet_hub_messages.MessageAuthError as exc:
                 self._send_json(403, {"error": str(exc)})

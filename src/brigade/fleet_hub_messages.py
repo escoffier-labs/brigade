@@ -55,6 +55,10 @@ class MessageQuotaError(MessageError):
     """A temporary per-principal message quota is full."""
 
 
+class MessageRecipientInactive(MessageError):
+    """A known recipient is temporarily unavailable because it was revoked."""
+
+
 class MessageAuthError(MessageError):
     """A principal was revoked while its request was being processed."""
 
@@ -271,8 +275,9 @@ def _enqueued_at(value: Any) -> str:
     return stamp.isoformat()
 
 
-def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str]:
-    if not isinstance(raw, dict) or set(raw) - {"name", "label", "request_id", "token"}:
+def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | None]:
+    allowed = {"name", "label", "request_id", "token", "expected_enrollment_id"}
+    if not isinstance(raw, dict) or set(raw) - allowed:
         raise MessageError("principal enrollment requires only name and optional label")
     name = _text(raw.get("name"), "name", 63)
     label = _text(raw.get("label", name), "label", 128)
@@ -284,11 +289,17 @@ def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str]:
     principal_id = f"agent:{name}"
     request_id = raw.get("request_id")
     secret = raw.get("token")
+    expected_enrollment_id = raw.get("expected_enrollment_id")
+    if expected_enrollment_id is not None and (
+        not isinstance(expected_enrollment_id, str) or _ENROLLMENT_ID_RE.fullmatch(expected_enrollment_id) is None
+    ):
+        raise MessageError("expected_enrollment_id is invalid")
+    if request_id is None and secret is None:
+        request_id = secrets.token_urlsafe(24)
+        secret = secrets.token_urlsafe(32)
     if (request_id is None) != (secret is None):
         raise MessageError("principal enrollment request_id and token must be provided together")
-    if request_id is None:
-        secret = secrets.token_urlsafe(32)
-    elif (
+    if (
         not isinstance(request_id, str)
         or _ENROLLMENT_ID_RE.fullmatch(request_id) is None
         or not isinstance(secret, str)
@@ -305,6 +316,8 @@ def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str]:
         ).fetchone()
         created_at = datetime.now(timezone.utc).isoformat()
         if existing is None:
+            if expected_enrollment_id is not None:
+                raise MessageConflict("principal enrollment generation changed", code="principal_enrollment_changed")
             conn.execute(
                 "INSERT INTO fleet_message_principals(principal_id,name,label,token_hash,created_at,enrollment_id) "
                 "VALUES(?,?,?,?,?,?)",
@@ -315,10 +328,12 @@ def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str]:
                 raise MessageConflict(
                     "revoked principal enrollment cannot be replayed", code="principal_enrollment_revoked"
                 )
+            if "expected_enrollment_id" not in raw or expected_enrollment_id != existing[1]:
+                raise MessageConflict("principal enrollment generation changed", code="principal_enrollment_changed")
             conn.execute(
                 "UPDATE fleet_message_principals SET label=?,token_hash=?,created_at=?,revoked_at=NULL,enrollment_id=? "
-                "WHERE principal_id=?",
-                (label, token_hash, created_at, request_id, principal_id),
+                "WHERE principal_id=? AND enrollment_id IS ? AND revoked_at IS NOT NULL",
+                (label, token_hash, created_at, request_id, principal_id, expected_enrollment_id),
             )
         elif request_id is not None and existing[1] == request_id:
             if existing[2] != token_hash or existing[3] != label:
@@ -329,7 +344,13 @@ def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str]:
     except BaseException:
         conn.rollback()
         raise
-    return {"principal_id": principal_id, "name": name, "label": label, "token": secret}
+    return {
+        "principal_id": principal_id,
+        "name": name,
+        "label": label,
+        "token": secret,
+        "enrollment_id": request_id,
+    }
 
 
 def lookup_principal_token(conn: sqlite3.Connection, presented: str) -> str | None:
@@ -340,27 +361,59 @@ def lookup_principal_token(conn: sqlite3.Connection, presented: str) -> str | No
     return str(row[0]) if row else None
 
 
-def revoke_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str] | None:
-    if not isinstance(raw, dict) or set(raw) != {"action", "name"} or raw.get("action") != "revoke":
-        raise MessageError("principal revocation requires action='revoke' and name")
+def get_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | None] | None:
+    if not isinstance(raw, dict) or set(raw) != {"action", "name"} or raw.get("action") != "get":
+        raise MessageError("principal lookup requires action='get' and name")
     name = _text(raw.get("name"), "name", 63)
     assert name is not None
+    row = conn.execute(
+        "SELECT principal_id,name,enrollment_id FROM fleet_message_principals WHERE principal_id=?",
+        (f"agent:{name}",),
+    ).fetchone()
+    return {"principal_id": str(row[0]), "name": str(row[1]), "enrollment_id": row[2]} if row else None
+
+
+def revoke_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | None] | None:
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"action", "name", "expected_enrollment_id"}
+        or raw.get("action") != "revoke"
+    ):
+        raise MessageError("principal revocation requires action='revoke', name, and expected enrollment generation")
+    name = _text(raw.get("name"), "name", 63)
+    assert name is not None
+    expected_enrollment_id = raw.get("expected_enrollment_id")
+    if expected_enrollment_id is not None and (
+        not isinstance(expected_enrollment_id, str) or _ENROLLMENT_ID_RE.fullmatch(expected_enrollment_id) is None
+    ):
+        raise MessageError("expected_enrollment_id is invalid")
     principal_id = f"agent:{name}"
     conn.execute("BEGIN IMMEDIATE")
     try:
+        existing = conn.execute(
+            "SELECT enrollment_id,revoked_at FROM fleet_message_principals WHERE principal_id=?", (principal_id,)
+        ).fetchone()
+        if existing is None:
+            conn.commit()
+            return None
+        if existing[0] != expected_enrollment_id:
+            raise MessageConflict("principal enrollment generation changed", code="principal_enrollment_changed")
         conn.execute(
-            "UPDATE fleet_message_principals SET revoked_at=? WHERE principal_id=? AND revoked_at IS NULL",
-            (datetime.now(timezone.utc).isoformat(), principal_id),
+            "UPDATE fleet_message_principals SET revoked_at=? "
+            "WHERE principal_id=? AND enrollment_id IS ? AND revoked_at IS NULL",
+            (datetime.now(timezone.utc).isoformat(), principal_id, expected_enrollment_id),
         )
-        exists = conn.execute("SELECT 1 FROM fleet_message_principals WHERE principal_id=?", (principal_id,)).fetchone()
         conn.commit()
     except BaseException:
         conn.rollback()
         raise
-    return {"principal_id": principal_id, "name": name} if exists else None
+    return {"principal_id": principal_id, "name": name, "enrollment_id": expected_enrollment_id}
 
 
 def handle_principal_admin(conn: sqlite3.Connection, raw: object) -> tuple[int, dict[str, Any]]:
+    if isinstance(raw, dict) and raw.get("action") == "get":
+        principal = get_principal(conn, raw)
+        return (200, {"principal": principal}) if principal else (404, {"error": "principal not found"})
     if isinstance(raw, dict) and raw.get("action") == "revoke":
         principal = revoke_principal(conn, raw)
         return (200, {"principal": principal}) if principal else (404, {"error": "principal not found"})
@@ -401,6 +454,14 @@ def send(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str, reply_to
                 conn.commit()
             return _fetch(conn, int(existing[0])) or {}
         if not _active_principal(conn, recipient):
+            revoked = conn.execute(
+                "SELECT 1 FROM nodes WHERE node_id=? AND revoked_at IS NOT NULL "
+                "UNION ALL SELECT 1 FROM fleet_message_principals WHERE principal_id=? AND revoked_at IS NOT NULL "
+                "LIMIT 1",
+                (recipient, recipient),
+            ).fetchone()
+            if revoked is not None:
+                raise MessageRecipientInactive("recipient is temporarily inactive")
             raise MessageError("recipient is not an active hub principal")
         count = conn.execute(
             "SELECT COUNT(*) FROM fleet_messages WHERE recipient=? AND acked_at IS NULL", (recipient,)

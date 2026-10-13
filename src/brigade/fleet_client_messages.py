@@ -150,6 +150,8 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                     return _queue_locked(path, message, dir_fd=dir_fd)
                 if status == 400 and payload.get("code") == "message_timestamp_future":
                     return _queue_locked(path, message, dir_fd=dir_fd)
+                if status == 400 and payload.get("code") == "message_recipient_inactive":
+                    return _queue_locked(path, message, dir_fd=dir_fd)
                 raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
             if not _response_confirms(payload, message):
                 _LOG.warning("fleet message response did not confirm the submitted request; queueing it")
@@ -270,43 +272,11 @@ def reply(message_id: int, *, body: str, subject: str | None, reference: str | N
     return _send_ordered(message, hub, token, node_id)
 
 
-def manage_principal(
-    action: str,
-    *,
-    name: str,
-    label: str | None = None,
-    _retried_revoked_enrollment: bool = False,
-    _defer_finalize: bool = False,
-    _deferred_request_ids: list[str] | None = None,
-) -> dict[str, Any]:
-    if _defer_finalize and _deferred_request_ids is None:
-        raise fleet_client.FleetClientError("deferred principal enrollment requires a request ID holder")
-    settings = fleet_client.load_fleet_settings()
-    if not settings["hub_url"]:
-        raise fleet_client.FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
-    if not settings["admin_token"]:
-        raise fleet_client.FleetClientError("no fleet admin token configured")
-    fleet_client._require_encrypted_or_loopback_hub(settings["hub_url"])
-    body: dict[str, Any] = {"action": action, "name": name}
-    pending_path: Path | None = None
-    revoke_pending_request_id: str | None = None
-    if action == "add":
-        body.update(_pending_principal_request(name, settings["admin_token"], label))
-        body["token"] = hmac.new(
-            settings["admin_token"].encode("utf-8"),
-            f"brigade-message-principal:{name}:{body['request_id']}".encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        pending_path = _principal_pending_path(name, settings["admin_token"])
-    elif action == "revoke":
-        pending_path = _principal_pending_path(name, settings["admin_token"])
-        revoke_pending_request_id = _pending_principal_request_id(pending_path, name)
-    elif label is not None:
-        body["label"] = label
+def _principal_admin_request(hub: str, admin_token: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     request = urllib.request.Request(
-        settings["hub_url"].rstrip("/") + "/message-principals",
+        hub.rstrip("/") + "/message-principals",
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {settings['admin_token']}"},
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {admin_token}"},
         method="POST",
     )
 
@@ -328,32 +298,88 @@ def manage_principal(
         return status, payload
 
     try:
-        status, payload = fleet_client._run_with_deadline(request_blocking, timeout=fleet_client.FLUSH_TIMEOUT_SECONDS)
+        return fleet_client._run_with_deadline(request_blocking, timeout=fleet_client.FLUSH_TIMEOUT_SECONDS)
     except fleet_client.FleetClientError:
         raise
     except Exception as exc:
         raise fleet_client.FleetClientError(f"fleet hub principal management failed: {type(exc).__name__}") from exc
+
+
+def _principal_enrollment_generation(hub: str, admin_token: str, name: str) -> str | None:
+    status, payload = _principal_admin_request(hub, admin_token, {"action": "get", "name": name})
+    if status == 404:
+        return None
+    principal = payload.get("principal")
+    if (
+        status != 200
+        or not isinstance(principal, dict)
+        or principal.get("principal_id") != f"agent:{name}"
+        or principal.get("name") != name
+    ):
+        raise fleet_client.FleetClientError(
+            str(payload.get("error") or "fleet hub did not confirm the principal generation")
+        )
+    request_id = principal.get("enrollment_id")
+    if request_id is not None and (
+        not isinstance(request_id, str)
+        or not 16 <= len(request_id) <= 128
+        or not request_id.isascii()
+        or any(not (character.isalnum() or character in "_-") for character in request_id)
+    ):
+        raise fleet_client.FleetClientError("fleet hub returned an invalid principal enrollment generation")
+    return request_id
+
+
+def manage_principal(
+    action: str,
+    *,
+    name: str,
+    label: str | None = None,
+    _defer_finalize: bool = False,
+    _deferred_request_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    if _defer_finalize and _deferred_request_ids is None:
+        raise fleet_client.FleetClientError("deferred principal enrollment requires a request ID holder")
+    settings = fleet_client.load_fleet_settings()
+    if not settings["hub_url"]:
+        raise fleet_client.FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
+    if not settings["admin_token"]:
+        raise fleet_client.FleetClientError("no fleet admin token configured")
+    fleet_client._require_encrypted_or_loopback_hub(settings["hub_url"])
+    body: dict[str, Any] = {"action": action, "name": name}
+    pending_path: Path | None = None
+    revoke_pending_request_id: str | None = None
+    generation = _principal_enrollment_generation(settings["hub_url"], settings["admin_token"], name)
+    if action == "add":
+        body.update(_pending_principal_request(name, settings["admin_token"], label, expected_enrollment_id=generation))
+        body["token"] = hmac.new(
+            settings["admin_token"].encode("utf-8"),
+            f"brigade-message-principal:{name}:{body['request_id']}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        pending_path = _principal_pending_path(name, settings["admin_token"])
+    elif action == "revoke":
+        body["expected_enrollment_id"] = generation
+        pending_path = _principal_pending_path(name, settings["admin_token"])
+        revoke_pending_request_id = _pending_principal_request_id(pending_path, name)
+    elif label is not None:
+        body["label"] = label
+    status, payload = _principal_admin_request(settings["hub_url"], settings["admin_token"], body)
     if not 200 <= status < 300:
         if (
             action == "add"
             and pending_path is not None
             and status == 409
-            and payload.get("code") == "principal_enrollment_revoked"
+            and payload.get("code") in ("principal_enrollment_revoked", "principal_enrollment_changed")
         ):
             _clear_principal_request(pending_path, request_id=body["request_id"])
-            if not _retried_revoked_enrollment:
-                return manage_principal(
-                    action,
-                    name=name,
-                    label=label,
-                    _retried_revoked_enrollment=True,
-                    _defer_finalize=_defer_finalize,
-                    _deferred_request_ids=_deferred_request_ids,
-                )
-        if pending_path is not None and 400 <= status < 500 and status not in (408, 409, 425, 429):
+        elif pending_path is not None and 400 <= status < 500 and status not in (408, 409, 425, 429):
             if action == "add":
                 _clear_principal_request(pending_path, request_id=body["request_id"])
-        raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
+        message = str(payload.get("error") or f"fleet hub returned HTTP {status}")
+        if action == "add" and payload.get("code") in ("principal_enrollment_revoked", "principal_enrollment_changed"):
+            message += "; run principals add again to request a new enrollment generation"
+        raise fleet_client.FleetClientError(message)
     if action == "add" and pending_path is not None:
         principal = payload.get("principal")
         returned_token = principal.get("token") if isinstance(principal, dict) else None
@@ -400,7 +426,13 @@ def _principal_pending_path(name: str, admin_token: str) -> Path:
     return fleet_client.brigade_home() / fleet_client.SPOOL_DIRNAME / f"principal-{name_scope}-{token_scope}.jsonl"
 
 
-def _pending_principal_request(name: str, admin_token: str, label: str | None) -> dict[str, Any]:
+def _pending_principal_request(
+    name: str,
+    admin_token: str,
+    label: str | None,
+    *,
+    expected_enrollment_id: str | None = None,
+) -> dict[str, Any]:
     path = _principal_pending_path(name, admin_token)
     with fleet_client._spool_lock(path) as dir_fd:
         pending = fleet_client._read_spool(path, dir_fd=dir_fd)
@@ -435,7 +467,11 @@ def _pending_principal_request(name: str, admin_token: str, label: str | None) -
         with fleet_client._spool_lock(path) as dir_fd:
             pending = fleet_client._read_spool(path, dir_fd=dir_fd)
             if not pending:
-                new_request: dict[str, Any] = {"name": name, "request_id": uuid4().hex}
+                new_request: dict[str, Any] = {
+                    "name": name,
+                    "request_id": uuid4().hex,
+                    "expected_enrollment_id": expected_enrollment_id,
+                }
                 if label is not None:
                     new_request["label"] = label
                 fleet_client._write_spool_atomic(path, [new_request], dir_fd=dir_fd)
@@ -443,7 +479,10 @@ def _pending_principal_request(name: str, admin_token: str, label: str | None) -
     for item in pending:
         request_id = item.get("request_id")
         if item.get("name") == name and isinstance(request_id, str) and request_id:
-            pending_request = {"name": name, "request_id": request_id}
+            pending_request: dict[str, Any] = {"name": name, "request_id": request_id}
+            expected = item.get("expected_enrollment_id")
+            if expected is None or isinstance(expected, str):
+                pending_request["expected_enrollment_id"] = expected
             if isinstance(item.get("label"), str):
                 pending_request["label"] = item["label"]
             return pending_request
@@ -514,7 +553,7 @@ def _flush_locked(
             300 <= status < 400
             or status >= 500
             or status in (401, 408, 425, 429)
-            or (status == 400 and payload.get("code") == "message_timestamp_future")
+            or (status == 400 and payload.get("code") in ("message_timestamp_future", "message_recipient_inactive"))
         ):
             fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
             return delivered

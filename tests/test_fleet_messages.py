@@ -593,10 +593,24 @@ def test_named_external_principal_uses_its_own_revocable_identity(message_hub):
     assert replied[0] == 201
     assert replied[1]["message"]["sender"] == "agent:miller"
 
-    revoked = _post_path(base, ADMIN, "/message-principals", {"action": "revoke", "name": "miller"})
+    revoked = _post_path(
+        base,
+        ADMIN,
+        "/message-principals",
+        {
+            "action": "revoke",
+            "name": "miller",
+            "expected_enrollment_id": principal["enrollment_id"],
+        },
+    )
     assert revoked[0] == 200
     assert _request(base, token, {"action": "list"})[0] == 401
-    reissued = _post_path(base, ADMIN, "/message-principals", {"action": "add", "name": "miller"})
+    reissued = _post_path(
+        base,
+        ADMIN,
+        "/message-principals",
+        {"action": "add", "name": "miller", "expected_enrollment_id": principal["enrollment_id"]},
+    )
     assert reissued[0] == 201
     new_token = reissued[1]["principal"]["token"]
     assert _request(base, token, {"action": "list"})[0] == 401
@@ -610,6 +624,7 @@ def test_principal_enrollment_replays_the_same_token_and_revocation_is_idempoten
         "name": "recoverable",
         "request_id": "a" * 32,
         "token": "client-generated-token-for-retry",
+        "expected_enrollment_id": None,
     }
     first = _post_path(base, ADMIN, "/message-principals", request)
     replay = _post_path(base, ADMIN, "/message-principals", request)
@@ -620,17 +635,85 @@ def test_principal_enrollment_replays_the_same_token_and_revocation_is_idempoten
     changed = _post_path(base, ADMIN, "/message-principals", {**request, "label": "changed"})
     assert changed[0] == 409
 
-    revoke = {"action": "revoke", "name": "recoverable"}
+    revoke = {"action": "revoke", "name": "recoverable", "expected_enrollment_id": request["request_id"]}
     assert _post_path(base, ADMIN, "/message-principals", revoke)[0] == 200
     stale_replay = _post_path(base, ADMIN, "/message-principals", request)
     assert stale_replay[0] == 409
     assert stale_replay[1]["code"] == "principal_enrollment_revoked"
     assert _post_path(base, ADMIN, "/message-principals", revoke)[0] == 200
-    assert _post_path(base, ADMIN, "/message-principals", {"action": "revoke", "name": "missing"})[0] == 404
+    assert (
+        _post_path(
+            base,
+            ADMIN,
+            "/message-principals",
+            {"action": "revoke", "name": "missing", "expected_enrollment_id": None},
+        )[0]
+        == 404
+    )
 
     with sqlite3.connect(db) as conn:
         stored = conn.execute("SELECT token_hash FROM fleet_message_principals WHERE name='recoverable'").fetchone()[0]
     assert stored != request["token"]
+
+
+def test_principal_enrollment_and_revoke_are_generation_fenced(message_hub):
+    base, _token_a, _token_b, db = message_hub
+    enrollment_a = {
+        "action": "add",
+        "name": "generation-fence",
+        "request_id": "a" * 32,
+        "token": "old-principal-token-that-is-long-enough",
+        "expected_enrollment_id": None,
+    }
+    first = _post_path(base, ADMIN, "/message-principals", enrollment_a)
+    assert first[0] == 201
+    generation_a = first[1]["principal"]["enrollment_id"]
+    assert (
+        _post_path(
+            base,
+            ADMIN,
+            "/message-principals",
+            {"action": "revoke", "name": "generation-fence", "expected_enrollment_id": generation_a},
+        )[0]
+        == 200
+    )
+
+    enrollment_b = {
+        **enrollment_a,
+        "request_id": "b" * 32,
+        "token": "new-principal-token-that-is-long-enough",
+        "expected_enrollment_id": generation_a,
+    }
+    second = _post_path(base, ADMIN, "/message-principals", enrollment_b)
+    assert second[0] == 201
+    generation_b = second[1]["principal"]["enrollment_id"]
+    delayed_revoke = _post_path(
+        base,
+        ADMIN,
+        "/message-principals",
+        {"action": "revoke", "name": "generation-fence", "expected_enrollment_id": generation_a},
+    )
+    assert delayed_revoke[0] == 409
+    assert delayed_revoke[1]["code"] == "principal_enrollment_changed"
+
+    assert (
+        _post_path(
+            base,
+            ADMIN,
+            "/message-principals",
+            {"action": "revoke", "name": "generation-fence", "expected_enrollment_id": generation_b},
+        )[0]
+        == 200
+    )
+    stale_add = _post_path(base, ADMIN, "/message-principals", enrollment_a)
+    assert stale_add[0] == 409
+    assert stale_add[1]["code"] == "principal_enrollment_changed"
+    with sqlite3.connect(db) as conn:
+        current = conn.execute(
+            "SELECT enrollment_id,revoked_at FROM fleet_message_principals WHERE name='generation-fence'"
+        ).fetchone()
+    assert current[0] == generation_b
+    assert current[1] is not None
 
 
 @pytest.mark.parametrize("token", ["a" * 31 + "\ud800", "a" * 31 + "\n", "é" * 32])
@@ -744,7 +827,10 @@ def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, 
             return False
 
     def hub_open(request, **_kwargs):
-        requests.append(json.loads(request.data))
+        body = json.loads(request.data)
+        if body["action"] == "get":
+            raise urllib.error.HTTPError(request.full_url, 404, "missing", {}, BytesIO(b'{"error":"missing"}'))
+        requests.append(body)
         return Response()
 
     monkeypatch.setattr(fleet_client, "_hub_open", hub_open)
@@ -765,9 +851,9 @@ def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, 
 
     def run_with_deadline(request, *, timeout):
         nonlocal calls
-        calls += 1
         result = request()
-        if calls == 1:
+        if requests and requests[-1]["action"] == "add" and calls == 0:
+            calls += 1
             raise TimeoutError("response lost after commit")
         return result
 
@@ -816,7 +902,10 @@ def test_principal_add_keeps_retry_state_until_response_matches_request(tmp_path
             return False
 
     def hub_open(request, **_kwargs):
-        requests.append(json.loads(request.data))
+        body = json.loads(request.data)
+        if body["action"] == "get":
+            raise urllib.error.HTTPError(request.full_url, 404, "missing", {}, BytesIO(b'{"error":"missing"}'))
+        requests.append(body)
         return Response()
 
     monkeypatch.setattr(fleet_client, "_hub_open", hub_open)
@@ -951,6 +1040,45 @@ def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
     assert fleet_client_messages.flush(NODE_A) == 1
     assert len({attempt["client_id"] for attempt in attempts}) == 1
     assert not fleet_client_messages._spool_path(NODE_A).exists()
+
+
+def test_spool_flush_keeps_message_during_recipient_revocation(message_hub, tmp_path, monkeypatch):
+    base, token_a, _token_b, db = message_hub
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": base, "node_token": token_a, "admin_token": ""},
+    )
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": base})
+    request = fleet_client_messages._request
+    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (503, {"error": "offline"}))
+
+    queued = fleet_client_messages.send(
+        recipient=NODE_B,
+        subject="During rotation",
+        body="Keep while recipient is re-enrolled",
+        reference=None,
+        priority="normal",
+    )
+    path = fleet_client_messages._spool_path(NODE_A, token_a)
+    assert queued["queued"] is True
+
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE nodes SET revoked_at=? WHERE node_id=?", (datetime.now(timezone.utc).isoformat(), NODE_B))
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+
+    assert fleet_client_messages.flush(NODE_A) == 0
+    assert fleet_client._read_spool(path)[0]["client_id"] == queued["client_id"]
+    status, response = _request(base, token_a, {"action": "send", "to": NODE_B, "subject": "x", "body": "x"})
+    assert status == 400
+    assert response["code"] == "message_recipient_inactive"
+
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE nodes SET revoked_at=NULL WHERE node_id=?", (NODE_B,))
+    assert fleet_client_messages.flush(NODE_A) == 1
+    assert not path.exists()
 
 
 @pytest.mark.parametrize("status", [302, 408, 425, 429, 503])
@@ -1966,11 +2094,12 @@ def test_message_transports_guard_bearer_urls_before_request(action, hub_url, tm
         opened.append(request)
         body = json.loads(request.data)
         payload = {"principal": {"principal_id": "agent:researcher", "name": "researcher"}}
-        if action == "add":
+        if body["action"] == "add":
             payload["principal"]["token"] = body["token"]
-        elif action in ("send", "reply"):
+            payload["principal"]["enrollment_id"] = body["request_id"]
+        elif body["action"] in ("send", "reply"):
             payload = {"message": {"client_id": body["client_id"]}}
-        elif action == "list":
+        elif body["action"] == "list":
             payload = {"messages": [], "next_cursor": body["after"]}
         return Response(json.dumps(payload).encode())
 
@@ -1996,7 +2125,8 @@ def test_message_transports_guard_bearer_urls_before_request(action, hub_url, tm
         assert requests == opened == []
     else:
         assert invoke()
-        assert len(requests) == len(opened) == 1
+        expected_requests = 2 if action in ("add", "revoke") else 1
+        assert len(requests) == len(opened) == expected_requests
         token = "node-token" if action in ("send", "reply", "list") else ADMIN
         assert requests[0].get_header("Authorization") == f"Bearer {token}"
     if action in ("send", "reply"):
@@ -2017,18 +2147,26 @@ def test_principal_add_recovers_committed_request_after_label_change_and_conflic
         lambda: {"hub_url": base, "node_token": "", "admin_token": ADMIN},
     )
     requests = []
+    add_requests = []
     original_open = fleet_client._hub_open
     original_deadline = fleet_client._run_with_deadline
+    last_action = None
 
     def hub_open(request, **kwargs):
-        requests.append(json.loads(request.data))
-        if conflict and len(requests) == 2:
+        nonlocal last_action
+        body = json.loads(request.data)
+        last_action = body["action"]
+        if body["action"] == "get":
+            return original_open(request, **kwargs)
+        requests.append(body)
+        add_requests.append(body)
+        if conflict and len(add_requests) == 2:
             raise urllib.error.HTTPError(request.full_url, 409, "conflict", {}, BytesIO(b'{"error":"conflict"}'))
         return original_open(request, **kwargs)
 
     def lose_first_response(request, *, timeout):
         result = original_deadline(request, timeout=timeout)
-        if len(requests) == 1:
+        if last_action == "add" and len(add_requests) == 1:
             raise TimeoutError("response lost after commit")
         return result
 
@@ -2043,8 +2181,8 @@ def test_principal_add_recovers_committed_request_after_label_change_and_conflic
             fleet_client_messages.manage_principal("add", name="recoverable", label="Changed label")
         assert fleet_client._read_spool(path) == pending
     recovered = fleet_client_messages.manage_principal("add", name="recoverable", label="Changed again")
-    assert all(request == requests[0] for request in requests)
-    assert recovered["principal"]["token"] == requests[0]["token"]
+    assert all(request == add_requests[0] for request in add_requests)
+    assert recovered["principal"]["token"] == add_requests[0]["token"]
     assert recovered["principal"]["label"] == (label or "recoverable")
     assert not path.exists()
     conn = fleet_hub.open_db(db)
@@ -2069,6 +2207,8 @@ def test_principal_add_clears_pending_request_after_definitive_validation_error(
 
     def hub_open(request, **_kwargs):
         body = json.loads(request.data)
+        if body["action"] == "get":
+            raise urllib.error.HTTPError(request.full_url, 404, "missing", {}, BytesIO(b'{"error":"missing"}'))
         requests.append(body)
         if len(requests) == 1:
             raise urllib.error.HTTPError(
@@ -2111,6 +2251,8 @@ def test_principal_add_retries_after_revoked_pending_enrollment(tmp_path, monkey
 
     def hub_open(request, **_kwargs):
         body = json.loads(request.data)
+        if body["action"] == "get":
+            raise urllib.error.HTTPError(request.full_url, 404, "missing", {}, BytesIO(b'{"error":"missing"}'))
         requests.append(body)
         if len(requests) == 1:
             raise urllib.error.HTTPError(
@@ -2134,10 +2276,13 @@ def test_principal_add_retries_after_revoked_pending_enrollment(tmp_path, monkey
         )
 
     monkeypatch.setattr(fleet_client, "_hub_open", hub_open)
+    with pytest.raises(fleet_client.FleetClientError, match="run principals add again"):
+        fleet_client_messages.manage_principal("add", name="researcher", label="Current label")
+    first_request_id = requests[0]["request_id"]
     enrolled = fleet_client_messages.manage_principal("add", name="researcher", label="Current label")
 
     assert len(requests) == 2
-    assert requests[0]["request_id"] != requests[1]["request_id"]
+    assert first_request_id != requests[1]["request_id"]
     assert requests[1]["label"] == "Current label"
     assert enrolled["principal"]["token"] == requests[1]["token"]
     assert not fleet_client_messages._principal_pending_path("researcher", ADMIN).exists()
@@ -2188,6 +2333,18 @@ def test_principal_revoke_requires_matching_success_identity(payload, monkeypatc
     class Response(BytesIO):
         status = 200
 
-    monkeypatch.setattr(fleet_client, "_hub_open", lambda *_args, **_kwargs: Response(json.dumps(payload).encode()))
+    calls = 0
+
+    def hub_open(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        body = (
+            b'{"principal":{"principal_id":"agent:researcher","name":"researcher","enrollment_id":null}}'
+            if calls == 1
+            else json.dumps(payload).encode()
+        )
+        return Response(body)
+
+    monkeypatch.setattr(fleet_client, "_hub_open", hub_open)
     with pytest.raises(fleet_client.FleetClientError, match="did not confirm the revoked principal"):
         fleet_client_messages.manage_principal("revoke", name="researcher")

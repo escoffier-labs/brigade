@@ -1117,6 +1117,24 @@ class TestBoardBounds:
         assert first_ids.isdisjoint(second_ids)
         assert first_ids | second_ids == set(node_ids)
 
+    def test_terminal_only_node_with_unread_message_gets_supplemental_card(self, hub, monkeypatch):
+        now = datetime.now(timezone.utc).isoformat()
+        status, _headers, text = _request(
+            hub,
+            "POST",
+            "/events",
+            headers=_bearer(),
+            body=[_event(NODE_A, "finished", 1, "run.completed", repo="repo", harness="codex", ts=now)],
+        )
+        assert status == 200, text
+        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: {NODE_A: 1})
+
+        status, _headers, page = _request(hub, "GET", "/view/machines", headers=_bearer())
+
+        assert status == 200
+        assert f'data-node="{NODE_A}"' in page
+        assert "1 unread messages" in page
+
     def test_claim_only_machine_cards_are_bounded_and_paginated(self, hub, monkeypatch):
         node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
         stamp = datetime.now(timezone.utc).isoformat()
