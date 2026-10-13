@@ -560,18 +560,6 @@ def downgrade_external_directory_authority(
     actor: str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    from ... import authority_marker
-
-    with authority_marker.isolation_marker_lock(env=env):
-        return _downgrade_external_directory_authority_locked(target, actor=actor, env=env)
-
-
-def _downgrade_external_directory_authority_locked(
-    target: Path,
-    *,
-    actor: str | None = None,
-    env: Mapping[str, str] | None = None,
-) -> dict[str, Any]:
     """Convert a signed store to unsigned, remove the sticky marker, and audit.
 
     The envelope must be bound to this destination target. A valid MAC for a
@@ -594,8 +582,8 @@ def _downgrade_external_directory_authority_locked(
 
     try:
         live_identity = _workspace_directory_identity(workspace)
-    except OSError as exc:
-        raise OSError("authority downgrade cannot identify the workspace posture markers") from exc
+    except OSError:
+        live_identity = {}
     governing_posture_paths = authority_marker.governing_isolation_marker_paths(
         workspace, env=env, workspace_identity=live_identity
     )
@@ -654,7 +642,6 @@ def _downgrade_external_directory_authority_locked(
             "target_fingerprint": fingerprint,
         }
 
-    transaction_id = uuid4().hex
     intent = {
         "action": "authority-downgrade",
         "actor": actor_value,
@@ -664,7 +651,6 @@ def _downgrade_external_directory_authority_locked(
         "store_unwrapped": unsigned_record is not None,
         "target": resolved,
         "target_fingerprint": fingerprint,
-        "transaction_id": transaction_id,
     }
     try:
         authority_marker.append_audit(intent, env=env)
@@ -696,28 +682,13 @@ def _downgrade_external_directory_authority_locked(
         _downgrade_durability_checkpoint(path)
 
     def _restore_all() -> None:
-        failures: list[tuple[Path, OSError]] = []
-
-        def _restore(path: Path, backup: bytes) -> None:
-            try:
-                _restore_authority_file(path, backup)
-                if path.read_bytes() != backup:
-                    raise OSError("restored authority bytes did not match the pre-downgrade backup")
-            except OSError as exc:
-                failures.append((path, exc))
-
-        for path, backup in reversed(tuple(changed.items())):
-            _restore(path, backup)
+        for path, backup in changed.items():
+            _restore_authority_file(path, backup)
         if marker_removed and marker_bytes is not None:
-            _restore(marker_path, marker_bytes)
+            _restore_authority_file(marker_path, marker_bytes)
         for p in postures_removed:
             if p in posture_backups:
-                _restore(p, posture_backups[p])
-        if failures:
-            first_path, first_error = failures[0]
-            raise OSError(
-                f"authority downgrade rollback incomplete for {len(failures)} file(s); first: {first_path.name}"
-            ) from first_error
+                _restore_authority_file(p, posture_backups[p])
 
     try:
         if unsigned_record is not None:
@@ -758,38 +729,6 @@ def _downgrade_external_directory_authority_locked(
     except OSError:
         try:
             _restore_all()
-        except OSError as restore_exc:
-            try:
-                authority_marker.append_audit(
-                    {
-                        "action": "authority-downgrade",
-                        "actor": actor_value,
-                        "created_at": utc_now_iso_z(),
-                        "phase": "rollback-failed",
-                        "target": resolved,
-                        "target_fingerprint": fingerprint,
-                        "transaction_id": transaction_id,
-                    },
-                    env=env,
-                )
-            except OSError:
-                pass
-            raise OSError(
-                "authority downgrade failed and rollback was incomplete; inspect authority state"
-            ) from restore_exc
-        try:
-            authority_marker.append_audit(
-                {
-                    "action": "authority-downgrade",
-                    "actor": actor_value,
-                    "created_at": utc_now_iso_z(),
-                    "phase": "rolled-back",
-                    "target": resolved,
-                    "target_fingerprint": fingerprint,
-                    "transaction_id": transaction_id,
-                },
-                env=env,
-            )
         except OSError:
             pass
         raise
@@ -801,11 +740,10 @@ def _downgrade_external_directory_authority_locked(
         "phase": "complete",
         "removed": marker_removed,
         "posture_marker_removed": bool(postures_removed),
-        "posture_marker_fingerprints_removed": sorted(path.name for path in postures_removed),
+        "removed_posture_markers": sorted([p.name for p in postures_removed]),
         "store_unwrapped": unsigned_record is not None,
         "target": resolved,
         "target_fingerprint": fingerprint,
-        "transaction_id": transaction_id,
     }
     try:
         completion["audit_path"] = str(authority_marker.append_audit(completion, env=env))
@@ -814,21 +752,6 @@ def _downgrade_external_directory_authority_locked(
             _restore_all()
         except OSError as restore_exc:
             raise OSError("authority downgrade audit failed and marker restore failed") from restore_exc
-        try:
-            authority_marker.append_audit(
-                {
-                    "action": "authority-downgrade",
-                    "actor": actor_value,
-                    "created_at": utc_now_iso_z(),
-                    "phase": "rolled-back",
-                    "target": resolved,
-                    "target_fingerprint": fingerprint,
-                    "transaction_id": transaction_id,
-                },
-                env=env,
-            )
-        except OSError:
-            raise OSError("authority downgrade audit failed; state restored but audit outcome is uncertain") from exc
         raise OSError("authority downgrade audit failed; marker restored") from exc
     return completion
 
