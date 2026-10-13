@@ -40,6 +40,39 @@ def test_acpx_metadata_provenance_uses_adapter_evidence_locators():
     assert preflight["requested_model"]["unknown_reason"] == "execution-not-started"
 
 
+def test_direct_cloudflare_preflight_uses_cli_receipt_transport(monkeypatch, tmp_path):
+    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_GATEWAY_ID", raising=False)
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="plan"),
+            "coder": Agent(
+                name="coder",
+                cli="codex",
+                role="write",
+                model="cloudflare-ai-gateway/example",
+            ),
+        },
+        max_workers=1,
+    )
+
+    result = run_transport.dispatch(
+        [Assignment(worker="coder", task="implement it")],
+        roster,
+        build_prompt=lambda agent, assignment, **kwargs: assignment.task,
+        run_appserver_worker=lambda *args, **kwargs: agents.AgentResult(text="", ok=False),
+        event_writer=lambda *args, **kwargs: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path,
+    )[0]
+
+    assert result.ok is False
+    assert result.failure_phase == "preflight"
+    assert result.transport == "cli"
+
+
 def _roster() -> Roster:
     return Roster(
         orchestrator="chef",
@@ -817,6 +850,7 @@ def test_dispatch_does_not_invoke_run_agent_when_admission_lease_denies(monkeypa
     assert results[0].ok is False
     assert results[0].failure_kind == "fleet-model-policy"
     assert results[0].failure_phase == "preflight"
+    assert results[0].transport == "cli"
     assert calls == []
 
 

@@ -103,6 +103,11 @@ def _is_direct_grok_invalid_final(
     )
 
 
+def _receipt_transport(agent: Agent) -> str:
+    """Map the roster dispatch mode to the runtime label used in receipts."""
+    return "acpx" if agent.transport == "acpx" else "cli"
+
+
 def _cloudflare_preflight_failure(agent: Agent, assignment: Assignment) -> WorkerResult | None:
     """Return a preflight failure if the agent's Cloudflare route lacks env.
 
@@ -120,14 +125,14 @@ def _cloudflare_preflight_failure(agent: Agent, assignment: Assignment) -> Worke
         detail=detail,
         failure_phase="preflight",
         failure_kind="provider-config",
-        transport=agent.transport,
+        transport=_receipt_transport(agent),
         requested_model=agent.model,
         metadata_provenance=_metadata_provenance(
             agents.AgentResult(
                 text="",
                 ok=False,
                 failure_phase="preflight",
-                transport=agent.transport,
+                transport=_receipt_transport(agent),
                 requested_model=agent.model,
             )
         ),
@@ -156,7 +161,7 @@ def _selected_agent_preflight(
             detail=f"seat {selected_agent.name} is quarantined for this run",
             failure_phase="preflight",
             failure_kind="unclassified",
-            transport=selected_agent.transport,
+            transport=_receipt_transport(selected_agent),
             requested_model=selected_agent.model,
         )
     if selected_agent.cli is None or not is_cli_allowed(selected_agent.cli, roster):
@@ -170,7 +175,7 @@ def _selected_agent_preflight(
             ),
             failure_phase="preflight",
             failure_kind="unclassified",
-            transport=selected_agent.transport,
+            transport=_receipt_transport(selected_agent),
             requested_model=selected_agent.model,
         )
     cloudflare_detail = agents.cloudflare_ai_gateway_preflight_detail(selected_agent.model)
@@ -181,7 +186,7 @@ def _selected_agent_preflight(
             detail=cloudflare_detail,
             failure_phase="preflight",
             failure_kind="provider-config",
-            transport=selected_agent.transport,
+            transport=_receipt_transport(selected_agent),
             requested_model=selected_agent.model,
         )
     return None
@@ -677,14 +682,14 @@ def dispatch(
                 detail=f"seat {assignment.worker} is quarantined for this run",
                 failure_phase="preflight",
                 failure_kind="unclassified",
-                transport=agent.transport,
+                transport=_receipt_transport(agent),
                 requested_model=agent.model,
                 metadata_provenance=_metadata_provenance(
                     agents.AgentResult(
                         text="",
                         ok=False,
                         failure_phase="preflight",
-                        transport=agent.transport,
+                        transport=_receipt_transport(agent),
                         requested_model=agent.model,
                     )
                 ),
@@ -702,14 +707,14 @@ def dispatch(
                 ),
                 failure_phase="preflight",
                 failure_kind="unclassified",
-                transport=agent.transport,
+                transport=_receipt_transport(agent),
                 requested_model=agent.model,
                 metadata_provenance=_metadata_provenance(
                     agents.AgentResult(
                         text="",
                         ok=False,
                         failure_phase="preflight",
-                        transport=agent.transport,
+                        transport=_receipt_transport(agent),
                         requested_model=agent.model,
                     )
                 ),
@@ -748,14 +753,14 @@ def dispatch(
                 detail=detail,
                 failure_phase="dispatch",
                 failure_kind=failure_kind,
-                transport=agent.transport,
+                transport=_receipt_transport(agent),
                 requested_model=agent.model,
                 metadata_provenance=_metadata_provenance(
                     agents.AgentResult(
                         text="",
                         ok=False,
                         failure_phase="preflight",
-                        transport=agent.transport,
+                        transport=_receipt_transport(agent),
                         requested_model=agent.model,
                     )
                 ),
@@ -805,7 +810,7 @@ def dispatch(
                     detail=exc.message[:200],
                     failure_phase="preflight",
                     failure_kind=exc.code,
-                    transport=selected_agent.transport,
+                    transport=_receipt_transport(selected_agent),
                     requested_model=selected_agent.model,
                     reasoning=selected_agent.reasoning,
                 )
@@ -1066,7 +1071,7 @@ def dispatch(
                                 detail=lease_error,
                                 failure_phase="preflight",
                                 failure_kind="fleet-model-policy",
-                                transport=selected_agent.transport,
+                                transport=_receipt_transport(selected_agent),
                                 requested_model=selected_agent.model,
                             )
                         else:
