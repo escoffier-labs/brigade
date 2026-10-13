@@ -631,6 +631,69 @@ def test_parse_stream_ignores_config_options_from_unrelated_response():
     assert parsed is not None and parsed["effective_model"] == "composer-2.5"
 
 
+def test_parse_stream_keeps_jsonrpc_id_types_distinct():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/new", "id": 1, "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"configOptions": [{"id": "model", "category": "model", "currentValue": "right-model"}]},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "1",
+                "result": {"configOptions": [{"id": "model", "category": "model", "currentValue": "wrong-model"}]},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "hello"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["effective_model"] == "right-model"
+
+
+def test_parse_stream_retires_config_request_id_without_config_options():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"update": {"sessionUpdate": "config_option_update", "modelId": "right-model"}},
+            },
+            {"jsonrpc": "2.0", "method": "session/new", "id": "new-1", "params": {}},
+            {"jsonrpc": "2.0", "id": "new-1", "result": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": "new-1",
+                "result": {"configOptions": [{"id": "model", "category": "model", "currentValue": "wrong-model"}]},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "hello"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["effective_model"] == "right-model"
+
+
 def test_parse_stream_reads_model_config_from_set_option_response():
     parsed, error = acpx_adapter.parse_stream(
         _stream(

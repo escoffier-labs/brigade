@@ -1920,3 +1920,70 @@ def test_resume_clears_stale_attempt_metadata_when_provider_raises(tmp_path, mon
         "session_id",
     ):
         assert key not in results[0]
+
+
+@pytest.mark.parametrize("probe_mode", ["raises", "unhealthy"])
+def test_resume_clears_stale_metadata_when_seat_probe_fails(tmp_path, monkeypatch, probe_mode):
+    stale = {
+        **_RESUMABLE_COOK,
+        "failure_kind": "output-limit",
+        "timed_out": True,
+        "output_truncated": True,
+        "output_bytes": 99,
+        "output_cap_bytes": 100,
+        "effective_model": "old-model",
+        "acpx_version": "0.12.0",
+        "metadata_provenance": {"fields": {"effective_model": {"source": "observed"}}},
+        "session_id": "old-session",
+        "request_id": "old-request",
+        "protocol_version": 1,
+        "safe_events": [{"type": "old-event"}],
+    }
+    run_dir = _write_run_dir(tmp_path, results=[stale])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["worker"] = "cook"
+    (run_dir / "run.json").write_text(json.dumps(meta))
+
+    class FakeProbe:
+        def invalidate(self, *, seat):  # noqa: ARG002
+            pass
+
+        def probe(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            if probe_mode == "raises":
+                raise RuntimeError("probe unavailable")
+            return type("Health", (), {"status": "unhealthy", "failure": None})()
+
+    class NoCallServer(_StubServer):
+        def resume_thread(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("unhealthy seat must not resume")
+
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", NoCallServer)
+    monkeypatch.setattr(run_resume.seat_health, "SeatHealthProbe", lambda **kwargs: FakeProbe())
+    monkeypatch.setattr(run_resume.seat_health, "write_seat_health_receipt", lambda *a, **k: None)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="unused", ok=True),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    results = json.loads((run_dir / "worker-results.json").read_text())["results"]
+    assert results[0]["status"] == "failed"
+    assert results[0]["failure_phase"] == "preflight"
+    assert results[0]["failure_kind"] == "unclassified"
+    expected_detail = "probe unavailable" if probe_mode == "raises" else "unhealthy"
+    assert expected_detail in results[0]["detail"]
+    for key in (
+        "timed_out",
+        "output_truncated",
+        "output_bytes",
+        "output_cap_bytes",
+        "effective_model",
+        "acpx_version",
+        "metadata_provenance",
+        "session_id",
+        "request_id",
+        "protocol_version",
+        "safe_events",
+    ):
+        assert key not in results[0]

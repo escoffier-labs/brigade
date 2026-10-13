@@ -820,9 +820,29 @@ def _resume_locked(
     probe = seat_health.SeatHealthProbe(collect_executable_version=False)
     try:
         for entry in resumable:
-            entry.pop("failure_phase", None)
             worker = entry.get("worker", "")
             agent = roster.agents.get(worker)
+            for stale_key in (
+                "failure_phase",
+                "failure_kind",
+                "timed_out",
+                "output_truncated",
+                "output_bytes",
+                "output_cap_bytes",
+                "effective_model",
+                "acpx_version",
+                "metadata_provenance",
+                "session_id",
+                "request_id",
+                "protocol_version",
+                "safe_events",
+            ):
+                entry.pop(stale_key, None)
+            if agent is not None and isinstance(agent.model, str):
+                entry["requested_model"] = agent.model
+            else:
+                entry.pop("requested_model", None)
+            entry["transport"] = "codex-app-server"
             if agent is not None:
                 probe.invalidate(seat=agent.name)
                 try:
@@ -836,6 +856,8 @@ def _resume_locked(
                 except Exception as exc:
                     entry["detail"] = f"resume seat probe failed: {exc}"[:200]
                     entry["status"] = "failed"
+                    entry["failure_phase"] = "preflight"
+                    entry["failure_kind"] = "unclassified"
                     print(f"skipping resume for {worker}: seat probe failed", file=sys.stderr)
                     continue
                 try:
@@ -856,26 +878,6 @@ def _resume_locked(
                     continue
             timeout = agent.timeout_seconds if agent and agent.timeout_seconds is not None else roster.timeout_seconds
             print(f"resuming: {worker} (thread {entry['thread_id']})", file=sys.stderr)
-            for stale_key in (
-                "failure_kind",
-                "timed_out",
-                "output_truncated",
-                "output_bytes",
-                "output_cap_bytes",
-                "effective_model",
-                "acpx_version",
-                "metadata_provenance",
-                "session_id",
-                "request_id",
-                "protocol_version",
-                "safe_events",
-            ):
-                entry.pop(stale_key, None)
-            if agent is not None and isinstance(agent.model, str):
-                entry["requested_model"] = agent.model
-            else:
-                entry.pop("requested_model", None)
-            entry["transport"] = "codex-app-server"
             try:
                 thread = server.resume_thread(
                     entry["thread_id"],

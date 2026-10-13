@@ -320,23 +320,32 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
     late_permission: dict[str, object] | None = None
     stream_finalized = False
     has_structured_jsonrpc_error = False
-    config_option_request_ids: set[str] = set()
+    config_option_request_ids: set[tuple[str, str | int]] = set()
     for message in messages:
         method = message.get("method")
         message_id = message.get("id")
-        if method in ("session/new", "session/set_config_option") and isinstance(message_id, (str, int)):
-            config_option_request_ids.add(str(message_id))
+        message_id_key: tuple[str, str | int] | None
+        if isinstance(message_id, str):
+            message_id_key = ("string", message_id)
+        elif isinstance(message_id, int) and not isinstance(message_id, bool):
+            message_id_key = ("integer", message_id)
+        else:
+            message_id_key = None
+        if method in ("session/new", "session/set_config_option") and message_id_key is not None:
+            config_option_request_ids.add(message_id_key)
+        is_response = "result" in message or "error" in message
+        matched_config_request = (
+            is_response and message_id_key is not None and message_id_key in config_option_request_ids
+        )
+        if is_response and message_id_key is not None:
+            config_option_request_ids.discard(message_id_key)
         result = message.get("result")
         if isinstance(result, dict):
             version = result.get("protocolVersion")
             if isinstance(version, int):
                 protocol_version = version
-            response_id = message.get("id")
-            if "configOptions" in result and isinstance(response_id, (str, int)):
-                response_key = str(response_id)
-                if response_key in config_option_request_ids:
-                    effective_model = _model_from_config_options(result["configOptions"])
-                    config_option_request_ids.discard(response_key)
+            if "error" not in message and "configOptions" in result and matched_config_request:
+                effective_model = _model_from_config_options(result["configOptions"])
             stop = result.get("stopReason")
             if isinstance(stop, str) and isinstance(message.get("id"), (str, int)):
                 stop_reasons[str(message["id"])] = stop
