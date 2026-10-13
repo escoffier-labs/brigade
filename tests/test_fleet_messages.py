@@ -534,6 +534,63 @@ def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
     assert not fleet_client_messages._spool_path(NODE_A).exists()
 
 
+def test_redirected_send_is_spooled_instead_of_reported_delivered(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    monkeypatch.setattr(
+        fleet_client_messages,
+        "_request",
+        lambda *_args, **_kwargs: (302, {"error": "redirected"}),
+    )
+
+    result = fleet_client_messages.send(
+        recipient=NODE_B,
+        subject="Keep after redirect",
+        body="A 3xx response is not delivery",
+        reference=None,
+        priority="normal",
+    )
+
+    assert result["queued"] is True
+    queued = fleet_client._read_spool(fleet_client_messages._spool_path(NODE_A, "node-secret"))
+    assert len(queued) == 1
+    assert queued[0]["subject"] == "Keep after redirect"
+
+
+def test_redirected_spool_flush_keeps_message_queued(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub.invalid"})
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    message = {
+        "action": "send",
+        "to": NODE_B,
+        "subject": "Keep after redirect",
+        "body": "A 3xx response is not delivery",
+        "client_id": "redirected-message",
+        "enqueued_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with fleet_client._spool_lock(path) as dir_fd:
+        assert fleet_client._spool_append_locked(path, message, dir_fd=dir_fd)
+    monkeypatch.setattr(
+        fleet_client_messages,
+        "_request",
+        lambda *_args, **_kwargs: (302, {"error": "redirected"}),
+    )
+
+    assert fleet_client_messages.flush(NODE_A) == 0
+    assert fleet_client._read_spool(path) == [message]
+
+
 def test_queued_messages_are_not_replayed_with_replaced_node_credentials(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
@@ -667,6 +724,38 @@ def test_message_request_uses_hard_wall_clock_deadline(monkeypatch):
 
     with pytest.raises(fleet_client.FleetClientError, match="TimeoutError"):
         fleet_client_messages._request("http://hub.invalid", "node-token", {"action": "list"})
+
+    assert deadlines == [fleet_client.FLUSH_TIMEOUT_SECONDS]
+
+
+def test_principal_management_uses_hard_wall_clock_deadline(monkeypatch):
+    deadlines = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "", "admin_token": "admin-token"},
+    )
+    monkeypatch.setattr(fleet_client, "_hub_open", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(fleet_client, "_read_bounded_response", lambda *_args, **_kwargs: b"{}")
+
+    def run_with_deadline(_fn, *, timeout):
+        deadlines.append(timeout)
+        raise TimeoutError("principal request hard deadline")
+
+    monkeypatch.setattr(fleet_client, "_run_with_deadline", run_with_deadline)
+
+    with pytest.raises(fleet_client.FleetClientError, match="TimeoutError"):
+        fleet_client_messages.manage_principal("add", name="researcher")
 
     assert deadlines == [fleet_client.FLUSH_TIMEOUT_SECONDS]
 

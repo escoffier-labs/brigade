@@ -137,7 +137,9 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                 return _queue_locked(path, message, dir_fd=dir_fd)
             if status in (408, 429) or status >= 500:
                 return _queue_locked(path, message, dir_fd=dir_fd)
-            if status >= 400:
+            if not 200 <= status < 300:
+                if 300 <= status < 400:
+                    return _queue_locked(path, message, dir_fd=dir_fd)
                 raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
             return payload
     except (KeyboardInterrupt, SystemExit):
@@ -240,20 +242,30 @@ def manage_principal(action: str, *, name: str, label: str | None = None) -> dic
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {settings['admin_token']}"},
         method="POST",
     )
-    try:
-        with fleet_client._hub_open(request, timeout=fleet_client.FLUSH_TIMEOUT_SECONDS) as response:
-            status = response.status
-            payload = json.loads(fleet_client._read_bounded_response(response, limit=64 * 1024))
-    except urllib.error.HTTPError as exc:
+
+    def request_blocking() -> tuple[int, dict[str, Any]]:
         try:
-            payload = json.loads(exc.read(64 * 1024 + 1))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            payload = {"error": f"HTTP {exc.code}"}
-        status = exc.code
+            with fleet_client._hub_open(request, timeout=fleet_client.FLUSH_TIMEOUT_SECONDS) as response:
+                status = response.status
+                payload = json.loads(fleet_client._read_bounded_response(response, limit=64 * 1024))
+        except urllib.error.HTTPError as exc:
+            try:
+                payload = json.loads(exc.read(64 * 1024 + 1))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                payload = {"error": f"HTTP {exc.code}"}
+            status = exc.code
+        except Exception as exc:
+            raise fleet_client.FleetClientError(f"fleet hub principal management failed: {type(exc).__name__}") from exc
+        if not isinstance(payload, dict):
+            raise fleet_client.FleetClientError("fleet hub principal management returned an invalid response")
+        return status, payload
+
+    try:
+        status, payload = fleet_client._run_with_deadline(request_blocking, timeout=fleet_client.FLUSH_TIMEOUT_SECONDS)
+    except fleet_client.FleetClientError:
+        raise
     except Exception as exc:
         raise fleet_client.FleetClientError(f"fleet hub principal management failed: {type(exc).__name__}") from exc
-    if not isinstance(payload, dict):
-        raise fleet_client.FleetClientError("fleet hub principal management returned an invalid response")
     if status >= 400:
         raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
     return payload
@@ -299,15 +311,18 @@ def _flush_locked(
         except fleet_client.FleetClientError:
             fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
             return delivered
-        if status >= 500 or status in (401, 403, 408, 429):
+        if 300 <= status < 400 or status >= 500 or status in (401, 403, 408, 429):
             fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
             return delivered
-        if status >= 400:
+        if not 200 <= status < 300 and status >= 400:
             _LOG.warning(
                 "fleet message spool %s: dropping rejected message: %s", path, _safe_log_text(payload.get("error"))
             )
-        else:
+        elif 200 <= status < 300:
             delivered += 1
+        else:
+            fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
+            return delivered
         index += 1
     fleet_client._write_spool_atomic(path, [], dir_fd=dir_fd)
     return delivered
