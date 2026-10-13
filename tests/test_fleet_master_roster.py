@@ -118,6 +118,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "password: actual-secret",
         "password is actual-secret",
         "API key is abcdefghijklmnop",
+        "password is p@ssw0rd!",
+        "API key is abcd.efgh.ijkl.mnop",
         "token is abcdefghijklmnop",
         "auth token is abcdefghijklmnop",
     ],
@@ -163,6 +165,8 @@ def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> N
         "No auth profile is required.",
         "Support auth profile selection.",
         "Support auth profiles as needed.",
+        "Configure auth profile selection.",
+        "Rotate auth profiles regularly.",
     ],
 )
 def test_parse_accepts_prose_that_mentions_auth_profiles(text: str) -> None:

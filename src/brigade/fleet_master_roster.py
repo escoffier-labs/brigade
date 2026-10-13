@@ -28,15 +28,17 @@ _DANGEROUS_VALUE = re.compile(
     r"(?!(?:required|needed|necessary|optional|available|selection)\b)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\bauth(?:entication)?[ _-]profiles?(?:\s*[:=]\s*|\s+)"
-    r"(?!(?:is|are|was|were|as|required|needed|necessary|optional|available|selection)\b)"
+    r"(?!(?:is|are|was|were|as|required|needed|necessary|optional|available|selection|regularly)\b)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
-    r"(?<![A-Za-z0-9_.-])(?!(?:no|any|a|an|the|some|our|your|their|its|this|that|support)\b)"
-    r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))\s+auth(?:entication)?[ _-]profiles?\b|"
+    r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with))\s+"
+    r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))\s+"
+    r"auth(?:entication)?[ _-]profiles?\b|"
     r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
     r"\s+is\s+(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not)\b)"
-    r"(?:[A-Za-z0-9_-]{16,}|(?=[A-Za-z0-9_-]{8,}\b)(?=[A-Za-z0-9_-]*[-_])[A-Za-z0-9_-]{8,})\b|"
+    r"(?:[A-Za-z0-9_-]{16,}|(?=[A-Za-z0-9_-]{8,}\b)(?=[A-Za-z0-9_-]*[-_])[A-Za-z0-9_-]{8,}|"
+    r"(?=[^\s]{8,})(?=[^\s]*[.@!#$%^&*+=~?][A-Za-z0-9])\S+)|"
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%USERPROFILE%))",
     re.IGNORECASE,
 )
