@@ -24,18 +24,22 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:Proxy-)?Authorization\s*:\s*Bearer\s+\S+|\bBearer\s+[A-Za-z0-9._~+/-]{20,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
-    r"\bauth(?:entication)?[ _-]profile(?:\s*[:=]\s*|\s+)"
+    r"\bauth(?:entication)?[ _-]profiles?(?:\s*[:=]\s*|\s+)"
     r"(?!(?:is|are|was|were|as|required|needed|necessary|optional|available|selection)\b)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"(?<![A-Za-z0-9_.-])(?!(?:no|any|a|an|the|some|our|your|their|its|this|that|support)\b)"
-    r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))\s+auth(?:entication)?[ _-]profile\b|"
+    r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))\s+auth(?:entication)?[ _-]profiles?\b|"
     r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
+    r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
+    r"\s+is\s+(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not)\b)"
+    r"(?:[A-Za-z0-9_-]{16,}|(?=[A-Za-z0-9_-]{8,}\b)(?=[A-Za-z0-9_-]*[-_])[A-Za-z0-9_-]{8,})\b|"
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%USERPROFILE%))",
     re.IGNORECASE,
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)", re.IGNORECASE)
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
+_DOCUMENTED_API_ROUTE = re.compile(r"(?<![A-Za-z0-9_.~-])/(?:models|preference)(?![A-Za-z0-9_.~-])", re.IGNORECASE)
 _HTTP_URL = re.compile(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE)
 _RELATIVE_PATH = re.compile(
     r"(?<![A-Za-z0-9_.-])(?P<path>(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+)(?![A-Za-z0-9_.~-])"
@@ -167,7 +171,7 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         or (
             check_paths
             and (
-                _ROOTED_PATH.search(_HTTP_URL.sub("", value))
+                _ROOTED_PATH.search(_DOCUMENTED_API_ROUTE.sub("", _HTTP_URL.sub("", value)))
                 or _has_relative_path_evidence(
                     value,
                     model_identifier=field.endswith(".model") and _MODEL_IDENTIFIER.fullmatch(value) is not None,

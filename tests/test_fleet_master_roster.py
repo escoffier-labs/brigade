@@ -107,12 +107,16 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Use auth profile `production-admin`.",
         "Use auth profile [production-admin].",
         "Auth profile (production-admin).",
+        "Use auth profiles: production-admin.",
+        "Connect through auth profiles (production-admin).",
         "Use auth profile: production-admin",
         "Use auth-profile production-admin",
         "Use auth_profile production-admin",
         "Use production-admin auth profile.",
         "Use `production-admin` auth profile.",
         "password: actual-secret",
+        "password is actual-secret",
+        "API key is abcdefghijklmnop",
     ],
 )
 def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
@@ -139,6 +143,7 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Use basic mode",
         "Plan A: review changes",
         "Use option B: fast mode",
+        "Password is required.",
     ],
 )
 def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> None:
@@ -161,6 +166,20 @@ def test_parse_accepts_prose_that_mentions_auth_profiles(text: str) -> None:
     document["seats"][0]["purpose"] = text  # type: ignore[index]
 
     assert fleet_master_roster.parse(document)["seats"][0]["purpose"] == text
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize("text", ["Serve the /models endpoint.", "Call /preference for routing."])
+def test_parse_accepts_known_api_routes_in_descriptive_text(field: str, text: str) -> None:
+    document = _document()
+    if field == "purpose":
+        document["seats"][0][field] = text  # type: ignore[index]
+    else:
+        document["seats"][0][field] = [text]  # type: ignore[index]
+
+    parsed = fleet_master_roster.parse(document)
+
+    assert parsed["seats"][0][field] == (text if field == "purpose" else [text])
 
 
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
