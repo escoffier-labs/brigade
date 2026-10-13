@@ -45,7 +45,7 @@ def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, An
 
 
 def _text(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or not value.strip():
         raise MasterRosterError(f"{field} must be a non-empty string")
     if len(value) > MAX_TEXT or _CONTROL.search(value):
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls")
@@ -135,7 +135,10 @@ def parse(raw: Mapping[str, Any] | bytes | str) -> dict[str, Any]:
                 raise MasterRosterError(f"{seat['name']} has an invalid fallback seat: {fallback}")
 
     document = {"schema": SCHEMA, "revision": revision, "seats": clean_seats}
-    canonical = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    try:
+        canonical = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    except (ValueError, RecursionError) as exc:
+        raise MasterRosterError("document cannot be represented as bounded JSON") from exc
     if len(canonical.encode("ascii")) > MAX_DOCUMENT_BYTES:
         raise MasterRosterError(f"document must be at most {MAX_DOCUMENT_BYTES} bytes")
     result = copy.deepcopy(document)

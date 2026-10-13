@@ -112,6 +112,23 @@ def test_parse_rejects_non_string_mapping_keys() -> None:
         fleet_master_roster.parse(document)
 
 
+@pytest.mark.parametrize("field", ["model", "purpose"])
+def test_parse_rejects_whitespace_only_required_text(field: str) -> None:
+    document = _document()
+    document["seats"][0][field] = " \t "  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="non-empty"):
+        fleet_master_roster.parse(document)
+
+
+def test_parse_normalizes_oversized_mapping_revision() -> None:
+    document = _document()
+    document["revision"] = 10**5000
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="JSON"):
+        fleet_master_roster.parse(document)
+
+
 def test_parse_normalizes_json_integer_digit_limit() -> None:
     raw = b'{"schema":"brigade.fleet_master_roster.v1","revision":' + b"9" * 5000 + b',"seats":[]}'
 
