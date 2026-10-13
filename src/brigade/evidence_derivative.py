@@ -32,7 +32,7 @@ _RECEIPT_FIELDS = frozenset(
         "schema_version",
         "status",
         "started_at",
-        "finished_at",
+        "completed_at",
         "baseline_commit",
         "tree_fingerprint",
         "changes_patch_sha256",
@@ -146,9 +146,9 @@ def _read(root_fd: int, name: str) -> tuple[bytes, tuple[int, int, int, int, int
             os.close(descriptor)
 
 
-def _json_object(data: bytes, name: str) -> dict[str, Any]:
+def _json_object(data: bytes, name: str, *, max_bytes: int = attestation_input.MAX_JSON_BYTES) -> dict[str, Any]:
     try:
-        value = attestation_input.strict_json_loads(data)
+        value = attestation_input.strict_json_loads(data, max_bytes=max_bytes)
     except attestation_input.AttestationInputError as exc:
         raise DerivativeExportError(f"source {name} is malformed") from exc
     if not isinstance(value, dict):
@@ -262,7 +262,7 @@ def export_derivative(
     finally:
         if root_fd != -1:
             os.close(root_fd)
-    manifest = _json_object(raw["manifest.json"], "manifest")
+    manifest = _json_object(raw["manifest.json"], "manifest", max_bytes=evidence_package_snapshot._MANIFEST_MAX_BYTES)
     if manifest.get("schema") != evidence_package.SCHEMA:
         raise DerivativeExportError("unsupported source package schema")
     candidate_source = manifest.get("source")
@@ -362,12 +362,24 @@ def export_derivative(
     encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
     _verify_source_inventory(source, names, root_observation, file_observations)
     staging = out.parent / f".{out.name}.staging-{secrets.token_hex(4)}"
+    created_output = False
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
         staging.mkdir(parents=True, mode=0o700)
         localio.write_bytes_atomic(staging / "derivative.json", encoded)
-        os.replace(staging, out)
+        # mkdir is an atomic no-clobber reservation, including for an empty
+        # directory created after the earlier existence check.
+        out.mkdir(mode=0o700)
+        created_output = True
+        os.link(staging / "derivative.json", out / "derivative.json")
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
+        if created_output:
+            try:
+                (out / "derivative.json").unlink()
+                out.rmdir()
+            except OSError:
+                pass
         raise
+    shutil.rmtree(staging, ignore_errors=True)
     return DerivativeReport(removed, redaction_occurrences, excluded, hashlib.sha256(encoded).hexdigest())

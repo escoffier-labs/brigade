@@ -35,6 +35,7 @@ def _fabricated_run_dir(tmp_path: Path) -> tuple[Path, dict[str, object]]:
         "schema_version": 2,
         "status": "completed",
         "started_at": "2026-10-13T12:00:00Z",
+        "completed_at": "2026-10-13T12:01:00Z",
         "target": str(tmp_path),
         "commands": [],
     }
@@ -444,6 +445,7 @@ def test_derivative_accepts_package_without_patch_when_digest_is_unavailable(tmp
     derivative = json.loads((out / "derivative.json").read_text(encoding="utf-8"))
     assert "changes.patch" not in {artifact["path"] for artifact in derivative["source_artifacts"]}
     assert derivative["evidence"]["receipt_metadata"]["status"] == "completed"
+    assert derivative["evidence"]["receipt_metadata"]["completed_at"] == "2026-10-13T12:01:00Z"
 
 
 def test_derivative_rejects_duplicate_json_properties(tmp_path: Path) -> None:
@@ -473,6 +475,60 @@ def test_derivative_rejects_duplicate_json_properties(tmp_path: Path) -> None:
             assert str(exc) == f"source {name.removesuffix('.json')} is malformed"
         else:
             raise AssertionError(f"derivative accepted duplicate properties in {name}")
+
+
+def test_derivative_rejects_manifest_over_portable_size_limit(tmp_path: Path) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    (source / "manifest.json").write_bytes(
+        b" " * (evidence_derivative.evidence_package_snapshot._MANIFEST_MAX_BYTES + 1)
+    )
+
+    try:
+        evidence_derivative.export_derivative(
+            source=source,
+            out=tmp_path / "derivative",
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == "source manifest is malformed"
+    else:
+        raise AssertionError("derivative accepted a manifest over the portable size limit")
+
+
+def test_derivative_does_not_replace_output_directory_created_during_publish(tmp_path: Path, monkeypatch) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    out = tmp_path / "derivative"
+    mkdir = Path.mkdir
+
+    def race_mkdir(path: Path, *args, **kwargs) -> None:
+        if path == out:
+            mkdir(path, *args, **kwargs)
+            raise FileExistsError(path)
+        mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", race_mkdir)
+    try:
+        evidence_derivative.export_derivative(
+            source=source,
+            out=out,
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    except FileExistsError:
+        pass
+    else:
+        raise AssertionError("derivative replaced an output directory created during publication")
+    assert out.is_dir()
+    assert list(out.iterdir()) == []
 
 
 def test_derivative_rejects_blank_authorization_metadata(tmp_path: Path) -> None:
