@@ -71,6 +71,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Read /etc/credentials.",
         "Write ./private/output.json.",
         "Read ../private/credentials.toml.",
+        "Write private/output.json.",
+        r"Write private\output.json.",
         "Use ~/.config/provider/credentials.json",
         "See (~/.ssh/config).",
         "Use auth profile production-admin.",
@@ -84,6 +86,14 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
 def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
     document = _document()
     document["seats"][0]["caveats"] = [text]  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+def test_parse_rejects_fine_grained_github_pat() -> None:
+    document = _document()
+    document["seats"][0]["caveats"] = ["placeholder=" + "github_pat_" + "A" * 24]  # type: ignore[index]
 
     with pytest.raises(fleet_master_roster.MasterRosterError):
         fleet_master_roster.parse(document)

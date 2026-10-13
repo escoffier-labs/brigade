@@ -17,13 +17,15 @@ MAX_TEXT = 512
 _SEAT_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _DANGEROUS_VALUE = re.compile(
-    r"(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{16,}|"
+    r"(?:sk-[A-Za-z0-9_-]{12,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
     r"\bBearer\s+\S+|\b[A-Z][A-Z0-9_]{2,}\s*=|"
     r"\bauth(?:entication)?[ -]profile(?:\s*[:=]\s*|\s+)(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+')|"
     r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
     r"(?:^|[^A-Za-z0-9_.-])(?:~[/\\]|[/\\]|\.{1,2}[/\\]|"
-    r"[A-Za-z]:[/\\]|%USERPROFILE%))",
+    r"[A-Za-z]:[/\\]|%USERPROFILE%)|"
+    r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z0-9_.~-]+[/\\])+"
+    r"[A-Za-z0-9_.~-]+\.[A-Za-z0-9]{1,8}(?=$|[^A-Za-z0-9]))",
     re.IGNORECASE,
 )
 _SURROGATE = re.compile("[\\ud800-\\udfff]")
