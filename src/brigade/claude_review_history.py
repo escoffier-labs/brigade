@@ -315,8 +315,12 @@ def read_managed_review_history(
     truncated = len(rows) > limit
     history = [
         dict(
-            json.loads(payload.decode("utf-8") if isinstance(payload, bytes) else payload),
-            observation_id=identity.decode("utf-8") if isinstance(identity, bytes) else identity,
+            json.loads(
+                bytes(payload).decode("utf-8") if isinstance(payload, (bytes, bytearray, memoryview)) else payload
+            ),
+            observation_id=bytes(identity).decode("utf-8")
+            if isinstance(identity, (bytes, bytearray, memoryview))
+            else identity,
         )
         for identity, payload in rows[:limit]
     ]

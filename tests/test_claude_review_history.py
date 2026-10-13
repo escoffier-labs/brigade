@@ -130,6 +130,39 @@ def test_read_preserves_caller_factories_and_returns_json(row_factory, text_fact
         assert version[0 if row_factory is None else "user_version"] == 19
 
 
+@pytest.mark.parametrize("text_factory", [bytearray, memoryview])
+@pytest.mark.parametrize("encoding", ["UTF-8", "UTF-16"])
+def test_byteslike_text_factories_preserve_settings_and_json_after_reopen(tmp_path, text_factory, encoding):
+    path = tmp_path / "history.sqlite"
+    for fresh in (True, False):
+        with sqlite3.connect(path) as conn:
+            if fresh:
+                conn.execute(f"PRAGMA encoding='{encoding}'")
+                conn.execute("PRAGMA user_version=19")
+            conn.row_factory = sqlite3.Row
+            conn.text_factory = text_factory
+            if fresh:
+                first = ingest(conn, FixtureGet([check()]))
+            stored_encoding = bytes(conn.execute("PRAGMA encoding").fetchone()[0]).decode("utf-8")
+            assert stored_encoding.startswith(encoding)
+            caller_cursor = conn.cursor()
+            settings = (conn.in_transaction, conn.isolation_level, conn.total_changes)
+            result = read(conn)
+            assert json.loads(json.dumps(result)) == result
+            assert result["history"][0]["observation_id"] == first["observation_id"]
+            assert isinstance(result["history"][0]["observation_id"], str)
+            assert result["checks"][0]["current_zero_findings"] is True
+            assert conn.row_factory is sqlite3.Row and conn.text_factory is text_factory
+            assert (conn.in_transaction, conn.isolation_level, conn.total_changes) == settings
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 19
+            assert bytes(conn.execute("PRAGMA encoding").fetchone()[0]).decode("utf-8") == stored_encoding
+            for cursor in (caller_cursor, conn.cursor()):
+                row = cursor.execute("SELECT 'caller' AS value").fetchone()
+                assert isinstance(row, sqlite3.Row)
+                assert isinstance(row["value"], text_factory)
+                assert row["value"] == text_factory(b"caller")
+
+
 def test_caller_head_survives_delayed_old_completion_and_insertion_order():
     conn = sqlite3.connect(":memory:")
     ingest(conn, FixtureGet([check(11)]), observed="2026-01-04T00:00:00Z")

@@ -81,7 +81,12 @@ Reads never create schema or change the caller's transaction state. A bounded
 `sqlite_master` probe checks whether the history table exists. When it is
 absent, reads return the same empty history and projection as an unknown
 subject, including on a read-only connection. Both completeness and truncation
-flags are false.
+flags are false. The reader uses its own tuple cursor and preserves caller row
+and text factories, existing cursors, transaction state and database encoding.
+For fetched observation IDs and payloads, `bytes`, `bytearray` and `memoryview`
+are decoded as UTF-8, while `str` values remain unchanged. SQLite supplies UTF-8
+bytes to text factories when fetching TEXT, including from UTF-16 databases.
+Arbitrary global TEXT converters remain unsupported.
 
 Reads fetch at most `limit + 1` rows for the exact subject. The default limit is
 20, and valid limits are integers from 1 through 100. An extra row sets
