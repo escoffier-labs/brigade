@@ -1,1 +1,4 @@
-ops/fleet-hub/secrets/
+**
+!ops/
+!ops/fleet-hub/
+!ops/fleet-hub/Containerfile

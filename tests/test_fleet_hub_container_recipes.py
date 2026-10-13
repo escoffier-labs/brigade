@@ -64,11 +64,13 @@ def test_hub_image_is_non_root_and_has_a_single_writable_state_directory():
 
 def test_compose_recipe_keeps_host_port_private_and_token_out_of_environment():
     text = (CONTAINER / "compose.yaml").read_text()
-    dockerignore = (ROOT / ".dockerignore").read_text()
+    dockerignore = (ROOT / ".dockerignore").read_text().splitlines()
+    containerfile = (CONTAINER / "Containerfile").read_text().splitlines()
 
     assert '"127.0.0.1:3774:3774"' in text
     assert "target: admin_token" in text
-    assert "ops/fleet-hub/secrets/" in dockerignore
+    assert dockerignore == ["**", "!ops/", "!ops/fleet-hub/", "!ops/fleet-hub/Containerfile"]
+    assert not any(line.startswith(("ADD ", "COPY ")) for line in containerfile)
     assert "BRIGADE_FLEET_TOKEN" not in text
     assert "restart: unless-stopped" in text
     assert "healthcheck:" in text
