@@ -384,7 +384,7 @@ def _evaluate_verify_receipt_completed(ctx: _Context) -> _Discovery:
         else:
             obs = _assess_verify_receipt(ctx, run_dir, path, receipt)
         # An unreadable receipt records no run identity, so it stays unbound.
-        _bind(obs, ctx, _receipt_binding(receipt))
+        _bind(obs, ctx, control_crosswalk_cosign.binding_candidates(obs, _receipt_binding(receipt)))
         obs.timestamp = _first_timestamp(receipt, "completed_at", "started_at")
         _apply_period(obs, ctx)
         out.observations.append(obs)
@@ -405,7 +405,7 @@ def _assess_verify_receipt(
             snapshot = attestation_receipt.snapshot_receipt(receipt)
             if has_digest_evidence:
                 receipt_digest = snapshot.digest
-        except attestation_receipt.ReceiptDigestError:
+        except attestation_receipt.ReceiptDigestMismatchError:
             return _obs(
                 relpath,
                 "claim_validated",
@@ -413,6 +413,8 @@ def _assess_verify_receipt(
                 _dims(integrity=("failed", "receipt_digest_mismatch"), subject="unknown", population="passed"),
                 ["receipt_digest_mismatch"],
             )
+        except attestation_receipt.ReceiptDigestError:
+            return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
     if type(schema_version) is not int or schema_version != receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION:
         return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
     subject: str | tuple[str, str] = (
@@ -635,7 +637,7 @@ def _evaluate_cosign_bundle_exists(ctx: _Context) -> _Discovery:
                 ),
                 ["verifier_not_wired"],
             )
-        _bind(obs, ctx, control_crosswalk_cosign.binding_candidates(obs, receipt))
+        _bind(obs, ctx, control_crosswalk_cosign.binding_candidates(obs, _receipt_binding(receipt)))
         obs.timestamp = _first_timestamp(receipt, "completed_at", "started_at")
         _apply_period(obs, ctx)
         if obs.scope == "in_scope":
@@ -1373,6 +1375,7 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
     manifest_reserve = evidence_package_snapshot.MAX_PACKAGE_BYTES * reservable_package_count if strict_adapter else 0
     for package_dir in package_dirs:
         path = package_dir / "manifest.json"
+        staged_receipt_candidates: dict[str, object] = {}
         linked = _is_symlink(ctx, package_dir) or _is_symlink(ctx, path)
         if not linked and not _discovery_path_present(ctx, out, path):
             continue
@@ -1394,22 +1397,17 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
         elif adapter is not None:
             try:
                 obs = _adapter_observation(adapter, ctx, package_dir, relpath, reserve_bytes=manifest_reserve)
+                if adapter is _verify_evidence_package and "package_snapshot_mismatch" in obs.reasons:
+                    staged_package = ctx.reader.snapshot_target / package_dir.relative_to(ctx.target)
+                    staged_receipt_candidates = control_crosswalk_package.receipt_binding_candidates(staged_package)
             finally:
                 if adapter is _verify_evidence_package:
                     ctx.reader.release_subtree(package_dir)
         else:
             obs = _assess_package_manifest(ctx, package_dir, relpath, manifest)
         source = manifest.get("source") if isinstance(manifest, dict) else None
-        _bind(
-            obs,
-            ctx,
-            {
-                "source.producer_run_id": source.get("producer_run_id"),
-                "source.verify_run_id": source.get("verify_run_id"),
-            }
-            if isinstance(source, dict)
-            else {},
-        )
+        candidates = control_crosswalk_package.binding_candidates(source, staged_receipt_candidates)
+        _bind(obs, ctx, control_crosswalk_cosign.binding_candidates(obs, candidates))
         obs.timestamp = _first_timestamp(manifest, "created_at")
         _apply_period(obs, ctx)
         if obs.scope == "in_scope":

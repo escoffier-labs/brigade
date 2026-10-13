@@ -335,8 +335,55 @@ def test_completed_verify_receipt_rejects_stale_digest_before_schema(tmp_path):
 
     readiness = _assess(target, "EC-01", RUN)
 
-    assert readiness["outcome"] == "rejected"
-    assert readiness["reason"] == "receipt_digest_mismatch"
+    assert readiness["outcome"] == "incomplete"
+    assert readiness["population"]["unbound"] == 1
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+    assert readiness["artifacts"][0]["reason_codes"] == ["receipt_digest_mismatch"]
+
+
+@pytest.mark.parametrize(
+    "digests",
+    [
+        None,
+        {"algorithm": "sha512", "receipt_sha256": "a" * 64},
+        {"algorithm": "sha256", "receipt_sha256": None},
+        {"algorithm": "sha256", "receipt_sha256": "not-a-digest"},
+    ],
+)
+def test_completed_verify_receipt_reports_malformed_digest_metadata_as_invalid(tmp_path, digests):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    receipt["digests"] = digests
+    _write_json(run_dir / "receipt.json", receipt)
+
+    readiness = _assess(target, "EC-01", RUN)
+
+    assert readiness["outcome"] == "invalid"
+    assert readiness["reason"] == "schema_missing"
+
+
+def test_completed_verify_receipt_does_not_bind_digest_rejection_from_tampered_fields(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    _write_json(receipt_path, receipt)
+    receipt["producer_run_id"] = "tampered-run"
+    _write_json(receipt_path, receipt)
+
+    readiness = _assess(target, "EC-01", RUN)
+
+    assert readiness["outcome"] == "incomplete"
+    assert readiness["population"]["unbound"] == 1
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+    assert readiness["artifacts"][0]["scope"] == "unbound"
 
 
 def test_completed_verify_receipt_rejects_non_integer_schema_version(tmp_path):
@@ -582,6 +629,24 @@ def test_ec12_rejects_stale_stored_receipt_digest_as_package_mismatch(tmp_path):
 
     assert result["outcome"] == "rejected"
     assert result["reason"] == "package_snapshot_mismatch"
+
+
+def test_ec12_binds_package_mismatch_from_packaged_receipt(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir, producer_run_id=RUN)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"]["producer_run_id"] = "tampered-run"
+    _write_json(manifest_path, manifest)
+
+    readiness = _assess(target, "EC-12", RUN)
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["population"]["in_scope"] == 1
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+    assert readiness["artifacts"][0]["scope"] == "in_scope"
+    assert readiness["reason"] == "package_snapshot_mismatch"
 
 
 def test_ec12_reserves_manifest_reads_for_the_discovered_package_population(tmp_path, monkeypatch):
@@ -1388,6 +1453,20 @@ def test_ec03_rejects_receipt_tampering_before_incomplete_classification(tmp_pat
 
     assert result["outcome"] == "rejected"
     assert result["reason"] == "signature_mismatch"
+
+
+def test_ec03_reports_malformed_receipt_digest_metadata_as_invalid(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["digests"] = {"algorithm": "sha512", "receipt_sha256": "a" * 64}
+    _write_json(receipt_path, receipt)
+
+    result = _assess(target, "EC-03", RUN)
+
+    assert result["outcome"] == "invalid"
+    assert result["reason"] == "schema_missing"
 
 
 def test_ec03_does_not_bind_rejected_bundle_from_tampered_receipt(tmp_path):

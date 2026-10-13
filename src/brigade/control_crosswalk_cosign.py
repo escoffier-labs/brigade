@@ -10,14 +10,12 @@ from typing import Any
 from . import attestation, attestation_input, attestation_receipt, control_readiness, cosign_attestation, receipt_schema
 
 
-def binding_candidates(obs: control_readiness.ArtifactObservation, receipt: dict[str, Any] | None) -> dict[str, object]:
+def binding_candidates(obs: control_readiness.ArtifactObservation, candidates: dict[str, object]) -> dict[str, object]:
     if obs.proposed == "rejected" and any(
-        obs.dimensions.get(name, {}).get("status") == "failed" for name in ("integrity", "signature")
+        reason in {"receipt_digest_mismatch", "signature_mismatch"} for reason in obs.reasons
     ):
         return {}
-    if receipt is None:
-        return {}
-    return {"producer_run_id": receipt.get("producer_run_id"), "run_id": receipt.get("run_id")}
+    return candidates
 
 
 def _observation(
@@ -76,13 +74,17 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
         return control_readiness.ArtifactObservation(
             relpath, "discovered", "invalid", control_readiness.dims(), ["schema_missing"]
         )
-    except attestation_receipt.ReceiptDigestError:
+    except attestation_receipt.ReceiptDigestMismatchError:
         return _observation(
             relpath,
             "rejected",
             integrity=("failed", "receipt_digest_mismatch"),
             subject="unknown",
             reason="receipt_digest_mismatch",
+        )
+    except attestation_receipt.ReceiptDigestError:
+        return control_readiness.ArtifactObservation(
+            relpath, "discovered", "invalid", control_readiness.dims(), ["schema_missing"]
         )
     if snapshot.receipt.get("run_id") != bundle_path.parent.name:
         return _observation(

@@ -109,6 +109,31 @@ def stage_source_package(
     return reader.snapshot_target / artifact.relative_to(reader.target)
 
 
+def receipt_binding_candidates(staged_package: Path) -> dict[str, object]:
+    """Return run identities from the receipt bytes staged for strict validation."""
+    try:
+        receipt = attestation_input.read_json_object(staged_package / "receipt.json")
+    except (OSError, attestation_input.AttestationInputError):
+        return {}
+    return {
+        "receipt.producer_run_id": receipt.get("producer_run_id"),
+        "receipt.run_id": receipt.get("run_id"),
+    }
+
+
+def binding_candidates(source: object, receipt: dict[str, object]) -> dict[str, object]:
+    candidates = (
+        {
+            "source.producer_run_id": source.get("producer_run_id"),
+            "source.verify_run_id": source.get("verify_run_id"),
+        }
+        if isinstance(source, dict)
+        else {}
+    )
+    candidates.update(receipt)
+    return candidates
+
+
 def _unavailable(relpath: str, reason: str) -> control_readiness.ArtifactObservation:
     return control_readiness.ArtifactObservation(
         relpath,
