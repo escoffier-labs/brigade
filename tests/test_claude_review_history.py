@@ -304,7 +304,8 @@ def test_ingest_schema_and_append_remain_in_caller_transaction(pending_caller_wr
         conn.set_authorizer(deny_append)
         with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
             ingest(conn)
-        conn.set_authorizer(None)
+        # Python 3.10 cannot disable an authorizer with None.
+        conn.set_authorizer(lambda *_: sqlite3.SQLITE_OK)
         assert conn.execute(f"SELECT count(*) FROM {api()._TABLE}").fetchone()[0] == 0
     else:
         ingest(conn)

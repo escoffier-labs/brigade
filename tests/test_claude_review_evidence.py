@@ -248,6 +248,45 @@ def test_invalid_trusted_identity_fails_closed(identity):
     assert normalize(check_run(), **identity) is None
 
 
+@pytest.mark.parametrize("fraction", ["1", "12", "123", "1234", "12345", "123456"])
+@pytest.mark.parametrize(
+    "offset,utc",
+    [("Z", "2026-10-06T00:15:00"), ("+02:30", "2026-10-05T21:45:00"), ("-02:30", "2026-10-06T02:45:00")],
+)
+def test_fractional_timestamps_preserve_precision_and_normalize_offsets(fraction, offset, utc):
+    timestamp = f"2026-10-06T00:15:00.{fraction}{offset}"
+    expected = f"{utc}.{fraction.ljust(6, '0')}Z"
+    evidence = normalize(check_run(started_at=timestamp, completed_at=timestamp), observed_at=timestamp)
+    assert evidence.observed_at == expected
+    assert evidence.started_at == expected
+    assert evidence.completed_at == expected
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "2026-10-06T10:00:00.Z",
+        "2026-10-06T10:00:00.1234567Z",
+        "2026-10-06T10:00:00,1Z",
+        "2026-10-06T10:00:00.1",
+        "2026-10-06T10:00:00.1z",
+        "2026-10-06T10:00:00.1+0230",
+        "2026-10-06T10:00:00.1+00:60",
+        "2026-02-30T10:00:00.1Z",
+        "2026-10-06T24:00:00.1Z",
+        "0001-01-01T00:00:00.1+01:00",
+        "9999-12-31T23:59:59.1-01:00",
+        "2026-10-06T10:00:00." + "1" * 41 + "Z",
+    ],
+)
+def test_invalid_fractional_timestamp_is_unknown_for_provider_and_rejected_for_caller(invalid):
+    evidence = normalize(check_run(started_at=invalid, completed_at=invalid))
+    assert evidence.started_at is None
+    assert evidence.completed_at is None
+    with pytest.raises(ValueError):
+        normalize(check_run(), observed_at=invalid)
+
+
 @pytest.mark.parametrize("offset", ["+00:60", "-00:99", "+12:75", "+99:00"])
 def test_invalid_offset_is_unknown_for_provider_and_rejected_for_caller(offset):
     invalid = "2026-10-06T10:00:00" + offset
