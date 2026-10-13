@@ -144,8 +144,9 @@ References accept exactly these three fields. Fingerprints follow the existing
 storage grammar: 16 or 64 lowercase hexadecimal characters. Preview bindings
 still require 64 characters. Input is limited to 256 references and 256 KiB.
 Each local ledger snapshot is limited to 4 MiB, including growth during reads.
-Reads retain nonblocking file descriptors anchored at the configured workspace
-or repository root. Child directories and files refuse symlinks and Windows
+Reads retain file descriptors anchored at the configured workspace or
+repository root. Opens are nonblocking on POSIX. Child directories and files
+refuse symlinks and Windows
 reparse points. Only regular files are read. Descriptor and recorded-name
 checks detect replacement, growth and observed generation changes. Parsing
 uses those same bounded bytes without compatibility readers or temporary
