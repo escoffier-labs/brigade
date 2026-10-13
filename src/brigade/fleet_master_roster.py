@@ -29,10 +29,10 @@ _DANGEROUS_VALUE = re.compile(
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))\s+auth(?:entication)?[ _-]profile\b|"
     r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
-    r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:[/\\]|%USERPROFILE%))",
+    r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:[/\\]?|%USERPROFILE%))",
     re.IGNORECASE,
 )
-_ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
+_ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
 _HTTP_URL = re.compile(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE)
 _RELATIVE_PATH = re.compile(
     r"(?<![A-Za-z0-9_.-])(?P<path>(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+)(?![A-Za-z0-9_.~-])"
@@ -85,6 +85,10 @@ _EXTENSIONLESS_FILES = frozenset(
 )
 _PRIVATE_KEY_FILES = frozenset({"id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"})
 _FILE_SUFFIX = re.compile(r"\.[A-Za-z]{2,8}$")
+_MODEL_PATH_SUFFIX = re.compile(
+    r"\.(?:c|cfg|conf|cpp|cs|css|csv|go|h|hpp|html|ini|java|js|json|jsx|md|png|py|rst|rs|sh|sql|svg|toml|ts|tsx|txt|xml|yaml|yml)$",
+    re.IGNORECASE,
+)
 _STANDALONE_FILE = re.compile(r"(?<![A-Za-z0-9_.-])(?P<file>\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+)(?![A-Za-z0-9_.-])")
 _SURROGATE = re.compile("[\\ud800-\\udfff]")
 
@@ -123,9 +127,8 @@ def _has_relative_path_evidence(value: str, *, provider_model: bool = False) -> 
             return True
         if any(component.startswith(".") or component.casefold() in _FILESYSTEM_COMPONENTS for component in components):
             return True
-        if components[-1].casefold() in _EXTENSIONLESS_FILES or (
-            not provider_model and _FILE_SUFFIX.search(components[-1])
-        ):
+        suffix = _MODEL_PATH_SUFFIX if provider_model else _FILE_SUFFIX
+        if components[-1].casefold() in _EXTENSIONLESS_FILES or suffix.search(components[-1]):
             return True
     return False
 

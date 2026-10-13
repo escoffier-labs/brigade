@@ -78,6 +78,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "_X=private-value",
         "__COMPAT_LAYER=RunAsInvoker",
         "Load config from C:\\Users\\operator\\.config\\secret.toml",
+        "Use C:Users\\alice",
+        "Read D:projects\\acme",
         "Read /etc/credentials.",
         "Write ./private/output.json.",
         "Read ../private/credentials.toml.",
@@ -91,6 +93,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Read secrets/token.",
         "Use ~/.config/provider/credentials.json",
         "See (~/.ssh/config).",
+        "Use ~alice/work/repo",
+        r"Read ~bob\work\repo",
         "Use auth profile production-admin.",
         'Use auth profile "production-admin".',
         "Use auth profile 'production-admin'.",
@@ -191,6 +195,9 @@ def test_parse_accepts_provider_qualified_model_identifiers(model: str) -> None:
         "usr/bin/python",
         "var/log/messages",
         "home/alice",
+        "package/pyproject.toml",
+        "foo/bar.py",
+        "assets/logo.png",
     ],
 )
 def test_parse_rejects_relative_paths_as_models(model: str) -> None:
