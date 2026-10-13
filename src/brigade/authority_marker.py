@@ -264,9 +264,15 @@ def governing_isolation_marker_paths(
         live = {"device": workspace_identity["device"], "inode": workspace_identity["inode"]}
     root = isolation_marker_root(env=env)
     try:
-        names = sorted(os.listdir(root))
+        root_metadata = os.lstat(root)
     except FileNotFoundError:
         return []
+    except OSError as exc:
+        raise OSError("authority isolation posture marker store is unreadable") from exc
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        raise OSError("authority isolation posture marker store is unreadable")
+    try:
+        names = sorted(os.listdir(root))
     except OSError as exc:
         raise OSError("authority isolation posture marker store is unreadable") from exc
 

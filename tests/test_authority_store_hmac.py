@@ -1433,6 +1433,31 @@ def test_authority_downgrade_fails_closed_when_posture_marker_is_unreadable(tmp_
     assert _store_path(tmp_path).read_bytes() == store_before
 
 
+def test_authority_downgrade_fails_closed_when_posture_marker_root_is_dangling_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_home(monkeypatch, tmp_path / "home")
+    _bind_workspace(tmp_path)
+    root = authority_marker.isolation_marker_root()
+    backup = root.with_name(f".{root.name}.backup")
+    root.rename(backup)
+    try:
+        root.symlink_to(root.with_name("missing-posture-store"), target_is_directory=True)
+    except OSError as exc:
+        backup.rename(root)
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    store_before = _store_path(tmp_path).read_bytes()
+    signed_marker = authority_marker.signed_marker_path(authority_marker.target_fingerprint(tmp_path))
+
+    with pytest.raises(OSError, match="posture marker store is unreadable"):
+        ledger.downgrade_external_directory_authority(tmp_path)
+
+    assert root.is_symlink()
+    assert _store_path(tmp_path).read_bytes() == store_before
+    assert signed_marker.is_file()
+
+
 def test_authority_downgrade_fails_closed_when_workspace_identity_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
