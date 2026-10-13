@@ -313,6 +313,40 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         fleet_master_roster.parse(document)
 
 
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Auth profile for implementer is production-admin",
+        "Authentication profile for the implementer is production-admin",
+        "Auth profile for reviewer: production-admin",
+    ],
+)
+def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        'The "auth profile" is production-admin',
+        '"Environment variable" SERVICE_MODE is production',
+        'The "path" is foo/bar',
+    ],
+)
+def test_parse_rejects_quoted_protected_labels(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -433,6 +467,16 @@ def test_parse_rejects_standalone_sensitive_file_names(text: str) -> None:
 def test_parse_rejects_digit_bearing_filename_extensions(field: str, filename: str) -> None:
     document = _document()
     text = f"Load {filename}"
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize("text", ["Filename: 秘密.txt", "Open 秘密.txt"])
+def test_parse_rejects_unicode_filenames_in_descriptive_text(field: str, text: str) -> None:
+    document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 
     with pytest.raises(fleet_master_roster.MasterRosterError):
@@ -746,6 +790,16 @@ def test_parse_accepts_lowercase_key_value_prose(field: str, text: str) -> None:
     ],
 )
 def test_parse_rejects_filesystem_paths_in_url_parameters(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize("text", ["Call /api/password%3Dhunter2", "Call /api/SERVICE_MODE%3Dproduction"])
+def test_parse_rejects_encoded_assignments_in_api_route_paths(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 

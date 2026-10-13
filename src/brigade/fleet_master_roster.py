@@ -32,7 +32,7 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:Proxy-)?Authorization\s*:\s*Bearer\s+\S+|\bBearer\s+[A-Za-z0-9._~+/-]{20,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
-    r"\bauth(?:entication)?[ _-]profiles?\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent)|value)(?:\s+|(?=[:=])))?(?:(?:(?:is\s+)?provided\s+(?:as|with)|is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|configured\s+(?:as|to|with))\s+|[:=]\s*)"
+    r"\bauth(?:entication)?[ _-]profiles?\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|value)(?:\s+|(?=[:=])))?(?:(?:(?:is\s+)?provided\s+(?:as|with)|is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|configured\s+(?:as|to|with))\s+|[:=]\s*)"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s*[:=]\s*" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
@@ -66,10 +66,13 @@ _DANGEROUS_VALUE = re.compile(
     r"(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))",
     re.IGNORECASE,
 )
-_QUOTED_CREDENTIAL_LABEL = re.compile(
-    r"([\"'“‘`])(?P<label>passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|"
-    r"auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
-    r"[\"'”’`]",
+_PATH_LABEL = r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositor(?:y|ies)|repos?|locations?)"
+_QUOTED_PROTECTED_LABEL = re.compile(
+    r"[\"'“‘`](?P<label>passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|"
+    r"auth(?:entication)?[ _-]?profiles?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|"
+    r"client[_ -]?secrets?|private[_ -]?keys?|environment[ _-]?variables?|home\s+directory|"
+    + _PATH_LABEL
+    + r")[\"'”’`]",
     re.IGNORECASE,
 )
 _URL_CREDENTIAL_QUERY = re.compile(
@@ -90,7 +93,6 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     + r"))\S+)",
     re.IGNORECASE,
 )
-_PATH_LABEL = r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositor(?:y|ies)|repos?|locations?)"
 _PATH_DECLARATION_LINKER = r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
 _PATH_DECLARATION = r"\b" + _PATH_LABEL + r"(?:\s+value)?\s*" + _PATH_DECLARATION_LINKER
 _ROOTED_PATH = re.compile(r"(?<![\w.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[\w.~-])")
@@ -108,12 +110,12 @@ _CONTEXTUAL_TERMINAL_PATH = re.compile(
 )
 _API_ROUTE_CONTEXT = re.compile(
     r"\b(?:call|invoke|serve|expose|request|hit|get|head|post|put|patch|delete|connect|options|trace)\s+(?:the\s+)?"
-    r"(?P<path>/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)(?:\?[^\s<>\"']*)?)",
+    r"(?P<path>/(?:[A-Za-z0-9._~%-]+(?:/[A-Za-z0-9._~%-]+)*)(?:\?[^\s<>\"']*)?)",
     re.IGNORECASE,
 )
 _HTTP_METHOD_ROUTE_CONTEXT = re.compile(
     r"\b(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)\s+"
-    r"(?P<path>/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)(?:\?[^\s<>\"']*)?)"
+    r"(?P<path>/(?:[A-Za-z0-9._~%-]+(?:/[A-Za-z0-9._~%-]+)*)(?:\?[^\s<>\"']*)?)"
 )
 _HTTP_METHOD_ROUTE_ROOTS = frozenset({"applications", "config", "users"})
 _HTTP_URL = re.compile(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE)
@@ -177,7 +179,15 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
 def _has_disallowed_api_route_query(value: str) -> bool:
     routes = (*_API_ROUTE_CONTEXT.finditer(value), *_HTTP_METHOD_ROUTE_CONTEXT.finditer(value))
     for match in routes:
-        route_query = match.group("path").partition("?")[2]
+        route = match.group("path")
+        route_path, _, route_query = route.partition("?")
+        decoded_path = _fully_unquote(route_path)
+        if (
+            _DANGEROUS_VALUE.search(decoded_path)
+            or _ENVIRONMENT_ASSIGNMENT.search(decoded_path)
+            or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_path)
+        ):
+            return True
         for key, query_value in parse_qsl(route_query, keep_blank_values=True):
             key = _fully_unquote(key)
             decoded_value = _fully_unquote(query_value)
@@ -344,7 +354,7 @@ _MODEL_PATH_SUFFIX = re.compile(
     r"\.(?:7z|avif|bmp|bz2|c|cfg|conf|cpp|cs|css|csv|docx|exe|gif|go|gz|h|hpp|html|ico|ini|java|jpe?g|js|json|jsx|lock|md|mov|mp3|mp4|pdf|png|pptx|py|rar|rst|rs|sh|so|sql|svg|tar|tiff?|toml|ts|tsx|txt|wav|webp|woff2|xml|xlsx|yaml|yml|zip)$",
     re.IGNORECASE,
 )
-_STANDALONE_FILE = re.compile(r"(?<![A-Za-z0-9_.-])(?P<file>\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+)(?![A-Za-z0-9_.-])")
+_STANDALONE_FILE = re.compile(r"(?<![\w.-])(?P<file>\.[\w-]+|[\w.-]+)(?![\w.-])")
 _SURROGATE = re.compile("[\\ud800-\\udfff]")
 
 
@@ -447,17 +457,17 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         raise MasterRosterError(f"{field} must contain valid Unicode scalar values")
     if len(value) > MAX_TEXT or _has_control(value):
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
-    credential_screening_text = _QUOTED_CREDENTIAL_LABEL.sub(r"\g<label>", value)
-    path_text = _without_api_route_references(value)
+    screening_text = _QUOTED_PROTECTED_LABEL.sub(r"\g<label>", value)
+    path_text = _without_api_route_references(screening_text)
     if (
-        _DANGEROUS_VALUE.search(credential_screening_text)
-        or _URL_CREDENTIAL_QUERY.search(value)
-        or _has_url_userinfo(value)
-        or _has_filesystem_path_in_url_query(value)
-        or _has_disallowed_api_route_query(value)
+        _DANGEROUS_VALUE.search(screening_text)
+        or _URL_CREDENTIAL_QUERY.search(screening_text)
+        or _has_url_userinfo(screening_text)
+        or _has_filesystem_path_in_url_query(screening_text)
+        or _has_disallowed_api_route_query(screening_text)
         or _ENVIRONMENT_ASSIGNMENT.search(path_text)
         or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(path_text)
-        or contains_credential(credential_screening_text)
+        or contains_credential(screening_text)
         or (
             check_paths
             and (
