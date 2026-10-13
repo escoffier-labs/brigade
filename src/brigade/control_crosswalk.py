@@ -294,6 +294,11 @@ def _adapter_observation(
                     if stat.S_ISLNK(entry_info.st_mode) or not stat.S_ISREG(entry_info.st_mode):
                         raise evidence_package_snapshot.PackageSnapshotError("unsafe") from exc
                     raise
+            final_names = set(
+                _control_crosswalk_io.dirfd.child_names(package_fd, len(evidence_package.PACKAGE_FILES) + 2)
+            )
+            if final_names != actual_names:
+                raise evidence_package_snapshot.PackageSnapshotError("unsafe")
         else:
             if adapter is _verify_evidence_package:
                 return _invalid(ctx, artifact, "schema_missing")

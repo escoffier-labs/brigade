@@ -569,6 +569,29 @@ def test_ec12_rejects_unlisted_child_after_five_package_entries(tmp_path):
     assert readiness["artifacts"][0]["outcome"] == "rejected"
 
 
+def test_ec12_rejects_child_added_while_package_is_staged(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    late_path = package_dir / "late-unlisted.txt"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def copy_then_add(reader, path, *args, **kwargs):
+        result = original_copy(reader, path, *args, **kwargs)
+        if path == manifest_path:
+            late_path.write_text("unexpected", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_then_add)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "entry_path_unsafe"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
 def test_ec12_rejects_unsafe_manifest_entry_path(tmp_path):
     target = _ws(tmp_path)
     package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
