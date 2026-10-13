@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from brigade import fleet_export, fleet_hub
+from tests._home import home_env, set_home
 from tests.support import assert_private_mode
 
 FAKE_DOLT_LOG_ENV = "BRIGADE_TEST_DOLT_LOG"
@@ -1008,7 +1009,7 @@ class _RealDolt:
         self.home = home
 
     def run(self, cwd: Path, *args: str) -> str:
-        env = {**os.environ, "HOME": str(self.home), "DOLT_ROOT_PATH": str(self.home)}
+        env = {**os.environ, **home_env(self.home), "DOLT_ROOT_PATH": str(self.home)}
         proc = subprocess.run(
             [self.binary, *args], cwd=cwd, env=env, capture_output=True, text=True, check=False, timeout=120
         )
@@ -1032,7 +1033,7 @@ def real_dolt(tmp_path, monkeypatch):
         pytest.skip(f"{REAL_DOLT_BIN_ENV} names an explicit real dolt binary for the optional migration tests")
     home = tmp_path / "dolt-user-home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
     return _RealDolt(real, home)
 
 
