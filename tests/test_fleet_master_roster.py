@@ -334,6 +334,8 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "This seat uses auth profile production-admin",
         "Reviewer uses auth profile production-admin",
         "Reviewer is using auth profile production-admin",
+        "Reviewer used auth profile production-admin",
+        "Reviewer was using the authentication profile production-admin",
         "This seat is using the authentication profile production-admin",
         "Reviewer has auth profile production-admin",
         "This seat has an auth profile production-admin",

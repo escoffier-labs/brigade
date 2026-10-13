@@ -41,7 +41,7 @@ _DANGEROUS_VALUE_PATTERN = (
     r"(?:[^\s.,;!?]+|\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|\[[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\]|\([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s+(?:\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|\[[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\]|\([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\))|"
     r"\b(?:(?:this|the|a|an|my|your|our|their|his|her|its)\s+)?"
-    r"[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?\s+(?:uses?|is\s+using|has|have)\s+"
+    r"[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?\s+(?:uses?|used|is\s+using|was\s+using|were\s+using|has|have)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?auth(?:entication)?[ _-]profiles?\s+"
     r"(?!(?:is|are|as|for|in|required|needed|necessary|optional|available|selection|rotation|management|regularly)\b)"
     r"(?:\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|"
