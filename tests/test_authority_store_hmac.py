@@ -1480,13 +1480,25 @@ def test_authority_downgrade_fails_closed_when_posture_identity_is_not_integer(
     assert signed_marker.is_file()
 
 
-@pytest.mark.parametrize("payload", [{}, {"schema_version": 99, "kind": "isolation-posture"}])
+@pytest.mark.parametrize("payload_kind", ["incomplete", "unknown-schema", "target-mismatch"])
 def test_authority_downgrade_fails_closed_on_unknown_or_incomplete_posture_marker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: dict
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload_kind: str
 ) -> None:
     set_home(monkeypatch, tmp_path / "home")
     _bind_workspace(tmp_path)
     malformed_path = authority_marker.isolation_marker_root() / ("0" * 64)
+    payload = {
+        "incomplete": {},
+        "unknown-schema": {"schema_version": 99, "kind": "isolation-posture"},
+        "target-mismatch": {
+            "schema_version": authority_marker.ISOLATION_MARKER_SCHEMA_VERSION,
+            "kind": "isolation-posture",
+            "target": str(tmp_path.resolve()),
+            "target_fingerprint": "0" * 64,
+            "recorded_by": "test-operator",
+            "created_at": "2026-10-13T00:00:00Z",
+        },
+    }[payload_kind]
     malformed_path.write_text(json.dumps(payload), encoding="utf-8")
     store_before = _store_path(tmp_path).read_bytes()
 
@@ -1495,6 +1507,20 @@ def test_authority_downgrade_fails_closed_on_unknown_or_incomplete_posture_marke
 
     assert malformed_path.is_file()
     assert _store_path(tmp_path).read_bytes() == store_before
+
+
+def test_valid_legacy_isolation_marker_schema_still_governs(tmp_path: Path) -> None:
+    fingerprint = authority_marker.target_fingerprint(tmp_path)
+    legacy = {
+        "schema_version": 1,
+        "kind": "isolation-posture",
+        "target": str(tmp_path.resolve()),
+        "target_fingerprint": fingerprint,
+        "recorded_by": "test-operator",
+        "created_at": "2026-10-13T00:00:00Z",
+    }
+
+    assert authority_marker._isolation_marker_governs(legacy, fingerprint, fingerprint, None) is True
 
 
 def test_authority_downgrade_lock_serializes_posture_marker_writers(
