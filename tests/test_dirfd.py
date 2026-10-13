@@ -443,6 +443,19 @@ def test_nt_stat_child_reads_only_metadata_and_closes(tmp_path, nt_metadata_kern
     assert len(kernel.closed) == len(set(kernel.closed)) == 2
 
 
+def test_nt_open_child_file_can_deny_write_sharing(tmp_path, nt_metadata_kernel):
+    from brigade.work_cmd import nt_dirfd
+
+    kernel = nt_metadata_kernel
+    parent = nt_dirfd.open_root_directory(tmp_path, writable=False)
+    descriptor = dirfd.open_child_file(parent, "receipt.json", os.O_RDONLY, share_write=False)
+    try:
+        assert kernel.opens[-1][-1] == nt_dirfd._FILE_SHARE_READ | nt_dirfd._FILE_SHARE_DELETE
+    finally:
+        os.close(descriptor)
+        os.close(parent)
+
+
 @pytest.mark.parametrize(
     "name,failure,error,message,child_closed",
     [

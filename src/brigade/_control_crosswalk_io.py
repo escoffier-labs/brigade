@@ -129,7 +129,11 @@ class _AssessmentReader:
             flags = (
                 os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
             )
-            descriptor = dirfd.open_child_file(parent, path.name, flags)
+            # Deny concurrent Windows writers while bytes used for a package
+            # snapshot are read. ``st_ctime_ns`` is creation time there, so
+            # post-read metadata checks alone cannot detect a same-size write
+            # whose mtime is restored before the source recheck.
+            descriptor = dirfd.open_child_file(parent, path.name, flags, share_write=False)
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode):
                 raise _ReadRefusal("discovery_unreadable")

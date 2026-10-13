@@ -99,9 +99,9 @@ def test_assessment_reader_opens_files_in_binary_mode_when_supported(tmp_path, m
     real_open_child = dirfd.open_child_file
     flags_seen = []
 
-    def open_child(parent, name, flags, mode=0o600):
-        flags_seen.append(flags)
-        return real_open_child(parent, name, flags & ~binary_flag, mode)
+    def open_child(parent, name, flags, mode=0o600, *, share_write=True):
+        flags_seen.append((flags, share_write))
+        return real_open_child(parent, name, flags & ~binary_flag, mode, share_write=share_write)
 
     monkeypatch.setattr(dirfd, "open_child_file", open_child)
     reader = _AssessmentReader(tmp_path)
@@ -111,7 +111,7 @@ def test_assessment_reader_opens_files_in_binary_mode_when_supported(tmp_path, m
         reader.close()
 
     assert flags_seen
-    assert all(flags & binary_flag for flags in flags_seen)
+    assert all(flags & binary_flag and not share_write for flags, share_write in flags_seen)
 
 
 def test_assessment_reader_charges_chunks_before_later_io_error(tmp_path, monkeypatch):
@@ -4429,10 +4429,10 @@ def test_assessment_refuses_nonregular_trust_without_reading_private_keys(tmp_pa
     original_open = dirfd.open_child_file
     opened = []
 
-    def observe(parent, name, flags, mode=0o600):
+    def observe(parent, name, flags, mode=0o600, *, share_write=True):
         opened.append(name)
         assert name != "signing-key"
-        return original_open(parent, name, flags, mode)
+        return original_open(parent, name, flags, mode, share_write=share_write)
 
     monkeypatch.setattr(dirfd, "open_child_file", observe)
     assert _assess(target, "EC-05")["outcome"] == "validated"

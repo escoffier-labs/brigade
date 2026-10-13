@@ -379,8 +379,8 @@ def open_path_file(path: Path | str, flags: int, mode: int = 0o600) -> int:
         raise
 
 
-def open_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
-    """Open or create ``name`` under ``parent`` without following a reparse point."""
+def open_file(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
+    """Open ``name`` under ``parent``; optionally deny concurrent writer handles."""
     del mode
     api = _require_api()
     write = bool(flags & (os.O_WRONLY | os.O_RDWR))
@@ -399,6 +399,7 @@ def open_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
         access &= ~_FILE_WRITE_DATA
         if flags & os.O_RDWR:
             access |= _FILE_READ_DATA
+    share_options = {} if share_write else {"share_access": _FILE_SHARE_READ | _FILE_SHARE_DELETE}
     handle = _nt_create(
         api,
         parent,
@@ -407,6 +408,7 @@ def open_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
         disposition=disposition,
         options=_FILE_NON_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
         attributes=_FILE_ATTRIBUTE_NORMAL,
+        **share_options,
     )
     fd_flags = os.O_WRONLY if write and not (flags & os.O_RDWR) else os.O_RDONLY
     if flags & os.O_RDWR:
@@ -625,6 +627,7 @@ def _nt_create(
     name: str,
     *,
     access: int,
+    share_access: int = _SHARE_ALL,
     disposition: int,
     options: int,
     attributes: int,
@@ -647,7 +650,7 @@ def _nt_create(
         ctypes.byref(iosb),
         None,
         attributes,
-        _SHARE_ALL,
+        share_access,
         disposition,
         options,
         None,
