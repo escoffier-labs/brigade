@@ -168,6 +168,7 @@ def _read_child(
     limit: int,
     declared_size: int | None,
     capture: bool,
+    held_descriptors: list[int] | None = None,
 ) -> tuple[bytes | None, str, _Observation]:
     descriptor = -1
     try:
@@ -215,6 +216,9 @@ def _read_child(
         final = _observation(os.fstat(descriptor))
         if not _same_observation(initial, final):
             _error("changed")
+        if held_descriptors is not None:
+            held_descriptors.append(descriptor)
+            descriptor = -1
         return (b"".join(chunks) if chunks is not None else None, digest.hexdigest(), initial)
     except PackageSnapshotError:
         raise
@@ -381,6 +385,7 @@ def snapshot_package(directory: Path) -> PackageSnapshot:
         _error("unsafe")
 
     root_fd = -1
+    held_descriptors: list[int] = []
     try:
         try:
             root_fd = dirfd.open_directory_nofollow(directory, writable=False)
@@ -397,7 +402,12 @@ def snapshot_package(directory: Path) -> PackageSnapshot:
         if "manifest.json" not in initial_names:
             _error("malformed")
         manifest_bytes, manifest_digest, manifest_observation = _read_child(
-            root_fd, "manifest.json", limit=_MANIFEST_MAX_BYTES, declared_size=None, capture=True
+            root_fd,
+            "manifest.json",
+            limit=_MANIFEST_MAX_BYTES,
+            declared_size=None,
+            capture=True,
+            held_descriptors=held_descriptors,
         )
         assert manifest_bytes is not None
         try:
@@ -421,6 +431,7 @@ def snapshot_package(directory: Path) -> PackageSnapshot:
                 limit=attestation_input.MAX_JSON_BYTES if name == "receipt.json" else evidence_package.MAX_ENTRY_BYTES,
                 declared_size=entry["bytes"],
                 capture=name == "receipt.json",
+                held_descriptors=held_descriptors,
             )
             if digest != entry["sha256"]:
                 _error("mismatch")
@@ -466,6 +477,11 @@ def snapshot_package(directory: Path) -> PackageSnapshot:
     except (NotImplementedError, OSError):
         _error("unavailable")
     finally:
+        for descriptor in held_descriptors:
+            try:
+                os.close(descriptor)
+            except (NotImplementedError, OSError):
+                pass
         if root_fd != -1:
             try:
                 os.close(root_fd)

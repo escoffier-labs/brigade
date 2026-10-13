@@ -513,6 +513,38 @@ def test_every_opened_descriptor_is_closed_on_success_and_child_read_failure(
     assert not active
 
 
+def test_child_write_denials_stay_open_through_final_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = _write_package(tmp_path)
+    import brigade.evidence_package_snapshot as package_snapshot
+
+    real_open_child = package_snapshot.dirfd.open_child_file
+    real_final_checks = package_snapshot._final_child_checks
+    opened_children: list[int] = []
+
+    def open_child(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
+        descriptor = real_open_child(parent, name, flags, mode, share_write=share_write)
+        opened_children.append(descriptor)
+        return descriptor
+
+    def check_with_held_children(root_fd: int, observed: dict[str, object], expected_names: frozenset[str]) -> None:
+        assert opened_children
+        for descriptor in opened_children:
+            os.fstat(descriptor)
+        real_final_checks(root_fd, observed, expected_names)
+
+    monkeypatch.setattr(package_snapshot.dirfd, "open_child_file", open_child)
+    monkeypatch.setattr(package_snapshot, "_final_child_checks", check_with_held_children)
+
+    snapshot_package(directory)
+
+    assert len(opened_children) >= 2
+    for descriptor in opened_children:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
 def test_child_files_are_opened_in_binary_mode_when_supported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     directory = _write_package(tmp_path)
     import brigade.evidence_package_snapshot as package_snapshot
