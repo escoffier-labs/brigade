@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `brigade memory recall --query` accepts bounded caller-supplied task context using the existing fail-open recall API. Task/worktree fixtures compare relevance against basename queries and report stale/scope limits. Search status adds read-only repeat-query/result counts from the existing local log, separate from verification scores. (#1563)
 - Persist bounded sanitized managed Claude review history in caller-owned SQLite transactions, with exact replay, revision snapshots and conservative caller-head projections across pushes and reruns. (#1601)
+- Fleet Hub schema26 preserves legacy claims and adds durable target generations across acquire, supersede, release, and expiry pruning. Listings and inspection expose sanitized generations. Fence capacity, corruption, and exhaustion fail closed. Legacy late-acquire and same-holder races remain open. (#1189)
 
 - Jules cloud status preserves explicit empty-output evidence, so completed sessions with a recorded plan but no work are labeled for plan approval.
 - Run the full local verification gate in deterministic pytest shards with combined coverage and counted concurrency slots shared by linked worktrees. Shard and slot counts are configurable, and contention can wait for a bounded deadline.

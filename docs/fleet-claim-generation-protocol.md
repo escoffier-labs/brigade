@@ -2,17 +2,74 @@
 
 ## Status and boundary
 
-This is an offline, opt-in protocol design for #1189, grounded in public base
-`c47ae4185c5d81b79ac91868b6e6989ac72a17ad`. It documents proposed `/claims/v2`
-semantics. No endpoint, schema change, client support, or live activation ships
-with this document. The legacy `/claims` unknown-outcome/late-acquire orphan race
-remains unprotected. Neither #1189 nor parent #1121 is complete.
+The opt-in `/claims/v2` contract below remains a proposal. The first storage
+prerequisite now implements offline schema25 to schema26 migration and shared
+durable generations for the existing `/claims` writers. No v2 endpoint,
+capability, client, epoch provisioning, or live activation ships in this slice.
+The legacy unknown-outcome/late-acquire orphan race remains unprotected. Neither
+#1189 nor parent #1121 is complete.
 
-The operator-supplied deployment boundary is live Hub schema22 and public main
-schema24. This task performs no live reads. #1576 alone owns the next offline
-schema25 slice. This design allocates no migration number and requires a later,
-separately approved storage change after #1576. Version 0.28.0 and database schema
-metadata do not establish support for this protocol.
+#1576 supplied schema25. This slice changes offline storage only and performs no
+live reads or deployment. Version 0.28.0 and database schema metadata do not
+establish support for v2. The historical implementation description below is
+pinned to public base `c47ae4185c5d81b79ac91868b6e6989ac72a17ad`.
+
+## Implemented legacy storage prerequisite
+
+Schema26 adds `claim_fences(target, generation)` in the same SQLite authority as
+`claims`. Migration preserves existing claim rows, including their private
+holder and local-lock fields, and seeds each existing target at generation 1.
+An unseen target has no durable fence and its inspect response omits the
+`generation` field. All current rows have legacy provenance, reported as
+`protocol: "legacy"`. No unused v2
+origin or epoch columns are allocated. A later separate migration must add the
+v2 row tag and immutable attempt provenance before mixed-protocol writes exist.
+
+Every legacy ownership mutation uses one `BEGIN IMMEDIATE` transaction:
+
+- New acquire and exact dead-lock supersede increment the target generation.
+  A live same-node/same-holder retry extends TTL and keeps its generation and
+  `acquired_at`. Renew retains the generation.
+- An accepted holder, node, or force release increments the generation,
+  including a missing release on a free target. The existing missing response
+  remains `released: false`. Repeated missing legacy releases each advance the
+  fence. Refused releases leave both row and fence unchanged.
+- Acquire's global expiry pruning increments each retired target once before
+  deletion. Reacquiring that target consumes another generation. Inspect and
+  renew keep their legacy expiry behavior: inspect hides expired rows without
+  retirement, and renew refuses an expired row without retirement.
+
+Hub time is read after obtaining the transaction. The decision response is built
+from that transaction's snapshot and committed before return. A subsequent
+writer cannot substitute a later owner in a grant, renewal, or refusal response.
+Claim payloads and listings expose the sanitized generation and legacy protocol.
+Inspect also returns the durable stored generation when free. For an entirely
+unseen target the field is absent, preserving the legacy response. Holder and
+lock tokens remain private. Owned inspection retains the existing node-local
+`lock_run_dir` recovery field.
+
+Fences persist indefinitely, including free, renamed, and retired targets.
+Distinct stored targets are capped at 100,000. A new target at capacity fails
+closed, while existing targets remain usable. Migration exceeding that bound
+refuses without changing schema25 or its claims. Capacity, signed-64-bit
+exhaustion, and any pre-commit failure roll back the entire operation, including
+expiry pruning. A fence must be an integer in `[1, 9223372036854775807]` once
+stored. Missing or corrupt fences on existing rows refuse reads and mutations.
+The `/claims` HTTP adapter reports fence corruption, capacity refusal, and
+generation exhaustion as structured 503 errors without committing mutations.
+Startup validates current-schema fencing state without recreating it, and a
+newer schema refuses startup and request opens. Deleted current-schema fence
+storage is never silently rebuilt.
+
+These generations alone do not fix delayed legacy acquire, same-holder ABA,
+or backup restore and rollback. A missing release can advance the fence and a
+later unfenced legacy POST can still acquire an orphan. A delayed legacy renew
+or holder release can affect a later tenure with the same identities. Force
+release retains its existing unfenced behavior. The storage cannot detect a
+deleted fence for a free target or a restored older database without external
+history authority. The epoch/restore contract, v2 provenance, cancellation,
+capability, client admission, and original orphan-race acceptance remain open.
+Older hub versions refuse schema26. Rollout and deployment remain separate work.
 
 ## Current implementation at the pinned base
 

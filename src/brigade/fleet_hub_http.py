@@ -32,6 +32,7 @@ from . import fleet_model_inventory
 from . import fleet_policy_page
 from . import fleet_repo_policy_page
 from . import fleet_work_page
+from .fleet_hub_claims import ClaimFenceError
 from .worklore_validate import WorkloreValidationError
 from .fleet_hub import (
     DASHBOARD_COOKIE,
@@ -1296,6 +1297,9 @@ def make_handler(
                         payload = fleet_hub_policy_api.read_policy(conn, history=history, limit=limit)
                     else:
                         payload = {"claims": fleet_claim_display.list_display_claims(conn, include_all=include_all)}
+                except ClaimFenceError as exc:
+                    self._send_json(503, {"error": str(exc)})
+                    return
                 except sqlite3.Error as exc:
                     self._send_json(500, {"error": f"hub database error: {exc}"})
                     return
@@ -1523,6 +1527,9 @@ def make_handler(
                     status, body_payload = handle_grokbot(conn, parsed, caller_node=caller_node, config=frozen_deck)
                 else:
                     status, body_payload = handle_node_request(conn, parsed)
+            except ClaimFenceError as exc:
+                self._send_json(503, {"error": str(exc)})
+                return
             except fleet_hub_policy_api.FleetPolicyApiError as exc:
                 self._send_json(exc.status, exc.payload())
                 return
