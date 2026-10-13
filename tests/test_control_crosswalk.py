@@ -88,6 +88,32 @@ def test_assessment_reader_default_budget_stays_at_64_mib(tmp_path):
         reader.close()
 
 
+def test_assessment_reader_opens_files_in_binary_mode_when_supported(tmp_path, monkeypatch):
+    from brigade import dirfd
+    from brigade.control_crosswalk import _AssessmentReader
+
+    path = tmp_path / "bytes.bin"
+    path.write_bytes(b"before\r\nafter\x00")
+    binary_flag = 0x8000
+    monkeypatch.setattr(os, "O_BINARY", binary_flag, raising=False)
+    real_open_child = dirfd.open_child_file
+    flags_seen = []
+
+    def open_child(parent, name, flags, mode=0o600):
+        flags_seen.append(flags)
+        return real_open_child(parent, name, flags & ~binary_flag, mode)
+
+    monkeypatch.setattr(dirfd, "open_child_file", open_child)
+    reader = _AssessmentReader(tmp_path)
+    try:
+        assert reader.read(path) == b"before\r\nafter\x00"
+    finally:
+        reader.close()
+
+    assert flags_seen
+    assert all(flags & binary_flag for flags in flags_seen)
+
+
 def test_assessment_reader_charges_chunks_before_later_io_error(tmp_path, monkeypatch):
     import os
 
@@ -928,6 +954,29 @@ def test_ec12_rejects_entry_changed_after_staging(tmp_path, monkeypatch):
         return result
 
     monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_then_rewrite)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "package_snapshot_mismatch"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_rejects_entry_metadata_that_differs_when_opened(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    receipt_path = package_dir / "receipt.json"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def copy_with_different_opened_metadata(reader, path, *args, **kwargs):
+        result = original_copy(reader, path, *args, **kwargs)
+        if path == receipt_path:
+            opened = reader.read_metadata[path]
+            reader.read_metadata[path] = (opened[0], opened[1] + 1, *opened[2:])
+        return result
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_with_different_opened_metadata)
 
     readiness = _assess(target, "EC-12")
 

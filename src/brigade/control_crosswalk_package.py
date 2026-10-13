@@ -116,6 +116,8 @@ def stage_source_package(
             if stat.S_ISLNK(entry_info.st_mode) or not stat.S_ISREG(entry_info.st_mode):
                 raise evidence_package_snapshot.PackageSnapshotError("unsafe") from exc
             raise
+        if strict_package and reader.read_metadata.get(entry_path) != source_metadata[name]:
+            raise evidence_package_snapshot.PackageSnapshotError("mismatch")
     source_issue = _control_crosswalk_io.package_source_issue(
         reader,
         artifact,

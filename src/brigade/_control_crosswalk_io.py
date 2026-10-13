@@ -126,7 +126,9 @@ class _AssessmentReader:
         descriptor = -1
         try:
             parent = self.directory(path.parent)
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            flags = (
+                os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            )
             descriptor = dirfd.open_child_file(parent, path.name, flags)
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode):
