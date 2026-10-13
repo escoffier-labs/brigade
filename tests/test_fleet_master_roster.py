@@ -104,6 +104,19 @@ def test_parse_rejects_duplicate_json_keys() -> None:
         fleet_master_roster.parse(raw)
 
 
+def test_fleet_roster_validate_does_not_echo_control_duplicate_key(tmp_path, capsys) -> None:
+    path = tmp_path / "duplicate-key.json"
+    path.write_bytes(
+        b'{"schema":"brigade.fleet_master_roster.v1","revision":1,"seats":[],"\\u001b[2J":1,"\\u001b[2J":2}'
+    )
+
+    assert cli.main(["fleet", "roster", "validate", "--file", str(path)]) == 1
+
+    error = capsys.readouterr().err
+    assert "duplicate JSON key" in error
+    assert "\x1b" not in error
+
+
 def test_parse_rejects_non_string_mapping_keys() -> None:
     document = _document()
     document[1] = "unexpected"  # type: ignore[index]

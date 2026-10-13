@@ -39,7 +39,7 @@ def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, An
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise MasterRosterError(f"duplicate JSON key: {key}")
+            raise MasterRosterError("duplicate JSON key")
         result[key] = value
     return result
 
