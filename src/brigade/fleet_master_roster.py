@@ -62,6 +62,11 @@ _URL_CREDENTIAL_QUERY = re.compile(
     re.IGNORECASE,
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
+_EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
+    r"\b(?:export\s+|set\s+environment\s+variable\s+)"
+    r"[A-Za-z_][A-Za-z0-9_]*\s*=(?!=|>)",
+    re.IGNORECASE,
+)
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
 _API_ROUTE_CONTEXT = re.compile(
     r"\b(?:call|invoke|serve|expose|request|hit|get|head|post|put|patch|delete|connect|options|trace)\s+(?:the\s+)?"
@@ -95,7 +100,7 @@ _RELATIVE_PATH = re.compile(
 _PATH_CONTEXT = re.compile(
     r"(?:\b(?:run|execute|inspect|open|read|write|load|save|path|file|directory|folder|script|repository|repo)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?|"
-    r"\b(?:path|file|directory|folder|script|repository|repo)\s*(?:is|equals|:)\s*)[\"'“‘`()\[{]*\s*$",
+    r"\b(?:path|file|directory|folder|script|repository|repo)\s*(?:is|was|equals|will\s+be|has\s+been|:)\s*)[\"'“‘`()\[{]*\s*$",
     re.IGNORECASE,
 )
 _FILESYSTEM_COMPONENTS = frozenset(
@@ -257,6 +262,7 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         or _URL_CREDENTIAL_QUERY.search(value)
         or _has_filesystem_path_in_url_query(value)
         or _ENVIRONMENT_ASSIGNMENT.search(_without_api_route_references(value))
+        or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(_without_api_route_references(value))
         or contains_credential(value)
         or (
             check_paths

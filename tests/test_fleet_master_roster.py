@@ -174,6 +174,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "npm_" + "A" * 36,
         "token is abcdefghijklmnop",
         "auth token is abcdefghijklmnop",
+        "export service_mode=production",
+        "Set environment variable service_mode=production",
     ],
 )
 def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
@@ -450,6 +452,9 @@ def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None
         "The path is foo/bar.",
         "Repository path: foo/bar",
         "The path equals foo/bar",
+        "The path was foo/bar",
+        "The path will be foo/bar",
+        "The path has been foo/bar",
         "foo/bar",
         "tools/build",
     ],
