@@ -4,6 +4,11 @@ Seven paired scenarios use the existing retrieval harness at K=5 over five
 synthetic cards. `contexts.json` records generated checkout names, explicit
 caller context and expected candidate queries. `queries.json` records the
 basename and candidate query for each case with identical gold labels.
+The aggregate is case-weighted. `stale-scope` repeats the `explicit-task`
+query and gold label to retain a second stale/scope observation. It is not an
+independent task. Across the four distinct candidate queries, two improve
+(`orbit kit` and `token refresh`), one ties (`comet notes`), and one misses
+(`fix thing`).
 
 ```bash
 .venv/bin/python -m brigade.memory_retrieval_eval \
@@ -49,7 +54,8 @@ The grep adapter ties current on recall/hit rate for both modes. This comparison
 measures query construction, with deliberately lexical gold examples. It does
 not establish a scorer improvement or production-corpus performance.
 
-Relevance improves on five cases, ties on the plain fallback, and remains zero
+Relevance improves on five case rows, including the repeated task observation,
+ties on the plain fallback, and remains zero
 for the vague explicit task. Stale retrieval gets worse in count and rate.
 Candidate scope violations also increase in count. The lower scope fraction
 reflects a different returned population, without any scope-filter guarantee.
@@ -58,6 +64,14 @@ token cards, and `notes` matches every fixture body. Those extra results are
 retained in the quality measurements. The quality evaluator reports one scope
 violation per result occurrence, even if several dimensions disagree. Missing
 projection input is reported unavailable.
+
+Requested scope is fixture annotation: repository is `orbit-kit` for the linked
+worktrees and `comet-notes` for the plain fallback. The explicit, vague, and
+stale/scope cases request task `token-refresh`. Other cases request task null.
+The existing quality contract flags any task-tagged card for a null requested
+task, even if its repository matches. These annotations describe the known
+fixture intent. The CLI receives only the task query and checkout path, and
+does not enforce those scope annotations.
 
 All searches stay inside the supplied fixture memory target. Stable repository
 hints select query terms and do not select another corpus. No retrieval filter,
