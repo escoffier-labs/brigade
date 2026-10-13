@@ -393,6 +393,8 @@ def test_parse_rejects_qualified_compact_credential_assignments(field: str, text
         "Reviewer uses the password hunter2",
         "Reviewer is using API key shortkey",
         "This seat is using the password hunter2",
+        "Reviewer used API key shortkey",
+        "Reviewer was using the password hunter2",
         "Reviewer has API key shortkey",
         "Reviewer has the password hunter2",
         "Reviewers have API key shortkey",
@@ -875,6 +877,7 @@ def test_parse_accepts_lowercase_key_value_prose(field: str, text: str) -> None:
         "See https://example.com/download?file=~example/.ssh/config.",
         "See https://example.com/callback#path=/home/" + "example.",
         "See https://example.com/api?output=%2Fetc%2Fpasswd",
+        "See https://example.com/path%3Foutput%3D%2Fetc%2Fhosts",
         "Call /api?output=/etc/passwd",
     ],
 )
