@@ -1127,6 +1127,10 @@ class TestBoardBounds:
                 "VALUES (?, ?, 'test-holder-token', ?, ?, 3600, ?)",
                 [(f"repo-{index:03d}", node_id, stamp, stamp, expires) for index, node_id in enumerate(node_ids)],
             )
+            conn.executemany(
+                "INSERT INTO claim_fences (target, generation) VALUES (?, 1)",
+                [(f"repo-{index:03d}",) for index in range(len(node_ids))],
+            )
             conn.commit()
         finally:
             conn.close()
