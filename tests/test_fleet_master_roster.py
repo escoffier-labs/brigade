@@ -183,6 +183,7 @@ def test_parse_rejects_fine_grained_github_pat() -> None:
         "openai/gpt-5.6",
         "opencode-go/glm-5.2",
         "openrouter/x-ai/grok",
+        "openrouter/x-ai/grok.preview",
         "anthropic/claude",
         "openrouter/model:free",
         "openrouter/model.preview",

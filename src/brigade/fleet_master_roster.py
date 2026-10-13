@@ -18,7 +18,7 @@ MAX_SEATS = 128
 MAX_TEXT = 512
 _SEAT_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
-_PROVIDER_MODEL = re.compile(r"^[A-Za-z0-9_-]+/[A-Za-z0-9._:-]+$")
+_PROVIDER_MODEL = re.compile(r"^[A-Za-z0-9_-]+/(?:[A-Za-z0-9._:-]+/)*[A-Za-z0-9._:-]+$")
 _DANGEROUS_VALUE = re.compile(
     r"(?:(?<![A-Za-z0-9_])sk_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
     r"\bBearer\s+\S+|\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
