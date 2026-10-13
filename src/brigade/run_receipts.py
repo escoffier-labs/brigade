@@ -25,6 +25,28 @@ def _bound_detail(value: str) -> str:
     return proc.bound_text(value, proc.MAX_CAPTURE_BYTES)
 
 
+def _safe_metadata_provenance(value: dict[str, object]) -> dict[str, object]:
+    """Copy the closed provenance vocabulary, dropping arbitrary adapter data."""
+    safe: dict[str, object] = {}
+    observed_at = value.get("observed_at")
+    if isinstance(observed_at, str):
+        safe["observed_at"] = observed_at[:64]
+    fields = value.get("fields")
+    safe_fields: dict[str, object] = {}
+    if isinstance(fields, dict):
+        for name in ("requested_model", "effective_model", "acpx_version"):
+            evidence = fields.get(name)
+            if not isinstance(evidence, dict):
+                continue
+            safe_fields[name] = {
+                key: evidence.get(key)
+                for key in ("source", "locator", "digest", "unknown_reason")
+                if isinstance(evidence.get(key), str) or evidence.get(key) is None
+            }
+    safe["fields"] = safe_fields
+    return safe
+
+
 def assignment_payload(assignments: list[Assignment]) -> list[dict[str, object]]:
     payload: list[dict[str, object]] = []
     for assignment in assignments:
@@ -81,6 +103,8 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
             entry["transport_warning"] = dict(result.transport_warning)
         if result.cloud_environment is not None:
             entry["cloud_environment"] = dict(result.cloud_environment)
+        if result.metadata_provenance is not None:
+            entry["metadata_provenance"] = _safe_metadata_provenance(result.metadata_provenance)
         if result.output_truncated:
             entry["output_truncated"] = True
             entry["output_bytes"] = result.output_bytes
@@ -233,6 +257,7 @@ def agent_result_from_worker(result: WorkerResult) -> agents.AgentResult:
         acpx_version=result.acpx_version,
         safe_events=result.safe_events,
         cloud_environment=result.cloud_environment,
+        metadata_provenance=result.metadata_provenance,
     )
 
 

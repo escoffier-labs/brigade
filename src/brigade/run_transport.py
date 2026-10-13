@@ -336,6 +336,7 @@ class WorkerResult:
     failure_kind: str | None = None
     transport_warning: dict[str, object] | None = None
     cloud_environment: dict[str, str] | None = None
+    metadata_provenance: dict[str, object] | None = None
     env_overrides: tuple[str, ...] = ()
     endpoint_host: str | None = None
     attempts: tuple[WorkerAttempt, ...] = ()
@@ -347,6 +348,42 @@ class WorkerResult:
     # another machine. ``None`` for ordinary local work. Carries the target
     # provenance and pending-handoff facts; never implies a local edit.
     remote: dict[str, Any] | None = None
+
+
+def _metadata_provenance(result: agents.AgentResult) -> dict[str, object] | None:
+    """Attribute only facts that the acpx Cursor adapter can distinguish."""
+    if result.transport != "acpx":
+        return result.metadata_provenance
+    fields: dict[str, object] = {}
+    if result.requested_model is not None:
+        requested_unknown = (
+            "mutable-alias-not-backend-identity"
+            if result.requested_model in {"auto", "cursor-auto"}
+            else "launched-argument-not-backend-observation"
+        )
+        fields["requested_model"] = {
+            "source": "declared",
+            "locator": "launch-argument",
+            "digest": None,
+            "unknown_reason": requested_unknown,
+        }
+    if result.effective_model is not None:
+        fields["effective_model"] = {
+            "source": "observed",
+            "locator": "acp-session-update",
+            "digest": None,
+            "unknown_reason": "backend-revision-unavailable",
+        }
+    if result.acpx_version is not None:
+        fields["acpx_version"] = {
+            "source": "observed",
+            "locator": "acpx-version-output",
+            "digest": None,
+            "unknown_reason": None,
+        }
+    if not fields:
+        return None
+    return {"observed_at": _attempt_timestamp(), "fields": fields}
 
 
 def _is_output_limit_failure(result: agents.AgentResult | WorkerResult) -> bool:
@@ -1037,6 +1074,7 @@ def dispatch(
                 ),
                 transport_warning=result.transport_warning,
                 cloud_environment=result.cloud_environment,
+                metadata_provenance=_metadata_provenance(result),
                 thread_id=result.thread_id,
                 status=result.status,
                 stdout=_bound_capture_text(result.stdout),

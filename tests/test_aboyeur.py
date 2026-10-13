@@ -3132,9 +3132,10 @@ def test_dispatch_uses_acpx_transport(monkeypatch, tmp_path):
             text="through ACP",
             ok=True,
             transport="acpx",
-            requested_model="composer-2.5",
+            requested_model="cursor-auto",
             effective_model="composer-2.5",
             protocol_version=1,
+            acpx_version="0.12.0",
         )
 
     monkeypatch.setattr(acpx_adapter, "run_cursor", fake_cursor)
@@ -3146,7 +3147,7 @@ def test_dispatch_uses_acpx_transport(monkeypatch, tmp_path):
                 "composer",
                 "cursor",
                 "build",
-                model="composer-2.5",
+                model="cursor-auto",
                 transport="acpx",
                 transport_version="0.12.0",
             ),
@@ -3161,6 +3162,12 @@ def test_dispatch_uses_acpx_transport(monkeypatch, tmp_path):
     assert result.ok is True and result.transport == "acpx"
     assert seen["version"] == "0.12.0"
     assert seen["read_only"] is True
+    fields = result.metadata_provenance["fields"]
+    assert fields["requested_model"]["source"] == "declared"
+    assert fields["requested_model"]["unknown_reason"] == "mutable-alias-not-backend-identity"
+    assert fields["effective_model"]["source"] == "observed"
+    assert fields["effective_model"]["unknown_reason"] == "backend-revision-unavailable"
+    assert fields["acpx_version"]["locator"] == "acpx-version-output"
 
 
 def test_direct_acpx_auth_failure_reaches_worker_run_receipt_and_human_summary(monkeypatch, capsys, tmp_path):

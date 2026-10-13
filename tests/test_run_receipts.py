@@ -76,6 +76,53 @@ def test_worker_payload_includes_cloud_environment_fingerprint():
     assert "environment_id" not in entry["cloud_environment"]
 
 
+def test_worker_payload_distinguishes_declared_and_observed_model_evidence():
+    result = WorkerResult(
+        worker="cursor-worker",
+        task="fix it",
+        text="done",
+        ok=True,
+        transport="acpx",
+        requested_model="cursor-auto",
+        effective_model="composer-2.5",
+        acpx_version="0.12.0",
+        metadata_provenance={
+            "observed_at": "2026-10-13T12:00:00+00:00",
+            "provider_error": "Bearer super-secret-token",
+            "fields": {
+                "requested_model": {
+                    "source": "declared",
+                    "locator": "launch-argument",
+                    "digest": None,
+                    "unknown_reason": "mutable-alias-not-backend-identity",
+                },
+                "effective_model": {
+                    "source": "observed",
+                    "locator": "acp-session-update",
+                    "digest": None,
+                    "unknown_reason": "backend-revision-unavailable",
+                },
+                "acpx_version": {
+                    "source": "observed",
+                    "locator": "acpx-version-output",
+                    "digest": None,
+                    "unknown_reason": None,
+                },
+            },
+        },
+    )
+
+    entry = worker_payload([result])[0]
+
+    assert entry["metadata_provenance"]["fields"]["requested_model"]["source"] == "declared"
+    assert entry["metadata_provenance"]["fields"]["effective_model"]["source"] == "observed"
+    assert entry["metadata_provenance"]["fields"]["effective_model"]["unknown_reason"] == (
+        "backend-revision-unavailable"
+    )
+    assert "cursor-auto" not in str(entry["metadata_provenance"])
+    assert "super-secret-token" not in str(entry)
+
+
 def test_legacy_run_message_displays_unknown_provenance_and_is_not_replayed():
     env, display = message_envelope.synthesize_legacy_message_provenance()
     assert display == "UNKNOWN PROVENANCE - legacy message"

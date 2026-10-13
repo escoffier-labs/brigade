@@ -585,6 +585,8 @@ class AgentResult:
     failure_kind: str | None = None
     transport_warning: dict[str, object] | None = None
     cloud_environment: dict[str, str] | None = None
+    # Closed, receipt-safe attribution for model and harness metadata.
+    metadata_provenance: dict[str, object] | None = None
 
 
 def is_known(cli_ref: str) -> bool:
