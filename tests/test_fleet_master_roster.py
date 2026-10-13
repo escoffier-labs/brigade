@@ -95,6 +95,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Use auth profile: production-admin",
         "Use auth-profile production-admin",
         "Use auth_profile production-admin",
+        "Use production-admin auth profile.",
+        "Use `production-admin` auth profile.",
         "password: actual-secret",
     ],
 )
@@ -104,6 +106,14 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
 
     with pytest.raises(fleet_master_roster.MasterRosterError):
         fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("text", ["mask_live_data", "task-abcdefghijkl"])
+def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> None:
+    document = _document()
+    document["seats"][0]["caveats"] = [text]  # type: ignore[index]
+
+    assert fleet_master_roster.parse(document)["seats"][0]["caveats"] == [text]
 
 
 def test_parse_rejects_fine_grained_github_pat() -> None:
@@ -116,7 +126,14 @@ def test_parse_rejects_fine_grained_github_pat() -> None:
 
 @pytest.mark.parametrize(
     "model",
-    ["openai/gpt-5.6", "opencode-go/glm-5.2", "openrouter/x-ai/grok", "anthropic/claude", "openrouter/model:free"],
+    [
+        "openai/gpt-5.6",
+        "opencode-go/glm-5.2",
+        "openrouter/x-ai/grok",
+        "anthropic/claude",
+        "openrouter/model:free",
+        "openrouter/model.preview",
+    ],
 )
 def test_parse_accepts_provider_qualified_model_identifiers(model: str) -> None:
     document = _document()
