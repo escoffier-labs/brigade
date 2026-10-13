@@ -172,11 +172,17 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
         for command, expected in zip(commands, planned, strict=False)
     ):
         return _observation(relpath, "incomplete", integrity="passed", reason="planned_commands_mismatch")
-    if any(type(command.get("exit_code")) is not int or command.get("status") != "completed" for command in commands):
-        return _observation(relpath, "incomplete", integrity="passed", reason="command_not_terminal")
     receipt_status = snapshot.receipt.get("status")
     if not isinstance(receipt_status, str) or receipt_status not in {"completed", "failed", "rejected"}:
         return _observation(relpath, "incomplete", integrity="passed", reason="status_not_terminal")
+    terminal_command_statuses = {"completed"}
+    if receipt_status in {"failed", "rejected"}:
+        terminal_command_statuses.update({"failed", "timed_out", "rejected"})
+    if any(
+        type(command.get("exit_code")) is not int or command.get("status") not in terminal_command_statuses
+        for command in commands
+    ):
+        return _observation(relpath, "incomplete", integrity="passed", reason="command_not_terminal")
 
     if receipt_status != "completed" or any(command.get("exit_code") != 0 for command in commands):
         reason = (

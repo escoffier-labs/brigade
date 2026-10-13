@@ -215,7 +215,7 @@ def package_source_issue(
     *,
     max_children: int,
 ) -> str | None:
-    """Check that a staged package still names the entries initially observed."""
+    """Check that the staged package path and entries still match discovery."""
     names = set(dirfd.child_names(package_fd, max_children))
     if names != expected_names:
         return "unsafe"
@@ -229,6 +229,17 @@ def package_source_issue(
         observed = _package_entry_metadata(current)
         if observed != initial:
             return "mismatch"
+    try:
+        current_directory = dirfd.stat_child(reader.directory(artifact.parent), artifact.name)
+    except OSError:
+        return "changed"
+    if stat.S_ISLNK(current_directory.st_mode) or (getattr(current_directory, "st_file_attributes", 0) or 0) & 0x400:
+        return "unsafe"
+    if not stat.S_ISDIR(current_directory.st_mode):
+        return "unsafe"
+    held_directory = os.fstat(package_fd)
+    if (current_directory.st_dev, current_directory.st_ino) != (held_directory.st_dev, held_directory.st_ino):
+        return "changed"
     return None
 
 

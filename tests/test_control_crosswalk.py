@@ -676,6 +676,32 @@ def test_ec12_rejects_entry_changed_after_staging(tmp_path, monkeypatch):
     assert readiness["artifacts"][0]["outcome"] == "rejected"
 
 
+def test_ec12_rejects_package_directory_replaced_while_staging(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    displaced_dir = package_dir.with_name("pkg-1-original")
+    manifest_path = package_dir / "manifest.json"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def copy_then_replace_directory(reader, path, *args, **kwargs):
+        result = original_copy(reader, path, *args, **kwargs)
+        if path == manifest_path:
+            package_dir.rename(displaced_dir)
+            package_dir.mkdir()
+        return result
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_then_replace_directory)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "unavailable"
+    assert readiness["reason"] == "verifier_error"
+    assert readiness["artifacts"][0]["outcome"] == "unavailable"
+    assert displaced_dir.is_dir()
+    assert package_dir.is_dir()
+
+
 def test_ec12_rejects_manifest_changed_after_its_initial_read(tmp_path, monkeypatch):
     target = _ws(tmp_path)
     package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
@@ -1202,6 +1228,47 @@ def test_ec03_classifies_signed_nonterminal_receipt_as_incomplete(tmp_path, monk
 
     assert result["outcome"] == "incomplete"
     assert result["reason"] == "command_not_terminal"
+
+
+@pytest.mark.parametrize(
+    ("receipt_status", "command_status", "exit_code", "reason"),
+    [
+        ("failed", "failed", 1, "status_failed"),
+        ("failed", "timed_out", 124, "status_failed"),
+        ("rejected", "rejected", 2, "status_rejected"),
+    ],
+)
+def test_ec03_preserves_signed_terminal_command_failures(
+    tmp_path, monkeypatch, receipt_status, command_status, exit_code, reason
+):
+    from brigade import control_crosswalk_cosign
+
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["status"] = receipt_status
+    receipt["commands"][0].update(status=command_status, exit_code=exit_code)
+    _write_json(receipt_path, receipt)
+    bundle_path = run_dir / "attestation.sigstore.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    statement = attestation.build_statement(receipt)
+    bundle["dsseEnvelope"]["payload"] = base64.b64encode(attestation.canonical_statement_bytes(statement)).decode(
+        "ascii"
+    )
+    _write_json(bundle_path, bundle)
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+    monkeypatch.setattr(
+        control_crosswalk_cosign.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 0})(),
+    )
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "failed"
+    assert result["reason"] == reason
+    assert result["legacy_state"] == "evidenced_failed"
 
 
 @pytest.mark.parametrize("schema_version", [None, 2.0, 999])
