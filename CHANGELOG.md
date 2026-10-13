@@ -9,9 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Run the full local verification gate in deterministic pytest shards with combined coverage and counted concurrency slots shared by linked worktrees. Shard and slot counts are configurable, and contention can wait for a bounded deadline.
 
-- Keep Worklore item and fleet-event cursor reads within their SQLite work budget by seeking existing ordering indexes, preserving filtered pagination and timestamp ties. (Related #1259, #1601)
 - Speed up strict JSON validation of unescaped ASCII strings while preserving byte limits, Unicode checks, and string-subclass isolation. (#1674)
-- Keep Worklore item and fleet-event cursor reads within their SQLite work budget by seeking existing ordering indexes, preserving filtered pagination and timestamp ties. (Related #1259, #1601)
+- Keep Worklore item, fleet-event, and link cursor reads within their SQLite work budget by seeking existing ordering indexes, preserving filtered pagination and timestamp ties. (Related #1259, #1601)
 - Honor update-notifier opt-outs before resolving the cache path, avoiding Windows platform subprocess probes during offline CLI adoption. (#1664)
 - `brigade fleet cloud set` updates global and provider hosted-worker concurrency with administrator authorization. Limits persist across hub restarts and preserve omitted policy fields and active leases. The writer requires an upgraded hub, and explicit null policy limits are rejected. (#1576)
 - Fleet journal events use the same repository key as claims, so repositories sharing a home identity appear in separate status groups. Transient git failures retain event reporting with a workspace-name fallback warning. (#1662)

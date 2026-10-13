@@ -1782,6 +1782,24 @@ def test_link_pages_walk_a_high_cardinality_item_with_a_stable_cursor(tmp_path):
     assert len(set(seen)) == 7
 
 
+def test_link_pages_seek_within_synced_at_ties(tmp_path):
+    conn = _conn(tmp_path)
+    work_id = store.create_item(conn, {"title": "Tied links", "kind": "fleet"}, actor_id="admin")["work_id"]
+    for number in range(5):
+        _url_link(conn, work_id, number)
+    conn.execute("UPDATE work_links SET synced_at = 'a' WHERE work_id = ?", (work_id,))
+    conn.commit()
+    expected = [row[0] for row in conn.execute("SELECT link_id FROM work_links ORDER BY link_id")]
+    seen = []
+    cursor = None
+    for _ in range(3):
+        page = store.list_links_page(conn, work_id, limit=2, cursor=cursor)
+        seen.extend(link["link_id"] for link in page["links"])
+        cursor = page["next_cursor"]
+    assert cursor is None
+    assert seen == expected
+
+
 def test_link_page_rejects_a_bad_limit_or_cursor_and_an_unknown_item(tmp_path):
     conn = _conn(tmp_path)
     work_id = store.create_item(conn, {"title": "Paged", "kind": "fleet"}, actor_id="admin")["work_id"]
