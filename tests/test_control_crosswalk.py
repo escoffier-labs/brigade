@@ -1203,6 +1203,28 @@ def test_ec03_cosign_bundle_preserves_unavailable_verifier_state(tmp_path, monke
     assert not run_dir.joinpath("attestation.sigstore.json").is_symlink()
 
 
+@pytest.mark.parametrize("refusal", ["symlink_refused", "discovery_unreadable", "read_limit_exceeded"])
+def test_ec03_refused_companion_receipt_is_invalid_evidence(tmp_path, monkeypatch, refusal):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    receipt_path = run_dir / "receipt.json"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def refuse_receipt(reader, path, **kwargs):
+        if path == receipt_path:
+            reader.errors[path] = refusal
+            raise control_crosswalk._control_crosswalk_io._ReadRefusal(refusal)
+        return original_copy(reader, path, **kwargs)
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", refuse_receipt)
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "invalid"
+    assert result["reason"] == refusal
+    assert result["verifier"]["status"] == "wired"
+
+
 def test_ec03_ignores_wrong_run_verifier_outage_for_claim_status(tmp_path, monkeypatch):
     import subprocess
 

@@ -260,7 +260,14 @@ def _adapter_observation(
             if adapter is _verify_evidence_package:
                 return _invalid(ctx, artifact, "schema_missing")
             snapshot_artifact = ctx.reader.copy(artifact)
-            ctx.reader.copy(artifact.parent / "receipt.json")
+            receipt_path = artifact.parent / "receipt.json"
+            try:
+                ctx.reader.copy(receipt_path)
+            except OSError:
+                refusal = ctx.reader.errors.get(receipt_path)
+                if refusal in {"discovery_unreadable", "read_limit_exceeded", "symlink_refused"}:
+                    return _obs(relpath, "discovered", "invalid", _dims(), [refusal])
+                raise
         if adapter not in {_verify_evidence_package, _verify_cosign_bundle}:
             _copy_public_trust(ctx)
         elif adapter is _verify_cosign_bundle:
