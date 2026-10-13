@@ -262,7 +262,6 @@ def test_worker_payload_bounds_model_and_adapter_version_labels():
     assert fields["acpx_version"]["source"] == "unknown"
     assert fields["acpx_version"]["unknown_reason"] == "acpx-version-not-reported"
     assert "requested_model" not in synthesis
-
     documented_model_id = "grok-4.5[effort=high,fast=true]"
     observed = worker_payload(
         [
@@ -281,6 +280,91 @@ def test_worker_payload_bounds_model_and_adapter_version_labels():
     assert observed["requested_model"] == documented_model_id
     assert observed["effective_model"] == documented_model_id
     assert observed["acpx_version"] == "0.12.0"
+
+
+def test_acpx_receipt_sanitizes_provider_detail_and_events(tmp_path: Path):
+    credential = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"
+    private_path = r"\root\.ssh\id_rsa"
+    result = WorkerResult(
+        worker="cursor-worker",
+        task="inspect diagnostics",
+        text="done",
+        ok=False,
+        detail=f"provider startup failed: {credential} {private_path}",
+        stdout=f"provider output: {credential}",
+        stderr=f"provider stderr: {credential} {private_path}",
+        transport="acpx",
+        session_id=credential,
+        request_id=private_path,
+        safe_events=(
+            {"type": credential, "status": credential},
+            {"type": "agent_message_chunk", "status": credential},
+        ),
+    )
+
+    output_dir = tmp_path / "run"
+    recorded = write_worker_logs(output_dir, [result])[0]
+    entry = worker_payload([recorded])[0]
+    serialized = json.dumps(entry)
+
+    assert credential not in serialized
+    assert private_path not in serialized
+    assert entry["detail"] == "<redacted diagnostic>"
+    assert entry["events"] == [{"type": "agent_message_chunk"}]
+    assert entry["session_id"] == "<redacted diagnostic>"
+    assert entry["request_id"] == "<redacted diagnostic>"
+    assert (output_dir / recorded.stdout_log).read_text() == "<redacted diagnostic>"
+    assert (output_dir / recorded.stderr_log).read_text() == "<redacted diagnostic>"
+
+
+def test_sanitized_configured_model_keeps_other_provenance_fields():
+    credential = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"
+    metadata_provenance = {
+        "observed_at": "2026-10-13T12:00:00+00:00",
+        "fields": {
+            "requested_model": {
+                "source": "declared",
+                "locator": "configured-request",
+                "digest": None,
+                "unknown_reason": "execution-not-started",
+            },
+            "effective_model": {
+                "source": "observed",
+                "locator": "acp-config-option-update",
+                "digest": None,
+                "unknown_reason": "backend-revision-unavailable",
+            },
+            "acpx_version": {
+                "source": "observed",
+                "locator": "acpx-version-output",
+                "digest": None,
+                "unknown_reason": None,
+            },
+        },
+    }
+
+    entry = worker_payload(
+        [
+            WorkerResult(
+                worker="cursor-worker",
+                task="inspect metadata",
+                text="done",
+                ok=False,
+                transport="acpx",
+                requested_model=credential,
+                effective_model="composer-2.5",
+                acpx_version="0.12.0",
+                metadata_provenance=metadata_provenance,
+            )
+        ]
+    )[0]
+
+    assert "requested_model" not in entry
+    fields = entry["metadata_provenance"]["fields"]
+    assert fields["requested_model"]["source"] == "unknown"
+    assert fields["requested_model"]["unknown_reason"] == "requested-model-not-recorded"
+    assert fields["effective_model"]["source"] == "observed"
+    assert fields["acpx_version"]["source"] == "observed"
 
 
 def test_non_acp_model_display_labels_survive_receipt_serialization():

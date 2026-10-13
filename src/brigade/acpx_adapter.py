@@ -28,6 +28,23 @@ _MODEL_ID = re.compile(
     r"(?:\[[A-Za-z][A-Za-z0-9._-]{0,31}=[A-Za-z0-9._:+/-]{1,64}"
     r"(?:,[A-Za-z][A-Za-z0-9._-]{0,31}=[A-Za-z0-9._:+/-]{1,64}){0,7}\])?"
 )
+_SAFE_EVENT_TYPES = frozenset(
+    {
+        "agent_message_chunk",
+        "agent_thought_chunk",
+        "available_commands_update",
+        "config_option_update",
+        "current_mode_update",
+        "plan",
+        "provider_auth",
+        "session_info_update",
+        "tool_call",
+        "tool_call_update",
+        "usage_update",
+        "user_message_chunk",
+    }
+)
+_SAFE_EVENT_STATUSES = frozenset({"authenticated", "unauthenticated", "unavailable", "unrecognized"})
 _UNAUTHENTICATED_LINE = re.compile(
     r"^(?:[x✗✘]\s*)?(?:not logged in|not authenticated|unauthenticated|authentication required)[.!]?$",
     re.IGNORECASE,
@@ -58,7 +75,7 @@ class CursorAuthStatus:
     exit_code: int
 
 
-def _safe_diagnostic(text: str, *, limit: int = 2000) -> str:
+def sanitize_diagnostic(text: str, *, limit: int = 2000) -> str:
     safe = _ANSI_ESCAPE.sub("", text).strip()
     safe = _AUTH_IDENTITY.sub(r"\1 <redacted>", safe)
     safe = _EMAIL.sub("<redacted>", safe)
@@ -67,6 +84,28 @@ def _safe_diagnostic(text: str, *, limit: int = 2000) -> str:
     if contains_credential(safe) or contains_private_path(safe):
         safe = "<redacted diagnostic>"
     return safe[:limit]
+
+
+def sanitize_events(events: object) -> list[dict[str, str]]:
+    """Retain only closed ACP event labels and statuses in receipts."""
+    if not isinstance(events, (list, tuple)):
+        return []
+    safe: list[dict[str, str]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        if not isinstance(kind, str) or kind not in _SAFE_EVENT_TYPES:
+            continue
+        clean: dict[str, str] = {"type": kind}
+        status = event.get("status")
+        if isinstance(status, str) and status in _SAFE_EVENT_STATUSES:
+            clean["status"] = status
+        detail = event.get("detail")
+        if kind == "provider_auth" and isinstance(detail, str):
+            clean["detail"] = sanitize_diagnostic(detail)
+        safe.append(clean)
+    return safe
 
 
 def _diagnostic_line(stdout: str, stderr: str) -> str:
@@ -78,12 +117,12 @@ def _status_payload(stdout: str) -> tuple[dict[str, Any] | None, str]:
     try:
         payload = json.loads(stdout)
     except (json.JSONDecodeError, ValueError):
-        return None, _safe_diagnostic(stdout)
+        return None, sanitize_diagnostic(stdout)
     if not isinstance(payload, dict):
-        return None, _safe_diagnostic(stdout)
+        return None, sanitize_diagnostic(stdout)
     safe_payload = {key: value for key in _SAFE_STATUS_KEYS if isinstance((value := payload.get(key)), (bool, str))}
     safe_stdout = json.dumps(safe_payload, sort_keys=True, separators=(",", ":"))
-    return payload, _safe_diagnostic(safe_stdout)
+    return payload, sanitize_diagnostic(safe_stdout)
 
 
 def cursor_auth_status(*, process_registry: proc.ProcessRegistry | None = None) -> CursorAuthStatus:
@@ -102,7 +141,7 @@ def cursor_auth_status(*, process_registry: proc.ProcessRegistry | None = None) 
     else:
         result = proc.run(argv, timeout=CURSOR_AUTH_TIMEOUT_SECONDS, process_registry=process_registry)
     payload, stdout = _status_payload(result.stdout)
-    stderr = _safe_diagnostic(result.stderr)
+    stderr = sanitize_diagnostic(result.stderr)
     diagnostic = _diagnostic_line(stdout, stderr)
     authenticated = payload.get("isAuthenticated") if payload is not None else None
     primary_line = next((line.strip() for line in stdout.splitlines() if line.strip()), "")
@@ -252,6 +291,11 @@ def _objects(stdout: str | None) -> tuple[list[dict[str, Any]] | None, str]:
             return None, f"invalid ACP NDJSON at line {line_number}: {exc.msg}"
         if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
             return None, f"invalid ACP NDJSON at line {line_number}: expected JSON-RPC 2.0 object"
+        has_result = "result" in message
+        has_error = "error" in message
+        if has_result or has_error:
+            if has_result == has_error or "id" not in message or "method" in message:
+                return None, f"invalid ACP NDJSON at line {line_number}: malformed JSON-RPC response"
         messages.append(message)
     if not messages:
         return None, "empty ACP NDJSON stream"
@@ -315,7 +359,7 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
     session_id: str | None = None
     request_id: str | None = None
     stop_reason: str | None = None
-    active_prompt_ids: set[tuple[str, str | int]] = set()
+    active_prompt_id: tuple[str, str | int] | None = None
     effective_model: str | None = None
     safe_events: list[dict[str, Any]] = []
     prompt_completed = False
@@ -340,9 +384,9 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
                 "acp-session-new-response" if method == "session/new" else "acp-set-config-option-response"
             )
         is_response = "result" in message or "error" in message
-        matched_prompt_request = is_response and message_id_key is not None and message_id_key in active_prompt_ids
+        matched_prompt_request = is_response and message_id_key is not None and message_id_key == active_prompt_id
         if matched_prompt_request and message_id_key is not None:
-            active_prompt_ids.discard(message_id_key)
+            active_prompt_id = None
         matched_config_request = (
             is_response and message_id_key is not None and message_id_key in config_option_request_ids
         )
@@ -370,15 +414,15 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
             if message.get("method") == "session/prompt" and isinstance(message.get("id"), (str, int)):
                 request_id = str(message["id"])
                 if message_id_key is not None:
-                    active_prompt_ids.add(message_id_key)
+                    active_prompt_id = message_id_key
         update = _update(message)
         if update is not None:
             kind = update.get("sessionUpdate")
-            safe_event: dict[str, Any] = {"type": str(kind or "session_update")}
+            safe_event: dict[str, Any] = {"type": kind} if isinstance(kind, str) else {}
             status = update.get("status")
-            if isinstance(status, str):
+            if isinstance(status, str) and status in _SAFE_EVENT_STATUSES:
                 safe_event["status"] = status
-            safe_events.append(safe_event)
+            safe_events.extend(sanitize_events([safe_event]))
             if kind == "config_option_update" and ("modelId" in update or "configOptions" in update):
                 effective_model = _model_from(update)
                 if effective_model is not None:
@@ -634,14 +678,15 @@ def run_cursor(
                 safe_events=(auth_event, *parsed["events"]),
                 transport_warning=late_warning,
             )
-        detail = result.stderr.strip() or parse_error or f"acpx exit {result.code}"
+        raw_detail = result.stderr.strip() or parse_error or f"acpx exit {result.code}"
+        permission_denied = bool(_PERMISSION_FAILURE.search(raw_detail))
+        detail = sanitize_diagnostic(raw_detail, limit=200)
         timed_out = result.code in {3, 124}
         provider_startup = parsed is None or not parsed["text"]
-        permission_denied = bool(_PERMISSION_FAILURE.search(detail))
         return AgentResult(
             text=parsed["text"] if parsed is not None else "",
             ok=False,
-            detail=detail[:200],
+            detail=detail,
             failure_phase="inference" if timed_out or not provider_startup else "dispatch",
             failure_kind=(
                 "timeout"

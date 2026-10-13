@@ -160,6 +160,52 @@ def test_acpx_model_lease_denial_keeps_configured_provenance(tmp_path):
     assert result.metadata_provenance["fields"]["requested_model"]["locator"] == "configured-request"
 
 
+def test_rejected_acpx_request_keeps_configured_provenance(monkeypatch, tmp_path):
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="plan"),
+            "cursor": Agent(
+                name="cursor",
+                cli="cursor",
+                role="write",
+                transport="acpx",
+                transport_version="0.12.0",
+                model="composer-2.5",
+            ),
+        },
+        max_workers=1,
+    )
+    rejected = message_envelope.MessageDelivery(
+        message_id="rejected",
+        phase="work",
+        from_seat="brigade",
+        to_seat="cursor",
+        kind="worker-request",
+        envelope={},
+        delivered=False,
+        reason="blocked",
+    )
+    monkeypatch.setattr(message_envelope, "emit", lambda *args, **kwargs: rejected)
+
+    result = run_transport.dispatch(
+        [Assignment(worker="cursor", task="inspect")],
+        roster,
+        build_prompt=lambda agent, assignment, **kwargs: assignment.task,
+        run_appserver_worker=lambda *args, **kwargs: agents.AgentResult(text="", ok=False),
+        event_writer=lambda *args, **kwargs: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path,
+    )[0]
+
+    assert result.failure_phase == "dispatch"
+    assert result.transport == "acpx"
+    assert result.requested_model == "composer-2.5"
+    assert result.metadata_provenance is not None
+    assert result.metadata_provenance["fields"]["requested_model"]["locator"] == "configured-request"
+
+
 def test_dispatch_releases_lease_when_worker_invocation_raises(monkeypatch, tmp_path):
     released: list[str] = []
 

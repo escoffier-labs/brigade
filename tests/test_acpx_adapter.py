@@ -727,6 +727,86 @@ def test_parse_stream_only_completes_matching_active_prompt_ids():
         assert parsed["stop_reason"] is None
 
 
+def test_parse_stream_completion_is_bound_to_latest_prompt():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "old", "params": {}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "current", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "partial"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "old", "result": {"stopReason": "end_turn"}},
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None
+    assert parsed["request_id"] == "current"
+    assert parsed["prompt_completed"] is False
+    assert parsed["stop_reason"] is None
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        {"id": "req", "result": {"stopReason": "end_turn"}, "error": {"code": -32072}},
+        {"id": "req", "method": "session/prompt", "result": {"stopReason": "end_turn"}},
+    ),
+)
+def test_parse_stream_rejects_malformed_jsonrpc_responses(response):
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "req", "params": {}},
+            {"jsonrpc": "2.0", **response},
+        )
+    )
+
+    assert parsed is None
+    assert "malformed JSON-RPC response" in error
+
+
+def test_parse_stream_drops_unrecognized_event_labels():
+    credential = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "req", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"update": {"sessionUpdate": credential, "status": credential}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"update": {"sessionUpdate": "agent_message_chunk", "status": credential}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "safe answer"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "req", "result": {"stopReason": "end_turn"}},
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None
+    assert parsed["events"] == [{"type": "agent_message_chunk"}, {"type": "agent_message_chunk"}]
+    assert all("status" not in event for event in parsed["events"])
+
+
 def test_parse_stream_retires_config_request_id_without_config_options():
     parsed, error = acpx_adapter.parse_stream(
         _stream(
@@ -820,6 +900,37 @@ def test_failed_run_preserves_observed_model_and_session_metadata(monkeypatch, t
     assert result.session_id == "session-1"
     assert result.request_id == "req-1"
     assert result.safe_events
+
+
+def test_failed_run_redacts_credential_shaped_provider_diagnostic(monkeypatch, tmp_path):
+    credential = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"
+    stream = _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {"jsonrpc": "2.0", "method": "session/prompt", "id": "req-1", "params": {}},
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "partial"},
+                }
+            },
+        },
+        {"jsonrpc": "2.0", "id": "req-1", "error": {"code": -32000, "message": "provider failed"}},
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter([proc.Result(0, "acpx 0.12.0\n", ""), proc.Result(1, stream, f"provider error {credential}")])
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.detail == "<redacted diagnostic>"
+    assert credential not in result.detail
 
 
 def test_structured_permission_failure_preserves_prior_model_evidence(monkeypatch, tmp_path):

@@ -748,6 +748,17 @@ def dispatch(
                 detail=detail,
                 failure_phase="dispatch",
                 failure_kind=failure_kind,
+                transport=agent.transport,
+                requested_model=agent.model,
+                metadata_provenance=_metadata_provenance(
+                    agents.AgentResult(
+                        text="",
+                        ok=False,
+                        failure_phase="preflight",
+                        transport=agent.transport,
+                        requested_model=agent.model,
+                    )
+                ),
                 provenance=request.envelope,
             )
         started = time.monotonic()
