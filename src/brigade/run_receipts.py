@@ -29,8 +29,15 @@ def _safe_metadata_provenance(value: dict[str, object]) -> dict[str, object]:
     """Copy the closed provenance vocabulary, dropping arbitrary adapter data."""
     safe: dict[str, object] = {}
     observed_at = value.get("observed_at")
-    if isinstance(observed_at, str):
-        safe["observed_at"] = observed_at[:64]
+    if (
+        isinstance(observed_at, str)
+        and len(observed_at) <= 64
+        and re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
+            observed_at,
+        )
+    ):
+        safe["observed_at"] = observed_at
     fields = value.get("fields")
     safe_fields: dict[str, object] = {}
     if isinstance(fields, dict):
@@ -38,11 +45,29 @@ def _safe_metadata_provenance(value: dict[str, object]) -> dict[str, object]:
             evidence = fields.get(name)
             if not isinstance(evidence, dict):
                 continue
-            safe_fields[name] = {
-                key: evidence.get(key)
-                for key in ("source", "locator", "digest", "unknown_reason")
-                if isinstance(evidence.get(key), str) or evidence.get(key) is None
-            }
+            source = evidence.get("source")
+            locator = evidence.get("locator")
+            unknown_reason = evidence.get("unknown_reason")
+            digest = evidence.get("digest")
+            safe_evidence: dict[str, object] = {}
+            if source in {"declared", "observed", "inferred"}:
+                safe_evidence["source"] = source
+            if locator in {"launch-argument", "acp-session-update", "acpx-version-output"}:
+                safe_evidence["locator"] = locator
+            if isinstance(digest, str) and re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+                safe_evidence["digest"] = digest.lower()
+            elif digest is None:
+                safe_evidence["digest"] = None
+            if unknown_reason in {
+                "mutable-alias-not-backend-identity",
+                "launched-argument-not-backend-observation",
+                "backend-revision-unavailable",
+            }:
+                safe_evidence["unknown_reason"] = unknown_reason
+            elif unknown_reason is None:
+                safe_evidence["unknown_reason"] = None
+            if safe_evidence:
+                safe_fields[name] = safe_evidence
     safe["fields"] = safe_fields
     return safe
 

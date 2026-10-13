@@ -122,6 +122,30 @@ def test_worker_payload_distinguishes_declared_and_observed_model_evidence():
     assert "cursor-auto" not in str(entry["metadata_provenance"])
     assert "super-secret-token" not in str(entry)
 
+    untrusted = WorkerResult(
+        worker="other-worker",
+        task="inspect metadata",
+        text="done",
+        ok=True,
+        metadata_provenance={
+            "observed_at": "Bearer secret " + "x" * 100,
+            "fields": {
+                "requested_model": {
+                    "source": "Bearer secret-token",
+                    "locator": "x" * 500,
+                    "digest": "not-a-digest",
+                    "unknown_reason": "private provider error",
+                }
+            },
+        },
+    )
+
+    untrusted_entry = worker_payload([untrusted])[0]["metadata_provenance"]
+
+    assert "observed_at" not in untrusted_entry
+    assert "requested_model" not in untrusted_entry["fields"]
+    assert "secret" not in str(untrusted_entry)
+
 
 def test_legacy_run_message_displays_unknown_provenance_and_is_not_replayed():
     env, display = message_envelope.synthesize_legacy_message_provenance()

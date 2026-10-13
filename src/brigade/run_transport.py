@@ -353,7 +353,7 @@ class WorkerResult:
 def _metadata_provenance(result: agents.AgentResult) -> dict[str, object] | None:
     """Attribute only facts that the acpx Cursor adapter can distinguish."""
     if result.transport != "acpx":
-        return result.metadata_provenance
+        return None
     fields: dict[str, object] = {}
     if result.requested_model is not None:
         requested_unknown = (
