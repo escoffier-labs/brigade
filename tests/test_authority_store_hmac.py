@@ -1384,13 +1384,40 @@ def test_authority_downgrade_clears_isolation_posture_marker_after_rename(
     assert audit_log.is_file()
     lines = audit_log.read_text().splitlines()
     downgrade_audits = [json.loads(line) for line in lines if "authority-downgrade" in line]
-    removed_fingerprints = {
-        record.get("target_fingerprint")
+    completion = next(
+        record
         for record in downgrade_audits
         if record.get("phase") == "complete" and record.get("posture_marker_removed") is True
-    }
-    assert source_fingerprint in removed_fingerprints
-    assert dest_fingerprint in removed_fingerprints
+    )
+    assert completion["posture_marker_fingerprints_removed"] == sorted((source_fingerprint, dest_fingerprint))
+
+
+def test_authority_downgrade_rolls_back_without_completion_audit_on_audit_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _bind_workspace(tmp_path)
+    signed_marker = authority_marker.signed_marker_path(authority_marker.target_fingerprint(tmp_path))
+    posture_marker = _isolation_posture_marker_path(tmp_path)
+    store_before = _store_path(tmp_path).read_bytes()
+    original_append_audit = authority_marker.append_audit
+
+    def fail_completion_audit(record: dict, *, env: dict[str, str] | None = None) -> Path:
+        if record.get("phase") == "complete":
+            raise OSError("audit unavailable")
+        return original_append_audit(record, env=env)
+
+    monkeypatch.setattr(authority_marker, "append_audit", fail_completion_audit)
+
+    with pytest.raises(OSError, match="authority downgrade audit failed; marker restored"):
+        ledger.downgrade_external_directory_authority(tmp_path)
+
+    assert signed_marker.is_file()
+    assert posture_marker.is_file()
+    assert _store_path(tmp_path).read_bytes() == store_before
+    audit_records = [json.loads(line) for line in authority_marker.audit_path().read_text().splitlines()]
+    downgrade_records = [record for record in audit_records if record.get("action") == "authority-downgrade"]
+    assert downgrade_records
+    assert all(record.get("phase") != "complete" for record in downgrade_records)
 
 
 def test_authority_downgrade_clears_isolation_posture_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -726,25 +726,6 @@ def downgrade_external_directory_authority(
             else:
                 postures_removed.append(p)
                 _downgrade_durability_checkpoint(p)
-
-                # Append dedicated audit record for removed posture marker
-                try:
-                    authority_marker.append_audit(
-                        {
-                            "action": "authority-downgrade",
-                            "actor": actor_value,
-                            "created_at": utc_now_iso_z(),
-                            "phase": "complete",
-                            "removed": False,
-                            "posture_marker_removed": True,
-                            "store_unwrapped": False,
-                            "target": resolved,
-                            "target_fingerprint": p.name,
-                        },
-                        env=env,
-                    )
-                except OSError as exc:
-                    raise OSError("authority downgrade audit is unavailable; marker not removed") from exc
     except OSError:
         try:
             _restore_all()
@@ -759,6 +740,7 @@ def downgrade_external_directory_authority(
         "phase": "complete",
         "removed": marker_removed,
         "posture_marker_removed": bool(postures_removed),
+        "posture_marker_fingerprints_removed": sorted(path.name for path in postures_removed),
         "store_unwrapped": unsigned_record is not None,
         "target": resolved,
         "target_fingerprint": fingerprint,
