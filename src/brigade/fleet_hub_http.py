@@ -1823,7 +1823,7 @@ def make_handler(
                 )
                 return
             except fleet_hub_messages.MessageAuthError as exc:
-                self._send_json(403, {"error": str(exc)})
+                self._send_json(403, {"error": str(exc), "code": "message_sender_inactive"})
                 return
             except fleet_hub_messages.MessageFutureTimestamp as exc:
                 self._send_json(400, {"error": str(exc), "code": "message_timestamp_future"})

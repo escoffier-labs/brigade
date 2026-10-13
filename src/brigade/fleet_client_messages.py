@@ -27,7 +27,7 @@ _NOT_PROVIDED = object()
 
 
 class _UnauthorizedError(fleet_client.FleetClientError):
-    """An authentication failure cannot safely queue work in a credential-scoped spool."""
+    """A sender authentication failure cannot safely queue work in its scoped spool."""
 
 
 def _spool_path(node_id: str, token: str | None = None) -> Path:
@@ -646,8 +646,8 @@ def _reply_recipient(hub: str, token: str, message_id: int, *, timeout: float | 
     body = {"action": "list", "after": message_id - 1, "unacked": False}
     status, payload = _request(hub, token, body) if timeout is None else _request(hub, token, body, timeout=timeout)
     messages = payload.get("messages")
-    if status == 401:
-        raise _UnauthorizedError(str(payload.get("error") or "fleet hub returned HTTP 401"))
+    if status == 401 or (status == 403 and payload.get("code") == "message_sender_inactive"):
+        raise _UnauthorizedError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
     if status != 200 or not isinstance(messages, list):
         raise fleet_client.FleetClientError("fleet hub could not resolve the reply recipient")
     previous_id = message_id - 1
@@ -737,10 +737,10 @@ def _drain_locked(
             fleet_client._write_spool_atomic(path, retained, dir_fd=dir_fd)
             return delivered, True
         code = payload.get("code")
-        if status == 401:
+        if status == 401 or (status == 403 and code == "message_sender_inactive"):
             retained.extend(messages[index:])
             fleet_client._write_spool_atomic(path, retained, dir_fd=dir_fd)
-            raise _UnauthorizedError(str(payload.get("error") or "fleet hub returned HTTP 401"))
+            raise _UnauthorizedError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
         if status == 429 and code == "message_recipient_quota":
             rejected_recipient = payload.get("recipient") or recipient
             if isinstance(rejected_recipient, str):

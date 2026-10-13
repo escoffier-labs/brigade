@@ -387,6 +387,33 @@ def test_revoked_sender_is_rechecked_inside_message_transaction(message_hub):
     conn.close()
 
 
+def test_http_sender_revocation_race_has_retryable_error_code(message_hub, monkeypatch):
+    base, token_a, _token_b, db = message_hub
+    handle = fleet_hub_messages.handle
+
+    def revoke_after_caller_auth(conn, raw, *, caller):
+        conn.execute(
+            "UPDATE nodes SET revoked_at=? WHERE node_id=?",
+            (datetime.now(timezone.utc).isoformat(), NODE_A),
+        )
+        conn.commit()
+        return handle(conn, raw, caller=caller)
+
+    monkeypatch.setattr(fleet_hub_messages, "handle", revoke_after_caller_auth)
+
+    status, payload = _request(
+        base,
+        token_a,
+        {"action": "send", "to": NODE_B, "subject": "Race", "body": "Retain", "client_id": "auth-race"},
+    )
+
+    assert status == 403
+    assert payload["code"] == "message_sender_inactive"
+    assert payload["error"] == "sender is not an active hub principal"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM fleet_messages").fetchone()[0] == 0
+
+
 def test_client_enqueue_time_cannot_bypass_sender_daily_quota(message_hub, monkeypatch):
     base, token_a, _token_b, db = message_hub
     monkeypatch.setattr(fleet_hub_messages, "SENDER_DAILY_QUOTA", 1)
@@ -1119,7 +1146,14 @@ def test_new_send_reports_unauthorized_without_cross_credential_spooling(tmp_pat
     assert not fleet_client_messages._spool_path(NODE_A, "node-secret").exists()
 
 
-def test_send_surfaces_unauthorized_while_draining_existing_spool(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("status", "response"),
+    [
+        (401, {"error": "unauthorized"}),
+        (403, {"error": "sender is not an active hub principal", "code": "message_sender_inactive"}),
+    ],
+)
+def test_send_surfaces_unauthorized_while_draining_existing_spool(tmp_path, monkeypatch, status, response):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     monkeypatch.setattr(
@@ -1138,9 +1172,9 @@ def test_send_surfaces_unauthorized_while_draining_existing_spool(tmp_path, monk
     }
     with fleet_client._spool_lock(path) as dir_fd:
         assert fleet_client._spool_append_locked(path, old, dir_fd=dir_fd)
-    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (401, {"error": "unauthorized"}))
+    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (status, response))
 
-    with pytest.raises(fleet_client.FleetClientError, match="unauthorized"):
+    with pytest.raises(fleet_client.FleetClientError, match=response["error"]):
         fleet_client_messages.send(
             recipient=NODE_B,
             subject="New message",
@@ -1150,12 +1184,19 @@ def test_send_surfaces_unauthorized_while_draining_existing_spool(tmp_path, monk
         )
 
     assert fleet_client._read_spool(path) == [old]
-    with pytest.raises(fleet_client.FleetClientError, match="unauthorized"):
+    with pytest.raises(fleet_client.FleetClientError, match=response["error"]):
         fleet_client_messages.flush(NODE_A)
     assert fleet_client._read_spool(path) == [old]
 
 
-def test_send_surfaces_unauthorized_reply_lookup_while_draining(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("status", "response"),
+    [
+        (401, {"error": "unauthorized"}),
+        (403, {"error": "sender is not an active hub principal", "code": "message_sender_inactive"}),
+    ],
+)
+def test_send_surfaces_unauthorized_reply_lookup_while_draining(tmp_path, monkeypatch, status, response):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     monkeypatch.setattr(
@@ -1186,11 +1227,11 @@ def test_send_surfaces_unauthorized_reply_lookup_while_draining(tmp_path, monkey
     def request(_hub, _token, message, **_kwargs):
         if message.get("client_id") == "blocked-message":
             return 429, {"error": "quota", "code": "message_recipient_quota", "recipient": NODE_B}
-        return 401, {"error": "unauthorized"}
+        return status, response
 
     monkeypatch.setattr(fleet_client_messages, "_request", request)
 
-    with pytest.raises(fleet_client.FleetClientError, match="unauthorized"):
+    with pytest.raises(fleet_client.FleetClientError, match=response["error"]):
         fleet_client_messages.send(
             recipient=NODE_A,
             subject="New message",
@@ -1205,7 +1246,14 @@ def test_send_surfaces_unauthorized_reply_lookup_while_draining(tmp_path, monkey
     assert pending[1] == reply
 
 
-def test_new_reply_surfaces_unauthorized_parent_lookup(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("status", "response"),
+    [
+        (401, {"error": "unauthorized"}),
+        (403, {"error": "sender is not an active hub principal", "code": "message_sender_inactive"}),
+    ],
+)
+def test_new_reply_surfaces_unauthorized_parent_lookup(tmp_path, monkeypatch, status, response):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     monkeypatch.setattr(
@@ -1228,11 +1276,11 @@ def test_new_reply_surfaces_unauthorized_parent_lookup(tmp_path, monkeypatch):
     def request(_hub, _token, message, **_kwargs):
         if message.get("client_id") == "blocked-message":
             return 429, {"error": "quota", "code": "message_recipient_quota", "recipient": NODE_B}
-        return 401, {"error": "unauthorized"}
+        return status, response
 
     monkeypatch.setattr(fleet_client_messages, "_request", request)
 
-    with pytest.raises(fleet_client.FleetClientError, match="unauthorized"):
+    with pytest.raises(fleet_client.FleetClientError, match=response["error"]):
         fleet_client_messages.reply(42, body="Reply text", subject=None, reference=None, priority="normal")
 
     pending = fleet_client._read_spool(path)
