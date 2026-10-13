@@ -629,7 +629,7 @@ def _cosign_bundle_shape_ok(bundle: dict[str, Any]) -> bool:
 
 
 def _evaluate_cosign_bundle_exists(ctx: _Context) -> _Discovery:
-    """EC-03: verify a run-bound cosign Test Result against the configured public key."""
+    """Verify a run-bound cosign Test Result against the configured public key."""
     found, out = _verify_receipt_children(ctx, "attestation.sigstore.json")
     adapter = _VERIFIER_ADAPTERS.get("cosign-bundle")
     for run_dir, path in found:
@@ -646,6 +646,7 @@ def _evaluate_cosign_bundle_exists(ctx: _Context) -> _Discovery:
             obs = _invalid(ctx, path, "dsse_signatures_missing")
         elif adapter is not None:
             obs = _adapter_observation(adapter, ctx, path, relpath)
+            out.verifier_unavailable |= obs.proposed == "unavailable"
         else:
             not_wired = ("not_checked", "verifier_not_wired")
             obs = _obs(
@@ -710,8 +711,7 @@ def _agent_request_paths(ctx: _Context, run_dir: Path, out: _Discovery) -> list[
 def _evaluate_agent_request_signed(ctx: _Context) -> _Discovery:
     """EC-04: signed agent-request envelopes verify and name their run.
 
-    Signature, key trust and the statement's run are checked.  The ordering of
-    the request relative to worker dispatch is not independently checked.
+    Signature, key trust and statement run are checked; dispatch ordering is not.
     """
     run_dirs, out = _run_dirs(ctx)
     for run_dir in run_dirs:

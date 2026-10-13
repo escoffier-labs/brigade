@@ -978,6 +978,7 @@ def test_ec03_cosign_bundle_preserves_unavailable_verifier_state(tmp_path, monke
 
     assert result["outcome"] == "unavailable"
     assert result["reason"] == "verifier_tool_unavailable"
+    assert result["verifier"]["status"] == "unavailable"
     assert not run_dir.joinpath("attestation.sigstore.json").is_symlink()
 
 
@@ -1027,6 +1028,7 @@ def test_ec03_cosign_bundle_marks_missing_cosign_tool_unavailable(tmp_path, monk
 
     assert result["outcome"] == "unavailable"
     assert result["reason"] == "verifier_tool_unavailable"
+    assert result["verifier"]["status"] == "unavailable"
 
 
 def _fixture_ec07(target: Path) -> None:
