@@ -122,7 +122,7 @@ def _anchored_proposals(target: Path) -> list[tuple[str, dict[str, Any]]]:
     """
     entries: list[tuple[str, bytes]] = []
     try:
-        with _registry_mod._held_state_root(target) as state_anchor:
+        with _registry_mod._held_state_root(target, writable=False) as state_anchor:
             names = _registry_mod._plain_subdirs_under_anchor(state_anchor, "skills", "inbox") or []
             for name in names:
                 try:
@@ -288,7 +288,7 @@ def inbox_diff(*, target: Path, proposal_id: str, json_output: bool = False) -> 
     proposed_display = _registry_mod._inbox_root(target) / name / "skill" / "SKILL.md"
     existing_display = _registry_mod._skill_path(target, skill_id) / "SKILL.md"
     try:
-        with _registry_mod._held_state_root(target) as state_anchor:
+        with _registry_mod._held_state_root(target, writable=False) as state_anchor:
             # Both sides are read through the held anchor: the proposed tree
             # via descriptor collection and the registry copy via the
             # anchored reader, so symlinked components never drag outside

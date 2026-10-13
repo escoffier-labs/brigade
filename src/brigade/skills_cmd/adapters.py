@@ -120,7 +120,7 @@ def _mcp_read_resource(target: Path, uri: str) -> tuple[str, str] | tuple[None, 
     # Every registry read below goes through the held state-root anchor; a
     # refused or absent entry yields (None, None) instead of outside content.
     try:
-        with _registry_mod._held_state_root(target) as anchor:
+        with _registry_mod._held_state_root(target, writable=False) as anchor:
             if name == "SKILL.md":
                 raw = _registry_mod._read_state_file_bytes(anchor, "skills", "registry", skill_id, "SKILL.md")
                 return (raw.decode("utf-8", errors="replace"), "text/markdown") if raw is not None else (None, None)
@@ -202,7 +202,7 @@ def _mcp_tool_call(target: Path, name: str, arguments: dict[str, Any]) -> tuple[
         return text or "", text is None
     if name == "get_skill_metadata":
         try:
-            with _registry_mod._held_state_root(target) as anchor:
+            with _registry_mod._held_state_root(target, writable=False) as anchor:
                 metadata = _registry_mod._anchored_registry_metadata(anchor, skill_id)
         except _registry_mod.SkillsStatePathError:
             metadata = {}
@@ -393,7 +393,7 @@ def _plain_files_under_anchor(anchor: _registry_mod._StateRootAnchor, *relative:
     """
     if not _registry_mod._HAS_DESCRIPTOR_ANCHOR:
         raise _registry_mod._fallback_mutation_refusal("reads", anchor.workspace / ".brigade")
-    fd, opened = _registry_mod._anchor_open_chain(anchor, *relative, missing_ok=True)
+    fd, opened = _registry_mod._anchor_open_chain(anchor, *relative, missing_ok=True, writable=False)
     if fd is None:
         return None
     try:
@@ -425,7 +425,7 @@ def _fleet_receipts(target: Path) -> dict[tuple[str, str], dict[str, Any]]:
     """
     receipts: dict[tuple[str, str], dict[str, Any]] = {}
     try:
-        with _registry_mod._held_state_root(target) as anchor:
+        with _registry_mod._held_state_root(target, writable=False) as anchor:
             names = _plain_files_under_anchor(anchor, "skills", "installs")
             if not names:
                 return receipts

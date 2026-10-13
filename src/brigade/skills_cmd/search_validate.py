@@ -164,7 +164,7 @@ def _lint_registry_payload(
     """
     display_dir = registry._skill_path(target, skill_id)
     try:
-        with registry._held_state_root(target) as anchor:
+        with registry._held_state_root(target, writable=False) as anchor:
             snapshot_dirs, snapshot_files = registry._read_registry_entry_tree(anchor, skill_id)
             if ("skill.json",) not in snapshot_files:
                 # A missing, symlinked, or otherwise unreadable metadata file

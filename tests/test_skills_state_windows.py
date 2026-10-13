@@ -7,12 +7,12 @@ import ctypes
 import os
 import stat
 import sys
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import pytest
 
-from brigade import dirfd, skills_cmd
+from brigade import dirfd, outcome_discovery, skills_cmd
 from brigade.skills_cmd import registry
 from tests.test_skills_cmd import _write_skill
 from tests.test_work_import_inbox_windows import _link_directory
@@ -78,6 +78,166 @@ def _read_only_directory_acl(path):
             assert api.SetFileSecurityW(str(path), 4, original), ctypes.WinError(ctypes.get_last_error())
     finally:
         kernel.LocalFree(restricted)
+
+
+@native_windows
+@pytest.mark.parametrize("restricted", ["workspace", "root", "tree"])
+def test_native_skills_read_commands_on_read_only_state(tmp_path, capsys, restricted):
+    source = _write_skill(tmp_path / "source")
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+    assert skills_cmd.install(workspace=tmp_path, skill="security-review", harness="mcp", json_output=True) == 0
+    capsys.readouterr()
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, json_output=True) == 0
+    proposal = json.loads(capsys.readouterr().out)["proposal_id"]
+    assert skills_cmd.pack_build(target=tmp_path, json_output=True) == 0
+    pack = json.loads(capsys.readouterr().out)["pack_id"]
+    state = tmp_path / ".brigade"
+    paths = [tmp_path] if restricted == "workspace" else [state]
+    if restricted == "tree":
+        paths = sorted(path for path in state.rglob("*") if path.is_dir())
+    before = {path.relative_to(state): path.read_bytes() for path in state.rglob("*") if path.is_file()}
+    with ExitStack() as stack:
+        for path in paths:
+            stack.enter_context(_read_only_directory_acl(path))
+        with pytest.raises(PermissionError):
+            fd = dirfd.open_directory_nofollow(paths[0], writable=True)
+            os.close(fd)
+        assert "security-review" in outcome_discovery._skill_names_at(tmp_path)
+        assert skills_cmd.search(target=tmp_path, query="security-review", json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["count"] == 1
+        assert skills_cmd.history(target=tmp_path, json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["count"] == 1
+        assert skills_cmd.fleet_status(target=tmp_path, json_output=True) == 0
+        fleet = json.loads(capsys.readouterr().out)
+        copy = next(row for row in fleet["copies"] if row["skill_id"] == "security-review" and row["harness"] == "mcp")
+        assert copy["status"] == "current"
+        assert copy["drift"]["receipt_known"] is True
+        assert skills_cmd.inbox_list(target=tmp_path, json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["proposal_count"] == 1
+        assert skills_cmd.inbox_show(target=tmp_path, proposal_id=proposal, json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["skill_id"] == "security-review"
+        assert skills_cmd.inbox_diff(target=tmp_path, proposal_id=proposal, json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["skill_id"] == "security-review"
+        assert skills_cmd.pack_list(target=tmp_path, json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["pack_count"] == 1
+        assert skills_cmd.pack_show(target=tmp_path, pack_id=pack, json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["pack"]["pack_id"] == pack
+        assert skills_cmd.lint(target=tmp_path, skill="registry:security-review", json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["valid"] is True
+        assert skills_cmd.import_skill(target=tmp_path, source=source, force=True, json_output=True) == 2
+        capsys.readouterr()
+    assert {path.relative_to(state): path.read_bytes() for path in state.rglob("*") if path.is_file()} == before
+    assert skills_cmd.import_skill(target=tmp_path, source=source, force=True, json_output=True) == 0
+
+
+@native_windows
+def test_native_skills_read_commands_do_not_create_missing_state(tmp_path, capsys):
+    with _read_only_directory_acl(tmp_path):
+        assert skills_cmd.search(target=tmp_path, query="security-review", json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["count"] == 0
+        assert skills_cmd.history(target=tmp_path, json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["count"] == 0
+        assert skills_cmd.inbox_list(target=tmp_path, json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["proposal_count"] == 0
+        assert skills_cmd.pack_list(target=tmp_path, json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["pack_count"] == 0
+    assert not (tmp_path / ".brigade").exists()
+
+
+@native_windows
+def test_native_skills_root_creation_refuses_swap_and_closes_handles(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_mkdir = dirfd.mkdir_child
+    original_open = dirfd.open_child_directory
+    original_workspace_open = dirfd.open_directory_nofollow
+    opened = []
+
+    def open_workspace(*args, **kwargs):
+        fd = original_workspace_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def open_child(*args, **kwargs):
+        fd = original_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def swap_during_creation(parent, name, mode=0o700):
+        with _reparse_replacement_setup(workspace):
+            workspace.rename(tmp_path / "held-workspace")
+            _link_directory(workspace, outside)
+        return original_mkdir(parent, name, mode)
+
+    monkeypatch.setattr(dirfd, "open_directory_nofollow", open_workspace)
+    monkeypatch.setattr(dirfd, "open_child_directory", open_child)
+    monkeypatch.setattr(dirfd, "mkdir_child", swap_during_creation)
+    with pytest.raises(skills_cmd.SkillsStatePathError, match="workspace changed"):
+        skills_cmd._open_state_root_descriptor(workspace)
+    assert not (outside / ".brigade").exists()
+    assert (tmp_path / "held-workspace" / ".brigade").is_dir()
+    assert len(opened) == 2
+    for fd in opened:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+@native_windows
+def test_native_skills_write_refuses_hardlink_and_closes_file(tmp_path, monkeypatch):
+    state = tmp_path / ".brigade" / "skills"
+    state.mkdir(parents=True)
+    victim = tmp_path / "outside-victim.txt"
+    victim.write_bytes(b"outside victim\n")
+    os.link(victim, state / "receipt.json")
+    original_open = dirfd.open_child_file
+    opened = []
+
+    def open_file(*args, **kwargs):
+        fd = original_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    with skills_cmd._held_state_root(tmp_path) as anchor:
+        monkeypatch.setattr(dirfd, "open_child_file", open_file)
+        try:
+            with pytest.raises(skills_cmd.SkillsStatePathError, match="single-link regular file"):
+                skills_cmd._write_state_file(anchor, "skills", "receipt.json", data=b"replacement\n")
+            assert victim.read_bytes() == b"outside victim\n"
+            assert len(opened) == 1
+            with pytest.raises(OSError):
+                os.fstat(opened[0])
+        finally:
+            for fd in opened:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+
+@native_windows
+def test_native_skills_missing_read_chain_closes_handles(tmp_path, monkeypatch):
+    (tmp_path / ".brigade" / "skills").mkdir(parents=True)
+    original_open = dirfd.open_child_directory
+    opened = []
+
+    def open_child(*args, **kwargs):
+        fd = original_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    with skills_cmd._held_state_root(tmp_path, writable=False) as anchor:
+        monkeypatch.setattr(dirfd, "open_child_directory", open_child)
+        assert skills_cmd._plain_subdirs_under_anchor(anchor, "skills", "missing") is None
+        assert skills_cmd._read_state_file_bytes(anchor, "skills", "missing", "data.json") is None
+        assert skills_cmd._state_file_exists(anchor, "skills", "missing", "data.json") is False
+        assert skills_cmd._state_entry_kind(anchor, "skills", "missing", "entry") == "missing"
+        assert len(opened) == 4
+        for fd in opened:
+            with pytest.raises(OSError):
+                os.fstat(fd)
 
 
 @native_windows

@@ -647,14 +647,14 @@ def test_inbox_accept_rereads_current_state(tmp_path, capsys, monkeypatch):
     real_held = skills_cmd._held_state_root
 
     @contextlib.contextmanager
-    def flip_before_accept_hold(target):
+    def flip_before_accept_hold(target, *, writable=True):
         holds["n"] += 1
         if holds["n"] == 2:
             current = json.loads(meta_path.read_text())
             current["status"] = "rejected"
             current["reason"] = "flipped-before-lock"
             meta_path.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n")
-        with real_held(target) as anchor:
+        with real_held(target, writable=writable) as anchor:
             yield anchor
 
     monkeypatch.setattr(skills_cmd, "_held_state_root", flip_before_accept_hold)

@@ -101,7 +101,7 @@ def _latest_install_receipt(target: Path, skill_id: str, harness: str) -> dict[s
     report the installation as unknown instead of surfacing outside JSON.
     """
     try:
-        with registry._held_state_root(target) as state_anchor:
+        with registry._held_state_root(target, writable=False) as state_anchor:
             raw = registry._read_state_file_bytes(
                 state_anchor, "skills", "installs", f"{registry._slug(skill_id)}-{harness}.json"
             )
@@ -123,7 +123,7 @@ def _install_history(target: Path, skill_id: str | None = None, harness: str | N
     the link to outside content.
     """
     try:
-        with registry._held_state_root(target) as state_anchor:
+        with registry._held_state_root(target, writable=False) as state_anchor:
             raw = registry._read_state_file_bytes(state_anchor, "skills", "installs", "history.jsonl")
     except registry.SkillsStatePathError:
         raw = None
@@ -278,7 +278,7 @@ def _anchor_subtree_is_plain(anchor: registry._StateRootAnchor, *relative: str) 
     if not registry._HAS_DESCRIPTOR_ANCHOR:
         raise registry._fallback_mutation_refusal("reads", anchor.workspace / ".brigade")
     try:
-        fd, opened = registry._anchor_open_chain(anchor, *relative, missing_ok=True)
+        fd, opened = registry._anchor_open_chain(anchor, *relative, missing_ok=True, writable=False)
     except registry.SkillsStatePathError:
         return False
     if fd is None:
@@ -321,7 +321,7 @@ def _installed_tree_snapshot(
     if anchor is not None:
         return _collect(anchor)
     try:
-        with registry._held_state_root(workspace) as fresh_anchor:
+        with registry._held_state_root(workspace, writable=False) as fresh_anchor:
             return _collect(fresh_anchor)
     except registry.SkillsStatePathError:
         # A redirected or planted component contributes nothing rather than
@@ -804,7 +804,7 @@ def _user_profile_package(
     # The package body comes from one anchored registry snapshot; nothing is
     # walked or re-read by pathname under the state root.
     try:
-        with registry._held_state_root(workspace) as anchor:
+        with registry._held_state_root(workspace, writable=False) as anchor:
             _snapshot_dirs, snapshot_files = registry._read_registry_entry_tree(anchor, skill_id)
     except registry.SkillsStatePathError:
         return None

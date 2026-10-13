@@ -126,7 +126,7 @@ def _skill_packs(target: Path) -> list[dict[str, Any]]:
     """
     packs: list[dict[str, Any]] = []
     try:
-        with _registry_mod._held_state_root(target) as anchor:
+        with _registry_mod._held_state_root(target, writable=False) as anchor:
             for sub, archived in ((("skills", "packs"), False), (("skills", "packs-archive"), True)):
                 names = _registry_mod._plain_subdirs_under_anchor(anchor, *sub)
                 if not names:

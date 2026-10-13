@@ -90,7 +90,7 @@ def _skill_names_at(root: Path) -> set[str]:
         names.add(skill_id)
     if (root / ".brigade").exists():
         try:
-            with skills_cmd._held_state_root(root) as anchor:
+            with skills_cmd._held_state_root(root, writable=False) as anchor:
                 listed = skills_cmd._plain_subdirs_under_anchor(anchor, "skills", "registry")
                 if listed:
                     for name in listed:

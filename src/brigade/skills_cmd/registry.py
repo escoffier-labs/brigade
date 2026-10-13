@@ -486,7 +486,7 @@ def _collect_classified_source_tree(
         if any(part in {"", ".", ".."} for part in parts):
             return None, [], {}, f"refusing skills state path as import source: {raw}"
         try:
-            with _held_state_root(target) as anchor:
+            with _held_state_root(target, writable=False) as anchor:
                 if _state_entry_kind(anchor, *parts) != "dir":
                     return None, [], {}, f"refusing skills state path as import source: {raw}"
                 collected_dirs, collected_files = _read_tree_from_anchor(anchor, *parts)
@@ -602,7 +602,7 @@ def _resolve_diff_baseline(target: Path, skill_or_path: str, *, against: str = "
     # Registry existence is answered through the state-root anchor; a
     # symlinked entry is treated as absent rather than followed.
     try:
-        with _held_state_root(target) as anchor:
+        with _held_state_root(target, writable=False) as anchor:
             registry_exists = _read_state_file_bytes(anchor, "skills", "registry", skill_id, "SKILL.md") is not None
     except SkillsStatePathError:
         registry_exists = False
@@ -641,7 +641,7 @@ def _anchored_load_registry_metadata(target: Path, skill_id: str) -> tuple[Path,
     slug = _slug(skill_id)
     skill_dir = _skill_path(target, slug)
     try:
-        with _held_state_root(target) as anchor:
+        with _held_state_root(target, writable=False) as anchor:
             metadata = _anchored_registry_metadata(anchor, slug)
     except SkillsStatePathError:
         metadata = {}
@@ -651,7 +651,7 @@ def _anchored_load_registry_metadata(target: Path, skill_id: str) -> tuple[Path,
 def _registry_entry_present(target: Path, skill_id: str) -> bool:
     """Anchored existence check for one plain registry entry directory."""
     try:
-        with _held_state_root(target) as anchor:
+        with _held_state_root(target, writable=False) as anchor:
             return _state_entry_kind(anchor, "skills", "registry", _slug(skill_id)) == "dir"
     except SkillsStatePathError:
         return False
@@ -722,7 +722,7 @@ def _plain_subdirs_under_anchor(anchor: _StateRootAnchor, *relative: str) -> lis
     """
     if not _HAS_DESCRIPTOR_ANCHOR:
         raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
-    fd, opened = _anchor_open_chain(anchor, *relative, missing_ok=True)
+    fd, opened = _anchor_open_chain(anchor, *relative, missing_ok=True, writable=False)
     if fd is None:
         return None
     try:
@@ -756,7 +756,7 @@ def _iter_registry(target: Path) -> list[dict[str, Any]]:
     """
     rows: list[dict[str, Any]] = []
     try:
-        with _held_state_root(target) as anchor:
+        with _held_state_root(target, writable=False) as anchor:
             names = _plain_subdirs_under_anchor(anchor, "skills", "registry")
             if names is None:
                 return rows
@@ -798,13 +798,14 @@ class _StateRootAnchor:
     workspace: Path
     fd: int | None = None
     identity: tuple[int, int] | None = None
+    writable: bool = True
 
     def revalidate(self) -> None:
         if not _HAS_DESCRIPTOR_ANCHOR:
             _verify_state_root_no_descriptor(self.workspace)
             return
         expected = self.identity
-        fd, identity = _open_state_root_descriptor(self.workspace)
+        fd, identity = _open_state_root_descriptor(self.workspace, writable=self.writable)
         os.close(fd)
         if identity != expected:
             raise SkillsStatePathError(
@@ -818,7 +819,7 @@ class _StateRootAnchor:
         self.identity = None
 
 
-def _open_state_root_descriptor(workspace: Path) -> tuple[int, tuple[int, int]]:
+def _open_state_root_descriptor(workspace: Path, *, writable: bool = True) -> tuple[int, tuple[int, int]]:
     """Validate and open ``.brigade`` relative to a held workspace descriptor.
 
     The workspace directory itself is opened first; ``.brigade`` is then only
@@ -827,13 +828,16 @@ def _open_state_root_descriptor(workspace: Path) -> tuple[int, tuple[int, int]]:
     new directory (or the validation that follows) outside the workspace.
     """
     try:
-        ws_fd = dirfd.open_directory_nofollow(workspace)
+        ws_fd = dirfd.open_directory_nofollow(workspace, writable=writable)
     except OSError as exc:
         raise SkillsStatePathError(f"cannot open workspace directory: {workspace}") from exc
+    fd: int | None = None
     try:
         try:
-            fd = dirfd.open_child_directory(ws_fd, ".brigade")
+            fd = dirfd.open_child_directory(ws_fd, ".brigade", writable=writable)
         except FileNotFoundError:
+            if not writable:
+                raise SkillsStatePathError(f"skills state root is missing: {workspace / '.brigade'}") from None
             try:
                 dirfd.mkdir_child(ws_fd, ".brigade", 0o755)
             except FileExistsError:
@@ -841,7 +845,7 @@ def _open_state_root_descriptor(workspace: Path) -> tuple[int, tuple[int, int]]:
             except OSError as exc:
                 raise SkillsStatePathError(f"cannot create skills state root: {workspace / '.brigade'}") from exc
             try:
-                fd = dirfd.open_child_directory(ws_fd, ".brigade")
+                fd = dirfd.open_child_directory(ws_fd, ".brigade", writable=writable)
             except OSError as exc:
                 raise SkillsStatePathError(
                     f"cannot open skills state root without following symlinks: {workspace / '.brigade'}"
@@ -863,6 +867,10 @@ def _open_state_root_descriptor(workspace: Path) -> tuple[int, tuple[int, int]]:
             ) from exc
         st = os.fstat(fd)
         return fd, (st.st_dev, st.st_ino)
+    except BaseException:
+        if fd is not None:
+            os.close(fd)
+        raise
     finally:
         os.close(ws_fd)
 
@@ -871,18 +879,18 @@ def _verify_state_root_no_descriptor(workspace: Path) -> None:
     raise _fallback_mutation_refusal("access", workspace / ".brigade")
 
 
-def _hold_state_root(workspace: Path) -> _StateRootAnchor:
+def _hold_state_root(workspace: Path, *, writable: bool = True) -> _StateRootAnchor:
     """Validate the state root and take a held no-follow descriptor anchor."""
     if _HAS_DESCRIPTOR_ANCHOR:
-        fd, identity = _open_state_root_descriptor(workspace)
-        return _StateRootAnchor(workspace=workspace, fd=fd, identity=identity)
+        fd, identity = _open_state_root_descriptor(workspace, writable=writable)
+        return _StateRootAnchor(workspace=workspace, fd=fd, identity=identity, writable=writable)
     _verify_state_root_no_descriptor(workspace)
     return _StateRootAnchor(workspace=workspace)
 
 
 @contextlib.contextmanager
-def _held_state_root(workspace: Path) -> Iterator[_StateRootAnchor]:
-    anchor = _hold_state_root(workspace)
+def _held_state_root(workspace: Path, *, writable: bool = True) -> Iterator[_StateRootAnchor]:
+    anchor = _hold_state_root(workspace, writable=writable)
     try:
         yield anchor
     finally:
@@ -971,8 +979,8 @@ def _write_state_file(anchor: _StateRootAnchor, *relative: str, data: bytes, mod
                     relative[-1],
                     _FILE_REPLACE_FLAGS | _O_NONBLOCK,
                 )
-                _require_single_link_regular(file_fd, str(display))
             try:
+                _require_single_link_regular(file_fd, str(display))
                 os.ftruncate(file_fd, 0)
                 _write_all_fd(file_fd, data)
             finally:
@@ -1063,7 +1071,7 @@ def _require_plain_state_dirs(anchor: _StateRootAnchor, *relative: str) -> None:
 
 
 def _anchor_open_chain(
-    anchor: _StateRootAnchor, *relative: str, create: bool = False, missing_ok: bool = False
+    anchor: _StateRootAnchor, *relative: str, create: bool = False, missing_ok: bool = False, writable: bool = True
 ) -> tuple[int | None, list[int]]:
     """Open every component below the held state root relative to its parent.
 
@@ -1071,8 +1079,9 @@ def _anchor_open_chain(
     with ``O_DIRECTORY|O_NOFOLLOW`` against the previous descriptor, so no
     lookup can be redirected by a nested symlink; link components raise
     ``SkillsStatePathError`` instead of being followed. With ``missing_ok`` a
-    missing tail yields ``(None, opened)`` so absence can be handled without
-    following any path.
+    missing tail closes the partial chain and yields ``(None, [])`` so absence
+    can be handled without following any path. Reads pass ``writable=False``;
+    mutation callers keep writable handles even when ``create=False``.
     """
     assert anchor.fd is not None
     if any(part in {"", ".", ".."} for part in relative):
@@ -1087,7 +1096,7 @@ def _anchor_open_chain(
         for part in relative:
             current = current / part
             try:
-                fd = dirfd.open_child_directory(parent_fd, part)
+                fd = dirfd.open_child_directory(parent_fd, part, writable=writable)
             except FileNotFoundError:
                 if create:
                     try:
@@ -1095,13 +1104,15 @@ def _anchor_open_chain(
                     except OSError as exc:
                         raise SkillsStatePathError(f"skills state path could not be created safely: {current}") from exc
                     try:
-                        fd = dirfd.open_child_directory(parent_fd, part)
+                        fd = dirfd.open_child_directory(parent_fd, part, writable=writable)
                     except OSError as exc:
                         raise SkillsStatePathError(
                             f"skills state path could not be reopened safely: {current}"
                         ) from exc
                 elif missing_ok:
-                    return None, opened
+                    for held_fd in reversed(opened):
+                        os.close(held_fd)
+                    return None, []
                 else:
                     raise SkillsStatePathError(
                         f"skills state path is missing under the state root: {current}"
@@ -1123,7 +1134,7 @@ def _state_file_exists(anchor: _StateRootAnchor, *relative: str) -> bool:
     """Existence check for one regular file under the anchored state root."""
     if not _HAS_DESCRIPTOR_ANCHOR:
         raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
-    parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True)
+    parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True, writable=False)
     if parent_fd is None:
         return False
     try:
@@ -1305,7 +1316,7 @@ def _read_state_file_bytes(anchor: _StateRootAnchor, *relative: str) -> bytes | 
     display = (anchor.workspace / ".brigade").joinpath(*relative)
     if not _HAS_DESCRIPTOR_ANCHOR:
         raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
-    parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True)
+    parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True, writable=False)
     if parent_fd is None:
         return None
     try:
@@ -1342,7 +1353,7 @@ def _state_entry_kind(anchor: _StateRootAnchor, *relative: str) -> str:
     """
     if not _HAS_DESCRIPTOR_ANCHOR:
         raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
-    parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True)
+    parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True, writable=False)
     if parent_fd is None:
         return "missing"
     try:
@@ -1373,7 +1384,7 @@ def _read_tree_from_anchor(
     """
     if not _HAS_DESCRIPTOR_ANCHOR:
         raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
-    dir_fd, opened = _anchor_open_chain(anchor, *relative)
+    dir_fd, opened = _anchor_open_chain(anchor, *relative, writable=False)
     assert dir_fd is not None
     try:
         return _collect_fd_tree(dir_fd, (), (anchor.workspace / ".brigade").joinpath(*relative), "skills state")
@@ -1473,7 +1484,7 @@ def _state_json_via_anchor(target: Path, *relative: str) -> dict[str, Any]:
     Missing or refused files yield ``{}``; outside content is never followed.
     """
     try:
-        with _held_state_root(target) as anchor:
+        with _held_state_root(target, writable=False) as anchor:
             raw = _read_state_file_bytes(anchor, *relative)
     except SkillsStatePathError:
         return {}
@@ -1489,7 +1500,7 @@ def _state_json_via_anchor(target: Path, *relative: str) -> dict[str, Any]:
 def _anchored_registry_text(target: Path, skill_id: str, *relative_tail: str) -> str | None:
     """Read one text file from a registry entry through the state-root anchor."""
     try:
-        with _held_state_root(target) as anchor:
+        with _held_state_root(target, writable=False) as anchor:
             raw = _read_state_file_bytes(anchor, "skills", "registry", skill_id, *relative_tail)
     except SkillsStatePathError:
         return None
