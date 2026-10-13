@@ -22,7 +22,9 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
 
 def dispatch_validate(args: argparse.Namespace) -> int:
     try:
-        document = fleet_master_roster.parse(args.file.read_bytes())
+        with args.file.open("rb") as roster_file:
+            raw = roster_file.read(fleet_master_roster.MAX_DOCUMENT_BYTES + 1)
+        document = fleet_master_roster.parse(raw)
     except OSError as exc:
         print(f"error: cannot read roster file: {exc.strerror or 'I/O error'}", file=sys.stderr)
         return 1

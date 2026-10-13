@@ -70,6 +70,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Load config from C:\\Users\\operator\\.config\\secret.toml",
         "Use ~/.config/provider/credentials.json",
         "See (~/.ssh/config).",
+        "Use auth profile production-admin.",
+        "password: actual-secret",
     ],
 )
 def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
@@ -110,6 +112,13 @@ def test_parse_rejects_non_string_mapping_keys() -> None:
         fleet_master_roster.parse(document)
 
 
+def test_parse_normalizes_json_integer_digit_limit() -> None:
+    raw = b'{"schema":"brigade.fleet_master_roster.v1","revision":' + b"9" * 5000 + b',"seats":[]}'
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="valid UTF-8 JSON"):
+        fleet_master_roster.parse(raw)
+
+
 def test_fleet_roster_validate_cli_reports_document_digest(tmp_path, capsys) -> None:
     path = tmp_path / "roster.json"
     path.write_text(json.dumps(_document()), encoding="utf-8")
@@ -128,3 +137,34 @@ def test_fleet_roster_validate_cli_refuses_forbidden_document(tmp_path, capsys) 
 
     assert cli.main(["fleet", "roster", "validate", "--file", str(path)]) == 1
     assert "unknown document field" in capsys.readouterr().err
+
+
+def test_fleet_roster_validate_cli_reads_only_document_limit_plus_one(tmp_path, monkeypatch, capsys) -> None:
+    path = tmp_path / "oversized.json"
+    path.write_bytes(b" " * (fleet_master_roster.MAX_DOCUMENT_BYTES + 1))
+    original_open = type(path).open
+    requested_sizes: list[int] = []
+
+    class TrackingFile:
+        def __init__(self, file):
+            self.file = file
+
+        def __enter__(self):
+            self.file.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.file.__exit__(*args)
+
+        def read(self, size=-1):
+            requested_sizes.append(size)
+            return self.file.read(size)
+
+    def tracking_open(self, *args, **kwargs):
+        return TrackingFile(original_open(self, *args, **kwargs))
+
+    monkeypatch.setattr(type(path), "open", tracking_open)
+
+    assert cli.main(["fleet", "roster", "validate", "--file", str(path)]) == 1
+    assert requested_sizes == [fleet_master_roster.MAX_DOCUMENT_BYTES + 1]
+    assert "at most" in capsys.readouterr().err
