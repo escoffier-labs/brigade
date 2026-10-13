@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from time import monotonic
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,7 @@ from . import fleet_hub_messages as _message_limits
 _LOG = logging.getLogger("brigade.fleet")
 MESSAGE_RESPONSE_LIMIT = 8 * 1024 * 1024
 MESSAGE_BATCH_SIZE = 100
+MESSAGE_DRAIN_DEADLINE_SECONDS = 12.0
 
 
 def _spool_path(node_id: str, token: str | None = None) -> Path:
@@ -28,34 +30,73 @@ def _spool_path(node_id: str, token: str | None = None) -> Path:
     return fleet_client.spool_path(node_id).with_name(f"{node_id}.messages-{token_scope}.jsonl")
 
 
-def _warn_legacy_spool(node_id: str) -> None:
-    path = fleet_client.spool_path(node_id).with_name(f"{node_id}.messages.jsonl")
-    if path.is_file() and not path.is_symlink():
-        _LOG.warning("legacy fleet message spool %s has no credential scope; leaving it untouched", path)
+def _warn_inactive_spools(node_id: str, active_path: Path) -> None:
+    directory = fleet_client.spool_path(node_id).parent
+    legacy_path = directory / f"{node_id}.messages.jsonl"
+    if legacy_path.is_file() and not legacy_path.is_symlink():
+        _LOG.warning("legacy fleet message spool %s has no credential scope; leaving it untouched", legacy_path)
+    prefix = f"{node_id}.messages-"
+    try:
+        stale_count = sum(
+            1
+            for path in directory.iterdir()
+            if path != active_path
+            and path.name.startswith(prefix)
+            and path.name.endswith(".jsonl")
+            and path.is_file()
+            and not path.is_symlink()
+        )
+    except OSError:
+        return
+    if stale_count:
+        _LOG.warning(
+            "%d fleet message spool(s) for other credentials remain queued and were not replayed",
+            stale_count,
+        )
 
 
-def _request(hub: str, token: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+def _request(hub: str, token: str, body: dict[str, Any], *, timeout: float | None = None) -> tuple[int, dict[str, Any]]:
+    return _request_with_timeout(hub, token, body, fleet_client.FLUSH_TIMEOUT_SECONDS if timeout is None else timeout)
+
+
+def _request_with_timeout(hub: str, token: str, body: dict[str, Any], timeout: float) -> tuple[int, dict[str, Any]]:
     request = urllib.request.Request(
         hub.rstrip("/") + "/messages",
         data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
         method="POST",
     )
-    try:
-        with fleet_client._hub_open(request, timeout=fleet_client.FLUSH_TIMEOUT_SECONDS) as response:
-            status = response.status
-            payload = json.loads(fleet_client._read_bounded_response(response, limit=MESSAGE_RESPONSE_LIMIT))
-    except urllib.error.HTTPError as exc:
+
+    def request_blocking() -> tuple[int, dict[str, Any]]:
         try:
-            payload = json.loads(exc.read(MESSAGE_RESPONSE_LIMIT + 1))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            payload = {"error": f"HTTP {exc.code}"}
-        status = exc.code
+            with fleet_client._hub_open(request, timeout=timeout) as response:
+                status = response.status
+                payload = json.loads(fleet_client._read_bounded_response(response, limit=MESSAGE_RESPONSE_LIMIT))
+        except urllib.error.HTTPError as exc:
+            try:
+                payload = json.loads(exc.read(MESSAGE_RESPONSE_LIMIT + 1))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                payload = {"error": f"HTTP {exc.code}"}
+            status = exc.code
+        except Exception as exc:
+            raise fleet_client.FleetClientError(f"fleet hub messages failed: {type(exc).__name__}") from exc
+        if not isinstance(payload, dict):
+            raise fleet_client.FleetClientError("fleet hub messages returned an invalid response")
+        return status, payload
+
+    try:
+        return fleet_client._run_with_deadline(request_blocking, timeout=timeout)
+    except fleet_client.FleetClientError:
+        raise
     except Exception as exc:
         raise fleet_client.FleetClientError(f"fleet hub messages failed: {type(exc).__name__}") from exc
-    if not isinstance(payload, dict):
-        raise fleet_client.FleetClientError("fleet hub messages returned an invalid response")
-    return status, payload
+
+
+def _safe_log_text(value: Any) -> str:
+    text = str(value)
+    if text.isprintable():
+        return text
+    return "".join(character if character.isprintable() else ascii(character)[1:-1] for character in text)
 
 
 def _settings() -> tuple[str, str, str]:
@@ -82,8 +123,8 @@ def _queue_locked(path: Path, message: dict[str, Any], *, dir_fd: int | None = N
 
 
 def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -> dict[str, Any]:
-    _warn_legacy_spool(node_id)
     path = _spool_path(node_id, token)
+    _warn_inactive_spools(node_id, path)
     try:
         with fleet_client._spool_lock(path) as dir_fd:
             if path.exists() and not path.is_symlink():
@@ -222,8 +263,8 @@ def flush(node_id: str, *, hub_url: str | None = None, token: str | None = None)
     config = fleet_client.load_fleet_config()
     hub = hub_url or config["hub_url"]
     auth = token or fleet_client.load_fleet_settings()["node_token"]
-    _warn_legacy_spool(node_id)
     path = _spool_path(node_id, auth)
+    _warn_inactive_spools(node_id, path)
     if not hub or not path.is_file():
         return 0
     with fleet_client._spool_lock(path) as dir_fd:
@@ -234,6 +275,7 @@ def _flush_locked(
     path: Path, hub: str, token: str, *, max_messages: int | None = None, dir_fd: int | None = None
 ) -> int:
     messages = fleet_client._read_spool(path, dir_fd=dir_fd)
+    deadline = monotonic() + MESSAGE_DRAIN_DEADLINE_SECONDS
     delivered = 0
     index = 0
     for message in messages:
@@ -244,8 +286,16 @@ def _flush_locked(
             _LOG.warning("fleet message spool %s: dropping expired offline message", path)
             index += 1
             continue
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
+            return delivered
         try:
-            status, payload = _request(hub, token, message)
+            timeout = min(fleet_client.FLUSH_TIMEOUT_SECONDS, remaining)
+            if timeout == fleet_client.FLUSH_TIMEOUT_SECONDS:
+                status, payload = _request(hub, token, message)
+            else:
+                status, payload = _request(hub, token, message, timeout=timeout)
         except fleet_client.FleetClientError:
             fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
             return delivered
@@ -253,7 +303,9 @@ def _flush_locked(
             fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
             return delivered
         if status >= 400:
-            _LOG.warning("fleet message spool %s: dropping rejected message: %s", path, payload.get("error"))
+            _LOG.warning(
+                "fleet message spool %s: dropping rejected message: %s", path, _safe_log_text(payload.get("error"))
+            )
         else:
             delivered += 1
         index += 1

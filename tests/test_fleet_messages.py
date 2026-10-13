@@ -611,6 +611,102 @@ def test_flush_reports_legacy_unscoped_message_spool(tmp_path, monkeypatch, capl
     assert "no credential scope" in caplog.text
 
 
+def test_flush_reports_spools_scoped_to_replaced_credentials(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub.invalid"})
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "node-token-b", "admin_token": ""},
+    )
+    old_path = fleet_client_messages._spool_path(NODE_A, "node-token-a")
+    old_message = {
+        "action": "send",
+        "to": NODE_B,
+        "subject": "Old credential",
+        "body": "Keep this queued for its original sender",
+        "client_id": "old-credential-message",
+        "enqueued_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with fleet_client._spool_lock(old_path) as dir_fd:
+        assert fleet_client._spool_append_locked(old_path, old_message, dir_fd=dir_fd)
+    attempts = []
+    monkeypatch.setattr(
+        fleet_client_messages,
+        "_request",
+        lambda _hub, _token, message: attempts.append(message) or (201, {}),
+    )
+
+    assert fleet_client_messages.flush(NODE_A) == 0
+
+    assert attempts == []
+    assert fleet_client._read_spool(old_path) == [old_message]
+    assert "other credentials" in caplog.text
+
+
+def test_message_request_uses_hard_wall_clock_deadline(monkeypatch):
+    deadlines = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(fleet_client, "_hub_open", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(fleet_client, "_read_bounded_response", lambda *_args, **_kwargs: b"{}")
+
+    def run_with_deadline(_fn, *, timeout):
+        deadlines.append(timeout)
+        raise TimeoutError("message request hard deadline")
+
+    monkeypatch.setattr(fleet_client, "_run_with_deadline", run_with_deadline)
+
+    with pytest.raises(fleet_client.FleetClientError, match="TimeoutError"):
+        fleet_client_messages._request("http://hub.invalid", "node-token", {"action": "list"})
+
+    assert deadlines == [fleet_client.FLUSH_TIMEOUT_SECONDS]
+
+
+def test_spool_flush_obeys_aggregate_wall_clock_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    now = datetime.now(timezone.utc).isoformat()
+    with fleet_client._spool_lock(path) as dir_fd:
+        for index in range(4):
+            assert fleet_client._spool_append_locked(
+                path,
+                {
+                    "action": "send",
+                    "to": NODE_B,
+                    "subject": f"Queued {index}",
+                    "body": "bounded flush",
+                    "client_id": f"budget-{index}",
+                    "enqueued_at": now,
+                },
+                dir_fd=dir_fd,
+            )
+    clock = [0.0]
+    monkeypatch.setattr(fleet_client_messages, "monotonic", lambda: clock[0], raising=False)
+    timeouts = []
+
+    def request(_hub, _token, _message, *, timeout=fleet_client.FLUSH_TIMEOUT_SECONDS):
+        timeouts.append(timeout)
+        clock[0] += timeout
+        return 201, {}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+
+    delivered = fleet_client_messages._flush_locked(path, "http://hub.invalid", "node-token")
+
+    assert timeouts == [5.0, 5.0, 2.0]
+    assert delivered == 3
+    assert [message["client_id"] for message in fleet_client._read_spool(path)] == ["budget-3"]
+
+
 def test_new_send_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
@@ -998,6 +1094,43 @@ def test_msg_ack_and_reply_escape_subject_control_characters(command, tmp_path, 
     output = capsys.readouterr().out
     assert "\x1b" not in output
     assert "\\x1b[31m" in output
+
+
+def test_msg_errors_escape_hub_control_characters(capsys):
+    def rejected():
+        raise fleet_client.FleetClientError("hub rejected\x1b[31mmessage")
+
+    args = type("Args", (), {"json": False})()
+    assert fleet_messages_cli._result(args, rejected) == 1
+
+    output = capsys.readouterr().err
+    assert "\x1b" not in output
+    assert "\\x1b[31m" in output
+
+
+def test_spool_rejection_log_escapes_hub_control_characters(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    message = {
+        "action": "send",
+        "to": NODE_B,
+        "subject": "Rejected",
+        "body": "Keep errors safe in logs",
+        "client_id": "unsafe-error",
+        "enqueued_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with fleet_client._spool_lock(path) as dir_fd:
+        assert fleet_client._spool_append_locked(path, message, dir_fd=dir_fd)
+    monkeypatch.setattr(
+        fleet_client_messages,
+        "_request",
+        lambda *_args, **_kwargs: (400, {"error": "rejected\x1b[31mmessage"}),
+    )
+
+    fleet_client_messages._flush_locked(path, "http://hub.invalid", "node-token")
+
+    assert "\x1b" not in caplog.text
+    assert "\\x1b[31m" in caplog.text
 
 
 def test_message_body_file_read_is_bounded(monkeypatch):

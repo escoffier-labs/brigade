@@ -79,7 +79,9 @@ def _result(args: argparse.Namespace, operation: Callable[[], dict[str, Any]]) -
     try:
         payload = operation()
     except (fleet_client.FleetClientError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        from .fleet import _safe_table_cell
+
+        print(f"error: {_safe_table_cell(exc)}", file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
