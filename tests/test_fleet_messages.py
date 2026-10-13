@@ -723,6 +723,34 @@ def test_redirected_spool_flush_keeps_message_queued(tmp_path, monkeypatch):
     assert fleet_client._read_spool(path) == [message]
 
 
+def test_spool_flush_drops_forbidden_send_and_delivers_next_message(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub.invalid"})
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    enqueued_at = datetime.now(timezone.utc).isoformat()
+    forbidden = {"action": "send", "client_id": "forbidden", "enqueued_at": enqueued_at}
+    reply = {"action": "reply", "client_id": "valid-reply", "enqueued_at": enqueued_at}
+    with fleet_client._spool_lock(path) as dir_fd:
+        for message in (forbidden, reply):
+            assert fleet_client._spool_append_locked(path, message, dir_fd=dir_fd)
+    attempts = []
+
+    def request(_hub, _token, message, **_kwargs):
+        attempts.append(message["client_id"])
+        return (403, {"error": "external principals may only reply"}) if len(attempts) == 1 else (201, {})
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+
+    assert fleet_client_messages.flush(NODE_A) == 1
+    assert attempts == ["forbidden", "valid-reply"]
+    assert not path.exists()
+
+
 def test_queued_messages_are_not_replayed_with_replaced_node_credentials(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)

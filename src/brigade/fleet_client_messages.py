@@ -352,7 +352,7 @@ def _flush_locked(
         except fleet_client.FleetClientError:
             fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
             return delivered
-        if 300 <= status < 400 or status >= 500 or status in (401, 403, 408, 429):
+        if 300 <= status < 400 or status >= 500 or status in (401, 408, 429):
             fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
             return delivered
         if not 200 <= status < 300 and status >= 400:
