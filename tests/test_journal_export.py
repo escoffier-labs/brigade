@@ -626,3 +626,41 @@ def test_run_directory_swap_cannot_redirect_export(tmp_path, capsys, monkeypatch
     if replacement == "directory":
         assert "run directory changed during source traversal" in captured.err
     assert outside.read_bytes() != original
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory rename race")
+@pytest.mark.parametrize("replacement", ["directory", "symlink"])
+@pytest.mark.parametrize("file_output", [False, True])
+def test_run_directory_swap_during_validation_is_rejected(tmp_path, capsys, monkeypatch, replacement, file_output):
+    target = tmp_path / "workspace"
+    source, _ = _journal(target)
+    original = source.read_bytes()
+    other, _ = _journal(tmp_path / "replacement", times=TIMES[:1])
+    replacement_bytes = other.read_bytes()
+    run_dir = source.parent.parent
+    held = run_dir.with_name("held-run")
+    output = tmp_path / "export.jsonl"
+    real_read = run_journal.read_journal_bounded
+    swapped = False
+
+    def swap_during_validation(path):
+        nonlocal swapped
+        assert path != source and path.read_bytes() == original
+        run_dir.rename(held)
+        if replacement == "directory":
+            other.parent.parent.rename(run_dir)
+        else:
+            run_dir.symlink_to(other.parent.parent, target_is_directory=True)
+        swapped = True
+        return real_read(path)
+
+    monkeypatch.setattr(run_journal, "read_journal_bounded", swap_during_validation)
+    options = ["--out", str(output)] if file_output else []
+    status = _export(target, *options)
+    captured = capsys.readouterr()
+    assert swapped, captured.err
+    assert status != 0 and captured.out == "" and "error: journal export:" in captured.err
+    assert "run directory changed during export" in captured.err
+    assert not output.exists()
+    assert (held / "events" / "lifecycle.jsonl").read_bytes() == original
+    assert source.read_bytes() == replacement_bytes != original

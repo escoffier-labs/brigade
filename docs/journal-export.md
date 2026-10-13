@@ -62,7 +62,8 @@ identity against the original held events directory, and reads journal
 metadata through that fresh descriptor. Validation reads only the private
 copy, so later source changes cannot change the bytes being validated.
 After validation, export checks named-source metadata against the initial
-open file's metadata.
+open file's metadata and rechecks that the run directory still has its
+original named identity.
 Observed events-directory replacement, file replacement, truncation, growth,
 or metadata changes fail before output. Export does not lock writers.
 Changes after the final metadata observation remain possible, and the output represents a validated

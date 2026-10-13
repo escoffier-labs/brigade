@@ -130,6 +130,8 @@ def _validated_events(run_dir: Path, run_id: str) -> list[run_journal.RunEvent]:
             if bound.identity != (held.st_dev, held.st_ino):
                 raise OSError("run directory changed during source traversal")
             report = _snapshot_report(bound)
+            if not bound.still_bound():
+                raise OSError("run directory changed during export")
             if report.chain_errors:
                 raise ValueError(f"journal integrity failed: {report.chain_errors[0]}")
             if report.partial_tail is not None:
