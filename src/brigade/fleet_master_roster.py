@@ -80,9 +80,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     re.IGNORECASE,
 )
 _PATH_LABEL = r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositor(?:y|ies)|repos?|locations?)"
-_PATH_DECLARATION_LINKER = (
-    r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)"
-)
+_PATH_DECLARATION_LINKER = r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
 _EXPLICIT_TERMINAL_PATH = re.compile(
     r"\b(?:home\s+directory|" + _PATH_LABEL + r")\s*" + _PATH_DECLARATION_LINKER + r"\s*[\"'“‘`()\[{]*\s*"
@@ -141,6 +139,7 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
         for key, query_value in query_pairs:
             if (
                 _DANGEROUS_VALUE.search(f"{key}={query_value}")
+                or _ENVIRONMENT_ASSIGNMENT.search(f"{key}={query_value}")
                 or _ENVIRONMENT_ASSIGNMENT.search(query_value)
                 or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(query_value)
             ):
@@ -190,7 +189,9 @@ _RELATIVE_PATH = re.compile(
     r"(?<![A-Za-z0-9_.-])(?P<path>(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+)(?![A-Za-z0-9_.~-])"
 )
 _PATH_CONTEXT = re.compile(
-    r"(?:\b(?:run|execute|inspect|open|read|write|load|save|" + _PATH_LABEL + r")\s+"
+    r"(?:\b(?:change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store|"
+    + _PATH_LABEL
+    + r")\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?"
     r"[\"'“‘]*\s*(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?|"
     r"\b" + _PATH_LABEL + r"\s*" + _PATH_DECLARATION_LINKER + r"\s*)[\"'“‘`()\[{]*\s*$",
@@ -205,7 +206,7 @@ _QUOTED_PATH_CONTEXT = re.compile(
     re.IGNORECASE,
 )
 _SPACED_PATH_CONTEXT = re.compile(
-    r"(?:\b(?:run|execute|inspect|open|read|write|load|save)\s+"
+    r"(?:\b(?:change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store)\s+"
     r"(?:(?:from|at|in|to|into|under)\s+)?|"
     r"\b" + _PATH_LABEL + r"\s*" + _PATH_DECLARATION_LINKER + r"\s+)"
     r"(?:[A-Za-z0-9_.~-]+\s+)+$",
