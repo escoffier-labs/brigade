@@ -1620,6 +1620,36 @@ def test_authority_downgrade_lock_serializes_posture_marker_writers(
     assert writer_done.is_set()
 
 
+def test_isolation_marker_lock_rejects_user_directory_inside_target_before_writes(tmp_path: Path) -> None:
+    target = tmp_path / "workspace"
+    target.mkdir()
+    user_dir = target / "operator-state"
+    env = {authority_marker.USER_DIR_ENV: str(user_dir)}
+
+    with pytest.raises(OSError, match="must not be written inside the workspace"):
+        authority_marker.record_isolation_marker(target, env=env)
+
+    assert not user_dir.exists()
+
+
+def test_transfer_isolation_marker_checks_lock_against_destination_before_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_home(monkeypatch, tmp_path / "home")
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    authority_marker.record_isolation_marker(source)
+    user_dir = destination / "operator-state"
+    env = {authority_marker.USER_DIR_ENV: str(user_dir)}
+
+    with pytest.raises(OSError, match="must not be written inside the workspace"):
+        authority_marker.transfer_isolation_marker(source, destination, env=env)
+
+    assert not user_dir.exists()
+
+
 def test_authority_audit_fsync_failure_removes_partial_completion_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1643,6 +1673,32 @@ def test_authority_audit_fsync_failure_removes_partial_completion_record(
 
     assert audit.read_bytes() == b"prior-record\n"
     assert calls == 2
+
+
+def test_authority_downgrade_fails_before_mutation_when_new_audit_directory_fsync_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_home(monkeypatch, tmp_path / "home")
+    _bind_workspace(tmp_path)
+    audit = authority_marker.audit_path()
+    assert not audit.exists()
+    store = _store_path(tmp_path)
+    store_before = store.read_bytes()
+    signed_marker = authority_marker.signed_marker_path(authority_marker.target_fingerprint(tmp_path))
+    posture_marker = _isolation_posture_marker_path(tmp_path)
+
+    def fail_directory_fsync(_directory: Path) -> None:
+        raise OSError("simulated new audit directory fsync failure")
+
+    monkeypatch.setattr(authority_key, "_fsync_directory", fail_directory_fsync)
+    with pytest.raises(OSError, match="audit is unavailable; marker not removed"):
+        ledger.downgrade_external_directory_authority(tmp_path)
+
+    assert audit.exists()
+    assert audit.read_bytes() == b""
+    assert store.read_bytes() == store_before
+    assert signed_marker.is_file()
+    assert posture_marker.is_file()
 
 
 def test_authority_downgrade_restores_state_when_completion_fsync_fails(
@@ -1675,6 +1731,57 @@ def test_authority_downgrade_restores_state_when_completion_fsync_fails(
     transaction_records = [record for record in records if record.get("action") == "authority-downgrade"]
     assert not any(record.get("phase") == "complete" for record in transaction_records)
     assert any(record.get("phase") == "rolled-back" for record in transaction_records)
+
+
+def test_authority_downgrade_fsyncs_restored_directories_before_rollback_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_home(monkeypatch, tmp_path / "home")
+    _bind_workspace(tmp_path)
+    fingerprint = authority_marker.target_fingerprint(tmp_path)
+    signed_marker = authority_marker.signed_marker_path(fingerprint)
+    posture_marker = _isolation_posture_marker_path(tmp_path)
+    signed_root = signed_marker.parent.resolve()
+    posture_root = posture_marker.parent.resolve()
+    opened_directories: dict[int, Path] = {}
+    fsynced_directories: list[Path] = []
+    rollback_syncs: list[Path] = []
+    original_open_directory = ledger._open_directory_nofollow
+    original_fsync = ledger._dirfd_fsync
+    original_append_audit = authority_marker.append_audit
+    failed_once = False
+
+    def record_open(path: Path) -> int:
+        descriptor = original_open_directory(path)
+        opened_directories[descriptor] = path.resolve()
+        return descriptor
+
+    def fail_posture_once(descriptor: int) -> None:
+        nonlocal failed_once
+        directory = opened_directories.get(descriptor)
+        if directory == posture_root and not failed_once:
+            failed_once = True
+            raise OSError("simulated marker removal directory fsync failure")
+        original_fsync(descriptor)
+        if directory is not None:
+            fsynced_directories.append(directory)
+
+    def record_rollback_audit(record: dict, *, env: dict[str, str] | None = None) -> Path:
+        if record.get("phase") == "rolled-back":
+            rollback_syncs.extend(fsynced_directories)
+        return original_append_audit(record, env=env)
+
+    monkeypatch.setattr(ledger, "_open_directory_nofollow", record_open)
+    monkeypatch.setattr(ledger, "_dirfd_fsync", fail_posture_once)
+    monkeypatch.setattr(authority_marker, "append_audit", record_rollback_audit)
+
+    with pytest.raises(OSError, match="simulated marker removal directory fsync failure"):
+        ledger.downgrade_external_directory_authority(tmp_path)
+
+    assert signed_marker.is_file()
+    assert posture_marker.is_file()
+    assert signed_root in rollback_syncs
+    assert posture_root in rollback_syncs
 
 
 def test_authority_downgrade_attempts_every_restore_after_one_restore_fails(

@@ -80,12 +80,19 @@ def isolation_marker_root(*, env: Mapping[str, str] | None = None) -> Path:
 
 
 @contextmanager
-def isolation_marker_lock(*, env: Mapping[str, str] | None = None) -> Iterator[None]:
+def isolation_marker_lock(
+    *,
+    target: Path,
+    additional_targets: tuple[Path, ...] = (),
+    env: Mapping[str, str] | None = None,
+) -> Iterator[None]:
     """Serialize posture-marker writers and authority downgrades."""
 
     from .inbox_lock import held_file_lock
 
     lock = user_brigade_dir(env=env) / ".authority-isolation.lock"
+    for workspace in (target, *additional_targets):
+        reject_unsafe_marker_path(lock, workspace, env=env)
     with held_file_lock(lock, deadline_seconds=5):
         yield
 
@@ -485,7 +492,7 @@ def record_isolation_marker(
     observation callers must treat that as fail-closed, never best effort.
     """
 
-    with isolation_marker_lock(env=env):
+    with isolation_marker_lock(target=target, env=env):
         fingerprint = target_fingerprint(target)
         path = isolation_marker_path(fingerprint, env=env)
         reject_unsafe_marker_path(path, target, env=env)
@@ -526,7 +533,7 @@ def transfer_isolation_marker(
     proceed rather than silently drop the posture.
     """
 
-    with isolation_marker_lock(env=env):
+    with isolation_marker_lock(target=source_target, additional_targets=(destination_target,), env=env):
         source_fingerprint = target_fingerprint(source_target)
         try:
             source_path = isolation_marker_path(source_fingerprint, env=env)
@@ -614,6 +621,7 @@ def append_audit(record: Mapping[str, Any], *, env: Mapping[str, str] | None = N
         raise OSError("authority downgrade audit is unavailable") from exc
     line = json.dumps(dict(record), sort_keys=True, separators=(",", ":")) + "\n"
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    from . import authority_key
     from .inbox_lock import held_file_lock
 
     lock = user_brigade_dir(env=env) / ".authority-audit.lock"
@@ -629,6 +637,7 @@ def append_audit(record: Mapping[str, Any], *, env: Mapping[str, str] | None = N
                     handle.write(line)
                     handle.flush()
                     _audit_fsync(handle.fileno())
+                authority_key._fsync_directory(path.parent)
             except OSError as exc:
                 try:
                     os.ftruncate(descriptor, original_size)

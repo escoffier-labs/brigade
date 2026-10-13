@@ -567,7 +567,7 @@ def downgrade_external_directory_authority(
 ) -> dict[str, Any]:
     from ... import authority_marker
 
-    with authority_marker.isolation_marker_lock(env=env):
+    with authority_marker.isolation_marker_lock(target=target, env=env):
         return _downgrade_external_directory_authority_locked(target, actor=actor, env=env)
 
 
@@ -708,6 +708,7 @@ def _downgrade_external_directory_authority_locked(
                 _restore_authority_file(path, backup)
                 if path.read_bytes() != backup:
                     raise OSError("restored authority bytes did not match the pre-downgrade backup")
+                _downgrade_durability_checkpoint(path)
             except OSError as exc:
                 failures.append((path, exc))
 
