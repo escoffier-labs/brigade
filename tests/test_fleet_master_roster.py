@@ -384,6 +384,8 @@ def test_parse_rejects_qualified_compact_credential_assignments(field: str, text
     [
         "This seat uses API key shortkey",
         "Reviewer uses the password hunter2",
+        "Reviewer is using API key shortkey",
+        "This seat is using the password hunter2",
     ],
 )
 def test_parse_rejects_subject_first_credential_disclosures(field: str, text: str) -> None:
