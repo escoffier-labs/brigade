@@ -657,14 +657,6 @@ def make_handler(
                 include_all = _board_include_all(params)
                 current = datetime.now(timezone.utc)
                 offset = fleet_hub_status.clamp_board_offset(params.get("offset", ["0"])[0])
-                board = board_status(
-                    conn,
-                    include_all=include_all,
-                    offset=offset,
-                    now=current,
-                    history_window_seconds=frozen_deck.stale_history_after_seconds,
-                    stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
-                )
                 query_model = (
                     fleet_dashboard.parse_query(urlencode(params, doseq=True), view=view)
                     if view == "machines"
@@ -684,6 +676,31 @@ def make_handler(
                             )
                         ),
                         resolve_last_known_seat=bool(query_model.seat),
+                    )
+                    machine_limit = fleet_hub_status.BOARD_LIMIT
+                    machine_node_ids = sorted(complete_base_node_ids)[offset : offset + machine_limit]
+                    board_runs = fleet_hub_status.board_status_for_nodes(
+                        conn,
+                        machine_node_ids,
+                        include_all=include_all,
+                        now=current,
+                        history_window_seconds=frozen_deck.stale_history_after_seconds,
+                        stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                    )
+                    board = fleet_hub_status.BoardStatus(
+                        runs=board_runs,
+                        more=len(complete_base_node_ids) > offset + machine_limit,
+                        offset=offset,
+                        limit=machine_limit,
+                    )
+                else:
+                    board = board_status(
+                        conn,
+                        include_all=include_all,
+                        offset=offset,
+                        now=current,
+                        history_window_seconds=frozen_deck.stale_history_after_seconds,
+                        stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
                     )
                 claims = fleet_claim_display.list_display_claims(conn, include_all=include_all)
                 started_at = run_started_at(

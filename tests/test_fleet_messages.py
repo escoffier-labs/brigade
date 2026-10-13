@@ -1613,6 +1613,41 @@ def test_reply_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
     assert [message["action"] for message in attempts[1:]] == ["send", "reply"]
 
 
+def test_ordered_send_uses_the_locked_directory_descriptor(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    spool = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    spool.parent.mkdir(parents=True)
+    older = {"action": "send", "client_id": "older", "enqueued_at": datetime.now(timezone.utc).isoformat()}
+    newer = {"action": "send", "client_id": "newer"}
+    fleet_client._write_spool_atomic(spool, [older])
+    attempts = []
+
+    def request(_hub: str, _token: str, message: dict):
+        attempts.append(message["client_id"])
+        return 201, {"message": {"client_id": message["client_id"]}}
+
+    real_exists = Path.exists
+    real_is_symlink = Path.is_symlink
+
+    def reject_path_probe(path):
+        if path == spool:
+            raise AssertionError("spool checks must use the locked directory descriptor")
+        return real_exists(path)
+
+    def reject_symlink_probe(path):
+        if path == spool:
+            raise AssertionError("spool checks must use the locked directory descriptor")
+        return real_is_symlink(path)
+
+    monkeypatch.setattr(Path, "exists", reject_path_probe)
+    monkeypatch.setattr(Path, "is_symlink", reject_symlink_probe)
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+
+    fleet_client_messages._send_ordered(newer, "https://hub.invalid", "node-secret", NODE_A)
+
+    assert attempts == ["older", "newer"]
+
+
 def test_new_send_bounds_opportunistic_spool_drain(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
@@ -2343,7 +2378,8 @@ def test_principal_revoke_clears_local_pending_enrollment(tmp_path, monkeypatch)
         lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
     )
     pending_path = fleet_client_messages._principal_pending_path("researcher", ADMIN)
-    fleet_client_messages._pending_principal_request("researcher", ADMIN, None)
+    pending = fleet_client_messages._pending_principal_request("researcher", ADMIN, None)
+    generation = pending["request_id"]
 
     class Response(BytesIO):
         status = 200
@@ -2351,11 +2387,54 @@ def test_principal_revoke_clears_local_pending_enrollment(tmp_path, monkeypatch)
     monkeypatch.setattr(
         fleet_client,
         "_hub_open",
-        lambda *_args, **_kwargs: Response(b'{"principal":{"principal_id":"agent:researcher","name":"researcher"}}'),
+        lambda *_args, **_kwargs: Response(
+            json.dumps(
+                {
+                    "principal": {
+                        "principal_id": "agent:researcher",
+                        "name": "researcher",
+                        "enrollment_id": generation,
+                    }
+                }
+            ).encode()
+        ),
     )
     fleet_client_messages.manage_principal("revoke", name="researcher")
 
     assert not pending_path.exists()
+
+
+def test_principal_revoke_preserves_concurrent_replacement_add(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
+    )
+    add_path = fleet_client_messages._principal_pending_path("researcher", ADMIN)
+    add_path.parent.mkdir(parents=True)
+    replacement = {
+        "name": "researcher",
+        "request_id": "b" * 32,
+        "expected_enrollment_id": "a" * 32,
+    }
+    fleet_client._write_spool_atomic(add_path, [replacement])
+
+    def principal_request(_hub, _admin, body):
+        if body["action"] == "get":
+            principal = {
+                "principal_id": "agent:researcher",
+                "name": "researcher",
+                "enrollment_id": "a" * 32,
+            }
+            return 200, {"principal": principal}
+        assert body["expected_enrollment_id"] == "a" * 32
+        return 200, {"principal": {"principal_id": "agent:researcher", "name": "researcher"}}
+
+    monkeypatch.setattr(fleet_client_messages, "_principal_admin_request", principal_request)
+    fleet_client_messages.manage_principal("revoke", name="researcher")
+
+    assert fleet_client._read_spool(add_path) == [replacement]
 
 
 @pytest.mark.parametrize(

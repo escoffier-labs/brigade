@@ -190,6 +190,42 @@ def board_status(
     return BoardStatus(runs=mapped, more=more, offset=page_offset, limit=page_limit)
 
 
+def board_status_for_nodes(
+    conn: sqlite3.Connection,
+    node_ids: list[str],
+    *,
+    include_all: bool = False,
+    now: datetime | None = None,
+    history_window_seconds: int = STALE_HISTORY_AFTER_SECONDS,
+    stale_history_after_seconds: int = STALE_HISTORY_AFTER_SECONDS,
+) -> list[dict[str, Any]]:
+    """Return all latest run rows for one bounded page of machine identities."""
+    if not node_ids:
+        return []
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    windowed = not include_all
+    sql = _latest_sql(received_after=windowed)
+    params: list[Any] = []
+    if windowed:
+        cutoff = datetime.fromtimestamp(
+            current.timestamp() - max(1, int(history_window_seconds)), tz=timezone.utc
+        ).isoformat()
+        params.append(cutoff)
+    params.extend(node_ids)
+    placeholders = ",".join("?" for _ in node_ids)
+    rows = conn.execute(f"SELECT * FROM ({sql}) WHERE node_id IN ({placeholders})", params).fetchall()
+    return [
+        _status_entry(
+            conn,
+            row,
+            now=current,
+            age_stale=include_all,
+            stale_history_after_seconds=stale_history_after_seconds,
+        )
+        for row in rows
+    ]
+
+
 def board_node_ids(
     conn: sqlite3.Connection,
     *,

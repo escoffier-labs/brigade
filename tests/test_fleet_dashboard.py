@@ -1070,7 +1070,7 @@ class TestBoardBounds:
         _status, _headers, all_repos = _request(hub, "GET", "/view/repos?all=1", headers=_bearer())
         assert "repo-old" in all_repos
 
-    def test_all_board_paginates_with_more_link(self, hub):
+    def test_all_machine_board_keeps_each_nodes_runs_together(self, hub):
         now = datetime.now(timezone.utc).isoformat()
         events = [
             _event(NODE_A, f"page-{index}", 1, "run.completed", repo=f"repo-{index}", harness="claude", ts=now)
@@ -1079,18 +1079,9 @@ class TestBoardBounds:
         status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
         assert status == 200, text
         _status, _headers, first = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
-        assert 'class="fleet-more"' in first
-        assert "offset=200" in first
         first_ids = {f"page-{index}" for index in range(fleet_hub.BOARD_LIMIT + 1) if f'title="page-{index}"' in first}
-        assert len(first_ids) == fleet_hub.BOARD_LIMIT
-        _status, _headers, second = _request(hub, "GET", "/view/machines?all=1&offset=200", headers=_bearer())
-        assert 'class="fleet-more"' not in second
-        second_ids = {
-            f"page-{index}" for index in range(fleet_hub.BOARD_LIMIT + 1) if f'title="page-{index}"' in second
-        }
-        assert len(second_ids) == 1
-        assert first_ids.isdisjoint(second_ids)
-        assert len(first_ids | second_ids) == fleet_hub.BOARD_LIMIT + 1
+        assert 'class="fleet-more"' not in first
+        assert len(first_ids) == fleet_hub.BOARD_LIMIT + 1
 
     def test_unread_candidates_do_not_repeat_across_event_pages(self, hub, monkeypatch):
         now = datetime.now(timezone.utc).isoformat()
@@ -1135,29 +1126,38 @@ class TestBoardBounds:
         assert f'data-node="{NODE_A}"' in page
         assert "1 unread messages" in page
 
-    def test_complete_event_nodes_use_one_unpaged_projection(self, hub, monkeypatch):
-        node_ids = [f"11111111-1111-4111-8111-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
+    def test_machine_pages_keep_all_runs_for_each_node(self, hub, monkeypatch):
+        run_ids = [f"run-{index:03d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
         stamp = datetime.now(timezone.utc).isoformat()
         events = [
-            _event(node_id, f"run-{index}", 1, "run.started", repo="repo", harness="codex", ts=stamp)
-            for index, node_id in enumerate(node_ids)
+            _event(NODE_A, run_id, 1, "run.started", repo="repo", harness="codex", ts=stamp) for run_id in run_ids
         ]
         status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
         assert status == 200, text
 
-        page_calls = []
-        original_board_status = fleet_hub_http.board_status
+        node_queries = []
+        original_node_query = fleet_hub_status.board_node_ids
 
-        def count_page_queries(*args, **kwargs):
-            page_calls.append(kwargs.get("offset", 0))
-            return original_board_status(*args, **kwargs)
+        def count_node_queries(*args, **kwargs):
+            node_queries.append(True)
+            return original_node_query(*args, **kwargs)
 
-        monkeypatch.setattr(fleet_hub_http, "board_status", count_page_queries)
+        page_queries = []
+        original_page_query = fleet_hub_status.board_status_for_nodes
+
+        def count_page_queries(conn, node_ids, **kwargs):
+            page_queries.append(node_ids)
+            return original_page_query(conn, node_ids, **kwargs)
+
+        monkeypatch.setattr(fleet_hub_status, "board_node_ids", count_node_queries)
+        monkeypatch.setattr(fleet_hub_status, "board_status_for_nodes", count_page_queries)
         status, _headers, page = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
 
         assert status == 200
-        assert f'data-node="{node_ids[0]}"' in page
-        assert page_calls == [0]
+        assert page.count(f'data-node="{NODE_A}"') == 1
+        assert all(run_id in page for run_id in run_ids)
+        assert node_queries == [True]
+        assert page_queries == [[NODE_A]]
 
     def test_claim_only_machine_cards_are_bounded_and_paginated(self, hub, monkeypatch):
         node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]

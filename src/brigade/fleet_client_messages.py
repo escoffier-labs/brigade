@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import json
 import logging
+import os
+import stat
 from time import monotonic
 import urllib.error
 import urllib.request
@@ -102,6 +104,21 @@ def _safe_log_text(value: Any) -> str:
     return "".join(character if character.isprintable() else ascii(character)[1:-1] for character in text)
 
 
+def _spool_exists_locked(path: Path, dir_fd: int | None) -> bool:
+    """Inspect the spool through its locked directory descriptor when available."""
+    if dir_fd is None:  # pragma: no cover - Windows
+        return path.exists() and not path.is_symlink()
+    try:
+        info = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise fleet_client.FleetClientError("fleet message spool could not be inspected") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise fleet_client.FleetClientError("fleet message could not be persisted: spool is not a regular file")
+    return True
+
+
 def _settings() -> tuple[str, str, str]:
     settings = fleet_client.load_fleet_settings()
     if not settings["hub_url"]:
@@ -136,7 +153,7 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
     _warn_inactive_spools(node_id, path)
     try:
         with fleet_client._spool_lock(path) as dir_fd:
-            if path.exists() and not path.is_symlink():
+            if _spool_exists_locked(path, dir_fd):
                 _flush_locked(path, hub, token, max_messages=MESSAGE_BATCH_SIZE, dir_fd=dir_fd)
                 if fleet_client._read_spool(path, dir_fd=dir_fd):
                     return _queue_locked(path, message, dir_fd=dir_fd)
@@ -428,9 +445,7 @@ def manage_principal(
         if revoke_pending_request_id is not None and pending_path is not None:
             _clear_principal_request(pending_path, request_id=revoke_pending_request_id)
         add_path = _principal_pending_path(name, settings["admin_token"])
-        add_request_id = _pending_principal_request_id(
-            add_path, name, expected_enrollment_id=body["expected_enrollment_id"]
-        )
+        add_request_id = _pending_principal_request_id(add_path, name, enrollment_id=body["expected_enrollment_id"])
         if add_request_id is not None:
             _clear_principal_request(add_path, request_id=add_request_id)
     return payload
@@ -562,17 +577,12 @@ def _clear_principal_request(path: Path, *, request_id: str) -> bool:
         return True
 
 
-def _pending_principal_request_id(path: Path, name: str, *, expected_enrollment_id: str | None) -> str | None:
+def _pending_principal_request_id(path: Path, name: str, *, enrollment_id: str | None) -> str | None:
     with fleet_client._spool_lock(path) as dir_fd:
         pending = fleet_client._read_spool(path, dir_fd=dir_fd)
     for item in pending:
         request_id = item.get("request_id")
-        if (
-            item.get("name") == name
-            and isinstance(request_id, str)
-            and request_id
-            and item.get("expected_enrollment_id") == expected_enrollment_id
-        ):
+        if item.get("name") == name and isinstance(request_id, str) and request_id and request_id == enrollment_id:
             return request_id
     return None
 
