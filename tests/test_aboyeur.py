@@ -2688,6 +2688,18 @@ def test_record_run_termination_write_error_retains_run_lock(tmp_path, monkeypat
 
 
 def test_run_direct_worker_writes_complete_process_logs(monkeypatch, tmp_path):
+    metadata_provenance = {
+        "observed_at": "2026-10-13T12:00:00+00:00",
+        "fields": {
+            "effective_model": {
+                "source": "observed",
+                "locator": "acp-config-option-update",
+                "digest": None,
+                "unknown_reason": "backend-revision-unavailable",
+            }
+        },
+    }
+
     def fake_run_agent(cli_ref, prompt, **kwargs):
         return agents.AgentResult(
             text="answer",
@@ -2700,6 +2712,7 @@ def test_run_direct_worker_writes_complete_process_logs(monkeypatch, tmp_path):
             requested_model="Bearer PRIVATE_MARKER",
             effective_model="composer-2.5",
             acpx_version="0.12.0",
+            metadata_provenance=metadata_provenance,
         )
 
     output_dir = tmp_path / "run"
@@ -2720,12 +2733,14 @@ def test_run_direct_worker_writes_complete_process_logs(monkeypatch, tmp_path):
     assert worker_payload["stdout_log"] == "logs/worker-001-coder.stdout.log"
     assert worker_payload["stderr_log"] == "logs/worker-001-coder.stderr.log"
     assert "requested_model" not in worker_payload
+    assert worker_payload["metadata_provenance"]["fields"]["effective_model"]["source"] == "observed"
     assert (output_dir / worker_payload["stdout_log"]).read_text() == "answer\n"
     assert (output_dir / worker_payload["stderr_log"]).read_text() == "adapter diagnostic\n"
     synthesis = json.loads((output_dir / "synthesis.json").read_text())["result"]
     assert synthesis["stdout_log"] == worker_payload["stdout_log"]
     assert synthesis["stderr_log"] == worker_payload["stderr_log"]
     assert "requested_model" not in synthesis
+    assert synthesis["metadata_provenance"] == worker_payload["metadata_provenance"]
 
 
 def test_run_direct_worker_preserves_timeout_as_terminal_status(monkeypatch, tmp_path):

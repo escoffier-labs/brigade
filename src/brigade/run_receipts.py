@@ -300,6 +300,10 @@ def agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
                 if value is None:
                     continue
             payload[key] = value
+    if result.metadata_provenance is not None:
+        metadata_provenance = _safe_metadata_provenance(result.metadata_provenance)
+        if metadata_provenance is not None:
+            payload["metadata_provenance"] = metadata_provenance
     if result.safe_events:
         payload["events"] = list(result.safe_events)
     return payload
