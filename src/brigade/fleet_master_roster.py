@@ -71,9 +71,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*\s*=(?!=|>)",
     re.IGNORECASE,
 )
-_PATH_LABEL = (
-    r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositories|repos?|locations?)"
-)
+_PATH_LABEL = r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositor(?:y|ies)|repos?|locations?)"
 _PATH_DECLARATION_LINKER = (
     r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)"
 )
