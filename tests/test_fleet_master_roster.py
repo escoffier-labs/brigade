@@ -68,6 +68,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
     [
         "Use token sk-ant-abcdefghijklmnopqrstuvwxyz0123456789 for auth.",
         "Use Slack token " + "xoxb-" + "A" * 20,
+        "Use Stripe key " + "sk_live_" + "A" * 24,
         "Use GitLab token " + "glpat-" + "A" * 20,
         "OPENAI_API_KEY=placeholder-secret",
         "CI=production",
@@ -138,6 +139,19 @@ def test_parse_rejects_relative_paths_as_models(model: str) -> None:
         fleet_master_roster.parse(document)
 
 
+@pytest.mark.parametrize("field", ["model", "purpose", "caveats"])
+@pytest.mark.parametrize("path", ["workspace/Dockerfile", "project/Makefile"])
+def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None:
+    document = _document()
+    if field == "caveats":
+        document["seats"][0][field] = [path]  # type: ignore[index]
+    else:
+        document["seats"][0][field] = path  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
 @pytest.mark.parametrize("text", ["and/or", "input/output", "read/write"])
 def test_parse_accepts_slash_separated_descriptive_prose(text: str) -> None:
     document = _document()
@@ -153,6 +167,20 @@ def test_parse_accepts_ordinary_slash_delimited_descriptive_prose(text: str) -> 
     document["seats"][0]["purpose"] = f"Support {text} workflows"  # type: ignore[index]
 
     assert fleet_master_roster.parse(document)["seats"][0]["purpose"] == f"Support {text} workflows"
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+def test_parse_accepts_https_urls_in_descriptive_text(field: str) -> None:
+    document = _document()
+    text = "See https://example.com/docs for the guide."
+    if field == "purpose":
+        document["seats"][0][field] = text  # type: ignore[index]
+    else:
+        document["seats"][0][field] = [text]  # type: ignore[index]
+
+    parsed = fleet_master_roster.parse(document)
+
+    assert parsed["seats"][0][field] == (text if field == "purpose" else [text])
 
 
 def test_parse_rejects_duplicate_seat_names() -> None:

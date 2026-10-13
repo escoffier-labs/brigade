@@ -19,7 +19,7 @@ MAX_TEXT = 512
 _SEAT_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _DANGEROUS_VALUE = re.compile(
-    r"(?:sk-[A-Za-z0-9_-]{12,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
+    r"(?:sk_live_[A-Za-z0-9]+|sk-[A-Za-z0-9_-]{12,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
     r"\bBearer\s+\S+|\b[A-Z][A-Z0-9_]*\s*=|"
     r"\bauth(?:entication)?[ -]profile(?:\s*[:=]\s*|\s+)(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+')|"
     r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|"
@@ -28,6 +28,7 @@ _DANGEROUS_VALUE = re.compile(
     re.IGNORECASE,
 )
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~[/\\]|[/\\]|\.{1,2}[/\\])")
+_HTTP_URL = re.compile(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE)
 _RELATIVE_PATH = re.compile(
     r"(?<![A-Za-z0-9_.-])(?P<path>(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+)(?![A-Za-z0-9_.~-])"
 )
@@ -60,8 +61,11 @@ _FILESYSTEM_COMPONENTS = frozenset(
         "tmp",
         "usr",
         "var",
+        "workspace",
+        "project",
     }
 )
+_EXTENSIONLESS_FILES = frozenset({"containerfile", "dockerfile", "gnumakefile", "makefile", "justfile", "procfile"})
 _FILE_SUFFIX = re.compile(r"\.[A-Za-z]{1,8}$")
 _SURROGATE = re.compile("[\\ud800-\\udfff]")
 
@@ -78,11 +82,11 @@ def _has_control(value: str) -> bool:
 
 
 def _has_relative_path_evidence(value: str) -> bool:
-    for match in _RELATIVE_PATH.finditer(value):
+    for match in _RELATIVE_PATH.finditer(_HTTP_URL.sub("", value)):
         components = re.split(r"[/\\]", match.group("path"))
         if any(component.startswith(".") or component.casefold() in _FILESYSTEM_COMPONENTS for component in components):
             return True
-        if _FILE_SUFFIX.search(components[-1]):
+        if components[-1].casefold() in _EXTENSIONLESS_FILES or _FILE_SUFFIX.search(components[-1]):
             return True
     return False
 
@@ -106,7 +110,7 @@ def _text(value: Any, field: str) -> str:
     if (
         _DANGEROUS_VALUE.search(value)
         or contains_credential(value)
-        or _ROOTED_PATH.search(value)
+        or _ROOTED_PATH.search(_HTTP_URL.sub("", value))
         or _has_relative_path_evidence(value)
     ):
         raise MasterRosterError(f"{field} contains a credential, environment assignment, or home path")
