@@ -553,7 +553,9 @@ def test_principal_enrollment_replays_the_same_token_and_revocation_is_idempoten
 
     revoke = {"action": "revoke", "name": "recoverable"}
     assert _post_path(base, ADMIN, "/message-principals", revoke)[0] == 200
-    assert _post_path(base, ADMIN, "/message-principals", request)[0] == 409
+    stale_replay = _post_path(base, ADMIN, "/message-principals", request)
+    assert stale_replay[0] == 409
+    assert stale_replay[1]["code"] == "principal_enrollment_revoked"
     assert _post_path(base, ADMIN, "/message-principals", revoke)[0] == 200
     assert _post_path(base, ADMIN, "/message-principals", {"action": "revoke", "name": "missing"})[0] == 404
 
@@ -1883,6 +1885,77 @@ def test_principal_add_clears_pending_request_after_definitive_validation_error(
     assert enrolled["principal"]["label"] == "Corrected label"
     assert requests[0]["request_id"] != requests[1]["request_id"]
     assert requests[1]["label"] == "Corrected label"
+
+
+def test_principal_add_retries_after_revoked_pending_enrollment(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
+    )
+    requests = []
+
+    class Response(BytesIO):
+        status = 201
+
+    def hub_open(request, **_kwargs):
+        body = json.loads(request.data)
+        requests.append(body)
+        if len(requests) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                409,
+                "revoked enrollment",
+                {},
+                BytesIO(b'{"error":"revoked enrollment","code":"principal_enrollment_revoked"}'),
+            )
+        return Response(
+            json.dumps(
+                {
+                    "principal": {
+                        "principal_id": "agent:researcher",
+                        "name": "researcher",
+                        "label": body["label"],
+                        "token": body["token"],
+                    }
+                }
+            ).encode()
+        )
+
+    monkeypatch.setattr(fleet_client, "_hub_open", hub_open)
+    enrolled = fleet_client_messages.manage_principal("add", name="researcher", label="Current label")
+
+    assert len(requests) == 2
+    assert requests[0]["request_id"] != requests[1]["request_id"]
+    assert requests[1]["label"] == "Current label"
+    assert enrolled["principal"]["token"] == requests[1]["token"]
+    assert not fleet_client_messages._principal_pending_path("researcher", ADMIN).exists()
+
+
+def test_principal_revoke_clears_local_pending_enrollment(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
+    )
+    pending_path = fleet_client_messages._principal_pending_path("researcher", ADMIN)
+    fleet_client_messages._pending_principal_request("researcher", ADMIN, None)
+
+    class Response(BytesIO):
+        status = 200
+
+    monkeypatch.setattr(
+        fleet_client,
+        "_hub_open",
+        lambda *_args, **_kwargs: Response(b'{"principal":{"principal_id":"agent:researcher","name":"researcher"}}'),
+    )
+    fleet_client_messages.manage_principal("revoke", name="researcher")
+
+    assert not pending_path.exists()
 
 
 @pytest.mark.parametrize(

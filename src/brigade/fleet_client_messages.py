@@ -243,7 +243,9 @@ def reply(message_id: int, *, body: str, subject: str | None, reference: str | N
     return _send_ordered(message, hub, token, node_id)
 
 
-def manage_principal(action: str, *, name: str, label: str | None = None) -> dict[str, Any]:
+def manage_principal(
+    action: str, *, name: str, label: str | None = None, _retried_revoked_enrollment: bool = False
+) -> dict[str, Any]:
     settings = fleet_client.load_fleet_settings()
     if not settings["hub_url"]:
         raise fleet_client.FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
@@ -293,6 +295,20 @@ def manage_principal(action: str, *, name: str, label: str | None = None) -> dic
     except Exception as exc:
         raise fleet_client.FleetClientError(f"fleet hub principal management failed: {type(exc).__name__}") from exc
     if not 200 <= status < 300:
+        if (
+            action == "add"
+            and pending_path is not None
+            and status == 409
+            and payload.get("code") == "principal_enrollment_revoked"
+        ):
+            _clear_principal_request(pending_path)
+            if not _retried_revoked_enrollment:
+                return manage_principal(
+                    action,
+                    name=name,
+                    label=label,
+                    _retried_revoked_enrollment=True,
+                )
         if pending_path is not None and 400 <= status < 500 and status not in (408, 409, 425, 429):
             _clear_principal_request(pending_path)
         raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
@@ -319,6 +335,7 @@ def manage_principal(action: str, *, name: str, label: str | None = None) -> dic
             or principal.get("name") != name
         ):
             raise fleet_client.FleetClientError("fleet hub did not confirm the revoked principal")
+        _clear_principal_request(_principal_pending_path(name, settings["admin_token"]))
     return payload
 
 

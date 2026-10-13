@@ -41,6 +41,10 @@ class MessageError(ValueError):
 class MessageConflict(MessageError):
     """An idempotency key was reused for a different message payload."""
 
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 class MessageQuotaError(MessageError):
     """A temporary per-principal message quota is full."""
@@ -304,7 +308,9 @@ def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str]:
             )
         elif existing[0] is not None:
             if request_id is not None and existing[1] == request_id:
-                raise MessageConflict("revoked principal enrollment cannot be replayed")
+                raise MessageConflict(
+                    "revoked principal enrollment cannot be replayed", code="principal_enrollment_revoked"
+                )
             conn.execute(
                 "UPDATE fleet_message_principals SET label=?,token_hash=?,created_at=?,revoked_at=NULL,enrollment_id=? "
                 "WHERE principal_id=?",

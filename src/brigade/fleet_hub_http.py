@@ -1747,7 +1747,10 @@ def make_handler(
                 self._send_json(exc.status, exc.payload())
                 return
             except fleet_hub_messages.MessageConflict as exc:
-                self._send_json(409, {"error": str(exc)})
+                payload = {"error": str(exc)}
+                if exc.code is not None:
+                    payload["code"] = exc.code
+                self._send_json(409, payload)
                 return
             except fleet_hub_messages.MessageQuotaError as exc:
                 self._send_json(429, {"error": str(exc)})
