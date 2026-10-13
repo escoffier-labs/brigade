@@ -185,6 +185,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "token: optional-token",
         "password is x",
         "Password set to hunter2",
+        "Set password to hunter2",
+        "Set API key to shortkey",
         "Password is set to hunter2",
         "Password was set to hunter2",
         "Token is set to abcdefgh",
@@ -222,14 +224,20 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "auth token is abcdefghijklmnop",
         "export service_mode=production",
         "Set environment variable service_mode=production",
+        "Set environment variable SERVICE_MODE to production",
         "env service_mode=production",
         "Set env service_mode=production",
         "Environment variable service_mode=production",
+        "Environment variable SERVICE_MODE is production",
+        "Environment variable SERVICE_MODE: production",
         "Use environment variable service_mode=production",
         "Home directory: ~",
         "The path is /",
         "The path is .",
         "The path is ..",
+        "Start at /",
+        "Operate from ~",
+        "Move to ..",
     ],
 )
 def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
@@ -266,6 +274,7 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Password is confidential.",
         "Password is managed by Vault.",
         "Auth profile is required.",
+        "Environment variable SERVICE_MODE is required.",
     ],
 )
 def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> None:
