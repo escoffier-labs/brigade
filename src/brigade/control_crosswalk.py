@@ -1377,7 +1377,7 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
         if not linked and not _discovery_path_present(ctx, out, path):
             continue
         relpath = _relpath(ctx, path)
-        manifest = None if linked else _read_json_object(ctx, path, reserve_bytes=manifest_reserve)
+        manifest = None if linked else _read_json_object(ctx, path, manifest_reserve, strict_adapter)
         if _is_symlink(ctx, package_dir) or _is_symlink(ctx, path):
             if adapter is _verify_evidence_package:
                 obs = _obs(
@@ -1391,6 +1391,8 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
                 obs = _invalid(ctx, path, "symlink_refused")
         elif manifest is None:
             obs = control_crosswalk_package.unreadable_manifest_observation(ctx.reader, relpath, path)
+            if strict_adapter:
+                ctx.reader.release_subtree(package_dir)
         elif adapter is not None:
             try:
                 obs = _adapter_observation(adapter, ctx, package_dir, relpath, reserve_bytes=manifest_reserve)

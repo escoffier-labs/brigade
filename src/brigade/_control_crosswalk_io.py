@@ -51,6 +51,7 @@ class _AssessmentReader:
         self.errors: dict[Path, str] = {}
         self.contents: dict[Path, bytes] = {}
         self.read_metadata: dict[Path, tuple[int, int, int, int, int, int]] = {}
+        self.held_reads: dict[Path, int] = {}
         self.used = 0
         self.temporary: tempfile.TemporaryDirectory[str] | None = None
         self.copied: set[Path] = set()
@@ -69,11 +70,25 @@ class _AssessmentReader:
 
     def close(self) -> None:
         try:
-            if self.temporary is not None:
-                self.temporary.cleanup()
+            self._close_held_reads()
         finally:
-            for descriptor in reversed(list(self.directories.values())):
-                os.close(descriptor)
+            try:
+                if self.temporary is not None:
+                    self.temporary.cleanup()
+            finally:
+                for descriptor in reversed(list(self.directories.values())):
+                    os.close(descriptor)
+
+    def _close_held_reads(self, path: Path | None = None) -> None:
+        """Close source handles held through a package source recheck."""
+        for candidate, descriptor in list(self.held_reads.items()):
+            if path is not None:
+                try:
+                    candidate.relative_to(path)
+                except ValueError:
+                    continue
+            del self.held_reads[candidate]
+            os.close(descriptor)
 
     def directory(self, path: Path) -> int:
         parts = path.relative_to(self.target).parts
@@ -117,11 +132,14 @@ class _AssessmentReader:
         limit: int = attestation_input.MAX_JSON_BYTES,
         *,
         reserve_bytes: int = 0,
+        hold_open: bool = False,
     ) -> bytes:
         if path in self.contents:
             cached = self.contents[path]
             if len(cached) > limit:
                 raise _ReadRefusal("read_limit_exceeded")
+            if hold_open and path not in self.held_reads:
+                raise _ReadRefusal("discovery_unreadable")
             return cached
         descriptor = -1
         try:
@@ -157,6 +175,9 @@ class _AssessmentReader:
                     raise _ReadRefusal("read_limit_exceeded")
             result = bytes(raw)
             self.contents[path] = result
+            if hold_open:
+                self.held_reads[path] = descriptor
+                descriptor = -1
             return result
         except FileNotFoundError:
             raise
@@ -175,6 +196,7 @@ class _AssessmentReader:
         *,
         limit: int = attestation_input.MAX_JSON_BYTES,
         reserve_bytes: int = 0,
+        hold_open: bool = False,
     ) -> Path:
         destination = self.snapshot_target / path.relative_to(self.target)
         if path in self.copied:
@@ -187,7 +209,7 @@ class _AssessmentReader:
             self.refusal(path, exc)
             raise
         try:
-            raw = self.read(path, limit, reserve_bytes=reserve_bytes)
+            raw = self.read(path, limit, reserve_bytes=reserve_bytes, hold_open=hold_open)
         except FileNotFoundError as exc:
             # Disappearance after discovery is not optional-data absence.
             self.errors[path] = "discovery_unreadable"
@@ -209,6 +231,7 @@ class _AssessmentReader:
                 return False
             return parts[: len(prefix)] == prefix
 
+        self._close_held_reads(path)
         self.contents = {candidate: value for candidate, value in self.contents.items() if not in_subtree(candidate)}
         self.read_metadata = {
             candidate: value for candidate, value in self.read_metadata.items() if not in_subtree(candidate)
@@ -301,10 +324,14 @@ def _path_refusal(ctx: _ReadContext, path: Path, *, include_leaf: bool = False) 
     return None
 
 
-def _read_json_object(ctx: _ReadContext, path: Path, *, reserve_bytes: int = 0) -> dict[str, Any] | None:
+def _read_json_object(
+    ctx: _ReadContext, path: Path, reserve_bytes: int = 0, hold_open: bool = False
+) -> dict[str, Any] | None:
     """Bounded, regular-file, handle-relative JSON read."""
     try:
-        value = attestation_input.strict_json_loads(ctx.reader.read(path, reserve_bytes=reserve_bytes))
+        value = attestation_input.strict_json_loads(
+            ctx.reader.read(path, reserve_bytes=reserve_bytes, hold_open=hold_open)
+        )
         return value if isinstance(value, dict) else None
     except (attestation_input.AttestationInputError, OSError):
         return None

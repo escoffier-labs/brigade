@@ -71,7 +71,7 @@ def stage_source_package(
         *entry_names,
     }:
         raise evidence_package_snapshot.PackageSnapshotError("unsafe")
-    reader.copy(artifact / "manifest.json", reserve_bytes=reserve_bytes)
+    reader.copy(artifact / "manifest.json", reserve_bytes=reserve_bytes, hold_open=strict_package)
     for name in sorted(entry_names, key=lambda item: item != "receipt.json"):
         entry_path = artifact / name
         limit = attestation_input.MAX_JSON_BYTES if name == "receipt.json" else evidence_package.MAX_ENTRY_BYTES
@@ -92,7 +92,7 @@ def stage_source_package(
             raise evidence_package_snapshot.PackageSnapshotError("mismatch")
         source_metadata[name] = _control_crosswalk_io._package_entry_metadata(entry_info)
         try:
-            reader.copy(entry_path, limit=limit, reserve_bytes=reserve_bytes)
+            reader.copy(entry_path, limit=limit, reserve_bytes=reserve_bytes, hold_open=strict_package)
         except _control_crosswalk_io._ReadRefusal as exc:
             if exc.reason == "read_limit_exceeded":
                 raise evidence_package_snapshot.PackageSnapshotError("read_limit_exceeded") from exc

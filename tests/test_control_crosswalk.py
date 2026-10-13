@@ -671,6 +671,35 @@ def test_ec12_strict_package_snapshot_validates_and_rejects_tampering(tmp_path):
     assert evaluated["evidence_readiness"]["EC-12"]["reason"] == "package_snapshot_mismatch"
 
 
+def test_ec12_holds_source_handles_through_final_package_recheck(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    io = control_crosswalk._control_crosswalk_io
+    original_check = io.package_source_issue
+    readers = []
+
+    def check_with_held_source_handles(reader, artifact, *args, **kwargs):
+        assert artifact == package_dir
+        assert {path.name for path in reader.held_reads if path.parent == artifact} == {
+            "manifest.json",
+            "receipt.json",
+            "changes.patch",
+        }
+        for descriptor in reader.held_reads.values():
+            os.fstat(descriptor)
+        readers.append(reader)
+        return original_check(reader, artifact, *args, **kwargs)
+
+    monkeypatch.setattr(io, "package_source_issue", check_with_held_source_handles)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "validated"
+    assert len(readers) == 1
+    assert readers[0].held_reads == {}
+
+
 def test_ec12_accepts_export_supported_legacy_receipt_schema(tmp_path):
     target = _ws(tmp_path)
     package_dir = target / ".brigade" / "evidence-packages" / "pkg-legacy"
