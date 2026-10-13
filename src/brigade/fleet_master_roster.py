@@ -55,9 +55,10 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
     r"\s+(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to)\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
-    r"\bset\s+(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
-    r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+to\s+"
-    + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
+    r"\b(?:set|configure(?:d)?|store(?:d)?|provide(?:d)?|generate(?:d)?)\s+"
+    r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
+    r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
+    r"(?:to|as|with)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%[A-Za-z_][A-Za-z0-9_]*%|"
     r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][^}]*\})"
     r"(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))",
@@ -71,7 +72,7 @@ _URL_CREDENTIAL_QUERY = re.compile(
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"\b(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+|(?:use\s+)?environment\s+variable\s+)"
-    r"[A-Za-z_][A-Za-z0-9_]*(?:\s*=(?!=|>)|\s+(?:to|is|are|was|were|equals|will\s+be|has\s+been|have\s+been)\s+(?!(?:"
+    r"[A-Za-z_][A-Za-z0-9_]*(?:\s*=(?!=|>)|\s+(?:set\s+to|configured\s+(?:as|to|with)|to|is|are|was|were|equals|will\s+be|has\s+been|have\s+been)\s+(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
     + r"))\S+|:\s*(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
@@ -148,6 +149,32 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
                 continue
             decoded_value = unquote(query_value)
             path_value = decoded_value.rstrip(",;!?")
+            if path_value.endswith(".") and path_value not in {".", ".."}:
+                path_value = path_value.rstrip(".")
+            if (
+                _EXPLICIT_TERMINAL_PATH.search(f"path: {path_value}")
+                or _ROOTED_PATH.search(path_value)
+                or _RELATIVE_PATH.search(path_value)
+            ):
+                return True
+    return False
+
+
+def _has_disallowed_api_route_query(value: str) -> bool:
+    routes = (*_API_ROUTE_CONTEXT.finditer(value), *_HTTP_METHOD_ROUTE_CONTEXT.finditer(value))
+    for match in routes:
+        route_query = match.group("path").partition("?")[2]
+        for key, query_value in parse_qsl(route_query, keep_blank_values=True):
+            pair = f"{key}={query_value}"
+            if (
+                _DANGEROUS_VALUE.search(pair)
+                or _ENVIRONMENT_ASSIGNMENT.search(pair)
+                or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(pair)
+            ):
+                return True
+            if key.casefold() not in _URL_PATH_QUERY_KEYS:
+                continue
+            path_value = query_value.rstrip(",;!?")
             if path_value.endswith(".") and path_value not in {".", ".."}:
                 path_value = path_value.rstrip(".")
             if (
@@ -369,6 +396,7 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         or _URL_CREDENTIAL_QUERY.search(value)
         or _has_url_userinfo(value)
         or _has_filesystem_path_in_url_query(value)
+        or _has_disallowed_api_route_query(value)
         or _ENVIRONMENT_ASSIGNMENT.search(path_text)
         or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(path_text)
         or contains_credential(value)
