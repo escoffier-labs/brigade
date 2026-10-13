@@ -580,7 +580,66 @@ def test_parse_stream_reads_standard_model_config_options(message):
     parsed, error = acpx_adapter.parse_stream(
         _stream(
             {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+            {"jsonrpc": "2.0", "method": "session/new", "id": "new-session", "params": {}},
             message,
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "hello"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["effective_model"] == "composer-2.5"
+
+
+def test_parse_stream_ignores_config_options_from_unrelated_response():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/new", "id": "new-1", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": "new-1",
+                "result": {"configOptions": [{"id": "model", "category": "model", "currentValue": "composer-2.5"}]},
+            },
+            {"jsonrpc": "2.0", "method": "session/list", "id": "other-1", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": "other-1",
+                "result": {"configOptions": [{"id": "model", "category": "model", "currentValue": "forged-model"}]},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "hello"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["effective_model"] == "composer-2.5"
+
+
+def test_parse_stream_reads_model_config_from_set_option_response():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/set_config_option", "id": "set-1", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": "set-1",
+                "result": {"configOptions": [{"id": "model", "category": "model", "currentValue": "composer-2.5"}]},
+            },
             {
                 "jsonrpc": "2.0",
                 "method": "session/update",

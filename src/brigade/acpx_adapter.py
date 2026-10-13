@@ -320,14 +320,23 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
     late_permission: dict[str, object] | None = None
     stream_finalized = False
     has_structured_jsonrpc_error = False
+    config_option_request_ids: set[str] = set()
     for message in messages:
+        method = message.get("method")
+        message_id = message.get("id")
+        if method in ("session/new", "session/set_config_option") and isinstance(message_id, (str, int)):
+            config_option_request_ids.add(str(message_id))
         result = message.get("result")
         if isinstance(result, dict):
             version = result.get("protocolVersion")
             if isinstance(version, int):
                 protocol_version = version
-            if "configOptions" in result:
-                effective_model = _model_from_config_options(result["configOptions"])
+            response_id = message.get("id")
+            if "configOptions" in result and isinstance(response_id, (str, int)):
+                response_key = str(response_id)
+                if response_key in config_option_request_ids:
+                    effective_model = _model_from_config_options(result["configOptions"])
+                    config_option_request_ids.discard(response_key)
             stop = result.get("stopReason")
             if isinstance(stop, str) and isinstance(message.get("id"), (str, int)):
                 stop_reasons[str(message["id"])] = stop
