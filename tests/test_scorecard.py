@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from brigade import cli, localio, outcome, outcome_cmd, scorecard, verify_manifest, verify_trial
 
 from tests.test_verify_trial import (
@@ -765,14 +767,16 @@ def _skill_card_with_counts(*, helped: int, hurt: int) -> scorecard.SubjectScore
     )
 
 
-def _decide_skill_candidate(*, helped: int, hurt: int) -> outcome.Decision:
+def _decide_skill_candidate(
+    *, helped: int, hurt: int, config: outcome.ReconcileConfig | None = None
+) -> outcome.Decision:
     return scorecard.decide_scorecard(
         _skill_card_with_counts(helped=helped, hurt=hurt),
         artifact_id="brigade-work",
         current_status="candidate",
         last_action_ts=None,
         now=dt.datetime(2026, 10, 12, tzinfo=dt.timezone.utc),
-        config=outcome.ReconcileConfig(),
+        config=config or outcome.ReconcileConfig(),
     )
 
 
@@ -797,10 +801,17 @@ def test_skill_candidate_without_regressions_is_unchanged_by_margin():
     assert _decide_skill_candidate(helped=1, hurt=0).reason == "insufficient verified evidence"
 
 
-def test_skill_and_card_install_margins_agree():
-    config = outcome.ReconcileConfig()
+@pytest.mark.parametrize(
+    "config",
+    [
+        outcome.ReconcileConfig(),
+        # Unrestricted fork overrides must still require helped > hurt.
+        outcome.ReconcileConfig(install_min_helped=0, effective_wilson_min=0.0),
+    ],
+)
+def test_skill_and_card_install_margins_agree(config):
     now = dt.datetime(2026, 10, 12, tzinfo=dt.timezone.utc)
-    for helped, hurt in [(2, 1), (3, 1), (2, 0), (4, 2), (3, 2)]:
+    for helped, hurt in [(0, 0), (2, 1), (3, 1), (2, 0), (4, 2), (3, 2)]:
         card = outcome.decide(
             outcome.OutcomeScore("card", helped, hurt, 0, 0.0, None),
             current_status="candidate",
@@ -808,5 +819,5 @@ def test_skill_and_card_install_margins_agree():
             now=now,
             config=config,
         )
-        skill = _decide_skill_candidate(helped=helped, hurt=hurt)
+        skill = _decide_skill_candidate(helped=helped, hurt=hurt, config=config)
         assert (skill.action, skill.reason) == (card.action, card.reason), (helped, hurt)

@@ -770,7 +770,7 @@ def effectiveness_gate_reason(
     wilson = outcome_core.wilson_lower_bound(helped, trials, config.z)
     if outcome_core.candidate_regression_withheld(helped, hurt):
         return "withheld: verified regression present"
-    if helped < config.install_min_helped:
+    if helped < config.install_min_helped or helped <= hurt:
         return "insufficient verified evidence"
     # Same post-regression margin as candidate cards (#648, #1686).
     if not outcome_core.candidate_install_margin_met(helped, hurt, install_min_helped=config.install_min_helped):
