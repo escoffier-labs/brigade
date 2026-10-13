@@ -333,6 +333,8 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Auth profile used by implementer: production-admin",
         "This seat uses auth profile production-admin",
         "Reviewer uses auth profile production-admin",
+        "Reviewer is using auth profile production-admin",
+        "This seat is using the authentication profile production-admin",
         "Auth profile of this seat is production-admin",
         "Auth profile of implementer is production-admin",
         'Auth profile is "production admin"',
@@ -386,6 +388,8 @@ def test_parse_rejects_qualified_compact_credential_assignments(field: str, text
         "Reviewer uses the password hunter2",
         "Reviewer is using API key shortkey",
         "This seat is using the password hunter2",
+        "Reviewer has API key shortkey",
+        "Reviewer has the password hunter2",
     ],
 )
 def test_parse_rejects_subject_first_credential_disclosures(field: str, text: str) -> None:
