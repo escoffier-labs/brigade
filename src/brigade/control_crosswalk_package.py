@@ -7,7 +7,14 @@ import stat
 from collections.abc import Callable
 from pathlib import Path
 
-from . import _control_crosswalk_io, attestation_input, control_readiness, evidence_package, evidence_package_snapshot
+from . import (
+    _control_crosswalk_io,
+    attestation_input,
+    attestation_receipt,
+    control_readiness,
+    evidence_package,
+    evidence_package_snapshot,
+)
 
 
 def check_entry_name(name: str, *, strict_package: bool) -> None:
@@ -86,6 +93,12 @@ def stage_source_package(
         source_metadata[name] = _control_crosswalk_io._package_entry_metadata(entry_info)
         try:
             reader.copy(entry_path, limit=limit, reserve_bytes=reserve_bytes)
+        except _control_crosswalk_io._ReadRefusal as exc:
+            if exc.reason == "read_limit_exceeded":
+                raise evidence_package_snapshot.PackageSnapshotError("read_limit_exceeded") from exc
+            if _control_crosswalk_io._is_unsafe_link_refusal(exc):
+                raise evidence_package_snapshot.PackageSnapshotError("unsafe") from exc
+            raise
         except OSError as exc:
             if _control_crosswalk_io._is_unsafe_link_refusal(exc):
                 raise evidence_package_snapshot.PackageSnapshotError("unsafe") from exc
@@ -118,14 +131,15 @@ def stage_source_package(
 
 
 def receipt_binding_candidates(staged_package: Path) -> dict[str, object]:
-    """Return run identities from the receipt bytes staged for strict validation."""
+    """Return run identities only from a receipt with a valid stored digest."""
     try:
         receipt = attestation_input.read_json_object(staged_package / "receipt.json")
-    except (OSError, attestation_input.AttestationInputError):
+        snapshot = attestation_receipt.snapshot_stored_receipt(receipt)
+    except (OSError, attestation_input.AttestationInputError, attestation_receipt.ReceiptDigestError):
         return {}
     return {
-        "receipt.producer_run_id": receipt.get("producer_run_id"),
-        "receipt.run_id": receipt.get("run_id"),
+        "receipt.producer_run_id": snapshot.receipt.get("producer_run_id"),
+        "receipt.run_id": snapshot.receipt.get("run_id"),
     }
 
 
@@ -216,6 +230,8 @@ def verify_evidence_package(_target: Path, package_dir: Path) -> control_readine
                 ),
                 ["entry_path_unsafe"],
             )
+        if exc.code == "read_limit_exceeded":
+            return _unavailable(package_dir.name, exc.code)
         if exc.code == "malformed":
             return control_readiness.ArtifactObservation(
                 package_dir.name, "discovered", "invalid", control_readiness.dims(), ["schema_missing"]

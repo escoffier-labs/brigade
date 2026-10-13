@@ -21,6 +21,13 @@ def receipt_claims_untrusted(obs: control_readiness.ArtifactObservation) -> bool
     if (
         obs.proposed == "invalid"
         and "schema_missing" in obs.reasons
+        and obs.relpath.endswith("receipt.json")
+        and obs.dimensions.get("integrity", {}).get("status") != "passed"
+    ):
+        return True
+    if (
+        obs.proposed == "invalid"
+        and "schema_missing" in obs.reasons
         and obs.relpath.endswith("attestation.sigstore.json")
         and obs.dimensions.get("signature", {}).get("status") != "passed"
     ):

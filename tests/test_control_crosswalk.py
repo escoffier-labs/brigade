@@ -359,10 +359,44 @@ def test_completed_verify_receipt_reports_malformed_digest_metadata_as_invalid(t
     receipt["digests"] = digests
     _write_json(run_dir / "receipt.json", receipt)
 
+    workspace = _assess(target, "EC-01")
+    assert workspace["outcome"] == "invalid"
+    assert workspace["reason"] == "schema_missing"
+
     readiness = _assess(target, "EC-01", RUN)
 
-    assert readiness["outcome"] == "invalid"
-    assert readiness["reason"] == "schema_missing"
+    assert readiness["outcome"] == "incomplete"
+    assert readiness["reason"] == "artifact_not_run_bound"
+    assert readiness["population"]["unbound"] == 1
+    assert readiness["artifacts"][0]["outcome"] == "invalid"
+    assert readiness["artifacts"][0]["scope"] == "unbound"
+    assert readiness["artifacts"][0]["reason_codes"] == ["schema_missing"]
+
+
+def test_ec01_does_not_bind_or_period_filter_receipt_with_unverified_digest_metadata(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["digests"] = {"algorithm": "sha256", "receipt_sha256": None}
+    receipt["producer_run_id"] = "tampered-run"
+    receipt["run_id"] = "tampered-run"
+    receipt["completed_at"] = "2020-01-01T00:00:00Z"
+    _write_json(receipt_path, receipt)
+
+    result = _assess(
+        target,
+        "EC-01",
+        RUN,
+        period=("2026-01-01T00:00:00Z", "2026-12-31T23:59:59Z"),
+    )
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["population"]["out_of_period"] == 0
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["schema_missing", "timestamp_missing"]
 
 
 def test_completed_verify_receipt_does_not_bind_digest_rejection_from_tampered_fields(tmp_path):
@@ -1759,6 +1793,51 @@ def test_ec12_leaves_pre_staging_package_rejections_unbound(tmp_path):
     assert result["artifacts"][0]["reason_codes"] == ["entry_path_unsafe"]
 
 
+def test_ec12_does_not_bind_package_rejection_from_receipt_with_stale_digest(tmp_path):
+    target = _ws(tmp_path)
+    package = target / ".brigade" / "evidence-packages" / "pkg-stale-receipt"
+    _write_strict_package(package, producer_run_id=RUN)
+    receipt_path = package / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["producer_run_id"] = "tampered-run"
+    receipt["run_id"] = "tampered-run"
+    _write_json(receipt_path, receipt)
+
+    manifest_path = package / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"]["producer_run_id"] = "tampered-run"
+    manifest["source"]["verify_run_id"] = "tampered-run"
+    for entry in manifest["entries"]:
+        if entry["path"] == "receipt.json":
+            raw_receipt = receipt_path.read_bytes()
+            entry["bytes"] = len(raw_receipt)
+            entry["sha256"] = hashlib.sha256(raw_receipt).hexdigest()
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    _write_json(manifest_path, manifest)
+
+    result = _assess(target, "EC-12", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "rejected"
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["package_snapshot_mismatch"]
+
+
+def test_ec12_preserves_read_limit_refusal_during_package_staging(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package = target / ".brigade" / "evidence-packages" / "pkg-bounded-read"
+    _write_strict_package(package)
+    limit = (package / "manifest.json").stat().st_size + (package / "receipt.json").stat().st_size
+    monkeypatch.setattr(control_crosswalk.evidence_package_snapshot, "MAX_PACKAGE_BYTES", limit)
+    monkeypatch.setattr(control_crosswalk, "_ASSESSMENT_BYTE_BUDGET", 0)
+
+    result = _assess(target, "EC-12")
+
+    assert result["artifacts"][0]["outcome"] == "unavailable"
+    assert result["artifacts"][0]["reason_codes"] == ["read_limit_exceeded"]
+
+
 def test_ec12_classifies_a_missing_manifest_listed_entry_as_snapshot_mismatch(tmp_path):
     target = _ws(tmp_path)
     package = target / ".brigade" / "evidence-packages" / "pkg-missing-entry"
@@ -1986,7 +2065,7 @@ def _fixture_ec12(target: Path) -> None:
 
 # claim -> (fixture, workspace outcome, workspace reason, run-scoped outcome)
 _ISSUE_FIXTURES = {
-    "EC-01": (_fixture_ec01, "invalid", "schema_missing", "invalid"),
+    "EC-01": (_fixture_ec01, "invalid", "schema_missing", "incomplete"),
     "EC-03": (_fixture_ec03, "invalid", "dsse_signatures_missing", "incomplete"),
     "EC-07": (_fixture_ec07, "invalid", "schema_missing", "incomplete"),
     "EC-09": (_fixture_ec09, "incomplete", "no_explicit_verdict", "incomplete"),

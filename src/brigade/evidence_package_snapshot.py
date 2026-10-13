@@ -47,7 +47,7 @@ class PackageSnapshotError(ValueError):
     """A strict package snapshot could not be produced safely."""
 
     def __init__(self, code: str):
-        if code not in {"unavailable", "unsafe", "malformed", "mismatch", "changed"}:
+        if code not in {"unavailable", "unsafe", "malformed", "mismatch", "changed", "read_limit_exceeded"}:
             raise ValueError("invalid package snapshot error code")
         self.code = code
         super().__init__(code)

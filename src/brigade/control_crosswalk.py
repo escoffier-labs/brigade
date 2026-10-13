@@ -295,6 +295,8 @@ def _adapter_observation(
                 _dims(integrity=("failed", "package_snapshot_mismatch"), subject="unknown", population="passed"),
                 ["package_snapshot_mismatch"],
             )
+        if exc.code == "read_limit_exceeded":
+            return _verifier_unavailable(relpath, exc.code)
         return _verifier_unavailable(relpath, "verifier_error")
     except Exception:
         return _verifier_unavailable(relpath, "verifier_error")
@@ -348,11 +350,7 @@ def _invalid(ctx: _Context, path: Path, reason: str, **dim_overrides: Any) -> co
 
 
 def _verify_receipt_children(ctx: _Context, filename: str) -> tuple[list[tuple[Path, Path]], _Discovery]:
-    """Bounded verify-run scan.
-
-    Verify receipts bind to a producer run through recorded fields, so a run
-    scope still needs the scan; a truncated scan keeps the claim incomplete.
-    """
+    """Bounded scan; truncated run-scoped receipts keep the claim incomplete."""
     root = ctx.target / ".brigade" / "work" / "verify-runs"
     children, truncated, error = _bounded_children(ctx, root)
     out = _Discovery(truncated=truncated)
@@ -401,6 +399,11 @@ def _assess_verify_receipt(
     digests = receipt.get("digests")
     has_digest_evidence = isinstance(digests, dict) and "receipt_sha256" in digests
     receipt_digest: str | None = None
+
+    def invalid_schema() -> control_readiness.ArtifactObservation:
+        integrity = "passed" if receipt_digest else ("failed", "schema_missing")
+        return _obs(relpath, "discovered", "invalid", _dims(integrity=integrity), ["schema_missing"])
+
     if "digests" in receipt:
         try:
             snapshot = attestation_receipt.snapshot_receipt(receipt)
@@ -415,9 +418,9 @@ def _assess_verify_receipt(
                 ["receipt_digest_mismatch"],
             )
         except attestation_receipt.ReceiptDigestError:
-            return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
+            return invalid_schema()
     if type(schema_version) is not int or schema_version != receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION:
-        return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
+        return invalid_schema()
     subject: str | tuple[str, str] = (
         "passed" if receipt.get("run_id") == run_dir.name else ("failed", "run_binding_mismatch")
     )
@@ -436,7 +439,7 @@ def _assess_verify_receipt(
 
     status = receipt.get("status")
     if not isinstance(status, str):
-        return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
+        return invalid_schema()
     commands = receipt.get("commands")
     # Producer receipt statuses: running (nonterminal) and the terminal
     # completed, failed, rejected (a command was refused) and canceled.
@@ -447,12 +450,12 @@ def _assess_verify_receipt(
     if status != "completed":
         return observed("incomplete", ("unknown", "status_not_terminal"))
     if not isinstance(commands, list):
-        return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
+        return invalid_schema()
     if not commands:
         # An empty intended check list cannot establish that any test ran.
         return observed("incomplete", ("unknown", "empty_commands"))
     if not all(isinstance(c, dict) and type(c.get("exit_code")) is int for c in commands):
-        return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
+        return invalid_schema()
     if any(c["exit_code"] != 0 for c in commands):
         return observed("failed", "passed", ["exit_code_nonzero"])
     planned = receipt.get("planned_commands")
@@ -1351,12 +1354,7 @@ def _evaluate_verify_archive_index_exists(ctx: _Context) -> _Discovery:
 
 
 def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
-    """EC-12: evidence package manifests staged under ``.brigade/evidence-packages/``.
-
-    `brigade receipts export package --out` accepts any output path, so discover
-    ``manifest.json`` at the root and one level below. Deeper nesting is not
-    discovered; the strict snapshot validates captured bytes and rederives the source receipt digest.
-    """
+    """EC-12 validates root and one-level package manifests with strict snapshots."""
     root = ctx.target / ".brigade" / "evidence-packages"
     children, truncated, error = _bounded_children(ctx, root)
     out = _Discovery(truncated=truncated)
