@@ -19,6 +19,13 @@ MAX_TEXT = 512
 _SEAT_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _MODEL_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
+_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_EXPLANATORY_SECRET_VALUE = (
+    r"(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|"
+    r"not\s+(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable)|"
+    r"confidential|managed(?:\s+by\s+Vault)?|provided|stored(?:\s+securely)?|encrypted|protected|"
+    r"handled|generated|rotated|masked|redacted)(?=$|[.,;!?])"
+)
 _DANGEROUS_VALUE = re.compile(
     r"(?:(?<![A-Za-z0-9_])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|(?<![A-Za-z0-9_])xapp-[A-Za-z0-9-]{12,}|(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{20,}|(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{36}\b|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Bearer\s+\S+|\bBearer\s+[A-Za-z0-9._~+/-]{20,}|"
@@ -39,17 +46,10 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with))\s+"
     r"(?:the\s+)?(?:\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\)|(?!(?:the)\b)[A-Za-z0-9_.-]+)\s+"
     r"auth(?:entication)?[ _-]profiles?\b|"
-    r"\b(?:token|auth[_ -]?token)\s*[:=]\s*"
-    r"(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)(?=$|[\s.,;!?]))\S+|"
-    r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
+    r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)\s*[:=]\s*"
+    + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
-    r"\s+is\s+(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)(?=$|[\s.,;!?]))"
-    r"(?:\[(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\])[A-Za-z0-9_ -]+\]|"
-    r"\((?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\))[^)]+\)|"
-    r"\"[^\"]+\"|'[^']+'|`[^`]+`|“[^“”]+”|‘[^‘’]+’|"
-    r"[A-Za-z0-9_-]{3,}|"
-    r"(?=[^\s]{8,})(?=[^\s]*[.@!#$%^&*+=~?][A-Za-z0-9])\S+|"
-    r"(?=[^\s]{7,}[.!?](?:\s|$))\S+)|"
+    r"\s+is\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%USERPROFILE%))",
     re.IGNORECASE,
 )
@@ -182,6 +182,9 @@ def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -
             return True
     for match in _RELATIVE_PATH.finditer(path_text):
         components = re.split(r"[/\\]", match.group("path"))
+        standalone = path_text.strip().rstrip(".,;:!?").casefold() == match.group("path").casefold()
+        if standalone and not model_identifier and match.group("path").casefold() not in _PROSE_SLASH_TERMS:
+            return True
         path_context = _PATH_CONTEXT.search(path_text[: match.start()]) is not None
         if path_context and match.group("path").casefold() not in _PROSE_SLASH_TERMS:
             return True
@@ -287,6 +290,8 @@ def parse(raw: Mapping[str, Any] | bytes | str) -> dict[str, Any]:
         name = _text(raw_seat.get("name"), f"{where}.name", check_paths=False)
         cli = _text(raw_seat.get("cli"), f"{where}.cli", check_paths=False)
         model = _text(raw_seat.get("model"), f"{where}.model")
+        if _URL_SCHEME.match(model):
+            raise MasterRosterError(f"{where}.model must be a provider/model identifier, not a URL")
         if not _MODEL_IDENTIFIER.fullmatch(model):
             raise MasterRosterError(f"{where}.model must be a model identifier")
         purpose = _text(raw_seat.get("purpose"), f"{where}.purpose")

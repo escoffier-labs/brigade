@@ -138,6 +138,9 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "password is [hunter 2]",
         "password is required-secret",
         "token: optional-token",
+        "password is x",
+        "token is xy",
+        "password is !",
         "token: hunter2",
         "auth token: hunter2",
         "token is abcdefgh",
@@ -176,6 +179,9 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Use option B: fast mode",
         "Token: optional.",
         "Authentication token: managed by Vault.",
+        "Password: required.",
+        "API key: configured.",
+        "Client secret: stored securely.",
         "Password is required.",
         "Password is confidential.",
         "Password is managed by Vault.",
@@ -339,7 +345,7 @@ def test_parse_accepts_unqualified_inventory_model_identifiers(model: str) -> No
     assert fleet_master_roster.parse(document)["seats"][0]["model"] == model
 
 
-@pytest.mark.parametrize("model", ["gpt-4 fast", "gpt --fast", "model🚀"])
+@pytest.mark.parametrize("model", ["gpt-4 fast", "gpt --fast", "model🚀", "https://example.com/model"])
 def test_parse_rejects_invalid_model_identifiers(model: str) -> None:
     document = _document()
     document["seats"][0]["model"] = model  # type: ignore[index]
@@ -413,6 +419,8 @@ def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None
         "Use the file at tools/build",
         "The path is foo/bar.",
         "Repository path: foo/bar",
+        "foo/bar",
+        "tools/build",
     ],
 )
 def test_parse_rejects_unenumerated_paths_in_descriptive_text(field: str, text: str) -> None:
