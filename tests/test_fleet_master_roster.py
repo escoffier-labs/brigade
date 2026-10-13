@@ -147,10 +147,32 @@ def test_parse_rejects_unicode_format_controls_in_json_property_names() -> None:
         fleet_master_roster.parse(raw)
 
 
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029"])
+def test_parse_rejects_unicode_separators_in_json_property_names(separator: str) -> None:
+    document = _document()
+    document["seats"] = []
+    document[f"forged{separator}key"] = True
+    raw = json.dumps(document, ensure_ascii=True).encode("utf-8")
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="keys must not contain controls"):
+        fleet_master_roster.parse(raw)
+
+
 @pytest.mark.parametrize("field", ["model", "purpose", "caveats"])
 def test_parse_rejects_unicode_format_controls_in_roster_text(field: str) -> None:
     document = _document()
     value = "safe\u202etext"
+    document["seats"][0][field] = [value] if field == "caveats" else value  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="without controls"):
+        fleet_master_roster.parse(json.dumps(document, ensure_ascii=True).encode("utf-8"))
+
+
+@pytest.mark.parametrize("field", ["model", "purpose", "caveats"])
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029"])
+def test_parse_rejects_unicode_separators_in_roster_text(field: str, separator: str) -> None:
+    document = _document()
+    value = f"safe{separator}text"
     document["seats"][0][field] = [value] if field == "caveats" else value  # type: ignore[index]
 
     with pytest.raises(fleet_master_roster.MasterRosterError, match="without controls"):

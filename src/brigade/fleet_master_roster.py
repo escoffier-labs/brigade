@@ -37,7 +37,7 @@ class MasterRosterError(ValueError):
 
 
 def _has_control(value: str) -> bool:
-    return any(unicodedata.category(character) in {"Cc", "Cf"} for character in value)
+    return any(unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"} for character in value)
 
 
 def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -55,7 +55,7 @@ def _text(value: Any, field: str) -> str:
     if _SURROGATE.search(value):
         raise MasterRosterError(f"{field} must contain valid Unicode scalar values")
     if len(value) > MAX_TEXT or _has_control(value):
-        raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls")
+        raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
     if _DANGEROUS_VALUE.search(value):
         raise MasterRosterError(f"{field} contains a credential, environment assignment, or home path")
     return value
@@ -65,7 +65,7 @@ def _unknown_fields(value: Mapping[str, Any], allowed: frozenset[str], where: st
     if any(not isinstance(key, str) for key in value):
         raise MasterRosterError(f"{where} keys must be strings")
     if any(_has_control(key) for key in value):
-        raise MasterRosterError(f"{where} keys must not contain controls")
+        raise MasterRosterError(f"{where} keys must not contain controls or separators")
     unknown = sorted(set(value).difference(allowed))
     if unknown:
         raise MasterRosterError(f"unknown {where} field(s): {', '.join(unknown)}")
