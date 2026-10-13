@@ -31,7 +31,7 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:Proxy-)?Authorization\s*:\s*Bearer\s+\S+|\bBearer\s+[A-Za-z0-9._~+/-]{20,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
-    r"\bauth(?:entication)?[ _-]profiles?\s+is\s+"
+    r"\bauth(?:entication)?[ _-]profiles?\s+(?:is|equals)\s+"
     r"(?!(?:required|needed|necessary|optional|available|selection)\b)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s*[:=]\s*"
@@ -49,9 +49,10 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)\s*[:=]\s*"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
-    r"\s+(?:is|equals)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
+    r"\s+(?:is|was|equals)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%USERPROFILE%|"
-    r"\$[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))",
+    r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})"
+    r"(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))",
     re.IGNORECASE,
 )
 _URL_CREDENTIAL_QUERY = re.compile(
@@ -72,7 +73,7 @@ _RELATIVE_PATH = re.compile(
 )
 _PATH_CONTEXT = re.compile(
     r"(?:\b(?:run|execute|inspect|open|read|write|load|save|path|file|directory|folder|script|repository|repo)\s+"
-    r"(?:(?:the|a|an)\s+)?(?:(?:from|at|in|to|into|under)\s+)?|"
+    r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?|"
     r"\b(?:path|file|directory|folder|script|repository|repo)\s*(?:is|:)\s*)[\"'“‘`()\[{]*\s*$",
     re.IGNORECASE,
 )
