@@ -1420,6 +1420,38 @@ def test_authority_downgrade_rolls_back_without_completion_audit_on_audit_failur
     assert all(record.get("phase") != "complete" for record in downgrade_records)
 
 
+def test_authority_downgrade_fails_closed_when_posture_marker_is_unreadable(tmp_path: Path) -> None:
+    _bind_workspace(tmp_path)
+    posture_marker = _isolation_posture_marker_path(tmp_path)
+    posture_marker.write_text("{", encoding="utf-8")
+    store_before = _store_path(tmp_path).read_bytes()
+
+    with pytest.raises(OSError, match="posture marker is unreadable"):
+        ledger.downgrade_external_directory_authority(tmp_path)
+
+    assert posture_marker.read_text(encoding="utf-8") == "{"
+    assert _store_path(tmp_path).read_bytes() == store_before
+
+
+def test_authority_downgrade_fails_closed_when_workspace_identity_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _bind_workspace(tmp_path)
+    posture_marker = _isolation_posture_marker_path(tmp_path)
+    store_before = _store_path(tmp_path).read_bytes()
+    monkeypatch.setattr(
+        ledger,
+        "_workspace_directory_identity",
+        lambda _workspace: (_ for _ in ()).throw(OSError("identity unavailable")),
+    )
+
+    with pytest.raises(OSError, match="cannot identify the workspace posture markers"):
+        ledger.downgrade_external_directory_authority(tmp_path)
+
+    assert posture_marker.is_file()
+    assert _store_path(tmp_path).read_bytes() == store_before
+
+
 def test_authority_downgrade_clears_isolation_posture_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """#881 round 3: the explicit confirmed downgrade command is the only path
     that clears the isolation posture marker; it removes both sticky markers
