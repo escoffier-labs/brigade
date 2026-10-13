@@ -22,7 +22,7 @@ _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _MODEL_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _EXPLANATORY_SECRET_VALUE = (
-    r"(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|"
+    r"(?:required|optional|needed|necessary|available|configured|set(?!\s+to\b)|missing|unset|unavailable|"
     r"not\s+(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable)|"
     r"confidential|managed(?:\s+by\s+Vault)?|provided|stored(?:\s+securely)?|encrypted|protected|"
     r"handled|generated|rotated|masked|redacted)(?=$|\s|[.,;!?](?:\s|$))"
@@ -118,6 +118,10 @@ _PATH_CONTEXT = re.compile(
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?"
     r"[\"'“‘]*\s*(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?|"
     r"\b(?:path|file|directory|folder|script|repository|repo)\s*(?:is|was|equals|will\s+be|has\s+been|:|=)\s*)[\"'“‘`()\[{]*\s*$",
+    re.IGNORECASE,
+)
+_QUOTED_PATH_CONTEXT = re.compile(
+    r"\b(?:run|execute|inspect|open|read|write|load|save)\s+[\"'“‘][^\"'“”‘’]*$",
     re.IGNORECASE,
 )
 _FILESYSTEM_COMPONENTS = frozenset(
@@ -219,6 +223,12 @@ _MODEL_PATH_SUFFIX = re.compile(
 _STANDALONE_FILE = re.compile(r"(?<![A-Za-z0-9_.-])(?P<file>\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+)(?![A-Za-z0-9_.-])")
 _SURROGATE = re.compile("[\\ud800-\\udfff]")
 
+
+def _has_path_context(text: str, position: int) -> bool:
+    prefix = text[:position]
+    return _PATH_CONTEXT.search(prefix) is not None or _QUOTED_PATH_CONTEXT.search(prefix) is not None
+
+
 _TOP_FIELDS = frozenset({"schema", "revision", "seats"})
 _SEAT_FIELDS = frozenset({"name", "cli", "model", "purpose", "caveats", "fallbacks", "enabled"})
 
@@ -239,7 +249,7 @@ def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -
         suffix = _MODEL_PATH_SUFFIX if model_identifier else _FILE_SUFFIX
         suffix_match = suffix.search(filename)
         trailing_text = path_text[match.end() :].strip(" .,;:!?")
-        path_context = _PATH_CONTEXT.search(path_text[: match.start()]) is not None
+        path_context = _has_path_context(path_text, match.start())
         file_like = filename.casefold() not in _PROSE_DOTTED_TERMS and (
             filename.startswith(".")
             or sensitive_name
@@ -253,7 +263,7 @@ def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -
         standalone = path_text.strip().rstrip(".,;:!?").casefold() == match.group("path").casefold()
         if standalone and not model_identifier and match.group("path").casefold() not in _PROSE_SLASH_TERMS:
             return True
-        path_context = _PATH_CONTEXT.search(path_text[: match.start()]) is not None
+        path_context = _has_path_context(path_text, match.start())
         if path_context and match.group("path").casefold() not in _PROSE_SLASH_TERMS:
             return True
         if any(component.startswith(".") or component.casefold() in _FILESYSTEM_COMPONENTS for component in components):
