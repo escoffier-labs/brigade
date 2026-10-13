@@ -143,9 +143,16 @@ umask 077
 token_dir="$HOME/.local/share/brigade-fleet-hub"
 install -d -m 0700 "$token_dir"
 token_file="$token_dir/admin-token"
-python -c 'import secrets; print(secrets.token_urlsafe(32))' > "$token_file"
-chmod 0600 "$token_file"
-podman secret create brigade-fleet-admin-token "$token_file"
+if podman secret inspect brigade-fleet-admin-token >/dev/null 2>&1; then
+  test -s "$token_file" || {
+    echo "Existing Podman secret needs its saved operator token file at $token_file" >&2
+    exit 1
+  }
+else
+  python -c 'import secrets; print(secrets.token_urlsafe(32))' > "$token_file"
+  chmod 0600 "$token_file"
+  podman secret create brigade-fleet-admin-token "$token_file"
+fi
 install -d -m 0700 ~/.brigade
 cat > ~/.brigade/fleet.toml <<EOF
 [fleet]
@@ -160,6 +167,16 @@ sed "s|REPLACE_WITH_RECORDED_DIGEST|${image_digest}|" \
 chmod 0644 ~/.config/containers/systemd/brigade-fleet.container
 install -m 0644 ops/fleet-hub/quadlet/brigade-fleet.volume \
   ~/.config/containers/systemd/
+if [ "$(loginctl show-user "$USER" --property=Linger --value)" != yes ]; then
+  loginctl enable-linger "$USER" || {
+    echo "Could not enable lingering; ask the system administrator to enable it for $USER" >&2
+    exit 1
+  }
+fi
+test "$(loginctl show-user "$USER" --property=Linger --value)" = yes || {
+  echo "Lingering is required to keep the rootless Hub running after logout" >&2
+  exit 1
+}
 systemctl --user daemon-reload
 systemctl --user restart brigade-fleet.service
 curl --fail http://127.0.0.1:3774/health
@@ -179,7 +196,9 @@ archive_dir="$HOME/.local/share/brigade-fleet-hub/archives"
 install -d -m 0700 "$archive_dir"
 archive="$archive_dir/brigade-fleet-hub-${previous_digest#sha256:}.tar"
 podman image save --format oci-archive --output "$archive" "$previous_ref"
-chmod 0600 "$archive"
+image_id_file="${archive%.tar}.image-id"
+printf '%s\n' "$previous_id" > "$image_id_file"
+chmod 0600 "$archive" "$image_id_file"
 ```
 
 Build and deploy the candidate image using the steps above, recording its new
@@ -192,7 +211,9 @@ start the generated service again:
 archive="$HOME/.local/share/brigade-fleet-hub/archives/brigade-fleet-hub-REPLACE_WITH_RECORDED_DIGEST.tar"
 previous_digest="sha256:REPLACE_WITH_RECORDED_DIGEST"
 previous_ref="localhost/brigade-fleet-hub@${previous_digest}"
-previous_id="REPLACE_WITH_RECORDED_IMAGE_ID"
+image_id_file="${archive%.tar}.image-id"
+previous_id="$(cat "$image_id_file")"
+test -n "$previous_id"
 podman image load --input "$archive"
 restored_id="$(podman image inspect --format '{{.Id}}' "$previous_ref")"
 test "$restored_id" = "$previous_id"

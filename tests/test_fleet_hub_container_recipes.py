@@ -130,12 +130,18 @@ def test_quadlet_runbook_archives_and_restores_the_recorded_image():
     assert 'podman image load --input "$archive"' in podman_runbook
     assert 'test "$restored_id" = "$previous_id"' in podman_runbook
     assert "REPLACE_WITH_RECORDED_DIGEST" in podman_runbook
-    assert 'previous_id="REPLACE_WITH_RECORDED_IMAGE_ID"' in podman_runbook
+    assert 'previous_id="REPLACE_WITH_RECORDED_IMAGE_ID"' not in podman_runbook
     assert 'previous_id="sha256:REPLACE_WITH_RECORDED_IMAGE_ID"' not in podman_runbook
     assert 'podman secret create brigade-fleet-admin-token "$token_file"' in podman_runbook
+    assert "if podman secret inspect brigade-fleet-admin-token" in podman_runbook
     assert 'token_file="$token_dir/admin-token"' in podman_runbook
+    assert 'image_id_file="${archive%.tar}.image-id"' in podman_runbook
+    assert 'previous_id="$(cat "$image_id_file")"' in podman_runbook
+    assert 'chmod 0600 "$archive" "$image_id_file"' in podman_runbook
     assert podman_runbook.count("systemctl --user restart brigade-fleet.service") == 2
     assert "systemctl --user start brigade-fleet.service" not in podman_runbook
+    assert 'loginctl enable-linger "$USER"' in podman_runbook
+    assert 'loginctl show-user "$USER" --property=Linger --value' in podman_runbook
 
 
 def test_quadlet_recipe_has_equivalent_persistence_health_and_restart_policy():
