@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
+from contextlib import ExitStack
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import fleet_campaign as campaign
+from . import dirfd, fleet_campaign as campaign
 from .repos_cmd import actions_dispatch
-from .repos_cmd.constants import RepoEntry
+from .repos_cmd.constants import ACTION_STATUSES, RepoEntry
 from .work_cmd import edges, helpers
-from .work_cmd.ledger import import_model, locking
+from .work_cmd.ledger import import_model
 
 INSPECT_KIND = "fleet-campaign-inspect"
 MAX_LEDGER_BYTES = 4 * 1024 * 1024
@@ -40,18 +43,106 @@ def parse_references(raw: object) -> list[dict[str, str]]:
     return result
 
 
-def _snapshot(path: Path) -> tuple[bytes, tuple[int, int, int, int] | None]:
+def _identity(info: os.stat_result) -> tuple[int, int, int]:
+    return info.st_dev, info.st_ino, info.st_mode
+
+
+def _generation(info: os.stat_result) -> tuple[int, ...]:
+    return (*_identity(info), info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _regular(info: os.stat_result) -> bool:
+    return stat.S_ISREG(info.st_mode) and not (
+        getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+def _bounded_read(descriptor: int, before: os.stat_result) -> bytes:
+    if not _regular(before) or before.st_size > MAX_LEDGER_BYTES:
+        raise campaign.PreviewError("ledger_refused")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks = []
+    total = 0
+    while total <= MAX_LEDGER_BYTES:
+        chunk = os.read(descriptor, min(64 * 1024, MAX_LEDGER_BYTES + 1 - total))
+        if not chunk:
+            break
+        total += len(chunk)
+        chunks.append(chunk)
+    after = os.fstat(descriptor)
+    if not _regular(after) or _generation(before) != _generation(after) or total != before.st_size:
+        raise campaign.PreviewError("lineage_changed")
+    if total > MAX_LEDGER_BYTES:
+        raise campaign.PreviewError("ledger_refused")
+    return b"".join(chunks)
+
+
+@dataclass
+class _Snapshot:
+    root: Path
+    root_descriptor: int
+    directories: list[tuple[int, str, int]]
+    parent: int
+    name: str
+    descriptor: int | None = None
+    info: os.stat_result | None = None
+    raw: bytes = b""
+
+    def check(self) -> None:
+        """Check retained bytes and their names, including missing children."""
+        try:
+            current_root = dirfd.open_directory_nofollow(self.root, writable=False)
+            try:
+                if _identity(os.fstat(current_root)) != _identity(os.fstat(self.root_descriptor)):
+                    raise campaign.PreviewError("lineage_changed")
+            finally:
+                os.close(current_root)
+            for parent, name, child in self.directories:
+                if _identity(dirfd.stat_child(parent, name)) != _identity(os.fstat(child)):
+                    raise campaign.PreviewError("lineage_changed")
+            if self.descriptor is None:
+                try:
+                    dirfd.stat_child(self.parent, self.name)
+                except FileNotFoundError:
+                    return
+                raise campaign.PreviewError("lineage_changed")
+            assert self.info is not None
+            current = os.fstat(self.descriptor)
+            if (
+                _generation(current) != _generation(self.info)
+                or _identity(dirfd.stat_child(self.parent, self.name)) != _identity(self.info)
+                or _bounded_read(self.descriptor, current) != self.raw
+            ):
+                raise campaign.PreviewError("lineage_changed")
+        except OSError:
+            raise campaign.PreviewError("lineage_changed") from None
+
+
+def _snapshot(root: Path, path: Path, stack: ExitStack) -> _Snapshot:
+    root_descriptor = dirfd.open_directory_nofollow(root, writable=False)
+    stack.callback(os.close, root_descriptor)
+    parts = path.relative_to(root).parts
+    parent = root_descriptor
+    directories: list[tuple[int, str, int]] = []
+    for name in parts[:-1]:
+        try:
+            child = dirfd.open_child_directory(parent, name, writable=False)
+        except FileNotFoundError:
+            return _Snapshot(root, root_descriptor, directories, parent, name)
+        stack.callback(os.close, child)
+        directories.append((parent, name, child))
+        parent = child
+    snapshot = _Snapshot(root, root_descriptor, directories, parent, parts[-1])
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
-        info = path.stat()
+        snapshot.descriptor = dirfd.open_child_file(parent, snapshot.name, flags)
     except FileNotFoundError:
-        return b"", None
-    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_LEDGER_BYTES:
-        raise campaign.PreviewError("ledger_refused")
-    with path.open("rb") as stream:
-        raw = stream.read(MAX_LEDGER_BYTES + 1)
-    if len(raw) > MAX_LEDGER_BYTES:
-        raise campaign.PreviewError("ledger_refused")
-    return raw, (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        return snapshot
+    stack.callback(os.close, snapshot.descriptor)
+    snapshot.info = os.fstat(snapshot.descriptor)
+    snapshot.raw = _bounded_read(snapshot.descriptor, snapshot.info)
+    snapshot.check()
+    return snapshot
 
 
 def _json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -64,35 +155,49 @@ def _json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _read_rows(
+    root: Path,
     path: Path,
-    reader: Callable[[], list[dict[str, Any]]],
     field: str | None,
-    snapshots: dict[Path, tuple[bytes, tuple[int, int, int, int] | None]],
+    snapshots: dict[Path, _Snapshot],
+    stack: ExitStack,
 ) -> list[dict[str, Any]]:
-    before = _snapshot(path)
-    snapshots[path] = before
-    if before[1] is None:
+    snapshot = _snapshot(root, path, stack)
+    snapshots[path] = snapshot
+    if snapshot.descriptor is None:
         return []
     try:
         rows: object
         if field is None:
-            rows = [
+            # The inspection contract refuses malformed/duplicate-key JSONL;
+            # the canonical parser supplies the rows from those same bytes.
+            strict_rows = [
                 json.loads(line, object_pairs_hook=_json_object)
-                for line in before[0].decode("utf-8").splitlines()
+                for line in snapshot.raw.decode("utf-8").splitlines()
                 if line.strip()
             ]
+            rows = import_model._parse_import_inbox_bytes(snapshot.raw)
+            if rows != strict_rows:
+                raise campaign.PreviewError("ledger_refused")
         else:
-            payload = json.loads(before[0], object_pairs_hook=_json_object)
+            payload = json.loads(snapshot.raw.decode("utf-8"), object_pairs_hook=_json_object)
             rows = payload.get(field) if isinstance(payload, dict) else None
+            if field == "tasks" and isinstance(payload, dict):
+                version = payload.get("version", 1)
+                if (
+                    isinstance(version, bool)
+                    or not isinstance(version, int)
+                    or not 1 <= version <= edges.TASK_LEDGER_VERSION
+                ):
+                    raise campaign.PreviewError("ledger_refused")
+                edges.ensure_ledger_edges(payload)
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise campaign.PreviewError("ledger_refused")
-        observed = reader()
-        if observed != rows or _snapshot(path) != before:
-            raise campaign.PreviewError("lineage_changed")
-        return observed
-    except campaign.PreviewError:
-        raise
-    except (OSError, ValueError, TypeError, RecursionError, RuntimeError):
+        snapshot.check()
+        return rows
+    except (campaign.PreviewError, OSError, ValueError, TypeError, RecursionError, RuntimeError) as exc:
+        snapshot.check()
+        if isinstance(exc, campaign.PreviewError):
+            raise
         raise campaign.PreviewError("ledger_refused") from None
 
 
@@ -109,14 +214,18 @@ def _resolve(
     member: dict[str, Any],
     entry: RepoEntry,
     actions: list[dict[str, Any]],
-    snapshots: dict[Path, tuple[bytes, tuple[int, int, int, int] | None]],
+    snapshots: dict[Path, _Snapshot],
+    stack: ExitStack,
 ) -> None:
     action = _exact(actions, "fleet_action_id", member["action_id"], "action")
     fingerprint = member["source_fingerprint"]
     if action.get("repo_id") != member["repo_id"] or action.get("source_fingerprint") != fingerprint:
         raise campaign.PreviewError("action_mismatch")
-    if action.get("status") in {"superseded", "archived"}:
+    action_status = action.get("status")
+    if isinstance(action_status, str) and action_status in {"superseded", "archived"}:
         raise campaign.PreviewError("action_superseded")
+    if not isinstance(action_status, str) or action_status not in ACTION_STATUSES:
+        raise campaign.PreviewError("action_status_invalid")
     reviewed = action.get("reviewed_at")
     try:
         if not isinstance(reviewed, str) or datetime.fromisoformat(reviewed.replace("Z", "+00:00")).tzinfo is None:
@@ -126,11 +235,17 @@ def _resolve(
     dispatch = action.get("dispatch")
     if not isinstance(dispatch, dict) or dispatch.get("source_fingerprint") != fingerprint:
         raise campaign.PreviewError("dispatch_mismatch")
+    for record, field, known in (
+        (action, "resolution_status", {"dispatched", "in-progress", "completed"}),
+        (dispatch, "status", {"dispatched"}),
+    ):
+        if field in record and (not isinstance(record[field], str) or record[field] not in known):
+            raise campaign.PreviewError("lineage_mismatch")
     import_id = campaign.opaque_key(dispatch.get("target_import_id"))
+    if "target_import_id" in action and action["target_import_id"] != import_id:
+        raise campaign.PreviewError("lineage_mismatch")
     member["import_id"] = import_id
-    imports = _read_rows(
-        helpers._imports_path(entry.path), lambda: import_model._read_imports(entry.path), None, snapshots
-    )
+    imports = _read_rows(entry.path, helpers._imports_path(entry.path), None, snapshots, stack)
     item = _exact(imports, "id", import_id, "import")
     metadata = item.get("metadata")
     if (
@@ -144,14 +259,34 @@ def _resolve(
         raise campaign.PreviewError("import_mismatch")
     if item.get("status") == "superseded" or item.get("superseded_at") or item.get("superseded_by"):
         raise campaign.PreviewError("import_superseded")
-    if item.get("status") != "promoted":
+    if item.get("status") == "dismissed":
+        raise campaign.PreviewError("import_dismissed")
+    if item.get("status") == "pending":
         raise campaign.PreviewError("import_not_promoted")
+    if item.get("status") != "promoted":
+        raise campaign.PreviewError("import_status_invalid")
     task_id = campaign.opaque_key(item.get("task_id"))
     member["task_id"] = task_id
-    tasks = _read_rows(
-        helpers._tasks_path(entry.path), lambda: locking._read_task_ledger(entry.path)["tasks"], "tasks", snapshots
-    )
+    for record in (action, dispatch):
+        if "target_task_id" in record and record["target_task_id"] != task_id:
+            raise campaign.PreviewError("lineage_mismatch")
+    tasks = _read_rows(entry.path, helpers._tasks_path(entry.path), "tasks", snapshots, stack)
     task = _exact(tasks, "id", task_id, "task")
+    task_metadata = task.get("metadata")
+    expected = {
+        "import_id": import_id,
+        "import_kind": "task",
+        "import_source": "repo-fleet",
+        "fleet_action_id": member["action_id"],
+        "repo_id": member["repo_id"],
+        "source_fingerprint": fingerprint,
+    }
+    if (
+        task.get("source") != "import:repo-fleet"
+        or not isinstance(task_metadata, dict)
+        or any(task_metadata.get(key) != value for key, value in expected.items())
+    ):
+        raise campaign.PreviewError("task_mismatch")
     status = task.get("status")
     if not isinstance(status, str) or status not in {"pending", *edges.READY_EXCLUDED_STATUSES}:
         raise campaign.PreviewError("task_status_invalid")
@@ -172,43 +307,47 @@ def inspect(
         raise campaign.PreviewError("membership_refused")
     if {ref["repo_id"] for ref in references} != set(selected):
         raise campaign.PreviewError("membership_reference_mismatch")
-    action_path = actions_dispatch._actions_path(target)
-    action_snapshots: dict[Path, tuple[bytes, tuple[int, int, int, int] | None]] = {}
-    action_error = None
-    actions: list[dict[str, Any]] = []
-    try:
-        actions = _read_rows(action_path, lambda: actions_dispatch._read_actions(target), "actions", action_snapshots)
-    except campaign.PreviewError as exc:
-        action_error = str(exc)
-    except (OSError, ValueError, RuntimeError):
-        action_error = "ledger_refused"
-    members = []
-    for reference in sorted(references, key=lambda ref: ref["repo_id"]):
-        member: dict[str, Any] = {
-            **reference,
-            "import_id": None,
-            "task_id": None,
-            "action_binding": "unknown",
-            "reason": None,
-            "local_task_status": "unknown",
-            "specification_verification": "unknown",
-            "launch_safety": "unknown",
-        }
-        snapshots = dict(action_snapshots)
+    with ExitStack() as action_stack:
+        action_path = actions_dispatch._actions_path(target)
+        action_snapshots: dict[Path, _Snapshot] = {}
+        action_error = None
+        actions: list[dict[str, Any]] = []
         try:
-            if action_error:
-                raise campaign.PreviewError(action_error)
-            _resolve(member, selected[reference["repo_id"]], actions, snapshots)
-            if any(_snapshot(path) != before for path, before in snapshots.items()):
-                raise campaign.PreviewError("lineage_changed")
-            member["action_binding"] = "matched"
+            actions = _read_rows(target, action_path, "actions", action_snapshots, action_stack)
         except campaign.PreviewError as exc:
-            member["reason"] = str(exc)
-            member["local_task_status"] = "unknown"
-        except (OSError, ValueError, TypeError, IndexError, RecursionError, RuntimeError):
-            member["reason"] = "ledger_refused"
-            member["local_task_status"] = "unknown"
-        members.append(member)
+            action_error = str(exc)
+        except (OSError, ValueError, RuntimeError):
+            action_error = "ledger_refused"
+        members = []
+        for reference in sorted(references, key=lambda ref: ref["repo_id"]):
+            member: dict[str, Any] = {
+                **reference,
+                "import_id": None,
+                "task_id": None,
+                "action_binding": "unknown",
+                "reason": None,
+                "local_task_status": "unknown",
+                "specification_verification": "unknown",
+                "launch_safety": "unknown",
+            }
+            snapshots = dict(action_snapshots)
+            try:
+                if action_error:
+                    raise campaign.PreviewError(action_error)
+                with ExitStack() as member_stack:
+                    try:
+                        _resolve(member, selected[reference["repo_id"]], actions, snapshots, member_stack)
+                    finally:
+                        for snapshot in snapshots.values():
+                            snapshot.check()
+                member["action_binding"] = "matched"
+            except campaign.PreviewError as exc:
+                member["reason"] = str(exc)
+                member["local_task_status"] = "unknown"
+            except (OSError, ValueError, TypeError, IndexError, RecursionError, RuntimeError):
+                member["reason"] = "ledger_refused"
+                member["local_task_status"] = "unknown"
+            members.append(member)
     matched = sum(member["action_binding"] == "matched" for member in members)
     return {
         "kind": INSPECT_KIND,

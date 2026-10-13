@@ -143,18 +143,42 @@ The references file contains one exact action reference per selected member:
 References accept exactly these three fields. Fingerprints follow the existing
 storage grammar: 16 or 64 lowercase hexadecimal characters. Preview bindings
 still require 64 characters. Input is limited to 256 references and 256 KiB.
-Each local ledger snapshot is limited to 4 MiB. Opaque keys use preview's key
+Each local ledger snapshot is limited to 4 MiB, including growth during reads.
+Reads retain nonblocking file descriptors anchored at the configured workspace
+or repository root. Child directories and files refuse symlinks and Windows
+reparse points. Only regular files are read. Descriptor and recorded-name
+checks detect replacement, growth and observed generation changes. Parsing
+uses those same bounded bytes without compatibility readers or temporary
+snapshot files. Opaque keys use preview's key
 grammar and must never encode private contents or secrets.
 
 Inspection requires an exact action ID and repository ID, its explicit stored
 fingerprint and a recorded review timestamp. The dispatch fingerprint must
 match before inspection follows its exact `target_import_id`. That import
 must have matching repo-fleet action, repository and fingerprint metadata. A
-promoted import leads only to its recorded exact task ID. Prefixes, newer
-imports, synthesized fingerprints and task searches never repair missing
-lineage. Missing, duplicate, corrupt, superseded, mismatched or changed
-lineage stays unknown with a fixed reason code. An unpromoted import reports
-`import_not_promoted` and no task observation.
+promoted import leads only to its recorded exact task ID. The task must have
+source `import:repo-fleet` and exact `import_id`, `import_source`, `import_kind`,
+`fleet_action_id`, `repo_id` and `source_fingerprint` metadata linking it back
+to that promoted import. An unrelated task or changed provenance reports
+`task_mismatch`, with no local task observation.
+
+If recorded, the action's `target_import_id` and `target_task_id` and the
+dispatch's `target_task_id` must agree with the chain. Contradictions report
+`lineage_mismatch`. Action status must be a known non-archived action state.
+missing or junk states report `action_status_invalid`. Archived or superseded
+actions report `action_superseded`. Recorded resolution states may be
+`dispatched`, `in-progress` or `completed`, and dispatch status may be
+`dispatched`. Negative states (`superseded`, `dismissed`, `stale`,
+`broken-reference`) and unknown recorded states report `lineage_mismatch`.
+These states confer no launch or completion authority.
+
+Prefixes, newer imports, synthesized fingerprints and task searches never
+repair missing lineage. Missing, duplicate, corrupt, superseded, mismatched or
+changed lineage stays unknown with a fixed reason code. Pending imports report
+`import_not_promoted`, dismissed imports report `import_dismissed`, and unknown
+import states report `import_status_invalid`. None yield a task observation.
+Stable malformed or unsafe ledgers report `ledger_refused`. Observed generation
+changes report `lineage_changed`.
 
 The JSON envelope contains `kind: "fleet-campaign-inspect"`, `read_only: true`,
 the campaign ID and members with opaque repository/action/import/task IDs,
