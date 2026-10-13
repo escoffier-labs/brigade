@@ -8,8 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Fenced Worklore checkpoints atomically refuse overlapping repository path declarations with bounded, structured conflicts. Handoff, terminal and unchecked historical scopes remain reserved until explicit replacement or release. Ownership reads expose historical `path-admission` while retaining unknown liveness. (Refs #1595)
-- Journal sync failures report indeterminate outcomes. Checkpoint recovery synchronizes the verified head while holding the writer lock through terminalization, including recovery of multiple stale claims. (#1565)
-
 - `brigade memory recall --query` accepts bounded caller-supplied task context using the existing fail-open recall API. Task/worktree fixtures compare relevance against basename queries and report stale/scope limits. Search status adds read-only repeat-query/result counts from the existing local log, separate from verification scores. (#1563)
 - Persist bounded sanitized managed Claude review history in caller-owned SQLite transactions, with exact replay, revision snapshots and conservative caller-head projections across pushes and reruns. (#1601)
 
@@ -26,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On Windows, control assessments classify refused symlinks and reparse points as `invalid` with `symlink_refused`, including linked run directories and local commit-trailer receipts. Synthetic NT metadata with unset file attributes no longer interrupts directory discovery. (#1642)
 - Add a local CRA actor and incident worksheet separating applicability, incident triggers, reporting deadlines, and actual filing evidence, with three synthetic drills. (#1625)
 - Add coordinated journal process qualification for locked same-key tail/index reads, replay/conflict, stale-head rejection, and deliberate termination at complete or partial write boundaries, with an inventory of durability limits. (#1565)
+- Journal sync failures report indeterminate outcomes. Checkpoint recovery synchronizes the verified head while holding the writer lock through terminalization, including recovery of multiple stale claims. (#1565)
 - `brigade doctor --operator` checks the Grok CLI against the reviewed 1.0.13 JSON-envelope floor when that harness is selected, with bounded probing and safe missing/uncertain-version diagnostics. (Refs #1351 item 7)
 
 - Correct the twelve reviewed NIST AI RMF claim mappings: six mismatched pairs receive conditional mappings, three become unmapped evidence properties, and three retain documented prerequisites. Provenance now names sources, actors and verification limits. Migration: `crosswalk_version` is 2 and `control_id` uses the NIST space format, so consumers matching old IDs must update. The template schema stays `brigade.control_crosswalk.v1`; controls output adds `relationship_semantics`, `integrity_boundary`, root `unmapped_evidence_properties` and per-row provenance keys. Local evidence states its tamper-evidence and custody limits: EC-12 rationales say the evaluator checks only the unsigned manifest's entries-list digest, and EC-06 says a consistent journal rewrite is undetectable without an external anchor. Licensed ISO/AICPA text remains unverified. (#1616)
