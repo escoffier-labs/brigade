@@ -409,6 +409,7 @@ def open_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
     if flags & os.O_RDWR:
         fd_flags = os.O_RDWR
     fd_flags |= flags & os.O_APPEND
+    fd_flags |= flags & getattr(os, "O_BINARY", 0)
     try:
         _reject_reparse(api, handle, expected_directory=False)
         return _handle_to_fd(api, handle, fd_flags)

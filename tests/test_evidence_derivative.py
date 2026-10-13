@@ -523,12 +523,39 @@ def test_derivative_does_not_replace_output_directory_created_during_publish(tmp
             lawful_basis="contract",
             necessity="review",
         )
-    except FileExistsError:
-        pass
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == "derivative output could not be published"
     else:
         raise AssertionError("derivative replaced an output directory created during publication")
     assert out.is_dir()
     assert list(out.iterdir()) == []
+
+
+def test_derivative_wraps_unsupported_publication_link_errors(tmp_path: Path, monkeypatch) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+
+    def unsupported_link(*_args, **_kwargs):
+        raise OSError("hard links are unavailable")
+
+    monkeypatch.setattr(evidence_derivative.os, "link", unsupported_link)
+    try:
+        evidence_derivative.export_derivative(
+            source=source,
+            out=tmp_path / "derivative",
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == "derivative output could not be published"
+    else:
+        raise AssertionError("derivative exposed an unsupported hard-link error")
+
+    assert not (tmp_path / "derivative").exists()
+    assert not list(tmp_path.glob(".derivative.staging-*"))
 
 
 def test_derivative_rejects_blank_authorization_metadata(tmp_path: Path) -> None:

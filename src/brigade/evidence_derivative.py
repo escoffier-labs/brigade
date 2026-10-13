@@ -372,14 +372,19 @@ def export_derivative(
         out.mkdir(mode=0o700)
         created_output = True
         os.link(staging / "derivative.json", out / "derivative.json")
-    except BaseException:
+    except BaseException as exc:
         shutil.rmtree(staging, ignore_errors=True)
         if created_output:
             try:
-                (out / "derivative.json").unlink()
+                (out / "derivative.json").unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
                 out.rmdir()
             except OSError:
                 pass
+        if isinstance(exc, OSError):
+            raise DerivativeExportError("derivative output could not be published") from exc
         raise
     shutil.rmtree(staging, ignore_errors=True)
     return DerivativeReport(removed, redaction_occurrences, excluded, hashlib.sha256(encoded).hexdigest())
