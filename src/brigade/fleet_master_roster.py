@@ -71,7 +71,7 @@ _DANGEROUS_VALUE_PATTERN = (
     r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
     r"(?:to|as|with)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:(?:this|the|a|an|my|your|our|their|his|her|its)\s+)?"
-    r"[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?\s+(?:uses?|used|is\s+using|are\s+using|was\s+using|were\s+using|has|have)\s+"
+    r"[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?\s+(?:uses?|used|is\s+using|are\s+using|was\s+using|were\s+using|has|have|had)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
     r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE})\b)\S+|"
@@ -207,10 +207,12 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
                 or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_path)
             ):
                 return True
-            fragment_query = parsed.fragment.partition("?")[2] or parsed.fragment
+            decoded_query = _fully_unquote(parsed.query)
+            decoded_fragment = _fully_unquote(parsed.fragment)
+            fragment_query = decoded_fragment.partition("?")[2] or decoded_fragment
             query_pairs = (
                 parse_qsl(embedded_query, keep_blank_values=True)
-                + parse_qsl(parsed.query, keep_blank_values=True)
+                + parse_qsl(decoded_query, keep_blank_values=True)
                 + parse_qsl(fragment_query, keep_blank_values=True)
             )
         except ValueError:
