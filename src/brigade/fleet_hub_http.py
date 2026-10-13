@@ -21,7 +21,14 @@ from urllib.parse import parse_qs, urlencode
 
 from . import fleet_hub_enrollment as enrollment
 from . import fleet_claim_display
-from . import fleet_command_deck, fleet_dashboard, fleet_hub_grokbot, fleet_hub_sessions, worklore_http
+from . import (
+    fleet_command_deck,
+    fleet_dashboard,
+    fleet_hub_grokbot,
+    fleet_hub_messages,
+    fleet_hub_sessions,
+    worklore_http,
+)
 from . import fleet_hub as _hub
 from . import fleet_hub_model_roster
 from . import fleet_hub_policy_api
@@ -1411,7 +1418,17 @@ def make_handler(
             if path.startswith("/work/"):
                 self._handle_worklore()
                 return
-            if path not in ("/events", "/claims", "/nodes", "/cloud", "/models", "/grokbot", "/sessions", "/policy"):
+            if path not in (
+                "/events",
+                "/claims",
+                "/nodes",
+                "/cloud",
+                "/models",
+                "/grokbot",
+                "/sessions",
+                "/policy",
+                "/messages",
+            ):
                 self._send_json(404, {"error": "not found"})
                 return
             if self._bearer() is None:
@@ -1446,7 +1463,7 @@ def make_handler(
                 elif path == "/policy" and is_admin and not allow_admin_writes:
                     # Document writes stay admin. Resolve/prepare/ack need a node token.
                     pass
-                elif path in ("/events", "/claims", "/sessions") and is_admin and not allow_admin_writes:
+                elif path in ("/events", "/claims", "/sessions", "/messages") and is_admin and not allow_admin_writes:
                     self._send_json(
                         403,
                         {
@@ -1476,6 +1493,8 @@ def make_handler(
                     status, body_payload = handle_claim(conn, parsed, caller_node=caller_node)
                 elif path == "/sessions":
                     status, body_payload = handle_session(conn, parsed, caller_node=caller_node)
+                elif path == "/messages":
+                    status, body_payload = fleet_hub_messages.handle(conn, parsed, caller=caller_node)
                 elif path == "/cloud":
                     if (
                         is_admin
@@ -1560,6 +1579,9 @@ def make_handler(
                 return
             except fleet_hub_policy_api.FleetPolicyApiError as exc:
                 self._send_json(exc.status, exc.payload())
+                return
+            except fleet_hub_messages.MessageError as exc:
+                self._send_json(400, {"error": str(exc)})
                 return
             except FleetHubForbidden as exc:
                 self._send_json(403, {"error": str(exc)})

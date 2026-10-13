@@ -606,6 +606,9 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     from . import fleet_hub_enrollment
 
     fleet_hub_enrollment.ensure_schema(conn)
+    from . import fleet_hub_messages
+
+    fleet_hub_messages.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
