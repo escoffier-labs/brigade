@@ -1,0 +1,24 @@
+{
+  "name": "brigade-cli",
+  "version": "0.28.0",
+  "description": "npm launcher for the Brigade Python CLI",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/escoffier-labs/brigade.git"
+  },
+  "homepage": "https://brigade.tools",
+  "bin": {
+    "brigade": "bin/brigade.js"
+  },
+  "files": [
+    "bin/brigade.js"
+  ],
+  "dependencies": {},
+  "engines": {
+    "node": ">=14"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

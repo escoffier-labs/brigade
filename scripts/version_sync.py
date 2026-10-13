@@ -2,11 +2,12 @@
 """Verify (and optionally fix) that every place the version is stamped matches
 pyproject.toml.
 
-Three kinds of location carry the version, each as a literal string decoupled
+Four kinds of location carry the version, each as a literal string decoupled
 from the ``[project].version`` source of truth:
 
   - ``src/brigade/__init__.py``      -> ``__version__ = "X"``
   - ``src/brigade/templates/**/*.json`` -> ``"_brigade_version": "X"``
+  - ``package.json``                    -> ``"version": "X"``
   - recorded demo assets             -> a ``brigade X.Y.Z`` token baked into the
                                         rendered frames (``.cast`` and ``.svg``)
 
@@ -44,6 +45,7 @@ COMPONENT_MANIFEST = (
     "src/brigade/templates/components/manifest-v1.json",
     r'"brigade_version"\s*:\s*"([^"]+)"',
 )
+PACKAGE_MANIFEST = ("package.json", r'"version"\s*:\s*"([^"]+)"')
 TEMPLATES_GLOB = "src/brigade/templates/**/*.json"
 TEMPLATE_PATTERN = r'"_brigade_version"\s*:\s*"([^"]+)"'
 # Recorded demo assets with the version baked into the frames. The .cast is the
@@ -63,7 +65,7 @@ def _expected() -> str:
 
 def _locations() -> list[tuple[str, str]]:
     """Return every (path, pattern) location the version is stamped into."""
-    locs: list[tuple[str, str]] = [INIT_FILE, COMPONENT_MANIFEST]
+    locs: list[tuple[str, str]] = [INIT_FILE, COMPONENT_MANIFEST, PACKAGE_MANIFEST]
     for path in sorted(ROOT.glob(TEMPLATES_GLOB)):
         if '"_brigade_version"' in path.read_text():
             locs.append((path.relative_to(ROOT).as_posix(), TEMPLATE_PATTERN))

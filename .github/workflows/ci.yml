@@ -602,9 +602,18 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Install pipx
+        run: python -m pip install --upgrade pip pipx
+      - name: npm wrapper smoke (without Brigade installed)
+        if: runner.os == 'Linux'
+        run: |
+          npm link
+          npx --no-install brigade --version
       - name: pipx install
         run: |
-          python -m pip install --upgrade pip pipx
           pipx install .
           brigade --version
       - name: Quickstart (minimal default, Linux/macOS)

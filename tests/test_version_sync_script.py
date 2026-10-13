@@ -28,6 +28,7 @@ def test_version_sync_checks_component_manifest_brigade_version(tmp_path):
     init_dir.mkdir(parents=True)
     manifest_dir.mkdir(parents=True)
     (repo / "pyproject.toml").write_text('[project]\nversion = "1.0.0"\n')
+    (repo / "package.json").write_text('{"version":"1.0.0"}\n')
     (init_dir / "__init__.py").write_text('__version__ = "1.0.0"\n')
     manifest_rel = "src/brigade/templates/components/manifest-v1.json"
     manifest_path = repo / manifest_rel
@@ -46,3 +47,19 @@ def test_version_sync_checks_component_manifest_brigade_version(tmp_path):
     assert exit_code == 1
     assert manifest_rel in output
     assert "0.9.0" in output
+
+
+def test_version_sync_checks_npm_package_version(tmp_path):
+    repo = tmp_path / "repo"
+    init_dir = repo / "src/brigade"
+    manifest_dir = repo / "src/brigade/templates/components"
+    init_dir.mkdir(parents=True)
+    manifest_dir.mkdir(parents=True)
+    (repo / "pyproject.toml").write_text('[project]\nversion = "1.0.0"\n')
+    (repo / "package.json").write_text('{"name":"brigade-cli","version":"0.9.0"}\n')
+    (init_dir / "__init__.py").write_text('__version__ = "1.0.0"\n')
+    (manifest_dir / "manifest-v1.json").write_text('{"brigade_version":"1.0.0"}\n')
+
+    module = _load_version_sync_module(repo)
+
+    assert module.check("1.0.0") == 1

@@ -451,6 +451,15 @@ def test_quickstart_smoke_covers_linux_macos_and_windows_powershell():
     assert "brigade operator doctor --target $target" in text
 
 
+def test_quickstart_smoke_exercises_npm_wrapper_before_pipx_install():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    section = text[text.index("  quickstart-smoke:") : text.index("  windows-native-acceptance:")]
+
+    npm_smoke = section.index("npx --no-install brigade --version")
+    pipx_install = section.index("pipx install .")
+    assert npm_smoke < pipx_install
+
+
 def test_ci_windows_native_acceptance_job_uses_script_and_source_install():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
 

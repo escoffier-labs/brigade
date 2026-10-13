@@ -93,23 +93,19 @@ updates:
           - minor
           - patch
 
-  # npm: pre-wired for the npm wrapper package (#1273). Dependabot reports a
-  # config error on every run when an npm entry has no package.json, so this
-  # stays commented out. Uncomment and set `directory` in the same PR that adds
-  # the manifest.
-  # - package-ecosystem: npm
-  #   directory: /
-  #   schedule:
-  #     interval: weekly
-  #   open-pull-requests-limit: 5
-  #   labels:
-  #     - dependencies
-  #   commit-message:
-  #     prefix: "chore(deps)"
-  #   groups:
-  #     minor-and-patch:
-  #       patterns:
-  #         - "*"
-  #       update-types:
-  #         - minor
-  #         - patch
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
