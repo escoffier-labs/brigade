@@ -177,6 +177,8 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                             int(message["id"]),
                             timeout=min(fleet_client.FLUSH_TIMEOUT_SECONDS, remaining),
                         )
+                    except _UnauthorizedError:
+                        raise
                     except (KeyError, TypeError, ValueError, fleet_client.FleetClientError):
                         return _queue_locked(path, message, dir_fd=dir_fd)
                     if recipient is None:

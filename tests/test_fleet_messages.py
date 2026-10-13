@@ -1205,6 +1205,41 @@ def test_send_surfaces_unauthorized_reply_lookup_while_draining(tmp_path, monkey
     assert pending[1] == reply
 
 
+def test_new_reply_surfaces_unauthorized_parent_lookup(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    old = {
+        "action": "send",
+        "to": NODE_B,
+        "subject": "Queued earlier",
+        "body": "Recipient quota may clear later",
+        "client_id": "blocked-message",
+        "enqueued_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with fleet_client._spool_lock(path) as dir_fd:
+        assert fleet_client._spool_append_locked(path, old, dir_fd=dir_fd)
+
+    def request(_hub, _token, message, **_kwargs):
+        if message.get("client_id") == "blocked-message":
+            return 429, {"error": "quota", "code": "message_recipient_quota", "recipient": NODE_B}
+        return 401, {"error": "unauthorized"}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+
+    with pytest.raises(fleet_client.FleetClientError, match="unauthorized"):
+        fleet_client_messages.reply(42, body="Reply text", subject=None, reference=None, priority="normal")
+
+    pending = fleet_client._read_spool(path)
+    assert [item["client_id"] for item in pending] == ["blocked-message"]
+    assert pending[0]["_recipient"] == NODE_B
+
+
 def test_spool_flush_keeps_message_during_recipient_revocation(message_hub, tmp_path, monkeypatch):
     base, token_a, _token_b, db = message_hub
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
