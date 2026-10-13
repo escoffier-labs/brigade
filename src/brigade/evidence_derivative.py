@@ -362,23 +362,29 @@ def export_derivative(
     encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
     _verify_source_inventory(source, names, root_observation, file_observations)
     staging = out.parent / f".{out.name}.staging-{secrets.token_hex(4)}"
+    created_staging = False
     created_output = False
+    published = False
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
         staging.mkdir(parents=True, mode=0o700)
+        created_staging = True
         localio.write_bytes_atomic(staging / "derivative.json", encoded)
         # mkdir is an atomic no-clobber reservation, including for an empty
         # directory created after the earlier existence check.
         out.mkdir(mode=0o700)
         created_output = True
         os.link(staging / "derivative.json", out / "derivative.json")
+        published = True
     except BaseException as exc:
-        shutil.rmtree(staging, ignore_errors=True)
+        if created_staging:
+            shutil.rmtree(staging, ignore_errors=True)
         if created_output:
-            try:
-                (out / "derivative.json").unlink(missing_ok=True)
-            except OSError:
-                pass
+            if published:
+                try:
+                    (out / "derivative.json").unlink(missing_ok=True)
+                except OSError:
+                    pass
             try:
                 out.rmdir()
             except OSError:
@@ -386,5 +392,6 @@ def export_derivative(
         if isinstance(exc, OSError):
             raise DerivativeExportError("derivative output could not be published") from exc
         raise
-    shutil.rmtree(staging, ignore_errors=True)
+    if created_staging:
+        shutil.rmtree(staging, ignore_errors=True)
     return DerivativeReport(removed, redaction_occurrences, excluded, hashlib.sha256(encoded).hexdigest())

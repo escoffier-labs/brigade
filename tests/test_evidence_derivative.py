@@ -531,6 +531,62 @@ def test_derivative_does_not_replace_output_directory_created_during_publish(tmp
     assert list(out.iterdir()) == []
 
 
+def test_derivative_preserves_preexisting_staging_directory_on_name_collision(tmp_path: Path, monkeypatch) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    staging = tmp_path / ".derivative.staging-collision"
+    staging.mkdir()
+    sentinel = staging / "owned-by-another-export"
+    sentinel.write_text("preserve", encoding="utf-8")
+    monkeypatch.setattr(evidence_derivative.secrets, "token_hex", lambda _size: "collision")
+
+    try:
+        evidence_derivative.export_derivative(
+            source=source,
+            out=tmp_path / "derivative",
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == "derivative output could not be published"
+    else:
+        raise AssertionError("derivative accepted an already occupied staging name")
+
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+
+
+def test_derivative_preserves_concurrent_file_after_publish_link_collision(tmp_path: Path, monkeypatch) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    out = tmp_path / "derivative"
+    concurrent_data = b"created by another process"
+
+    def concurrent_link(_source: Path, destination: Path) -> None:
+        destination.write_bytes(concurrent_data)
+        raise FileExistsError(destination)
+
+    monkeypatch.setattr(evidence_derivative.os, "link", concurrent_link)
+    try:
+        evidence_derivative.export_derivative(
+            source=source,
+            out=out,
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == "derivative output could not be published"
+    else:
+        raise AssertionError("derivative accepted a concurrent output file")
+
+    assert (out / "derivative.json").read_bytes() == concurrent_data
+
+
 def test_derivative_wraps_unsupported_publication_link_errors(tmp_path: Path, monkeypatch) -> None:
     _, receipt = _fabricated_run_dir(tmp_path)
     source = tmp_path / "source"
