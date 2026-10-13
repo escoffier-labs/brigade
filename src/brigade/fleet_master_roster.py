@@ -55,7 +55,8 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
     r"\s+(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to)\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
-    r"\bset\s+(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+to\s+"
+    r"\bset\s+(?:(?:the|my|your|our|their|his|her|its)\s+)?"
+    r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+to\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%[A-Za-z_][A-Za-z0-9_]*%|"
     r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][^}]*\})"
@@ -70,7 +71,7 @@ _URL_CREDENTIAL_QUERY = re.compile(
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"\b(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+|(?:use\s+)?environment\s+variable\s+)"
-    r"[A-Za-z_][A-Za-z0-9_]*(?:\s*=(?!=|>)|\s+(?:to|is)\s+(?!(?:"
+    r"[A-Za-z_][A-Za-z0-9_]*(?:\s*=(?!=|>)|\s+(?:to|is|are|was|were|will\s+be|has\s+been|have\s+been)\s+(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
     + r"))\S+|:\s*(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
@@ -88,7 +89,9 @@ _EXPLICIT_TERMINAL_PATH = re.compile(
     re.IGNORECASE,
 )
 _CONTEXTUAL_TERMINAL_PATH = re.compile(
-    r"\b(?:start\s+at|operate\s+from|move\s+to)\s+[\"'“‘`()\[{]*\s*"
+    r"\b(?:start|operate|move|run|execute|inspect|open|read|write|load|save|navigate|copy|store)\s+"
+    r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
+    r"(?:(?:from|at|in|to|into|under)\s+)?[\"'“‘`()\[{]*\s*"
     r"(?:~|/|\\|\.{1,2})(?=$|[\s,;!?\"'”’)\]}])",
     re.IGNORECASE,
 )
