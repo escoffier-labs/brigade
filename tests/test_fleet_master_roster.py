@@ -398,6 +398,7 @@ def test_parse_rejects_qualified_compact_credential_assignments(field: str, text
         "This seat is using the password hunter2",
         "Reviewer used API key shortkey",
         "Reviewer was using the password hunter2",
+        "Reviewer will be using API key shortkey",
         "Reviewer has API key shortkey",
         "Reviewer has the password hunter2",
         "Reviewer had API key shortkey",
@@ -506,6 +507,8 @@ def test_parse_accepts_prose_that_mentions_auth_profiles(text: str) -> None:
         "Target Python/3.12 runtimes.",
         "Handle TLS/1.3 connections.",
         "GET /health endpoint",
+        "GET /.well-known/openid-configuration",
+        "Call /api/.well-known/info",
         "POST /v1/jobs",
         "Call /api/v1/%6aobs",
         "GET /users",
@@ -888,7 +891,10 @@ def test_parse_accepts_lowercase_key_value_prose(field: str, text: str) -> None:
         "See https://example.com/?output%3D%2Fetc%2Fhosts",
         "See https://example.com/#output%3D%2Fetc%2Fhosts",
         "See https://example.com/?%2Fhome%2Fexample=x",
+        "https://example.com/%2Fetc/passwd",
+        "https://example.com/%7Eexample/.ssh/config",
         "Call /api?output=/etc/passwd",
+        "Call /api#path%3D%2Fetc%2Fhosts",
     ],
 )
 def test_parse_rejects_filesystem_paths_in_url_parameters(field: str, text: str) -> None:

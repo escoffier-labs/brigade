@@ -71,7 +71,7 @@ _DANGEROUS_VALUE_PATTERN = (
     r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
     r"(?:to|as|with)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:(?:this|the|a|an|my|your|our|their|his|her|its)\s+)?"
-    r"[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?\s+(?:uses?|used|is\s+using|are\s+using|was\s+using|were\s+using|has|have|had)\s+"
+    r"[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?\s+(?:uses?|used|is\s+using|are\s+using|was\s+using|were\s+using|will\s+be\s+using|has|have|had)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
     r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE})\b)\S+|"
@@ -139,12 +139,12 @@ _CONTEXTUAL_TERMINAL_PATH = re.compile(
 )
 _API_ROUTE_CONTEXT = re.compile(
     r"\b(?:call|invoke|serve|expose|request|hit|get|head|post|put|patch|delete|connect|options|trace)\s+(?:the\s+)?"
-    r"(?P<path>/(?:[A-Za-z0-9._~%=-]+(?:/[A-Za-z0-9._~%=-]+)*)(?:\?[^\s<>\"']*)?)",
+    r"(?P<path>/(?:[A-Za-z0-9._~%=-]+(?:/[A-Za-z0-9._~%=-]+)*)(?:\?[^\s<>\"']*)?(?:#[^\s<>\"']*)?)",
     re.IGNORECASE,
 )
 _HTTP_METHOD_ROUTE_CONTEXT = re.compile(
     r"\b(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)\s+"
-    r"(?P<path>/(?:[A-Za-z0-9._~%=-]+(?:/[A-Za-z0-9._~%=-]+)*)(?:\?[^\s<>\"']*)?)"
+    r"(?P<path>/(?:[A-Za-z0-9._~%=-]+(?:/[A-Za-z0-9._~%=-]+)*)(?:\?[^\s<>\"']*)?(?:#[^\s<>\"']*)?)"
 )
 _HTTP_METHOD_ROUTE_ROOTS = frozenset({"applications", "config", "users"})
 _FILESYSTEM_ROUTE_ROOTS = frozenset(
@@ -205,6 +205,8 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
                 _DANGEROUS_VALUE.search(decoded_path)
                 or _ENVIRONMENT_ASSIGNMENT.search(decoded_path)
                 or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_path)
+                or "//" in decoded_path.replace("\\", "/")
+                or _has_disallowed_api_route_query(f"Call {decoded_path}")
             ):
                 return True
             decoded_query = _fully_unquote(parsed.query)
@@ -245,13 +247,14 @@ def _has_disallowed_api_route_query(value: str) -> bool:
         method_route = re.match(r"(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)\s+", match.group(), re.I)
         route = match.group("path")
         decoded_route = _fully_unquote(route)
-        decoded_path, _, route_query = decoded_route.partition("?")
+        route_without_fragment, _, route_fragment = decoded_route.partition("#")
+        decoded_path, _, route_query = route_without_fragment.partition("?")
         normalized_path = decoded_path.replace("\\", "/")
         if "//" in normalized_path:
             return True
         decoded_components = [component.casefold() for component in normalized_path.split("/") if component]
         if any(component in {".", ".."} for component in decoded_components) or any(
-            component.startswith(".")
+            (component.startswith(".") and component != ".well-known")
             or component.startswith("~")
             or component in _PRIVATE_KEY_FILES
             or (index == 0 and component in _FILESYSTEM_ROUTE_ROOTS and not method_route)
@@ -265,7 +268,9 @@ def _has_disallowed_api_route_query(value: str) -> bool:
             or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_path)
         ):
             return True
-        for key, query_value in parse_qsl(route_query, keep_blank_values=True):
+        fragment_query = route_fragment.partition("?")[2] or route_fragment
+        route_pairs = parse_qsl(route_query, keep_blank_values=True) + parse_qsl(fragment_query, keep_blank_values=True)
+        for key, query_value in route_pairs:
             key = _fully_unquote(key)
             decoded_value = _fully_unquote(query_value)
             pair = f"{key}={decoded_value}"
