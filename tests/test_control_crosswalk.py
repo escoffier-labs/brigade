@@ -1626,6 +1626,25 @@ def test_ec03_cosign_bundle_rejects_wrong_run_binding(tmp_path, monkeypatch):
     assert result["dimensions"]["signature"]["status"] == "passed"
 
 
+def test_ec03_signature_failure_does_not_pass_unchecked_run_binding(tmp_path, monkeypatch):
+    from brigade import control_crosswalk_cosign
+
+    target = _ws(tmp_path)
+    _write_cosign_assessment_fixture(target, wrong_run=True)
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+    monkeypatch.setattr(
+        control_crosswalk_cosign.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 1})(),
+    )
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "rejected"
+    assert result["dimensions"]["signature"]["status"] == "failed"
+    assert result["dimensions"]["subject"]["status"] == "unknown"
+
+
 def test_ec03_does_not_bind_preverification_invalid_bundle_from_receipt(tmp_path):
     target = _ws(tmp_path)
     run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)

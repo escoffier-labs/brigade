@@ -182,7 +182,7 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
             "rejected",
             integrity=("failed", "signature_mismatch"),
             signature=("failed", "signature_mismatch"),
-            subject="passed",
+            subject="unknown",
             reason="signature_mismatch",
             source_digest=digest,
         )
