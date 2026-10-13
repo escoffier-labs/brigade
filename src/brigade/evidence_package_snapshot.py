@@ -35,6 +35,10 @@ _ENTRY_KEYS = frozenset({"path", "sha256", "bytes", "media_type", "kind"})
 _LIMITATIONS = ["receipt-contains-local-paths", "integrity-only"]
 _ALLOWED = {name: (kind, media_type) for name, kind, media_type in evidence_package.PACKAGE_FILES}
 _PACKAGE_NAMES = frozenset({"manifest.json", *_ALLOWED})
+MAX_PACKAGE_BYTES = _MANIFEST_MAX_BYTES + sum(
+    attestation_input.MAX_JSON_BYTES if name == "receipt.json" else evidence_package.MAX_ENTRY_BYTES
+    for name in _ALLOWED
+)
 
 
 class PackageSnapshotError(ValueError):

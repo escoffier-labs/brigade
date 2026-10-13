@@ -98,7 +98,9 @@ def load_crosswalk() -> dict[str, Any]:
     return json.loads(text)
 
 
-_ASSESSMENT_BYTE_BUDGET = 64 * 1024 * 1024
+# Preserve the ordinary assessment allowance and reserve enough extra space to
+# stage one complete package at the strict verifier's maximum valid size.
+_ASSESSMENT_BYTE_BUDGET = 64 * 1024 * 1024 + evidence_package_snapshot.MAX_PACKAGE_BYTES
 
 
 class _AssessmentReader(_control_crosswalk_io._AssessmentReader):
@@ -256,11 +258,13 @@ def _adapter_observation(
                 raise _ReadRefusal("discovery_unreadable")
             entries = manifest.get("entries")
             if not isinstance(entries, list):
-                raise _ReadRefusal("discovery_unreadable")
+                raise evidence_package_snapshot.PackageSnapshotError("malformed")
             entry_names: set[str] = set()
             for entry in entries:
-                name = entry.get("path") if isinstance(entry, dict) else None
-                if not isinstance(name, str) or not evidence_package._is_safe_entry_path(name):
+                if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                    raise evidence_package_snapshot.PackageSnapshotError("malformed")
+                name = entry["path"]
+                if not evidence_package._is_safe_entry_path(name):
                     raise evidence_package_snapshot.PackageSnapshotError("unsafe")
                 entry_names.add(name)
             if len(actual_names) > len(evidence_package.PACKAGE_FILES) + 1 or actual_names - {
@@ -280,6 +284,8 @@ def _adapter_observation(
         _copy_public_trust(ctx)
         obs = control_readiness.validate_observation(adapter(ctx.reader.snapshot_target, snapshot_artifact))
     except evidence_package_snapshot.PackageSnapshotError as exc:
+        if exc.code == "malformed":
+            return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
         if exc.code == "unsafe":
             return _obs(
                 relpath,
@@ -389,7 +395,8 @@ def _assess_verify_receipt(
 ) -> control_readiness.ArtifactObservation:
     """EC-01 verification result with a rederived writer-compatible digest."""
     relpath = _relpath(ctx, path)
-    if receipt.get("schema_version") != receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION:
+    schema_version = receipt.get("schema_version")
+    if type(schema_version) is not int or schema_version != receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION:
         return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
     has_digest_evidence = "digests" in receipt
     receipt_digest: str | None = None

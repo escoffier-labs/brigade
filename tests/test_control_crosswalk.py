@@ -294,6 +294,24 @@ def test_completed_verify_receipt_rejects_unsupported_schema_version(tmp_path):
     assert readiness["reason"] == "schema_missing"
 
 
+def test_completed_verify_receipt_rejects_non_integer_schema_version(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    receipt["schema_version"] = 2.0
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    _write_json(run_dir / "receipt.json", receipt)
+
+    readiness = _assess(target, "EC-01", RUN)
+
+    assert readiness["outcome"] == "invalid"
+    assert readiness["reason"] == "schema_missing"
+
+
 def test_completed_verify_receipt_with_changed_payload_is_rejected(tmp_path):
     target = _ws(tmp_path)
     run_dir = _verify_dir(target, "verify-a")
@@ -538,11 +556,14 @@ def test_ec12_rejects_unsafe_manifest_entry_path(tmp_path):
     assert readiness["artifacts"][0]["outcome"] == "rejected"
 
 
-def test_ec12_accepts_package_entry_above_json_limit(tmp_path):
+@pytest.mark.parametrize(
+    "patch_size", [attestation_input.MAX_JSON_BYTES + 1, control_crosswalk.evidence_package.MAX_ENTRY_BYTES]
+)
+def test_ec12_accepts_package_entry_within_entry_limit(tmp_path, patch_size):
     target = _ws(tmp_path)
     package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
     _write_strict_package(package_dir)
-    patch = b"p" * (attestation_input.MAX_JSON_BYTES + 1)
+    patch = b"p" * patch_size
     receipt_path = package_dir / "receipt.json"
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     receipt["changes_patch_sha256"] = hashlib.sha256(patch).hexdigest()
@@ -567,6 +588,22 @@ def test_ec12_accepts_package_entry_above_json_limit(tmp_path):
     readiness = _assess(target, "EC-12")
 
     assert readiness["outcome"] == "validated"
+
+
+@pytest.mark.parametrize("entries", [None, "not-a-list"])
+def test_ec12_reports_malformed_entry_list_as_invalid(tmp_path, entries):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["entries"] = entries
+    _write_json(manifest_path, manifest)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "invalid"
+    assert readiness["reason"] == "schema_missing"
 
 
 def test_json_output_is_sorted_and_includes_schema(tmp_path, capsys):
