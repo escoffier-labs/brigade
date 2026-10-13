@@ -184,7 +184,8 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                 status, payload = _request(hub, token, message)
             except fleet_client.FleetClientError:
                 return _queue_locked(path, message, dir_fd=dir_fd)
-            if status in (401, 408, 425, 429) or status >= 500:
+            # 401 is surfaced because a rotated token cannot flush this token-scoped spool.
+            if status in (408, 425, 429) or status >= 500:
                 return _queue_locked(path, message, dir_fd=dir_fd)
             if not 200 <= status < 300:
                 if 300 <= status < 400:

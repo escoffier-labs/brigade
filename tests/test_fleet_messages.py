@@ -1097,7 +1097,7 @@ def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
     assert not fleet_client_messages._spool_path(NODE_A).exists()
 
 
-def test_new_send_is_spooled_when_hub_temporarily_rejects_credentials(tmp_path, monkeypatch):
+def test_new_send_reports_unauthorized_without_cross_credential_spooling(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     monkeypatch.setattr(
@@ -1107,19 +1107,16 @@ def test_new_send_is_spooled_when_hub_temporarily_rejects_credentials(tmp_path, 
     )
     monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (401, {"error": "unauthorized"}))
 
-    queued = fleet_client_messages.send(
-        recipient=NODE_B,
-        subject="Retry after credential recovery",
-        body="Persist this request",
-        reference=None,
-        priority="normal",
-    )
+    with pytest.raises(fleet_client.FleetClientError, match="unauthorized"):
+        fleet_client_messages.send(
+            recipient=NODE_B,
+            subject="Retry after credential recovery",
+            body="Do not leave an unreachable token-scoped request",
+            reference=None,
+            priority="normal",
+        )
 
-    assert queued["queued"] is True
-    assert (
-        fleet_client._read_spool(fleet_client_messages._spool_path(NODE_A, "node-secret"))[0]["client_id"]
-        == queued["client_id"]
-    )
+    assert not fleet_client_messages._spool_path(NODE_A, "node-secret").exists()
 
 
 def test_spool_flush_keeps_message_during_recipient_revocation(message_hub, tmp_path, monkeypatch):
