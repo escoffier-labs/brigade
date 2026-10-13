@@ -18,7 +18,7 @@ from typing import Any
 from . import __version__
 from .install import build_render_context, resolve_manifests
 from .selection import Selection
-from .templates import is_text, render, template_root
+from .templates import canonical_template_bytes, is_text, render, template_root
 
 SCHEMA = "brigade.template_profile_snapshot.v1"
 HARNESS_CONTRACT_SCHEMA = "harness-contract.v1"
@@ -234,7 +234,7 @@ def compute_profile_renders(selection: Selection) -> list[dict[str, Any]]:
             content = render(src.read_text(encoding="utf-8"), context).encode("utf-8")
             rendered = True
         else:
-            content = src.read_bytes()
+            content = canonical_template_bytes(src)
             rendered = False
         renders.append(
             {
