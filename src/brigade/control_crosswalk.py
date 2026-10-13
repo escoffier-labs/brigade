@@ -26,6 +26,7 @@ from . import (
     agent_request,
     approval,
     attestation,
+    attestation_receipt,
     causal_receipt,
     control_readiness,
     cosign_attestation,
@@ -354,19 +355,26 @@ def _evaluate_verify_receipt_completed(ctx: _Context) -> _Discovery:
 def _assess_verify_receipt(
     ctx: _Context, run_dir: Path, path: Path, receipt: dict[str, Any]
 ) -> control_readiness.ArtifactObservation:
-    """EC-01 structure of one verify receipt.
-
-    The stored digest and optional local HMAC are not verified here (the
-    integrity adapter is #1618), so integrity is ``not_checked`` and even a
-    well-formed successful receipt stops at ``structure_observed``.
-    """
+    """EC-01 verification result with a rederived writer-compatible digest."""
     relpath = _relpath(ctx, path)
     if not isinstance(receipt.get("schema_version"), int):
         return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
+    has_digest_evidence = "digests" in receipt
+    if has_digest_evidence:
+        try:
+            attestation_receipt.snapshot_stored_receipt(receipt)
+        except attestation_receipt.ReceiptDigestError:
+            return _obs(
+                relpath,
+                "claim_validated",
+                "rejected",
+                _dims(integrity=("failed", "receipt_digest_mismatch"), subject="unknown", population="passed"),
+                ["receipt_digest_mismatch"],
+            )
     subject: str | tuple[str, str] = (
         "passed" if receipt.get("run_id") == run_dir.name else ("failed", "run_binding_mismatch")
     )
-    integrity = ("not_checked", "verifier_not_wired")
+    integrity: Any = "passed" if has_digest_evidence else ("not_checked", "verifier_not_wired")
 
     def observed(
         proposed: str, population: Any, reasons: list[str] | None = None
@@ -411,6 +419,14 @@ def _assess_verify_receipt(
         return observed("incomplete", ("unknown", "planned_commands_mismatch"))
     if not all(c.get("status") == "completed" for c in commands):
         return observed("incomplete", ("unknown", "command_not_terminal"))
+    if has_digest_evidence:
+        return _obs(
+            relpath,
+            "claim_validated",
+            "validated" if subject == "passed" else "rejected",
+            _dims(integrity="passed", subject=subject, population="passed"),
+            [] if subject == "passed" else ["run_binding_mismatch"],
+        )
     return observed("structure_observed", "passed", ["verifier_not_wired"])
 
 
@@ -1391,8 +1407,8 @@ _EVALUATORS: dict[str, _Rule] = {
     "verify-receipt-completed": _Rule(
         _evaluate_verify_receipt_completed,
         "in_module",
-        "verify-receipt-integrity",
-        "not_wired",
+        "attestation_receipt.snapshot_stored_receipt",
+        "wired",
         frozenset({"integrity", "subject", "population"}),
     ),
     "sshsig-test-result-signed-ok": _Rule(

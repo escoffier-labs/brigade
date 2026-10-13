@@ -240,7 +240,7 @@ def test_framework_not_mapped_appears_in_doc():
         assert name in rendered, f"framework {name} missing from rendered doc"
 
 
-def test_completed_verify_receipt_is_structure_only_until_integrity_adapter(tmp_path):
+def test_completed_verify_receipt_without_stored_digest_is_structure_only(tmp_path):
     target = tmp_path / "ws"
     target.mkdir()
     run_dir = target / ".brigade" / "work" / "verify-runs" / "20260101-000000-test"
@@ -250,11 +250,46 @@ def test_completed_verify_receipt_is_structure_only_until_integrity_adapter(tmp_
 
     ec01 = next(m for m in evaluated["mappings"] if m["claim_id"] == "EC-01" and m["framework_id"] == "iso-42001-2023")
     ec02 = next(m for m in evaluated["mappings"] if m["claim_id"] == "EC-02" and m["framework_id"] == "iso-42001-2023")
-    # The receipt is unsigned and its digest is not rederived (#1618), so a
+    # Without a stored digest there is nothing authenticated to rederive, so a
     # well-formed successful receipt is structure, not validated evidence.
     assert ec01["state"] == "untested"
     assert ec01["evidence_outcome"] == "structure_observed"
     assert ec02["state"] == "untested"
+
+
+def test_completed_verify_receipt_with_rederived_digest_is_validated(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    _write_json(run_dir / "receipt.json", receipt)
+
+    readiness = _assess(target, "EC-01", RUN)
+
+    assert readiness["outcome"] == "validated"
+    assert readiness["dimensions"]["integrity"] == {"status": "passed", "reason": None}
+
+
+def test_completed_verify_receipt_with_changed_payload_is_rejected(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a")
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    receipt["commands"][0]["command"] = "false"
+    _write_json(run_dir / "receipt.json", receipt)
+
+    readiness = _assess(target, "EC-01")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "receipt_digest_mismatch"
 
 
 def test_run_scoped_query_excludes_other_producer_runs(tmp_path):
@@ -1678,7 +1713,7 @@ def test_ec01_forged_well_shaped_receipt_without_digest_never_validates(tmp_path
     assert readiness["legacy_state"] == "untested"
     assert "integrity" in readiness["required_dimensions"]
     assert readiness["dimensions"]["integrity"] == {"status": "not_checked", "reason": "verifier_not_wired"}
-    assert readiness["verifier"]["status"] == "not_wired"
+    assert readiness["verifier"]["status"] == "wired"
     assert control_crosswalk._evaluate_claim_state(target, "EC-01", None) != "evidenced_passed"
 
 

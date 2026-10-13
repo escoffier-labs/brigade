@@ -97,6 +97,7 @@ REASON_CODES = frozenset(
         "planned_commands_missing",
         "population_truncated",
         "read_limit_exceeded",
+        "receipt_digest_mismatch",
         "run_binding_mismatch",
         "schema_missing",
         "signature_mismatch",
