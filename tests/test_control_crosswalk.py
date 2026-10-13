@@ -1598,7 +1598,7 @@ def test_ec03_refused_companion_receipt_is_invalid_evidence(tmp_path, monkeypatc
     assert result["verifier"]["status"] == "wired"
 
 
-def test_ec03_ignores_wrong_run_verifier_outage_for_claim_status(tmp_path, monkeypatch):
+def test_ec03_keeps_verifier_outage_unbound_for_claim_status(tmp_path, monkeypatch):
     import subprocess
 
     from brigade import control_crosswalk_cosign
@@ -1622,7 +1622,8 @@ def test_ec03_ignores_wrong_run_verifier_outage_for_claim_status(tmp_path, monke
 
     assert result["outcome"] == "incomplete"
     assert result["verifier"]["status"] == "wired"
-    assert result["population"]["wrong_run"] == 1
+    assert result["population"]["wrong_run"] == 0
+    assert result["population"]["unbound"] == 1
     assert len(calls) == 2
 
 
@@ -1828,14 +1829,29 @@ def test_ec12_preserves_read_limit_refusal_during_package_staging(tmp_path, monk
     target = _ws(tmp_path)
     package = target / ".brigade" / "evidence-packages" / "pkg-bounded-read"
     _write_strict_package(package)
+    manifest_path = package / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["created_at"] = "2020-01-01T00:00:00Z"
+    manifest["source"]["producer_run_id"] = "tampered-run"
+    manifest["source"]["verify_run_id"] = "tampered-run"
+    _write_json(manifest_path, manifest)
     limit = (package / "manifest.json").stat().st_size + (package / "receipt.json").stat().st_size
     monkeypatch.setattr(control_crosswalk.evidence_package_snapshot, "MAX_PACKAGE_BYTES", limit)
     monkeypatch.setattr(control_crosswalk, "_ASSESSMENT_BYTE_BUDGET", 0)
 
-    result = _assess(target, "EC-12")
+    result = _assess(
+        target,
+        "EC-12",
+        RUN,
+        period=("2026-01-01T00:00:00Z", "2026-12-31T23:59:59Z"),
+    )
 
-    assert result["artifacts"][0]["outcome"] == "unavailable"
-    assert result["artifacts"][0]["reason_codes"] == ["read_limit_exceeded"]
+    artifact = result["artifacts"][0]
+    assert result["outcome"] == "unavailable"
+    assert result["population"]["out_of_period"] == 0
+    assert artifact["outcome"] == "unavailable"
+    assert artifact["scope"] == "in_scope"
+    assert artifact["reason_codes"] == ["read_limit_exceeded", "timestamp_missing"]
 
 
 def test_ec12_classifies_a_missing_manifest_listed_entry_as_snapshot_mismatch(tmp_path):
@@ -2012,6 +2028,42 @@ def test_ec03_cosign_bundle_marks_missing_cosign_tool_unavailable(tmp_path, monk
     assert result["outcome"] == "unavailable"
     assert result["reason"] == "verifier_tool_unavailable"
     assert result["verifier"]["status"] == "unavailable"
+
+
+def test_ec03_does_not_bind_or_period_filter_receipt_before_signature_verification(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["run_id"] = "tampered-run"
+    receipt["producer_run_id"] = "tampered-run"
+    receipt["completed_at"] = "2020-01-01T00:00:00Z"
+    _write_json(receipt_path, receipt)
+    bundle_path = run_dir / "attestation.sigstore.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    statement = attestation.build_statement(receipt)
+    bundle["dsseEnvelope"]["payload"] = base64.b64encode(attestation.canonical_statement_bytes(statement)).decode(
+        "ascii"
+    )
+    _write_json(bundle_path, bundle)
+
+    def unavailable():
+        raise cosign_attestation.CosignAttestationError("cosign is absent")
+
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", unavailable)
+    result = _assess(
+        target,
+        "EC-03",
+        RUN,
+        period=("2026-01-01T00:00:00Z", "2026-12-31T23:59:59Z"),
+    )
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["population"]["out_of_period"] == 0
+    assert result["artifacts"][0]["outcome"] == "unavailable"
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["timestamp_missing", "verifier_tool_unavailable"]
 
 
 def _fixture_ec07(target: Path) -> None:
@@ -2443,7 +2495,7 @@ def test_assessment_period_freshness(tmp_path):
 
 
 @pytest.mark.parametrize("claim_id", ["EC-03", "EC-12"])
-def test_out_of_period_verifier_outage_does_not_change_claim_verifier_status(tmp_path, monkeypatch, claim_id):
+def test_verifier_outage_is_not_filtered_by_unverified_period_metadata(tmp_path, monkeypatch, claim_id):
     from brigade import control_readiness
 
     target = _ws(tmp_path)
@@ -2497,10 +2549,17 @@ def test_out_of_period_verifier_outage_does_not_change_claim_verifier_status(tmp
         period=("2026-09-01T00:00:00+00:00", "2026-09-30T23:59:59+00:00"),
     )
 
-    assert result["outcome"] == "validated"
-    assert result["verifier"]["status"] == "wired"
-    assert result["population"]["in_scope"] == 1
-    assert result["population"]["out_of_period"] == 1
+    if claim_id == "EC-03":
+        assert result["outcome"] == "incomplete"
+        assert result["population"]["out_of_period"] == 0
+        assert result["verifier"]["status"] == "wired"
+        assert result["population"]["in_scope"] == 1
+        assert result["population"]["unbound"] == 1
+    else:
+        assert result["outcome"] == "validated"
+        assert result["verifier"]["status"] == "wired"
+        assert result["population"]["in_scope"] == 1
+        assert result["population"]["out_of_period"] == 1
 
 
 def test_assessment_period_missing_timestamp_is_incomplete(tmp_path):

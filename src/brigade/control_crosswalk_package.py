@@ -150,10 +150,8 @@ def binding_candidates(
     *,
     strict_package: bool,
 ) -> dict[str, object]:
-    if strict_package and obs.proposed == "invalid":
+    if strict_package and obs.proposed in {"invalid", "rejected", "unavailable"}:
         return {f"receipt.{name}": value for name, value in receipt.items()}
-    if obs.proposed == "rejected" and not receipt:
-        return {}
     candidates = (
         {
             "source.producer_run_id": source.get("producer_run_id"),
@@ -182,6 +180,7 @@ def needs_staged_receipt(obs: control_readiness.ArtifactObservation) -> bool:
         "package_snapshot_mismatch" in obs.reasons
         or (obs.proposed == "invalid" and "schema_missing" in obs.reasons)
         or (obs.proposed == "rejected" and "entry_path_unsafe" in obs.reasons)
+        or obs.proposed == "unavailable"
     )
 
 
@@ -192,7 +191,7 @@ def trusted_timestamp_manifest(
     strict_package: bool,
 ) -> dict[str, object] | None:
     """Discard manifest timestamps until strict-package validation succeeds."""
-    return None if strict_package and obs.proposed in {"invalid", "rejected"} else manifest
+    return None if strict_package and obs.proposed in {"invalid", "rejected", "unavailable"} else manifest
 
 
 def _unavailable(relpath: str, reason: str) -> control_readiness.ArtifactObservation:
