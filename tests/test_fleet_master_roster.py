@@ -120,6 +120,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "API key is abcdefghijklmnop",
         "password is p@ssw0rd!",
         "API key is abcd.efgh.ijkl.mnop",
+        "password is hunter2!",
+        "token is abcdefg.",
         "token is abcdefghijklmnop",
         "auth token is abcdefghijklmnop",
     ],
@@ -149,6 +151,7 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Plan A: review changes",
         "Use option B: fast mode",
         "Password is required.",
+        "Password is confidential.",
         "Auth profile is required.",
     ],
 )
@@ -167,6 +170,8 @@ def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> N
         "Support auth profiles as needed.",
         "Configure auth profile selection.",
         "Rotate auth profiles regularly.",
+        "Support auth profile rotation.",
+        "Configure authentication profile management.",
     ],
 )
 def test_parse_accepts_prose_that_mentions_auth_profiles(text: str) -> None:
@@ -177,7 +182,15 @@ def test_parse_accepts_prose_that_mentions_auth_profiles(text: str) -> None:
 
 
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
-@pytest.mark.parametrize("text", ["Serve the /models endpoint.", "Call /preference for routing."])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Serve the /models endpoint.",
+        "Call /preference for routing.",
+        "Invoke /health for readiness.",
+        "Call /v1/chat/completions endpoint.",
+    ],
+)
 def test_parse_accepts_known_api_routes_in_descriptive_text(field: str, text: str) -> None:
     document = _document()
     if field == "purpose":
