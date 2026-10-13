@@ -131,6 +131,7 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Run CI/CD workflows",
         "Read input/output formats",
         "Read e.g., the guide",
+        "See https://example.com/docs?lang=en",
         "Support Bearer authentication for API clients",
         "Read Node.js documentation",
         "Open VS.Code to review",
@@ -224,6 +225,15 @@ def test_parse_accepts_unqualified_inventory_model_identifiers(model: str) -> No
     assert fleet_master_roster.parse(document)["seats"][0]["model"] == model
 
 
+@pytest.mark.parametrize("model", ["gpt-4 fast", "gpt --fast", "model🚀"])
+def test_parse_rejects_invalid_model_identifiers(model: str) -> None:
+    document = _document()
+    document["seats"][0]["model"] = model  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
 @pytest.mark.parametrize(
     "model",
     [
@@ -239,6 +249,9 @@ def test_parse_accepts_unqualified_inventory_model_identifiers(model: str) -> No
         "assets/logo.png",
         "package/Gemfile.lock",
         "assets/logo.webp",
+        "package/foo.rb",
+        "app/main.php",
+        "web/client.mjs",
     ],
 )
 def test_parse_rejects_relative_paths_as_models(model: str) -> None:

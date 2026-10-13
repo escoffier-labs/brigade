@@ -24,7 +24,6 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:Proxy-)?Authorization\s*:\s*Bearer\s+\S+|\bBearer\s+[A-Za-z0-9._~+/-]{20,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
-    r"(?<![A-Za-z0-9])[A-Z_][A-Z0-9_]*\s*=|"
     r"\bauth(?:entication)?[ _-]profile(?:\s*[:=]\s*|\s+)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))\s+auth(?:entication)?[ _-]profile\b|"
@@ -33,6 +32,7 @@ _DANGEROUS_VALUE = re.compile(
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%USERPROFILE%))",
     re.IGNORECASE,
 )
+_ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9])[A-Z_][A-Z0-9_]*\s*=", re.IGNORECASE)
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
 _HTTP_URL = re.compile(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE)
 _RELATIVE_PATH = re.compile(
@@ -130,6 +130,12 @@ def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -
             return True
         if any(component.startswith(".") or component.casefold() in _FILESYSTEM_COMPONENTS for component in components):
             return True
+        if (
+            model_identifier
+            and components[0].casefold() in {"app", "package", "web"}
+            and _FILE_SUFFIX.search(components[-1])
+        ):
+            return True
         suffix = _MODEL_PATH_SUFFIX if model_identifier else _FILE_SUFFIX
         if components[-1].casefold() in _EXTENSIONLESS_FILES or suffix.search(components[-1]):
             return True
@@ -154,6 +160,7 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
     if (
         _DANGEROUS_VALUE.search(value)
+        or _ENVIRONMENT_ASSIGNMENT.search(_HTTP_URL.sub("", value))
         or contains_credential(value)
         or (
             check_paths
@@ -222,6 +229,8 @@ def parse(raw: Mapping[str, Any] | bytes | str) -> dict[str, Any]:
         name = _text(raw_seat.get("name"), f"{where}.name", check_paths=False)
         cli = _text(raw_seat.get("cli"), f"{where}.cli", check_paths=False)
         model = _text(raw_seat.get("model"), f"{where}.model")
+        if not _MODEL_IDENTIFIER.fullmatch(model):
+            raise MasterRosterError(f"{where}.model must be a model identifier")
         purpose = _text(raw_seat.get("purpose"), f"{where}.purpose")
         if not _SEAT_NAME.fullmatch(name):
             raise MasterRosterError(f"{where}.name is not a valid seat name")
