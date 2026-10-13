@@ -260,18 +260,17 @@ def _update(message: dict[str, Any]) -> dict[str, Any] | None:
     return nested if isinstance(nested, dict) else params
 
 
-def _model_from(value: object) -> str | None:
-    if not isinstance(value, dict):
+def _model_from(update: dict[str, Any]) -> str | None:
+    if update.get("sessionUpdate") != "config_option_update":
         return None
-    for key in ("effectiveModel", "modelId", "currentModelId", "model"):
-        model = value.get(key)
-        if isinstance(model, str) and model:
-            return model
-    for nested in value.values():
-        found = _model_from(nested)
-        if found is not None:
-            return found
-    return None
+    model = update.get("modelId")
+    if (
+        not isinstance(model, str)
+        or len(model) > 128
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}", model)
+    ):
+        return None
+    return model
 
 
 def parse_stream(stdout: str | None) -> tuple[dict[str, Any] | None, str]:

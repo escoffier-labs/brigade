@@ -3121,7 +3121,23 @@ def test_run_passes_agent_models(monkeypatch):
     ]
 
 
-def test_dispatch_uses_acpx_transport(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("effective_model", "acpx_version", "effective_source", "effective_reason", "version_source", "version_reason"),
+    [
+        ("composer-2.5", "0.12.0", "observed", "backend-revision-unavailable", "observed", None),
+        (None, None, "unknown", "effective-model-not-reported", "unknown", "acpx-version-not-reported"),
+    ],
+)
+def test_dispatch_uses_acpx_transport(
+    monkeypatch,
+    tmp_path,
+    effective_model,
+    acpx_version,
+    effective_source,
+    effective_reason,
+    version_source,
+    version_reason,
+):
     from brigade import acpx_adapter
 
     seen = {}
@@ -3133,9 +3149,9 @@ def test_dispatch_uses_acpx_transport(monkeypatch, tmp_path):
             ok=True,
             transport="acpx",
             requested_model="cursor-auto",
-            effective_model="composer-2.5",
+            effective_model=effective_model,
             protocol_version=1,
-            acpx_version="0.12.0",
+            acpx_version=acpx_version,
         )
 
     monkeypatch.setattr(acpx_adapter, "run_cursor", fake_cursor)
@@ -3165,9 +3181,11 @@ def test_dispatch_uses_acpx_transport(monkeypatch, tmp_path):
     fields = result.metadata_provenance["fields"]
     assert fields["requested_model"]["source"] == "declared"
     assert fields["requested_model"]["unknown_reason"] == "mutable-alias-not-backend-identity"
-    assert fields["effective_model"]["source"] == "observed"
-    assert fields["effective_model"]["unknown_reason"] == "backend-revision-unavailable"
+    assert fields["effective_model"]["source"] == effective_source
+    assert fields["effective_model"]["unknown_reason"] == effective_reason
     assert fields["acpx_version"]["locator"] == "acpx-version-output"
+    assert fields["acpx_version"]["source"] == version_source
+    assert fields["acpx_version"]["unknown_reason"] == version_reason
 
 
 def test_direct_acpx_auth_failure_reaches_worker_run_receipt_and_human_summary(monkeypatch, capsys, tmp_path):

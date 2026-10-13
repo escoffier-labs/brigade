@@ -355,34 +355,33 @@ def _metadata_provenance(result: agents.AgentResult) -> dict[str, object] | None
     if result.transport != "acpx":
         return None
     fields: dict[str, object] = {}
-    if result.requested_model is not None:
-        requested_unknown = (
-            "mutable-alias-not-backend-identity"
-            if result.requested_model in {"auto", "cursor-auto"}
-            else "launched-argument-not-backend-observation"
-        )
-        fields["requested_model"] = {
-            "source": "declared",
-            "locator": "launch-argument",
-            "digest": None,
-            "unknown_reason": requested_unknown,
-        }
-    if result.effective_model is not None:
-        fields["effective_model"] = {
-            "source": "observed",
-            "locator": "acp-session-update",
-            "digest": None,
-            "unknown_reason": "backend-revision-unavailable",
-        }
-    if result.acpx_version is not None:
-        fields["acpx_version"] = {
-            "source": "observed",
-            "locator": "acpx-version-output",
-            "digest": None,
-            "unknown_reason": None,
-        }
-    if not fields:
-        return None
+    requested_unknown = (
+        "requested-model-not-recorded"
+        if result.requested_model is None
+        else "mutable-alias-not-backend-identity"
+        if result.requested_model in {"auto", "cursor-auto"}
+        else "launched-argument-not-backend-observation"
+    )
+    fields["requested_model"] = {
+        "source": "unknown" if result.requested_model is None else "declared",
+        "locator": "launch-argument",
+        "digest": None,
+        "unknown_reason": requested_unknown,
+    }
+    fields["effective_model"] = {
+        "source": "unknown" if result.effective_model is None else "observed",
+        "locator": "acp-config-option-update",
+        "digest": None,
+        "unknown_reason": "effective-model-not-reported"
+        if result.effective_model is None
+        else "backend-revision-unavailable",
+    }
+    fields["acpx_version"] = {
+        "source": "unknown" if result.acpx_version is None else "observed",
+        "locator": "acpx-version-output",
+        "digest": None,
+        "unknown_reason": "acpx-version-not-reported" if result.acpx_version is None else None,
+    }
     return {"observed_at": _attempt_timestamp(), "fields": fields}
 
 

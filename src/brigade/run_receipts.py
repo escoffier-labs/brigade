@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 from . import agents, localio, message_envelope, proc
@@ -25,55 +26,84 @@ def _bound_detail(value: str) -> str:
     return proc.bound_text(value, proc.MAX_CAPTURE_BYTES)
 
 
-def _safe_metadata_provenance(value: dict[str, object]) -> dict[str, object]:
+_ALLOWED_METADATA_PROVENANCE: dict[str, set[tuple[str, str, str | None]]] = {
+    "requested_model": {
+        ("declared", "launch-argument", "mutable-alias-not-backend-identity"),
+        ("declared", "launch-argument", "launched-argument-not-backend-observation"),
+        ("unknown", "launch-argument", "requested-model-not-recorded"),
+    },
+    "effective_model": {
+        ("observed", "acp-config-option-update", "backend-revision-unavailable"),
+        ("unknown", "acp-config-option-update", "effective-model-not-reported"),
+    },
+    "acpx_version": {
+        ("observed", "acpx-version-output", None),
+        ("unknown", "acpx-version-output", "acpx-version-not-reported"),
+    },
+}
+_METADATA_EVIDENCE_KEYS = {"source", "locator", "digest", "unknown_reason"}
+_SAFE_METADATA_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}")
+
+
+def _safe_metadata_label(value: object) -> str | None:
+    if isinstance(value, str) and _SAFE_METADATA_LABEL.fullmatch(value):
+        return value
+    return None
+
+
+def _safe_metadata_provenance(value: object) -> dict[str, object] | None:
     """Copy the closed provenance vocabulary, dropping arbitrary adapter data."""
-    safe: dict[str, object] = {}
+    if not isinstance(value, dict):
+        return None
     observed_at = value.get("observed_at")
     if (
-        isinstance(observed_at, str)
-        and len(observed_at) <= 64
-        and re.fullmatch(
+        not isinstance(observed_at, str)
+        or len(observed_at) > 64
+        or not re.fullmatch(
             r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
             observed_at,
         )
     ):
-        safe["observed_at"] = observed_at
+        return None
+    try:
+        parsed_observed_at = datetime.fromisoformat(
+            observed_at[:-1] + "+00:00" if observed_at.endswith("Z") else observed_at
+        )
+    except ValueError:
+        return None
+    if parsed_observed_at.tzinfo is None or parsed_observed_at.utcoffset() is None:
+        return None
     fields = value.get("fields")
+    if not isinstance(fields, dict):
+        return None
     safe_fields: dict[str, object] = {}
-    if isinstance(fields, dict):
-        for name in ("requested_model", "effective_model", "acpx_version"):
-            evidence = fields.get(name)
-            if not isinstance(evidence, dict):
-                continue
-            source = evidence.get("source")
-            locator = evidence.get("locator")
-            unknown_reason = evidence.get("unknown_reason")
-            digest = evidence.get("digest")
-            safe_evidence: dict[str, object] = {}
-            if isinstance(source, str) and source in {"declared", "observed", "inferred"}:
-                safe_evidence["source"] = source
-            if isinstance(locator, str) and locator in {
-                "launch-argument",
-                "acp-session-update",
-                "acpx-version-output",
-            }:
-                safe_evidence["locator"] = locator
-            if isinstance(digest, str) and re.fullmatch(r"[0-9a-fA-F]{64}", digest):
-                safe_evidence["digest"] = digest.lower()
-            elif digest is None:
-                safe_evidence["digest"] = None
-            if isinstance(unknown_reason, str) and unknown_reason in {
-                "mutable-alias-not-backend-identity",
-                "launched-argument-not-backend-observation",
-                "backend-revision-unavailable",
-            }:
-                safe_evidence["unknown_reason"] = unknown_reason
-            elif unknown_reason is None:
-                safe_evidence["unknown_reason"] = None
-            if safe_evidence:
-                safe_fields[name] = safe_evidence
-    safe["fields"] = safe_fields
-    return safe
+    for name, evidence in fields.items():
+        allowed_claims = _ALLOWED_METADATA_PROVENANCE.get(name) if isinstance(name, str) else None
+        if allowed_claims is None:
+            continue
+        if not isinstance(evidence, dict) or set(evidence) != _METADATA_EVIDENCE_KEYS:
+            return None
+        source = evidence.get("source")
+        locator = evidence.get("locator")
+        digest = evidence.get("digest")
+        unknown_reason = evidence.get("unknown_reason")
+        if not isinstance(source, str) or not isinstance(locator, str):
+            return None
+        if unknown_reason is not None and not isinstance(unknown_reason, str):
+            return None
+        if (source, locator, unknown_reason) not in allowed_claims:
+            return None
+        if digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest)):
+            return None
+        safe_fields[name] = {
+            "source": source,
+            "locator": locator,
+            "digest": digest.lower() if isinstance(digest, str) else None,
+            "unknown_reason": unknown_reason,
+        }
+    if not safe_fields:
+        return None
+    return {"observed_at": observed_at, "fields": safe_fields}
 
 
 def assignment_payload(assignments: list[Assignment]) -> list[dict[str, object]]:
@@ -133,7 +163,9 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
         if result.cloud_environment is not None:
             entry["cloud_environment"] = dict(result.cloud_environment)
         if result.metadata_provenance is not None:
-            entry["metadata_provenance"] = _safe_metadata_provenance(result.metadata_provenance)
+            metadata_provenance = _safe_metadata_provenance(result.metadata_provenance)
+            if metadata_provenance is not None:
+                entry["metadata_provenance"] = metadata_provenance
         if result.output_truncated:
             entry["output_truncated"] = True
             entry["output_bytes"] = result.output_bytes
@@ -163,6 +195,10 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
             ("acpx_version", result.acpx_version),
         ):
             if value is not None:
+                if key in {"requested_model", "effective_model", "acpx_version"}:
+                    value = _safe_metadata_label(value)
+                    if value is None:
+                        continue
                 entry[key] = value
         if result.safe_events:
             entry["events"] = list(result.safe_events)

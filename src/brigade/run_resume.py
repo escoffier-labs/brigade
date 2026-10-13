@@ -921,6 +921,13 @@ def _resume_locked(
             text=r.get("text", ""),
             ok=bool(r.get("ok")),
             detail=r.get("detail", ""),
+            transport=r.get("transport") if isinstance(r.get("transport"), str) else "cli",
+            requested_model=r.get("requested_model") if isinstance(r.get("requested_model"), str) else None,
+            effective_model=r.get("effective_model") if isinstance(r.get("effective_model"), str) else None,
+            acpx_version=r.get("acpx_version") if isinstance(r.get("acpx_version"), str) else None,
+            metadata_provenance=(
+                r.get("metadata_provenance") if isinstance(r.get("metadata_provenance"), dict) else None
+            ),
             thread_id=r.get("thread_id"),
             status=r.get("status", ""),
             provenance=r.get("provenance") if isinstance(r.get("provenance"), dict) else None,

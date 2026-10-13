@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 from brigade import message_envelope, proc, provenance
 from brigade.run_receipts import worker_payload, write_agent_logs, write_worker_logs
@@ -98,7 +99,7 @@ def test_worker_payload_distinguishes_declared_and_observed_model_evidence():
                 },
                 "effective_model": {
                     "source": "observed",
-                    "locator": "acp-session-update",
+                    "locator": "acp-config-option-update",
                     "digest": None,
                     "unknown_reason": "backend-revision-unavailable",
                 },
@@ -122,36 +123,82 @@ def test_worker_payload_distinguishes_declared_and_observed_model_evidence():
     assert "cursor-auto" not in str(entry["metadata_provenance"])
     assert "super-secret-token" not in str(entry)
 
-    untrusted = WorkerResult(
-        worker="other-worker",
+
+def test_worker_payload_drops_non_mapping_metadata_provenance():
+    result = WorkerResult(
+        worker="cursor-worker",
         task="inspect metadata",
         text="done",
         ok=True,
-        metadata_provenance={
-            "observed_at": "Bearer secret " + "x" * 100,
+        metadata_provenance=cast(dict[str, object], []),
+    )
+
+    entry = worker_payload([result])[0]
+
+    assert "metadata_provenance" not in entry
+
+
+def test_worker_payload_drops_invalid_metadata_provenance_blocks():
+    timestamp = "2026-10-13T12:00:00+00:00"
+    invalid_blocks = (
+        {
+            "observed_at": "2026-99-99T99:99:99+99:99",
             "fields": {
-                "requested_model": {
-                    "source": "Bearer secret-token",
-                    "locator": "x" * 500,
-                    "digest": "not-a-digest",
-                    "unknown_reason": "private provider error",
-                },
                 "effective_model": {
-                    "source": ["Bearer secret-token"],
-                    "locator": {"error": "private"},
-                    "digest": ["not-a-digest"],
-                    "unknown_reason": {"error": "private"},
-                },
+                    "source": "observed",
+                    "locator": "acpx-session-update",
+                    "digest": None,
+                    "unknown_reason": "backend-revision-unavailable",
+                }
+            },
+        },
+        {
+            "observed_at": timestamp,
+            "fields": {"effective_model": {"digest": None, "unknown_reason": None}},
+        },
+        {
+            "observed_at": timestamp,
+            "fields": {
+                "effective_model": {
+                    "source": "observed",
+                    "locator": "launch-argument",
+                    "digest": None,
+                    "unknown_reason": "backend-revision-unavailable",
+                }
             },
         },
     )
 
-    untrusted_entry = worker_payload([untrusted])[0]["metadata_provenance"]
+    for metadata_provenance in invalid_blocks:
+        result = WorkerResult(
+            worker="cursor-worker",
+            task="inspect metadata",
+            text="done",
+            ok=True,
+            metadata_provenance=metadata_provenance,
+        )
+        entry = worker_payload([result])[0]
 
-    assert "observed_at" not in untrusted_entry
-    assert "requested_model" not in untrusted_entry["fields"]
-    assert "effective_model" not in untrusted_entry["fields"]
-    assert "secret" not in str(untrusted_entry)
+        assert "metadata_provenance" not in entry
+
+
+def test_worker_payload_bounds_model_and_adapter_version_labels():
+    result = WorkerResult(
+        worker="cursor-worker",
+        task="inspect metadata",
+        text="done",
+        ok=True,
+        transport="acpx",
+        requested_model="m" * 129,
+        effective_model="Bearer private-value",
+        acpx_version="v" * 129,
+    )
+
+    entry = worker_payload([result])[0]
+
+    assert "requested_model" not in entry
+    assert "effective_model" not in entry
+    assert "acpx_version" not in entry
 
 
 def test_legacy_run_message_displays_unknown_provenance_and_is_not_replayed():

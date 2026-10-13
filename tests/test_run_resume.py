@@ -213,6 +213,39 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
                 "thread_id": "t-1",
                 "status": "interrupted",
             },
+            {
+                "worker": "cursor-worker",
+                "task": "inspect changes",
+                "ok": True,
+                "text": "prior result",
+                "transport": "acpx",
+                "requested_model": "cursor-auto",
+                "effective_model": "composer-2.5",
+                "acpx_version": "0.12.0",
+                "metadata_provenance": {
+                    "observed_at": "2026-10-13T12:00:00+00:00",
+                    "fields": {
+                        "requested_model": {
+                            "source": "declared",
+                            "locator": "launch-argument",
+                            "digest": None,
+                            "unknown_reason": "mutable-alias-not-backend-identity",
+                        },
+                        "effective_model": {
+                            "source": "observed",
+                            "locator": "acp-config-option-update",
+                            "digest": None,
+                            "unknown_reason": "backend-revision-unavailable",
+                        },
+                        "acpx_version": {
+                            "source": "observed",
+                            "locator": "acpx-version-output",
+                            "digest": None,
+                            "unknown_reason": None,
+                        },
+                    },
+                },
+            },
         ],
     )
     legacy_worker_results = json.loads((run_dir / "worker-results.json").read_text())
@@ -243,6 +276,11 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
     results = json.loads((run_dir / "worker-results.json").read_text())["results"]
     assert results[0]["ok"] is True and results[0]["text"] == "finished now"
     assert results[0]["status"] == "complete"
+    assert results[1]["transport"] == "acpx"
+    assert results[1]["requested_model"] == "cursor-auto"
+    assert results[1]["effective_model"] == "composer-2.5"
+    assert results[1]["acpx_version"] == "0.12.0"
+    assert results[1]["metadata_provenance"]["fields"]["effective_model"]["source"] == "observed"
     assert (run_dir / "final.txt").read_text().strip() == "final synthesis"
     run_json = json.loads((run_dir / "run.json").read_text())
     assert run_json["status"] == "ok"
