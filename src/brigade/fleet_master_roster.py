@@ -41,8 +41,8 @@ _DANGEROUS_VALUE = re.compile(
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s+(?:\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with))\s+"
-    r"auth(?:entication)?[ _-]profiles?\s+"
-    r"(?!(?:is|are|as|required|needed|necessary|optional|available|selection|rotation|management|regularly)\b)"
+    r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?auth(?:entication)?[ _-]profiles?\s+"
+    r"(?!(?:is|are|as|for|in|required|needed|necessary|optional|available|selection|rotation|management|regularly)\b)"
     r"[A-Za-z0-9_.-]+|"
     r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with))\s+"
     r"(?:the\s+)?(?:\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\)|(?!(?:the)\b)[A-Za-z0-9_.-]+)\s+"
@@ -50,7 +50,7 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s*[:=]\s*"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
-    r"\s+(?:provided\s+(?:as|with)|stored\s+as|generated\s+as|configured\s+(?:as|with|to))\s+"
+    r"\s+(?:provided\s+(?:as|with)|stored\s+(?:as|with)|generated\s+(?:as|with)|configured\s+(?:as|with|to))\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
     r"\s+(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to)\s+"
@@ -71,8 +71,9 @@ _URL_CREDENTIAL_QUERY = re.compile(
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
-    r"\b(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+|(?:use\s+)?environment\s+variable\s+)"
-    r"[A-Za-z_][A-Za-z0-9_]*(?:\s*=(?!=|>)|\s+(?:set\s+to|configured\s+(?:as|to|with)|to|is|are|was|were|equals|will\s+be|has\s+been|have\s+been)\s+(?!(?:"
+    r"\b(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+|"
+    r"(?:(?:use|configure)\s+(?:the\s+)?)?environment\s+variable\s+)"
+    r"[A-Za-z_][A-Za-z0-9_]*(?:\s*=(?!=|>)|\s+(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|will\s+be|has\s+been|have\s+been)\s+(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
     + r"))\S+|:\s*(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
@@ -295,12 +296,15 @@ _PROSE_SLASH_TERMS = frozenset(
         "24/7",
         "and/or",
         "ci/cd",
+        "clear/concise",
         "client/server",
         "input/output",
         "key/value",
         "planner/reviewer",
         "read/write",
         "review/approval",
+        "source/proprietary",
+        "time/effort",
         "yes/no",
     }
 )
