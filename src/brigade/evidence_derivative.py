@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import evidence_package, evidence_redaction, localio
+from . import attestation_receipt, evidence_package, evidence_redaction, localio
 
 SCHEMA = "brigade.evidence_package_derivative.v1"
 SCHEMA_VERSION = 1
@@ -154,6 +154,13 @@ def export_derivative(
         raise DerivativeExportError("unsupported source package schema")
     _validate_manifest_entries(manifest, raw)
     receipt = _json_object(raw["receipt.json"], "receipt")
+    try:
+        receipt_snapshot = attestation_receipt.snapshot_stored_receipt(receipt)
+    except attestation_receipt.ReceiptDigestError as exc:
+        raise DerivativeExportError("source receipt digest is invalid") from exc
+    source_metadata = manifest.get("source")
+    if not isinstance(source_metadata, dict) or source_metadata.get("receipt_sha256") != receipt_snapshot.digest:
+        raise DerivativeExportError("source manifest receipt digest does not match receipt")
     minimized, removed = _minimize_receipt(receipt)
     excluded = len(names) - len(known_names)
     safe_authorization: dict[str, Any] = {}
@@ -163,6 +170,10 @@ def export_derivative(
         ("lawful_basis", lawful_basis),
         ("necessity", necessity),
     ):
+        if not isinstance(value, str):
+            raise DerivativeExportError("allowlisted metadata has an invalid type")
+        if not value.strip():
+            raise DerivativeExportError(f"authorization metadata cannot be blank: {key}")
         safe_authorization[key], redacted = _safe_text(value)
         removed += redacted
     safe_authorization.update(

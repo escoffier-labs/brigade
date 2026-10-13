@@ -16,6 +16,15 @@ def _stamp_receipt(receipt: dict[str, object]) -> None:
     }
 
 
+def _refresh_package_entry(source: Path, name: str, data: bytes) -> None:
+    manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    entry = next(item for item in manifest["entries"] if item["path"] == name)
+    entry["bytes"] = len(data)
+    entry["sha256"] = hashlib.sha256(data).hexdigest()
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    (source / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def _fabricated_run_dir(tmp_path: Path) -> tuple[Path, dict[str, object]]:
     run_id = "20261013-120000-work-verify-derivative"
     run_dir = tmp_path / ".brigade" / "work" / "verify-runs" / run_id
@@ -106,6 +115,78 @@ def test_derivative_excludes_inventory_logs_worker_checkpoint_and_prior_exports(
     assert json.loads(raw)["transformation"]["excluded_artifacts"] == 5
 
 
+def test_derivative_rejects_receipt_with_invalid_stored_digest(tmp_path: Path) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    altered = json.loads((source / "receipt.json").read_text(encoding="utf-8"))
+    altered["status"] = "rewritten"
+    receipt_bytes = json.dumps(altered, indent=2, sort_keys=True).encode() + b"\n"
+    (source / "receipt.json").write_bytes(receipt_bytes)
+    _refresh_package_entry(source, "receipt.json", receipt_bytes)
+
+    try:
+        evidence_derivative.export_derivative(
+            source=source,
+            out=tmp_path / "derivative",
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == "source receipt digest is invalid"
+    else:
+        raise AssertionError("derivative accepted a receipt with an invalid stored digest")
+
+
+def test_derivative_rejects_receipt_rewritten_with_recomputed_package_hashes(tmp_path: Path) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    altered = json.loads((source / "receipt.json").read_text(encoding="utf-8"))
+    altered["status"] = "rewritten"
+    _stamp_receipt(altered)
+    receipt_bytes = json.dumps(altered, indent=2, sort_keys=True).encode() + b"\n"
+    (source / "receipt.json").write_bytes(receipt_bytes)
+    _refresh_package_entry(source, "receipt.json", receipt_bytes)
+
+    try:
+        evidence_derivative.export_derivative(
+            source=source,
+            out=tmp_path / "derivative",
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == "source manifest receipt digest does not match receipt"
+    else:
+        raise AssertionError("derivative accepted a rewritten receipt with recomputed package hashes")
+
+
+def test_derivative_rejects_blank_authorization_metadata(tmp_path: Path) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+
+    for key in ("recipient", "authority", "lawful_basis", "necessity"):
+        authorization = {
+            "recipient": "recipient-42",
+            "authority": "approved-case-7",
+            "lawful_basis": "contract",
+            "necessity": "review",
+        }
+        authorization[key] = "  "
+        try:
+            evidence_derivative.export_derivative(source=source, out=tmp_path / f"derivative-{key}", **authorization)
+        except evidence_derivative.DerivativeExportError as exc:
+            assert str(exc) == f"authorization metadata cannot be blank: {key}"
+        else:
+            raise AssertionError(f"derivative accepted blank {key} authorization metadata")
+
+
 def test_derivative_refuses_export_inside_source_package(tmp_path: Path) -> None:
     _, receipt = _fabricated_run_dir(tmp_path)
     source = tmp_path / "source"
@@ -156,3 +237,35 @@ def test_derivative_export_cli_writes_local_json(tmp_path: Path, capsys) -> None
     )
     assert (out / "derivative.json").is_file()
     assert "evidence derivative exported" in capsys.readouterr().out
+
+
+def test_derivative_export_cli_rejects_blank_authority(tmp_path: Path, capsys) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    out = tmp_path / "derivative"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+
+    assert (
+        cli.main(
+            [
+                "receipts",
+                "export",
+                "derivative",
+                "--source",
+                str(source),
+                "--out",
+                str(out),
+                "--recipient",
+                "recipient-42",
+                "--authority",
+                "",
+                "--lawful-basis",
+                "contract",
+                "--necessity",
+                "review",
+            ]
+        )
+        == 1
+    )
+    assert not out.exists()
+    assert "authorization metadata cannot be blank: authority" in capsys.readouterr().err
