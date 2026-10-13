@@ -168,11 +168,27 @@ def unreadable_manifest_observation(
     reader: _control_crosswalk_io._AssessmentReader, relpath: str, path: Path
 ) -> control_readiness.ArtifactObservation:
     reason = reader.errors.get(path)
-    if reason == "read_limit_exceeded":
-        return _unavailable(relpath, reason)
-    return control_readiness.ArtifactObservation(
-        relpath, "discovered", "invalid", control_readiness.dims(), ["invalid_json"]
-    )
+    if reason is None:
+        return control_readiness.ArtifactObservation(
+            relpath, "discovered", "invalid", control_readiness.dims(), ["invalid_json"]
+        )
+    if reason == "symlink_refused":
+        unsafe = True
+    else:
+        try:
+            info = reader.info(path)
+        except OSError:
+            info = None
+        unsafe = info is not None and not stat.S_ISREG(info.st_mode)
+    if unsafe:
+        return control_readiness.ArtifactObservation(
+            relpath,
+            "claim_validated",
+            "rejected",
+            control_readiness.dims(integrity=("failed", "entry_path_unsafe"), subject="unknown", population="passed"),
+            ["entry_path_unsafe"],
+        )
+    return _unavailable(relpath, reason)
 
 
 def needs_staged_receipt(obs: control_readiness.ArtifactObservation) -> bool:

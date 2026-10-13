@@ -1044,6 +1044,40 @@ def test_ec12_rejects_symlinked_package_manifest(tmp_path):
     assert readiness["artifacts"][0]["outcome"] == "rejected"
 
 
+def test_ec12_rejects_nonregular_package_manifest(tmp_path):
+    target = _ws(tmp_path)
+    manifest_path = target / ".brigade" / "evidence-packages" / "pkg-dir-manifest" / "manifest.json"
+    manifest_path.mkdir(parents=True)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+    assert readiness["artifacts"][0]["reason_codes"] == ["entry_path_unsafe"]
+
+
+def test_ec12_preserves_manifest_read_refusal_as_unavailable(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-unreadable-manifest"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    original_read = control_crosswalk._AssessmentReader.read
+
+    def refuse_manifest(reader, path, *args, **kwargs):
+        if path == manifest_path:
+            reader.errors[path] = "discovery_unreadable"
+            raise control_crosswalk._control_crosswalk_io._ReadRefusal("discovery_unreadable")
+        return original_read(reader, path, *args, **kwargs)
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "read", refuse_manifest)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "unavailable"
+    assert readiness["artifacts"][0]["outcome"] == "unavailable"
+    assert readiness["artifacts"][0]["reason_codes"] == ["discovery_unreadable"]
+
+
 def test_ec12_rejects_symlinked_package_directory(tmp_path):
     target = _ws(tmp_path)
     package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
