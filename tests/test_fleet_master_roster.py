@@ -187,6 +187,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Password set to hunter2",
         "Set password to hunter2",
         "Set the password to hunter2",
+        "Set a password to hunter2",
+        "Set an API key to shortkey",
         "Set your API key to shortkey",
         "Set API key to shortkey",
         "Password is set to hunter2",
@@ -234,6 +236,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Environment variable SERVICE_MODE was production",
         "Environment variable SERVICE_MODE will be production",
         "Environment variable SERVICE_MODE has been production",
+        "Environment variable SERVICE_MODE equals production",
         "Environment variable SERVICE_MODE: production",
         "Use environment variable service_mode=production",
         "Home directory: ~",
@@ -247,6 +250,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Execute from ~",
         "Open ..",
         "Navigate to ..",
+        "Change directory to /",
+        "Work from /",
     ],
 )
 def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
