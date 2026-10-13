@@ -139,16 +139,30 @@ def ingest_managed_review(
     return {"observation_id": identity, "duplicate": duplicate}
 
 
-def _coverage(record: dict[str, Any], current: str) -> None:
+def _contradicted_checks(history: list[dict[str, Any]]) -> set[int]:
+    """Check IDs claimed by more than one known head; a check run's head is immutable."""
+    heads: dict[int, set[str]] = defaultdict(set)
+    for snapshot in history:
+        for record in snapshot["checks"]:
+            if record["reviewed_head"] is not None:
+                heads[record["check_id"]].add(record["reviewed_head"])
+    return {check_id for check_id, claimed in heads.items() if len(claimed) > 1}
+
+
+def _coverage(record: dict[str, Any], current: str, contradicted: bool = False) -> None:
     reviewed = record["reviewed_head"]
     record["current_head"] = current
-    record["coverage"] = "unknown" if reviewed is None else "current" if reviewed == current else "stale"
+    record["coverage"] = (
+        "unknown" if reviewed is None or contradicted else "current" if reviewed == current else "stale"
+    )
     if record["coverage"] != "current" and "current_findings_known" in record:
         record["current_findings_known"] = False
         record["current_zero_findings"] = False
 
 
-def _project(history: list[dict[str, Any]], current: str, truncated: bool) -> tuple[dict[str, Any], bool]:
+def _project(
+    history: list[dict[str, Any]], current: str, truncated: bool, contradicted: set[int]
+) -> tuple[dict[str, Any], bool]:
     exact = [s for s in history if s["current_head"] == current]
     latest = [s for s in exact if s["observed_at"] == exact[0]["observed_at"]] if exact else []
     complete = bool(latest) and not truncated and len({_canonical(s) for s in latest}) == 1
@@ -174,7 +188,9 @@ def _project(history: list[dict[str, Any]], current: str, truncated: bool) -> tu
                     previous = objects[key]
                     objects[key] = (previous[0], previous[1], True, previous[3])
         for _, record, conflict, observation_head in objects.values():
-            if conflict and len(heads[record["identity_key"]]) > 1:
+            parent_contradicted = kind in ("checks", "annotations") and record["check_id"] in contradicted
+            conflict = conflict or (kind == "checks" and parent_contradicted)
+            if parent_contradicted or (conflict and len(heads[record["identity_key"]]) > 1):
                 record["reviewed_head"] = None
             _coverage(record, current)
             if kind == "annotations" and len(locations[record["identity_key"]]) > 1:
@@ -193,9 +209,16 @@ def _project(history: list[dict[str, Any]], current: str, truncated: bool) -> tu
             record["supersession_disposition"] = "unknown"
             record["superseded_by"] = None
         return projection, complete
-    groups: dict[str | None, list[dict[str, Any]]] = defaultdict(list)
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in projection["checks"]:
-        groups[record["reviewed_head"]].append(record)
+        if record["reviewed_head"] is None:
+            # No reviewed head is no evidence that two runs belong to one revision.
+            record["supersession_disposition"] = "unknown"
+            record["superseded_by"] = None
+            record["current_findings_known"] = False
+            record["current_zero_findings"] = False
+        else:
+            groups[record["reviewed_head"]].append(record)
     for peers in groups.values():
         rounds: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for record in peers:
@@ -259,12 +282,13 @@ def read_managed_review_history(
         )
         for identity, payload in rows[:limit]
     ]
-    projection, complete = _project(history, current, truncated)
+    contradicted = _contradicted_checks(history)
+    projection, complete = _project(history, current, truncated, contradicted)
     projected_checks = {c["identity_key"]: c for c in projection["checks"]}
     for snapshot in history:
         for kind in _KINDS:
             for record in snapshot[kind]:
-                _coverage(record, current)
+                _coverage(record, current, kind in ("checks", "annotations") and record["check_id"] in contradicted)
                 if kind == "checks":
                     latest = projected_checks[record["identity_key"]]
                     is_latest = snapshot["current_head"] == current and record["observed_at"] == latest["observed_at"]

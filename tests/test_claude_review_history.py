@@ -505,3 +505,69 @@ def test_tied_object_head_conflict_has_unknown_projection_coverage():
     assert row["reviewed_head"] is None
     assert row["coverage"] == "unknown"
     assert row["current_findings_known"] is False
+
+
+def _unknown_check(row):
+    assert row["coverage"] == "unknown"
+    assert row["current_findings_known"] is False and row["current_zero_findings"] is False
+
+
+@pytest.mark.parametrize("newer", [HEAD, OLD], ids=["head-newer", "old-newer"])
+def test_cross_head_check_identity_is_unknown_and_keeps_both_claims(newer):
+    conn = sqlite3.connect(":memory:")
+    endpoint = "/repos/example/project/check-runs/10/annotations"
+    annotation = dict(path="src/example.py", start_line=2, end_line=2, annotation_level="warning")
+    for head, day, others in (
+        (OLD, 3 + (newer == OLD), []),
+        (HEAD, 3 + (newer == HEAD), [check(11, started_at="2026-01-02T00:00:00Z")]),
+    ):
+        row = check(head_sha=head, output={"annotations_count": 1, "text": ZERO})
+        ingest(
+            conn,
+            FixtureGet([row, *others], extras={endpoint: [annotation]}),
+            head=head,
+            observed=f"2026-01-0{day}T00:00:00Z",
+        )
+    result = read(conn)
+    rows = {r["check_id"]: r for r in result["checks"]}
+    conflicted, independent = rows[10], rows[11]
+    assert conflicted["reviewed_head"] is None and conflicted["history_disposition"] == "conflicting-observations"
+    assert conflicted["supersession_disposition"] == "unknown" and conflicted["superseded_by"] is None
+    _unknown_check(conflicted)
+    assert independent["coverage"] == "current" and independent["current_zero_findings"] is True
+    assert result["annotations"][0]["reviewed_head"] is None and result["annotations"][0]["coverage"] == "unknown"
+    history = [c for s in result["history"] for c in s["checks"] if c["check_id"] == 10]
+    assert {c["reviewed_head"] for c in history} == {OLD, HEAD}
+    for c in history:
+        _unknown_check(c)
+        assert c["supersession_disposition"] == "unknown" and c["superseded_by"] is None
+        assert c["severity"]["disposition"] == "known" and c["source_url"].endswith("/runs/10")
+    assert {a["reviewed_head"] for s in result["history"] for a in s["annotations"]} == {OLD, HEAD}
+    assert all(a["coverage"] == "unknown" for s in result["history"] for a in s["annotations"])
+
+
+def test_later_known_head_replaces_earlier_missing_head():
+    conn = sqlite3.connect(":memory:")
+    ingest(conn, FixtureGet([check(head_sha=None)]), observed="2026-01-03T00:00:00Z")
+    ingest(conn, observed="2026-01-04T00:00:00Z")
+    row = read(conn)["checks"][0]
+    assert row["reviewed_head"] == HEAD and row["history_disposition"] == "latest-observed"
+    assert row["coverage"] == "current" and row["current_zero_findings"] is True
+
+
+@pytest.mark.parametrize("second", [None, "not-a-sha"], ids=["missing", "malformed"])
+def test_unreviewed_head_checks_never_establish_supersession(second):
+    conn = sqlite3.connect(":memory:")
+    rows = [
+        check(10, head_sha=None, started_at="2026-01-01T00:00:00Z"),
+        check(11, head_sha=second, started_at="2026-01-01T12:00:00Z"),
+        check(12, started_at="2026-01-02T00:00:00Z"),
+    ]
+    ingest(conn, FixtureGet(rows))
+    result = read(conn)
+    for row in (*result["checks"], *result["history"][0]["checks"]):
+        if row["check_id"] == 12:
+            assert row["coverage"] == "current" and row["supersession_disposition"] == "latest-observed"
+        else:
+            _unknown_check(row)
+            assert row["supersession_disposition"] == "unknown" and row["superseded_by"] is None
