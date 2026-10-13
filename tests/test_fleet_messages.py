@@ -1160,6 +1160,9 @@ def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
+    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    with fleet_client._spool_lock(path):
+        pass
     attempts = []
 
     def request(_hub: str, _token: str, body: dict):
@@ -1235,14 +1238,19 @@ def test_send_does_not_post_until_spool_fsync_succeeds(tmp_path, monkeypatch):
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
+    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    with fleet_client._spool_lock(path):
+        pass
     attempts = []
 
     def request(_hub, _token, message):
         attempts.append(message.copy())
         return 503, {"error": "response lost after commit"}
 
-    def fail_fsync(_fd):
-        raise OSError("disk full")
+    def fail_fsync(fd):
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("disk full")
+        os.fsync(fd)
 
     monkeypatch.setattr(fleet_client_messages, "_request", request)
     monkeypatch.setattr(fleet_client.os, "fsync", fail_fsync)

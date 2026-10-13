@@ -9,18 +9,18 @@ from pathlib import Path
 def ensure_directory(path: Path) -> None:
     """Create missing directory components and persist their parent entries."""
     for directory in reversed(path.parents):
-        _create_directory(directory)
-    _create_directory(path)
-    if os.name == "posix":
-        for directory in (path, *path.parents):
+        if _create_directory(directory):
             _sync_parent(directory)
+    if _create_directory(path):
+        _sync_parent(path)
 
 
-def _create_directory(path: Path) -> None:
+def _create_directory(path: Path) -> bool:
     try:
         path.mkdir(mode=0o700)
     except FileExistsError:
-        return
+        return False
+    return os.name == "posix"
 
 
 def _sync_parent(path: Path) -> None:
