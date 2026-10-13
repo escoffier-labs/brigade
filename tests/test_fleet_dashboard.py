@@ -1115,6 +1115,35 @@ class TestBoardBounds:
         assert first_ids.isdisjoint(second_ids)
         assert first_ids | second_ids == set(node_ids)
 
+    def test_claim_only_machine_cards_are_bounded_and_paginated(self, hub):
+        node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
+        stamp = datetime.now(timezone.utc).isoformat()
+        expires = datetime.now(timezone.utc).timestamp() + 3600
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            conn.executemany(
+                "INSERT INTO claims "
+                "(target, owner_node, holder_token, acquired_at, renewed_at, ttl_seconds, expires_at) "
+                "VALUES (?, ?, 'test-holder-token', ?, ?, 3600, ?)",
+                [(f"repo-{index:03d}", node_id, stamp, stamp, expires) for index, node_id in enumerate(node_ids)],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        _status, _headers, first = _request(hub, "GET", "/view/machines", headers=_bearer())
+        assert "claim_only=1" in first
+        assert "claim_offset=200" in first
+        _status, _headers, second = _request(
+            hub, "GET", "/view/machines?claim_only=1&claim_offset=200", headers=_bearer()
+        )
+        first_ids = {node_id for node_id in node_ids if f'data-node="{node_id}"' in first}
+        second_ids = {node_id for node_id in node_ids if f'data-node="{node_id}"' in second}
+        assert len(first_ids) == fleet_hub.BOARD_LIMIT
+        assert len(second_ids) == 1
+        assert first_ids.isdisjoint(second_ids)
+        assert first_ids | second_ids == set(node_ids)
+
     def test_unread_only_machine_cards_are_bounded_and_paginated(self):
         unread = {f"unread-node-{index:03d}": 1 for index in range(300)}
         existing_nodes = [{"node_id": f"existing-node-{index:03d}"} for index in range(100)]
