@@ -763,6 +763,44 @@ def test_downgrade_restores_all_artifacts_after_durability_failure(
     )
 
 
+def test_downgrade_restores_markers_when_posture_directory_fsync_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_home(monkeypatch, tmp_path / "home")
+    _bind_workspace(tmp_path)
+    signed_marker = authority_marker.signed_marker_path(authority_marker.target_fingerprint(tmp_path))
+    posture_marker = _isolation_posture_marker_path(tmp_path)
+    store = _store_path(tmp_path)
+    store_before = store.read_bytes()
+    posture_root = authority_marker.isolation_marker_root().resolve()
+    opened_directories: dict[int, Path] = {}
+    original_open_directory = ledger._open_directory_nofollow
+    original_fsync = ledger._dirfd_fsync
+
+    def record_open(path: Path) -> int:
+        descriptor = original_open_directory(path)
+        opened_directories[descriptor] = path.resolve()
+        return descriptor
+
+    def fail_posture_root(descriptor: int) -> None:
+        if opened_directories.get(descriptor) == posture_root:
+            raise OSError("simulated posture marker directory fsync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(ledger, "_open_directory_nofollow", record_open)
+    monkeypatch.setattr(ledger, "_dirfd_fsync", fail_posture_root)
+
+    with pytest.raises(OSError, match="simulated posture marker directory fsync failure"):
+        ledger.downgrade_external_directory_authority(tmp_path)
+
+    assert signed_marker.is_file()
+    assert posture_marker.is_file()
+    assert store.read_bytes() == store_before
+    records = [json.loads(line) for line in authority_marker.audit_path().read_text().splitlines()]
+    downgrade_records = [record for record in records if record.get("action") == "authority-downgrade"]
+    assert not any(record.get("phase") == "complete" for record in downgrade_records)
+
+
 def test_authority_downgrade_tty_no_cancels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

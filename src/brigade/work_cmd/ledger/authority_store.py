@@ -479,7 +479,12 @@ def _write_external_directory_authority(
 
 
 def _downgrade_durability_checkpoint(path: Path) -> None:
-    """Test seam: dest bytes have changed; parent-dir durability has not run yet."""
+    """Persist a changed authority entry before recording downgrade completion."""
+    directory = _open_directory_nofollow(path.parent)
+    try:
+        _dirfd_fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _publish_authority_store_payload(
