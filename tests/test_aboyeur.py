@@ -2713,6 +2713,7 @@ def test_run_direct_worker_writes_complete_process_logs(monkeypatch, tmp_path):
             transport="acpx",
             requested_model="Bearer PRIVATE_MARKER",
             effective_model="composer-2.5",
+            effective_model_locator="acp-config-option-update",
             acpx_version="0.12.0",
             metadata_provenance=metadata_provenance,
         )
