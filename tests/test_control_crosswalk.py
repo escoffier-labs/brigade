@@ -556,6 +556,26 @@ def test_ec12_rejects_unsafe_manifest_entry_path(tmp_path):
     assert readiness["artifacts"][0]["outcome"] == "rejected"
 
 
+def test_ec12_rejects_symlinked_package_entry(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    external_patch = tmp_path / "external.patch"
+    external_patch.write_bytes((package_dir / "changes.patch").read_bytes())
+    entry_path = package_dir / "changes.patch"
+    entry_path.unlink()
+    try:
+        entry_path.symlink_to(external_patch)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "entry_path_unsafe"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
 @pytest.mark.parametrize(
     "patch_size", [attestation_input.MAX_JSON_BYTES + 1, control_crosswalk.evidence_package.MAX_ENTRY_BYTES]
 )

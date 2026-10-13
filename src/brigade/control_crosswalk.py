@@ -275,8 +275,26 @@ def _adapter_observation(
                 raise evidence_package_snapshot.PackageSnapshotError("unsafe")
             ctx.reader.copy(artifact / "manifest.json")
             for name in entry_names:
+                entry_path = artifact / name
                 limit = attestation_input.MAX_JSON_BYTES if name == "receipt.json" else evidence_package.MAX_ENTRY_BYTES
-                ctx.reader.copy(artifact / name, limit=limit)
+                try:
+                    entry_info = ctx.reader.info(entry_path)
+                except FileNotFoundError:
+                    entry_info = None
+                if entry_info is not None and (
+                    stat.S_ISLNK(entry_info.st_mode) or not stat.S_ISREG(entry_info.st_mode)
+                ):
+                    raise evidence_package_snapshot.PackageSnapshotError("unsafe")
+                try:
+                    ctx.reader.copy(entry_path, limit=limit)
+                except OSError as exc:
+                    try:
+                        entry_info = ctx.reader.info(entry_path)
+                    except OSError:
+                        raise exc from None
+                    if stat.S_ISLNK(entry_info.st_mode) or not stat.S_ISREG(entry_info.st_mode):
+                        raise evidence_package_snapshot.PackageSnapshotError("unsafe") from exc
+                    raise
         else:
             if adapter is _verify_evidence_package:
                 return _invalid(ctx, artifact, "schema_missing")

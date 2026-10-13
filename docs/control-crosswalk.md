@@ -176,7 +176,7 @@ Note: Rows cite the final NIST AI 100-1 Core tables (Section 5, Tables 1 to 4). 
   - Responsible actor: Adopting organization AI risk owner; Brigade only produces the artifact.
   - Applicability: The organization has selected measurement approaches and metrics for AI risks enumerated in MAP, prioritized the most significant risks, and documented risks it will not or cannot measure.
   - Support rationale: A completed receipt can corroborate that a selected check was executed with a recorded result. It does not select the approach or metric, and MEASURE 1.1 sets no numerical threshold.
-  - Verification limit: The evaluator checks receipt structure, ordered planned-command matching and run binding, but does not yet rederive the stored digest or verify an optional local HMAC. Brigade cannot judge whether the check measures a mapped risk. A Brigade artifact does not establish that an organizational control or process operated.
+  - Verification limit: The evaluator checks receipt structure, ordered planned-command matching and run binding, and rederives the stored digest when present. It does not verify optional local HMACs or establish independent custody or key-management effectiveness. Brigade cannot judge whether the check measures a mapped risk. A Brigade artifact does not establish that an organizational control or process operated.
 
 - `MEASURE 1.1` / EC-10: conditional-support
   - Edition: NIST AI 100-1, AI RMF 1.0 (January 2023), final

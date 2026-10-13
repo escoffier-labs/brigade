@@ -229,7 +229,7 @@
       "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
       "artifact_contract": "brigade.work_verify_receipt from brigade work verify run: per-command argv and exit status.",
       "responsible_actor": "Adopting organization AI risk owner; Brigade only produces the artifact.",
-      "verification_limit": "The evaluator checks receipt structure, ordered planned-command matching and run binding, but does not yet rederive the stored digest or verify an optional local HMAC. Brigade cannot judge whether the check measures a mapped risk. A Brigade artifact does not establish that an organizational control or process operated."
+      "verification_limit": "The evaluator checks receipt structure, ordered planned-command matching and run binding, and rederives the stored digest when present. It does not verify optional local HMACs or establish independent custody or key-management effectiveness. Brigade cannot judge whether the check measures a mapped risk. A Brigade artifact does not establish that an organizational control or process operated."
     },
     {
       "claim_id": "EC-01",
