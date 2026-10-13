@@ -1,0 +1,19 @@
+FROM python:3.12.7-slim-bookworm
+
+ARG BRIGADE_VERSION=0.27.0
+LABEL org.opencontainers.image.source="https://github.com/escoffier-labs/brigade" \
+      org.opencontainers.image.version="${BRIGADE_VERSION}" \
+      org.opencontainers.image.description="Brigade Fleet Hub"
+
+RUN python -m pip install --no-cache-dir "brigade-cli==${BRIGADE_VERSION}" \
+    && groupadd --gid 10001 brigade \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /var/lib/brigade brigade \
+    && install -d -o 10001 -g 10001 -m 0700 /var/lib/brigade
+
+USER 10001:10001
+VOLUME ["/var/lib/brigade"]
+EXPOSE 3774
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3774/health', timeout=2).read()"]
+ENTRYPOINT ["brigade", "fleet", "serve"]
+CMD ["--host", "0.0.0.0", "--port", "3774", "--db", "/var/lib/brigade/fleet-hub.db", "--token-file", "/run/secrets/admin_token"]

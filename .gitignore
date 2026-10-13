@@ -220,3 +220,6 @@ scripts/*.md
 
 # GraphTrail code-graph index
 .graphtrail/
+
+# Local Fleet Hub container credential
+ops/fleet-hub/secrets/
