@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Jules cloud status preserves explicit empty-output evidence, so completed sessions with a recorded plan but no work are labeled for plan approval.
 - Explicit authority downgrades remove every posture marker governing a relocated workspace and stop when marker state cannot be read safely. (#1217)
 - Explicit authority downgrades remove every posture marker governing a relocated workspace, fail closed when marker state is unreadable, and record removed fingerprints only after rollback is no longer possible. (#1217)
+- Candidate skills use the same post-regression install margin as candidate memory cards: after a verified regression, clears must exceed hurts by at least `install_min_helped`, so a skill at helped=2, hurt=1 now holds instead of installing. Skills without regressions are unchanged, and zero-threshold fork overrides still require helped to exceed hurt. (#1686)
 - Run the full local verification gate in deterministic pytest shards with combined coverage and counted concurrency slots shared by linked worktrees. Shard and slot counts are configurable, and contention can wait for a bounded deadline.
 
 - Speed up strict JSON validation of unescaped ASCII strings while preserving byte limits, Unicode checks, and string-subclass isolation. (#1674)
