@@ -1390,6 +1390,24 @@ def test_ec03_rejects_receipt_tampering_before_incomplete_classification(tmp_pat
     assert result["reason"] == "signature_mismatch"
 
 
+def test_ec03_does_not_bind_rejected_bundle_from_tampered_receipt(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["producer_run_id"] = "tampered-run"
+    _write_json(receipt_path, receipt)
+
+    result = _assess(target, "EC-03", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    artifact = result["artifacts"][0]
+    assert artifact["outcome"] == "rejected"
+    assert artifact["scope"] == "unbound"
+    assert artifact["reason_codes"] == ["signature_mismatch"]
+
+
 def test_ec03_classifies_signed_nonterminal_receipt_as_incomplete(tmp_path, monkeypatch):
     from brigade import control_crosswalk_cosign
 

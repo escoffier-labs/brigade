@@ -10,6 +10,16 @@ from typing import Any
 from . import attestation, attestation_input, attestation_receipt, control_readiness, cosign_attestation, receipt_schema
 
 
+def binding_candidates(obs: control_readiness.ArtifactObservation, receipt: dict[str, Any] | None) -> dict[str, object]:
+    if obs.proposed == "rejected" and any(
+        obs.dimensions.get(name, {}).get("status") == "failed" for name in ("integrity", "signature")
+    ):
+        return {}
+    if receipt is None:
+        return {}
+    return {"producer_run_id": receipt.get("producer_run_id"), "run_id": receipt.get("run_id")}
+
+
 def _observation(
     relpath: str,
     outcome: str,

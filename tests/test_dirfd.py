@@ -292,6 +292,21 @@ def test_nt_directory_enumeration_is_bounded_and_rejects_malformed_replies(monke
         assert all(call[-1] is False for call in calls[1:])
 
 
+@pytest.mark.parametrize(
+    "status",
+    [
+        0x8000002D,  # STATUS_STOPPED_ON_SYMLINK
+        0xC0000279,  # STATUS_IO_REPARSE_TAG_NOT_HANDLED
+        0xC0000280,  # STATUS_REPARSE_POINT_NOT_RESOLVED
+    ],
+)
+def test_nt_reparse_statuses_raise_typed_refusal(status):
+    from brigade.work_cmd import nt_dirfd
+
+    with pytest.raises(nt_dirfd.ReparsePointRefusedError, match="reparse point"):
+        nt_dirfd._raise_ntstatus(status)
+
+
 def test_child_names_never_falls_back_to_a_pathname(monkeypatch):
     monkeypatch.setattr(dirfd, "posix_available", lambda: False)
     monkeypatch.setattr(dirfd, "nt_available", lambda: False)

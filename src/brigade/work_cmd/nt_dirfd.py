@@ -696,7 +696,7 @@ def _raise_ntstatus(status: int, *, name: str | None = None) -> None:
     if code == _STATUS_FILE_IS_A_DIRECTORY:
         raise IsADirectoryError("path component is a directory")
     if code in {_STATUS_STOPPED_ON_SYMLINK, _STATUS_IO_REPARSE_TAG_NOT_HANDLED, _STATUS_REPARSE_POINT_NOT_RESOLVED}:
-        raise OSError("path component is a reparse point")
+        raise ReparsePointRefusedError("path component is a reparse point")
     raise OSError(f"Windows no-follow directory operation failed{suffix}: NTSTATUS=0x{code:08X}")
 
 

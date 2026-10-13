@@ -635,7 +635,7 @@ def _evaluate_cosign_bundle_exists(ctx: _Context) -> _Discovery:
                 ),
                 ["verifier_not_wired"],
             )
-        _bind(obs, ctx, _receipt_binding(receipt))
+        _bind(obs, ctx, control_crosswalk_cosign.binding_candidates(obs, receipt))
         obs.timestamp = _first_timestamp(receipt, "completed_at", "started_at")
         _apply_period(obs, ctx)
         if obs.scope == "in_scope":
