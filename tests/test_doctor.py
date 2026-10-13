@@ -14,6 +14,7 @@ import pytest
 from brigade import proc
 
 from brigade import cli
+from brigade import context_preview
 from brigade import dirfd
 from brigade import doctor as doctor_mod
 from brigade.install import install_selection
@@ -3321,17 +3322,78 @@ def _codex_repo(tmp_path: Path) -> Path:
     return repo
 
 
+def _assert_unsupported_codex_chain(status: str, detail: str) -> None:
+    from brigade import doctor_agent
+
+    assert status == doctor_mod.MANUAL
+    assert "posix_nofollow_required" in detail
+    assert "estimate, not observed" in detail
+    assert doctor_agent.extract_commands(detail) == []
+
+
+def _codex_truncated_preview(tmp_path: Path) -> dict:
+    """Supply preview metadata for rendering tests without unsafe filesystem names."""
+    repo = _codex_repo(tmp_path)
+    (repo / "AGENTS.md").write_text("x" * 40_000, encoding="utf-8")
+    result = context_preview.preview(
+        target=repo,
+        cwd=repo,
+        codex_version="0.160.0",
+        trust="trusted",
+        read_access="full",
+        assume_codex_defaults=True,
+        codex_home=None,
+    )
+    if not context_preview._POSIX_NOFOLLOW_SUPPORTED:
+        # The real preview initializes its schema and settings before refusing
+        # native Windows. Supply accounting only at this rendering boundary.
+        result.update(status="complete", matches_codex=True)
+        result["limitations"].remove("posix_nofollow_required")
+        result["limitations"].append("global_not_requested")
+        cap = result["settings"]["project_doc_max_bytes"]["value"]
+        result["totals"]["project"] = {
+            "selected_bytes": 40_000,
+            "consumed_raw_bytes": cap,
+            "rendered_utf8_bytes": cap,
+        }
+        result["totals"]["global"] = {
+            "selected_bytes": 0,
+            "consumed_raw_bytes": 0,
+            "rendered_utf8_bytes": 0,
+        }
+        result["files"] = [
+            {
+                "scope": "project",
+                "path": "AGENTS.md",
+                "selection_order": 1,
+                "size_bytes": 40_000,
+                "cumulative_selected_bytes": 40_000,
+                "consumed_raw_bytes": cap,
+                "rendered_utf8_bytes": cap,
+                "contribution": "truncated",
+                "brigade_advisory_budget_bytes": doctor_mod.BOOTSTRAP_BUDGETS["AGENTS.md"],
+            }
+        ]
+    return result
+
+
 def test_doctor_codex_instruction_chain_only_for_codex_harness(tmp_path: Path):
     repo = _codex_repo(tmp_path)
     (repo / "AGENTS.md").write_text("rules\n", encoding="utf-8")
     assert _codex_chain_check(repo, ["claude"]) is None
-    assert _codex_chain_check(repo) is not None
+    check = _codex_chain_check(repo)
+    assert check is not None
+    if not context_preview._POSIX_NOFOLLOW_SUPPORTED:
+        _assert_unsupported_codex_chain(check[0], check[2])
 
 
 def test_doctor_codex_instruction_chain_reports_estimate_within_cap(tmp_path: Path):
     repo = _codex_repo(tmp_path)
     (repo / "AGENTS.md").write_text("é" * 10, encoding="utf-8")
     status, _name, detail = _codex_chain_check(repo)
+    if not context_preview._POSIX_NOFOLLOW_SUPPORTED:
+        _assert_unsupported_codex_chain(status, detail)
+        return
     assert status == doctor_mod.OK
     assert "estimate, not observed" in detail
     assert '"AGENTS.md" 20 bytes loaded' in detail
@@ -3347,6 +3409,9 @@ def test_doctor_codex_instruction_chain_selects_override_over_agents(tmp_path: P
     (repo / "AGENTS.md").write_text("x" * 50_000, encoding="utf-8")
     (repo / "AGENTS.override.md").write_text("short\n", encoding="utf-8")
     status, _name, detail = _codex_chain_check(repo)
+    if not context_preview._POSIX_NOFOLLOW_SUPPORTED:
+        _assert_unsupported_codex_chain(status, detail)
+        return
     assert status == doctor_mod.OK
     assert '"AGENTS.override.md" 6 bytes loaded' in detail
     assert '"AGENTS.md"' not in detail
@@ -3356,6 +3421,9 @@ def test_doctor_codex_instruction_chain_warns_on_consumer_truncation(tmp_path: P
     repo = _codex_repo(tmp_path)
     (repo / "AGENTS.md").write_text("x" * 40_000, encoding="utf-8")
     status, _name, detail = _codex_chain_check(repo)
+    if not context_preview._POSIX_NOFOLLOW_SUPPORTED:
+        _assert_unsupported_codex_chain(status, detail)
+        return
     assert status == doctor_mod.WARN
     assert '"AGENTS.md" 40000 bytes truncated' in detail
     assert "selected 40000/32768 bytes" in detail
@@ -3368,6 +3436,9 @@ def test_doctor_codex_instruction_chain_empty_override_reports_empty(tmp_path: P
     (repo / "AGENTS.md").write_text("rules\n", encoding="utf-8")
     (repo / "AGENTS.override.md").write_text("  \n", encoding="utf-8")
     status, _name, detail = _codex_chain_check(repo)
+    if not context_preview._POSIX_NOFOLLOW_SUPPORTED:
+        _assert_unsupported_codex_chain(status, detail)
+        return
     assert status == doctor_mod.OK
     assert '"AGENTS.override.md" 3 bytes empty' in detail
     assert '"AGENTS.md"' not in detail
@@ -3376,6 +3447,9 @@ def test_doctor_codex_instruction_chain_empty_override_reports_empty(tmp_path: P
 def test_doctor_codex_instruction_chain_missing_files(tmp_path: Path):
     repo = _codex_repo(tmp_path)
     status, _name, detail = _codex_chain_check(repo)
+    if not context_preview._POSIX_NOFOLLOW_SUPPORTED:
+        _assert_unsupported_codex_chain(status, detail)
+        return
     assert status == doctor_mod.OK
     assert "no project instruction files selected" in detail
     assert "selected 0/32768 bytes" in detail
@@ -3386,10 +3460,22 @@ def test_doctor_codex_instruction_chain_unknown_root_is_manual(tmp_path: Path):
     workspace.mkdir()
     (workspace / "AGENTS.md").write_text("rules\n", encoding="utf-8")
     status, _name, detail = _codex_chain_check(workspace)
+    if not context_preview._POSIX_NOFOLLOW_SUPPORTED:
+        _assert_unsupported_codex_chain(status, detail)
+        return
     assert status == doctor_mod.MANUAL
     assert "root_outside_scope_or_unknown" in detail
     assert "not evaluated" in detail
     assert "brigade context preview" in detail
+
+
+def test_doctor_codex_instruction_chain_unsupported_platform_has_no_remedy(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(context_preview, "_POSIX_NOFOLLOW_SUPPORTED", False)
+    repo = _codex_repo(tmp_path)
+    status, name, detail = _codex_chain_check(repo)
+    assert name == "instruction-chain: codex"
+    _assert_unsupported_codex_chain(status, detail)
+    assert "unsupported on this platform" in detail
 
 
 def test_doctor_codex_instruction_chain_escapes_and_never_reads_bodies(tmp_path: Path, monkeypatch):
@@ -3411,14 +3497,18 @@ def test_doctor_codex_instruction_chain_escapes_and_never_reads_bodies(tmp_path:
     assert calls[0]["cwd"] == calls[0]["target"]
     assert calls[0]["codex_home"] is None
     assert calls[0]["assume_codex_defaults"] is True
+    if not context_preview._POSIX_NOFOLLOW_SUPPORTED:
+        _assert_unsupported_codex_chain(status, detail)
 
 
 def test_doctor_codex_instruction_chain_does_not_write(tmp_path: Path):
     repo = _codex_repo(tmp_path)
     (repo / "AGENTS.md").write_text("rules\n", encoding="utf-8")
     before = sorted(str(p.relative_to(repo)) for p in repo.rglob("*"))
-    _codex_chain_check(repo)
+    status, _name, detail = _codex_chain_check(repo)
     assert sorted(str(p.relative_to(repo)) for p in repo.rglob("*")) == before
+    if not context_preview._POSIX_NOFOLLOW_SUPPORTED:
+        _assert_unsupported_codex_chain(status, detail)
 
 
 def test_doctor_codex_instruction_chain_remedy_command_roundtrips(tmp_path: Path):
@@ -3431,6 +3521,9 @@ def test_doctor_codex_instruction_chain_remedy_command_roundtrips(tmp_path: Path
     (repo / ".git").write_text("gitdir: /nonexistent/common\n", encoding="utf-8")
     (repo / "AGENTS.md").write_text("x" * 40_000, encoding="utf-8")
     status, _name, detail = _codex_chain_check(repo)
+    if not context_preview._POSIX_NOFOLLOW_SUPPORTED:
+        _assert_unsupported_codex_chain(status, detail)
+        return
     assert status == doctor_mod.WARN
     commands = doctor_agent.extract_commands(detail)
     assert len(commands) == 1
@@ -3441,16 +3534,15 @@ def test_doctor_codex_instruction_chain_remedy_command_roundtrips(tmp_path: Path
 
 
 @pytest.mark.parametrize("unsafe", ["new\nline", "esc\x1b[31m", "back`tick"])
-def test_doctor_codex_instruction_chain_unsafe_target_omits_path(tmp_path: Path, unsafe: str):
+def test_doctor_codex_instruction_chain_unsafe_target_omits_path(tmp_path: Path, unsafe: str, monkeypatch):
     import shlex
 
     from brigade import doctor_agent
+    from brigade.doctor_instruction_chain import check_codex_instruction_chain
 
-    repo = tmp_path / unsafe
-    repo.mkdir()
-    (repo / ".git").write_text("gitdir: /nonexistent/common\n", encoding="utf-8")
-    (repo / "AGENTS.md").write_text("x" * 40_000, encoding="utf-8")
-    status, _name, detail = _codex_chain_check(repo)
+    result = _codex_truncated_preview(tmp_path)
+    monkeypatch.setattr(context_preview, "preview", lambda **_kwargs: result)
+    status, _name, detail = check_codex_instruction_chain(tmp_path / unsafe)
     assert status == doctor_mod.WARN
     assert unsafe not in detail
     assert detail.isprintable()
@@ -3459,16 +3551,17 @@ def test_doctor_codex_instruction_chain_unsafe_target_omits_path(tmp_path: Path,
         shlex.split(command)
 
 
-def test_doctor_codex_instruction_chain_fix_prefix_inside_path_roundtrips(tmp_path: Path):
+def test_doctor_codex_instruction_chain_fix_prefix_inside_path_roundtrips(tmp_path: Path, monkeypatch):
     import shlex
 
     from brigade import doctor_agent
+    from brigade.doctor_instruction_chain import check_codex_instruction_chain
 
+    result = _codex_truncated_preview(tmp_path)
+    monkeypatch.setattr(context_preview, "preview", lambda **_kwargs: result)
     repo = tmp_path / "a fix: brigade foo"
-    repo.mkdir()
-    (repo / ".git").write_text("gitdir: /nonexistent/common\n", encoding="utf-8")
-    (repo / "AGENTS.md").write_text("x" * 40_000, encoding="utf-8")
-    _status, _name, detail = _codex_chain_check(repo)
+    status, _name, detail = check_codex_instruction_chain(repo)
+    assert status == doctor_mod.WARN
     commands = doctor_agent.extract_commands(detail)
     assert len(commands) == 1
     argv = shlex.split(commands[0])

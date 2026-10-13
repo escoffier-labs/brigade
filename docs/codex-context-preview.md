@@ -204,9 +204,12 @@ doctor target, Codex defaults for omitted settings, and no global scope. The
 detail labels the result `estimate, not observed` and names the cap source,
 which is `default-assumption`. Doctor reads no Codex configuration, so it does
 not apply a configured `project_doc_max_bytes`. `WARN` and `MANUAL` results
-print a preview command for rerunning with effective settings. The command
-spells out the target only when the path has no control characters or
-backticks.
+print a preview command for rerunning with effective settings, except when the
+platform lacks the required POSIX nofollow capabilities. In that case, including
+native Windows, doctor reports `MANUAL` with `posix_nofollow_required`, states
+that preview is unsupported on this platform, and offers no rerun command.
+The command spells out the target only when the path has no control characters
+or backticks.
 
 Each selected file shows its byte count, contribution and Brigade advisory
 budget, and the detail repeats that the consumer cap is separate from those

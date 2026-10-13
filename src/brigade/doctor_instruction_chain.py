@@ -65,8 +65,15 @@ def check_codex_instruction_chain(target: Path) -> CheckResult:
     except Exception as exc:  # noqa: BLE001 - doctor must stay advisory
         return (MANUAL, _CODEX_CHAIN_NAME, f"not evaluated ({type(exc).__name__}); {assumptions}); {remedy}")
     reasons = [item for item in result["limitations"] if item not in _CODEX_CHAIN_BASELINE_LIMITATIONS]
+    reason_text = ", ".join(reasons) or result["status"]
+    if "posix_nofollow_required" in reasons:
+        return (
+            MANUAL,
+            _CODEX_CHAIN_NAME,
+            f"not evaluated (reasons: {reason_text}); {assumptions}); "
+            "preview is unsupported on this platform (requires POSIX nofollow capabilities)",
+        )
     if result["status"] != "complete" or result["matches_codex"] is not True:
-        reason_text = ", ".join(reasons) or result["status"]
         return (MANUAL, _CODEX_CHAIN_NAME, f"not evaluated (reasons: {reason_text}); {assumptions}); {remedy}")
     cap = result["settings"]["project_doc_max_bytes"]
     totals = result["totals"]["project"]
