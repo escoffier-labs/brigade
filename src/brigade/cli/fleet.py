@@ -1675,7 +1675,12 @@ def _dispatch_flush(args: argparse.Namespace) -> int:
 
     node_id = fleet_client.resolve_node_id()
     events = fleet_client.flush_spool(node_id)
-    messages = fleet_client_messages.flush(node_id)
+    try:
+        messages = fleet_client_messages.flush(node_id)
+    except fleet_client.FleetClientError as exc:
+        print(f"flushed {events} spooled event(s) for node {node_id}")
+        print(f"warning: could not flush fleet messages: {exc}", file=sys.stderr)
+        return 1
     if messages:
         print(f"flushed {events} spooled event(s) and {messages} message(s) for node {node_id}")
     else:

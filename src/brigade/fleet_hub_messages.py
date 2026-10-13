@@ -54,9 +54,18 @@ class MessageConflict(MessageError):
 class MessageQuotaError(MessageError):
     """A temporary per-principal message quota is full."""
 
+    def __init__(self, message: str, *, code: str, recipient: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.recipient = recipient
+
 
 class MessageRecipientInactive(MessageError):
     """A known recipient is temporarily unavailable because it was revoked."""
+
+    def __init__(self, message: str, *, recipient: str) -> None:
+        super().__init__(message)
+        self.recipient = recipient
 
 
 class MessageAuthError(MessageError):
@@ -461,19 +470,21 @@ def send(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str, reply_to
                 (recipient, recipient),
             ).fetchone()
             if revoked is not None:
-                raise MessageRecipientInactive("recipient is temporarily inactive")
+                raise MessageRecipientInactive("recipient is temporarily inactive", recipient=recipient)
             raise MessageError("recipient is not an active hub principal")
         count = conn.execute(
             "SELECT COUNT(*) FROM fleet_messages WHERE recipient=? AND acked_at IS NULL", (recipient,)
         ).fetchone()[0]
         if count >= UNACKED_QUOTA:
-            raise MessageQuotaError("recipient message quota exceeded")
+            raise MessageQuotaError(
+                "recipient message quota exceeded", code="message_recipient_quota", recipient=recipient
+            )
         sender_cutoff = (now - timedelta(days=1)).isoformat()
         sender_count = conn.execute(
             "SELECT COUNT(*) FROM fleet_message_sends WHERE sender=? AND received_at>=?", (sender, sender_cutoff)
         ).fetchone()[0]
         if sender_count >= SENDER_DAILY_QUOTA:
-            raise MessageQuotaError("sender message quota exceeded")
+            raise MessageQuotaError("sender message quota exceeded", code="message_sender_quota")
         created_at = enqueued_at
         cursor = conn.execute(
             "INSERT INTO fleet_messages(sender,recipient,subject,body,reference,priority,client_id,payload_hash,reply_to,created_at,received_at) "

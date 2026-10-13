@@ -738,7 +738,7 @@ def make_handler(
                 )
                 nodes = node_summary(board.runs)
                 unread_counts = (
-                    fleet_hub_messages.unread_counts(conn) if dashboard_authorized and view == "machines" else {}
+                    fleet_hub_messages.unread_counts(conn) if self._authorized() and view == "machines" else {}
                 )
             except ClaimFenceError as exc:
                 self._send_json(503, {"error": str(exc)})
@@ -826,6 +826,12 @@ def make_handler(
                         ]
                     else:
                         render_claims = event_claims
+                    rendered_node_ids = event_node_ids | set(selected_claim_ids)
+                    render_unread_counts = {
+                        node_id: count
+                        for node_id, count in unread_counts.items()
+                        if node_id not in complete_claim_node_ids or node_id in rendered_node_ids
+                    }
                     unread_room = max(0, room - len(selected_claim_ids))
                     consumed = len(unread_ids[unread_offset : unread_offset + unread_room])
                     next_unread_offset = unread_offset + consumed
@@ -1805,10 +1811,16 @@ def make_handler(
                 self._send_json(409, payload)
                 return
             except fleet_hub_messages.MessageQuotaError as exc:
-                self._send_json(429, {"error": str(exc)})
+                payload = {"error": str(exc), "code": exc.code}
+                if exc.recipient is not None:
+                    payload["recipient"] = exc.recipient
+                self._send_json(429, payload)
                 return
             except fleet_hub_messages.MessageRecipientInactive as exc:
-                self._send_json(400, {"error": str(exc), "code": "message_recipient_inactive"})
+                self._send_json(
+                    400,
+                    {"error": str(exc), "code": "message_recipient_inactive", "recipient": exc.recipient},
+                )
                 return
             except fleet_hub_messages.MessageAuthError as exc:
                 self._send_json(403, {"error": str(exc)})

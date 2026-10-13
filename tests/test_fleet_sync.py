@@ -829,6 +829,23 @@ class TestCli:
         finally:
             conn.close()
 
+    def test_flush_command_reports_events_when_message_flush_fails(self, monkeypatch, capsys):
+        from brigade import cli, fleet_client_messages
+
+        monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+        monkeypatch.setattr(fleet_client, "flush_spool", lambda _node_id: 3)
+
+        def fail_message_flush(_node_id):
+            raise fleet_client.FleetClientError("message spool unreadable")
+
+        monkeypatch.setattr(fleet_client_messages, "flush", fail_message_flush)
+
+        assert cli.main(["fleet", "flush"]) == 1
+
+        captured = capsys.readouterr()
+        assert f"flushed 3 spooled event(s) for node {NODE_A}" in captured.out
+        assert "could not flush fleet messages: message spool unreadable" in captured.err
+
     def test_format_age(self):
         from datetime import datetime, timezone
 

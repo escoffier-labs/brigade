@@ -189,6 +189,22 @@ class TestDashboardAuth:
         )
         assert status == 401
 
+    def test_readonly_dashboard_does_not_scan_or_show_unread_totals(self, hub, monkeypatch):
+        calls = []
+
+        def unread_counts(_conn):
+            calls.append(True)
+            return {NODE_A: 3}
+
+        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", unread_counts)
+        cookie = _login_cookie(hub)
+
+        status, _headers, page = _request(hub, "GET", "/view/machines", headers={"Cookie": cookie})
+
+        assert status == 200
+        assert "unread messages" not in page
+        assert calls == []
+
     def test_legacy_derived_cookie_is_refused(self, hub):
         value = hmac.new(TOKEN.encode(), b"brigade-fleet-dashboard-cookie-v1", hashlib.sha256).hexdigest()
         assert _request(hub, "GET", "/deck", headers={"Cookie": f"{fleet_hub.DASHBOARD_COOKIE}={value}"})[0] == 401
@@ -1158,6 +1174,48 @@ class TestBoardBounds:
         assert len(second_ids) == 1
         assert first_ids.isdisjoint(second_ids)
         assert first_ids | second_ids == set(node_ids)
+
+    def test_machine_event_page_uses_same_unread_exclusions_as_pagination(self, hub, monkeypatch):
+        stamp = datetime.now(timezone.utc).isoformat()
+        monkeypatch.setattr(fleet_dashboard, "MACHINE_CARD_LIMIT", 4)
+        event_node_ids = ["00000000-0000-4000-8000-000000000000"]
+        claim_node_id = "ffffffff-ffff-4fff-8fff-000000000001"
+        events = [
+            _event(node_id, f"event-{index}", 1, "run.started", repo="repo", harness="codex", ts=stamp)
+            for index, node_id in enumerate(event_node_ids)
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        status, _headers, text = _request(
+            hub,
+            "POST",
+            "/claims",
+            headers=_bearer(),
+            body={
+                "action": "acquire",
+                "target": "repo",
+                "node_id": claim_node_id,
+                "holder": HOLDER_TOKEN,
+                "conductor": "test",
+            },
+        )
+        assert status == 200, text
+        unread_node_ids = [f"unread-only-{index:03d}" for index in range(3)]
+        unread = {claim_node_id: 1, **dict.fromkeys(unread_node_ids, 1)}
+        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: unread)
+
+        status, _headers, first = _request(hub, "GET", "/view/machines", headers=_bearer())
+
+        assert status == 200
+        assert f'data-node="{claim_node_id}"' not in first
+        assert all(f'data-node="{node_id}"' in first for node_id in event_node_ids + unread_node_ids)
+        more = re.search(r'class="fleet-more"><a href="([^"]+)"', first)
+        assert more
+        next_path = html.unescape(more[1])
+        status, _headers, second = _request(hub, "GET", next_path, headers=_bearer())
+
+        assert status == 200
+        assert f'data-node="{claim_node_id}"' in second
 
     def test_terminal_only_node_with_unread_message_gets_supplemental_card(self, hub, monkeypatch):
         now = datetime.now(timezone.utc).isoformat()

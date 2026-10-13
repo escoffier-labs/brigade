@@ -305,6 +305,7 @@ def test_retry_deduplication_quota_and_dashboard_unread_count(message_hub, monke
         {"action": "send", "to": NODE_B, "subject": "Over quota", "body": "Two", "client_id": "retry-key-2"},
     )
     assert rejected[0] == 429
+    assert rejected[1]["code"] == "message_recipient_quota"
     assert "quota" in rejected[1]["error"]
 
     page = _get(base, ADMIN, "/view/machines")
@@ -319,10 +320,11 @@ def test_retry_deduplication_quota_and_dashboard_unread_count(message_hub, monke
         {"action": "send", "to": NODE_A, "subject": "Daily limit", "body": "Three", "client_id": "retry-key-3"},
     )
     assert sender_limited[0] == 429
+    assert sender_limited[1]["code"] == "message_sender_quota"
     assert "sender" in sender_limited[1]["error"]
 
 
-def test_dashboard_cookie_user_sees_unread_message_count(message_hub):
+def test_dashboard_cookie_user_does_not_see_unread_message_count(message_hub):
     base, token_a, _token_b, db = message_hub
     assert (
         _request(
@@ -342,7 +344,7 @@ def test_dashboard_cookie_user_sees_unread_message_count(message_hub):
     )
     with urllib.request.urlopen(request, timeout=5) as response:
         page = response.read().decode("utf-8")
-    assert "1 unread messages" in page
+    assert "1 unread messages" not in page
 
 
 def test_revoked_recipient_exact_retry_returns_existing_before_active_check(message_hub):
@@ -422,6 +424,7 @@ def test_client_enqueue_time_cannot_bypass_sender_daily_quota(message_hub, monke
         },
     )
     assert rejected[0] == 429
+    assert rejected[1]["code"] == "message_sender_quota"
     assert "sender" in rejected[1]["error"]
 
 
@@ -1593,6 +1596,134 @@ def test_new_send_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
 
     assert newest["message"]["client_id"] == attempts[-1]["client_id"]
     assert [message["subject"] for message in attempts[2:]] == ["Older", "Newer", "Newest"]
+
+
+def test_spool_flush_skips_recipient_quota_without_reordering_that_recipient(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    now = datetime.now(timezone.utc).isoformat()
+    messages = [
+        {"action": "send", "to": NODE_B, "client_id": "blocked-1", "enqueued_at": now},
+        {"action": "send", "to": NODE_A, "client_id": "deliver-1", "enqueued_at": now},
+        {"action": "send", "to": NODE_B, "client_id": "blocked-2", "enqueued_at": now},
+    ]
+    with fleet_client._spool_lock(path) as dir_fd:
+        for message in messages:
+            assert fleet_client._spool_append_locked(path, message, dir_fd=dir_fd)
+    attempts = []
+
+    def request(_hub, _token, message, *, timeout=fleet_client.FLUSH_TIMEOUT_SECONDS):
+        attempts.append(message["client_id"])
+        if message["to"] == NODE_B:
+            return 429, {
+                "error": "recipient quota exceeded",
+                "code": "message_recipient_quota",
+                "recipient": NODE_B,
+            }
+        return 201, {"message": {"client_id": message["client_id"]}}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+
+    assert fleet_client_messages._flush_locked(path, "https://hub.invalid", "node-token") == 1
+
+    assert attempts == ["blocked-1", "deliver-1"]
+    assert [message["client_id"] for message in fleet_client._read_spool(path)] == ["blocked-1", "blocked-2"]
+
+
+@pytest.mark.parametrize(("recipient", "queued"), [(NODE_B, True), (NODE_A, False)])
+def test_new_send_only_waits_behind_blocked_messages_for_its_recipient(tmp_path, monkeypatch, recipient, queued):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
+    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    old = {
+        "action": "send",
+        "to": NODE_B,
+        "subject": "Blocked recipient",
+        "body": "Wait for quota",
+        "client_id": "blocked-old",
+        "enqueued_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with fleet_client._spool_lock(path) as dir_fd:
+        assert fleet_client._spool_append_locked(path, old, dir_fd=dir_fd)
+    attempts = []
+
+    def request(_hub, _token, message, *, timeout=fleet_client.FLUSH_TIMEOUT_SECONDS):
+        attempts.append(message["client_id"])
+        if message["client_id"] == "blocked-old":
+            return 429, {
+                "error": "recipient quota exceeded",
+                "code": "message_recipient_quota",
+                "recipient": NODE_B,
+            }
+        return 201, {"message": {"client_id": message["client_id"]}}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+
+    result = fleet_client_messages.send(
+        recipient=recipient,
+        subject="New message",
+        body="Keep unrelated recipients moving",
+        reference=None,
+        priority="normal",
+    )
+
+    assert bool(result.get("queued")) is queued
+    assert attempts == (["blocked-old"] if queued else ["blocked-old", result["message"]["client_id"]])
+    pending = fleet_client._read_spool(path)
+    assert pending[0]["client_id"] == "blocked-old"
+    assert len(pending) == (2 if queued else 1)
+
+
+@pytest.mark.parametrize(("reply_recipient", "queued"), [(NODE_B, True), (NODE_A, False)])
+def test_new_reply_waits_only_behind_blocked_messages_for_its_recipient(tmp_path, monkeypatch, reply_recipient, queued):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
+    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    old = {
+        "action": "send",
+        "to": NODE_B,
+        "subject": "Blocked recipient",
+        "body": "Wait for quota",
+        "client_id": "blocked-old",
+        "enqueued_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with fleet_client._spool_lock(path) as dir_fd:
+        assert fleet_client._spool_append_locked(path, old, dir_fd=dir_fd)
+    attempts = []
+
+    def request(_hub, _token, message, **_kwargs):
+        attempts.append(message["action"])
+        if message.get("client_id") == "blocked-old":
+            return 429, {
+                "error": "recipient quota exceeded",
+                "code": "message_recipient_quota",
+                "recipient": NODE_B,
+            }
+        if message["action"] == "list":
+            return 200, {"messages": [{"id": 77, "sender": reply_recipient}]}
+        return 201, {"message": {"client_id": message["client_id"]}}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+
+    result = fleet_client_messages.reply(77, body="Reply", subject="Re: task", reference=None, priority="normal")
+
+    assert bool(result.get("queued")) is queued
+    assert attempts == (["send", "list"] if queued else ["send", "list", "reply"])
+    pending = fleet_client._read_spool(path)
+    assert pending[0]["client_id"] == "blocked-old"
+    assert len(pending) == (2 if queued else 1)
 
 
 @pytest.mark.parametrize("action", ["send", "reply"])
