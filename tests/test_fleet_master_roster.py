@@ -69,6 +69,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Use token sk-ant-abcdefghijklmnopqrstuvwxyz0123456789 for auth.",
         "Use Slack token " + "xoxb-" + "A" * 20,
         "Use Stripe key " + "sk_live_" + "A" * 24,
+        "Use Stripe test key " + "sk_test_" + "A" * 24,
         "Use GitLab token " + "glpat-" + "A" * 20,
         "OPENAI_API_KEY=placeholder-secret",
         "CI=production",
@@ -90,6 +91,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         'Use auth profile "production-admin".',
         "Use auth profile 'production-admin'.",
         "Use auth profile `production-admin`.",
+        "Use auth profile [production-admin].",
         "Use auth profile: production-admin",
         "Use auth-profile production-admin",
         "Use auth_profile production-admin",
@@ -146,7 +148,14 @@ def test_parse_rejects_relative_paths_as_models(model: str) -> None:
 @pytest.mark.parametrize("field", ["model", "purpose", "caveats"])
 @pytest.mark.parametrize(
     "path",
-    ["workspace/Dockerfile", "project/Makefile", "docs/README", "src/main"],
+    [
+        "workspace/Dockerfile",
+        "project/Makefile",
+        "docs/README",
+        "src/main",
+        "scripts/verify",
+        "tests/unit",
+    ],
 )
 def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None:
     document = _document()
@@ -154,6 +163,16 @@ def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None
         document["seats"][0][field] = [path]  # type: ignore[index]
     else:
         document["seats"][0][field] = path  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize("text", ["Run automation/verify.", "Inspect checks/unit."])
+def test_parse_rejects_unenumerated_paths_in_descriptive_text(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 
     with pytest.raises(fleet_master_roster.MasterRosterError):
         fleet_master_roster.parse(document)
