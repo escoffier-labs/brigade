@@ -449,6 +449,28 @@ class TestHubClaims:
         assert status == 400
         assert payload["error"] == f"claim field 'target' must be at most {target_limit} characters"
 
+    def test_legacy_oversized_claim_remains_manageable(self, hub, clock):
+        url, token, db = hub
+        target = "r" * (EVENT_FIELD_MAX_CHARS["repo"] + 1)
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                "INSERT INTO claims "
+                "(target, owner_node, holder_token, acquired_at, renewed_at, ttl_seconds, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (target, NODE_A, "h1", "legacy-acquired", "legacy-renewed", 900, clock["now"] + 900),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        status, payload = _post(url, token, _claim("inspect", target=target))
+        assert status == 200 and payload["claim"]["target"] == target
+        status, payload = _post(url, token, _claim("renew", target=target))
+        assert status == 200 and payload["renewed"] is True
+        status, payload = _post(url, token, _claim("release", target=target))
+        assert status == 200 and payload["released"] is True
+
     def test_unknown_and_malformed_node_ids_rejected(self, hub):
         """Two identity-less or cloned nodes must never both be granted."""
         url, token, _db = hub

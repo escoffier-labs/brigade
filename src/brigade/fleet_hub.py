@@ -893,7 +893,7 @@ def _validate_claim_request(raw: Any) -> dict[str, Any]:
         if not isinstance(value, str) or not value.strip():
             raise FleetHubError(f"claim field {field!r} must be a non-empty string")
         if field == "target":
-            value = validate_claim_target(value, _reject_controls, FleetHubError)
+            value = validate_claim_target(value, _reject_controls, FleetHubError, bounded=action == "acquire")
         request[field] = value.strip()
     for field in ("node_id", "holder"):
         if request[field] is None:

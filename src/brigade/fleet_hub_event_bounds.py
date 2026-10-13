@@ -46,11 +46,13 @@ def validate_claim_target(
     value: str,
     reject_controls: Callable[..., None],
     error_type: type[Exception],
+    *,
+    bounded: bool = True,
 ) -> str:
-    """Return a normalized claim target, raising the caller's API error when oversized."""
+    """Normalize a target and optionally enforce the bound for new claims."""
     reject_controls(value, "target", kind="claim")
     target = value.strip()
     limit = EVENT_FIELD_MAX_CHARS["repo"]
-    if len(target) > limit:
+    if bounded and len(target) > limit:
         raise error_type(f"claim field 'target' must be at most {limit} characters")
     return target
