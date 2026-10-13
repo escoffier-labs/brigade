@@ -40,6 +40,12 @@ Existing scope bounds allow 32 paths of 256 characters per item. The query bound
 application processing and decoded data. SQLite may traverse additional index
 entries to group and select the latest events.
 
+The scan cap is hub-wide: every other item's latest unreleased owned or
+handoff-pending event counts, including empty scopes and holders in other
+repositories. Lost holder nonces retain those slots, and supported recovery for
+lost nonces remains pending. Holder release frees a slot, and departed histories
+no longer count.
+
 HTTP 409 refusals use fixed messages and resolution codes:
 
 - `path-scope-conflict` includes validated work IDs, owner nodes, requested paths
@@ -60,7 +66,19 @@ enter conflict output. For nonempty peer scope, safe repository identity is
 validated and compared before paths. Malformed paths in a reliably different
 repository do not block admission here. Malformed JSON, unknown or unsafe
 repository identity, and unsafe declarations in the same repository still
-refuse admission. An incomplete assessment never admits a writer.
+refuse admission. Stored action must agree with the event type. Accept,
+checkpoint and report events must retain owned state, and handoff events must
+retain handoff-pending state. Their owner must match the stored authenticated
+node principal. These checks and canonical lowercase SHA256 digest validation
+also apply to empty scopes and holders in other repositories. Inconsistent
+active events refuse admission rather than freeing a reservation.
+
+Every reflected identity and path passes the same private-data guard before
+path pairs are compared. It refuses case-equivalent holder digests and embedded
+32-byte nonce candidates whose SHA256 matches the stored digest, including
+canonical base64url, standard base64 and hex spellings. Each bounded string is
+scanned once per snapshot, without returning the digest or nonce. An incomplete
+assessment never admits a writer.
 Resolution codes describe an end state for ownership review. They do not
 instruct callers to release another holder automatically.
 

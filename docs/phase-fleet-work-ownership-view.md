@@ -14,6 +14,10 @@ remains the canonical memory authority.
 
 ## Contract and bounded plan
 
+Current-work and change-history paging seek from the composite continuation
+keys on their existing ordered indexes. Bounded filtered reads can continue
+past sparse matches without scanning earlier pages again.
+
 1. Add CLI tests for GET-only transport, recognized projections, independent
    revisions/observations, absent metadata, malformed replies, and safe refusals.
    Run them through Brigade and observe the missing command fail.
@@ -35,9 +39,11 @@ its own local completion timestamp. `consistency: separate-reads` explicitly
 permits intervening writes; there is no atomic combined revision. Report
 freshness is `unassessed`: this read has no provider liveness or expiry proof.
 Absent checkpoint/report metadata is `unobserved`; unowned is a real ownership
-state, distinct from a missing item. Liveness is always `unknown` and conflict
-checking is always `not-performed`. Reported evidence remains unverified and
-provider lifecycle remains unobserved.
+state, distinct from a missing item. Liveness is always `unknown`. Conflict
+checking follows the current [checkpoint path admission contract](phase-worklore-path-scope-admission.md):
+new checkpoints record `path-admission`, while older unchecked snapshots retain
+`not-performed`. Reported evidence remains unverified and provider lifecycle
+remains unobserved.
 
 Failures exit 1, with fixed JSON on stderr under `--json` and plain safe text
 otherwise. `not-found` means missing; stale revision/generation refusals mean

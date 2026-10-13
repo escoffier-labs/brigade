@@ -1,5 +1,7 @@
 """Atomic checkpoint admission at the authenticated HTTP/SQLite owner boundary."""
 
+import base64
+import hashlib
 import json
 import threading
 
@@ -12,6 +14,7 @@ from tests.test_worklore_ownership import (
     NONCE_A,
     NONCE_B,
     OFFER,
+    dot_report,
     event_count,
     ledger as ledger,  # shared real SQLite fixture
     make_terminal,
@@ -431,3 +434,152 @@ def test_unsafe_imported_reservation_refuses_without_reflection(ledger, field):
     assert status == 409 and reply["code"] == "path-scope-unavailable"
     assert private not in json.dumps(reply) and "conflicts" not in reply
     assert event_count(conn, other) == 2
+
+
+@pytest.mark.parametrize("action", ["accept", "checkpoint", "report", "handoff"])
+@pytest.mark.parametrize(
+    "corruption",
+    ["unowned", "offered", "wrong-state", "action", "owner", "principal", "unsafe-principal", "digest"],
+)
+def test_inconsistent_active_event_never_frees_reservation(ledger, action, corruption):
+    conn, work_id, _ = ledger
+    owned(conn, work_id)
+    if action != "accept":
+        assert checkpoint(conn, work_id, ["src"])[0] == 200
+    if action == "report":
+        post(
+            conn,
+            work_id,
+            {"action": "report", "generation": 1, "report": dot_report()},
+            revision=3,
+            key="report",
+            nonce=NONCE_A,
+        )
+    elif action == "handoff":
+        post(
+            conn,
+            work_id,
+            {"action": "handoff", "generation": 1, "target_node": "node-b"},
+            revision=3,
+            key="handoff",
+            nonce=NONCE_A,
+        )
+    other = another_owner(conn)
+    row = conn.execute(
+        "SELECT seq, detail_json, node_id FROM work_events WHERE work_id=? ORDER BY seq DESC LIMIT 1", (work_id,)
+    ).fetchone()
+    detail = json.loads(row[1])
+    detail["ownership"].update(repo_identity="example/project", write_scope=["src"])
+    principal = row[2]
+    if corruption in {"unowned", "offered", "wrong-state"}:
+        detail["ownership"]["state"] = (
+            ("owned" if action == "handoff" else "handoff-pending") if corruption == "wrong-state" else corruption
+        )
+    elif corruption == "action":
+        detail["action"] = "release"
+    elif corruption == "owner":
+        detail["ownership"]["owner_node"] = "node-b"
+    elif corruption in {"principal", "unsafe-principal"}:
+        principal = "node-b" if corruption == "principal" else "token=" + "q" * 40
+    else:
+        detail["ownership"]["holder_hash"] = "not-a-digest"
+    conn.execute("UPDATE work_events SET detail_json=?, node_id=? WHERE seq=?", (json.dumps(detail), principal, row[0]))
+    conn.commit()
+    before = snapshot(conn, other)
+    status, reply = checkpoint(conn, other, ["src/module.py"], node="node-b", nonce=NONCE_B)
+    assert status == 409 and reply["code"] == "path-scope-unavailable", reply
+    assert "conflicts" not in reply and "q" * 40 not in json.dumps(reply)
+    assert snapshot(conn, other) == before and event_count(conn, other) == 2
+
+
+@pytest.mark.parametrize("field", ["work_id", "owner_node", "held_path", "requested_path"])
+@pytest.mark.parametrize("encoding", ["digest-upper", "nonce-url", "nonce-hex"])
+def test_stored_capability_cannot_be_reflected_to_another_same_node_holder(ledger, field, encoding):
+    conn, work_id, _ = ledger
+    decoded = base64.urlsafe_b64decode(NONCE_A + "=")
+    digest = hashlib.sha256(decoded).hexdigest()
+    private = {"digest-upper": digest.upper(), "nonce-url": NONCE_A, "nonce-hex": decoded.hex().upper()}[encoding]
+    embedded = "fixture-" + private + "-tail"
+    node = embedded if field == "owner_node" else "node-a"
+    if field == "work_id":
+        conn.execute("PRAGMA defer_foreign_keys=ON")
+        conn.execute("UPDATE work_items SET work_id=? WHERE work_id=?", (embedded, work_id))
+        conn.execute("UPDATE work_events SET work_id=? WHERE work_id=?", (embedded, work_id))
+        conn.commit()
+        work_id = embedded
+    if node != "node-a":
+        fleet_hub.add_node(conn, node, node)
+    post(conn, work_id, {**OFFER, "target_node": node}, admin=True, key="offer")
+    post(conn, work_id, {"action": "accept", "generation": 0}, node=node, revision=1, key="accept", nonce=NONCE_A)
+    assert checkpoint(conn, work_id, ["src"], node=node)[0] == 200
+    other = another_owner(conn, node=node)
+    row = conn.execute(
+        "SELECT seq, detail_json FROM work_events WHERE work_id=? ORDER BY seq DESC LIMIT 1", (work_id,)
+    ).fetchone()
+    detail = json.loads(row[1])
+    held = "src/" + embedded + "/module.py" if field == "held_path" else "src"
+    detail["ownership"]["write_scope"] = [held]
+    conn.execute("UPDATE work_events SET detail_json=? WHERE seq=?", (json.dumps(detail), row[0]))
+    conn.commit()
+    requested = "src/" + embedded + "/module.py" if field == "requested_path" else "src"
+    before = snapshot(conn, other)
+    status, reply = checkpoint(conn, other, [requested], node=node, nonce=NONCE_B)
+    assert status == 409 and reply["code"] == "path-scope-unavailable", reply
+    assert "conflicts" not in reply
+    assert all(secret not in json.dumps(reply) for secret in (private, digest, NONCE_A, NONCE_B))
+    assert snapshot(conn, other) == before and event_count(conn, other) == 2
+    # The separate item's legitimate nonce never authorizes the reserved item.
+    status, reply = request(
+        conn, work_id, {"action": "release", "generation": 1}, node=node, revision=3, key="release-other", nonce=NONCE_B
+    )
+    assert status == 403 and reply["code"] == "holder-mismatch"
+    assert event_count(conn, work_id) == 3
+
+
+@pytest.mark.parametrize("encoding", ["url", "url-padded", "standard", "standard-unpadded", "hex", "hex-upper"])
+def test_embedded_common_nonce_spellings_are_not_reflected(ledger, encoding):
+    conn, work_id, _ = ledger
+    decoded = b"\xfb" + b"a" * 31
+    nonce = base64.urlsafe_b64encode(decoded).decode().rstrip("=")
+    standard = base64.b64encode(decoded).decode()
+    private = {
+        "url": nonce,
+        "url-padded": nonce + "=",
+        "standard": standard,
+        "standard-unpadded": standard.rstrip("="),
+        "hex": decoded.hex(),
+        "hex-upper": decoded.hex().upper(),
+    }[encoding]
+    post(conn, work_id, OFFER, admin=True, key="offer")
+    post(conn, work_id, {"action": "accept", "generation": 0}, revision=1, key="accept", nonce=nonce)
+    assert checkpoint(conn, work_id, ["src"], nonce=nonce)[0] == 200
+    other = another_owner(conn, node="node-a")
+    row = conn.execute(
+        "SELECT seq, detail_json FROM work_events WHERE work_id=? ORDER BY seq DESC LIMIT 1", (work_id,)
+    ).fetchone()
+    detail = json.loads(row[1])
+    detail["ownership"]["write_scope"] = ["src/prefix" + private + "suffix/module.py"]
+    conn.execute("UPDATE work_events SET detail_json=? WHERE seq=?", (json.dumps(detail), row[0]))
+    conn.commit()
+    status, reply = checkpoint(conn, other, ["src"], nonce=NONCE_B)
+    assert status == 409 and reply["code"] == "path-scope-unavailable", reply
+    assert "conflicts" not in reply and private not in json.dumps(reply)
+    assert event_count(conn, other) == 2
+
+
+@pytest.mark.parametrize("digest", [None, 42, "a" * 63, "A" * 64])
+@pytest.mark.parametrize("scope", [[], ["other"]])
+def test_malformed_holder_digest_refuses_even_empty_or_other_repository_scope(ledger, digest, scope):
+    conn, work_id, _ = ledger
+    owned(conn, work_id)
+    other = another_owner(conn)
+    row = conn.execute(
+        "SELECT seq, detail_json FROM work_events WHERE work_id=? ORDER BY seq DESC LIMIT 1", (other,)
+    ).fetchone()
+    detail = json.loads(row[1])
+    detail["ownership"].update(holder_hash=digest, repo_identity="example/other", write_scope=scope)
+    conn.execute("UPDATE work_events SET detail_json=? WHERE seq=?", (json.dumps(detail), row[0]))
+    conn.commit()
+    status, reply = checkpoint(conn, work_id, ["src"])
+    assert status == 409 and reply["code"] == "path-scope-unavailable", reply
+    assert "conflicts" not in reply and event_count(conn, work_id) == 2

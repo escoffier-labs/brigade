@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
+import re
 import sqlite3
 from typing import Any, Mapping
 
@@ -23,6 +27,10 @@ _MESSAGES = {
     "path-scope-capacity-exhausted": "checkpoint admission exceeds snapshot scan bound. Ownership unchanged.",
     "path-scope-unavailable": "stored scope cannot be safely assessed. Ownership unchanged.",
 }
+_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+# Lookahead also finds capabilities embedded inside longer identifiers/segments.
+_NONCE_CANDIDATES = re.compile(r"(?=([A-Za-z0-9_+/-]{43}))")
+_HEX_CANDIDATES = re.compile(r"(?=([0-9A-Fa-f]{64}))")
 
 
 class ScopeAdmissionError(store.WorkloreConflict):
@@ -33,6 +41,26 @@ class ScopeAdmissionError(store.WorkloreConflict):
         self.details: dict[str, Any] = {"resolution": _RESOLUTIONS[code]}
         if conflicts is not None:
             self.details.update(conflicts=conflicts, truncated=truncated)
+
+
+def _reject_reflection(digest: str, texts: list[str]) -> None:
+    """Assess each bounded output string once, before enumerating path pairs."""
+    for text in set(texts):
+        if digest in text.lower():
+            raise ValueError("private reservation metadata")
+        for match in _NONCE_CANDIDATES.finditer(text):
+            candidate = match[1]
+            decoded = base64.b64decode(candidate + "=", altchars=b"-_", validate=True)
+            if candidate not in {
+                base64.urlsafe_b64encode(decoded).decode().rstrip("="),
+                base64.b64encode(decoded).decode().rstrip("="),
+            }:
+                continue
+            if len(decoded) == 32 and hmac.compare_digest(hashlib.sha256(decoded).hexdigest(), digest):
+                raise ValueError("private reservation metadata")
+        for match in _HEX_CANDIDATES.finditer(text):
+            if hmac.compare_digest(hashlib.sha256(bytes.fromhex(match[1])).hexdigest(), digest):
+                raise ValueError("private reservation metadata")
 
 
 def admit_checkpoint(conn: sqlite3.Connection, work_id: str, body: Mapping[str, Any]) -> None:
@@ -48,57 +76,72 @@ def admit_checkpoint(conn: sqlite3.Connection, work_id: str, body: Mapping[str, 
     requested = body["write_scope"]
     if not requested:
         return
+    reservations = {
+        ownership.EVENT_TYPES[action]: (action, state)
+        for action, state in (
+            ("accept", "owned"),
+            ("checkpoint", "owned"),
+            ("report", "owned"),
+            ("handoff", "handoff-pending"),
+        )
+    }
     # Group all ownership events first: a later reset ends the old reservation.
     # Filter resets before LIMIT so immutable departed histories consume no slot.
     rows = conn.execute(
-        "SELECT e.work_id, substr(CAST(e.detail_json AS BLOB), 1, ?) FROM work_events e "
+        "SELECT e.work_id, e.event_type, substr(e.node_id, 1, ?), "
+        "substr(CAST(e.detail_json AS BLOB), 1, ?) FROM work_events e "
         "JOIN (SELECT work_id, MAX(seq) AS seq FROM work_events WHERE work_id != ? AND "
         + ownership._EVENT_PREDICATE
         + " GROUP BY work_id) latest ON e.work_id=latest.work_id AND e.seq=latest.seq "
-        "WHERE e.event_type IN ('ownership-accepted', 'ownership-checkpoint', "
-        "'ownership-reported', 'ownership-handoff-offered') ORDER BY e.work_id LIMIT ?",
-        (ownership.OWNERSHIP_EVENT_MAX_BYTES + 1, work_id, *ownership.EVENT_TYPES.values(), MAX_SCOPE_SNAPSHOTS + 1),
+        "WHERE e.event_type IN (" + ",".join("?" for _ in reservations) + ") ORDER BY e.work_id LIMIT ?",
+        (
+            ownership.NODE_ID_MAX + 1,
+            ownership.OWNERSHIP_EVENT_MAX_BYTES + 1,
+            work_id,
+            *ownership.EVENT_TYPES.values(),
+            *reservations,
+            MAX_SCOPE_SNAPSHOTS + 1,
+        ),
     )
     conflicts: list[dict[str, str]] = []
     truncated = False
     conflicted = False
     conflict_bytes = 2  # JSON list brackets
-    for index, (identifier, raw) in enumerate(rows):
+    for index, (identifier, event_type, principal, raw) in enumerate(rows):
         if index == MAX_SCOPE_SNAPSHOTS:
             raise ScopeAdmissionError("path-scope-capacity-exhausted")
         try:
             if len(raw) > ownership.OWNERSHIP_EVENT_MAX_BYTES:
                 raise ValueError("oversized snapshot")
-            snapshot = json.loads(raw)["ownership"]
-            if snapshot["state"] in {"unowned", "offered"}:
-                continue
-            if snapshot["state"] not in {"owned", "handoff-pending"}:
-                raise ValueError("unknown reservation state")
-            if snapshot["write_scope"] == []:
+            detail = json.loads(raw)
+            snapshot = detail["ownership"]
+            action, state = reservations[event_type]
+            if (
+                ownership._text(detail["action"], "action", ownership.ACTION_MAX) != action
+                or snapshot["state"] != state
+            ):
+                raise ValueError("inconsistent reservation event")
+            identifier = ownership._reference(identifier)
+            owner = ownership._node(snapshot["owner_node"])
+            if owner != ownership._node(principal):
+                raise ValueError("inconsistent reservation principal")
+            digest = snapshot["holder_hash"]
+            if not isinstance(digest, str) or not _DIGEST_RE.fullmatch(digest):
+                raise ValueError("invalid reservation digest")
+            raw_paths = ownership._array(snapshot["write_scope"], ownership.SCOPE_MAX_ITEMS)
+            if not raw_paths:
                 continue
             repo = ownership._path(snapshot["repo_identity"], "repo_identity", ownership.REPO_IDENTITY_MAX)
             if not ownership._REPO_RE.fullmatch(repo):
                 raise ValueError("invalid repository")
             if repo.casefold() != body["repo_identity"].casefold():
                 continue
-            paths = [
-                ownership._path(path) for path in ownership._array(snapshot["write_scope"], ownership.SCOPE_MAX_ITEMS)
-            ]
-            identifier = ownership._reference(identifier)
-            owner = ownership._node(snapshot["owner_node"])
+            paths = [ownership._path(path) for path in raw_paths]
+            _reject_reflection(digest, [identifier, owner, *requested, *paths])
             for path in requested:
                 for held in paths:
                     if path != held and not path.startswith(held + "/") and not held.startswith(path + "/"):
                         continue
-                    # Imported snapshots must not reflect even a digest through
-                    # an otherwise syntactically valid identity or path.
-                    digest = snapshot.get("holder_hash")
-                    if (
-                        isinstance(digest, str)
-                        and digest
-                        and any(digest in text for text in (identifier, owner, path, held))
-                    ):
-                        raise ValueError("private reservation metadata")
                     conflicted = True
                     record = {
                         "work_id": identifier,

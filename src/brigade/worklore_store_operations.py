@@ -342,8 +342,8 @@ def _item_candidates(conn: sqlite3.Connection, *, after: Mapping[str, str] | Non
     predicate = ""
     params: tuple[object, ...] = ()
     if after is not None:
-        predicate = " WHERE (created_at > ? OR (created_at = ? AND work_id > ?))"
-        params = (after["created_at"], after["created_at"], after["work_id"])
+        predicate = " WHERE (created_at, work_id) > (?, ?)"
+        params = (after["created_at"], after["work_id"])
     return list(
         conn.execute(
             f"SELECT {', '.join(_ITEM_COLUMNS)} FROM work_items{predicate} "
@@ -486,8 +486,8 @@ def _event_candidates(conn: sqlite3.Connection, *, after: Mapping[str, str] | No
     predicate = ""
     params: tuple[object, ...] = ()
     if after is not None:
-        predicate = " WHERE (occurred_at < ? OR (occurred_at = ? AND seq < ?))"
-        params = (after["occurred_at"], after["occurred_at"], _cursor_seq(after))
+        predicate = " WHERE (occurred_at, seq) < (?, ?)"
+        params = (after["occurred_at"], _cursor_seq(after))
     return list(
         conn.execute(
             f"SELECT {', '.join(_EVENT_PAGE_COLUMNS)} FROM work_events{predicate} "
