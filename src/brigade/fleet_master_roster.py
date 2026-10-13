@@ -28,15 +28,41 @@ _DANGEROUS_VALUE = re.compile(
     re.IGNORECASE,
 )
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~[/\\]|[/\\]|\.{1,2}[/\\])")
-_RELATIVE_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+(?=$|[^A-Za-z0-9_.~-])")
-_PROVIDER_MODEL = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+$")
-_SLASH_PROSE = re.compile(r"\b(?:and/or|input/output|read/write)\b", re.IGNORECASE)
-_MODEL_PATH_HINT = re.compile(
-    r"(?:^|[/\\])\.(?:[^/\\]+)(?:[/\\]|$)|"
-    r"(?:^|[/\\])(?:private|secrets?|credentials?|etc|passwd)(?:[/\\]|$)|"
-    r"\.[A-Za-z]{1,8}$",
-    re.IGNORECASE,
+_RELATIVE_PATH = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?P<path>(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+)(?![A-Za-z0-9_.~-])"
 )
+_FILESYSTEM_COMPONENTS = frozenset(
+    {
+        "bin",
+        "boot",
+        "cache",
+        "config",
+        "credentials",
+        "dev",
+        "etc",
+        "home",
+        "lib",
+        "lib64",
+        "logs",
+        "media",
+        "mnt",
+        "opt",
+        "passwd",
+        "private",
+        "proc",
+        "root",
+        "run",
+        "sbin",
+        "secret",
+        "secrets",
+        "srv",
+        "sys",
+        "tmp",
+        "usr",
+        "var",
+    }
+)
+_FILE_SUFFIX = re.compile(r"\.[A-Za-z]{1,8}$")
 _SURROGATE = re.compile("[\\ud800-\\udfff]")
 
 _TOP_FIELDS = frozenset({"schema", "revision", "seats"})
@@ -49,6 +75,16 @@ class MasterRosterError(ValueError):
 
 def _has_control(value: str) -> bool:
     return any(unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"} for character in value)
+
+
+def _has_relative_path_evidence(value: str) -> bool:
+    for match in _RELATIVE_PATH.finditer(value):
+        components = re.split(r"[/\\]", match.group("path"))
+        if any(component.startswith(".") or component.casefold() in _FILESYSTEM_COMPONENTS for component in components):
+            return True
+        if _FILE_SUFFIX.search(components[-1]):
+            return True
+    return False
 
 
 def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -67,16 +103,11 @@ def _text(value: Any, field: str) -> str:
         raise MasterRosterError(f"{field} must contain valid Unicode scalar values")
     if len(value) > MAX_TEXT or _has_control(value):
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
-    provider_model = field.endswith(".model") and _PROVIDER_MODEL.fullmatch(value)
-    screened_text = _SLASH_PROSE.sub("", value)
-    relative_path = _RELATIVE_PATH.search(screened_text)
-    provider_model_path = provider_model and _MODEL_PATH_HINT.search(value)
     if (
         _DANGEROUS_VALUE.search(value)
         or contains_credential(value)
         or _ROOTED_PATH.search(value)
-        or provider_model_path
-        or (relative_path and not provider_model)
+        or _has_relative_path_evidence(value)
     ):
         raise MasterRosterError(f"{field} contains a credential, environment assignment, or home path")
     return value

@@ -108,7 +108,7 @@ def test_parse_rejects_fine_grained_github_pat() -> None:
 
 @pytest.mark.parametrize(
     "model",
-    ["openai/gpt-5.6", "opencode-go/glm-5.2", "openrouter/x-ai/grok", "anthropic/claude"],
+    ["openai/gpt-5.6", "opencode-go/glm-5.2", "openrouter/x-ai/grok", "anthropic/claude", "openrouter/model:free"],
 )
 def test_parse_accepts_provider_qualified_model_identifiers(model: str) -> None:
     document = _document()
@@ -117,7 +117,18 @@ def test_parse_accepts_provider_qualified_model_identifiers(model: str) -> None:
     assert fleet_master_roster.parse(document)["seats"][0]["model"] == model
 
 
-@pytest.mark.parametrize("model", [".ssh/config", "private/credentials", "etc/passwd", "private/output.json"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        ".ssh/config",
+        "private/credentials",
+        "etc/passwd",
+        "private/output.json",
+        "usr/bin/python",
+        "var/log/messages",
+        "home/alice",
+    ],
+)
 def test_parse_rejects_relative_paths_as_models(model: str) -> None:
     document = _document()
     document["seats"][0]["model"] = model  # type: ignore[index]
@@ -131,6 +142,14 @@ def test_parse_accepts_slash_separated_descriptive_prose(text: str) -> None:
     document = _document()
     document["seats"][0]["purpose"] = f"Support {text} workflows"  # type: ignore[index]
     document["seats"][0]["caveats"] = [f"Review {text} details"]  # type: ignore[index]
+
+    assert fleet_master_roster.parse(document)["seats"][0]["purpose"] == f"Support {text} workflows"
+
+
+@pytest.mark.parametrize("text", ["CI/CD", "planner/reviewer"])
+def test_parse_accepts_ordinary_slash_delimited_descriptive_prose(text: str) -> None:
+    document = _document()
+    document["seats"][0]["purpose"] = f"Support {text} workflows"  # type: ignore[index]
 
     assert fleet_master_roster.parse(document)["seats"][0]["purpose"] == f"Support {text} workflows"
 
