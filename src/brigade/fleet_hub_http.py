@@ -737,7 +737,9 @@ def make_handler(
                     ],
                 )
                 nodes = node_summary(board.runs)
-                unread_counts = fleet_hub_messages.unread_counts(conn) if dashboard_authorized else {}
+                unread_counts = (
+                    fleet_hub_messages.unread_counts(conn) if dashboard_authorized and view == "machines" else {}
+                )
             except ClaimFenceError as exc:
                 self._send_json(503, {"error": str(exc)})
                 return

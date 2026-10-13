@@ -1257,6 +1257,38 @@ class TestBoardBounds:
         assert 'title="matching-active"' in filtered_page
         assert 'title="matching-terminal"' in filtered_page
 
+    def test_machine_page_global_cap_keeps_all_matching_runs_first(self, hub):
+        stamp = datetime.now(timezone.utc).isoformat()
+        node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(21)]
+        matching_run_ids = [f"matching-{index:03d}" for index in range(100)]
+        events = []
+        for node_index, node_id in enumerate(node_ids):
+            for run_index in range(100):
+                matches = node_index == 0 or run_index == 0
+                run_id = matching_run_ids[run_index] if node_index == 0 else f"node-{node_index:02d}-{run_index:03d}"
+                events.append(
+                    _event(
+                        node_id,
+                        run_id,
+                        1,
+                        "run.completed",
+                        repo="matched" if matches else "other",
+                        harness="codex",
+                        ts=stamp,
+                    )
+                )
+
+        for start in range(0, len(events), 1000):
+            status, _headers, text = _request(
+                hub, "POST", "/events", headers=_bearer(), body=events[start : start + 1000]
+            )
+            assert status == 200, text
+
+        status, _headers, page = _request(hub, "GET", "/view/machines?all=1&repo=matched", headers=_bearer())
+
+        assert status == 200
+        assert all(f'title="{run_id}"' in page for run_id in matching_run_ids)
+
     def test_machine_page_caps_total_runs_and_marks_truncation(self, hub):
         node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(21)]
         stamp = datetime.now(timezone.utc).isoformat()
@@ -1412,6 +1444,22 @@ class TestBoardBounds:
         status, _headers, page = _request(hub, "GET", "/view/repos", headers=_bearer())
         assert status == 200
         assert "repo-a" in page
+        assert calls == []
+
+    def test_repo_view_skips_unread_message_scan(self, hub, monkeypatch):
+        calls = []
+        original_query = fleet_hub_http.fleet_hub_messages.unread_counts
+
+        def unread_scan(conn):
+            calls.append(conn)
+            return original_query(conn)
+
+        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", unread_scan)
+
+        status, _headers, page = _request(hub, "GET", "/view/repos", headers=_bearer())
+
+        assert status == 200
+        assert "Fleet: Repos" in page
         assert calls == []
 
     def test_unread_only_machine_cards_are_bounded_and_paginated(self):

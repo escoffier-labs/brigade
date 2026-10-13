@@ -279,7 +279,7 @@ def board_status_for_nodes(
             for node_id, ranked in per_node.items()
             for rank, (order, entry) in enumerate(ranked)
         ),
-        key=lambda item: (item[0], item[1], item[2]),
+        key=lambda item: (item[1][0], item[0], item[1][1:], item[2]),
     )
     if len(page_rows) > MACHINE_PAGE_RUN_LIMIT:
         truncated.update(row[2] for row in page_rows[MACHINE_PAGE_RUN_LIMIT:])
