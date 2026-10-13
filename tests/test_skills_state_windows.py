@@ -148,15 +148,16 @@ def test_native_skills_read_commands_do_not_create_missing_state(tmp_path, capsy
 
 @native_windows
 @pytest.mark.parametrize("operation", ["import", "install"])
-def test_native_skills_relative_source_import_and_install(tmp_path, monkeypatch, capsys, operation):
+@pytest.mark.parametrize("parent_relative", [False, True], ids=["child", "parent"])
+def test_native_skills_relative_source_import_and_install(tmp_path, monkeypatch, capsys, operation, parent_relative):
     source = _write_skill(tmp_path / "source")
     payload = b"relative source\x00\xff\n"
     (source / "scripts").mkdir()
     (source / "scripts" / "relative.txt").write_bytes(payload)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.chdir(tmp_path)
-    requested = Path(".") / source.relative_to(tmp_path)
+    monkeypatch.chdir(workspace if parent_relative else tmp_path)
+    requested = Path(".." if parent_relative else ".") / source.relative_to(tmp_path)
     if operation == "import":
         result = skills_cmd.import_skill(target=workspace, source=requested, json_output=True)
         destination = workspace / ".brigade" / "skills" / "registry" / "security-review"
@@ -170,7 +171,8 @@ def test_native_skills_relative_source_import_and_install(tmp_path, monkeypatch,
 
 @native_windows
 @pytest.mark.parametrize("reparse", [False, True], ids=["plain", "junction"])
-def test_native_relative_source_collection_keeps_reparse_refusal(tmp_path, monkeypatch, reparse):
+@pytest.mark.parametrize("parent_relative", [False, True], ids=["child", "parent"])
+def test_native_relative_source_collection_keeps_reparse_refusal(tmp_path, monkeypatch, reparse, parent_relative):
     source = tmp_path / "source"
     source.mkdir()
     payload = b"relative source\x00\xff\n"
@@ -180,8 +182,10 @@ def test_native_relative_source_collection_keeps_reparse_refusal(tmp_path, monke
         selected = tmp_path / "linked-source"
         with _reparse_replacement_setup(selected):
             _link_directory(selected, source)
-    monkeypatch.chdir(tmp_path)
-    requested = selected.relative_to(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace if parent_relative else tmp_path)
+    requested = Path(".." if parent_relative else ".") / selected.relative_to(tmp_path)
     if reparse:
         with pytest.raises(skills_cmd.SkillsStatePathError):
             skills_cmd._collect_source_tree(requested)

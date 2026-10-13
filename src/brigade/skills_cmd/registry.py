@@ -1298,8 +1298,9 @@ def _collect_source_tree(source_dir: Path) -> tuple[list[tuple[str, ...]], dict[
     if not _HAS_DESCRIPTOR_ANCHOR:
         raise _fallback_mutation_refusal("source reads", source_dir)
     try:
-        # NT extended paths must be absolute without resolving away a final reparse point.
-        root_fd = dirfd.open_directory_nofollow(source_dir.absolute(), writable=False)
+        # NT extended paths need lexical normalization, without following reparse points.
+        root_path = Path(os.path.abspath(source_dir)) if sys.platform == "win32" else source_dir
+        root_fd = dirfd.open_directory_nofollow(root_path, writable=False)
     except OSError as exc:
         raise SkillsStatePathError(f"skills source must be a plain readable directory: {source_dir}") from exc
     try:
