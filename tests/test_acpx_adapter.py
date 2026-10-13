@@ -886,6 +886,28 @@ def test_parse_stream_ignores_colliding_agent_permission_error_for_prompt_state(
     assert parsed["has_structured_jsonrpc_error"] is False
 
 
+def test_parse_stream_preserves_ambiguous_prompt_error_until_prompt_completion():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "shared", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/request_permission",
+                "id": "shared",
+                "params": {},
+            },
+            {"jsonrpc": "2.0", "id": "shared", "error": {"code": -32000, "message": "Model unavailable"}},
+            {"jsonrpc": "2.0", "id": "shared", "result": {"outcome": "selected"}},
+        ),
+        allow_empty_text=True,
+    )
+
+    assert parsed is not None
+    assert parsed["prompt_completed"] is False
+    assert parsed["structured_error_detail"] == "Model unavailable"
+    assert error == "Model unavailable"
+
+
 def test_parse_stream_rejects_duplicate_outstanding_prompt_id():
     parsed, error = acpx_adapter.parse_stream(
         _stream(

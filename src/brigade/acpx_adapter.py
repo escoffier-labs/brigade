@@ -401,6 +401,7 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
     has_structured_jsonrpc_error = False
     structured_error_detail: str | None = None
     permission_error_detail: str | None = None
+    ambiguous_prompt_error: dict[str, Any] | None = None
     effective_model_locator: str | None = None
     for message in messages:
         method = message.get("method")
@@ -430,15 +431,26 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
             or (client_request_type == "session/prompt" and "stopReason" in result)
             or (client_request_type == "session/set_config_option" and "configOptions" in result)
         )
+        rpc_error = message.get("error")
+        ambiguous_prompt_error_response = (
+            is_response
+            and isinstance(rpc_error, dict)
+            and message_id_key is not None
+            and message_id_key == active_prompt_id
+            and client_request_type == "session/prompt"
+            and message_id_key in outstanding_agent_request_ids
+        )
         agent_request_response = (
             is_response
             and message_id_key is not None
             and message_id_key in outstanding_agent_request_ids
             and not client_response_shape
+            and not ambiguous_prompt_error_response
         )
         matched_prompt_request = (
             is_response
             and not agent_request_response
+            and not ambiguous_prompt_error_response
             and client_request_type == "session/prompt"
             and message_id_key == active_prompt_id
         )
@@ -459,7 +471,12 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
             else None
         )
         matched_initialize_request = is_response and not agent_request_response and client_request_type == "initialize"
-        if is_response and message_id_key is not None and not agent_request_response:
+        if (
+            is_response
+            and message_id_key is not None
+            and not agent_request_response
+            and not ambiguous_prompt_error_response
+        ):
             client_request_types.pop(message_id_key, None)
         if isinstance(result, dict):
             if "protocolVersion" in result:
@@ -477,6 +494,8 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
             if matched_prompt_request and isinstance(stop, str):
                 stop_reason = stop
                 prompt_completed = stop == "end_turn"
+                if prompt_completed:
+                    ambiguous_prompt_error = None
         params = message.get("params")
         if isinstance(params, dict):
             candidate_session = params.get("sessionId")
@@ -491,6 +510,7 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
                 has_structured_jsonrpc_error = False
                 structured_error_detail = None
                 permission_error_detail = None
+                ambiguous_prompt_error = None
                 request_id = str(message["id"])
                 if message_id_key is not None:
                     active_prompt_id = message_id_key
@@ -510,13 +530,19 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
                 content = update.get("content")
                 if isinstance(content, dict) and content.get("type") == "text" and isinstance(content.get("text"), str):
                     text_parts.append(content["text"])
-        rpc_error = message.get("error")
-        if isinstance(rpc_error, dict) and not agent_request_response:
+        if ambiguous_prompt_error_response and isinstance(rpc_error, dict):
+            if ambiguous_prompt_error is None:
+                ambiguous_prompt_error = rpc_error
+        elif isinstance(rpc_error, dict) and not agent_request_response:
             has_structured_jsonrpc_error = True
             error_message = rpc_error.get("message")
             if structured_error_detail is None and isinstance(error_message, str):
                 structured_error_detail = sanitize_diagnostic(error_message, limit=200)
-        permission_error = None if agent_request_response else _permission_prompt_diagnostic(rpc_error)
+        permission_error = (
+            None
+            if agent_request_response or ambiguous_prompt_error_response
+            else _permission_prompt_diagnostic(rpc_error)
+        )
         if permission_error is not None:
             if prompt_completed:
                 if "".join(text_parts).strip():
@@ -529,6 +555,16 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
                 break
     if protocol_version not in (None, 1):
         return None, f"unsupported ACP protocol version: {protocol_version}"
+    if ambiguous_prompt_error is not None and not prompt_completed:
+        has_structured_jsonrpc_error = True
+        error_message = ambiguous_prompt_error.get("message")
+        if structured_error_detail is None and isinstance(error_message, str):
+            structured_error_detail = sanitize_diagnostic(error_message, limit=200)
+        permission_error = _permission_prompt_diagnostic(ambiguous_prompt_error)
+        if permission_error is not None:
+            if not allow_empty_text:
+                return None, str(permission_error["detail"])
+            permission_error_detail = str(permission_error["detail"])
     text = "".join(text_parts).strip()
     if not text and not allow_empty_text:
         return None, "ACP stream contained no final assistant text"
