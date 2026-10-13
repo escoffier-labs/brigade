@@ -469,17 +469,27 @@ def test_new_send_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
     )
     assert older["queued"] is True
 
-    offline = False
-    newer = fleet_client_messages.send(
+    pending = fleet_client_messages.send(
         recipient=NODE_B,
         subject="Newer",
         body="Sent second",
         reference=None,
         priority="normal",
     )
+    assert pending["queued"] is True
+    assert [message["subject"] for message in attempts[1:]] == ["Older"]
 
-    assert newer["message"]["client_id"] == attempts[-1]["client_id"]
-    assert [message["subject"] for message in attempts[1:]] == ["Older", "Newer"]
+    offline = False
+    newest = fleet_client_messages.send(
+        recipient=NODE_B,
+        subject="Newest",
+        body="Sent last",
+        reference=None,
+        priority="normal",
+    )
+
+    assert newest["message"]["client_id"] == attempts[-1]["client_id"]
+    assert [message["subject"] for message in attempts[2:]] == ["Older", "Newer", "Newest"]
 
 
 def test_ambiguous_reply_is_spooled_and_retried_with_same_client_id(tmp_path, monkeypatch):
