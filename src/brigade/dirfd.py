@@ -143,6 +143,10 @@ def _nt_mkdir_child(parent: int, name: str) -> None:
     _nt_dirfd().mkdir_child(parent, name)
 
 
+def _nt_reopen_directory_writable(parent: int, *, modify: bool = False) -> int:
+    return _nt_dirfd().reopen_directory_writable(parent, modify=modify)
+
+
 def _posix_open_child_file(parent: int, name: str, flags: int, mode: int) -> int:
     if flags & os.O_CREAT:
         return os.open(name, flags, mode, dir_fd=parent)
@@ -224,7 +228,7 @@ def open_directory_chain(path: Path, *, create: bool = False, writable: bool = T
             os.close(descriptor)
             descriptor = child
         if writable and nt_available():
-            writable_descriptor = _nt_dirfd().reopen_directory_writable(descriptor, modify=True)
+            writable_descriptor = _nt_reopen_directory_writable(descriptor, modify=True)
             os.close(descriptor)
             descriptor = writable_descriptor
         return descriptor
@@ -262,7 +266,7 @@ def mkdir_child(parent: int, name: str) -> None:
         _posix_mkdir_child(parent, name)
         return
     if nt_available():
-        writable_parent = _nt_dirfd().reopen_directory_writable(parent)
+        writable_parent = _nt_reopen_directory_writable(parent)
         try:
             _nt_mkdir_child(writable_parent, name)
         finally:

@@ -188,11 +188,16 @@ def test_dirfd_public_api_delegates_to_nt_when_posix_unavailable(
         calls.append(("mkdir", name))
         os.mkdir(name, 0o700, dir_fd=parent)
 
+    def reopen_writable(parent: int, *, modify: bool = False) -> int:
+        calls.append(("reopen", modify))
+        return os.dup(parent)
+
     monkeypatch.setattr(dirfd, "posix_available", lambda: False)
     monkeypatch.setattr(dirfd, "nt_available", lambda: True)
     monkeypatch.setattr(nt_dirfd, "open_root_directory", open_root)
     monkeypatch.setattr(nt_dirfd, "open_child_directory", open_child)
     monkeypatch.setattr(nt_dirfd, "mkdir_child", mkdir_child)
+    monkeypatch.setattr(nt_dirfd, "reopen_directory_writable", reopen_writable)
 
     parent = dirfd.open_directory_nofollow(tmp_path)
     child = -1
@@ -201,6 +206,7 @@ def test_dirfd_public_api_delegates_to_nt_when_posix_unavailable(
         child = dirfd.open_child_directory(parent, "events")
         assert ("root", os.fspath(tmp_path)) in calls
         assert ("mkdir", "events") in calls
+        assert ("reopen", False) in calls
         assert ("child", "events") in calls
     finally:
         if child != -1:
