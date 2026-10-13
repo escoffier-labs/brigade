@@ -50,7 +50,7 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)\s*[:=]\s*"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
-    r"\s+(?:is|was|equals|will\s+be|has\s+been)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
+    r"\s+(?:is|was|equals|will\s+be|has\s+been|set\s+to)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%[A-Za-z_][A-Za-z0-9_]*%|"
     r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})"
     r"(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))",
@@ -73,6 +73,11 @@ _API_ROUTE_CONTEXT = re.compile(
     r"(?P<path>/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)(?:\?[^\s<>\"']*)?)",
     re.IGNORECASE,
 )
+_HTTP_METHOD_ROUTE_CONTEXT = re.compile(
+    r"\b(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)\s+"
+    r"(?P<path>/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)(?:\?[^\s<>\"']*)?)"
+)
+_HTTP_METHOD_ROUTE_ROOTS = frozenset({"applications", "config", "users"})
 _HTTP_URL = re.compile(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE)
 _URL_PATH_QUERY_KEYS = frozenset({"dir", "directory", "file", "filename", "filepath", "path", "root"})
 
@@ -110,7 +115,8 @@ _RELATIVE_PATH = re.compile(
 )
 _PATH_CONTEXT = re.compile(
     r"(?:\b(?:run|execute|inspect|open|read|write|load|save|path|file|directory|folder|script|repository|repo)\s+"
-    r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?|"
+    r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?"
+    r"[\"'“‘]*\s*(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?|"
     r"\b(?:path|file|directory|folder|script|repository|repo)\s*(?:is|was|equals|will\s+be|has\s+been|:|=)\s*)[\"'“‘`()\[{]*\s*$",
     re.IGNORECASE,
 )
@@ -170,7 +176,19 @@ def _without_api_route_references(value: str) -> str:
             return match.group(0)
         return match.group(0).replace(route, "")
 
-    return _API_ROUTE_CONTEXT.sub(remove_route, _HTTP_URL.sub("", value))
+    text = _HTTP_URL.sub("", value)
+
+    def remove_http_method_route(match: re.Match[str]) -> str:
+        path = match.group("path")
+        components = path.split("?", maxsplit=1)[0].strip("/").split("/")
+        if components[0].casefold() in _HTTP_METHOD_ROUTE_ROOTS and not any(
+            component in {".", ".."} for component in components
+        ):
+            return match.group(0).replace(path, "")
+        return match.group(0)
+
+    text = _HTTP_METHOD_ROUTE_CONTEXT.sub(remove_http_method_route, text)
+    return _API_ROUTE_CONTEXT.sub(remove_route, text)
 
 
 _EXTENSIONLESS_FILES = frozenset(
@@ -268,20 +286,21 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         raise MasterRosterError(f"{field} must contain valid Unicode scalar values")
     if len(value) > MAX_TEXT or _has_control(value):
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
+    path_text = _without_api_route_references(value)
     if (
         _DANGEROUS_VALUE.search(value)
         or _URL_CREDENTIAL_QUERY.search(value)
         or _has_url_userinfo(value)
         or _has_filesystem_path_in_url_query(value)
-        or _ENVIRONMENT_ASSIGNMENT.search(_without_api_route_references(value))
-        or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(_without_api_route_references(value))
+        or _ENVIRONMENT_ASSIGNMENT.search(path_text)
+        or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(path_text)
         or contains_credential(value)
         or (
             check_paths
             and (
-                _ROOTED_PATH.search(_without_api_route_references(value))
+                _ROOTED_PATH.search(path_text)
                 or _has_relative_path_evidence(
-                    value,
+                    path_text,
                     model_identifier=field.endswith(".model") and _MODEL_IDENTIFIER.fullmatch(value) is not None,
                 )
             )
