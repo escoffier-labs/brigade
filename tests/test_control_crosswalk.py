@@ -1972,14 +1972,15 @@ def test_ec12_classifies_a_missing_manifest_listed_entry_as_snapshot_mismatch(tm
     assert result["artifacts"][0]["reason_codes"] == ["package_snapshot_mismatch"]
 
 
-def test_ec03_classifies_signed_nonterminal_receipt_as_incomplete(tmp_path, monkeypatch):
+@pytest.mark.parametrize("command_status", ["running", [], {}])
+def test_ec03_classifies_non_string_command_status_as_incomplete(tmp_path, monkeypatch, command_status):
     from brigade import control_crosswalk_cosign
 
     target = _ws(tmp_path)
     run_dir = _write_cosign_assessment_fixture(target)
     receipt_path = run_dir / "receipt.json"
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    receipt["commands"][0]["status"] = "running"
+    receipt["commands"][0]["status"] = command_status
     _write_json(receipt_path, receipt)
     bundle_path = run_dir / "attestation.sigstore.json"
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))

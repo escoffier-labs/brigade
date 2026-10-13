@@ -236,7 +236,8 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
     if receipt_status in {"failed", "rejected"}:
         terminal_command_statuses.update({"failed", "timed_out", "rejected"})
     if any(
-        command.get("status") not in terminal_command_statuses
+        not isinstance(command.get("status"), str)
+        or command.get("status") not in terminal_command_statuses
         or (command.get("exit_code") is None and command.get("status") != "timed_out")
         or (command.get("exit_code") is not None and type(command.get("exit_code")) is not int)
         for command in commands
