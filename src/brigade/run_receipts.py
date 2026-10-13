@@ -10,6 +10,7 @@ from pathlib import Path
 from . import agents, localio, message_envelope, proc
 from .acpx_adapter import is_safe_model_id
 from .run_transport import Assignment, WorkerAttempt, WorkerResult
+from .worklore_validate import contains_controls, contains_credential, contains_private_path
 from .worker_failure import normalized_failure
 
 
@@ -44,12 +45,30 @@ _ALLOWED_METADATA_PROVENANCE: dict[str, set[tuple[str, str, str | None]]] = {
 }
 _METADATA_EVIDENCE_KEYS = {"source", "locator", "digest", "unknown_reason"}
 _SAFE_ACPX_VERSION = re.compile(r"\d+\.\d+\.\d+")
+_SENSITIVE_MODEL_LABEL = re.compile(r"(?i)\b(?:bearer|token|secret|password|api[ _-]?key)\b")
 
 
-def _safe_metadata_label(key: str, value: object) -> str | None:
-    if key in {"requested_model", "effective_model", "model"} and is_safe_model_id(value):
-        assert isinstance(value, str)
-        return value
+def _safe_display_model_label(value: object) -> str | None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 128
+        or value.strip() != value
+        or contains_controls(value)
+        or contains_private_path(value)
+        or contains_credential(value)
+        or _SENSITIVE_MODEL_LABEL.search(value)
+    ):
+        return None
+    return value
+
+
+def _safe_metadata_label(key: str, value: object, *, strict_model_id: bool = False) -> str | None:
+    if key in {"requested_model", "effective_model", "model"}:
+        safe_label = _safe_display_model_label(value)
+        if safe_label is None or (strict_model_id and not is_safe_model_id(safe_label)):
+            return None
+        return safe_label
     if key == "acpx_version" and isinstance(value, str) and len(value) <= 128 and _SAFE_ACPX_VERSION.fullmatch(value):
         return value
     return None
@@ -151,7 +170,11 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
     payload: list[dict[str, object]] = []
     for result in results:
         safe_metadata_labels = {
-            name: _safe_metadata_label(name, value)
+            name: _safe_metadata_label(
+                name,
+                value,
+                strict_model_id=name == "effective_model" and result.transport == "acpx",
+            )
             for name, value in (
                 ("requested_model", result.requested_model),
                 ("effective_model", result.effective_model),
@@ -257,7 +280,7 @@ def _attempt_payload(attempt: WorkerAttempt, *, attempt_number: int) -> dict[str
         "selected": attempt.selected,
     }
     if attempt.model is not None:
-        model = _safe_metadata_label("model", attempt.model)
+        model = _safe_metadata_label("model", attempt.model, strict_model_id=attempt.transport == "acpx")
         if model is not None:
             payload["model"] = model
     if attempt.stdout_log is not None:
@@ -280,7 +303,11 @@ def _attempt_payload(attempt: WorkerAttempt, *, attempt_number: int) -> dict[str
 
 def agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
     safe_metadata_labels = {
-        name: _safe_metadata_label(name, value)
+        name: _safe_metadata_label(
+            name,
+            value,
+            strict_model_id=name == "effective_model" and result.transport == "acpx",
+        )
         for name, value in (
             ("requested_model", result.requested_model),
             ("effective_model", result.effective_model),

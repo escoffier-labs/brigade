@@ -283,6 +283,47 @@ def test_worker_payload_bounds_model_and_adapter_version_labels():
     assert observed["acpx_version"] == "0.12.0"
 
 
+def test_non_acp_model_display_labels_survive_receipt_serialization():
+    label = "Gemini 3.8 Flash (Low)"
+    result = WorkerResult(
+        worker="coder",
+        task="inspect metadata",
+        text="done",
+        ok=True,
+        transport="cli",
+        requested_model=label,
+        effective_model=label,
+        attempts=(
+            WorkerAttempt(
+                kind="retry",
+                worker="coder",
+                task="inspect metadata",
+                transport="cli",
+                model=label,
+                reasoning=None,
+                started_at="2026-10-13T12:00:00+00:00",
+                finished_at="2026-10-13T12:00:01+00:00",
+                exit_code=0,
+                terminal_reason="complete",
+                failure_phase=None,
+                failure_kind=None,
+                session_id=None,
+            ),
+        ),
+    )
+
+    worker = worker_payload([result])[0]
+    synthesis = agent_result_payload(
+        agents.AgentResult(transport="cli", text="done", ok=True, requested_model=label, effective_model=label)
+    )
+
+    assert worker["requested_model"] == label
+    assert worker["effective_model"] == label
+    assert worker["attempts"][0]["model"] == label
+    assert synthesis["requested_model"] == label
+    assert synthesis["effective_model"] == label
+
+
 def test_worker_receipt_sinks_drop_known_credential_families_and_version_metadata():
     credential_models = (
         "ghp_" + "A" * 24,
@@ -290,6 +331,7 @@ def test_worker_receipt_sinks_drop_known_credential_families_and_version_metadat
         "xoxb-" + "A" * 16,
         "sk-" + "A" * 24,
         "AKIA" + "A" * 16,
+        "ASIA" + "A" * 16,
         "AIza" + "a" * 30,
         "glpat-" + "a" * 20,
         "eyJ" + "A" * 8 + "." + "B" * 8 + "." + "C" * 8,

@@ -78,6 +78,7 @@ def test_approval_handoff_selects_completed_requester_not_unrelated_workers(tmp_
             text="approval is required",
             ok=True,
             thread_id="thread-requester",
+            transport="codex-app-server",
             status="complete",
         ),
     ]
@@ -96,6 +97,7 @@ def test_approval_handoff_selects_completed_requester_not_unrelated_workers(tmp_
             "status": "interrupted",
             "task": "request approval",
             "thread_id": "thread-requester",
+            "transport": "codex-app-server",
             "worker": "requester",
         }
     ]

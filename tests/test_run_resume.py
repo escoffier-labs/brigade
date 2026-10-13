@@ -215,6 +215,7 @@ def test_roster_snapshot_rejects_colliding_env_targets():
         "xoxb-" + "A" * 16,
         "sk-" + "A" * 24,
         "AKIA" + "A" * 16,
+        "ASIA" + "A" * 16,
         "AIza" + "a" * 30,
         "glpat-" + "a" * 20,
         "eyJ" + "A" * 8 + "." + "B" * 8 + "." + "C" * 8,

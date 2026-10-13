@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from brigade import acpx_adapter
 from brigade import proc
 
@@ -521,6 +523,103 @@ def test_parse_stream_clears_stale_model_after_rejected_explicit_update():
     assert parsed is not None and parsed["effective_model"] is None
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "config_option_update",
+                    "configOptions": [
+                        {
+                            "id": "model",
+                            "category": "model",
+                            "type": "select",
+                            "currentValue": "composer-2.5",
+                            "options": [],
+                        }
+                    ],
+                }
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": "new-session",
+            "result": {
+                "configOptions": [
+                    {
+                        "id": "model",
+                        "category": "model",
+                        "type": "select",
+                        "currentValue": "composer-2.5",
+                        "options": [],
+                    }
+                ]
+            },
+        },
+    ],
+    ids=["config-update", "session-response"],
+)
+def test_parse_stream_reads_standard_model_config_options(message):
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+            message,
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "hello"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["effective_model"] == "composer-2.5"
+
+
+def test_failed_run_preserves_observed_model_and_session_metadata(monkeypatch, tmp_path):
+    stream = _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "session/prompt",
+            "params": {"sessionId": "session-1", "prompt": "hidden"},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "session-1",
+                "update": {"sessionUpdate": "config_option_update", "modelId": "composer-2.5"},
+            },
+        },
+        {"jsonrpc": "2.0", "id": "req-1", "error": {"code": -32000, "message": "provider failed"}},
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter([proc.Result(0, "acpx 0.12.0\n", ""), proc.Result(1, stream, "provider failed")])
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.effective_model == "composer-2.5"
+    assert result.protocol_version == 1
+    assert result.session_id == "session-1"
+    assert result.request_id == "req-1"
+    assert result.safe_events
+
+
 def test_parse_stream_rejects_known_credential_families_as_model_ids():
     credential_models = (
         "ghp_" + "A" * 24,
@@ -528,6 +627,7 @@ def test_parse_stream_rejects_known_credential_families_as_model_ids():
         "xoxb-" + "A" * 16,
         "sk-" + "A" * 24,
         "AKIA" + "A" * 16,
+        "ASIA" + "A" * 16,
         "AIza" + "a" * 30,
         "glpat-" + "a" * 20,
         "eyJ" + "A" * 8 + "." + "B" * 8 + "." + "C" * 8,

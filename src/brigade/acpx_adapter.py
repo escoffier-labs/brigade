@@ -266,13 +266,27 @@ def _update(message: dict[str, Any]) -> dict[str, Any] | None:
     return nested if isinstance(nested, dict) else params
 
 
+def _model_from_config_options(value: object) -> str | None:
+    if not isinstance(value, list):
+        return None
+    model_options = [
+        option
+        for option in value
+        if isinstance(option, dict) and (option.get("category") == "model" or option.get("id") == "model")
+    ]
+    if len(model_options) != 1:
+        return None
+    model = model_options[0].get("currentValue")
+    return model if is_safe_model_id(model) else None
+
+
 def _model_from(update: dict[str, Any]) -> str | None:
     if update.get("sessionUpdate") != "config_option_update":
         return None
-    model = update.get("modelId")
-    if not is_safe_model_id(model):
-        return None
-    return model
+    if "modelId" in update:
+        model = update["modelId"]
+        return model if is_safe_model_id(model) else None
+    return _model_from_config_options(update.get("configOptions"))
 
 
 def is_safe_model_id(value: object) -> bool:
@@ -285,7 +299,7 @@ def is_safe_model_id(value: object) -> bool:
     )
 
 
-def parse_stream(stdout: str | None) -> tuple[dict[str, Any] | None, str]:
+def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple[dict[str, Any] | None, str]:
     messages, error = _objects(stdout)
     if messages is None:
         return None, error
@@ -307,6 +321,8 @@ def parse_stream(stdout: str | None) -> tuple[dict[str, Any] | None, str]:
             version = result.get("protocolVersion")
             if isinstance(version, int):
                 protocol_version = version
+            if "configOptions" in result:
+                effective_model = _model_from_config_options(result["configOptions"])
             stop = result.get("stopReason")
             if isinstance(stop, str) and isinstance(message.get("id"), (str, int)):
                 stop_reasons[str(message["id"])] = stop
@@ -327,7 +343,7 @@ def parse_stream(stdout: str | None) -> tuple[dict[str, Any] | None, str]:
             if isinstance(status, str):
                 safe_event["status"] = status
             safe_events.append(safe_event)
-            if kind == "config_option_update" and "modelId" in update:
+            if kind == "config_option_update" and ("modelId" in update or "configOptions" in update):
                 effective_model = _model_from(update)
             if not stream_finalized and kind == "agent_message_chunk":
                 content = update.get("content")
@@ -351,7 +367,7 @@ def parse_stream(stdout: str | None) -> tuple[dict[str, Any] | None, str]:
     if protocol_version not in (None, 1):
         return None, f"unsupported ACP protocol version: {protocol_version}"
     text = "".join(text_parts).strip()
-    if not text:
+    if not text and not allow_empty_text:
         return None, "ACP stream contained no final assistant text"
     parsed: dict[str, Any] = {
         "text": text,
@@ -366,7 +382,7 @@ def parse_stream(stdout: str | None) -> tuple[dict[str, Any] | None, str]:
     }
     if late_permission is not None:
         parsed["late_permission"] = late_permission
-    return parsed, ""
+    return parsed, "" if text else "ACP stream contained no final assistant text"
 
 
 def run_cursor(
@@ -518,7 +534,7 @@ def run_cursor(
             acpx_version=installed,
             safe_events=(auth_event,),
         )
-    parsed, parse_error = parse_stream(result.stdout)
+    parsed, parse_error = parse_stream(result.stdout, allow_empty_text=True)
     if result.code != 0:
         late_warning: dict[str, object] | None = None
         if parsed is not None:
@@ -573,7 +589,7 @@ def run_cursor(
             )
         detail = result.stderr.strip() or parse_error or f"acpx exit {result.code}"
         timed_out = result.code in {3, 124}
-        provider_startup = parsed is None
+        provider_startup = parsed is None or not parsed["text"]
         permission_denied = bool(_PERMISSION_FAILURE.search(detail))
         return AgentResult(
             text=parsed["text"] if parsed is not None else "",
@@ -603,10 +619,10 @@ def run_cursor(
             acpx_version=installed,
             safe_events=(auth_event, *(parsed["events"] if parsed is not None else [])),
         )
-    if parsed is None:
+    if parsed is None or not parsed["text"]:
         empty_final = parse_error == "ACP stream contained no final assistant text"
         return AgentResult(
-            text="",
+            text=parsed["text"] if parsed is not None else "",
             ok=False,
             detail=parse_error[:200],
             failure_phase="output-validation",
@@ -616,8 +632,13 @@ def run_cursor(
             exit_code=result.code,
             transport="acpx",
             requested_model=model,
+            effective_model=parsed.get("effective_model") if parsed is not None else None,
+            stop_reason=parsed.get("stop_reason") if parsed is not None else None,
+            protocol_version=parsed.get("protocol_version") if parsed is not None else None,
+            session_id=parsed.get("session_id") if parsed is not None else None,
+            request_id=parsed.get("request_id") if parsed is not None else None,
             acpx_version=installed,
-            safe_events=(auth_event,),
+            safe_events=(auth_event, *(parsed["events"] if parsed is not None else [])),
         )
     if parsed["stop_reason"] != "end_turn":
         stop_reason = parsed["stop_reason"] or "missing"
