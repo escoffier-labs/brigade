@@ -503,9 +503,31 @@ class RemoteOutcome:
             payload["disposition"] = self.disposition
         if self.handoff:
             payload["handoff"] = dict(self.handoff)
+        delivery = self._result_delivery()
+        if delivery is not None:
+            payload["result_delivery"] = delivery
         if self.failure_kind:
             payload["failure_kind"] = self.failure_kind
         return payload
+
+    def _result_delivery(self) -> dict[str, Any] | None:
+        """Describe a retained result that this transport cannot itself deliver.
+
+        A successful provider turn and a target worktree are not artifact
+        delivery.  The public client currently exposes no authorized byte
+        export, so make that gap explicit and non-retryable instead of inviting
+        another ``recover`` call or producer turn.
+        """
+        if self.state != STATE_SUCCEEDED or self.disposition != "pending-handoff":
+            return None
+        return {
+            "state": "unavailable",
+            "reason": "retained-result-artifacts-unavailable",
+            "retryable": False,
+            "request_id": self.request_id,
+            "target_reference": _one_line(self.handoff.get("worktree_ref"), 128) or None,
+            "action": "export the retained target result through an authorized artifact surface",
+        }
 
 
 #: Frozen handoff field names, shared with the T3 coordinator. ``worktree_ref``

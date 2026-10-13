@@ -548,6 +548,41 @@ def test_writable_remote_result_is_pending_handoff_not_locally_implemented(tmp_p
     assert receipt["handoff"]["target_machine"] == "linux-worker"
 
 
+def test_pending_handoff_without_artifacts_has_actionable_bounded_diagnostic(tmp_path, clean_source):
+    policy = FakePolicyClient()
+    runner = FakeT3Runner(
+        {
+            "doctor": _eligible(),
+            "capacity": _eligible(),
+            "submit": _succeeded(
+                disposition="pending-handoff",
+                handoff={
+                    "target_machine": "linux-worker",
+                    "repository": "configured-repo-alias",
+                    "source_revision": REVISION,
+                    "request_id": QUALIFIED_REQUEST,
+                    "worktree_ref": "opaque-target-ref",
+                },
+            ),
+        }
+    )
+
+    dispatch = _transport(tmp_path, policy, runner)("coder", "build it", "prompt body")
+
+    assert dispatch is not None and dispatch.outcome is not None
+    delivery = dispatch.receipt()["result_delivery"]
+    assert delivery == {
+        "state": "unavailable",
+        "reason": "retained-result-artifacts-unavailable",
+        "retryable": False,
+        "request_id": QUALIFIED_REQUEST,
+        "target_reference": "opaque-target-ref",
+        "action": "export the retained target result through an authorized artifact surface",
+    }
+    assert runner.verbs().count("submit") == 1
+    assert "recover" not in runner.verbs()
+
+
 def test_a_running_state_never_claims_a_completed_handoff(tmp_path, clean_source):
     policy = FakePolicyClient()
     runner = FakeT3Runner(

@@ -97,6 +97,17 @@ An unknown outcome (or a `unknown_state` error carrying a request id) is
 recovered with `t3-fleet recover` against the retained qualified handle. The
 original prompt is never resubmitted as a guess.
 
+Execution success remains separate from artifact delivery, passing checks, and
+merge completion. When T3 reports `pending-handoff` but supplies only the
+opaque target reference, the remote receipt now includes
+`result_delivery.state="unavailable"`, the stable reason
+`retained-result-artifacts-unavailable`, `retryable=false`, and an action to use
+an authorized target artifact-export surface. This is deliberately not another
+`recover` call: recovery reads execution state and cannot manufacture the exact
+base/candidate-fenced source bytes or the target-local `brigade receipts export
+package` output. Until T3 advertises such an authorized, bounded byte surface,
+the producer must not be relaunched merely to read an existing result.
+
 ## Deployment prerequisites
 
 - **`t3-fleet submit --delegation-id` must ship.** The client installed at the
