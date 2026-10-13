@@ -50,7 +50,7 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)\s*[:=]\s*"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
-    r"\s+(?:provided\s+as|stored\s+as|generated\s+as|configured\s+(?:as|with|to))\s+"
+    r"\s+(?:provided\s+(?:as|with)|stored\s+as|generated\s+as|configured\s+(?:as|with|to))\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
     r"\s+(?:is|was|equals|will\s+be|has\s+been|set\s+to)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"

@@ -172,6 +172,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "password is required-secret",
         "Password is configured as hunter2",
         "Password is provided with hunter2",
+        "Password provided with hunter2",
         "Password is configured with hunter2",
         "Password is configured to hunter2",
         "token: optional-token",
