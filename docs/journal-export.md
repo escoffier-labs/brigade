@@ -14,6 +14,8 @@ brigade receipts export journal --target ./workspace --run-id example-run --sinc
 and accepts only `jsonl`. `--out` defaults to `-` for stdout. A file output
 must be new: the command refuses an existing file and has no overwrite flag.
 The parent output directory must already exist.
+An unresolvable `~user` in `--target` or `--out` is refused with a nonzero exit
+and an `error: journal export:` diagnostic, without a traceback or output.
 
 ## Time filtering and validation
 
@@ -54,12 +56,16 @@ semantics and POSIX nonblocking flags. Export checks the actual open file's
 type, identity, size, modification time, and change time against the initial
 source metadata. It copies at most the observed size, within the shared byte
 bound, then checks descriptor and named-source metadata before closing the
-source file. Validation reads only the private copy, so later source changes
-cannot change the bytes being validated. After validation, export checks
-named-source metadata against the initial open file's metadata.
-Observed replacement, truncation, growth, or metadata changes
-fail before output. Export does not lock writers. Changes after the final
-metadata observation remain possible, and the output represents a validated
+source file. Each named-source check reopens the currently named events
+directory from the held run root with no-follow semantics, compares its
+identity against the original held events directory, and reads journal
+metadata through that fresh descriptor. Validation reads only the private
+copy, so later source changes cannot change the bytes being validated.
+After validation, export checks named-source metadata against the initial
+open file's metadata.
+Observed events-directory replacement, file replacement, truncation, growth,
+or metadata changes fail before output. Export does not lock writers.
+Changes after the final metadata observation remain possible, and the output represents a validated
 snapshot observed during export.
 
 Validation creates a temporary directory in the configured temporary storage,

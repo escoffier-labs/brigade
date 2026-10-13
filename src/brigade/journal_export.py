@@ -44,11 +44,21 @@ def _source_metadata(info: os.stat_result) -> tuple[int, ...]:
     return info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
+def _named_source_metadata(bound: run_dirfd.BoundRunDir) -> tuple[int, ...]:
+    """Observe the currently named events directory from the held run root."""
+    original = os.fstat(bound.dir_fd("events"))
+    descriptor = dirfd.open_child_directory(bound.dir_fd(), "events", writable=False)
+    try:
+        current = os.fstat(descriptor)
+        if (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino):
+            raise OSError("journal events directory changed during export")
+        return _source_metadata(dirfd.stat_child(descriptor, "lifecycle.jsonl"))
+    finally:
+        os.close(descriptor)
+
+
 def _check_source(bound: run_dirfd.BoundRunDir, descriptor: int, metadata: tuple[int, ...]) -> None:
-    if (
-        _source_metadata(os.fstat(descriptor)) != metadata
-        or _source_metadata(bound.stat(("events",), "lifecycle.jsonl")) != metadata
-    ):
+    if _source_metadata(os.fstat(descriptor)) != metadata or _named_source_metadata(bound) != metadata:
         raise OSError("journal source changed during export")
 
 
@@ -85,7 +95,7 @@ def _snapshot_report(bound: run_dirfd.BoundRunDir) -> run_journal.JournalReport:
             # writers can replace it on Windows while that copy is parsed.
             source.close()
             report = run_journal.read_journal_bounded(Path(snapshot.name))
-            if _source_metadata(bound.stat(("events",), "lifecycle.jsonl")) != metadata:
+            if _named_source_metadata(bound) != metadata:
                 raise OSError("journal source changed during export")
             if opened.st_size > 0 and not report.events and not report.chain_errors and report.partial_tail is None:
                 raise ValueError("nonempty journal validation snapshot disappeared or changed during read")
@@ -129,6 +139,13 @@ def _validated_events(run_dir: Path, run_id: str) -> list[run_journal.RunEvent]:
             return report.events
 
 
+def _expand_path(path: Path) -> Path:
+    try:
+        return path.expanduser()
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
+
+
 def export_journal(*, target: Path, run_id: str, out: str, since: str | None, format: str = "jsonl") -> int:
     """Validate the full original journal before creating any export output."""
     try:
@@ -142,7 +159,7 @@ def export_journal(*, target: Path, run_id: str, out: str, since: str | None, fo
             raise ValueError("journal export format must be jsonl")
         cutoff = _cutoff(since)
         # absolute() retains symlink components for the no-follow walk.
-        run_dir = Path(target).expanduser().absolute() / ".brigade" / "runs" / run_id
+        run_dir = _expand_path(Path(target)).absolute() / ".brigade" / "runs" / run_id
         events = _validated_events(run_dir, run_id)
         data = b"".join(
             canonical_bytes(event.to_dict()) + b"\n"
@@ -159,7 +176,7 @@ def export_journal(*, target: Path, run_id: str, out: str, since: str | None, fo
             sys.stdout.flush()
         else:
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            descriptor = dirfd.open_file_nofollow(Path(out).expanduser(), flags, 0o600)
+            descriptor = dirfd.open_file_nofollow(_expand_path(Path(out)), flags, 0o600)
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(data)
                 handle.flush()

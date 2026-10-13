@@ -241,6 +241,55 @@ def test_same_run_journal_replacement_is_rejected(tmp_path, capsys, monkeypatch,
     assert not output.exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory rename race")
+@pytest.mark.parametrize("phase", ["after-stat", "during-validation"])
+@pytest.mark.parametrize("replacement", ["directory", "symlink"])
+def test_events_directory_replacement_is_rejected(tmp_path, capsys, monkeypatch, phase, replacement):
+    target = tmp_path / "workspace"
+    source, _ = _journal(target)
+    original = source.read_bytes()
+    other, _ = _journal(tmp_path / "replacement", times=TIMES[:1])
+    replacement_bytes = other.read_bytes()
+    held = source.parent.with_name("held-events")
+    output = tmp_path / "export.jsonl"
+    swapped = False
+    real_stat = run_dirfd.BoundRunDir.stat
+    real_read = run_journal.read_journal_bounded
+
+    def replace_events():
+        nonlocal swapped
+        source.parent.rename(held)
+        if replacement == "directory":
+            shutil.copytree(other.parent, source.parent)
+        else:
+            source.parent.symlink_to(other.parent, target_is_directory=True)
+        swapped = True
+
+    def swap_after_stat(bound, components, name):
+        info = real_stat(bound, components, name)
+        if not swapped and components == ("events",) and name == "lifecycle.jsonl":
+            replace_events()
+        return info
+
+    def swap_during_validation(path):
+        replace_events()
+        return real_read(path)
+
+    if phase == "after-stat":
+        monkeypatch.setattr(run_dirfd.BoundRunDir, "stat", swap_after_stat)
+    else:
+        monkeypatch.setattr(run_journal, "read_journal_bounded", swap_during_validation)
+    status = _export(target, "--out", str(output))
+    captured = capsys.readouterr()
+    assert swapped, captured.err
+    assert status != 0 and captured.out == "" and "error: journal export:" in captured.err
+    if replacement == "directory":
+        assert "journal events directory changed during export" in captured.err
+    assert not output.exists()
+    assert (held / "lifecycle.jsonl").read_bytes() == original
+    assert source.read_bytes() == replacement_bytes != original
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX FIFO race")
 def test_raced_fifo_is_rejected_without_blocking(tmp_path):
     source, _ = _journal(tmp_path)
@@ -467,6 +516,59 @@ def test_file_output_is_private_canonical_and_never_overwrites(tmp_path, capsys)
     captured = capsys.readouterr()
     assert captured.out == "" and "error:" in captured.err and "invalid choice" not in captured.err
     assert output.read_bytes() == b"existing output\n"
+
+
+@pytest.mark.parametrize("option", ["target", "out"])
+@pytest.mark.parametrize("expansion", ["native", "controlled"])
+def test_unresolvable_user_path_is_refused(tmp_path, capsys, monkeypatch, option, expansion):
+    source, _ = _journal(tmp_path)
+    original = source.read_bytes()
+    unknown = Path("~brigade-nonexistent-user-7f9c2e/export.jsonl")
+    output = tmp_path / "export.jsonl"
+    if expansion == "native":
+        if os.name != "posix":
+            pytest.skip("POSIX unknown-user expansion")
+        with pytest.raises(RuntimeError):
+            unknown.expanduser()
+    else:
+        real_expand = Path.expanduser
+        attempted = False
+
+        def fail_unknown(path):
+            nonlocal attempted
+            if path == unknown:
+                attempted = True
+                raise RuntimeError("Could not determine home directory.")
+            return real_expand(path)
+
+        monkeypatch.setattr(Path, "expanduser", fail_unknown)
+    target = unknown if option == "target" else tmp_path
+    destination = str(unknown) if option == "out" else str(output)
+    status = _export(target, "--out", destination)
+    captured = capsys.readouterr()
+    if expansion == "controlled":
+        assert attempted
+    assert status != 0 and captured.out == ""
+    assert captured.err.startswith("error: journal export:")
+    assert "home directory" in captured.err and "Traceback" not in captured.err
+    assert not output.exists() and not unknown.exists()
+    assert source.read_bytes() == original
+
+
+def test_validation_runtime_error_is_not_translated_to_path_refusal(tmp_path, capsys, monkeypatch):
+    source, _ = _journal(tmp_path)
+    original = source.read_bytes()
+    output = tmp_path / "export.jsonl"
+
+    def fail_validation(path):
+        raise RuntimeError("internal validation failure")
+
+    monkeypatch.setattr(run_journal, "read_journal_bounded", fail_validation)
+    with pytest.raises(RuntimeError, match="internal validation failure"):
+        _export(tmp_path, "--out", str(output))
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""
+    assert not output.exists() and source.read_bytes() == original
 
 
 def test_output_errors_do_not_mutate_source(tmp_path, capsys):
