@@ -771,7 +771,7 @@ def _decide_skill_candidate(*, helped: int, hurt: int) -> outcome.Decision:
         artifact_id="brigade-work",
         current_status="candidate",
         last_action_ts=None,
-        now=dt.datetime(2026, 10, 12, tzinfo=dt.UTC),
+        now=dt.datetime(2026, 10, 12, tzinfo=dt.timezone.utc),
         config=outcome.ReconcileConfig(),
     )
 
@@ -799,7 +799,7 @@ def test_skill_candidate_without_regressions_is_unchanged_by_margin():
 
 def test_skill_and_card_install_margins_agree():
     config = outcome.ReconcileConfig()
-    now = dt.datetime(2026, 10, 12, tzinfo=dt.UTC)
+    now = dt.datetime(2026, 10, 12, tzinfo=dt.timezone.utc)
     for helped, hurt in [(2, 1), (3, 1), (2, 0), (4, 2), (3, 2)]:
         card = outcome.decide(
             outcome.OutcomeScore("card", helped, hurt, 0, 0.0, None),
