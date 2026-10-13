@@ -360,6 +360,7 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
     request_id: str | None = None
     stop_reason: str | None = None
     active_prompt_id: tuple[str, str | int] | None = None
+    outstanding_prompt_ids: set[tuple[str, str | int]] = set()
     effective_model: str | None = None
     safe_events: list[dict[str, Any]] = []
     prompt_completed = False
@@ -385,6 +386,8 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
             )
         is_response = "result" in message or "error" in message
         matched_prompt_request = is_response and message_id_key is not None and message_id_key == active_prompt_id
+        if is_response and message_id_key is not None:
+            outstanding_prompt_ids.discard(message_id_key)
         if matched_prompt_request and message_id_key is not None:
             active_prompt_id = None
         matched_config_request = (
@@ -412,9 +415,19 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
             if isinstance(candidate_session, str):
                 session_id = candidate_session
             if message.get("method") == "session/prompt" and isinstance(message.get("id"), (str, int)):
+                if message_id_key is not None and message_id_key in outstanding_prompt_ids:
+                    return None, "malformed ACP stream: duplicate outstanding prompt id"
+                text_parts = []
+                stop_reason = None
+                prompt_completed = False
+                late_permission = None
+                stream_finalized = False
+                has_structured_jsonrpc_error = False
+                permission_error_detail = None
                 request_id = str(message["id"])
                 if message_id_key is not None:
                     active_prompt_id = message_id_key
+                    outstanding_prompt_ids.add(message_id_key)
         update = _update(message)
         if update is not None:
             kind = update.get("sessionUpdate")

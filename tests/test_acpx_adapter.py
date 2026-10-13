@@ -753,6 +753,47 @@ def test_parse_stream_completion_is_bound_to_latest_prompt():
     assert parsed["stop_reason"] is None
 
 
+def test_parse_stream_new_prompt_resets_previous_completion_and_text():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "first", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "old answer"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "first", "result": {"stopReason": "end_turn"}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "latest", "params": {}},
+        ),
+        allow_empty_text=True,
+    )
+
+    assert error == "ACP stream contained no final assistant text"
+    assert parsed is not None
+    assert parsed["request_id"] == "latest"
+    assert parsed["text"] == ""
+    assert parsed["prompt_completed"] is False
+    assert parsed["stop_reason"] is None
+
+
+def test_parse_stream_rejects_duplicate_outstanding_prompt_id():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "same", "params": {}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "same", "params": {}},
+        ),
+        allow_empty_text=True,
+    )
+
+    assert parsed is None
+    assert "duplicate outstanding prompt id" in error
+
+
 @pytest.mark.parametrize(
     "response",
     (

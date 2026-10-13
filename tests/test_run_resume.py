@@ -258,6 +258,11 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys, requ
                 "requested_model": requested_model,
                 "effective_model": "composer-2.5",
                 "acpx_version": "0.12.0",
+                "stop_reason": "end_turn",
+                "protocol_version": 1,
+                "session_id": "acp-session",
+                "request_id": "req-2",
+                "events": [{"type": "agent_message_chunk"}],
                 "metadata_provenance": {
                     "observed_at": "2026-10-13T12:00:00+00:00",
                     "fields": {
@@ -324,6 +329,11 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys, requ
         assert "requested_model" not in results[1]
     assert results[1]["effective_model"] == "composer-2.5"
     assert results[1]["acpx_version"] == "0.12.0"
+    assert results[1]["stop_reason"] == "end_turn"
+    assert results[1]["protocol_version"] == 1
+    assert results[1]["session_id"] == "acp-session"
+    assert results[1]["request_id"] == "req-2"
+    assert results[1]["events"] == [{"type": "agent_message_chunk"}]
     assert results[1]["metadata_provenance"]["fields"]["effective_model"]["source"] == "observed"
     assert (run_dir / "final.txt").read_text().strip() == "final synthesis"
     run_json = json.loads((run_dir / "run.json").read_text())

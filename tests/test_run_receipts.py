@@ -300,6 +300,23 @@ def test_acpx_receipt_sanitizes_provider_detail_and_events(tmp_path: Path):
             {"type": credential, "status": credential},
             {"type": "agent_message_chunk", "status": credential},
         ),
+        attempts=(
+            WorkerAttempt(
+                kind="retry",
+                worker="cursor-worker",
+                task="inspect diagnostics",
+                transport="acpx",
+                model=None,
+                reasoning=None,
+                started_at="2026-10-13T00:00:00+00:00",
+                finished_at="2026-10-13T00:00:01+00:00",
+                exit_code=None,
+                terminal_reason=f"provider stopped {credential} {private_path}",
+                failure_phase=None,
+                failure_kind=None,
+                session_id=None,
+            ),
+        ),
     )
 
     output_dir = tmp_path / "run"
@@ -309,6 +326,7 @@ def test_acpx_receipt_sanitizes_provider_detail_and_events(tmp_path: Path):
 
     assert credential not in serialized
     assert private_path not in serialized
+    assert entry["attempts"][0]["terminal_reason"] == "<redacted diagnostic>"
     assert entry["detail"] == "<redacted diagnostic>"
     assert entry["events"] == [{"type": "agent_message_chunk"}]
     assert entry["session_id"] == "<redacted diagnostic>"

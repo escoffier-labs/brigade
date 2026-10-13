@@ -306,7 +306,7 @@ def _attempt_payload(attempt: WorkerAttempt, *, attempt_number: int) -> dict[str
         "started_at": attempt.started_at,
         "finished_at": attempt.finished_at,
         "exit_code": attempt.exit_code,
-        "terminal_reason": attempt.terminal_reason,
+        "terminal_reason": _receipt_label(attempt.terminal_reason, attempt.transport),
         "failure_phase": attempt.failure_phase,
         "failure_kind": attempt.failure_kind,
         "session_id": _receipt_label(attempt.session_id, attempt.transport),

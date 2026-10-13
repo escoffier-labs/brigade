@@ -840,7 +840,9 @@ def _resume_locked(
                 "metadata_provenance",
                 "session_id",
                 "request_id",
+                "stop_reason",
                 "protocol_version",
+                "events",
                 "safe_events",
             ):
                 entry.pop(stale_key, None)
@@ -969,6 +971,21 @@ def _resume_locked(
             failure_phase=(
                 r.get("failure_phase") if not r.get("ok") and isinstance(r.get("failure_phase"), str) else None
             ),
+            stop_reason=r.get("stop_reason") if isinstance(r.get("stop_reason"), str) else None,
+            protocol_version=(
+                r.get("protocol_version")
+                if isinstance(r.get("protocol_version"), int) and not isinstance(r.get("protocol_version"), bool)
+                else None
+            ),
+            session_id=r.get("session_id") if isinstance(r.get("session_id"), str) else None,
+            request_id=(
+                r.get("request_id")
+                if isinstance(r.get("request_id"), (str, int)) and not isinstance(r.get("request_id"), bool)
+                else None
+            ),
+            safe_events=tuple(event for event in r.get("events", []) if isinstance(event, dict))
+            if isinstance(r.get("events"), list)
+            else (),
             timed_out=bool(r.get("timed_out")),
             output_truncated=bool(r.get("output_truncated")),
             output_bytes=int(r.get("output_bytes") or 0),
