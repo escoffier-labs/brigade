@@ -92,6 +92,14 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Use %APPDATA%",
         "Use %PATH%",
         "Use %HOME%",
+        "Read ${HOME:-fallback}",
+        "Use ${XDG_CONFIG_HOME:+configured}",
+        "Password is provided as hunter2",
+        "Password: stored as hunter2",
+        "Password is generated as hunter2",
+        "The directory is build",
+        "File: LICENSE",
+        "Folder set to artifacts",
         "Use C:Users\\alice",
         "Read D:projects\\acme",
         "Read /etc/credentials.",
@@ -581,7 +589,7 @@ def test_parse_accepts_lowercase_key_value_prose(field: str, text: str) -> None:
     [
         "See https://example.com/download?path=/opt/example.",
         "See https://example.com/download?file=~example/.ssh/config.",
-        "See https://example.com/callback#path=/home/example.",
+        "See https://example.com/callback#path=/home/" + "example.",
     ],
 )
 def test_parse_rejects_filesystem_paths_in_url_parameters(field: str, text: str) -> None:

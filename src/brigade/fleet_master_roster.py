@@ -25,7 +25,7 @@ _EXPLANATORY_SECRET_VALUE = (
     r"(?:required|optional|needed|necessary|available|configured(?!\s+(?:as|to)\b)|set(?!\s+to\b)|missing|unset|unavailable|"
     r"not\s+(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable)|"
     r"confidential|managed(?:\s+by\s+Vault)?|provided|stored(?:\s+securely)?|encrypted|protected|"
-    r"handled|generated|rotated|masked|redacted)(?=$|\s|[.,;!?](?:\s|$))"
+    r"handled|generated|rotated|masked|redacted)(?!\s+(?:as|to)\b)(?=$|\s|[.,;!?](?:\s|$))"
 )
 _DANGEROUS_VALUE = re.compile(
     r"(?:(?<![A-Za-z0-9_])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|(?<![A-Za-z0-9_])xapp-[A-Za-z0-9-]{12,}|(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{20,}|(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{36}\b|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
@@ -52,7 +52,7 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
     r"\s+(?:is|was|equals|will\s+be|has\s+been|set\s+to)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%[A-Za-z_][A-Za-z0-9_]*%|"
-    r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})"
+    r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][^}]*\})"
     r"(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))",
     re.IGNORECASE,
 )
@@ -127,6 +127,11 @@ _PATH_CONTEXT = re.compile(
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?"
     r"[\"'“‘]*\s*(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?|"
     r"\b(?:path|file|directory|folder|script|repository|repo)\s*(?:is|was|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s*)[\"'“‘`()\[{]*\s*$",
+    re.IGNORECASE,
+)
+_EXPLICIT_PATH_DECLARATION = re.compile(
+    r"\b(?:path|file|directory|folder|script|repository|repo)\s*"
+    r"(?:is|was|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s*$",
     re.IGNORECASE,
 )
 _QUOTED_PATH_CONTEXT = re.compile(
@@ -269,9 +274,11 @@ def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -
         suffix_match = suffix.search(filename)
         trailing_text = path_text[match.end() :].strip(" .,;:!?")
         path_context = _has_path_context(path_text, match.start())
+        path_declaration = _EXPLICIT_PATH_DECLARATION.search(path_text[: match.start()]) is not None
         file_like = filename.casefold() not in _PROSE_DOTTED_TERMS and (
             filename.startswith(".")
             or sensitive_name
+            or path_declaration
             or (suffix_match and (path_context or not trailing_text or sensitive_name))
         )
         standalone = path_text.strip().rstrip(".,;:!?") == filename
