@@ -119,6 +119,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Use auth_profile production-admin",
         "Use production-admin auth profile.",
         "Use `production-admin` auth profile.",
+        "Use the production-admin auth profile.",
         "password: actual-secret",
         "password is actual-secret",
         "API key is abcdefghijklmnop",
@@ -130,6 +131,10 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         'token is "hunter2!"',
         "password is “abcdefghijklmnop”",
         "token is ‘hunter2!’",
+        "password is hunter2",
+        "token is abcdefgh",
+        "api key is shortkey",
+        "npm_" + "A" * 36,
         "token is abcdefghijklmnop",
         "auth token is abcdefghijklmnop",
     ],
@@ -160,6 +165,7 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Use option B: fast mode",
         "Password is required.",
         "Password is confidential.",
+        "Password is managed by Vault.",
         "Auth profile is required.",
     ],
 )
@@ -180,6 +186,7 @@ def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> N
         "Rotate auth profiles regularly.",
         "Support auth profile rotation.",
         "Configure authentication profile management.",
+        "Use the auth profile for this service.",
     ],
 )
 def test_parse_accepts_prose_that_mentions_auth_profiles(text: str) -> None:
@@ -246,6 +253,16 @@ def test_parse_rejects_standalone_sensitive_file_names(text: str) -> None:
 def test_parse_rejects_digit_bearing_filename_extensions(field: str, filename: str) -> None:
     document = _document()
     text = f"Load {filename}"
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize("text", ["Open README.md for instructions", "Load video.mp4 before launch"])
+def test_parse_rejects_filenames_followed_by_prose(field: str, text: str) -> None:
+    document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 
     with pytest.raises(fleet_master_roster.MasterRosterError):

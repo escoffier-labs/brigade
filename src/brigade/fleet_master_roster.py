@@ -20,7 +20,7 @@ _SEAT_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _MODEL_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _DANGEROUS_VALUE = re.compile(
-    r"(?:(?<![A-Za-z0-9_])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|(?<![A-Za-z0-9_])xapp-[A-Za-z0-9-]{12,}|(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{20,}|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
+    r"(?:(?<![A-Za-z0-9_])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|(?<![A-Za-z0-9_])xapp-[A-Za-z0-9-]{12,}|(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{20,}|(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{36}\b|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Bearer\s+\S+|\bBearer\s+[A-Za-z0-9._~+/-]{20,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
@@ -37,14 +37,14 @@ _DANGEROUS_VALUE = re.compile(
     r"(?!(?:is|are|as|required|needed|necessary|optional|available|selection|rotation|management|regularly)\b)"
     r"[A-Za-z0-9_.-]+|"
     r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with))\s+"
-    r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))\s+"
+    r"(?:the\s+)?(?:\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\)|(?!(?:the)\b)[A-Za-z0-9_.-]+)\s+"
     r"auth(?:entication)?[ _-]profiles?\b|"
     r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
-    r"\s+is\s+(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential)\b)"
+    r"\s+is\s+(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\b)"
     r"(?:\"[^\s\"]{7,}\"|'[^\s']{7,}'|`[^\s`]{7,}`|“[^\s“”]{7,}”|‘[^\s‘’]{7,}’|"
-    r"[A-Za-z0-9_-]{16,}|(?=[A-Za-z0-9_-]{8,}\b)(?=[A-Za-z0-9_-]*[-_])[A-Za-z0-9_-]{8,}|"
+    r"[A-Za-z0-9_-]{3,}|"
     r"(?=[^\s]{8,})(?=[^\s]*[.@!#$%^&*+=~?][A-Za-z0-9])\S+|"
     r"(?=[^\s]{7,}[.!?](?:\s|$))\S+)|"
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%USERPROFILE%))",
@@ -129,6 +129,7 @@ _EXTENSIONLESS_FILES = frozenset(
 )
 _PRIVATE_KEY_FILES = frozenset({"id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"})
 _PROSE_SLASH_TERMS = frozenset({"and/or", "ci/cd", "input/output", "planner/reviewer", "read/write"})
+_PROSE_DOTTED_TERMS = frozenset({"e.g", "i.e", "node.js", "vs.code"})
 _VERSION_REFERENCE = re.compile(r"\b[A-Z][A-Za-z0-9.+-]*/\d+(?:\.\d+)+")
 _FILE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 _MODEL_PATH_SUFFIX = re.compile(
@@ -158,11 +159,14 @@ def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -
         suffix = _MODEL_PATH_SUFFIX if model_identifier else _FILE_SUFFIX
         suffix_match = suffix.search(filename)
         trailing_text = path_text[match.end() :].strip(" .,;:!?")
-        file_like = (
-            filename.startswith(".") or sensitive_name or (suffix_match and (not trailing_text or sensitive_name))
+        path_context = _PATH_CONTEXT.search(path_text[: match.start()]) is not None
+        file_like = filename.casefold() not in _PROSE_DOTTED_TERMS and (
+            filename.startswith(".")
+            or sensitive_name
+            or (suffix_match and (path_context or not trailing_text or sensitive_name))
         )
         standalone = path_text.strip().rstrip(".,;:!?") == filename
-        if file_like and (_PATH_CONTEXT.search(path_text[: match.start()]) or standalone):
+        if file_like and (path_context or standalone):
             return True
     for match in _RELATIVE_PATH.finditer(path_text):
         components = re.split(r"[/\\]", match.group("path"))
