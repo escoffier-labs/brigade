@@ -12,11 +12,15 @@ def project(raw: object, *, lane: str) -> dict[str, object]:
 
     if not evidence:
         blocker = "missing-readiness-evidence"
-    elif not str(evidence.get("browser_identity") or "").strip():
+    elif not _nonempty_string(evidence.get("browser_identity")):
         blocker = "ambiguous-browser-profile"
     elif evidence.get("lane") != lane:
         blocker = "wrong-lane"
-    elif not evidence.get("expected_owner") or evidence.get("owner") != evidence.get("expected_owner"):
+    elif (
+        not _nonempty_string(evidence.get("expected_owner"))
+        or not _nonempty_string(evidence.get("owner"))
+        or evidence.get("owner") != evidence.get("expected_owner")
+    ):
         blocker = "ownership-conflict"
     elif evidence.get("login_status") == "verification-required":
         blocker = "human-verification-required"
@@ -26,17 +30,25 @@ def project(raw: object, *, lane: str) -> dict[str, object]:
         blocker = "browser-auth"
     elif evidence.get("mode") != "deep-research":
         blocker = "mode-unavailable"
-    elif not str(evidence.get("model") or "").strip() or evidence.get("model") == "unverified":
+    elif not _nonempty_string(evidence.get("model")) or str(evidence.get("model")).strip().casefold() == "unverified":
         blocker = "unknown-model"
     elif evidence.get("collector_status") != "available":
         blocker = "missing-collector"
-    elif evidence.get("status") == "resumable" and not evidence.get("session_ref"):
+    elif evidence.get("status") not in (None, "ready", "resumable"):
+        blocker = "unknown-readiness-state"
+    elif evidence.get("status") == "resumable" and not _nonempty_string(evidence.get("session_ref")):
         blocker = "missing-session-reference"
+    elif evidence.get("status") == "resumable" and not _nonempty_string(evidence.get("output_receipt")):
+        blocker = "missing-output-receipt"
 
     status = "resumable" if evidence.get("status") == "resumable" else "ready"
     if blocker is not None:
         status = "unverified" if blocker == "missing-readiness-evidence" else "blocked"
     return {**evidence, "status": status, "blocker": blocker}
+
+
+def _nonempty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def ready(projection: Mapping[str, object]) -> bool:

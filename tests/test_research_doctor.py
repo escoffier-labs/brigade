@@ -465,10 +465,18 @@ def test_doctor_projects_named_browser_preflight_states(monkeypatch, tmp_path: P
         "collector_status": "available",
     }
     cases = [
+        ({**base, "browser_identity": ""}, "ambiguous-browser-profile", "warn"),
         ({**base, "lane": "another_lane"}, "wrong-lane", "warn"),
         ({**base, "owner": "another-owner"}, "ownership-conflict", "warn"),
         ({**base, "login_status": "verification-required"}, "human-verification-required", "warn"),
+        ({**base, "login_status": "quota-exhausted"}, "provider-quota", "warn"),
+        ({**base, "mode": "standard"}, "mode-unavailable", "warn"),
+        ({**base, "model": "unverified"}, "unknown-model", "warn"),
+        ({**base, "model": " UNVERIFIED "}, "unknown-model", "warn"),
+        ({**base, "collector_status": "missing"}, "missing-collector", "warn"),
         (base, None, "ok"),
+        ({**base, "status": "stale"}, "unknown-readiness-state", "warn"),
+        ({**base, "status": "resumable", "session_ref": "conversation-42"}, "missing-output-receipt", "warn"),
         (
             {**base, "status": "resumable", "session_ref": "conversation-42", "output_receipt": "export-42"},
             None,
@@ -481,7 +489,8 @@ def test_doctor_projects_named_browser_preflight_states(monkeypatch, tmp_path: P
         assert lane["browser_preflight"]["blocker"] == blocker
         if evidence.get("status") == "resumable":
             assert lane["browser_preflight"]["session_ref"] == "conversation-42"
-            assert lane["browser_preflight"]["output_receipt"] == "export-42"
+            if "output_receipt" in evidence:
+                assert lane["browser_preflight"]["output_receipt"] == evidence["output_receipt"]
 
 
 def test_doctor_redacts_secret_keys_recursively(monkeypatch, tmp_path: Path) -> None:
