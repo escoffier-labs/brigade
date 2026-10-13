@@ -218,6 +218,34 @@ def test_cursor_auth_status_uses_boolean_json_state_not_incidental_words(monkeyp
     assert prose.state == "unrecognized"
 
 
+def test_cursor_auth_status_redacts_credential_shapes_and_private_paths(monkeypatch):
+    sensitive_values = (
+        "ghp_" + "A" * 24,
+        "github_pat_" + "A" * 24,
+        "xoxb-" + "A" * 16,
+        "sk-" + "A" * 24,
+        "AKIA" + "A" * 16,
+        "ASIA" + "A" * 16,
+        "AIza" + "a" * 30,
+        "glpat-" + "a" * 20,
+        "eyJ" + "A" * 8 + "." + "B" * 8 + "." + "C" * 8,
+        r"\root\.ssh\id_rsa",
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    for sensitive in sensitive_values:
+        monkeypatch.setattr(
+            acpx_adapter.proc,
+            "run",
+            lambda argv, sensitive=sensitive, **kwargs: proc.Result(
+                1, f"bad status {sensitive}", f"failure {sensitive}"
+            ),
+        )
+        status = acpx_adapter.cursor_auth_status()
+        assert sensitive not in status.detail
+        assert sensitive not in status.stdout
+        assert sensitive not in status.stderr
+
+
 def test_cursor_auth_status_redacts_ansi_and_common_credential_shapes(monkeypatch):
     monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
     monkeypatch.setattr(
@@ -666,6 +694,39 @@ def test_parse_stream_keeps_jsonrpc_id_types_distinct():
     assert parsed is not None and parsed["effective_model"] == "right-model"
 
 
+def test_parse_stream_only_completes_matching_active_prompt_ids():
+    streams = (
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": 1, "params": {}},
+            {"jsonrpc": "2.0", "id": "1", "result": {"stopReason": "end_turn"}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "partial"}}
+                },
+            },
+        ),
+        _stream(
+            {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "req-1", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "partial"}}
+                },
+            },
+        ),
+    )
+    for stream in streams:
+        parsed, error = acpx_adapter.parse_stream(stream)
+        assert error == ""
+        assert parsed is not None
+        assert parsed["prompt_completed"] is False
+        assert parsed["stop_reason"] is None
+
+
 def test_parse_stream_retires_config_request_id_without_config_options():
     parsed, error = acpx_adapter.parse_stream(
         _stream(
@@ -934,6 +995,33 @@ def test_run_rejects_version_mismatch(monkeypatch, tmp_path):
     assert "requires acpx 0.12.0" in result.detail
     assert result.failure_phase == "preflight"
     assert result.failure_kind == "version-mismatch"
+    assert result.transport == "acpx"
+    assert result.requested_model == "composer-2.5"
+
+
+def test_run_missing_executable_and_unsafe_worktree_keep_configured_model(monkeypatch, tmp_path):
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: None)
+    missing = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+    assert missing.failure_kind == "missing-executable"
+    assert missing.transport == "acpx"
+    assert missing.requested_model == "composer-2.5"
+
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    monkeypatch.setattr(acpx_adapter, "installed_version", lambda **kwargs: ("0.12.0", ""))
+
+    def reject_argv(**kwargs):
+        raise ValueError("unsafe")
+
+    monkeypatch.setattr(acpx_adapter, "build_argv", reject_argv)
+    unsafe = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+    assert unsafe.failure_kind == "unsafe-worktree"
+    assert unsafe.transport == "acpx"
+    assert unsafe.requested_model == "composer-2.5"
 
 
 def test_run_rejects_invalid_or_empty_protocol_output(monkeypatch, tmp_path):

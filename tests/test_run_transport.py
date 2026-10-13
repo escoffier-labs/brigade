@@ -120,6 +120,46 @@ def test_dispatch_acquires_and_releases_only_the_invoked_worker_seat(monkeypatch
     assert released == ["coder"]
 
 
+def test_acpx_model_lease_denial_keeps_configured_provenance(tmp_path):
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="plan"),
+            "cursor": Agent(
+                name="cursor",
+                cli="cursor",
+                role="write",
+                transport="acpx",
+                transport_version="0.12.0",
+                model="composer-2.5",
+            ),
+        },
+        max_workers=1,
+    )
+
+    @contextmanager
+    def denied_lease(agent):
+        yield f"lease denied for {agent.name}"
+
+    result = run_transport.dispatch(
+        [Assignment(worker="cursor", task="inspect")],
+        roster,
+        build_prompt=lambda agent, assignment, **kwargs: assignment.task,
+        run_appserver_worker=lambda *args, **kwargs: agents.AgentResult(text="", ok=False),
+        event_writer=lambda *args, **kwargs: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path,
+        model_lease=denied_lease,
+    )[0]
+
+    assert result.failure_kind == "fleet-model-policy"
+    assert result.transport == "acpx"
+    assert result.requested_model == "composer-2.5"
+    assert result.metadata_provenance is not None
+    assert result.metadata_provenance["fields"]["requested_model"]["locator"] == "configured-request"
+
+
 def test_dispatch_releases_lease_when_worker_invocation_raises(monkeypatch, tmp_path):
     released: list[str] = []
 

@@ -120,6 +120,17 @@ def _cloudflare_preflight_failure(agent: Agent, assignment: Assignment) -> Worke
         detail=detail,
         failure_phase="preflight",
         failure_kind="provider-config",
+        transport=agent.transport,
+        requested_model=agent.model,
+        metadata_provenance=_metadata_provenance(
+            agents.AgentResult(
+                text="",
+                ok=False,
+                failure_phase="preflight",
+                transport=agent.transport,
+                requested_model=agent.model,
+            )
+        ),
     )
 
 
@@ -143,8 +154,10 @@ def _selected_agent_preflight(
             text="",
             ok=False,
             detail=f"seat {selected_agent.name} is quarantined for this run",
-            failure_phase="dispatch",
+            failure_phase="preflight",
             failure_kind="unclassified",
+            transport=selected_agent.transport,
+            requested_model=selected_agent.model,
         )
     if selected_agent.cli is None or not is_cli_allowed(selected_agent.cli, roster):
         return agents.AgentResult(
@@ -155,8 +168,10 @@ def _selected_agent_preflight(
                 if selected_agent.cli is None
                 else f"{selected_agent.cli} is not allowed by limits.allow_models"
             ),
-            failure_phase="dispatch",
+            failure_phase="preflight",
             failure_kind="unclassified",
+            transport=selected_agent.transport,
+            requested_model=selected_agent.model,
         )
     cloudflare_detail = agents.cloudflare_ai_gateway_preflight_detail(selected_agent.model)
     if cloudflare_detail is not None:
@@ -166,6 +181,8 @@ def _selected_agent_preflight(
             detail=cloudflare_detail,
             failure_phase="preflight",
             failure_kind="provider-config",
+            transport=selected_agent.transport,
+            requested_model=selected_agent.model,
         )
     return None
 
@@ -658,8 +675,19 @@ def dispatch(
                 text="",
                 ok=False,
                 detail=f"seat {assignment.worker} is quarantined for this run",
-                failure_phase="dispatch",
+                failure_phase="preflight",
                 failure_kind="unclassified",
+                transport=agent.transport,
+                requested_model=agent.model,
+                metadata_provenance=_metadata_provenance(
+                    agents.AgentResult(
+                        text="",
+                        ok=False,
+                        failure_phase="preflight",
+                        transport=agent.transport,
+                        requested_model=agent.model,
+                    )
+                ),
             )
         if agent.cli is None or not is_cli_allowed(agent.cli, roster):
             return WorkerResult(
@@ -671,6 +699,19 @@ def dispatch(
                     "worker has no CLI adapter"
                     if agent.cli is None
                     else f"{agent.cli} is not allowed by limits.allow_models"
+                ),
+                failure_phase="preflight",
+                failure_kind="unclassified",
+                transport=agent.transport,
+                requested_model=agent.model,
+                metadata_provenance=_metadata_provenance(
+                    agents.AgentResult(
+                        text="",
+                        ok=False,
+                        failure_phase="preflight",
+                        transport=agent.transport,
+                        requested_model=agent.model,
+                    )
                 ),
             )
         preflight = _cloudflare_preflight_failure(agent, assignment)
@@ -753,6 +794,7 @@ def dispatch(
                     detail=exc.message[:200],
                     failure_phase="preflight",
                     failure_kind=exc.code,
+                    transport=selected_agent.transport,
                     requested_model=selected_agent.model,
                     reasoning=selected_agent.reasoning,
                 )
@@ -1013,6 +1055,8 @@ def dispatch(
                                 detail=lease_error,
                                 failure_phase="preflight",
                                 failure_kind="fleet-model-policy",
+                                transport=selected_agent.transport,
+                                requested_model=selected_agent.model,
                             )
                         else:
                             result = _invoke_external(

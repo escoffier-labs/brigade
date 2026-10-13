@@ -13,7 +13,7 @@ from typing import Any, Literal
 from . import proc
 from .agents import AgentResult
 from .result_integrity import validate_final_output
-from .worklore_validate import contains_credential
+from .worklore_validate import contains_credential, contains_private_path
 
 SUPPORTED_VERSION = "0.12.0"
 CURSOR_AUTH_TIMEOUT_SECONDS = 10.0
@@ -64,6 +64,8 @@ def _safe_diagnostic(text: str, *, limit: int = 2000) -> str:
     safe = _EMAIL.sub("<redacted>", safe)
     safe = _SENSITIVE_VALUE.sub(lambda match: f"{match.group(1)}=<redacted>", safe)
     safe = _BEARER.sub(lambda match: f"{match.group(1)} <redacted>", safe)
+    if contains_credential(safe) or contains_private_path(safe):
+        safe = "<redacted diagnostic>"
     return safe[:limit]
 
 
@@ -313,7 +315,7 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
     session_id: str | None = None
     request_id: str | None = None
     stop_reason: str | None = None
-    stop_reasons: dict[str, str] = {}
+    active_prompt_ids: set[tuple[str, str | int]] = set()
     effective_model: str | None = None
     safe_events: list[dict[str, Any]] = []
     prompt_completed = False
@@ -338,6 +340,9 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
                 "acp-session-new-response" if method == "session/new" else "acp-set-config-option-response"
             )
         is_response = "result" in message or "error" in message
+        matched_prompt_request = is_response and message_id_key is not None and message_id_key in active_prompt_ids
+        if matched_prompt_request and message_id_key is not None:
+            active_prompt_ids.discard(message_id_key)
         matched_config_request = (
             is_response and message_id_key is not None and message_id_key in config_option_request_ids
         )
@@ -354,10 +359,9 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
                 if effective_model is not None:
                     effective_model_locator = response_locator
             stop = result.get("stopReason")
-            if isinstance(stop, str) and isinstance(message.get("id"), (str, int)):
-                stop_reasons[str(message["id"])] = stop
-                if request_id is not None and str(message["id"]) == request_id and stop == "end_turn":
-                    prompt_completed = True
+            if matched_prompt_request and isinstance(stop, str):
+                stop_reason = stop
+                prompt_completed = stop == "end_turn"
         params = message.get("params")
         if isinstance(params, dict):
             candidate_session = params.get("sessionId")
@@ -365,6 +369,8 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
                 session_id = candidate_session
             if message.get("method") == "session/prompt" and isinstance(message.get("id"), (str, int)):
                 request_id = str(message["id"])
+                if message_id_key is not None:
+                    active_prompt_ids.add(message_id_key)
         update = _update(message)
         if update is not None:
             kind = update.get("sessionUpdate")
@@ -395,10 +401,6 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
                     return None, str(permission_error["detail"])
                 permission_error_detail = str(permission_error["detail"])
                 break
-    if request_id is not None:
-        stop_reason = stop_reasons.get(request_id)
-    elif len(stop_reasons) == 1:
-        request_id, stop_reason = next(iter(stop_reasons.items()))
     if protocol_version not in (None, 1):
         return None, f"unsupported ACP protocol version: {protocol_version}"
     text = "".join(text_parts).strip()
@@ -443,6 +445,7 @@ def run_cursor(
             failure_phase="preflight",
             failure_kind="version-mismatch",
             transport="acpx",
+            requested_model=model,
         )
     if proc.which("acpx") is None:
         return AgentResult(
@@ -452,6 +455,7 @@ def run_cursor(
             failure_phase="preflight",
             failure_kind="missing-executable",
             transport="acpx",
+            requested_model=model,
         )
     if proc.which("cursor-agent") is None:
         return AgentResult(
@@ -461,6 +465,7 @@ def run_cursor(
             failure_phase="preflight",
             failure_kind="missing-executable",
             transport="acpx",
+            requested_model=model,
         )
     installed, version_error = _call_with_process_registry(
         installed_version,
@@ -475,6 +480,7 @@ def run_cursor(
             failure_phase="preflight",
             failure_kind="version-mismatch",
             transport="acpx",
+            requested_model=model,
             acpx_version=installed,
         )
     auth = _call_with_process_registry(
@@ -524,6 +530,7 @@ def run_cursor(
             failure_phase="preflight",
             failure_kind="unsafe-worktree",
             transport="acpx",
+            requested_model=model,
             acpx_version=installed,
             safe_events=(auth_event,),
         )
