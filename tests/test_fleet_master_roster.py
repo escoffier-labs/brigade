@@ -102,6 +102,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "The API key for implementer is shortkey",
         "The API key for the implementer is shortkey",
         "The API key assigned to this seat is shortkey",
+        "The API key used by this seat is shortkey",
+        "The API key used by implementer is shortkey",
         "API key value is shortkey",
         "Password value = hunter2",
         "Password: stored as hunter2",
@@ -170,6 +172,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Use `production-admin` auth profile.",
         "Use the production-admin auth profile.",
         "Authentication profile for this seat is production-admin",
+        "The auth profile assigned to this seat is production-admin",
         "Auth profile value: production-admin",
         "password: actual-secret",
         "password equals hunter2",
@@ -423,6 +426,7 @@ def test_parse_accepts_prose_that_mentions_auth_profiles(text: str) -> None:
         "Handle TLS/1.3 connections.",
         "GET /health endpoint",
         "POST /v1/jobs",
+        "Call /api/v1/%6aobs",
         "GET /users",
         "POST /applications",
         "DELETE /config/settings.json",
@@ -812,6 +816,23 @@ def test_parse_rejects_filesystem_paths_in_url_parameters(field: str, text: str)
     ],
 )
 def test_parse_rejects_encoded_assignments_in_api_route_paths(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Call /api/%2Fetc/passwd",
+        "Call /api/foo/%65tc/passwd",
+        "Call /api/%7E/.ssh/id_rsa",
+    ],
+)
+def test_parse_rejects_encoded_filesystem_paths_in_api_routes(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 
