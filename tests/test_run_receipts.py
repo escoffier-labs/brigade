@@ -582,3 +582,22 @@ def test_worker_payload_and_logs_truncate_beyond_declared_bounds(tmp_path: Path)
     )
     assert len(agent.text.encode("utf-8")) == message_envelope.MESSAGE_WRAP_MAX_BYTES
     assert len((tmp_path / agent.stdout_log).read_bytes()) == proc.MAX_CAPTURE_BYTES
+
+
+def test_acpx_receipt_details_stay_within_byte_cap(tmp_path: Path):
+    multibyte_detail = "😃" * (proc.MAX_CAPTURE_BYTES // 4 + 1)
+    result = WorkerResult(
+        worker="coder",
+        task="inspect diagnostics",
+        text="result",
+        ok=False,
+        detail=multibyte_detail,
+        stdout=None,
+        stderr="",
+        transport="acpx",
+    )
+
+    recorded = write_worker_logs(tmp_path, [result])[0]
+    payload = worker_payload([recorded])[0]
+
+    assert len(payload["detail"].encode("utf-8")) <= proc.MAX_CAPTURE_BYTES

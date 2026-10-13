@@ -30,7 +30,7 @@ def _bound_detail(value: str) -> str:
 
 def _receipt_detail(value: str, transport: str) -> str:
     if transport == "acpx":
-        return sanitize_diagnostic(value, limit=proc.MAX_CAPTURE_BYTES)
+        return proc.bound_text(sanitize_diagnostic(value, limit=proc.MAX_CAPTURE_BYTES), proc.MAX_CAPTURE_BYTES)
     return _bound_detail(value)
 
 
@@ -38,7 +38,7 @@ def _receipt_capture(value: str | None, transport: str) -> str | None:
     bounded = _bound_capture_text(value)
     if bounded is not None and transport == "acpx":
         safe = sanitize_diagnostic(bounded, limit=proc.MAX_CAPTURE_BYTES)
-        return bounded if safe == bounded.strip() else safe
+        return proc.bound_text(bounded if safe == bounded.strip() else safe, proc.MAX_CAPTURE_BYTES)
     return bounded
 
 
