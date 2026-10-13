@@ -71,6 +71,9 @@ def stage_source_package(
         try:
             entry_info = reader.info(entry_path)
         except FileNotFoundError:
+            if strict_package:
+                code = "malformed" if name == "receipt.json" else "mismatch"
+                raise evidence_package_snapshot.PackageSnapshotError(code) from None
             entry_info = None
         except OSError as exc:
             if _control_crosswalk_io._is_unsafe_link_refusal(exc):
@@ -88,6 +91,11 @@ def stage_source_package(
                 raise evidence_package_snapshot.PackageSnapshotError("unsafe") from exc
             try:
                 entry_info = reader.info(entry_path)
+            except FileNotFoundError:
+                if strict_package:
+                    code = "malformed" if name == "receipt.json" else "mismatch"
+                    raise evidence_package_snapshot.PackageSnapshotError(code) from None
+                raise exc from None
             except OSError as recheck_error:
                 if _control_crosswalk_io._is_unsafe_link_refusal(recheck_error):
                     raise evidence_package_snapshot.PackageSnapshotError("unsafe") from recheck_error
@@ -132,6 +140,10 @@ def binding_candidates(source: object, receipt: dict[str, object]) -> dict[str, 
     )
     candidates.update(receipt)
     return candidates
+
+
+def needs_staged_receipt(obs: control_readiness.ArtifactObservation) -> bool:
+    return "package_snapshot_mismatch" in obs.reasons or (obs.proposed == "invalid" and "schema_missing" in obs.reasons)
 
 
 def _unavailable(relpath: str, reason: str) -> control_readiness.ArtifactObservation:

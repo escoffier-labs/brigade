@@ -11,11 +11,16 @@ from . import attestation, attestation_input, attestation_receipt, control_readi
 
 
 def binding_candidates(obs: control_readiness.ArtifactObservation, candidates: dict[str, object]) -> dict[str, object]:
-    if obs.proposed == "rejected" and any(
-        reason in {"receipt_digest_mismatch", "signature_mismatch"} for reason in obs.reasons
-    ):
+    if receipt_claims_untrusted(obs):
         return {}
     return candidates
+
+
+def receipt_claims_untrusted(obs: control_readiness.ArtifactObservation) -> bool:
+    """Return whether receipt fields failed integrity or signed-payload checks."""
+    return obs.proposed == "rejected" and any(
+        reason in {"receipt_digest_mismatch", "signature_mismatch"} for reason in obs.reasons
+    )
 
 
 def _observation(
@@ -86,21 +91,16 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
         return control_readiness.ArtifactObservation(
             relpath, "discovered", "invalid", control_readiness.dims(), ["schema_missing"]
         )
-    if snapshot.receipt.get("run_id") != bundle_path.parent.name:
-        return _observation(
-            relpath,
-            "rejected",
-            integrity="unknown",
-            subject=("failed", "run_binding_mismatch"),
-            reason="run_binding_mismatch",
-            source_digest=hashlib.sha256(bundle_path.read_bytes()).hexdigest(),
-        )
-
     try:
         statement = attestation.build_statement(snapshot)
+    except attestation.AttestationExportError:
+        return control_readiness.ArtifactObservation(
+            relpath, "discovered", "invalid", control_readiness.dims(), ["schema_missing"]
+        )
+    try:
         bundle = attestation_input.read_json_object(bundle_path)
         cosign_attestation.validate_bundle(bundle, statement)
-    except (OSError, attestation_input.AttestationInputError, attestation.AttestationExportError):
+    except (OSError, attestation_input.AttestationInputError):
         return _observation(
             relpath,
             "rejected",
@@ -165,6 +165,15 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
             reason="signature_mismatch",
             source_digest=digest,
         )
+    if snapshot.receipt.get("run_id") != bundle_path.parent.name:
+        return _observation(
+            relpath,
+            "rejected",
+            integrity="unknown",
+            subject=("failed", "run_binding_mismatch"),
+            reason="run_binding_mismatch",
+            source_digest=digest,
+        )
     if (
         type(snapshot.receipt.get("schema_version")) is not int
         or snapshot.receipt.get("schema_version") != receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION
@@ -174,7 +183,7 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
             "invalid",
             integrity="passed",
             signature="passed",
-            authorization="passed",
+            authorization="unknown",
             subject="passed",
             reason="schema_missing",
             source_digest=digest,
@@ -185,7 +194,7 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
     verified_trust = {
         "integrity": "passed",
         "signature": "passed",
-        "authorization": "passed",
+        "authorization": "unknown",
         "subject": "passed",
         "source_digest": digest,
     }
@@ -223,7 +232,7 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
             "failed",
             integrity="passed",
             signature="passed",
-            authorization="passed",
+            authorization="unknown",
             subject="passed",
             reason=reason,
             source_digest=digest,
@@ -233,7 +242,7 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
         "validated",
         integrity="passed",
         signature="passed",
-        authorization="passed",
+        authorization="unknown",
         subject="passed",
         source_digest=digest,
     )

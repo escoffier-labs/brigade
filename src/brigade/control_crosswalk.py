@@ -385,7 +385,8 @@ def _evaluate_verify_receipt_completed(ctx: _Context) -> _Discovery:
             obs = _assess_verify_receipt(ctx, run_dir, path, receipt)
         # An unreadable receipt records no run identity, so it stays unbound.
         _bind(obs, ctx, control_crosswalk_cosign.binding_candidates(obs, _receipt_binding(receipt)))
-        obs.timestamp = _first_timestamp(receipt, "completed_at", "started_at")
+        if not control_crosswalk_cosign.receipt_claims_untrusted(obs):
+            obs.timestamp = _first_timestamp(receipt, "completed_at", "started_at")
         _apply_period(obs, ctx)
         out.observations.append(obs)
     return out
@@ -638,7 +639,8 @@ def _evaluate_cosign_bundle_exists(ctx: _Context) -> _Discovery:
                 ["verifier_not_wired"],
             )
         _bind(obs, ctx, control_crosswalk_cosign.binding_candidates(obs, _receipt_binding(receipt)))
-        obs.timestamp = _first_timestamp(receipt, "completed_at", "started_at")
+        if not control_crosswalk_cosign.receipt_claims_untrusted(obs):
+            obs.timestamp = _first_timestamp(receipt, "completed_at", "started_at")
         _apply_period(obs, ctx)
         if obs.scope == "in_scope":
             out.verifier_unavailable |= obs.proposed == "unavailable"
@@ -1397,7 +1399,7 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
         elif adapter is not None:
             try:
                 obs = _adapter_observation(adapter, ctx, package_dir, relpath, reserve_bytes=manifest_reserve)
-                if adapter is _verify_evidence_package and "package_snapshot_mismatch" in obs.reasons:
+                if adapter is _verify_evidence_package and control_crosswalk_package.needs_staged_receipt(obs):
                     staged_package = ctx.reader.snapshot_target / package_dir.relative_to(ctx.target)
                     staged_receipt_candidates = control_crosswalk_package.receipt_binding_candidates(staged_package)
             finally:
