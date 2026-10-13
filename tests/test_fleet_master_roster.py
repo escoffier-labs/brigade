@@ -89,6 +89,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Use auth profile production-admin.",
         'Use auth profile "production-admin".',
         "Use auth profile 'production-admin'.",
+        "Use auth profile `production-admin`.",
         "Use auth profile: production-admin",
         "Use auth-profile production-admin",
         "Use auth_profile production-admin",
@@ -143,7 +144,10 @@ def test_parse_rejects_relative_paths_as_models(model: str) -> None:
 
 
 @pytest.mark.parametrize("field", ["model", "purpose", "caveats"])
-@pytest.mark.parametrize("path", ["workspace/Dockerfile", "project/Makefile"])
+@pytest.mark.parametrize(
+    "path",
+    ["workspace/Dockerfile", "project/Makefile", "docs/README", "src/main"],
+)
 def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None:
     document = _document()
     if field == "caveats":
@@ -155,7 +159,7 @@ def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None
         fleet_master_roster.parse(document)
 
 
-@pytest.mark.parametrize("text", ["and/or", "input/output", "read/write"])
+@pytest.mark.parametrize("text", ["and/or", "input/output", "read/write", "input / output", "planner / reviewer"])
 def test_parse_accepts_slash_separated_descriptive_prose(text: str) -> None:
     document = _document()
     document["seats"][0]["purpose"] = f"Support {text} workflows"  # type: ignore[index]
