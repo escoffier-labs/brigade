@@ -22,7 +22,7 @@ _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _MODEL_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _EXPLANATORY_SECRET_VALUE = (
-    r"(?:required|optional|needed|necessary|available|configured|set(?!\s+to\b)|missing|unset|unavailable|"
+    r"(?:required|optional|needed|necessary|available|configured(?!\s+as\b)|set(?!\s+to\b)|missing|unset|unavailable|"
     r"not\s+(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable)|"
     r"confidential|managed(?:\s+by\s+Vault)?|provided|stored(?:\s+securely)?|encrypted|protected|"
     r"handled|generated|rotated|masked|redacted)(?=$|\s|[.,;!?](?:\s|$))"
@@ -32,7 +32,7 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:Proxy-)?Authorization\s*:\s*Bearer\s+\S+|\bBearer\s+[A-Za-z0-9._~+/-]{20,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
-    r"\bauth(?:entication)?[ _-]profiles?\s+(?:is|was|equals|will\s+be|has\s+been)\s+"
+    r"\bauth(?:entication)?[ _-]profiles?\s+(?:is|was|equals|will\s+be|has\s+been|set\s+to)\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s*[:=]\s*" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
@@ -63,11 +63,17 @@ _URL_CREDENTIAL_QUERY = re.compile(
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
-    r"\b(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+)"
+    r"\b(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+|(?:use\s+)?environment\s+variable\s+)"
     r"[A-Za-z_][A-Za-z0-9_]*\s*=(?!=|>)",
     re.IGNORECASE,
 )
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
+_EXPLICIT_TERMINAL_PATH = re.compile(
+    r"\b(?:home\s+directory|path|file|directory|folder|script|repository|repo)\s*"
+    r"(?:is|was|equals|will\s+be|has\s+been|set\s+to|:|=)\s*[\"'“‘`()\[{]*\s*"
+    r"(?:~|/|\\|\.{1,2})(?=$|[\s,;!?\"'”’)\]}])",
+    re.IGNORECASE,
+)
 _API_ROUTE_CONTEXT = re.compile(
     r"\b(?:call|invoke|serve|expose|request|hit|get|head|post|put|patch|delete|connect|options|trace)\s+(?:the\s+)?"
     r"(?P<path>/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)(?:\?[^\s<>\"']*)?)",
@@ -117,7 +123,7 @@ _PATH_CONTEXT = re.compile(
     r"(?:\b(?:run|execute|inspect|open|read|write|load|save|path|file|directory|folder|script|repository|repo)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?"
     r"[\"'“‘]*\s*(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?|"
-    r"\b(?:path|file|directory|folder|script|repository|repo)\s*(?:is|was|equals|will\s+be|has\s+been|:|=)\s*)[\"'“‘`()\[{]*\s*$",
+    r"\b(?:path|file|directory|folder|script|repository|repo)\s*(?:is|was|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s*)[\"'“‘`()\[{]*\s*$",
     re.IGNORECASE,
 )
 _QUOTED_PATH_CONTEXT = re.compile(
@@ -308,7 +314,8 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         or (
             check_paths
             and (
-                _ROOTED_PATH.search(path_text)
+                _EXPLICIT_TERMINAL_PATH.search(path_text)
+                or _ROOTED_PATH.search(path_text)
                 or _has_relative_path_evidence(
                     path_text,
                     model_identifier=field.endswith(".model") and _MODEL_IDENTIFIER.fullmatch(value) is not None,
