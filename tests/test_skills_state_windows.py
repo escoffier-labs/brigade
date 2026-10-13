@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import ctypes
+import io
 import os
 import stat
 import sys
@@ -491,6 +492,28 @@ def test_native_dirfd_rename_to_and_from_nonbmp_destination(tmp_path):
 
 
 @native_windows
+def test_native_dirfd_rename_to_and_from_lone_surrogate_destination(tmp_path):
+    (tmp_path / "source.txt").write_bytes(b"rename\x00data\xff\n")
+    destination = "renamed-\ud800.txt"
+    with ExitStack() as stack:
+        parent = dirfd.open_directory_nofollow(tmp_path)
+        stack.callback(os.close, parent)
+        for source, target in (("source.txt", destination), (destination, "restored.txt")):
+            dirfd.replace_children(parent, source, target)
+            assert not (tmp_path / source).exists()
+            assert (tmp_path / target).read_bytes() == b"rename\x00data\xff\n"
+            fd = dirfd.open_child_file(parent, target, os.O_RDONLY | os.O_BINARY)
+            try:
+                assert os.read(fd, 100) == b"rename\x00data\xff\n"
+            finally:
+                os.close(fd)
+            with pytest.raises(OSError):
+                os.fstat(fd)
+    with pytest.raises(OSError):
+        os.fstat(parent)
+
+
+@native_windows
 def test_native_dirfd_lone_surrogate_child_lookup(tmp_path):
     name = "child-\ud800.txt"
     (tmp_path / name).write_bytes(b"child data\n")
@@ -503,6 +526,136 @@ def test_native_dirfd_lone_surrogate_child_lookup(tmp_path):
             os.close(fd)
     finally:
         os.close(parent)
+
+
+@contextmanager
+def _fleet_state_path_probes(monkeypatch, state):
+    """Observe every pathname probe, including no-follow metadata reads."""
+    probes = []
+
+    def observe(operation, original):
+        def call(path, *args, **kwargs):
+            if not isinstance(path, int):
+                candidate = Path(os.fsdecode(path))
+                if candidate.is_relative_to(state):
+                    probes.append((operation, str(candidate)))
+            return original(path, *args, **kwargs)
+
+        return call
+
+    backend = (dirfd.posix_available(), dirfd.available())
+    with monkeypatch.context() as patch:
+        patch.setattr(io, "open", observe("open", io.open))
+        wrappers = {}
+        for operation in ("stat", "lstat", "scandir", "listdir", "access"):
+            original = getattr(os, operation)
+            wrappers[original] = observe(operation, original)
+            patch.setattr(os, operation, wrappers[original])
+        # Wrappers inherit the originals' capabilities so backend selection is unchanged.
+        for capability in ("supports_dir_fd", "supports_fd", "supports_follow_symlinks", "supports_effective_ids"):
+            members = getattr(os, capability)
+            inherited = {wrapper for original, wrapper in wrappers.items() if original in members}
+            patch.setattr(os, capability, members | inherited)
+        for operation in ("exists", "isdir", "isfile", "islink", "isjunction"):
+            if hasattr(os.path, operation):
+                patch.setattr(os.path, operation, observe(operation, getattr(os.path, operation)))
+        assert (dirfd.posix_available(), dirfd.available()) == backend, "path probes must not change the backend"
+        yield probes
+
+
+@native_windows
+@pytest.mark.parametrize(
+    ("harness", "junction"),
+    [("mcp", "root"), ("mcp", "parent"), ("mcp", "adapter"), ("custom", "parent"), ("custom", "adapter")],
+)
+def test_native_fleet_discovery_never_walks_state_junction(tmp_path, monkeypatch, capsys, harness, junction):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = workspace / ".brigade"
+    relative = ("skills", "mcp-resources") if harness == "mcp" else ("projections", "custom")
+    if harness == "custom":
+        config = state / "skills" / "adapters.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            json.dumps({"adapters": {"custom": {"install_path": ".brigade/projections/custom/{skill_id}"}}})
+        )
+    outside = tmp_path / "outside"
+    remaining = relative if junction == "root" else relative[1:] if junction == "parent" else ()
+    foreign = outside.joinpath(*remaining, "outside-fleet-only", "SKILL.md")
+    foreign.parent.mkdir(parents=True)
+    foreign.write_bytes(b"outside fleet content\n")
+    link = state if junction == "root" else state / relative[0] if junction == "parent" else state.joinpath(*relative)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    with _reparse_replacement_setup(link):
+        _link_directory(link, outside)
+    assert link.resolve() == outside.resolve(), "junction must redirect before fleet discovery"
+    assert link.joinpath(*remaining, "outside-fleet-only", "SKILL.md").read_bytes() == b"outside fleet content\n"
+    with _read_only_directory_acl(workspace), _fleet_state_path_probes(monkeypatch, state) as probes:
+        assert skills_cmd.fleet_status(target=workspace, json_output=True) == 0
+        payload = json.loads(capsys.readouterr().out)
+        keys = skills_cmd._fleet_copy_keys(workspace)
+    assert payload["copies"] == []
+    assert keys == []
+    assert not probes, f"fleet state pathname metadata lookup through a live junction: {probes}"
+    assert foreign.read_bytes() == b"outside fleet content\n"
+
+
+@native_windows
+@pytest.mark.parametrize("copy_kind", ["missing", "bundled", "registry-without-receipt"])
+def test_native_fleet_discovery_uses_read_only_state_anchor(tmp_path, monkeypatch, capsys, copy_kind):
+    state = tmp_path / ".brigade"
+    present = copy_kind != "missing"
+    skill_id = "security-review" if copy_kind == "registry-without-receipt" else "brigade-work"
+    if copy_kind == "registry-without-receipt":
+        source = _write_skill(tmp_path / "source")
+        assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+        capsys.readouterr()
+    if present:
+        assert skills_cmd.install(workspace=tmp_path, skill=skill_id, harness="mcp", json_output=True) == 0
+        capsys.readouterr()
+    if copy_kind == "registry-without-receipt":
+        (state / "skills" / "installs" / f"{skill_id}-mcp.json").unlink()
+    paths = [tmp_path]
+    if present:
+        paths += [state, *sorted(path for path in state.rglob("*") if path.is_dir())]
+    with ExitStack() as stack:
+        for path in paths:
+            stack.enter_context(_read_only_directory_acl(path))
+        with _fleet_state_path_probes(monkeypatch, state) as probes:
+            assert skills_cmd.fleet_status(target=tmp_path, json_output=True) == 0
+            payload = json.loads(capsys.readouterr().out)
+    assert [(row["skill_id"], row["harness"], row["status"]) for row in payload["copies"]] == (
+        [(skill_id, "mcp", "unknown" if copy_kind == "registry-without-receipt" else "current")] if present else []
+    )
+    assert not probes, f"fleet inspection must use held descriptors: {probes}"
+    assert state.exists() is present
+
+
+@native_windows
+@pytest.mark.parametrize("selector", ["bare", "registry", "raw-path"])
+def test_native_compatibility_reads_registry_and_state_copies_through_anchor(tmp_path, monkeypatch, capsys, selector):
+    state = tmp_path / ".brigade"
+    skill_id = "security-review"
+    assert skills_cmd.import_skill(target=tmp_path, source=_write_skill(tmp_path / "source"), json_output=True) == 0
+    assert skills_cmd.install(workspace=tmp_path, skill=f"registry:{skill_id}", harness="mcp", json_output=True) == 0
+    capsys.readouterr()
+    requested = {
+        "bare": skill_id,
+        "registry": f"registry:{skill_id}",
+        "raw-path": str(state / "skills" / "registry" / skill_id),
+    }[selector]
+    with ExitStack() as stack:
+        for path in [tmp_path, state, *sorted(path for path in state.rglob("*") if path.is_dir())]:
+            stack.enter_context(_read_only_directory_acl(path))
+        with _fleet_state_path_probes(monkeypatch, state) as probes:
+            assert skills_cmd.compatibility(target=tmp_path, skill=requested, json_output=True) == 0
+            payload = json.loads(capsys.readouterr().out)
+    mcp = next(row for row in payload["adapters"] if row["id"] == "mcp")
+    assert payload["source"]["identity"] == f"registry://skills/{skill_id}"
+    assert mcp["installed"] is True
+    assert mcp["current_render_fingerprint"] == mcp["installed_render_fingerprint"]
+    assert mcp["drift"]["overall"] == "current"
+    assert not probes, f"compatibility must read state through held descriptors: {probes}"
 
 
 @contextmanager
@@ -571,3 +724,66 @@ def test_native_outcome_discovery_uses_read_only_state_anchor(tmp_path, monkeypa
         assert outcome_discovery._artifact_content_path_at(tmp_path, "registry-only") == (skill if present else None)
     assert not probes, f"state inspection must use the held descriptor: {probes}"
     assert state.exists() is present
+
+
+@native_windows
+@pytest.mark.parametrize("destination", ["workspace-docs", "outside"])
+def test_native_compatibility_reports_junctioned_install_copy_as_not_installed(
+    tmp_path, monkeypatch, capsys, destination
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = workspace / ".brigade"
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "source"), json_output=True) == 0
+    capsys.readouterr()
+    redirected = workspace / "docs" if destination == "workspace-docs" else tmp_path / "outside"
+    redirected.mkdir()
+    (redirected / "SKILL.md").write_bytes(b"redirected copy\n")
+    link = state / "skills" / "mcp-resources" / "security-review"
+    link.parent.mkdir(parents=True)
+    with _reparse_replacement_setup(link):
+        _link_directory(link, redirected)
+    assert link.resolve() == redirected.resolve(), "junction must redirect before compatibility"
+    with _read_only_directory_acl(workspace), _fleet_state_path_probes(monkeypatch, state) as probes:
+        assert skills_cmd.compatibility(target=workspace, skill="registry:security-review", json_output=True) == 0
+        payload = json.loads(capsys.readouterr().out)
+        result, is_error = skills_cmd._mcp_tool_call(
+            workspace, "get_skill_compatibility", {"skill_id": "security-review"}
+        )
+    assert not probes, f"compatibility must not probe a refused install copy by pathname: {probes}"
+    assert payload["source"]["identity"] == "registry://skills/security-review"
+    for rows in (payload["adapters"], result["adapters"]):
+        mcp = next(row for row in rows if row["id"] == "mcp")
+        assert mcp["installed"] is False
+        assert mcp["drift"] is None
+        assert "installed copy refused by skills state anchoring" in mcp["blockers"]
+    assert is_error is False
+    assert (redirected / "SKILL.md").read_bytes() == b"redirected copy\n"
+
+
+def test_bare_id_lint_never_rereads_registry_entry_by_pathname_after_path_disappears(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = workspace / ".brigade"
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "source", "race-skill")) == 0
+    cwd = tmp_path / "cwd"
+    _write_skill(cwd, "race-skill")
+    monkeypatch.chdir(cwd)
+    real_load_skill = registry._load_skill
+    kinds = []
+
+    def load_then_rename(target, skill_or_path):
+        loaded = real_load_skill(target, skill_or_path)
+        kinds.append(loaded[2]["kind"])
+        if len(kinds) == 1:
+            (cwd / "race-skill").rename(cwd / "moved")
+        return loaded
+
+    monkeypatch.setattr(registry, "_load_skill", load_then_rename)
+    with _fleet_state_path_probes(monkeypatch, state) as probes:
+        payload = skills_cmd._lint_payload(workspace, "race-skill")
+    assert kinds[:2] == ["path", "registry"], "the second classification must see the registry entry"
+    assert not probes, f"registry entry must be linted from the anchored snapshot: {probes}"
+    assert payload["valid"] is True, payload["errors"]
+    assert payload["source"]["identity"] == "registry://skills/race-skill"
+    assert payload["skill_dir"] == str(state / "skills" / "registry" / "race-skill")

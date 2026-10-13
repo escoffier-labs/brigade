@@ -106,6 +106,19 @@ def validate_component(name: str) -> str:
     return name
 
 
+def _validate_child_component(name: str) -> str:
+    """Allow POSIX filename characters only when using the POSIX backend."""
+    if not posix_available():
+        return validate_component(name)
+    if not isinstance(name, str) or not name:
+        raise OSError("path component is empty")
+    if name in {".", ".."}:
+        raise OSError("path component is not contained")
+    if "/" in name or "\x00" in name:
+        raise OSError("path component is not a single contained name")
+    return name
+
+
 def _posix_open_directory(path: Path) -> int:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     return os.open(path, flags)
@@ -197,7 +210,7 @@ def open_file_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
 
 
 def open_child_directory(parent: int, name: str, *, writable: bool = True) -> int:
-    validate_component(name)
+    _validate_child_component(name)
     if posix_available():
         return _posix_open_child_directory(parent, name)
     if nt_available():
@@ -210,7 +223,7 @@ def open_child_directory(parent: int, name: str, *, writable: bool = True) -> in
 
 
 def mkdir_child(parent: int, name: str, mode: int = 0o700) -> None:
-    validate_component(name)
+    _validate_child_component(name)
     if posix_available():
         _posix_mkdir_child(parent, name, mode)
         return
@@ -221,7 +234,7 @@ def mkdir_child(parent: int, name: str, mode: int = 0o700) -> None:
 
 
 def open_child_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
-    validate_component(name)
+    _validate_child_component(name)
     if posix_available():
         return _posix_open_child_file(parent, name, flags, mode)
     if nt_available():
@@ -231,7 +244,7 @@ def open_child_file(parent: int, name: str, flags: int, mode: int = 0o600) -> in
 
 def open_child_lock_file(parent: int, name: str, mode: int = 0o600) -> int:
     """Open a sibling lock under a held parent with no-follow and minimal rights."""
-    validate_component(name)
+    _validate_child_component(name)
     if posix_available():
         return _posix_open_child_file(parent, name, file_flags(os.O_RDWR | os.O_CREAT), mode)
     if nt_available():
@@ -240,8 +253,8 @@ def open_child_lock_file(parent: int, name: str, mode: int = 0o600) -> int:
 
 
 def replace_children(parent: int, source: str, destination: str) -> None:
-    validate_component(source)
-    validate_component(destination)
+    _validate_child_component(source)
+    _validate_child_component(destination)
     if posix_available():
         _posix_replace_children(parent, source, destination)
         return
@@ -252,7 +265,7 @@ def replace_children(parent: int, source: str, destination: str) -> None:
 
 
 def unlink_child(parent: int, name: str, *, allow_reparse: bool = False) -> None:
-    validate_component(name)
+    _validate_child_component(name)
     if posix_available():
         _posix_unlink_child(parent, name)
         return
@@ -266,7 +279,7 @@ def unlink_child(parent: int, name: str, *, allow_reparse: bool = False) -> None
 
 
 def stat_child(parent: int, name: str, *, allow_reparse: bool = False) -> os.stat_result:
-    validate_component(name)
+    _validate_child_component(name)
     if posix_available():
         return _posix_stat_child(parent, name)
     if nt_available():
@@ -278,7 +291,7 @@ def stat_child(parent: int, name: str, *, allow_reparse: bool = False) -> os.sta
 
 def rmdir_child(parent: int, name: str) -> None:
     """Remove an empty plain directory relative to its held parent."""
-    validate_component(name)
+    _validate_child_component(name)
     if posix_available():
         os.rmdir(name, dir_fd=parent)
         return
@@ -290,8 +303,8 @@ def rmdir_child(parent: int, name: str) -> None:
 
 def rename_child(source_parent: int, source: str, destination_parent: int, destination: str) -> None:
     """Move a plain child directory between two held parents."""
-    validate_component(source)
-    validate_component(destination)
+    _validate_child_component(source)
+    _validate_child_component(destination)
     if posix_available():
         os.rename(source, destination, src_dir_fd=source_parent, dst_dir_fd=destination_parent)
         return

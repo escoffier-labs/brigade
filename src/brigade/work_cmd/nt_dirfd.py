@@ -657,7 +657,7 @@ def _nt_set_info(api: Any, handle: Any, info: Any, length: int, klass: int, *, n
 
 
 def _rename_information(api: Any, parent: int, destination: str, *, replace: bool) -> tuple[Any, int]:
-    encoded = destination.encode("utf-16-le")
+    encoded = destination.encode("utf-16-le", errors="surrogatepass")
     nchars = len(encoded) // 2
     rename_class = api.make_rename_class(nchars)
     info = rename_class()

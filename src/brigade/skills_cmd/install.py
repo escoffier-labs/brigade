@@ -45,6 +45,12 @@ def _evaluate_install_dir(workspace: Path, harness: str, skill_id: str) -> tuple
         return registry._hermes_skills_root() / registry._slug(skill_id), False
     adapter = _adapter_map(workspace)[harness]
     install_dir = workspace / str(adapter["install_path"]).format(skill_id=skill_id)
+    parts = _packs_mod._lexical_state_root_parts(workspace, install_dir)
+    if parts is not None:
+        # State paths are lexical projections only. Read-only callers inspect
+        # them through held anchors; resolving here would follow a junction
+        # before those callers can refuse it.
+        return install_dir, not parts or ".." in install_dir.parts
     workspace_resolved = workspace.resolve()
     resolved = install_dir.resolve()
     escapes = (
@@ -57,6 +63,16 @@ def _install_dir(workspace: Path, harness: str, skill_id: str) -> Path:
     install_dir, escapes = _evaluate_install_dir(workspace, harness, skill_id)
     if escapes:
         raise ValueError(f"skill install path escapes workspace: {install_dir}")
+    parts = _packs_mod._lexical_state_root_parts(workspace, install_dir)
+    if parts is not None:
+        # Preserve the writable destination guard now that projection avoids
+        # resolve(). Missing state is created only by the mutation owner.
+        try:
+            with registry._held_state_root(workspace, writable=False) as anchor:
+                registry._state_entry_kind(anchor, *parts)
+        except registry.SkillsStatePathError as exc:
+            if not isinstance(exc.__context__, FileNotFoundError):
+                raise
     return install_dir
 
 

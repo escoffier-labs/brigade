@@ -64,6 +64,35 @@ def test_import_preserves_nested_source_directories(tmp_path, capsys):
     assert (imported / "scripts" / "nested" / "data.txt").read_bytes() == b"nested source\n"
 
 
+@pytest.mark.skipif(not dirfd.posix_available(), reason="POSIX bundle component names")
+@pytest.mark.parametrize("suffix", [":part", "\\part"], ids=["colon", "backslash"])
+def test_skills_posix_bundle_component_lifecycle(tmp_path, capsys, suffix):
+    source = _write_skill(tmp_path / "source")
+    parts = ("scripts", "nested" + suffix, "data" + suffix)
+    source.joinpath(*parts[:-1]).mkdir(parents=True)
+    registry = tmp_path / ".brigade" / "skills" / "registry" / "security-review"
+    installed = tmp_path / ".brigade" / "skills" / "mcp-resources" / "security-review"
+    for index, data in enumerate((b"original\x00\xff\n", b"updated\x00\xfe\n")):
+        source.joinpath(*parts).write_bytes(data)
+        assert skills_cmd.import_skill(target=tmp_path, source=source, force=bool(index), json_output=True) == 0
+        capsys.readouterr()
+        assert registry.joinpath(*parts).read_bytes() == data
+        assert skills_cmd.lint(target=tmp_path, skill="registry:security-review", json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["valid"] is True
+        assert (
+            skills_cmd.install(
+                workspace=tmp_path, skill="security-review", harness="mcp", force=bool(index), json_output=True
+            )
+            == 0
+        )
+        capsys.readouterr()
+        assert installed.joinpath(*parts).read_bytes() == data
+    assert skills_cmd.uninstall(workspace=tmp_path, skill="security-review", harness="mcp", json_output=True) == 0
+    capsys.readouterr()
+    assert not installed.exists()
+    assert registry.joinpath(*parts).read_bytes() == data
+
+
 def test_skills_import_lint_search_and_install_all(tmp_path, capsys):
     source = _write_skill(tmp_path / "source")
 
@@ -1271,6 +1300,18 @@ def test_skills_diff_marks_legacy_receipt_unknown(tmp_path, capsys):
     assert payload["drift"]["source"] == "unknown"
     assert payload["drift"]["render"] == "unknown"
     assert payload["drift"]["local_edit"] == "unknown"
+
+
+@pytest.mark.parametrize("operation", ["compatibility", "diff"])
+def test_state_install_projection_preserves_missing_read_only_commands(tmp_path, capsys, operation):
+    if operation == "compatibility":
+        assert skills_cmd.compatibility(target=tmp_path, skill="bundled:brigade-work", json_output=True) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert next(row for row in payload["adapters"] if row["id"] == "mcp")["installed"] is False
+    else:
+        assert skills_cmd.diff(target=tmp_path, skill="bundled:brigade-work", harness="mcp", json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["installed"] is False
+    assert not (tmp_path / ".brigade").exists()
 
 
 def test_skills_fleet_does_not_repair_missing_copy_with_legacy_receipt(tmp_path):

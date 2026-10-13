@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,66 @@ def test_validate_component_rejects_empty_dot_dotdot_separators_and_nul() -> Non
         dirfd.validate_component("events\\lifecycle.jsonl")
     with pytest.raises(OSError, match="single contained name"):
         dirfd.validate_component("a\x00b")
+
+
+@pytest.mark.skipif(not dirfd.posix_available(), reason="POSIX dir_fd plus O_NOFOLLOW required")
+@pytest.mark.parametrize("suffix", [":part", "\\part"], ids=["colon", "backslash"])
+def test_posix_child_names_round_trip(tmp_path: Path, suffix: str) -> None:
+    directory, moved = "directory" + suffix, "moved" + suffix
+    source, destination, lock = "source" + suffix, "destination" + suffix, "lock" + suffix
+    data = b"exact\x00bytes\xff\n"
+    with ExitStack() as stack:
+        parent = dirfd.open_directory_nofollow(tmp_path)
+        stack.callback(os.close, parent)
+        dirfd.mkdir_child(parent, directory)
+        child = dirfd.open_child_directory(parent, directory)
+        stack.callback(os.close, child)
+        assert stat.S_ISDIR(dirfd.stat_child(parent, directory).st_mode)
+        fd = dirfd.open_child_file(child, source, dirfd.file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL))
+        try:
+            assert os.write(fd, data) == len(data)
+        finally:
+            os.close(fd)
+        fd = dirfd.open_child_lock_file(child, lock)
+        os.close(fd)
+        assert set(dirfd.child_names(child, 10)) == {source, lock}
+        assert dirfd.stat_child(child, source).st_size == len(data)
+        dirfd.replace_children(child, source, destination)
+        fd = dirfd.open_child_file(child, destination, dirfd.file_flags(os.O_RDONLY))
+        try:
+            assert os.read(fd, 100) == data
+        finally:
+            os.close(fd)
+        dirfd.rename_child(parent, directory, parent, moved)
+        assert dirfd.child_names(parent, 10) == [moved]
+        assert (tmp_path / moved / destination).read_bytes() == data
+        dirfd.unlink_child(child, destination)
+        dirfd.unlink_child(child, lock)
+        assert dirfd.child_names(child, 10) == []
+        dirfd.rmdir_child(parent, moved)
+        assert dirfd.child_names(parent, 10) == []
+
+
+def test_nt_child_wrappers_keep_strict_validation_when_backend_is_mocked(monkeypatch) -> None:
+    monkeypatch.setattr(dirfd, "posix_available", lambda: False)
+    monkeypatch.setattr(dirfd, "nt_available", lambda: True)
+    operations = (
+        lambda name: dirfd.open_child_directory(3, name),
+        lambda name: dirfd.mkdir_child(3, name),
+        lambda name: dirfd.open_child_file(3, name, os.O_RDONLY),
+        lambda name: dirfd.open_child_lock_file(3, name),
+        lambda name: dirfd.stat_child(3, name),
+        lambda name: dirfd.unlink_child(3, name),
+        lambda name: dirfd.rmdir_child(3, name),
+        lambda name: dirfd.replace_children(3, name, "safe"),
+        lambda name: dirfd.replace_children(3, "safe", name),
+        lambda name: dirfd.rename_child(3, name, 4, "safe"),
+        lambda name: dirfd.rename_child(3, "safe", 4, name),
+    )
+    for name in ("", ".", "..", "a/b", "a\x00b", "a:b", "a\\b"):
+        for operation in operations:
+            with pytest.raises(OSError, match="path component"):
+                operation(name)
 
 
 def test_dirfd_unavailable_message_matches_authority_store() -> None:
