@@ -73,7 +73,12 @@ def _read_body(path: Path) -> str:
         raise ValueError(f"cannot read message body file {path}: {exc}") from exc
 
 
-def _result(args: argparse.Namespace, operation: Callable[[], dict[str, Any]]) -> int:
+def _result(
+    args: argparse.Namespace,
+    operation: Callable[[], dict[str, Any]],
+    *,
+    after_output: Callable[[], None] | None = None,
+) -> int:
     from .. import fleet_client
 
     try:
@@ -98,6 +103,15 @@ def _result(args: argparse.Namespace, operation: Callable[[], dict[str, Any]]) -
             print(f"message queued for delivery ({payload.get('client_id')})")
         else:
             print(json.dumps(payload, sort_keys=True))
+    if after_output is not None:
+        sys.stdout.flush()
+        try:
+            after_output()
+        except (fleet_client.FleetClientError, ValueError) as exc:
+            from .fleet import _safe_table_cell
+
+            print(f"error: {_safe_table_cell(exc)}", file=sys.stderr)
+            return 1
     return 0
 
 
@@ -148,7 +162,8 @@ def _principal_add(args: argparse.Namespace) -> int:
 
     return _result(
         args,
-        lambda: fleet_client_messages.manage_principal("add", name=args.name, label=args.label),
+        lambda: fleet_client_messages.manage_principal("add", name=args.name, label=args.label, _defer_finalize=True),
+        after_output=lambda: fleet_client_messages.finalize_principal_add(args.name),
     )
 
 

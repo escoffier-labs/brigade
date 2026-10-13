@@ -210,13 +210,26 @@ def list_messages(*, after: int = 0, unacked: bool = False) -> dict[str, Any]:
     payload = _online({"action": "list", "after": after, "unacked": unacked})
     messages = payload.get("messages")
     next_cursor = payload.get("next_cursor")
+    previous_id = after
+    valid_ids = isinstance(messages, list)
+    if isinstance(messages, list):
+        for message in messages:
+            message_id = message.get("id") if isinstance(message, dict) else None
+            if (
+                isinstance(message_id, bool)
+                or not isinstance(message_id, int)
+                or message_id <= previous_id
+                or message_id > _message_limits.MAX_SQLITE_INTEGER
+            ):
+                valid_ids = False
+                break
+            previous_id = message_id
     if (
-        not isinstance(messages, list)
-        or any(not isinstance(message, dict) for message in messages)
+        not valid_ids
         or isinstance(next_cursor, bool)
         or not isinstance(next_cursor, int)
-        or next_cursor < after
         or next_cursor > _message_limits.MAX_SQLITE_INTEGER
+        or next_cursor != previous_id
     ):
         raise fleet_client.FleetClientError("fleet hub returned an invalid message page")
     return payload
@@ -258,7 +271,12 @@ def reply(message_id: int, *, body: str, subject: str | None, reference: str | N
 
 
 def manage_principal(
-    action: str, *, name: str, label: str | None = None, _retried_revoked_enrollment: bool = False
+    action: str,
+    *,
+    name: str,
+    label: str | None = None,
+    _retried_revoked_enrollment: bool = False,
+    _defer_finalize: bool = False,
 ) -> dict[str, Any]:
     settings = fleet_client.load_fleet_settings()
     if not settings["hub_url"]:
@@ -322,6 +340,7 @@ def manage_principal(
                     name=name,
                     label=label,
                     _retried_revoked_enrollment=True,
+                    _defer_finalize=_defer_finalize,
                 )
         if pending_path is not None and 400 <= status < 500 and status not in (408, 409, 425, 429):
             _clear_principal_request(pending_path)
@@ -340,7 +359,8 @@ def manage_principal(
             or not hmac.compare_digest(returned_token, body["token"])
         ):
             raise fleet_client.FleetClientError("fleet hub did not confirm the enrolled principal and token")
-        _clear_principal_request(pending_path)
+        if not _defer_finalize:
+            _clear_principal_request(pending_path)
     elif action == "revoke":
         principal = payload.get("principal")
         if (
@@ -351,6 +371,14 @@ def manage_principal(
             raise fleet_client.FleetClientError("fleet hub did not confirm the revoked principal")
         _clear_principal_request(_principal_pending_path(name, settings["admin_token"]))
     return payload
+
+
+def finalize_principal_add(name: str) -> None:
+    """Clear enrollment retry state after the caller has safely delivered the token."""
+    settings = fleet_client.load_fleet_settings()
+    if not settings["admin_token"]:
+        raise fleet_client.FleetClientError("no fleet admin token configured")
+    _clear_principal_request(_principal_pending_path(name, settings["admin_token"]))
 
 
 def _principal_pending_path(name: str, admin_token: str) -> Path:

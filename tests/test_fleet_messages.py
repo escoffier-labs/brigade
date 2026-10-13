@@ -146,6 +146,10 @@ def test_ack_requires_matching_response_message_id(monkeypatch):
         {"messages": [None], "next_cursor": 0},
         {"messages": [], "next_cursor": -1},
         {"messages": [], "next_cursor": True},
+        {"messages": [{"id": 7}], "next_cursor": 5},
+        {"messages": [{"id": 7}, {"id": 6}], "next_cursor": 6},
+        {"messages": [], "next_cursor": 1},
+        {"messages": [{"id": True}], "next_cursor": True},
     ],
 )
 def test_message_list_rejects_invalid_success_payload(monkeypatch, payload):
@@ -154,6 +158,23 @@ def test_message_list_rejects_invalid_success_payload(monkeypatch, payload):
 
     with pytest.raises(fleet_client.FleetClientError, match="invalid message page"):
         fleet_client_messages.list_messages()
+
+
+def test_message_list_rejects_id_before_requested_cursor(monkeypatch):
+    payload = {"messages": [{"id": 5}], "next_cursor": 5}
+    monkeypatch.setattr(fleet_client_messages, "_settings", lambda: ("https://hub.invalid", "token", NODE_A))
+    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (200, payload))
+
+    with pytest.raises(fleet_client.FleetClientError, match="invalid message page"):
+        fleet_client_messages.list_messages(after=5)
+
+
+def test_message_list_accepts_consistent_cursor(monkeypatch):
+    page = {"messages": [{"id": 7}, {"id": 9}], "next_cursor": 9}
+    monkeypatch.setattr(fleet_client_messages, "_settings", lambda: ("https://hub.invalid", "token", NODE_A))
+    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (200, page))
+
+    assert fleet_client_messages.list_messages(after=5) == page
 
 
 def test_recipient_scope_and_field_bounds(message_hub):
@@ -760,7 +781,11 @@ def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, 
     # Recover retry state written by the older node-scoped format even after
     # the home node identity changes.
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_B)
-    assert fleet_client_messages.manage_principal("add", name="researcher")["principal"]["token"]
+    enrolled = fleet_client_messages.manage_principal("add", name="researcher", _defer_finalize=True)
+    assert enrolled["principal"]["token"]
+    assert fleet_client._read_spool(stable_path)[0]["request_id"] == requests[-1]["request_id"]
+    fleet_client_messages.finalize_principal_add("researcher")
+    assert not stable_path.exists()
     assert requests[0]["request_id"] == requests[1]["request_id"]
     assert requests[0]["token"] == requests[1]["token"]
     assert not stable_path.exists()
@@ -1682,6 +1707,51 @@ def test_msg_errors_escape_hub_control_characters(capsys):
     output = capsys.readouterr().err
     assert "\x1b" not in output
     assert "\\x1b[31m" in output
+
+
+def test_principal_add_retry_state_finalizes_only_after_successful_output(monkeypatch):
+    args = type("Args", (), {"json": True, "name": "researcher", "label": None})()
+    original_print = print
+    events = []
+    monkeypatch.setattr("builtins.print", lambda *_args, **_kwargs: events.append("output"))
+    monkeypatch.setattr(
+        fleet_client_messages,
+        "manage_principal",
+        lambda *_args, **kwargs: (
+            events.append(("managed", kwargs.get("_defer_finalize"))) or {"principal": {"token": "one-time-token"}}
+        ),
+    )
+    monkeypatch.setattr(fleet_client_messages, "finalize_principal_add", lambda _name: events.append("finalized"))
+
+    assert fleet_messages_cli._principal_add(args) == 0
+    assert events == [("managed", True), "output", "finalized"]
+
+    events.clear()
+
+    def fail_output(*_args, **_kwargs):
+        raise BrokenPipeError("consumer closed stdout")
+
+    monkeypatch.setattr("builtins.print", fail_output)
+    with pytest.raises(BrokenPipeError, match="consumer closed stdout"):
+        fleet_messages_cli._principal_add(args)
+    assert events == [("managed", True)]
+
+    class FlushFails:
+        def write(self, value):
+            events.append(("write", value))
+            return len(value)
+
+        def flush(self):
+            raise BrokenPipeError("stdout flush failed")
+
+    events.clear()
+    monkeypatch.setattr("builtins.print", original_print)
+    monkeypatch.setattr(fleet_messages_cli.sys, "stdout", FlushFails())
+    with pytest.raises(BrokenPipeError, match="stdout flush failed"):
+        fleet_messages_cli._principal_add(args)
+    assert events[0] == ("managed", True)
+    assert events[1][0] == "write"
+    assert all(event != "finalized" for event in events)
 
 
 def test_spool_rejection_log_escapes_hub_control_characters(tmp_path, monkeypatch, caplog):
