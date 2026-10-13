@@ -324,7 +324,7 @@ def _validate_receipt(data: bytes, source: dict[str, Any]) -> str:
     ):
         _error("malformed")
     try:
-        receipt_snapshot = attestation_receipt.snapshot_stored_receipt(parsed)
+        receipt_snapshot = attestation_receipt.snapshot_receipt(parsed)
     except attestation_receipt.ReceiptDigestError:
         digests = parsed.get("digests")
         stored_digest = digests.get("receipt_sha256") if isinstance(digests, dict) else None

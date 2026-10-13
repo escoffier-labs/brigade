@@ -1319,6 +1319,10 @@ def test_ec03_classifies_signed_nonterminal_receipt_as_incomplete(tmp_path, monk
 
     assert result["outcome"] == "incomplete"
     assert result["reason"] == "command_not_terminal"
+    assert result["dimensions"]["integrity"]["status"] == "passed"
+    assert result["dimensions"]["signature"]["status"] == "passed"
+    assert result["dimensions"]["authorization"]["status"] == "passed"
+    assert result["dimensions"]["subject"]["status"] == "passed"
 
 
 @pytest.mark.parametrize(

@@ -240,7 +240,7 @@ def test_source_must_equal_the_stored_receipt(tmp_path: Path, field: str) -> Non
     _assert_refused(directory, "mismatch")
 
 
-def test_stored_receipt_digest_and_patch_presence_are_required(tmp_path: Path) -> None:
+def test_manifest_digest_supports_legacy_receipt_and_patch_presence_is_required(tmp_path: Path) -> None:
     directory = _write_package(tmp_path)
     receipt = json.loads((directory / "receipt.json").read_text(encoding="utf-8"))
     receipt.pop("digests")
@@ -256,7 +256,8 @@ def test_stored_receipt_digest_and_patch_presence_are_required(tmp_path: Path) -
     source["receipt_sha256"] = localio.canonical_json_digest(receipt, exclude_keys={"digests"})
     manifest["entries_sha256"] = localio.canonical_json_digest(entries)
     _write_manifest(directory, manifest)
-    _assert_refused(directory, "malformed")
+    snapshot = snapshot_package(directory)
+    assert snapshot.source.receipt_sha256 == source["receipt_sha256"]
     assert evidence_package.verify_package(directory=directory, json_output=False) == 0
 
     directory = _write_package(tmp_path, files={})

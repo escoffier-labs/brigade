@@ -170,18 +170,25 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
 
     commands = snapshot.receipt.get("commands")
     planned = snapshot.receipt.get("planned_commands")
+    verified_trust = {
+        "integrity": "passed",
+        "signature": "passed",
+        "authorization": "passed",
+        "subject": "passed",
+        "source_digest": digest,
+    }
     if not isinstance(commands, list) or not commands:
-        return _observation(relpath, "incomplete", integrity="passed", reason="empty_commands")
+        return _observation(relpath, "incomplete", **verified_trust, reason="empty_commands")
     if not isinstance(planned, list) or not planned or not all(isinstance(item, str) and item for item in planned):
-        return _observation(relpath, "incomplete", integrity="passed", reason="planned_commands_missing")
+        return _observation(relpath, "incomplete", **verified_trust, reason="planned_commands_missing")
     if len(commands) != len(planned) or any(
         not isinstance(command, dict) or command.get("command") != expected
         for command, expected in zip(commands, planned, strict=False)
     ):
-        return _observation(relpath, "incomplete", integrity="passed", reason="planned_commands_mismatch")
+        return _observation(relpath, "incomplete", **verified_trust, reason="planned_commands_mismatch")
     receipt_status = snapshot.receipt.get("status")
     if not isinstance(receipt_status, str) or receipt_status not in {"completed", "failed", "rejected"}:
-        return _observation(relpath, "incomplete", integrity="passed", reason="status_not_terminal")
+        return _observation(relpath, "incomplete", **verified_trust, reason="status_not_terminal")
     terminal_command_statuses = {"completed"}
     if receipt_status in {"failed", "rejected"}:
         terminal_command_statuses.update({"failed", "timed_out", "rejected"})
@@ -191,7 +198,7 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
         or (command.get("exit_code") is not None and type(command.get("exit_code")) is not int)
         for command in commands
     ):
-        return _observation(relpath, "incomplete", integrity="passed", reason="command_not_terminal")
+        return _observation(relpath, "incomplete", **verified_trust, reason="command_not_terminal")
 
     if receipt_status != "completed" or any(command.get("exit_code") != 0 for command in commands):
         reason = (
