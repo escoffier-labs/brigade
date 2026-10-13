@@ -134,6 +134,9 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "password is hunter2",
         "token is abcdefgh",
         "api key is shortkey",
+        "See https://example.com/callback?token=hunter2",
+        "password is [hunter2]",
+        "token is (abcdefg)",
         "npm_" + "A" * 36,
         "token is abcdefghijklmnop",
         "auth token is abcdefghijklmnop",
@@ -389,7 +392,14 @@ def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
 @pytest.mark.parametrize(
     "text",
-    ["Run automation/verify.", "Inspect checks/unit.", "Run tools/build", "Inspect foo/bar"],
+    [
+        "Run automation/verify.",
+        "Inspect checks/unit.",
+        "Run tools/build",
+        "Inspect foo/bar",
+        "Run the tools/build script",
+        "Execute the foo/bar helper",
+    ],
 )
 def test_parse_rejects_unenumerated_paths_in_descriptive_text(field: str, text: str) -> None:
     document = _document()
@@ -419,7 +429,7 @@ def test_parse_accepts_ordinary_slash_delimited_descriptive_prose(text: str) -> 
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
 def test_parse_accepts_https_urls_in_descriptive_text(field: str) -> None:
     document = _document()
-    text = "See https://example.com/docs for the guide."
+    text = "See https://example.com/docs?page=2 for the guide."
     if field == "purpose":
         document["seats"][0][field] = text  # type: ignore[index]
     else:

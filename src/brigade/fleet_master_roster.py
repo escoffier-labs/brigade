@@ -43,11 +43,18 @@ _DANGEROUS_VALUE = re.compile(
     r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
     r"\s+is\s+(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\b)"
-    r"(?:\"[^\s\"]{7,}\"|'[^\s']{7,}'|`[^\s`]{7,}`|“[^\s“”]{7,}”|‘[^\s‘’]{7,}’|"
+    r"(?:\[(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\])[A-Za-z0-9_-]{3,}\]|"
+    r"\((?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\))[A-Za-z0-9_-]{3,}\)|"
+    r"\"[^\s\"]{7,}\"|'[^\s']{7,}'|`[^\s`]{7,}`|“[^\s“”]{7,}”|‘[^\s‘’]{7,}’|"
     r"[A-Za-z0-9_-]{3,}|"
     r"(?=[^\s]{8,})(?=[^\s]*[.@!#$%^&*+=~?][A-Za-z0-9])\S+|"
     r"(?=[^\s]{7,}[.!?](?:\s|$))\S+)|"
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%USERPROFILE%))",
+    re.IGNORECASE,
+)
+_URL_CREDENTIAL_QUERY = re.compile(
+    r"https?://[^\s<>\"']*?[?&](?:password|passwd|passphrase|secret|token|auth[_-]?token|"
+    r"api[_-]?key|access[_-]?token|client[_-]?secret|private[_-]?key)=[^&#\s]+",
     re.IGNORECASE,
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)", re.IGNORECASE)
@@ -62,7 +69,8 @@ _RELATIVE_PATH = re.compile(
     r"(?<![A-Za-z0-9_.-])(?P<path>(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+)(?![A-Za-z0-9_.~-])"
 )
 _PATH_CONTEXT = re.compile(
-    r"\b(?:run|execute|inspect|open|read|write|load|save|path|file|directory|folder|script|repository|repo)\s+$",
+    r"\b(?:run|execute|inspect|open|read|write|load|save|path|file|directory|folder|script|repository|repo)\s+"
+    r"(?:(?:the|a|an)\s+)?$",
     re.IGNORECASE,
 )
 _FILESYSTEM_COMPONENTS = frozenset(
@@ -205,6 +213,7 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
     if (
         _DANGEROUS_VALUE.search(value)
+        or _URL_CREDENTIAL_QUERY.search(value)
         or _ENVIRONMENT_ASSIGNMENT.search(_without_api_route_references(value))
         or contains_credential(value)
         or (
