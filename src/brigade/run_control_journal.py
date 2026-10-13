@@ -23,10 +23,12 @@ import secrets
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, TypeVar
 
 from brigade import runguard, run_events, run_journal, run_lifecycle, run_shadow
 from brigade.run_events import MAX_DIAGNOSTIC_LEN, MAX_PAYLOAD_STR_LEN
+
+_T = TypeVar("_T")
 
 CONTROL_REQUESTED = "control.requested"
 CONTROL_OBSERVED = "control.observed"
@@ -266,15 +268,21 @@ def _append_control_event(
 ) -> run_journal.RunEvent:
     """Append a control event, retrying on concurrent tail races.
 
-    Holds ``checkpoint_event_pair`` around the append + shadow sync so a control
-    line cannot land between an owner's checkpoint and its paired event.
+    Holds ``checkpoint_event_pair`` then the journal lock, in claim order,
+    around the read, liveness gate, append and shadow sync. A control line
+    cannot land between an owner's checkpoint and its paired event, and a new
+    outcome either precedes recovery's synchronized head or is refused after
+    terminalization. An existing receipt with this key keeps its idempotent
+    replay, conflict and fresh-sync behavior.
     """
     last_error: Exception | None = None
     for _ in range(_MAX_STALE_RETRIES):
         try:
-            with run_lifecycle.checkpoint_event_pair():
+            with run_lifecycle.checkpoint_event_pair(), run_journal.journal_mutation(journal_path):
                 events = _read_verified(journal_path)
                 expected = events[-1].sequence if events else 0
+                if not any(event.idempotency_key == idempotency_key for event in events):
+                    _gate_new_control_outcome(run_dir, event_type=event_type, payload=payload)
                 try:
                     event = run_journal.append_event(
                         journal_path,
@@ -311,6 +319,64 @@ def _append_control_event(
         _bound(f"control append raced the journal tail: {last_error}"),
         code="control_append_race",
     )
+
+
+def _gate_new_control_outcome(run_dir: Path, *, event_type: str, payload: Mapping[str, Any]) -> None:
+    """Refuse a new outcome for a run that is no longer live.
+
+    The transport already ran, so the refusal says only that the outcome was
+    not appended. It names the observed response class without raw detail;
+    the durable request stays indeterminate.
+    """
+    try:
+        _preflight_live_control(run_dir)
+    except ControlJournalError as exc:
+        if event_type == CONTROL_OBSERVED:
+            observation = "acknowledged"
+        elif payload.get("error_class") == ControlFailureClass.TRANSPORT_REJECTED.value:
+            observation = "negative response"
+        else:
+            observation = "unknown"
+        raise ControlJournalError(
+            f"control outcome unrecorded: {exc.code}; transport observation: {observation}; "
+            "request remains indeterminate",
+            code="control_outcome_unrecorded",
+        ) from exc
+
+
+def hold_journal_for_recovery(run_dir: Path, action: Callable[[], _T]) -> _T:
+    """Run ``action`` while holding the run's journal writer lock.
+
+    Recovery holds the lock from checkpoint publication through its terminal
+    receipt write, so a control request admitted earlier rechecks liveness in
+    ``_claim_control_request`` and is refused instead of appending past the
+    terminal cursor. Same-thread journal writers inside ``action`` re-enter.
+    Errors raised by ``action`` propagate unchanged. A lock failure before
+    ``action`` runs is a clean failure; a release failure after it returns is
+    indeterminate because its terminal receipt may already be published.
+    """
+    journal_path = _journal_path(run_dir)
+    if not journal_path.is_file():
+        return action()
+    entered = finished = False
+    try:
+        with run_journal.journal_mutation(journal_path):
+            entered = True
+            result = action()
+            finished = True
+    except (OSError, run_journal.RunJournalError) as exc:
+        if entered and not finished:
+            raise
+        detail = _bound(str(run_lifecycle._bound_journal_failure(exc)))
+        if not entered:
+            raise ControlJournalError(
+                _bound(f"journal recovery lock failed: {detail}"), code="recovery_journal_lock_failed"
+            ) from exc
+        raise IndeterminateControlJournalError(
+            _bound(f"recovery outcome indeterminate: journal recovery lock release failed: {detail}"),
+            code="recovery_journal_lock_failed",
+        ) from exc
+    return result
 
 
 def _claim_control_request(
@@ -354,6 +420,10 @@ def _claim_control_request(
                     return state, requested, terminal
                 if state != "absent":
                     return state, requested, terminal
+                # Callers admit a request before taking this lock. Recovery can
+                # terminalize the run in that gap while holding the same lock,
+                # so recheck liveness here before appending a new request.
+                _preflight_live_control(run_dir)
                 events = _read_verified(journal_path)
                 requested = run_journal.append_event(
                     journal_path,

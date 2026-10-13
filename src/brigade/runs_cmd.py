@@ -3007,7 +3007,7 @@ def _recover_from_checkpoint(
     run_meta: dict[str, Any] | None,
     read_error: str | None,
 ) -> int:
-    from . import run_checkpoint, runguard
+    from . import run_checkpoint, run_control_journal, runguard
 
     # runguard wraps every before_terminalize callback exception into a
     # RunLockError after restoring the claimed lock, so a CheckpointError raised
@@ -3026,7 +3026,12 @@ def _recover_from_checkpoint(
             raise
 
     try:
-        runguard.recover_stale_run(workspace, run_dir, before_terminalize=before_terminalize)
+        run_control_journal.hold_journal_for_recovery(
+            run_dir, lambda: runguard.recover_stale_run(workspace, run_dir, before_terminalize=before_terminalize)
+        )
+    except run_control_journal.ControlJournalError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     except runguard.RunLockError as exc:
         if checkpoint_failure is not None:
             print(f"error: {checkpoint_failure}", file=sys.stderr)

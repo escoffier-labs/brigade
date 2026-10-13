@@ -1367,15 +1367,19 @@ def recover_from_checkpoint(
     (``run_meta is None``); a corrupt original is preserved by rename and
     the restore uses ``localio.write_text_atomic``. Returns the repaired
     validated mapping parsed from the selected restore bytes. Raises
-    ``CheckpointError`` (bounded, categorized) on any validation or
-    restoration failure; nothing is restored on failure.
+    ``CheckpointError`` (bounded, categorized) on validation or restoration
+    failure. Validation and journal-barrier failures publish no snapshot. A
+    lock-release failure after restoration may leave the repaired snapshot in
+    place even though recovery reports an error.
 
     Before restoration or return, synchronize the exact verified journal head
     under its writer lock. This is a fresh platform durability barrier, not
     evidence of a previous writer's acknowledgment. A failed barrier reports
     ``journal-sync-indeterminate`` without publishing the recovered mapping.
-    The caller must hold the recovery run lock across this function so an owner
-    append cannot interleave between the barrier and snapshot restoration.
+    The exact-head check, barrier and snapshot restoration share one journal
+    writer lock scope. The recovery run lock alone cannot exclude a control
+    writer admitted before the owner died, so no append can land between the
+    synchronized head and the published projection.
     """
     from brigade import localio  # noqa: F401  (kept for symmetry with the restore helper)
     from brigade import run_lifecycle  # lazy: avoid circular import
@@ -1492,20 +1496,33 @@ def recover_from_checkpoint(
     # caller's receipt of success. Recovery establishes its own exact-head
     # barrier before publishing or returning the recovered projection.
     tail = report.events[-1]
+    publication_error: BaseException | None = None
     try:
-        run_journal.sync_journal_head(
-            journal_path,
-            expected_sequence=tail.sequence,
-            expected_event_digest=tail.event_digest,
-        )
-    except run_journal.IndeterminateOutcomeError as exc:
-        raise CheckpointError(
-            _bound("recovery outcome indeterminate: journal durability barrier failed"),
-            category="journal-sync-indeterminate",
-        ) from exc
+        with run_journal.journal_mutation(journal_path):
+            try:
+                run_journal.sync_journal_head(
+                    journal_path,
+                    expected_sequence=tail.sequence,
+                    expected_event_digest=tail.event_digest,
+                )
+            except run_journal.IndeterminateOutcomeError as exc:
+                raise CheckpointError(
+                    _bound("recovery outcome indeterminate: journal durability barrier failed"),
+                    category="journal-sync-indeterminate",
+                ) from exc
+            except (OSError, run_journal.RunJournalError) as exc:
+                raise CheckpointError(_bound("journal recovery barrier failed"), category="journal-sync") from exc
+            try:
+                repaired = _restore_run_json_from_checkpoint(run_dir, restore_bytes, run_meta=run_meta)
+            except BaseException as exc:
+                publication_error = exc
+                raise
     except (OSError, run_journal.RunJournalError) as exc:
-        raise CheckpointError(_bound("journal recovery barrier failed"), category="journal-sync") from exc
-    return _restore_run_json_from_checkpoint(run_dir, restore_bytes, run_meta=run_meta)
+        if exc is publication_error:
+            raise
+        # Journal writer lock acquisition or release failed outside the barrier.
+        raise CheckpointError(_bound("journal recovery lock failed"), category="journal-sync") from exc
+    return repaired
 
 
 # -- Export boundary (issue #636) ---------------------------------------------
