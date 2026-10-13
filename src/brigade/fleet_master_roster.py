@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Mapping
 from typing import Any
 
@@ -25,7 +26,6 @@ _DANGEROUS_VALUE = re.compile(
     r"[A-Za-z]:[/\\]|%USERPROFILE%))",
     re.IGNORECASE,
 )
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _SURROGATE = re.compile("[\\ud800-\\udfff]")
 
 _TOP_FIELDS = frozenset({"schema", "revision", "seats"})
@@ -34,6 +34,10 @@ _SEAT_FIELDS = frozenset({"name", "cli", "model", "purpose", "caveats", "fallbac
 
 class MasterRosterError(ValueError):
     """A master-roster document is malformed or contains forbidden material."""
+
+
+def _has_control(value: str) -> bool:
+    return any(unicodedata.category(character) in {"Cc", "Cf"} for character in value)
 
 
 def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -50,7 +54,7 @@ def _text(value: Any, field: str) -> str:
         raise MasterRosterError(f"{field} must be a non-empty string")
     if _SURROGATE.search(value):
         raise MasterRosterError(f"{field} must contain valid Unicode scalar values")
-    if len(value) > MAX_TEXT or _CONTROL.search(value):
+    if len(value) > MAX_TEXT or _has_control(value):
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls")
     if _DANGEROUS_VALUE.search(value):
         raise MasterRosterError(f"{field} contains a credential, environment assignment, or home path")
@@ -60,7 +64,7 @@ def _text(value: Any, field: str) -> str:
 def _unknown_fields(value: Mapping[str, Any], allowed: frozenset[str], where: str) -> None:
     if any(not isinstance(key, str) for key in value):
         raise MasterRosterError(f"{where} keys must be strings")
-    if any(_CONTROL.search(key) for key in value):
+    if any(_has_control(key) for key in value):
         raise MasterRosterError(f"{where} keys must not contain controls")
     unknown = sorted(set(value).difference(allowed))
     if unknown:

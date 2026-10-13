@@ -140,6 +140,23 @@ def test_parse_rejects_control_characters_in_json_property_names() -> None:
         fleet_master_roster.parse(raw)
 
 
+def test_parse_rejects_unicode_format_controls_in_json_property_names() -> None:
+    raw = b'{"schema":"brigade.fleet_master_roster.v1","revision":1,"seats":[],"\\u202eforged":true}'
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="keys must not contain controls"):
+        fleet_master_roster.parse(raw)
+
+
+@pytest.mark.parametrize("field", ["model", "purpose", "caveats"])
+def test_parse_rejects_unicode_format_controls_in_roster_text(field: str) -> None:
+    document = _document()
+    value = "safe\u202etext"
+    document["seats"][0][field] = [value] if field == "caveats" else value  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="without controls"):
+        fleet_master_roster.parse(json.dumps(document, ensure_ascii=True).encode("utf-8"))
+
+
 def test_parse_normalizes_unpaired_surrogate_string_input() -> None:
     with pytest.raises(fleet_master_roster.MasterRosterError, match="valid UTF-8 JSON"):
         fleet_master_roster.parse("\ud800")
