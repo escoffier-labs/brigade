@@ -849,6 +849,43 @@ def test_parse_stream_new_prompt_resets_previous_completion_and_text():
     assert parsed["stop_reason"] is None
 
 
+def test_parse_stream_ignores_colliding_agent_permission_error_for_prompt_state():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "shared", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/request_permission",
+                "id": "shared",
+                "params": {},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "shared",
+                "error": {"code": -32072, "message": "PERMISSION_PROMPT_UNAVAILABLE"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "answer"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "shared", "result": {"stopReason": "end_turn"}},
+        ),
+        allow_empty_text=True,
+    )
+
+    assert error == ""
+    assert parsed is not None
+    assert parsed["text"] == "answer"
+    assert parsed["stop_reason"] == "end_turn"
+    assert parsed["has_structured_jsonrpc_error"] is False
+
+
 def test_parse_stream_rejects_duplicate_outstanding_prompt_id():
     parsed, error = acpx_adapter.parse_stream(
         _stream(

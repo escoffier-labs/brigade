@@ -442,7 +442,6 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
             and client_request_type == "session/prompt"
             and message_id_key == active_prompt_id
         )
-        superseded_prompt_response = False
         if agent_request_response and message_id_key is not None:
             outstanding_agent_request_ids.discard(message_id_key)
         if matched_prompt_request and message_id_key is not None:
@@ -512,12 +511,12 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
                 if isinstance(content, dict) and content.get("type") == "text" and isinstance(content.get("text"), str):
                     text_parts.append(content["text"])
         rpc_error = message.get("error")
-        if isinstance(rpc_error, dict) and not superseded_prompt_response:
+        if isinstance(rpc_error, dict) and not agent_request_response:
             has_structured_jsonrpc_error = True
             error_message = rpc_error.get("message")
             if structured_error_detail is None and isinstance(error_message, str):
                 structured_error_detail = sanitize_diagnostic(error_message, limit=200)
-        permission_error = None if superseded_prompt_response else _permission_prompt_diagnostic(rpc_error)
+        permission_error = None if agent_request_response else _permission_prompt_diagnostic(rpc_error)
         if permission_error is not None:
             if prompt_completed:
                 if "".join(text_parts).strip():
