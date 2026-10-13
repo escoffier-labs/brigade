@@ -29,9 +29,9 @@ _NOT_PROVIDED = object()
 def _spool_path(node_id: str, token: str | None = None) -> Path:
     if token is None:
         token = fleet_client.load_fleet_settings()["node_token"]
-    # Scope queued requests to their sender without persisting the bearer token.
+    # Scope queued requests to their sender, independent of mutable node identity.
     token_scope = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    return fleet_client.spool_path(node_id).with_name(f"{node_id}.messages-{token_scope}.jsonl")
+    return fleet_client.spool_path(node_id).with_name(f"messages-{token_scope}.jsonl")
 
 
 def _warn_inactive_spools(node_id: str, active_path: Path) -> None:
@@ -39,7 +39,7 @@ def _warn_inactive_spools(node_id: str, active_path: Path) -> None:
     legacy_path = directory / f"{node_id}.messages.jsonl"
     if legacy_path.is_file() and not legacy_path.is_symlink():
         _LOG.warning("legacy fleet message spool %s has no credential scope; leaving it untouched", legacy_path)
-    prefix = f"{node_id}.messages-"
+    prefix = "messages-"
     try:
         stale_count = sum(
             1
@@ -440,8 +440,9 @@ def manage_principal(
             not isinstance(principal, dict)
             or principal.get("principal_id") != f"agent:{name}"
             or principal.get("name") != name
+            or principal.get("enrollment_id") != body["expected_enrollment_id"]
         ):
-            raise fleet_client.FleetClientError("fleet hub did not confirm the revoked principal")
+            raise fleet_client.FleetClientError("fleet hub did not confirm the revoked principal generation")
         if revoke_pending_request_id is not None and pending_path is not None:
             _clear_principal_request(pending_path, request_id=revoke_pending_request_id)
         add_path = _principal_pending_path(name, settings["admin_token"])

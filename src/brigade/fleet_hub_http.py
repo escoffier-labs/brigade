@@ -679,20 +679,22 @@ def make_handler(
                             default=fleet_dashboard._IDLE_RANK,
                         )
 
-                    complete_base_node_ids, machine_node_ids, machine_more = fleet_hub_status.board_machine_page(
-                        conn,
-                        include_all=include_all,
-                        offset=offset,
-                        now=current,
-                        history_window_seconds=frozen_deck.stale_history_after_seconds,
-                        stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
-                        predicate=lambda entry: bool(
-                            fleet_dashboard.filter_rows(
-                                fleet_dashboard.build_rows([entry], {}, now=current), query_model
-                            )
-                        ),
-                        resolve_last_known_seat=bool(query_model.seat),
-                        priority=machine_priority,
+                    complete_base_node_ids, machine_node_ids, machine_more, required_run_ids = (
+                        fleet_hub_status.board_machine_page(
+                            conn,
+                            include_all=include_all,
+                            offset=offset,
+                            now=current,
+                            history_window_seconds=frozen_deck.stale_history_after_seconds,
+                            stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                            predicate=lambda entry: bool(
+                                fleet_dashboard.filter_rows(
+                                    fleet_dashboard.build_rows([entry], {}, now=current), query_model
+                                )
+                            ),
+                            resolve_last_known_seat=bool(query_model.seat),
+                            priority=machine_priority,
+                        )
                     )
                     machine_limit = fleet_hub_status.BOARD_LIMIT
                     board_runs, truncated_node_ids = fleet_hub_status.board_status_for_nodes(
@@ -703,6 +705,7 @@ def make_handler(
                         history_window_seconds=frozen_deck.stale_history_after_seconds,
                         stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
                         resolve_last_known_seat=True,
+                        required_run_ids=required_run_ids,
                     )
                     board = fleet_hub_status.BoardStatus(
                         runs=board_runs,

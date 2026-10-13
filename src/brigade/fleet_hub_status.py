@@ -224,6 +224,7 @@ def board_status_for_nodes(
     history_window_seconds: int = STALE_HISTORY_AFTER_SECONDS,
     stale_history_after_seconds: int = STALE_HISTORY_AFTER_SECONDS,
     resolve_last_known_seat: bool = False,
+    required_run_ids: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], set[str]]:
     """Return a bounded latest-run view and identities with truncated history."""
     if not node_ids:
@@ -246,11 +247,26 @@ def board_status_for_nodes(
     columns = _LATEST_COLUMNS.split(", ")
     if resolve_last_known_seat:
         columns.append("last_known_seat")
+    required = required_run_ids or {}
+    required_values = list(required.items())
+    required_cte = (
+        "required(node_id, run_id) AS (VALUES " + ",".join("(?, ?)" for _ in required_values) + "), "
+        if required_values
+        else ""
+    )
+    required_match = (
+        "EXISTS (SELECT 1 FROM required WHERE required.node_id = latest.node_id AND required.run_id = latest.run_id)"
+        if required_values
+        else "0"
+    )
     ranked_sql = (
         f"WITH latest AS ({sql}), "
+        f"{required_cte}"
         "node_ranked AS ("
-        "SELECT latest.*, ROW_NUMBER() OVER (PARTITION BY node_id "
-        "ORDER BY received_at DESC, run_id) AS machine_rank FROM latest), "
+        f"SELECT latest.*, CASE WHEN {required_match} THEN 0 ELSE 1 END AS required_rank, "
+        "ROW_NUMBER() OVER (PARTITION BY node_id "
+        f"ORDER BY CASE WHEN {required_match} THEN 0 ELSE 1 END, received_at DESC, run_id) "
+        "AS machine_rank FROM latest), "
         "page_ranked AS ("
         "SELECT node_ranked.*, ROW_NUMBER() OVER ("
         "ORDER BY machine_rank, received_at DESC, node_id, run_id) AS page_rank "
@@ -259,6 +275,7 @@ def board_status_for_nodes(
         "SELECT page_ranked.*, MAX(CASE WHEN machine_rank > ? OR page_rank > ? THEN 1 ELSE 0 END) "
         "OVER (PARTITION BY node_id) AS node_truncated FROM page_ranked) "
     )
+    params.extend(value for pair in required_values for value in pair)
     run_columns = ", ".join(columns)
     empty_columns = ", ".join("node_id" if name == "node_id" else f"NULL AS {name}" for name in columns)
     ranked_sql += (
@@ -298,7 +315,7 @@ def board_machine_page(
     predicate: Callable[[dict[str, Any]], bool] | None = None,
     resolve_last_known_seat: bool = True,
     priority: Callable[[dict[str, Any]], int] | None = None,
-) -> tuple[set[str], list[str], bool]:
+) -> tuple[set[str], list[str], bool, dict[str, str]]:
     """Return complete matching identities and a prioritized bounded page.
 
     The query streams the latest projection once, retaining only one ranking
@@ -317,6 +334,7 @@ def board_machine_page(
         ).isoformat()
         params.append(cutoff)
     node_priorities: dict[str, int] = {}
+    required_run_ids: dict[str, str] = {}
     for row in conn.execute(sql, params):
         entry = _status_entry(
             conn,
@@ -332,10 +350,16 @@ def board_machine_page(
             current_key = node_priorities.get(str(node_id))
             if current_key is None or key < current_key:
                 node_priorities[str(node_id)] = key
+                required_run_ids[str(node_id)] = str(entry["run_id"])
     ordered_ids = sorted(node_priorities, key=lambda item: (node_priorities[item], item))
     page_ids = ordered_ids[page_offset : page_offset + page_limit]
     more = len(ordered_ids) > page_offset + page_limit
-    return set(node_priorities), page_ids, more
+    return (
+        set(node_priorities),
+        page_ids,
+        more,
+        {node_id: required_run_ids[node_id] for node_id in page_ids if node_id in required_run_ids},
+    )
 
 
 def _status_entry(

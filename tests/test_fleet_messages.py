@@ -994,7 +994,13 @@ def test_principal_revoke_reuses_generation_after_ambiguous_timeout(tmp_path, mo
             raise fleet_client.FleetClientError("timeout after revoke commit")
         if len(revoke_requests) == 2:
             return 409, {"code": "principal_enrollment_changed", "error": "principal generation changed"}
-        return 200, {"principal": {"principal_id": "agent:researcher", "name": "researcher"}}
+        return 200, {
+            "principal": {
+                "principal_id": "agent:researcher",
+                "name": "researcher",
+                "enrollment_id": body["expected_enrollment_id"],
+            }
+        }
 
     monkeypatch.setattr(fleet_client_messages, "_principal_admin_request", request)
     with pytest.raises(fleet_client.FleetClientError, match="timeout after revoke commit"):
@@ -1309,6 +1315,51 @@ def test_queued_messages_are_not_replayed_with_replaced_node_credentials(tmp_pat
     assert attempts[-1][0] == "node-token-b"
     assert all(request_token != "node-token-b" for request_token, _message in attempts[:-1])
     assert first_path.is_file()
+
+
+def test_queued_messages_survive_home_node_identity_change(tmp_path, monkeypatch):
+    current_node = "unknown"
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: current_node)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    attempts = []
+
+    def request(_hub: str, _token: str, message: dict):
+        attempts.append(message["client_id"])
+        if len(attempts) == 1:
+            return 503, {"error": "temporarily unavailable"}
+        return 201, {"message": {"client_id": message["client_id"]}}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+    queued = fleet_client_messages.send(
+        recipient=NODE_B,
+        subject="Queued before node identity is known",
+        body="Keep the stable sender spool",
+        reference=None,
+        priority="normal",
+    )
+    original_path = fleet_client_messages._spool_path(current_node)
+    assert queued["queued"] is True
+    assert original_path.is_file()
+
+    current_node = NODE_A
+    newer = fleet_client_messages.send(
+        recipient=NODE_B,
+        subject="Newer after node identity is known",
+        body="Deliver after the older queued message",
+        reference=None,
+        priority="normal",
+    )
+
+    assert fleet_client_messages._spool_path(current_node) == original_path
+    assert attempts[:2] == [queued["client_id"], queued["client_id"]]
+    assert attempts[2] != queued["client_id"]
+    assert newer["message"]["client_id"] == attempts[2]
+    assert not original_path.exists()
 
 
 def test_flush_reports_legacy_unscoped_message_spool(tmp_path, monkeypatch, caplog):
@@ -2429,7 +2480,13 @@ def test_principal_revoke_preserves_concurrent_replacement_add(tmp_path, monkeyp
             }
             return 200, {"principal": principal}
         assert body["expected_enrollment_id"] == "a" * 32
-        return 200, {"principal": {"principal_id": "agent:researcher", "name": "researcher"}}
+        return 200, {
+            "principal": {
+                "principal_id": "agent:researcher",
+                "name": "researcher",
+                "enrollment_id": body["expected_enrollment_id"],
+            }
+        }
 
     monkeypatch.setattr(fleet_client_messages, "_principal_admin_request", principal_request)
     fleet_client_messages.manage_principal("revoke", name="researcher")
@@ -2446,6 +2503,13 @@ def test_principal_revoke_preserves_concurrent_replacement_add(tmp_path, monkeyp
         {"principal": {}},
         {"principal": {"principal_id": "agent:other", "name": "researcher"}},
         {"principal": {"principal_id": "agent:researcher", "name": "other"}},
+        {
+            "principal": {
+                "principal_id": "agent:researcher",
+                "name": "researcher",
+                "enrollment_id": "b" * 32,
+            }
+        },
     ],
 )
 def test_principal_revoke_requires_matching_success_identity(payload, monkeypatch):
@@ -2463,13 +2527,19 @@ def test_principal_revoke_requires_matching_success_identity(payload, monkeypatc
     def hub_open(*_args, **_kwargs):
         nonlocal calls
         calls += 1
-        body = (
-            b'{"principal":{"principal_id":"agent:researcher","name":"researcher","enrollment_id":null}}'
+        body = json.dumps(
+            {
+                "principal": {
+                    "principal_id": "agent:researcher",
+                    "name": "researcher",
+                    "enrollment_id": "a" * 32,
+                }
+            }
             if calls == 1
-            else json.dumps(payload).encode()
-        )
+            else payload
+        ).encode()
         return Response(body)
 
     monkeypatch.setattr(fleet_client, "_hub_open", hub_open)
-    with pytest.raises(fleet_client.FleetClientError, match="did not confirm the revoked principal"):
+    with pytest.raises(fleet_client.FleetClientError, match="did not confirm the revoked principal generation"):
         fleet_client_messages.manage_principal("revoke", name="researcher")

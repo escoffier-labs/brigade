@@ -1183,6 +1183,33 @@ class TestBoardBounds:
         assert node_queries == [True]
         assert page_queries == [[NODE_A]]
 
+    def test_machine_page_keeps_run_that_matched_before_history_cap(self, hub):
+        old_stamp = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        recent_stamp = datetime.now(timezone.utc).isoformat()
+        events = [_event(NODE_A, "matching-active", 1, "run.started", repo="repo", harness="codex", ts=old_stamp)]
+        events.extend(
+            _event(
+                NODE_A,
+                f"newer-terminal-{index:03d}",
+                1,
+                "run.completed",
+                repo="other",
+                harness="codex",
+                ts=recent_stamp,
+            )
+            for index in range(100)
+        )
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+
+        status, _headers, default_page = _request(hub, "GET", "/view/machines", headers=_bearer())
+        assert status == 200
+        assert 'title="matching-active"' in default_page
+
+        status, _headers, filtered_page = _request(hub, "GET", "/view/machines?all=1&repo=repo", headers=_bearer())
+        assert status == 200
+        assert 'title="matching-active"' in filtered_page
+
     def test_machine_page_caps_total_runs_and_marks_truncation(self, hub):
         node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(21)]
         stamp = datetime.now(timezone.utc).isoformat()
