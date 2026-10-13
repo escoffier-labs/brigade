@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -542,6 +543,43 @@ def test_online_message_operations_reject_redirects(action, monkeypatch):
             fleet_client_messages.list_messages()
         else:
             fleet_client_messages.ack(1)
+
+
+def test_message_post_does_not_follow_same_origin_redirect():
+    requests = []
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802 - stdlib handler API
+            requests.append(self.command)
+            self.send_response(302)
+            self.send_header("Location", "/redirect-target")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self):  # noqa: N802 - stdlib handler API
+            requests.append(self.command)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_args):
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), RedirectHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, payload = fleet_client_messages._request(
+            f"http://127.0.0.1:{server.server_address[1]}", "node-token", {"action": "send"}, timeout=1
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == 302
+    assert payload["error"] == "HTTP 302"
+    assert requests == ["POST"]
 
 
 @pytest.mark.parametrize("action", ["add", "revoke"])
