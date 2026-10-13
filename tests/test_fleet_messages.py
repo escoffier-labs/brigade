@@ -440,6 +440,48 @@ def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
     assert not fleet_client_messages._spool_path(NODE_A).exists()
 
 
+def test_new_send_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub.invalid"})
+    attempts = []
+    offline = True
+
+    def request(_hub: str, _token: str, message: dict):
+        nonlocal offline
+        attempts.append(message)
+        if offline:
+            return 503, {"error": "temporarily unavailable"}
+        return 201, {"message": {"client_id": message["client_id"]}}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+    older = fleet_client_messages.send(
+        recipient=NODE_B,
+        subject="Older",
+        body="Queued first",
+        reference=None,
+        priority="normal",
+    )
+    assert older["queued"] is True
+
+    offline = False
+    newer = fleet_client_messages.send(
+        recipient=NODE_B,
+        subject="Newer",
+        body="Sent second",
+        reference=None,
+        priority="normal",
+    )
+
+    assert newer["message"]["client_id"] == attempts[-1]["client_id"]
+    assert [message["subject"] for message in attempts[1:]] == ["Older", "Newer"]
+
+
 def test_ambiguous_reply_is_spooled_and_retried_with_same_client_id(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)

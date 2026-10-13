@@ -105,15 +105,27 @@ def send(*, recipient: str, subject: str, body: str, reference: str | None, prio
         "client_id": uuid4().hex,
         "enqueued_at": datetime.now(timezone.utc).isoformat(),
     }
-    try:
-        status, payload = _request(hub, token, message)
-    except fleet_client.FleetClientError:
-        return _queue_ambiguous(message, node_id)
-    if status in (408, 429) or status >= 500:
-        return _queue_ambiguous(message, node_id)
-    if status >= 400:
-        raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
-    return payload
+    path = _spool_path(node_id)
+    with fleet_client._spool_lock(path) as dir_fd:
+        if path.exists() and not path.is_symlink():
+            _flush_locked(path, hub, token, dir_fd=dir_fd)
+            if fleet_client._read_spool(path, dir_fd=dir_fd):
+                if not fleet_client._spool_append_locked(path, message, dir_fd=dir_fd):
+                    raise fleet_client.FleetClientError("fleet message could not be persisted to the local spool")
+                return {"queued": True, "client_id": message["client_id"]}
+        try:
+            status, payload = _request(hub, token, message)
+        except fleet_client.FleetClientError:
+            if not fleet_client._spool_append_locked(path, message, dir_fd=dir_fd):
+                raise fleet_client.FleetClientError("fleet message could not be persisted to the local spool") from None
+            return {"queued": True, "client_id": message["client_id"]}
+        if status in (408, 429) or status >= 500:
+            if not fleet_client._spool_append_locked(path, message, dir_fd=dir_fd):
+                raise fleet_client.FleetClientError("fleet message could not be persisted to the local spool")
+            return {"queued": True, "client_id": message["client_id"]}
+        if status >= 400:
+            raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
+        return payload
 
 
 def list_messages(*, after: int = 0, unacked: bool = False) -> dict[str, Any]:
@@ -200,31 +212,33 @@ def flush(node_id: str, *, hub_url: str | None = None, token: str | None = None)
     path = _spool_path(node_id)
     if not hub or not path.is_file():
         return 0
-    delivered = 0
     with fleet_client._spool_lock(path) as dir_fd:
-        messages = fleet_client._read_spool(path, dir_fd=dir_fd)
-        index = 0
-        for start in range(0, len(messages), MESSAGE_BATCH_SIZE):
-            batch = messages[start : start + MESSAGE_BATCH_SIZE]
-            for message in batch:
-                if _expired(message):
-                    _LOG.warning("fleet message spool %s: dropping expired offline message", path)
-                    index += 1
-                    continue
-                try:
-                    status, payload = _request(hub, auth, message)
-                except fleet_client.FleetClientError:
-                    fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
-                    return delivered
-                if status >= 500 or status in (401, 403, 408, 429):
-                    fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
-                    return delivered
-                if status >= 400:
-                    _LOG.warning("fleet message spool %s: dropping rejected message: %s", path, payload.get("error"))
-                else:
-                    delivered += 1
-                index += 1
-        fleet_client._write_spool_atomic(path, [], dir_fd=dir_fd)
+        return _flush_locked(path, hub, auth, dir_fd=dir_fd)
+
+
+def _flush_locked(path: Path, hub: str, token: str, *, dir_fd: int | None = None) -> int:
+    messages = fleet_client._read_spool(path, dir_fd=dir_fd)
+    delivered = 0
+    index = 0
+    for message in messages:
+        if _expired(message):
+            _LOG.warning("fleet message spool %s: dropping expired offline message", path)
+            index += 1
+            continue
+        try:
+            status, payload = _request(hub, token, message)
+        except fleet_client.FleetClientError:
+            fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
+            return delivered
+        if status >= 500 or status in (401, 403, 408, 429):
+            fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
+            return delivered
+        if status >= 400:
+            _LOG.warning("fleet message spool %s: dropping rejected message: %s", path, payload.get("error"))
+        else:
+            delivered += 1
+        index += 1
+    fleet_client._write_spool_atomic(path, [], dir_fd=dir_fd)
     return delivered
 
 
