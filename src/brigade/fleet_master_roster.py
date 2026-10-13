@@ -125,11 +125,13 @@ def _text(value: Any, field: str) -> str:
 def _unknown_fields(value: Mapping[str, Any], allowed: frozenset[str], where: str) -> None:
     if any(not isinstance(key, str) for key in value):
         raise MasterRosterError(f"{where} keys must be strings")
+    if any(_SURROGATE.search(key) for key in value):
+        raise MasterRosterError(f"{where} keys must contain valid Unicode scalar values")
     if any(_has_control(key) for key in value):
         raise MasterRosterError(f"{where} keys must not contain controls or separators")
-    unknown = sorted(set(value).difference(allowed))
+    unknown = set(value).difference(allowed)
     if unknown:
-        raise MasterRosterError(f"unknown {where} field(s): {', '.join(unknown)}")
+        raise MasterRosterError(f"unknown {where} field(s)")
 
 
 def parse(raw: Mapping[str, Any] | bytes | str) -> dict[str, Any]:

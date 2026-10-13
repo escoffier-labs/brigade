@@ -255,6 +255,27 @@ def test_parse_rejects_unicode_format_controls_in_json_property_names() -> None:
         fleet_master_roster.parse(raw)
 
 
+def test_parse_does_not_echo_secret_unknown_property_names() -> None:
+    secret_name = "github_pat_" + "A" * 24
+    document = _document()
+    document["seats"] = []
+    document[secret_name] = True
+
+    with pytest.raises(fleet_master_roster.MasterRosterError) as exc_info:
+        fleet_master_roster.parse(json.dumps(document).encode("utf-8"))
+
+    assert secret_name not in str(exc_info.value)
+
+
+def test_parse_rejects_lone_surrogate_json_property_names() -> None:
+    raw = b'{"schema":"brigade.fleet_master_roster.v1","revision":1,"seats":[],"\\ud800":true}'
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="valid Unicode scalar values") as exc_info:
+        fleet_master_roster.parse(raw)
+
+    str(exc_info.value).encode("utf-8")
+
+
 @pytest.mark.parametrize("separator", ["\u2028", "\u2029"])
 def test_parse_rejects_unicode_separators_in_json_property_names(separator: str) -> None:
     document = _document()
