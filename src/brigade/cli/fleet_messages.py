@@ -83,7 +83,7 @@ def _result(
 
     try:
         payload = operation()
-    except (fleet_client.FleetClientError, ValueError) as exc:
+    except (fleet_client.FleetClientError, OSError, ValueError) as exc:
         from .fleet import _safe_table_cell
 
         print(f"error: {_safe_table_cell(exc)}", file=sys.stderr)
@@ -107,7 +107,7 @@ def _result(
         sys.stdout.flush()
         try:
             after_output()
-        except (fleet_client.FleetClientError, ValueError) as exc:
+        except (fleet_client.FleetClientError, OSError, ValueError) as exc:
             from .fleet import _safe_table_cell
 
             print(f"error: {_safe_table_cell(exc)}", file=sys.stderr)

@@ -2494,6 +2494,27 @@ def test_msg_errors_escape_hub_control_characters(capsys):
     assert "\\x1b[31m" in output
 
 
+@pytest.mark.parametrize("failure_phase", ["operation", "after_output"])
+def test_msg_reports_spool_oserrors_without_tracebacks(capsys, failure_phase):
+    def operation():
+        if failure_phase == "operation":
+            raise OSError("message spool is read-only")
+        return {}
+
+    def after_output():
+        if failure_phase == "after_output":
+            raise OSError("principal spool finalization failed")
+
+    args = type("Args", (), {"json": False})()
+    assert fleet_messages_cli._result(args, operation, after_output=after_output) == 1
+
+    captured = capsys.readouterr()
+    expected_output = "" if failure_phase == "operation" else "{}\n"
+    assert captured.out == expected_output
+    assert "error:" in captured.err
+    assert "OSError" not in captured.err
+
+
 def test_principal_add_retry_state_finalizes_only_after_successful_output(monkeypatch):
     args = type("Args", (), {"json": True, "name": "researcher", "label": None})()
     original_print = print
