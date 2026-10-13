@@ -186,6 +186,7 @@ def _read_child(
             | getattr(os, "O_NOFOLLOW", 0)
             | getattr(os, "O_NONBLOCK", 0)
             | getattr(os, "O_CLOEXEC", 0),
+            share_write=False,
         )
         initial = _observation(os.fstat(descriptor))
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):

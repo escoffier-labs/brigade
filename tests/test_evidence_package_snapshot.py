@@ -479,7 +479,7 @@ def test_every_opened_descriptor_is_closed_on_success_and_child_read_failure(
         lambda path, *, writable=True: track(real_open(path, package_snapshot.dirfd.root_directory_flags())),
     )
 
-    def open_child(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def open_child(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
         descriptor = track(real_open(name, flags, dir_fd=parent))
         child_descriptors.add(descriptor)
         return descriptor
@@ -522,9 +522,9 @@ def test_child_files_are_opened_in_binary_mode_when_supported(tmp_path: Path, mo
     real_open_child = package_snapshot.dirfd.open_child_file
     flags_seen: list[int] = []
 
-    def open_child(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def open_child(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
         flags_seen.append(flags)
-        return real_open_child(parent, name, flags & ~binary_flag, mode)
+        return real_open_child(parent, name, flags & ~binary_flag, mode, share_write=share_write)
 
     monkeypatch.setattr(package_snapshot.dirfd, "open_child_file", open_child)
 
@@ -532,6 +532,24 @@ def test_child_files_are_opened_in_binary_mode_when_supported(tmp_path: Path, mo
 
     assert flags_seen
     assert all(flags & binary_flag for flags in flags_seen)
+
+
+def test_child_files_are_opened_without_windows_write_sharing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    directory = _write_package(tmp_path)
+    import brigade.evidence_package_snapshot as package_snapshot
+
+    real_open_child = package_snapshot.dirfd.open_child_file
+    sharing_modes: list[bool] = []
+
+    def open_child(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
+        sharing_modes.append(share_write)
+        return real_open_child(parent, name, flags, mode, share_write=share_write)
+
+    monkeypatch.setattr(package_snapshot.dirfd, "open_child_file", open_child)
+    snapshot_package(directory)
+
+    assert sharing_modes
+    assert not any(sharing_modes)
 
 
 def test_declared_companion_growth_uses_only_one_eof_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -545,9 +563,9 @@ def test_declared_companion_growth_uses_only_one_eof_probe(tmp_path: Path, monke
     real_open = package_snapshot.dirfd.open_child_file
     real_read = os.read
 
-    def record_patch_open(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def record_patch_open(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
         nonlocal patch_descriptor
-        descriptor = real_open(parent, name, flags, mode)
+        descriptor = real_open(parent, name, flags, mode, share_write=share_write)
         if name == "changes.patch":
             patch_descriptor = descriptor
         return descriptor
@@ -759,8 +777,8 @@ def test_root_replacement_after_open_cannot_redirect_child_reads(
             replacement.rename(directory)
         return descriptor
 
-    def record_child_open(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
-        descriptor = real_child_open(parent, name, flags, mode)
+    def record_child_open(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
+        descriptor = real_child_open(parent, name, flags, mode, share_write=share_write)
         opened_inodes.append(os.fstat(descriptor).st_ino)
         return descriptor
 
@@ -829,10 +847,10 @@ def test_declared_receipt_limit_is_malformed_before_receipt_open(
 
     real_open = package_snapshot.dirfd.open_child_file
 
-    def refuse_receipt_open(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def refuse_receipt_open(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
         if name == "receipt.json":
             raise AssertionError("oversized declared receipt was opened")
-        return real_open(parent, name, flags, mode)
+        return real_open(parent, name, flags, mode, share_write=share_write)
 
     monkeypatch.setattr(package_snapshot.dirfd, "open_child_file", refuse_receipt_open)
     _assert_refused(directory, "malformed")
@@ -854,10 +872,10 @@ def test_oversized_sparse_companion_is_refused_before_whole_read(
 
     real_open = package_snapshot.dirfd.open_child_file
 
-    def refuse_patch_open(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def refuse_patch_open(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
         if name == "changes.patch":
             raise AssertionError("oversized child was opened")
-        return real_open(parent, name, flags, mode)
+        return real_open(parent, name, flags, mode, share_write=share_write)
 
     monkeypatch.setattr(package_snapshot.dirfd, "open_child_file", refuse_patch_open)
     _assert_refused(directory, "malformed")
@@ -875,9 +893,9 @@ def test_oversized_sparse_companion_is_refused_before_whole_read(
     patch_descriptor = -1
     real_read = os.read
 
-    def record_patch_open(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def record_patch_open(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
         nonlocal patch_descriptor
-        descriptor = real_open(parent, name, flags, mode)
+        descriptor = real_open(parent, name, flags, mode, share_write=share_write)
         if name == "changes.patch":
             patch_descriptor = descriptor
         return descriptor
@@ -904,9 +922,9 @@ def test_opaque_companion_streaming_is_bounded(tmp_path: Path, monkeypatch: pyte
     real_open = package_snapshot.dirfd.open_child_file
     real_read = os.read
 
-    def record_summary_open(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def record_summary_open(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
         nonlocal summary_fd
-        descriptor = real_open(parent, name, flags, mode)
+        descriptor = real_open(parent, name, flags, mode, share_write=share_write)
         if name == "summary.md":
             summary_fd = descriptor
         return descriptor
@@ -1019,10 +1037,10 @@ def test_runtime_unsupported_primitives_after_capability_admission_close_descrip
     def open_root(path: Path, *, writable: bool = True) -> int:
         return track(real_root_open(path, writable=writable))
 
-    def open_child(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def open_child(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
         if operation == "child-open":
             unsupported()
-        descriptor = track(real_child_open(parent, name, flags, mode))
+        descriptor = track(real_child_open(parent, name, flags, mode, share_write=share_write))
         child_descriptors.add(descriptor)
         return descriptor
 
