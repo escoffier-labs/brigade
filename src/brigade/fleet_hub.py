@@ -105,7 +105,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import fleet_command_deck, fleet_hub_preference, worklore_store
-from .fleet_hub_event_bounds import oversized_event_field
+from .fleet_hub_event_bounds import EVENT_FIELD_MAX_CHARS, oversized_event_field
 from .fleet_hub_server import BoundedThreadingHTTPServer
 from .fleet_hub_status import (
     ACTIVE_EVENT_TTL_SECONDS as ACTIVE_EVENT_TTL_SECONDS,
@@ -894,7 +894,13 @@ def _validate_claim_request(raw: Any) -> dict[str, Any]:
             raise FleetHubError(f"claim field {field!r} must be a non-empty string")
         if field == "target":
             _reject_controls(value, field, kind="claim")
-        request[field] = value.strip()
+            target = value.strip()
+            target_limit = EVENT_FIELD_MAX_CHARS["repo"]
+            if len(target) > target_limit:
+                raise FleetHubError(f"claim field 'target' must be at most {target_limit} characters")
+            request[field] = target
+        else:
+            request[field] = value.strip()
     for field in ("node_id", "holder"):
         if request[field] is None:
             continue
