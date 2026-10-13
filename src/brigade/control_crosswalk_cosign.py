@@ -130,7 +130,7 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
             authorization="unknown",
             reason="signature_mismatch",
         )
-    except cosign_attestation.CosignAttestationError:
+    except cosign_attestation.CosignBundlePayloadMismatchError:
         return _observation(
             relpath,
             "rejected",
@@ -139,6 +139,8 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
             authorization="unknown",
             reason="signature_mismatch",
         )
+    except cosign_attestation.CosignAttestationError:
+        return _observation(relpath, "invalid", reason="schema_missing")
 
     key_path = _target / ".brigade" / "attestation" / "cosign.pub"
     if not key_path.is_file():

@@ -1665,6 +1665,23 @@ def test_ec03_does_not_bind_preverification_invalid_bundle_from_receipt(tmp_path
     assert result["artifacts"][0]["scope"] == "unbound"
 
 
+def test_ec03_classifies_missing_bundle_verification_material_as_invalid(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    bundle_path = run_dir / "attestation.sigstore.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle.pop("verificationMaterial")
+    _write_json(bundle_path, bundle)
+
+    result = _assess(target, "EC-03", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "invalid"
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["schema_missing"]
+
+
 def test_ec03_cosign_bundle_preserves_unavailable_verifier_state(tmp_path, monkeypatch):
     target = _ws(tmp_path)
     run_dir = _write_cosign_assessment_fixture(target)
