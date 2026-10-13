@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from brigade import cli, evidence_derivative, evidence_package, localio
 
 
@@ -572,14 +574,19 @@ def test_derivative_preserves_concurrent_file_after_publish_link_collision(tmp_p
     out = tmp_path / "derivative"
     concurrent_data = b"created by another process"
 
+    link_child = evidence_derivative.dirfd.link_child
     replace_children = evidence_derivative.dirfd.replace_children
 
     def concurrent_link(parent: int, source: str, destination: str, *, replace: bool = True) -> None:
         if destination == "derivative.json":
             (out / destination).write_bytes(concurrent_data)
             raise FileExistsError(destination)
-        replace_children(parent, source, destination, replace=replace)
+        if evidence_derivative.dirfd.posix_available():
+            link_child(parent, source, destination)
+        else:
+            replace_children(parent, source, destination, replace=replace)
 
+    monkeypatch.setattr(evidence_derivative.dirfd, "link_child", concurrent_link)
     monkeypatch.setattr(evidence_derivative.dirfd, "replace_children", concurrent_link)
     try:
         evidence_derivative.export_derivative(
@@ -596,6 +603,44 @@ def test_derivative_preserves_concurrent_file_after_publish_link_collision(tmp_p
         raise AssertionError("derivative accepted a concurrent output file")
 
     assert (out / "derivative.json").read_bytes() == concurrent_data
+
+
+def test_derivative_fails_and_cleans_publication_when_temp_unlink_fails(tmp_path: Path, monkeypatch) -> None:
+    if not evidence_derivative.dirfd.posix_available():
+        pytest.skip("POSIX descriptor-relative hard-link publication required")
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    out = tmp_path / "derivative"
+    temp_name = ".derivative.json.tmp-unlink-once"
+    monkeypatch.setattr(evidence_derivative.secrets, "token_hex", lambda _size: "unlink-once")
+    unlink_child = evidence_derivative.dirfd.unlink_child
+    failure_pending = True
+
+    def fail_temp_unlink_once(parent: int, name: str) -> None:
+        nonlocal failure_pending
+        if name == temp_name and failure_pending:
+            failure_pending = False
+            raise PermissionError("temporary publication cleanup failed")
+        unlink_child(parent, name)
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "unlink_child", fail_temp_unlink_once)
+    try:
+        evidence_derivative.export_derivative(
+            source=source,
+            out=out,
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == "derivative output could not be published"
+    else:
+        raise AssertionError("derivative accepted a leftover publication temporary file")
+
+    assert not out.exists()
+    assert not list(tmp_path.glob(".derivative.staging-*"))
 
 
 def test_derivative_rejects_output_parent_replaced_with_source(tmp_path: Path, monkeypatch) -> None:
@@ -645,6 +690,7 @@ def test_derivative_wraps_unsupported_publication_link_errors(tmp_path: Path, mo
     def unsupported_publish(*_args, **_kwargs):
         raise OSError("no-clobber publication is unavailable")
 
+    monkeypatch.setattr(evidence_derivative.dirfd, "link_child", unsupported_publish)
     monkeypatch.setattr(evidence_derivative.dirfd, "replace_children", unsupported_publish)
     try:
         evidence_derivative.export_derivative(

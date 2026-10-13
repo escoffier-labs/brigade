@@ -158,10 +158,11 @@ def _posix_replace_children(parent: int, source: str, destination: str, *, repla
         os.replace(source, destination, src_dir_fd=parent, dst_dir_fd=parent)
     else:
         os.link(source, destination, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
-        try:
-            os.unlink(source, dir_fd=parent)
-        except OSError:
-            pass
+        os.unlink(source, dir_fd=parent)
+
+
+def _posix_link_child(parent: int, source: str, destination: str) -> None:
+    os.link(source, destination, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
 
 
 def _nt_replace_children(parent: int, source: str, destination: str, *, replace: bool = True) -> None:
@@ -264,6 +265,16 @@ def replace_children(parent: int, source: str, destination: str, *, replace: boo
         _nt_replace_children(parent, source, destination, replace=replace)
         return
     raise unavailable("import inbox operations")
+
+
+def link_child(parent: int, source: str, destination: str) -> None:
+    """Create a no-follow hard link under a held POSIX directory."""
+    validate_component(source)
+    validate_component(destination)
+    if posix_available():
+        _posix_link_child(parent, source, destination)
+        return
+    raise unavailable("hard-link operations")
 
 
 def unlink_child(parent: int, name: str) -> None:

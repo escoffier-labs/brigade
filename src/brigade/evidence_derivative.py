@@ -414,8 +414,13 @@ def export_derivative(
         temp_entry = dirfd.stat_child(output_fd, temp_name)
         if not stat.S_ISREG(temp_entry.st_mode) or (temp_entry.st_dev, temp_entry.st_ino) != temp_identity:
             raise DerivativeExportError("derivative temporary file changed during publication")
-        dirfd.replace_children(output_fd, temp_name, "derivative.json", replace=False)
-        published = True
+        if dirfd.posix_available():
+            dirfd.link_child(output_fd, temp_name, "derivative.json")
+            published = True
+            dirfd.unlink_child(output_fd, temp_name)
+        else:
+            dirfd.replace_children(output_fd, temp_name, "derivative.json", replace=False)
+            published = True
         final_entry = dirfd.stat_child(output_fd, "derivative.json")
         if not stat.S_ISREG(final_entry.st_mode) or (final_entry.st_dev, final_entry.st_ino) != temp_identity:
             raise DerivativeExportError("derivative output file changed during publication")

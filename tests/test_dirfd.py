@@ -86,6 +86,20 @@ def test_replace_children_without_replacement_preserves_destination(tmp_path: Pa
         os.close(parent)
 
 
+@pytest.mark.skipif(not dirfd.posix_available(), reason="POSIX dir_fd plus O_NOFOLLOW required")
+def test_link_child_preserves_existing_destination(tmp_path: Path) -> None:
+    (tmp_path / "source").write_bytes(b"source")
+    (tmp_path / "destination").write_bytes(b"destination")
+    parent = dirfd.open_directory_nofollow(tmp_path)
+    try:
+        with pytest.raises(FileExistsError):
+            dirfd.link_child(parent, "source", "destination")
+    finally:
+        os.close(parent)
+    assert (tmp_path / "source").read_bytes() == b"source"
+    assert (tmp_path / "destination").read_bytes() == b"destination"
+
+
 def test_validate_component_rejects_empty_dot_dotdot_separators_and_nul() -> None:
     assert dirfd.validate_component("run.json") == "run.json"
     assert dirfd.validate_component("recovery-checkpoints") == "recovery-checkpoints"
