@@ -333,6 +333,7 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Auth profile used by implementer: production-admin",
         "This seat uses auth profile production-admin",
         "Reviewer uses auth profile production-admin",
+        "Reviewer had auth profile production-admin",
         "Reviewer is using auth profile production-admin",
         "Reviewer used auth profile production-admin",
         "Reviewer was using the authentication profile production-admin",
@@ -949,6 +950,8 @@ def test_parse_rejects_encoded_assignments_in_api_route_paths(field: str, text: 
         "Call /api/~example/work/repo",
         "Call /api/foo/%65tc/passwd",
         "Call /api/%7E/.ssh/id_rsa",
+        "Call /api?%2Fetc%2Fhosts=x",
+        "GET /api?%2Fhome%2Fexample=x",
         "Call /api/etc/passwd",
         "Call /api/foo/etc/passwd",
         "GET /users/.ssh/id_rsa",
@@ -973,6 +976,22 @@ def test_parse_rejects_filesystem_paths_in_api_routes(field: str, text: str) -> 
     ],
 )
 def test_parse_rejects_ownership_qualified_environment_assignments(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Environment variable SERVICE_MODE had been production",
+        "Path had been foo/bar",
+    ],
+)
+def test_parse_rejects_past_perfect_disclosures(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 
