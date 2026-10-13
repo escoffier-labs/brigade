@@ -127,6 +127,8 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Read e.g., the guide",
         "Basic code review",
         "Use basic mode",
+        "Plan A: review changes",
+        "Use option B: fast mode",
     ],
 )
 def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> None:
@@ -157,6 +159,14 @@ def test_parse_accepts_dotted_seat_names_and_fallbacks() -> None:
 
     assert parsed["seats"][0]["name"] == "builder.prod"
     assert parsed["seats"][0]["fallbacks"] == ["reviewer.prod"]
+
+
+@pytest.mark.parametrize("cli_name", ["agent.exe", "aider.chat"])
+def test_parse_accepts_dotted_cli_executable_names(cli_name: str) -> None:
+    document = _document()
+    document["seats"][0]["cli"] = cli_name  # type: ignore[index]
+
+    assert fleet_master_roster.parse(document)["seats"][0]["cli"] == cli_name
 
 
 def test_parse_rejects_fine_grained_github_pat() -> None:
@@ -198,6 +208,8 @@ def test_parse_accepts_provider_qualified_model_identifiers(model: str) -> None:
         "package/pyproject.toml",
         "foo/bar.py",
         "assets/logo.png",
+        "package/Gemfile.lock",
+        "assets/logo.webp",
     ],
 )
 def test_parse_rejects_relative_paths_as_models(model: str) -> None:

@@ -29,7 +29,7 @@ _DANGEROUS_VALUE = re.compile(
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))\s+auth(?:entication)?[ _-]profile\b|"
     r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
-    r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:[/\\]?|%USERPROFILE%))",
+    r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%USERPROFILE%))",
     re.IGNORECASE,
 )
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
@@ -86,7 +86,7 @@ _EXTENSIONLESS_FILES = frozenset(
 _PRIVATE_KEY_FILES = frozenset({"id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"})
 _FILE_SUFFIX = re.compile(r"\.[A-Za-z]{2,8}$")
 _MODEL_PATH_SUFFIX = re.compile(
-    r"\.(?:c|cfg|conf|cpp|cs|css|csv|go|h|hpp|html|ini|java|js|json|jsx|md|png|py|rst|rs|sh|sql|svg|toml|ts|tsx|txt|xml|yaml|yml)$",
+    r"\.(?:7z|avif|bmp|bz2|c|cfg|conf|cpp|cs|css|csv|docx|exe|gif|go|gz|h|hpp|html|ico|ini|java|jpe?g|js|json|jsx|lock|md|mov|mp3|mp4|pdf|png|pptx|py|rar|rst|rs|sh|so|sql|svg|tar|tiff?|toml|ts|tsx|txt|wav|webp|xml|xlsx|yaml|yml|zip)$",
     re.IGNORECASE,
 )
 _STANDALONE_FILE = re.compile(r"(?<![A-Za-z0-9_.-])(?P<file>\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+)(?![A-Za-z0-9_.-])")
@@ -217,7 +217,7 @@ def parse(raw: Mapping[str, Any] | bytes | str) -> dict[str, Any]:
             raise MasterRosterError(f"{where} must be an object")
         _unknown_fields(raw_seat, _SEAT_FIELDS, where)
         name = _text(raw_seat.get("name"), f"{where}.name", check_paths=False)
-        cli = _text(raw_seat.get("cli"), f"{where}.cli")
+        cli = _text(raw_seat.get("cli"), f"{where}.cli", check_paths=False)
         model = _text(raw_seat.get("model"), f"{where}.model")
         purpose = _text(raw_seat.get("purpose"), f"{where}.purpose")
         if not _SEAT_NAME.fullmatch(name):
