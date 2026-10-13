@@ -125,6 +125,10 @@ revision has no head, older known head claims still affect peers on those heads.
 A headless run also remains an uncertain rival on each commit-specific listing
 head where its missing or malformed reviewed head was observed. That listing
 context cannot supply a reviewed head, current coverage or positive supersession.
+If a later known head disagrees with any such listing head, the run remains
+uncertain for ordering on every known and headless listing head. Its valid
+reviewed-head claim and coverage remain unchanged. Recovery at the same listing
+head can still restore otherwise certain ordering metadata.
 A contradicted check also retains every claimed head for peer ordering.
 Affected peers have unknown supersession and false current finding flags unless
 every possible rival start is strictly earlier than the peer's start. Missing

@@ -801,3 +801,56 @@ def test_headless_listing_does_not_taint_unrelated_head_or_app(missing_head):
     rows = {r["check_id"]: r for r in read(conn)["checks"]}
     assert rows[11]["supersession_disposition"] == "latest-observed" and rows[11]["current_zero_findings"] is True
     assert len(read(conn)["history"]) == 2
+
+
+@pytest.mark.parametrize("missing_head", [None, "not-a-sha"], ids=["missing", "malformed"])
+@pytest.mark.parametrize("omitted", [False, True], ids=["present", "omitted"])
+@pytest.mark.parametrize("recovered_head", [HEAD, OLD], ids=["same-head", "different-head"])
+@pytest.mark.parametrize("peer_later", [False, True], ids=["older-peer", "known-later-peer"])
+def test_headless_listing_recovery_preserves_rivals_after_reopen(
+    tmp_path, missing_head, omitted, recovered_head, peer_later
+):
+    path = tmp_path / "history.sqlite"
+    peer = check(11, started_at=f"2026-01-0{2 if peer_later else 1}T00:00:00Z")
+    headless = check(12, head_sha=missing_head, started_at="2026-01-01T12:00:00Z")
+    recovered = headless | {"head_sha": recovered_head}
+    with sqlite3.connect(path) as conn:
+        ingest(conn, FixtureGet([peer, headless]))
+        before = {r["check_id"]: r for r in read(conn)["checks"]}
+        assert before[11]["supersession_disposition"] == ("latest-observed" if peer_later else "unknown")
+        assert before[11]["current_findings_known"] is False and before[11]["current_zero_findings"] is False
+        others = [check(13, head_sha=OLD)] if recovered_head == OLD else []
+        ingest(
+            conn,
+            FixtureGet([recovered, *others]),
+            head=recovered_head,
+            observed="2026-01-04T00:00:00Z",
+        )
+        ingest(conn, FixtureGet([peer] if omitted else [peer, recovered]), observed="2026-01-05T00:00:00Z")
+    with sqlite3.connect(path) as conn:
+        result = read(conn)
+    rows = {r["check_id"]: r for r in result["checks"]}
+    disagreement = recovered_head == OLD
+    peer_order = "latest-observed" if peer_later else "unknown" if disagreement else "superseded"
+    assert rows[11]["supersession_disposition"] == peer_order
+    assert rows[11]["superseded_by"] == (12 if not peer_later and not disagreement else None)
+    eligible = peer_later and (omitted or not disagreement)
+    assert rows[11]["current_findings_known"] is eligible and rows[11]["current_zero_findings"] is eligible
+    assert rows[12]["reviewed_head"] == recovered_head
+    assert rows[12]["coverage"] == ("stale" if disagreement else "current")
+    assert rows[12]["history_disposition"] == "latest-observed"
+    for row in (*result["checks"], *(c for s in result["history"] for c in s["checks"])):
+        if disagreement:
+            assert row["supersession_disposition"] == (peer_order if row["check_id"] == 11 else "unknown")
+            assert row["superseded_by"] is None
+        if row["check_id"] != 11 or not eligible:
+            if disagreement or peer_later or omitted:
+                assert row["current_findings_known"] is False and row["current_zero_findings"] is False
+        if row["reviewed_head"] is None:
+            _unknown_check(row)
+    if not disagreement:
+        assert rows[12]["supersession_disposition"] == ("superseded" if peer_later else "latest-observed")
+        assert rows[12]["superseded_by"] == (11 if peer_later else None)
+        assert rows[12]["current_zero_findings"] is (not peer_later and not omitted)
+    claims = [c for s in result["history"] for c in s["checks"] if c["check_id"] == 12]
+    assert {c["reviewed_head"] for c in claims} == {None, recovered_head}

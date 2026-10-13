@@ -236,6 +236,7 @@ def _order_checks(
             or record["reviewed_head"] is None
             or record["started_at"] is None
             or record["history_disposition"] == "conflicting-observations"
+            or (heads[identity] and listed[identity] - heads[identity])
         ):
             uncertain.add(identity)
             record["supersession_disposition"] = "unknown"
