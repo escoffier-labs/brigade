@@ -95,6 +95,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Read ${HOME:-fallback}",
         "Use ${XDG_CONFIG_HOME:+configured}",
         "Password is provided as hunter2",
+        "Password provided as hunter2",
+        "API key configured with hunter2",
         "Password: stored as hunter2",
         "Password is generated as hunter2",
         "The directory is build",
