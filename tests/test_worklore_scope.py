@@ -293,6 +293,98 @@ def test_latest_snapshot_scan_bound_refuses_without_truncating_admission(ledger,
     assert checkpoint(conn, work_id, [])[0] == 200
 
 
+@pytest.mark.parametrize("reset", ["release", "offer", "withdraw"])
+def test_departed_ownership_histories_do_not_consume_admission_budget(ledger, monkeypatch, reset):
+    from brigade import worklore_scope
+
+    conn, work_id, _ = ledger
+    owned(conn, work_id)
+    for index in range(2):
+        other = another_owner(conn)
+        assert checkpoint(conn, other, [f"retired/{index}"], node="node-b", nonce=NONCE_B)[0] == 200
+        post(
+            conn, other, {"action": "release", "generation": 1}, node="node-b", revision=3, key="release", nonce=NONCE_B
+        )
+        if reset in {"offer", "withdraw"}:
+            post(conn, other, OFFER, admin=True, revision=4, key="reoffer")
+        if reset == "withdraw":
+            post(conn, other, {"action": "withdraw"}, admin=True, revision=5, key="withdraw")
+    monkeypatch.setattr(worklore_scope, "MAX_SCOPE_SNAPSHOTS", 1)
+    status, reply = checkpoint(conn, work_id, ["retired"])
+    assert status == 200, reply
+    assert reply["ownership"]["write_scope"] == ["retired"]
+    assert event_count(conn, work_id) == 3
+
+
+def test_withdrawn_histories_beyond_default_bound_allow_checkpoint(ledger):
+    conn, work_id, _ = ledger
+    owned(conn, work_id)
+    # Real completed offer/withdraw cycles exceed the production 1,024-item bound.
+    for _ in range(1025):
+        item = store.create_item(conn, {"title": "Departed fixture", "kind": "repo"}, actor_id="admin")
+        other = item["work_id"]
+        post(conn, other, OFFER, admin=True, key="offer")
+        post(conn, other, {"action": "withdraw"}, admin=True, revision=1, key="withdraw")
+    status, reply = checkpoint(conn, work_id, ["src"])
+    assert status == 200, reply
+    assert event_count(conn, work_id) == 3
+
+
+def test_active_overflow_refuses_until_explicit_holder_release(ledger, monkeypatch):
+    from brigade import worklore_scope
+
+    conn, work_id, _ = ledger
+    owned(conn, work_id)
+    other = another_owner(conn)
+    another_owner(conn)
+    monkeypatch.setattr(worklore_scope, "MAX_SCOPE_SNAPSHOTS", 1)
+    before = snapshot(conn, work_id)
+    status, reply = checkpoint(conn, work_id, ["src"])
+    assert status == 409 and reply["code"] == "path-scope-capacity-exhausted"
+    assert snapshot(conn, work_id) == before and event_count(conn, work_id) == 2
+    post(conn, other, {"action": "release", "generation": 1}, node="node-b", revision=2, key="release", nonce=NONCE_B)
+    status, reply = checkpoint(conn, work_id, ["src"])
+    assert status == 200, reply
+    assert event_count(conn, work_id) == 3
+
+
+@pytest.mark.parametrize("repo", ["example/other", "EXAMPLE/Project", None, "example/../other"])
+def test_repository_identity_is_assessed_before_peer_paths(ledger, repo):
+    conn, work_id, _ = ledger
+    owned(conn, work_id)
+    assert checkpoint(conn, work_id, ["src"])[0] == 200
+    other = another_owner(conn)
+    row = conn.execute(
+        "SELECT seq, detail_json FROM work_events WHERE work_id=? ORDER BY seq DESC LIMIT 1", (work_id,)
+    ).fetchone()
+    detail = json.loads(row[1])
+    private = "token=" + "q" * 40
+    detail["ownership"].update(repo_identity=repo, write_scope=[private])
+    conn.execute("UPDATE work_events SET detail_json=? WHERE seq=?", (json.dumps(detail), row[0]))
+    conn.commit()
+    status, reply = checkpoint(conn, other, ["src"], node="node-b", nonce=NONCE_B)
+    if repo == "example/other":
+        assert status == 200, reply
+        assert event_count(conn, other) == 3
+    else:
+        assert status == 409 and reply["code"] == "path-scope-unavailable"
+        assert "conflicts" not in reply and event_count(conn, other) == 2
+    assert private not in json.dumps(reply)
+
+
+def test_serialized_byte_fence_precedes_scope_conflict_disclosure(ledger):
+    conn, work_id, _ = ledger
+    owned(conn, work_id)
+    assert checkpoint(conn, work_id, ["src"])[0] == 200
+    other = another_owner(conn)
+    before = snapshot(conn, other)
+    paths = ["src"] + [f"wide/{i:02d}" + "😀" * 240 for i in range(31)]
+    status, reply = checkpoint(conn, other, paths, node="node-b", nonce=NONCE_B)
+    assert status == 400 and reply["code"] == "field-bound", reply
+    assert all(field not in reply for field in ("conflicts", "resolution", "truncated"))
+    assert snapshot(conn, other) == before and event_count(conn, other) == 2
+
+
 @pytest.mark.parametrize("wide", [False, True])
 def test_conflict_output_is_bounded_and_does_not_evict_imported_duplicates(ledger, wide):
     conn, work_id, _ = ledger

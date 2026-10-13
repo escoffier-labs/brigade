@@ -7,9 +7,11 @@ Admission uses the existing SQLite ownership transaction and immutable events.
 
 Authenticated historical replay returns the recorded ownership revision before
 admission. It does not reacquire scope or change an older `not-performed` marker.
-New checkpoints pass the existing authority, generation, revision, item-state
-and event-capacity checks before comparing other items' latest ownership events.
-The comparison and checkpoint insertion share `BEGIN IMMEDIATE`.
+New checkpoints pass the existing authority, generation, revision, item-state,
+event-capacity and serialized byte-size checks before comparing other items'
+latest ownership events. An oversized event returns `field-bound` without
+conflict details or an inserted event, even if its paths overlap. Admission runs
+immediately before insertion. Both share `BEGIN IMMEDIATE`.
 
 Repository identifiers compare case-insensitively while retaining stored
 spelling. Path components compare case-sensitively. Identical paths and
@@ -27,9 +29,12 @@ Admission does not evict or reconcile imported duplicates.
 
 ## Refusal and processing bounds
 
-`worklore_scope.py` selects the latest ownership event per other work item,
-excluding unrelated event types. The query returns at most 1,025 snapshots,
-including an overflow sentinel. At most 1,024 snapshots are assessed. Each
+`worklore_scope.py` groups all ownership events to select the latest event per
+other work item, excluding unrelated event types. The outer query retains only
+accepted, checkpoint, reported and handoff-offered events before ordering and
+limiting results. Latest offers, releases and withdrawals consume no scan slot,
+and their earlier reservations do not reappear. The query returns at most 1,025
+retained snapshots, including an overflow sentinel. At most 1,024 are assessed. Each
 snapshot is read as at most 65,537 bytes, including a byte overflow sentinel.
 Existing scope bounds allow 32 paths of 256 characters per item. The query bounds
 application processing and decoded data. SQLite may traverse additional index
@@ -43,15 +48,26 @@ HTTP 409 refusals use fixed messages and resolution codes:
   the response under 8 KiB. `truncated` reports omitted conflicting pairs.
 - `path-scope-capacity-exhausted` reports that the latest-snapshot set exceeds the
   scan bound. Its resolution is `reduce-snapshot-set-or-retry-after-scope-review`.
-  Releasing scope does not remove an item's historical snapshot from this count.
+  Explicit holder release removes that item from the scan count while preserving
+  its immutable history. Terminal item states and revoked nodes remain counted
+  when their latest ownership events retain reservations.
 - `path-scope-unavailable` refuses unsafe, malformed or oversized stored
   declarations. Its resolution is `review-stored-scope-declarations`.
 
 Refusals do not return holder hashes, capabilities, grants, checkpoint prose or
 unrelated item fields. Stored identities and paths are validated before they
-enter conflict output. An incomplete assessment never admits a writer.
+enter conflict output. For nonempty peer scope, safe repository identity is
+validated and compared before paths. Malformed paths in a reliably different
+repository do not block admission here. Malformed JSON, unknown or unsafe
+repository identity, and unsafe declarations in the same repository still
+refuse admission. An incomplete assessment never admits a writer.
 Resolution codes describe an end state for ownership review. They do not
 instruct callers to release another holder automatically.
+
+These structured details are supported through raw HTTP. The existing Python
+client exposes the refusal's error code and sanitized message, discarding
+`conflicts`, `resolution` and `truncated`. Bounded client propagation remains
+epic work.
 
 ## Historical observation and limits
 
@@ -66,8 +82,12 @@ read-view slice.
 Admission records a Hub declaration check at an ownership revision. Physical
 filesystem writers, process cessation, provider readiness, dependencies, merge
 reconciliation, delegated scope, resource arbitration and three-owner execution
-qualification remain outside this slice. Existing imported duplicates can
-continue to exist until explicitly reconciled. No schema, migrations, runtime
+qualification remain outside this slice. Operator-reviewed reservation recovery
+for a lost holder capability also remains epic work: release requires the
+current nonce and an enrolled, unrevoked holder node. Admin and operator
+privileges cannot force release. A successor item cannot checkpoint over a lost
+holder's reserved paths. Existing imported duplicates can continue to exist
+until explicitly reconciled. No schema, migrations, runtime
 dependencies, provider changes or verification tooling changes are introduced.
 
 ## Verification ownership

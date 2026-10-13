@@ -511,8 +511,6 @@ def ownership_action(
         result = _transition(
             current, body, actor_id=actor_id, actor_type="operator" if action == "offer" else actor_type, digest=digest
         )
-        if action == "checkpoint":
-            scope.admit_checkpoint(conn, work_id, body)
         result["last_seq"] = conn.execute(f"SELECT {store._EVENT_SEQ_SQL}").fetchone()[0]
         result["updated_at"] = store._utc_now()
         authority = {key: current[key] for key in ("generation", "owner_node", "offered_to", "holder_hash")}
@@ -521,6 +519,8 @@ def ownership_action(
         if len(serialized.encode("utf-8")) > OWNERSHIP_EVENT_MAX_BYTES:
             raise _invalid("ownership event exceeds serialized byte bound; ownership unchanged")
         placeholders = ",".join(["?"] * len(store._EVENT_COLUMNS) + [store._EVENT_SEQ_SQL])
+        if action == "checkpoint":
+            scope.admit_checkpoint(conn, work_id, body)
         conn.execute(
             f"INSERT INTO work_events ({','.join(store._EVENT_INSERT_COLUMNS)}) VALUES ({placeholders})",
             (

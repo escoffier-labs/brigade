@@ -39,7 +39,7 @@ def admit_checkpoint(conn: sqlite3.Connection, work_id: str, body: Mapping[str, 
     """Check latest declarations without presence/status inference or modifying holders.
 
     The ownership caller holds BEGIN IMMEDIATE and has already fenced authority,
-    CAS, replay and event capacity. LIMIT bounds snapshot processing, not SQLite's
+    CAS, replay, event capacity and serialized byte size. LIMIT bounds snapshot processing, not SQLite's
     underlying index traversal. Empty scopes have no writer to admit.
     """
     # Reuse the ownership contract without a module-initialization import cycle.
@@ -48,11 +48,15 @@ def admit_checkpoint(conn: sqlite3.Connection, work_id: str, body: Mapping[str, 
     requested = body["write_scope"]
     if not requested:
         return
+    # Group all ownership events first: a later reset ends the old reservation.
+    # Filter resets before LIMIT so immutable departed histories consume no slot.
     rows = conn.execute(
         "SELECT e.work_id, substr(CAST(e.detail_json AS BLOB), 1, ?) FROM work_events e "
         "JOIN (SELECT work_id, MAX(seq) AS seq FROM work_events WHERE work_id != ? AND "
         + ownership._EVENT_PREDICATE
-        + " GROUP BY work_id ORDER BY work_id LIMIT ?) latest ON e.work_id=latest.work_id AND e.seq=latest.seq ORDER BY e.work_id",
+        + " GROUP BY work_id) latest ON e.work_id=latest.work_id AND e.seq=latest.seq "
+        "WHERE e.event_type IN ('ownership-accepted', 'ownership-checkpoint', "
+        "'ownership-reported', 'ownership-handoff-offered') ORDER BY e.work_id LIMIT ?",
         (ownership.OWNERSHIP_EVENT_MAX_BYTES + 1, work_id, *ownership.EVENT_TYPES.values(), MAX_SCOPE_SNAPSHOTS + 1),
     )
     conflicts: list[dict[str, str]] = []
@@ -70,16 +74,16 @@ def admit_checkpoint(conn: sqlite3.Connection, work_id: str, body: Mapping[str, 
                 continue
             if snapshot["state"] not in {"owned", "handoff-pending"}:
                 raise ValueError("unknown reservation state")
-            paths = [
-                ownership._path(path) for path in ownership._array(snapshot["write_scope"], ownership.SCOPE_MAX_ITEMS)
-            ]
-            if not paths:
+            if snapshot["write_scope"] == []:
                 continue
             repo = ownership._path(snapshot["repo_identity"], "repo_identity", ownership.REPO_IDENTITY_MAX)
             if not ownership._REPO_RE.fullmatch(repo):
                 raise ValueError("invalid repository")
             if repo.casefold() != body["repo_identity"].casefold():
                 continue
+            paths = [
+                ownership._path(path) for path in ownership._array(snapshot["write_scope"], ownership.SCOPE_MAX_ITEMS)
+            ]
             identifier = ownership._reference(identifier)
             owner = ownership._node(snapshot["owner_node"])
             for path in requested:
