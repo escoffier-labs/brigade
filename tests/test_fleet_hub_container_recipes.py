@@ -64,9 +64,11 @@ def test_hub_image_is_non_root_and_has_a_single_writable_state_directory():
 
 def test_compose_recipe_keeps_host_port_private_and_token_out_of_environment():
     text = (CONTAINER / "compose.yaml").read_text()
+    dockerignore = (ROOT / ".dockerignore").read_text()
 
     assert '"127.0.0.1:3774:3774"' in text
     assert "target: admin_token" in text
+    assert "ops/fleet-hub/secrets/" in dockerignore
     assert "BRIGADE_FLEET_TOKEN" not in text
     assert "restart: unless-stopped" in text
     assert "healthcheck:" in text
@@ -77,6 +79,7 @@ def test_quadlet_recipe_has_equivalent_persistence_health_and_restart_policy():
     container = (CONTAINER / "quadlet" / "brigade-fleet.container").read_text()
     volume = (CONTAINER / "quadlet" / "brigade-fleet.volume").read_text()
 
+    assert "Image=localhost/brigade-fleet-hub@REPLACE_WITH_RECORDED_DIGEST" in container
     assert "PublishPort=127.0.0.1:3774:3774" in container
     assert "Volume=brigade-fleet.volume:/var/lib/brigade" in container
     assert "Secret=brigade-fleet-admin-token,target=admin_token" in container

@@ -64,18 +64,25 @@ database support.
 
 ## Rootless Podman Quadlet
 
-Build the pinned image locally, create the Podman secret over standard input, copy both Quadlet files to
-`~/.config/containers/systemd/`, then reload the user manager:
+Build the pinned image locally and record its digest. Create the Podman secret
+over standard input, render the Quadlet with that digest, and copy the volume
+unit to `~/.config/containers/systemd/`:
 
 ```bash
 podman build -f ops/fleet-hub/Containerfile \
   --build-arg BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409 \
   -t localhost/brigade-fleet-hub:0.28.0-e6009f6 .
+image_digest="$(podman image inspect --format '{{.Digest}}' localhost/brigade-fleet-hub:0.28.0-e6009f6)"
+case "$image_digest" in sha256:*) ;; *) echo "Expected a sha256 image digest" >&2; exit 1 ;; esac
 umask 077
 python -c 'import secrets; print(secrets.token_urlsafe(32))' | \
   podman secret create brigade-fleet-admin-token -
 install -d ~/.config/containers/systemd
-install -m 0644 ops/fleet-hub/quadlet/brigade-fleet.{container,volume} \
+sed "s|REPLACE_WITH_RECORDED_DIGEST|${image_digest}|" \
+  ops/fleet-hub/quadlet/brigade-fleet.container \
+  > ~/.config/containers/systemd/brigade-fleet.container
+chmod 0644 ~/.config/containers/systemd/brigade-fleet.container
+install -m 0644 ops/fleet-hub/quadlet/brigade-fleet.volume \
   ~/.config/containers/systemd/
 systemctl --user daemon-reload
 systemctl --user start brigade-fleet.service
