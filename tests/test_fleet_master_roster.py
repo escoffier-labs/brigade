@@ -1,0 +1,130 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from brigade import cli, fleet_master_roster
+
+
+def _document() -> dict[str, object]:
+    return {
+        "schema": fleet_master_roster.SCHEMA,
+        "revision": 7,
+        "seats": [
+            {
+                "name": "implementer",
+                "cli": "codex",
+                "model": "gpt-5.6",
+                "purpose": "Implement and review repository changes.",
+                "caveats": ["Use the repository's focused verification gate."],
+                "fallbacks": ["reviewer"],
+                "enabled": True,
+            },
+            {
+                "name": "reviewer",
+                "cli": "claude",
+                "model": "opus",
+                "purpose": "Review changes independently.",
+                "caveats": [],
+                "fallbacks": [],
+                "enabled": True,
+            },
+        ],
+    }
+
+
+def test_parse_master_roster_returns_canonical_digest_and_copy() -> None:
+    document = _document()
+
+    parsed = fleet_master_roster.parse(document)
+
+    assert parsed["revision"] == 7
+    assert parsed["seats"][0]["fallbacks"] == ["reviewer"]
+    assert parsed["sha256"].startswith("sha256:")
+    assert "sha256" not in document
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("api_token", "placeholder-token"),
+        ("env", {"OPENAI_API_KEY": "placeholder-secret"}),
+        ("home", "~/.config/credential"),
+        ("command", "codex --api-key=placeholder"),
+    ],
+)
+def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
+    document = _document()
+    document["seats"][0][key] = value  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use token sk-ant-abcdefghijklmnopqrstuvwxyz0123456789 for auth.",
+        "OPENAI_API_KEY=placeholder-secret",
+        "Load config from C:\\Users\\operator\\.config\\secret.toml",
+        "Use ~/.config/provider/credentials.json",
+        "See (~/.ssh/config).",
+    ],
+)
+def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
+    document = _document()
+    document["seats"][0]["caveats"] = [text]  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+def test_parse_rejects_duplicate_seat_names() -> None:
+    document = _document()
+    document["seats"].append(document["seats"][0])  # type: ignore[union-attr,index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="duplicate"):
+        fleet_master_roster.parse(document)
+
+
+def test_parse_rejects_non_utf8_json_bytes() -> None:
+    encoded = json.dumps(_document()).encode("utf-16")
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="UTF-8"):
+        fleet_master_roster.parse(encoded)
+
+
+def test_parse_rejects_duplicate_json_keys() -> None:
+    raw = b'{"schema":"brigade.fleet_master_roster.v1","revision":1,"revision":2,"seats":[]}'
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="duplicate JSON key"):
+        fleet_master_roster.parse(raw)
+
+
+def test_parse_rejects_non_string_mapping_keys() -> None:
+    document = _document()
+    document[1] = "unexpected"  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="keys must be strings"):
+        fleet_master_roster.parse(document)
+
+
+def test_fleet_roster_validate_cli_reports_document_digest(tmp_path, capsys) -> None:
+    path = tmp_path / "roster.json"
+    path.write_text(json.dumps(_document()), encoding="utf-8")
+
+    assert cli.main(["fleet", "roster", "validate", "--file", str(path), "--json"]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["revision"] == 7
+    assert output["seats"] == 2
+    assert output["sha256"].startswith("sha256:")
+
+
+def test_fleet_roster_validate_cli_refuses_forbidden_document(tmp_path, capsys) -> None:
+    path = tmp_path / "roster.json"
+    path.write_text(json.dumps({**_document(), "api_token": "placeholder"}), encoding="utf-8")
+
+    assert cli.main(["fleet", "roster", "validate", "--file", str(path)]) == 1
+    assert "unknown document field" in capsys.readouterr().err
