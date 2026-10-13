@@ -1877,3 +1877,46 @@ def test_resume_resets_stale_failure_phase_before_retry(tmp_path, monkeypatch):
     assert results[0]["detail"] == "provider hung up"
     assert results[0].get("failure_phase") != "dispatch"
     assert "failure_phase" not in results[0]
+
+
+def test_resume_clears_stale_attempt_metadata_when_provider_raises(tmp_path, monkeypatch):
+    stale = {
+        **_RESUMABLE_COOK,
+        "failure_kind": "output-limit",
+        "timed_out": True,
+        "output_truncated": True,
+        "output_bytes": 99,
+        "output_cap_bytes": 100,
+        "effective_model": "old-model",
+        "session_id": "old-session",
+    }
+    run_dir = _write_run_dir(tmp_path, results=[stale])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["worker"] = "cook"
+    (run_dir / "run.json").write_text(json.dumps(meta))
+
+    class FailingServer(_StubServer):
+        def resume_thread(self, thread_id, *, cwd, model=None, sandbox=None):
+            raise codex_appserver.AppServerError("app server disconnected")
+
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", FailingServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="unused", ok=True),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    results = json.loads((run_dir / "worker-results.json").read_text())["results"]
+    assert results[0]["detail"] == "app server disconnected"
+    assert results[0]["transport"] == "codex-app-server"
+    for key in (
+        "failure_kind",
+        "timed_out",
+        "output_truncated",
+        "output_bytes",
+        "output_cap_bytes",
+        "effective_model",
+        "session_id",
+    ):
+        assert key not in results[0]

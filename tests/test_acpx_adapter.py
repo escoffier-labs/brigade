@@ -539,7 +539,14 @@ def test_parse_stream_clears_stale_model_after_rejected_explicit_update():
                             "type": "select",
                             "currentValue": "composer-2.5",
                             "options": [],
-                        }
+                        },
+                        {
+                            "id": "fast-mode",
+                            "category": "model",
+                            "type": "select",
+                            "currentValue": "fast",
+                            "options": [],
+                        },
                     ],
                 }
             },
@@ -555,7 +562,14 @@ def test_parse_stream_clears_stale_model_after_rejected_explicit_update():
                         "type": "select",
                         "currentValue": "composer-2.5",
                         "options": [],
-                    }
+                    },
+                    {
+                        "id": "fast-mode",
+                        "category": "model",
+                        "type": "select",
+                        "currentValue": "fast",
+                        "options": [],
+                    },
                 ]
             },
         },

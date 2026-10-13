@@ -269,14 +269,19 @@ def _update(message: dict[str, Any]) -> dict[str, Any] | None:
 def _model_from_config_options(value: object) -> str | None:
     if not isinstance(value, list):
         return None
-    model_options = [
-        option
-        for option in value
-        if isinstance(option, dict) and (option.get("category") == "model" or option.get("id") == "model")
-    ]
-    if len(model_options) != 1:
+    primary_options = [option for option in value if isinstance(option, dict) and option.get("id") == "model"]
+    if len(primary_options) == 1:
+        model_option = primary_options[0]
+    elif primary_options:
         return None
-    model = model_options[0].get("currentValue")
+    else:
+        category_options = [
+            option for option in value if isinstance(option, dict) and option.get("category") == "model"
+        ]
+        if len(category_options) != 1:
+            return None
+        model_option = category_options[0]
+    model = model_option.get("currentValue")
     return model if is_safe_model_id(model) else None
 
 
