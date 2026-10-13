@@ -679,6 +679,23 @@ def test_ec12_reports_malformed_entry_list_as_invalid(tmp_path, entries):
     assert readiness["reason"] == "schema_missing"
 
 
+@pytest.mark.parametrize("bad_name", ["bad\\name", "bad:name", "bad\x00name"])
+def test_ec12_reports_descriptor_invalid_entry_names_as_malformed(tmp_path, bad_name):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    patch_entry = next(entry for entry in manifest["entries"] if entry["path"] == "changes.patch")
+    patch_entry["path"] = bad_name
+    _write_json(manifest_path, manifest)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "invalid"
+    assert readiness["reason"] == "schema_missing"
+
+
 def test_json_output_is_sorted_and_includes_schema(tmp_path, capsys):
     target = tmp_path / "ws"
     target.mkdir()

@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import control_readiness, evidence_package_snapshot
+from . import control_readiness, evidence_package, evidence_package_snapshot
+
+
+def check_entry_name(name: str, *, strict_package: bool) -> None:
+    """Reject unsafe paths and names outside the strict package descriptor."""
+    if not evidence_package._is_safe_entry_path(name):
+        raise evidence_package_snapshot.PackageSnapshotError("unsafe")
+    if strict_package and name not in evidence_package.PACKAGE_ENTRY_NAMES:
+        raise evidence_package_snapshot.PackageSnapshotError("malformed")
 
 
 def _unavailable(relpath: str, reason: str) -> control_readiness.ArtifactObservation:

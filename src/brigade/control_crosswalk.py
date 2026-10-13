@@ -265,8 +265,7 @@ def _adapter_observation(
                 if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
                     raise evidence_package_snapshot.PackageSnapshotError("malformed")
                 name = entry["path"]
-                if not evidence_package._is_safe_entry_path(name):
-                    raise evidence_package_snapshot.PackageSnapshotError("unsafe")
+                control_crosswalk_package.check_entry_name(name, strict_package=adapter is _verify_evidence_package)
                 entry_names.add(name)
             if len(actual_names) > len(evidence_package.PACKAGE_FILES) + 1 or actual_names - {
                 "manifest.json",
