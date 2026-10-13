@@ -53,7 +53,8 @@ _DANGEROUS_VALUE = re.compile(
     r"\s+(?:provided\s+(?:as|with)|stored\s+as|generated\s+as|configured\s+(?:as|with|to))\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
-    r"\s+(?:is|are|was|equals|will\s+be|has\s+been|set\s+to)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
+    r"\s+(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to)\s+"
+    + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%[A-Za-z_][A-Za-z0-9_]*%|"
     r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][^}]*\})"
     r"(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))",
@@ -73,7 +74,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
 _EXPLICIT_TERMINAL_PATH = re.compile(
     r"\b(?:home\s+directory|path|file(?:\s+names?)?|filenames?|directory|folder|script|repository|repo|location)\s*"
-    r"(?:is|was|equals|will\s+be|has\s+been|set\s+to|:|=)\s*[\"'“‘`()\[{]*\s*"
+    r"(?:is|are|was|were|equals|will\s+be|has\s+been|set\s+to|:|=)\s*[\"'“‘`()\[{]*\s*"
     r"(?:~|/|\\|\.{1,2})(?=$|[\s,;!?\"'”’)\]}])",
     re.IGNORECASE,
 )
