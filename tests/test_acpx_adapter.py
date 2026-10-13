@@ -1068,6 +1068,36 @@ def test_parse_stream_drops_unrecognized_event_labels():
     assert all("status" not in event for event in parsed["events"])
 
 
+@pytest.mark.parametrize("event_type", ("tool_call", "tool_call_update"))
+@pytest.mark.parametrize("status", ("pending", "in_progress", "completed", "failed"))
+def test_parse_stream_preserves_tool_call_lifecycle_status(event_type, status):
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "req-1", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"update": {"sessionUpdate": event_type, "status": status}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "done"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None
+    assert parsed["events"][0] == {"type": event_type, "status": status}
+
+
 def test_parse_stream_retires_config_request_id_without_config_options():
     parsed, error = acpx_adapter.parse_stream(
         _stream(
@@ -1161,6 +1191,48 @@ def test_failed_run_preserves_observed_model_and_session_metadata(monkeypatch, t
     assert result.session_id == "session-1"
     assert result.request_id == "req-1"
     assert result.safe_events
+
+
+def test_output_limit_failure_preserves_model_from_complete_retained_frames(monkeypatch, tmp_path):
+    retained = _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "session/prompt",
+            "params": {"sessionId": "session-1", "prompt": "hidden"},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "session-1",
+                "update": {"sessionUpdate": "config_option_update", "modelId": "composer-2.5"},
+            },
+        },
+    )
+    overflow = proc.Result(
+        -15,
+        retained + proc.TRUNCATION_MARKER + '{"jsonrpc":"2.0"',
+        "combined output exceeded capture limit",
+        output_limit_exceeded=True,
+        stdout_bytes=proc.MAX_CAPTURE_BYTES + 1,
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter([proc.Result(0, "acpx 0.12.0\n", ""), overflow])
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.failure_kind == "output-limit"
+    assert result.effective_model == "composer-2.5"
+    assert result.effective_model_locator == "acp-config-option-update"
+    assert result.session_id == "session-1"
+    assert result.request_id == "req-1"
 
 
 @pytest.mark.parametrize(

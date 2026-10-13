@@ -44,7 +44,8 @@ _SAFE_EVENT_TYPES = frozenset(
         "user_message_chunk",
     }
 )
-_SAFE_EVENT_STATUSES = frozenset({"authenticated", "unauthenticated", "unavailable", "unrecognized"})
+_SAFE_PROVIDER_AUTH_STATUSES = frozenset({"authenticated", "unauthenticated", "unavailable", "unrecognized"})
+_SAFE_TOOL_CALL_STATUSES = frozenset({"pending", "in_progress", "completed", "failed"})
 _UNAUTHENTICATED_LINE = re.compile(
     r"^(?:[x✗✘]\s*)?(?:not logged in|not authenticated|unauthenticated|authentication required)[.!]?$",
     re.IGNORECASE,
@@ -99,7 +100,14 @@ def sanitize_events(events: object) -> list[dict[str, str]]:
             continue
         clean: dict[str, str] = {"type": kind}
         status = event.get("status")
-        if isinstance(status, str) and status in _SAFE_EVENT_STATUSES:
+        safe_statuses = (
+            _SAFE_PROVIDER_AUTH_STATUSES
+            if kind == "provider_auth"
+            else _SAFE_TOOL_CALL_STATUSES
+            if kind in {"tool_call", "tool_call_update"}
+            else frozenset()
+        )
+        if isinstance(status, str) and status in safe_statuses:
             clean["status"] = status
         detail = event.get("detail")
         if kind == "provider_auth" and isinstance(detail, str):
@@ -317,6 +325,14 @@ def _objects(stdout: str | None) -> tuple[list[dict[str, Any]] | None, str]:
     return messages, ""
 
 
+def _complete_retained_frames(stdout: str) -> str:
+    """Return complete NDJSON lines from the retained head of an overflowed stream."""
+    marker_at = stdout.find(proc.TRUNCATION_MARKER)
+    head = stdout if marker_at < 0 else stdout[:marker_at]
+    last_line_end = head.rfind("\n")
+    return head[: last_line_end + 1] if last_line_end >= 0 else ""
+
+
 def _update(message: dict[str, Any]) -> dict[str, Any] | None:
     if message.get("method") != "session/update":
         return None
@@ -484,7 +500,7 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
             kind = update.get("sessionUpdate")
             safe_event: dict[str, Any] = {"type": kind} if isinstance(kind, str) else {}
             status = update.get("status")
-            if isinstance(status, str) and status in _SAFE_EVENT_STATUSES:
+            if isinstance(status, str):
                 safe_event["status"] = status
             safe_events.extend(sanitize_events([safe_event]))
             if kind == "config_option_update" and ("modelId" in update or "configOptions" in update):
@@ -660,6 +676,8 @@ def run_cursor(
     )
     if result.output_limit_exceeded:
         detail = (result.stderr.strip() or f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte limit")[:200]
+        retained, _ = parse_stream(_complete_retained_frames(result.stdout), allow_empty_text=True)
+        retained_metadata = retained or {}
         return AgentResult(
             text="",
             ok=False,
@@ -672,8 +690,13 @@ def run_cursor(
             timed_out=result.code == 124,
             transport="acpx",
             requested_model=model,
+            effective_model=retained_metadata.get("effective_model"),
+            effective_model_locator=retained_metadata.get("effective_model_locator"),
+            protocol_version=retained_metadata.get("protocol_version"),
+            session_id=retained_metadata.get("session_id"),
+            request_id=retained_metadata.get("request_id"),
             acpx_version=installed,
-            safe_events=(auth_event,),
+            safe_events=(auth_event, *retained_metadata.get("events", [])),
         )
     if result.decode_failed:
         detail = (result.stderr.strip() or result.decode_failure_detail)[:200]
