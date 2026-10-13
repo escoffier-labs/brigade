@@ -238,6 +238,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Environment variable SERVICE_MODE is production",
         "Environment variable SERVICE_MODE set to production",
         "Environment variable SERVICE_MODE configured as production",
+        "Environment variable SERVICE_MODE configured to production",
+        "Environment variable SERVICE_MODE configured with production",
         "Environment variable SERVICE_MODE was production",
         "Environment variable SERVICE_MODE will be production",
         "Environment variable SERVICE_MODE has been production",
