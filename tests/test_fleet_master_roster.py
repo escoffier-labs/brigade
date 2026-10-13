@@ -601,7 +601,16 @@ def test_parse_accepts_ordinary_slash_delimited_descriptive_prose(text: str) -> 
 
 
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
-@pytest.mark.parametrize("text", ["24/7", "yes/no", "review/approval"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "24/7",
+        "yes/no",
+        "review/approval",
+        "Work / life balance guidance.",
+        "We work / collaborate asynchronously.",
+    ],
+)
 def test_parse_accepts_standalone_slash_prose(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]

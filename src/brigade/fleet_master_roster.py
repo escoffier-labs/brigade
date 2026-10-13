@@ -92,7 +92,7 @@ _CONTEXTUAL_TERMINAL_PATH = re.compile(
     r"\b(?:change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
     r"(?:(?:from|at|in|to|into|under)\s+)?[\"'“‘`()\[{]*\s*"
-    r"(?:~|/|\\|\.{1,2})(?=$|[\s,;!?\"'”’)\]}])",
+    r"(?:~|/|\\|\.{1,2})(?=$|[,;!?\"'”’)\]}])",
     re.IGNORECASE,
 )
 _API_ROUTE_CONTEXT = re.compile(
