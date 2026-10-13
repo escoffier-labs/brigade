@@ -167,6 +167,13 @@ def _response_confirms(payload: dict[str, Any], message: dict[str, Any]) -> bool
     return isinstance(response_message, dict) and response_message.get("client_id") == message.get("client_id")
 
 
+def _remove_queued_locked(path: Path, client_id: str, *, dir_fd: int | None) -> None:
+    queued = fleet_client._read_spool(path, dir_fd=dir_fd)
+    remaining = [entry for entry in queued if entry.get("client_id") != client_id]
+    if len(remaining) != len(queued):
+        fleet_client._write_spool_atomic(path, remaining, dir_fd=dir_fd)
+
+
 def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -> dict[str, Any]:
     fleet_client._require_encrypted_or_loopback_hub(hub)
     path = _spool_path(node_id, token)
@@ -202,24 +209,30 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                 if any(_message_recipient(item) == recipient for item in pending) or globally_blocked:
                     return _queue_locked(path, message, dir_fd=dir_fd)
             _require_spool_capacity(path, message, dir_fd=dir_fd)
+            queued_result = _queue_locked(path, message, dir_fd=dir_fd)
             try:
                 status, payload = _request(hub, token, message)
             except fleet_client.FleetClientError:
-                return _queue_locked(path, message, dir_fd=dir_fd)
+                return queued_result
             # 401 is surfaced because a rotated token cannot flush this token-scoped spool.
             if status in (408, 425, 429) or status >= 500:
-                return _queue_locked(path, message, dir_fd=dir_fd)
+                return queued_result
             if not 200 <= status < 300:
                 if 300 <= status < 400:
-                    return _queue_locked(path, message, dir_fd=dir_fd)
+                    return queued_result
                 if status == 400 and payload.get("code") == "message_timestamp_future":
-                    return _queue_locked(path, message, dir_fd=dir_fd)
+                    return queued_result
                 if status == 400 and payload.get("code") == "message_recipient_inactive":
-                    return _queue_locked(path, message, dir_fd=dir_fd)
+                    return queued_result
+                _remove_queued_locked(path, message["client_id"], dir_fd=dir_fd)
                 raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
             if not _response_confirms(payload, message):
                 _LOG.warning("fleet message response did not confirm the submitted request; queueing it")
-                return _queue_locked(path, message, dir_fd=dir_fd)
+                return queued_result
+            try:
+                _remove_queued_locked(path, message["client_id"], dir_fd=dir_fd)
+            except (fleet_client.FleetClientError, OSError) as exc:
+                _LOG.warning("confirmed fleet message remains in local spool: %s", type(exc).__name__)
             return payload
     except (KeyboardInterrupt, SystemExit):
         try:

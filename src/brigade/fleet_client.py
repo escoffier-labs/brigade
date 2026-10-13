@@ -103,6 +103,7 @@ if TYPE_CHECKING:
 
 from . import fleet_claim_lifecycle as _claim_lifecycle
 from . import fleet_claim_target as _claim_target
+from .fleet_client_spool import ensure_directory as _ensure_spool_directory
 from .fleet_client_spool import fsync_parent as _fsync_spool_parent
 from . import toml_compat as tomllib
 from .fleet_claim_lifecycle import _ConfirmedClaimLease as _ConfirmedClaimLease
@@ -501,26 +502,15 @@ def _dir_fd_supported() -> bool:
 
 
 def _ensure_private_dir(path: Path) -> int | None:
-    """Create ``path`` (and parents), enforce 0700 through a directory
-    descriptor, and return that descriptor for ``dir_fd`` use.
+    """Create a durable private directory and return its safe dir_fd if supported.
 
-    Privacy is proven through the descriptor, not the path (#1157 round 2):
-    the directory is opened ``O_DIRECTORY|O_NOFOLLOW`` so a symlink swapped
-    in after any earlier check fails the open instead of redirecting every
-    write below it, forced to 0700 via ``fchmod``, and re-stat'ed through
-    the same descriptor to verify the bits landed. When privacy cannot be
-    enforced or verified, writing is refused (``FleetClientError``) rather
-    than warned about. The caller must close the returned descriptor when it
-    has finished opening files beneath the directory.
-
-    On platforms without descriptor-relative APIs (Windows: ``dir_fd`` is
-    unsupported per ``os.supports_dir_fd``, which also rules out
-    ``os.fchmod``), returns ``None`` so callers take their path-based
-    fallback: a symlinked spool directory is still refused, privacy is a
-    best-effort path ``chmod`` whose failure only warns — the documented
-    platform gap (#1157 round 3).
+    POSIX verifies privacy through a no-follow descriptor. Windows uses the
+    documented path-based chmod fallback because ``dir_fd`` is unsupported.
     """
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        _ensure_spool_directory(path)
+    except OSError as exc:
+        raise FleetClientError("fleet spool directory could not be persisted") from exc
     if not _dir_fd_supported():
         if os.path.islink(path):
             raise FleetClientError(f"fleet spool directory {path} is a symlink")

@@ -1227,6 +1227,38 @@ def test_send_refuses_before_post_when_full_spool_cannot_retain_retry(tmp_path, 
     assert fleet_client._read_spool(path)[0]["client_id"] == "blocked-message"
 
 
+def test_send_does_not_post_until_spool_fsync_succeeds(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    attempts = []
+
+    def request(_hub, _token, message):
+        attempts.append(message.copy())
+        return 503, {"error": "response lost after commit"}
+
+    def fail_fsync(_fd):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+    monkeypatch.setattr(fleet_client.os, "fsync", fail_fsync)
+
+    with pytest.raises(fleet_client.FleetClientError, match="could not be persisted"):
+        fleet_client_messages.send(
+            recipient=NODE_B,
+            subject="Keep the idempotency key",
+            body="Do not post before durable spooling",
+            reference=None,
+            priority="normal",
+        )
+
+    assert attempts == []
+
+
 def test_message_spool_refuses_overflow_without_evicting_queued_messages(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     messages = [

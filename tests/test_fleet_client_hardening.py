@@ -154,6 +154,21 @@ class TestSpoolPrivacy:
         assert synced_modes.count(stat.S_IFREG) >= 2
         assert synced_modes.count(stat.S_IFDIR) >= 3
 
+    @pytest.mark.skipif(os.name != "posix", reason="directory durability is POSIX-specific")
+    def test_first_spool_creation_syncs_each_new_directory_entry(self, home, monkeypatch):
+        spool = _spool()
+        real_fsync = os.fsync
+        synced_modes = []
+
+        def record_fsync(fd):
+            synced_modes.append(stat.S_IFMT(os.fstat(fd).st_mode))
+            real_fsync(fd)
+
+        monkeypatch.setattr(fleet_client.os, "fsync", record_fsync)
+        assert fleet_client.report_event({"run_id": "r1", "state": "run.started"}) is False
+        assert spool.is_file()
+        assert synced_modes.count(stat.S_IFDIR) >= 3
+
     def test_oversized_new_event_preserves_existing_spool(self, home, monkeypatch):
         spool = _spool()
         spool.parent.mkdir(parents=True, exist_ok=True)
