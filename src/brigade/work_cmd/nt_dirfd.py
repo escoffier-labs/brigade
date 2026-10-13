@@ -487,6 +487,27 @@ def unlink_child(parent: int, name: str) -> None:
         api.CloseHandle(handle)
 
 
+def rmdir_child(parent: int, name: str) -> None:
+    """Remove an empty directory relative to the held parent handle."""
+    api = _require_api()
+    handle = _nt_create(
+        api,
+        parent,
+        name,
+        access=_DELETE | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
+        disposition=_FILE_OPEN,
+        options=_FILE_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
+        attributes=_FILE_ATTRIBUTE_NORMAL,
+    )
+    try:
+        _reject_reparse(api, handle, expected_directory=True)
+        info = api.FILE_DISPOSITION_INFORMATION()
+        info.DeleteFile = True
+        _nt_set_info(api, handle, ctypes.byref(info), ctypes.sizeof(info), _FileDispositionInformation, name=name)
+    finally:
+        api.CloseHandle(handle)
+
+
 def stat_child(parent: int, name: str) -> os.stat_result:
     """Read file or directory metadata under the held parent, refusing reparse points."""
     api = _require_api()

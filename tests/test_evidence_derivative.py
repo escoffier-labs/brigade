@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -505,15 +506,14 @@ def test_derivative_does_not_replace_output_directory_created_during_publish(tmp
     source = tmp_path / "source"
     assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
     out = tmp_path / "derivative"
-    mkdir = Path.mkdir
+    mkdir_child = evidence_derivative.dirfd.mkdir_child
 
-    def race_mkdir(path: Path, *args, **kwargs) -> None:
-        if path == out:
-            mkdir(path, *args, **kwargs)
-            raise FileExistsError(path)
-        mkdir(path, *args, **kwargs)
+    def race_mkdir_child(parent: int, name: str) -> None:
+        mkdir_child(parent, name)
+        if name == out.name:
+            raise FileExistsError(name)
 
-    monkeypatch.setattr(Path, "mkdir", race_mkdir)
+    monkeypatch.setattr(evidence_derivative.dirfd, "mkdir_child", race_mkdir_child)
     try:
         evidence_derivative.export_derivative(
             source=source,
@@ -531,15 +531,22 @@ def test_derivative_does_not_replace_output_directory_created_during_publish(tmp
     assert list(out.iterdir()) == []
 
 
-def test_derivative_preserves_preexisting_staging_directory_on_name_collision(tmp_path: Path, monkeypatch) -> None:
+def test_derivative_preserves_concurrent_temporary_file_on_name_collision(tmp_path: Path, monkeypatch) -> None:
     _, receipt = _fabricated_run_dir(tmp_path)
     source = tmp_path / "source"
     assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
-    staging = tmp_path / ".derivative.staging-collision"
-    staging.mkdir()
-    sentinel = staging / "owned-by-another-export"
-    sentinel.write_text("preserve", encoding="utf-8")
     monkeypatch.setattr(evidence_derivative.secrets, "token_hex", lambda _size: "collision")
+    open_child_file = evidence_derivative.dirfd.open_child_file
+    concurrent_data = b"owned by another export"
+
+    def collide_on_temp(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+        if name == ".derivative.json.tmp-collision":
+            competitor = open_child_file(parent, name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            os.write(competitor, concurrent_data)
+            os.close(competitor)
+        return open_child_file(parent, name, flags, mode)
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "open_child_file", collide_on_temp)
 
     try:
         evidence_derivative.export_derivative(
@@ -553,9 +560,9 @@ def test_derivative_preserves_preexisting_staging_directory_on_name_collision(tm
     except evidence_derivative.DerivativeExportError as exc:
         assert str(exc) == "derivative output could not be published"
     else:
-        raise AssertionError("derivative accepted an already occupied staging name")
+        raise AssertionError("derivative accepted an already occupied temporary name")
 
-    assert sentinel.read_text(encoding="utf-8") == "preserve"
+    assert (tmp_path / "derivative" / ".derivative.json.tmp-collision").read_bytes() == concurrent_data
 
 
 def test_derivative_preserves_concurrent_file_after_publish_link_collision(tmp_path: Path, monkeypatch) -> None:
@@ -565,11 +572,15 @@ def test_derivative_preserves_concurrent_file_after_publish_link_collision(tmp_p
     out = tmp_path / "derivative"
     concurrent_data = b"created by another process"
 
-    def concurrent_link(_source: Path, destination: Path) -> None:
-        destination.write_bytes(concurrent_data)
-        raise FileExistsError(destination)
+    replace_children = evidence_derivative.dirfd.replace_children
 
-    monkeypatch.setattr(evidence_derivative.os, "link", concurrent_link)
+    def concurrent_link(parent: int, source: str, destination: str, *, replace: bool = True) -> None:
+        if destination == "derivative.json":
+            (out / destination).write_bytes(concurrent_data)
+            raise FileExistsError(destination)
+        replace_children(parent, source, destination, replace=replace)
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "replace_children", concurrent_link)
     try:
         evidence_derivative.export_derivative(
             source=source,
@@ -587,15 +598,54 @@ def test_derivative_preserves_concurrent_file_after_publish_link_collision(tmp_p
     assert (out / "derivative.json").read_bytes() == concurrent_data
 
 
+def test_derivative_rejects_output_parent_replaced_with_source(tmp_path: Path, monkeypatch) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    source_entries = {path.name for path in source.iterdir()}
+    out_parent = tmp_path / "destination"
+    out_parent.mkdir()
+    displaced_parent = tmp_path / "destination-before-race"
+    original_verify = evidence_derivative._verify_source_inventory
+
+    def replace_parent_after_verification(*args) -> None:
+        original_verify(*args)
+        out_parent.rename(displaced_parent)
+        source.rename(out_parent)
+
+    monkeypatch.setattr(evidence_derivative, "_verify_source_inventory", replace_parent_after_verification)
+    try:
+        try:
+            evidence_derivative.export_derivative(
+                source=source,
+                out=out_parent / "derivative",
+                recipient="recipient-42",
+                authority="approved-case-7",
+                lawful_basis="contract",
+                necessity="review",
+            )
+        except evidence_derivative.DerivativeExportError as exc:
+            assert str(exc) == "derivative output parent changed during publication"
+        else:
+            raise AssertionError("derivative export followed a replaced output parent into the source package")
+
+        assert {path.name for path in out_parent.iterdir()} == source_entries
+    finally:
+        if out_parent.exists() and not source.exists():
+            out_parent.rename(source)
+        if displaced_parent.exists() and not out_parent.exists():
+            displaced_parent.rename(out_parent)
+
+
 def test_derivative_wraps_unsupported_publication_link_errors(tmp_path: Path, monkeypatch) -> None:
     _, receipt = _fabricated_run_dir(tmp_path)
     source = tmp_path / "source"
     assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
 
-    def unsupported_link(*_args, **_kwargs):
-        raise OSError("hard links are unavailable")
+    def unsupported_publish(*_args, **_kwargs):
+        raise OSError("no-clobber publication is unavailable")
 
-    monkeypatch.setattr(evidence_derivative.os, "link", unsupported_link)
+    monkeypatch.setattr(evidence_derivative.dirfd, "replace_children", unsupported_publish)
     try:
         evidence_derivative.export_derivative(
             source=source,

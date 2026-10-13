@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import secrets
-import shutil
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -360,38 +359,107 @@ def export_derivative(
         "limitations": ["not-original-signed-object", "no-recipient-authorization-validation", "local-export-only"],
     }
     encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
-    _verify_source_inventory(source, names, root_observation, file_observations)
-    staging = out.parent / f".{out.name}.staging-{secrets.token_hex(4)}"
-    created_staging = False
+    parent_fd = output_fd = temp_fd = -1
+    temp_name = f".derivative.json.tmp-{secrets.token_hex(4)}"
+    parent_identity: tuple[int, int] | None = None
+    output_identity: tuple[int, int] | None = None
+    temp_identity: tuple[int, int] | None = None
     created_output = False
     published = False
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
-        staging.mkdir(parents=True, mode=0o700)
-        created_staging = True
-        localio.write_bytes_atomic(staging / "derivative.json", encoded)
-        # mkdir is an atomic no-clobber reservation, including for an empty
-        # directory created after the earlier existence check.
-        out.mkdir(mode=0o700)
+        parent_fd = dirfd.open_directory_nofollow(out.parent)
+        parent_info = os.fstat(parent_fd)
+        parent_identity = (parent_info.st_dev, parent_info.st_ino)
+        _verify_source_inventory(source, names, root_observation, file_observations)
+        current_parent_fd = dirfd.open_directory_nofollow(out.parent)
+        try:
+            current_parent = os.fstat(current_parent_fd)
+            if (current_parent.st_dev, current_parent.st_ino) != parent_identity:
+                raise DerivativeExportError("derivative output parent changed during publication")
+        finally:
+            os.close(current_parent_fd)
+        dirfd.mkdir_child(parent_fd, out.name)
         created_output = True
-        os.link(staging / "derivative.json", out / "derivative.json")
+        output_fd = dirfd.open_child_directory(parent_fd, out.name)
+        output_info = os.fstat(output_fd)
+        output_identity = (output_info.st_dev, output_info.st_ino)
+        output_entry = dirfd.stat_child(parent_fd, out.name)
+        if (output_entry.st_dev, output_entry.st_ino) != output_identity:
+            raise DerivativeExportError("derivative output directory changed during publication")
+        temp_fd = dirfd.open_child_file(
+            output_fd,
+            temp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+        temp_info = os.fstat(temp_fd)
+        temp_identity = (temp_info.st_dev, temp_info.st_ino)
+        if not stat.S_ISREG(temp_info.st_mode):
+            raise DerivativeExportError("derivative temporary file changed during publication")
+        view = memoryview(encoded)
+        while view:
+            view = view[os.write(temp_fd, view) :]
+        os.fsync(temp_fd)
+        current_parent_fd = dirfd.open_directory_nofollow(out.parent)
+        try:
+            current_parent = os.fstat(current_parent_fd)
+            if (current_parent.st_dev, current_parent.st_ino) != parent_identity:
+                raise DerivativeExportError("derivative output parent changed during publication")
+        finally:
+            os.close(current_parent_fd)
+        output_entry = dirfd.stat_child(parent_fd, out.name)
+        if (output_entry.st_dev, output_entry.st_ino) != output_identity:
+            raise DerivativeExportError("derivative output directory changed during publication")
+        temp_entry = dirfd.stat_child(output_fd, temp_name)
+        if not stat.S_ISREG(temp_entry.st_mode) or (temp_entry.st_dev, temp_entry.st_ino) != temp_identity:
+            raise DerivativeExportError("derivative temporary file changed during publication")
+        dirfd.replace_children(output_fd, temp_name, "derivative.json", replace=False)
         published = True
+        final_entry = dirfd.stat_child(output_fd, "derivative.json")
+        if not stat.S_ISREG(final_entry.st_mode) or (final_entry.st_dev, final_entry.st_ino) != temp_identity:
+            raise DerivativeExportError("derivative output file changed during publication")
+        current_parent_fd = dirfd.open_directory_nofollow(out.parent)
+        try:
+            current_parent = os.fstat(current_parent_fd)
+            if (current_parent.st_dev, current_parent.st_ino) != parent_identity:
+                raise DerivativeExportError("derivative output parent changed during publication")
+        finally:
+            os.close(current_parent_fd)
+        output_entry = dirfd.stat_child(parent_fd, out.name)
+        if (output_entry.st_dev, output_entry.st_ino) != output_identity:
+            raise DerivativeExportError("derivative output directory changed during publication")
+        dirfd.fsync_directory(output_fd)
     except BaseException as exc:
-        if created_staging:
-            shutil.rmtree(staging, ignore_errors=True)
-        if created_output:
-            if published:
-                try:
-                    (out / "derivative.json").unlink(missing_ok=True)
-                except OSError:
-                    pass
+        if temp_fd != -1:
+            os.close(temp_fd)
+            temp_fd = -1
+        if output_fd != -1:
+            for name, identity in (
+                (temp_name, temp_identity),
+                ("derivative.json", temp_identity if published else None),
+            ):
+                if identity is not None:
+                    try:
+                        entry = dirfd.stat_child(output_fd, name)
+                        if (entry.st_dev, entry.st_ino) == identity:
+                            dirfd.unlink_child(output_fd, name)
+                    except OSError:
+                        pass
+            os.close(output_fd)
+            output_fd = -1
+        if created_output and parent_fd != -1 and output_identity is not None:
             try:
-                out.rmdir()
+                entry = dirfd.stat_child(parent_fd, out.name)
+                if (entry.st_dev, entry.st_ino) == output_identity:
+                    dirfd.rmdir_child(parent_fd, out.name)
             except OSError:
                 pass
         if isinstance(exc, OSError):
             raise DerivativeExportError("derivative output could not be published") from exc
         raise
-    if created_staging:
-        shutil.rmtree(staging, ignore_errors=True)
+    finally:
+        for descriptor in (temp_fd, output_fd, parent_fd):
+            if descriptor != -1:
+                os.close(descriptor)
     return DerivativeReport(removed, redaction_occurrences, excluded, hashlib.sha256(encoded).hexdigest())

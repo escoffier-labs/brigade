@@ -153,12 +153,19 @@ def _nt_open_child_file(parent: int, name: str, flags: int, mode: int) -> int:
     return _nt_dirfd().open_file(parent, name, flags, mode)
 
 
-def _posix_replace_children(parent: int, source: str, destination: str) -> None:
-    os.replace(source, destination, src_dir_fd=parent, dst_dir_fd=parent)
+def _posix_replace_children(parent: int, source: str, destination: str, *, replace: bool = True) -> None:
+    if replace:
+        os.replace(source, destination, src_dir_fd=parent, dst_dir_fd=parent)
+    else:
+        os.link(source, destination, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+        try:
+            os.unlink(source, dir_fd=parent)
+        except OSError:
+            pass
 
 
-def _nt_replace_children(parent: int, source: str, destination: str) -> None:
-    _nt_dirfd().replace_children(parent, source, destination)
+def _nt_replace_children(parent: int, source: str, destination: str, *, replace: bool = True) -> None:
+    _nt_dirfd().replace_children(parent, source, destination, replace=replace)
 
 
 def _posix_unlink_child(parent: int, name: str) -> None:
@@ -167,6 +174,14 @@ def _posix_unlink_child(parent: int, name: str) -> None:
 
 def _nt_unlink_child(parent: int, name: str) -> None:
     _nt_dirfd().unlink_child(parent, name)
+
+
+def _posix_rmdir_child(parent: int, name: str) -> None:
+    os.rmdir(name, dir_fd=parent)
+
+
+def _nt_rmdir_child(parent: int, name: str) -> None:
+    _nt_dirfd().rmdir_child(parent, name)
 
 
 def _posix_stat_child(parent: int, name: str) -> os.stat_result:
@@ -239,14 +254,14 @@ def open_child_lock_file(parent: int, name: str, mode: int = 0o600) -> int:
     raise unavailable("sibling lock operations")
 
 
-def replace_children(parent: int, source: str, destination: str) -> None:
+def replace_children(parent: int, source: str, destination: str, *, replace: bool = True) -> None:
     validate_component(source)
     validate_component(destination)
     if posix_available():
-        _posix_replace_children(parent, source, destination)
+        _posix_replace_children(parent, source, destination, replace=replace)
         return
     if nt_available():
-        _nt_replace_children(parent, source, destination)
+        _nt_replace_children(parent, source, destination, replace=replace)
         return
     raise unavailable("import inbox operations")
 
@@ -258,6 +273,17 @@ def unlink_child(parent: int, name: str) -> None:
         return
     if nt_available():
         _nt_unlink_child(parent, name)
+        return
+    raise unavailable("import inbox operations")
+
+
+def rmdir_child(parent: int, name: str) -> None:
+    validate_component(name)
+    if posix_available():
+        _posix_rmdir_child(parent, name)
+        return
+    if nt_available():
+        _nt_rmdir_child(parent, name)
         return
     raise unavailable("import inbox operations")
 
