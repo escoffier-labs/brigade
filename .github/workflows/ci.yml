@@ -413,7 +413,7 @@ jobs:
 
   test:
     name: test (${{ matrix.python }})
-    needs: [test-shards, coverage, cosign-integration]
+    needs: [test-shards, coverage, cosign-integration, fleet-hub-container]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     strategy:
@@ -425,9 +425,10 @@ jobs:
           SHARDS_RESULT: ${{ needs.test-shards.result }}
           COVERAGE_RESULT: ${{ needs.coverage.result }}
           COSIGN_RESULT: ${{ needs.cosign-integration.result }}
+          FLEET_HUB_RESULT: ${{ needs.fleet-hub-container.result }}
         run: |
-          if [ "$SHARDS_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ] || [ "$COSIGN_RESULT" != "success" ]; then
-            echo "test-shards=$SHARDS_RESULT coverage=$COVERAGE_RESULT cosign-integration=$COSIGN_RESULT"
+          if [ "$SHARDS_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ] || [ "$COSIGN_RESULT" != "success" ] || [ "$FLEET_HUB_RESULT" != "success" ]; then
+            echo "test-shards=$SHARDS_RESULT coverage=$COVERAGE_RESULT cosign-integration=$COSIGN_RESULT fleet-hub-container=$FLEET_HUB_RESULT"
             exit 1
           fi
 

@@ -78,12 +78,15 @@ install -d ~/.config/containers/systemd
 install -m 0644 ops/fleet-hub/quadlet/brigade-fleet.{container,volume} \
   ~/.config/containers/systemd/
 systemctl --user daemon-reload
-systemctl --user enable --now brigade-fleet.service
+systemctl --user start brigade-fleet.service
 curl --fail http://127.0.0.1:3774/health
 ```
 
 Rootless UID mapping must make volume UID 10001 writable; the volume Quadlet
-declares that ownership. Confirm it on the target Podman version before use.
+declares UID and GID ownership. Confirm it on the target Podman version before
+use. Quadlet generates this service, so start it with `systemctl --user start`;
+do not enable the generated unit directly. Its `[Install]` section supplies the
+generator's startup wiring.
 Podman Compose is not Podman's Compose implementation: it invokes an external
 provider such as `docker-compose` or `podman-compose`. On Docker/Podman Desktop,
 containers and named volumes live inside its Linux VM, so backup and restore
