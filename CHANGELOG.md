@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persist bounded sanitized managed Claude review history in caller-owned SQLite transactions, with exact replay, revision snapshots and conservative caller-head projections across pushes and reruns. (#1601)
 
 - Jules cloud status preserves explicit empty-output evidence, so completed sessions with a recorded plan but no work are labeled for plan approval.
+- Treat generic JSONL imports as external content for every import kind, redacting email addresses and infrastructure values from import text before persistence while preserving importer identity. Record the shipped #1006 fixes and the separate same-UID containment residuals.
+
 - Run the full local verification gate in deterministic pytest shards with combined coverage and counted concurrency slots shared by linked worktrees. Shard and slot counts are configurable, and contention can wait for a bounded deadline.
 
 - Speed up strict JSON validation of unescaped ASCII strings while preserving byte limits, Unicode checks, and string-subclass isolation. (#1674)

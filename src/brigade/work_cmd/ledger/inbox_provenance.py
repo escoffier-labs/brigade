@@ -526,7 +526,7 @@ _IMPORT_SOURCE_ORIGIN_MODALITY: dict[str, tuple[str, str]] = {
     "code-review": ("workspace", "tool-output"),
     "context-pack": ("workspace", "tool-output"),
     "handoff-ingest": ("agent-session", "mixed"),
-    "learning-loop": ("workspace", "tool-output"),
+    "learning-loop": ("external-web", "tool-output"),
     "memory-care": ("workspace", "tool-output"),
     "memory-refresh": ("workspace", "tool-output"),
     "project-consolidation": ("workspace", "tool-output"),

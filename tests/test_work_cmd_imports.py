@@ -631,7 +631,7 @@ def test_work_import_ingest_makes_forged_trusted_source_non_authoritative(tmp_pa
     assert item["metadata"]["declared_source"] == "security-scan"
     envelope = item["metadata"]["provenance"]
     assert envelope["source"]["kind"] == "learning-loop"
-    assert envelope["origin"] == "workspace"
+    assert envelope["origin"] == "external-web"
     assert envelope["modality"] == "tool-output"
 
 

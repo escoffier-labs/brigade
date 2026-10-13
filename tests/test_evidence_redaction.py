@@ -310,6 +310,54 @@ def _cleartext_hits(root: Path, *needles: str) -> list[Path]:
 
 
 @pytest.mark.parametrize(
+    "kind", ["task", "finding", "decision", "preference", "incident", "link", "command", "context"]
+)
+def test_import_ingest_redacts_external_content_despite_claimed_local_source(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], kind: str
+) -> None:
+    target = tmp_path / "workspace"
+    target.mkdir()
+    home_path = "/home/example-user/work/repo"
+    safe_text = "Ordinary imported note survives"
+    input_path = tmp_path / "external-imports.jsonl"
+    input_path.write_text(
+        json.dumps(
+            {
+                "kind": kind,
+                "source": "security-scan",
+                "text": f"{safe_text}; contact {PLANTED_EMAIL}; host {PLANTED_IP}; logs {home_path}",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert work_cmd.import_ingest(target=target, input_path=input_path, json_output=True) == 0
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+    assert payload["created"] == 1
+    stored = (target / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text(encoding="utf-8")
+    for canary in (PLANTED_EMAIL, PLANTED_IP, home_path):
+        assert canary not in stored
+        assert canary not in output
+    assert safe_text in stored
+    assert safe_text in output
+    item = json.loads(stored)
+    assert payload["imports"] == [item]
+    assert item["kind"] == kind
+    assert safe_text in item["text"]
+    assert item["source"] == "learning-loop"
+    assert item["metadata"]["declared_source"] == "security-scan"
+    env = item["metadata"]["provenance"]
+    assert env["source"]["kind"] == "learning-loop"
+    assert env["collection_id"] == "work-inbox:learning-loop"
+    assert env["origin"] == "external-web"
+    assert env["redaction"]["origin"] == "external-web"
+    assert env["redaction"]["status"] == "redacted"
+    assert {"email", "private-ipv4", "home-path"} <= set(env["redaction"]["detectors"])
+
+
+@pytest.mark.parametrize(
     ("source", "origin"),
     [
         ("external-web", "external-web"),

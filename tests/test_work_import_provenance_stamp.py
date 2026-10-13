@@ -2225,7 +2225,7 @@ def test_untrusted_batch_ingest_rejects_forged_manual_source_authority(tmp_path:
     assert imported[0]["source"] == "manual"
     env = _envelope(imported[0])
     assert provenance.validate_envelope(env) == []
-    assert env["origin"] == "workspace"
+    assert env["origin"] == "external-web"
     assert env["modality"] == "tool-output"
     assert env["source"]["kind"] == "learning-loop"
 
