@@ -41,9 +41,11 @@ _PATH_CONTEXT = re.compile(
 )
 _FILESYSTEM_COMPONENTS = frozenset(
     {
+        "automation",
         "bin",
         "boot",
         "cache",
+        "checks",
         "config",
         "credentials",
         "dev",
@@ -100,15 +102,22 @@ def _has_relative_path_evidence(value: str, *, provider_model: bool = False) -> 
     path_text = _HTTP_URL.sub("", value)
     for match in _STANDALONE_FILE.finditer(path_text):
         filename = match.group("file").rstrip(".,;:!?")
-        if _PATH_CONTEXT.search(path_text[: match.start()]) and (
+        file_like = (
             filename.startswith(".")
             or filename.casefold() in _EXTENSIONLESS_FILES | _PRIVATE_KEY_FILES | {"credentials"}
             or _FILE_SUFFIX.search(filename)
-        ):
+        )
+        standalone = path_text.strip().rstrip(".,;:!?") == filename
+        if file_like and (_PATH_CONTEXT.search(path_text[: match.start()]) or standalone):
             return True
     for match in _RELATIVE_PATH.finditer(path_text):
         components = re.split(r"[/\\]", match.group("path"))
-        if _PATH_CONTEXT.search(path_text[: match.start()]):
+        path_context = _PATH_CONTEXT.search(path_text[: match.start()]) is not None
+        if path_context and (
+            any(component.startswith(".") for component in components)
+            or any(_FILE_SUFFIX.search(component) for component in components)
+            or components[-1].casefold() in _EXTENSIONLESS_FILES | _PRIVATE_KEY_FILES
+        ):
             return True
         if any(component.startswith(".") or component.casefold() in _FILESYSTEM_COMPONENTS for component in components):
             return True

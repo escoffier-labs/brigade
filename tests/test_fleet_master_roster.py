@@ -111,12 +111,29 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         fleet_master_roster.parse(document)
 
 
-@pytest.mark.parametrize("text", ["mask_live_data", "task-abcdefghijkl"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "mask_live_data",
+        "task-abcdefghijkl",
+        "Run CI/CD workflows",
+        "Read input/output formats",
+    ],
+)
 def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> None:
     document = _document()
     document["seats"][0]["caveats"] = [text]  # type: ignore[index]
 
     assert fleet_master_roster.parse(document)["seats"][0]["caveats"] == [text]
+
+
+@pytest.mark.parametrize("text", [".env", "credentials.json", "id_rsa"])
+def test_parse_rejects_standalone_sensitive_file_names(text: str) -> None:
+    document = _document()
+    document["seats"][0]["caveats"] = [text]  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
 
 
 def test_parse_rejects_fine_grained_github_pat() -> None:
