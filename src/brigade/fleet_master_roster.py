@@ -50,11 +50,11 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s*[:=]\s*"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
-    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent)|value)(?:\s+|(?=[:=])))?"
+    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|value)(?:\s+|(?=[:=])))?"
     r"(?:provided\s+(?:as|with)|stored\s+(?:as|with)|generated\s+(?:as|with)|configured\s+(?:as|with|to))\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
-    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent)|value)(?:\s+|(?=:)))?"
+    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|value)(?:\s+|(?=:)))?"
     r"(?:(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to)\s+|[:=]\s*)"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:set|configure(?:d)?|store(?:d)?|provide(?:d)?|generate(?:d)?)\s+"
@@ -213,6 +213,11 @@ _PATH_CONTEXT = re.compile(
     r"\b" + _PATH_LABEL + r"(?:\s+value)?\s*" + _PATH_DECLARATION_LINKER + r"\s*)[\"'“‘`()\[{]*\s*$",
     re.IGNORECASE,
 )
+_EXPLICIT_NAVIGATION_CONTEXT = re.compile(
+    r"\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store)\s+"
+    r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?[\"'“‘]*\s*$",
+    re.IGNORECASE,
+)
 _EXPLICIT_PATH_DECLARATION = re.compile(
     _PATH_DECLARATION + r"\s*$",
     re.IGNORECASE,
@@ -325,8 +330,10 @@ _PROSE_SLASH_TERMS = frozenset(
         "read/write",
         "review/approval",
         "request/response",
+        "source/target",
         "source/proprietary",
         "time/effort",
+        "xml/json",
         "yes/no",
     }
 )
@@ -400,12 +407,13 @@ def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -
         if standalone and not model_identifier and match.group("path").casefold() not in _PROSE_SLASH_TERMS:
             return True
         path_context = _has_path_context(path_text, match.start())
+        explicit_navigation = _EXPLICIT_NAVIGATION_CONTEXT.search(path_text[: match.start()]) is not None
         continuation = path_text[match.end() :]
         prose_continuation = _SLASH_PROSE_CONTINUATION.match(continuation)
         filesystem_noun = _FILESYSTEM_NOUN_CONTINUATION.match(continuation)
         if (
             path_context
-            and (not prose_continuation or filesystem_noun)
+            and (not prose_continuation or filesystem_noun or explicit_navigation)
             and match.group("path").casefold() not in _PROSE_SLASH_TERMS
         ):
             return True
