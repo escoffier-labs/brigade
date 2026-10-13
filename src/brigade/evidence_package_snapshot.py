@@ -303,10 +303,10 @@ def _validate_manifest(value: object) -> tuple[dict[str, Any], dict[str, Any], l
         entries.append(entry)
     if paths != sorted(paths) or len(paths) != len(set(paths)) or "receipt.json" not in paths:
         _error("malformed")
-    if not _is_digest(manifest["entries_sha256"], nullable=False) or manifest[
-        "entries_sha256"
-    ] != localio.canonical_json_digest(entries):
+    if not _is_digest(manifest["entries_sha256"], nullable=False):
         _error("malformed")
+    if manifest["entries_sha256"] != localio.canonical_json_digest(entries):
+        _error("mismatch")
     if source["changes_patch_sha256"] is None and "changes.patch" in paths:
         _error("malformed")
     return manifest, source, entries
@@ -341,18 +341,19 @@ def _validate_receipt(data: bytes, source: dict[str, Any]) -> str:
         parsed = attestation_input.strict_json_loads(data, max_bytes=attestation_input.MAX_JSON_BYTES)
     except attestation_input.AttestationInputError:
         _error("malformed")
-    if (
-        not isinstance(parsed, dict)
-        or type(parsed.get("schema_version")) is not int
-        or parsed["schema_version"] not in _SUPPORTED_RECEIPT_SCHEMA_VERSIONS
-        or not _is_run_id(parsed.get("run_id"), nullable=False)
-    ):
+    if not isinstance(parsed, dict):
         _error("malformed")
     try:
         receipt_snapshot = attestation_receipt.snapshot_receipt(parsed)
     except attestation_receipt.ReceiptDigestMismatchError:
         _error("mismatch")
     except attestation_receipt.ReceiptDigestError:
+        _error("malformed")
+    if (
+        type(parsed.get("schema_version")) is not int
+        or parsed["schema_version"] not in _SUPPORTED_RECEIPT_SCHEMA_VERSIONS
+        or not _is_run_id(parsed.get("run_id"), nullable=False)
+    ):
         _error("malformed")
     for key in ("verify_run_id", "producer_run_id", "tree_fingerprint", "baseline_commit", "changes_patch_sha256"):
         receipt_key = "run_id" if key == "verify_run_id" else key

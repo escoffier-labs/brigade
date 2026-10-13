@@ -646,6 +646,45 @@ def test_ec12_rejects_stale_stored_receipt_digest_as_package_mismatch(tmp_path):
     assert result["reason"] == "package_snapshot_mismatch"
 
 
+def test_ec12_rejects_receipt_tampering_before_unsupported_schema(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-unsupported-tampered"
+    _write_strict_package(package_dir)
+    receipt_path = package_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["schema_version"] = 999
+    _write_json(receipt_path, receipt)
+
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    receipt_entry = next(entry for entry in manifest["entries"] if entry["path"] == "receipt.json")
+    receipt_bytes = receipt_path.read_bytes()
+    receipt_entry["bytes"] = len(receipt_bytes)
+    receipt_entry["sha256"] = hashlib.sha256(receipt_bytes).hexdigest()
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    _write_json(manifest_path, manifest)
+
+    result = _assess(target, "EC-12")
+
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "package_snapshot_mismatch"
+
+
+def test_ec12_rejects_stale_manifest_entries_digest_as_mismatch(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-stale-entries-digest"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["entries_sha256"] = "0" * 64
+    _write_json(manifest_path, manifest)
+
+    result = _assess(target, "EC-12")
+
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "package_snapshot_mismatch"
+
+
 def test_ec12_binds_package_mismatch_from_packaged_receipt(tmp_path):
     target = _ws(tmp_path)
     package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
@@ -662,6 +701,29 @@ def test_ec12_binds_package_mismatch_from_packaged_receipt(tmp_path):
     assert readiness["artifacts"][0]["outcome"] == "rejected"
     assert readiness["artifacts"][0]["scope"] == "in_scope"
     assert readiness["reason"] == "package_snapshot_mismatch"
+
+
+def test_ec12_does_not_period_filter_rejected_package_from_manifest_timestamp(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-tampered-period"
+    _write_strict_package(package_dir, producer_run_id=RUN)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"]["baseline_commit"] = "f" * 40
+    manifest["created_at"] = "2020-01-01T00:00:00Z"
+    _write_json(manifest_path, manifest)
+
+    result = _assess(
+        target,
+        "EC-12",
+        RUN,
+        period=("2026-01-01T00:00:00Z", "2026-12-31T23:59:59Z"),
+    )
+
+    assert result["outcome"] == "rejected"
+    assert result["population"]["out_of_period"] == 0
+    assert result["artifacts"][0]["scope"] == "in_scope"
+    assert result["artifacts"][0]["reason_codes"] == ["package_snapshot_mismatch", "timestamp_missing"]
 
 
 def test_ec12_reserves_manifest_reads_for_the_discovered_package_population(tmp_path, monkeypatch):

@@ -150,6 +150,16 @@ def needs_staged_receipt(obs: control_readiness.ArtifactObservation) -> bool:
     return "package_snapshot_mismatch" in obs.reasons or (obs.proposed == "invalid" and "schema_missing" in obs.reasons)
 
 
+def trusted_timestamp_manifest(
+    manifest: dict[str, object] | None,
+    obs: control_readiness.ArtifactObservation,
+    *,
+    strict_package: bool,
+) -> dict[str, object] | None:
+    """Discard manifest timestamps when strict-package integrity failed."""
+    return None if strict_package and obs.proposed == "rejected" else manifest
+
+
 def _unavailable(relpath: str, reason: str) -> control_readiness.ArtifactObservation:
     return control_readiness.ArtifactObservation(
         relpath,

@@ -1410,6 +1410,7 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
         source = manifest.get("source") if isinstance(manifest, dict) else None
         candidates = control_crosswalk_package.binding_candidates(obs, source, staged_receipt_candidates)
         _bind(obs, ctx, control_crosswalk_cosign.binding_candidates(obs, candidates))
+        manifest = control_crosswalk_package.trusted_timestamp_manifest(manifest, obs, strict_package=strict_adapter)
         obs.timestamp = _first_timestamp(manifest, "created_at")
         _apply_period(obs, ctx)
         if obs.scope == "in_scope":
