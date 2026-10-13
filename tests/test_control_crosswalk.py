@@ -987,7 +987,7 @@ def test_ec12_rejects_symlinked_package_directory(tmp_path):
 def test_ec12_rejects_symlinked_package_entry(tmp_path):
     target = _ws(tmp_path)
     package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
-    _write_strict_package(package_dir)
+    _write_strict_package(package_dir, producer_run_id=RUN)
     external_patch = tmp_path / "external.patch"
     external_patch.write_bytes((package_dir / "changes.patch").read_bytes())
     entry_path = package_dir / "changes.patch"
@@ -997,10 +997,12 @@ def test_ec12_rejects_symlinked_package_entry(tmp_path):
     except OSError as exc:
         pytest.skip(f"symlink creation unavailable: {exc}")
 
-    readiness = _assess(target, "EC-12")
+    readiness = _assess(target, "EC-12", RUN)
 
     assert readiness["outcome"] == "rejected"
-    assert readiness["reason"] == "entry_path_unsafe"
+    assert readiness["population"]["in_scope"] == 1
+    assert readiness["artifacts"][0]["scope"] == "in_scope"
+    assert readiness["artifacts"][0]["reason_codes"] == ["entry_path_unsafe"]
     assert readiness["artifacts"][0]["outcome"] == "rejected"
 
 

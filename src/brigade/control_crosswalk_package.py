@@ -147,7 +147,11 @@ def binding_candidates(
 
 
 def needs_staged_receipt(obs: control_readiness.ArtifactObservation) -> bool:
-    return "package_snapshot_mismatch" in obs.reasons or (obs.proposed == "invalid" and "schema_missing" in obs.reasons)
+    return (
+        "package_snapshot_mismatch" in obs.reasons
+        or (obs.proposed == "invalid" and "schema_missing" in obs.reasons)
+        or (obs.proposed == "rejected" and "entry_path_unsafe" in obs.reasons)
+    )
 
 
 def trusted_timestamp_manifest(
