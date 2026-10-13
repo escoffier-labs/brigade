@@ -445,6 +445,23 @@ class TestSortAndFilter:
         assert text.index(f'data-node="{NODE_A}"') < text.index(f'data-node="{NODE_B}"')
         assert '<option value="node" selected>' in text
 
+    def test_attention_sort_paginates_nodes_after_priority(self, hub):
+        node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT)]
+        failed_node = "ffffffff-ffff-4fff-8fff-000000000001"
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(node_id, f"run-{index}", 1, "run.started", repo="repo", harness="codex", ts=stamp)
+            for index, node_id in enumerate(node_ids)
+        ]
+        events.append(_event(failed_node, "failed", 1, "run.failed", repo="repo", harness="codex", ts=stamp))
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+
+        _status, _headers, first = _request(hub, "GET", "/view/machines?all=1&sort=attention", headers=_bearer())
+
+        assert f'data-node="{failed_node}"' in first
+        assert first.index(f'data-node="{failed_node}"') < first.index(f'data-node="{node_ids[0]}"')
+
     def test_sort_orders_repo_rows(self, hub):
         _seed(hub)
         _status, _headers, text = _request(hub, "GET", "/view/repos", headers=_bearer())
@@ -1136,7 +1153,7 @@ class TestBoardBounds:
         assert status == 200, text
 
         node_queries = []
-        original_node_query = fleet_hub_status.board_node_ids
+        original_node_query = fleet_hub_status.board_machine_page
 
         def count_node_queries(*args, **kwargs):
             node_queries.append(True)
@@ -1149,7 +1166,7 @@ class TestBoardBounds:
             page_queries.append(node_ids)
             return original_page_query(conn, node_ids, **kwargs)
 
-        monkeypatch.setattr(fleet_hub_status, "board_node_ids", count_node_queries)
+        monkeypatch.setattr(fleet_hub_status, "board_machine_page", count_node_queries)
         monkeypatch.setattr(fleet_hub_status, "board_status_for_nodes", count_page_queries)
         status, _headers, page = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
 
@@ -1158,6 +1175,31 @@ class TestBoardBounds:
         assert all(run_id in page for run_id in run_ids)
         assert node_queries == [True]
         assert page_queries == [[NODE_A]]
+
+    def test_machine_seat_filter_resolves_history_without_per_run_queries(self, hub, monkeypatch):
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(NODE_A, "historical-seat", 1, "run.started", repo="repo", harness="codex", ts=stamp),
+            _event(NODE_A, "historical-seat", 2, "run.completed", repo="repo", harness="codex", ts=stamp),
+        ]
+        events[1]["seat"] = "-"
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        statements = []
+        original_open_db = fleet_hub_http.open_db
+
+        def trace_open_db(*args, **kwargs):
+            conn = original_open_db(*args, **kwargs)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        monkeypatch.setattr(fleet_hub_http, "open_db", trace_open_db)
+
+        status, _headers, page = _request(hub, "GET", "/view/machines?all=1&seat=worker", headers=_bearer())
+
+        assert status == 200
+        assert "historical-seat" in page
+        assert not any("SELECT seat FROM events WHERE node_id" in statement for statement in statements)
 
     def test_claim_only_machine_cards_are_bounded_and_paginated(self, hub, monkeypatch):
         node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
@@ -1246,13 +1288,13 @@ class TestBoardBounds:
         _seed(hub)
 
         calls = []
-        original_query = fleet_hub_status.board_node_ids
+        original_query = fleet_hub_status.board_machine_page
 
         def complete_node_query(*args, **kwargs):
             calls.append(args)
             return original_query(*args, **kwargs)
 
-        monkeypatch.setattr(fleet_hub_status, "board_node_ids", complete_node_query)
+        monkeypatch.setattr(fleet_hub_status, "board_machine_page", complete_node_query)
         status, _headers, page = _request(hub, "GET", "/view/repos", headers=_bearer())
         assert status == 200
         assert "repo-a" in page

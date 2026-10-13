@@ -67,11 +67,30 @@ def _received_at_age_seconds(value: object, *, now: datetime) -> float | None:
     return (now - received.astimezone(timezone.utc)).total_seconds()
 
 
-def _latest_sql(*, received_after: bool = False) -> str:
+def _latest_sql(
+    *,
+    received_after: bool = False,
+    node_ids: list[str] | None = None,
+    resolve_last_known_seat: bool = False,
+) -> str:
     inner = _LATEST_PARTITION
+    predicates = []
     if received_after:
-        inner += " WHERE e.received_at >= ?"
-    return f"SELECT {_LATEST_COLUMNS} FROM ({inner}) WHERE rn = 1"
+        predicates.append("e.received_at >= ?")
+    if node_ids:
+        predicates.append(f"e.node_id IN ({','.join('?' for _ in node_ids)})")
+    if predicates:
+        inner = inner.replace(" FROM events e", f" FROM events e WHERE {' AND '.join(predicates)}")
+    columns = _LATEST_COLUMNS
+    if resolve_last_known_seat:
+        columns += (
+            ", CASE WHEN latest.seat IS NOT NULL AND trim(latest.seat) != '' AND trim(latest.seat) != '-' "
+            "THEN latest.seat ELSE (SELECT e2.seat FROM events e2 "
+            "WHERE e2.node_id = latest.node_id AND e2.run_id = latest.run_id "
+            "AND e2.seat IS NOT NULL AND trim(e2.seat) != '' AND e2.seat != '-' "
+            "ORDER BY e2.sequence DESC, e2.received_at DESC, e2.digest DESC LIMIT 1) END AS last_known_seat"
+        )
+    return f"SELECT {columns} FROM ({inner}) AS latest WHERE rn = 1"
 
 
 def board_latest_sql(*, windowed: bool) -> str:
@@ -198,13 +217,18 @@ def board_status_for_nodes(
     now: datetime | None = None,
     history_window_seconds: int = STALE_HISTORY_AFTER_SECONDS,
     stale_history_after_seconds: int = STALE_HISTORY_AFTER_SECONDS,
+    resolve_last_known_seat: bool = False,
 ) -> list[dict[str, Any]]:
     """Return all latest run rows for one bounded page of machine identities."""
     if not node_ids:
         return []
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     windowed = not include_all
-    sql = _latest_sql(received_after=windowed)
+    sql = _latest_sql(
+        received_after=windowed,
+        node_ids=node_ids,
+        resolve_last_known_seat=resolve_last_known_seat,
+    )
     params: list[Any] = []
     if windowed:
         cutoff = datetime.fromtimestamp(
@@ -212,8 +236,7 @@ def board_status_for_nodes(
         ).isoformat()
         params.append(cutoff)
     params.extend(node_ids)
-    placeholders = ",".join("?" for _ in node_ids)
-    rows = conn.execute(f"SELECT * FROM ({sql}) WHERE node_id IN ({placeholders})", params).fetchall()
+    rows = conn.execute(sql, params).fetchall()
     return [
         _status_entry(
             conn,
@@ -221,42 +244,43 @@ def board_status_for_nodes(
             now=current,
             age_stale=include_all,
             stale_history_after_seconds=stale_history_after_seconds,
+            resolve_last_known_seat=resolve_last_known_seat,
         )
         for row in rows
     ]
 
 
-def board_node_ids(
+def board_machine_page(
     conn: sqlite3.Connection,
     *,
     include_all: bool = False,
+    offset: int = 0,
+    limit: int = BOARD_LIMIT,
     now: datetime | None = None,
     history_window_seconds: int = STALE_HISTORY_AFTER_SECONDS,
     stale_history_after_seconds: int = STALE_HISTORY_AFTER_SECONDS,
     predicate: Callable[[dict[str, Any]], bool] | None = None,
     resolve_last_known_seat: bool = True,
-) -> set[str]:
-    """Return node identities represented by the complete board result set.
+    priority: Callable[[dict[str, Any]], int] | None = None,
+) -> tuple[set[str], list[str], bool]:
+    """Return complete matching identities and a prioritized bounded page.
 
-    This is used to keep supplemental dashboard cards stable across pages.
-    It shares the board's history window and latest-state projection. With a
-    predicate, it materializes that projection once and filters the mapped
-    rows without repeating the full projection for each page.
+    The query streams the latest projection once, retaining only one ranking
+    value per matching node before choosing the requested page.
     """
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     windowed = not include_all
-    sql = _latest_sql(received_after=windowed)
-    params: tuple[str, ...] = ()
+    page_offset = clamp_board_offset(offset)
+    page_limit = clamp_board_limit(limit)
+    sql = _latest_sql(received_after=windowed, resolve_last_known_seat=resolve_last_known_seat)
+    params: list[str] = []
     if windowed:
         cutoff = datetime.fromtimestamp(
             current.timestamp() - max(1, int(history_window_seconds)),
             tz=timezone.utc,
         ).isoformat()
-        params = (cutoff,)
-    if predicate is None:
-        return {str(row[0]) for row in conn.execute(f"SELECT DISTINCT node_id FROM ({sql})", params) if row[0]}
-
-    result: set[str] = set()
+        params.append(cutoff)
+    node_priorities: dict[str, int] = {}
     for row in conn.execute(sql, params):
         entry = _status_entry(
             conn,
@@ -267,9 +291,15 @@ def board_node_ids(
             resolve_last_known_seat=resolve_last_known_seat,
         )
         node_id = entry["node_id"]
-        if node_id and predicate(entry):
-            result.add(str(node_id))
-    return result
+        if node_id and (predicate is None or predicate(entry)):
+            key = priority(entry) if priority is not None else 0
+            current_key = node_priorities.get(str(node_id))
+            if current_key is None or key < current_key:
+                node_priorities[str(node_id)] = key
+    ordered_ids = sorted(node_priorities, key=lambda item: (node_priorities[item], item))
+    page_ids = ordered_ids[page_offset : page_offset + page_limit]
+    more = len(ordered_ids) > page_offset + page_limit
+    return set(node_priorities), page_ids, more
 
 
 def _status_entry(
@@ -286,7 +316,13 @@ def _status_entry(
         "node_id": row[0],
         "run_id": row[1],
         "repo": row[2],
-        "seat": _last_known_seat(conn, row[0], row[1], row[3]) if resolve_last_known_seat else row[3],
+        "seat": (
+            row[13]
+            if resolve_last_known_seat and len(row) > 13
+            else _last_known_seat(conn, row[0], row[1], row[3])
+            if resolve_last_known_seat
+            else row[3]
+        ),
         "harness": row[4],
         "state": state,
         "ts": row[6],

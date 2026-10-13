@@ -619,7 +619,9 @@ def _machine_board(
     node_ids.update(unread_ids[unread_offset : unread_offset + room])
 
     def card_key(node_id: str) -> tuple[int, str]:
-        worst = min((_rank(row) for row in by_node.get(node_id, []) if row.live), default=_IDLE_RANK)
+        worst = min(
+            (_rank(row) for row in by_node.get(node_id, []) if row.live or query.include_all), default=_IDLE_RANK
+        )
         return (worst if query.sort in ("attention", "state", "age") else 0, node_id)
 
     cards = []

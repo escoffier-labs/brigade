@@ -664,9 +664,24 @@ def make_handler(
                 )
                 complete_base_node_ids: set[str] = set()
                 if query_model is not None:
-                    complete_base_node_ids = fleet_hub_status.board_node_ids(
+
+                    def machine_priority(entry: dict[str, Any]) -> int:
+                        if query_model.sort not in ("attention", "state", "age"):
+                            return 0
+                        rows = fleet_dashboard.build_rows([entry], {}, now=current)
+                        return min(
+                            (
+                                fleet_dashboard.BUCKET_RANK.get(row.bucket, fleet_dashboard._IDLE_RANK)
+                                for row in rows
+                                if row.live or query_model.include_all
+                            ),
+                            default=fleet_dashboard._IDLE_RANK,
+                        )
+
+                    complete_base_node_ids, machine_node_ids, machine_more = fleet_hub_status.board_machine_page(
                         conn,
                         include_all=include_all,
+                        offset=offset,
                         now=current,
                         history_window_seconds=frozen_deck.stale_history_after_seconds,
                         stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
@@ -676,9 +691,9 @@ def make_handler(
                             )
                         ),
                         resolve_last_known_seat=bool(query_model.seat),
+                        priority=machine_priority,
                     )
                     machine_limit = fleet_hub_status.BOARD_LIMIT
-                    machine_node_ids = sorted(complete_base_node_ids)[offset : offset + machine_limit]
                     board_runs = fleet_hub_status.board_status_for_nodes(
                         conn,
                         machine_node_ids,
@@ -686,10 +701,11 @@ def make_handler(
                         now=current,
                         history_window_seconds=frozen_deck.stale_history_after_seconds,
                         stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                        resolve_last_known_seat=bool(query_model.seat),
                     )
                     board = fleet_hub_status.BoardStatus(
                         runs=board_runs,
-                        more=len(complete_base_node_ids) > offset + machine_limit,
+                        more=machine_more,
                         offset=offset,
                         limit=machine_limit,
                     )
