@@ -89,6 +89,9 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         r"Read $PWD/foo",
         r"Read $XDG_CONFIG_HOME/tool",
         r"Read ${XDG_CONFIG_HOME}",
+        "Use %APPDATA%",
+        "Use %PATH%",
+        "Use %HOME%",
         "Use C:Users\\alice",
         "Read D:projects\\acme",
         "Read /etc/credentials.",
@@ -133,6 +136,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "API key equals shortkey",
         "password is actual-secret",
         "Password was hunter2",
+        "Password will be hunter2",
+        "Password has been hunter2",
         "API key is abcdefghijklmnop",
         "password is p@ssw0rd!",
         "API key is abcd.efgh.ijkl.mnop",
@@ -476,9 +481,10 @@ def test_parse_accepts_ordinary_slash_delimited_descriptive_prose(text: str) -> 
 
 
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
-def test_parse_accepts_https_urls_in_descriptive_text(field: str) -> None:
+@pytest.mark.parametrize("url", ["https://example.com/docs?page=2", "https://example.com/download?file=report.pdf"])
+def test_parse_accepts_https_urls_in_descriptive_text(field: str, url: str) -> None:
     document = _document()
-    text = "See https://example.com/docs?page=2 for the guide."
+    text = f"See {url} for the guide."
     if field == "purpose":
         document["seats"][0][field] = text  # type: ignore[index]
     else:
@@ -487,6 +493,38 @@ def test_parse_accepts_https_urls_in_descriptive_text(field: str) -> None:
     parsed = fleet_master_roster.parse(document)
 
     assert parsed["seats"][0][field] == (text if field == "purpose" else [text])
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use query parameter page=2.",
+        "Accept format=json responses.",
+        "Document x=2 arithmetic.",
+    ],
+)
+def test_parse_accepts_lowercase_key_value_prose(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    assert fleet_master_roster.parse(document)["seats"][0][field] == ([text] if field == "caveats" else text)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "See https://example.com/download?path=/home/example.",
+        "See https://example.com/download?file=~example/.ssh/config.",
+    ],
+)
+def test_parse_rejects_filesystem_paths_in_url_queries(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
 
 
 def test_parse_rejects_duplicate_seat_names() -> None:

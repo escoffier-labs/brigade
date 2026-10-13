@@ -9,6 +9,7 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from .worklore_validate import contains_credential
 
@@ -49,8 +50,8 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)\s*[:=]\s*"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
-    r"\s+(?:is|was|equals)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
-    r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%USERPROFILE%|"
+    r"\s+(?:is|was|equals|will\s+be|has\s+been)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
+    r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%[A-Za-z_][A-Za-z0-9_]*%|"
     r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})"
     r"(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))",
     re.IGNORECASE,
@@ -60,7 +61,7 @@ _URL_CREDENTIAL_QUERY = re.compile(
     r"api[_-]?key|access[_-]?token|client[_-]?secret|private[_-]?key)=[^&#\s]+",
     re.IGNORECASE,
 )
-_ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)", re.IGNORECASE)
+_ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
 _API_ROUTE_CONTEXT = re.compile(
     r"\b(?:call|invoke|serve|expose|request|hit|get|head|post|put|patch|delete|connect|options|trace)\s+(?:the\s+)?"
@@ -68,6 +69,24 @@ _API_ROUTE_CONTEXT = re.compile(
     re.IGNORECASE,
 )
 _HTTP_URL = re.compile(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE)
+_URL_PATH_QUERY_KEYS = frozenset({"dir", "directory", "file", "filename", "filepath", "path", "root"})
+
+
+def _has_filesystem_path_in_url_query(value: str) -> bool:
+    for match in _HTTP_URL.finditer(value):
+        try:
+            query_pairs = parse_qsl(urlsplit(match.group()).query, keep_blank_values=True)
+        except ValueError:
+            continue
+        for key, query_value in query_pairs:
+            if key.casefold() not in _URL_PATH_QUERY_KEYS:
+                continue
+            decoded_value = unquote(query_value)
+            if _ROOTED_PATH.search(decoded_value) or _RELATIVE_PATH.search(decoded_value):
+                return True
+    return False
+
+
 _RELATIVE_PATH = re.compile(
     r"(?<![A-Za-z0-9_.-])(?P<path>(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+)(?![A-Za-z0-9_.~-])"
 )
@@ -223,6 +242,7 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     if (
         _DANGEROUS_VALUE.search(value)
         or _URL_CREDENTIAL_QUERY.search(value)
+        or _has_filesystem_path_in_url_query(value)
         or _ENVIRONMENT_ASSIGNMENT.search(_without_api_route_references(value))
         or contains_credential(value)
         or (
