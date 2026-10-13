@@ -30,6 +30,13 @@ _DANGEROUS_VALUE = re.compile(
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~[/\\]|[/\\]|\.{1,2}[/\\])")
 _RELATIVE_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+(?=$|[^A-Za-z0-9_.~-])")
 _PROVIDER_MODEL = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+$")
+_SLASH_PROSE = re.compile(r"\b(?:and/or|input/output|read/write)\b", re.IGNORECASE)
+_MODEL_PATH_HINT = re.compile(
+    r"(?:^|[/\\])\.(?:[^/\\]+)(?:[/\\]|$)|"
+    r"(?:^|[/\\])(?:private|secrets?|credentials?|etc|passwd)(?:[/\\]|$)|"
+    r"\.[A-Za-z]{1,8}$",
+    re.IGNORECASE,
+)
 _SURROGATE = re.compile("[\\ud800-\\udfff]")
 
 _TOP_FIELDS = frozenset({"schema", "revision", "seats"})
@@ -61,8 +68,16 @@ def _text(value: Any, field: str) -> str:
     if len(value) > MAX_TEXT or _has_control(value):
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
     provider_model = field.endswith(".model") and _PROVIDER_MODEL.fullmatch(value)
-    relative_path = not provider_model and _RELATIVE_PATH.search(value)
-    if _DANGEROUS_VALUE.search(value) or contains_credential(value) or _ROOTED_PATH.search(value) or relative_path:
+    screened_text = _SLASH_PROSE.sub("", value)
+    relative_path = _RELATIVE_PATH.search(screened_text)
+    provider_model_path = provider_model and _MODEL_PATH_HINT.search(value)
+    if (
+        _DANGEROUS_VALUE.search(value)
+        or contains_credential(value)
+        or _ROOTED_PATH.search(value)
+        or provider_model_path
+        or (relative_path and not provider_model)
+    ):
         raise MasterRosterError(f"{field} contains a credential, environment assignment, or home path")
     return value
 
