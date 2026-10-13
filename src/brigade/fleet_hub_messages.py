@@ -22,6 +22,7 @@ MAX_FUTURE_SKEW = timedelta(minutes=5)
 MAX_SQLITE_INTEGER = (1 << 63) - 1
 _PRINCIPAL_NAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,62}$")
 _ENROLLMENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+_PRINCIPAL_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 
 _PRINCIPAL_SCHEMA = """CREATE TABLE IF NOT EXISTS fleet_message_principals (
     principal_id TEXT PRIMARY KEY,
@@ -287,8 +288,7 @@ def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str]:
         not isinstance(request_id, str)
         or _ENROLLMENT_ID_RE.fullmatch(request_id) is None
         or not isinstance(secret, str)
-        or len(secret) < 32
-        or len(secret) > 128
+        or _PRINCIPAL_TOKEN_RE.fullmatch(secret) is None
     ):
         raise MessageError("principal enrollment request_id or token is invalid")
     assert isinstance(secret, str)

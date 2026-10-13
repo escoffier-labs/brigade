@@ -564,6 +564,20 @@ def test_principal_enrollment_replays_the_same_token_and_revocation_is_idempoten
     assert stored != request["token"]
 
 
+@pytest.mark.parametrize("token", ["a" * 31 + "\ud800", "a" * 31 + "\n", "é" * 32])
+def test_principal_enrollment_rejects_tokens_unsafe_for_bearer_headers(message_hub, token):
+    base, _token_a, _token_b, _db = message_hub
+    status, payload = _post_path(
+        base,
+        ADMIN,
+        "/message-principals",
+        {"action": "add", "name": "unsafe-token", "request_id": "u" * 32, "token": token},
+    )
+
+    assert status == 400
+    assert "token is invalid" in payload["error"]
+
+
 @pytest.mark.parametrize("action", ["list", "ack"])
 def test_online_message_operations_reject_redirects(action, monkeypatch):
     monkeypatch.setattr(
