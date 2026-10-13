@@ -73,6 +73,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "OPENAI_API_KEY=placeholder-secret",
         "CI=production",
         "X=private-value",
+        "_X=private-value",
+        "__COMPAT_LAYER=RunAsInvoker",
         "Load config from C:\\Users\\operator\\.config\\secret.toml",
         "Read /etc/credentials.",
         "Write ./private/output.json.",
@@ -89,6 +91,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Use auth profile 'production-admin'.",
         "Use auth profile: production-admin",
         "Use auth-profile production-admin",
+        "Use auth_profile production-admin",
         "password: actual-secret",
     ],
 )
