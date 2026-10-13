@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import glob
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -42,6 +43,7 @@ class _AssessmentReader:
         self.directories: dict[tuple[str, ...], int] = {(): dirfd.open_directory_nofollow(target, writable=False)}
         self.errors: dict[Path, str] = {}
         self.contents: dict[Path, bytes] = {}
+        self.read_metadata: dict[Path, tuple[int, int, int, int, int, int]] = {}
         self.used = 0
         self.temporary: tempfile.TemporaryDirectory[str] | None = None
         self.copied: set[Path] = set()
@@ -122,6 +124,9 @@ class _AssessmentReader:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode):
                 raise _ReadRefusal("discovery_unreadable")
+            metadata = _package_entry_metadata(info)
+            assert metadata is not None
+            self.read_metadata[path] = metadata
             permitted = min(limit, self.byte_budget + reserve_bytes - self.used)
             if permitted < 0 or info.st_size > permitted:
                 raise _ReadRefusal("read_limit_exceeded")
@@ -179,6 +184,58 @@ class _AssessmentReader:
             stream.write(raw)
         self.copied.add(path)
         return destination
+
+    def release_subtree(self, path: Path) -> None:
+        """Release cached bytes and private copies after a bounded adapter run."""
+        prefix = path.relative_to(self.target).parts
+
+        def in_subtree(candidate: Path) -> bool:
+            try:
+                parts = candidate.relative_to(self.target).parts
+            except ValueError:
+                return False
+            return parts[: len(prefix)] == prefix
+
+        self.contents = {candidate: value for candidate, value in self.contents.items() if not in_subtree(candidate)}
+        self.read_metadata = {
+            candidate: value for candidate, value in self.read_metadata.items() if not in_subtree(candidate)
+        }
+        self.errors = {candidate: value for candidate, value in self.errors.items() if not in_subtree(candidate)}
+        self.copied = {candidate for candidate in self.copied if not in_subtree(candidate)}
+        if self.temporary is not None:
+            shutil.rmtree(self.snapshot_target / Path(*prefix), ignore_errors=True)
+
+
+def package_source_issue(
+    reader: _AssessmentReader,
+    artifact: Path,
+    package_fd: int,
+    expected_names: set[str],
+    metadata: dict[str, tuple[int, int, int, int, int, int] | None],
+    *,
+    max_children: int,
+) -> str | None:
+    """Check that a staged package still names the entries initially observed."""
+    names = set(dirfd.child_names(package_fd, max_children))
+    if names != expected_names:
+        return "unsafe"
+    for name, initial in metadata.items():
+        try:
+            current = reader.info(artifact / name)
+        except FileNotFoundError:
+            current = None
+        if current is not None and (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode)):
+            return "unsafe"
+        observed = _package_entry_metadata(current)
+        if observed != initial:
+            return "mismatch"
+    return None
+
+
+def _package_entry_metadata(info: os.stat_result | None) -> tuple[int, int, int, int, int, int] | None:
+    if info is None:
+        return None
+    return info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
 class _ReadContext(Protocol):

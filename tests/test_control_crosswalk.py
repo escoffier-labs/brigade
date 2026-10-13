@@ -305,6 +305,24 @@ def test_completed_verify_receipt_rejects_unsupported_schema_version(tmp_path):
     assert readiness["reason"] == "schema_missing"
 
 
+def test_completed_verify_receipt_rejects_stale_digest_before_schema(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    receipt["schema_version"] = 999
+    _write_json(run_dir / "receipt.json", receipt)
+
+    readiness = _assess(target, "EC-01", RUN)
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "receipt_digest_mismatch"
+
+
 def test_completed_verify_receipt_rejects_non_integer_schema_version(tmp_path):
     target = _ws(tmp_path)
     run_dir = _verify_dir(target, "verify-a")
@@ -525,20 +543,47 @@ def test_ec12_strict_package_snapshot_validates_and_rejects_tampering(tmp_path):
     assert evaluated["evidence_readiness"]["EC-12"]["reason"] == "package_snapshot_mismatch"
 
 
-def test_ec12_reserves_manifest_reads_after_large_package_staging(tmp_path, monkeypatch):
+def test_ec12_reserves_manifest_reads_for_the_discovered_package_population(tmp_path, monkeypatch):
     target = _ws(tmp_path)
     package_root = target / ".brigade" / "evidence-packages"
     first = package_root / "pkg-1"
     second = package_root / "pkg-2"
     _write_strict_package(first)
     _write_strict_package(second)
-    (first / "changes.patch").write_bytes(b"p" * 8192)
-    monkeypatch.setattr(control_crosswalk, "_ASSESSMENT_BYTE_BUDGET", 4096)
+    package_bytes = sum(path.stat().st_size for path in first.iterdir())
+    monkeypatch.setattr(control_crosswalk.evidence_package_snapshot, "MAX_PACKAGE_BYTES", package_bytes)
+    monkeypatch.setattr(control_crosswalk, "_ASSESSMENT_BYTE_BUDGET", 0)
 
     readiness = _assess(target, "EC-12")
 
-    assert readiness["artifacts"][0]["outcome"] == "rejected"
+    assert readiness["artifacts"][0]["outcome"] == "validated"
     assert readiness["artifacts"][1]["outcome"] == "validated"
+
+
+def test_ec12_ignores_unavailable_wrong_run_package_verifier_state(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_root = target / ".brigade" / "evidence-packages"
+    in_scope = package_root / "a-valid"
+    wrong_run = package_root / "z-wrong"
+    _write_strict_package(in_scope, verify_run_id=RUN)
+    _write_strict_package(wrong_run, verify_run_id="other-run", producer_run_id="other-run")
+    failing_entry = wrong_run / "changes.patch"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def fail_wrong_run_entry(reader, path, *args, **kwargs):
+        if path == failing_entry:
+            raise OSError("synthetic source read failure")
+        return original_copy(reader, path, *args, **kwargs)
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", fail_wrong_run_entry)
+
+    readiness = _assess(target, "EC-12", RUN)
+
+    assert readiness["outcome"] == "validated"
+    assert readiness["verifier"]["status"] == "wired"
+    assert readiness["artifacts"][0]["outcome"] == "validated"
+    assert readiness["artifacts"][1]["scope"] == "wrong_run"
+    assert readiness["artifacts"][1]["outcome"] == "unavailable"
 
 
 def test_ec12_valid_package_ignores_symlinked_public_trust_file(tmp_path):
@@ -606,6 +651,50 @@ def test_ec12_rejects_child_added_while_package_is_staged(tmp_path, monkeypatch)
 
     assert readiness["outcome"] == "rejected"
     assert readiness["reason"] == "entry_path_unsafe"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_rejects_entry_changed_after_staging(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    entry_path = package_dir / "changes.patch"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def copy_then_rewrite(reader, path, *args, **kwargs):
+        result = original_copy(reader, path, *args, **kwargs)
+        if path == entry_path:
+            entry_path.write_text("changed after staging", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_then_rewrite)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "package_snapshot_mismatch"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_rejects_manifest_changed_after_its_initial_read(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def copy_then_rewrite_manifest(reader, path, *args, **kwargs):
+        result = original_copy(reader, path, *args, **kwargs)
+        if path == manifest_path:
+            manifest_path.write_text(manifest_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_then_rewrite_manifest)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "package_snapshot_mismatch"
     assert readiness["artifacts"][0]["outcome"] == "rejected"
 
 
@@ -695,7 +784,7 @@ def test_ec12_reports_malformed_entry_list_as_invalid(tmp_path, entries):
     assert readiness["reason"] == "schema_missing"
 
 
-@pytest.mark.parametrize("bad_name", ["bad\\name", "bad:name", "bad\x00name"])
+@pytest.mark.parametrize("bad_name", ["bad\\name", "bad:name", "bad\x00name", "manifest.json"])
 def test_ec12_reports_descriptor_invalid_entry_names_as_malformed(tmp_path, bad_name):
     target = _ws(tmp_path)
     package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
@@ -1015,7 +1104,7 @@ def test_ec03_cosign_bundle_preserves_unavailable_verifier_state(tmp_path, monke
     assert not run_dir.joinpath("attestation.sigstore.json").is_symlink()
 
 
-def test_ec03_cosign_bundle_requires_terminal_nonempty_check_results(tmp_path, monkeypatch):
+def test_ec03_rejects_receipt_tampering_before_incomplete_classification(tmp_path):
     target = _ws(tmp_path)
     run_dir = _write_cosign_assessment_fixture(target)
     receipt_path = run_dir / "receipt.json"
@@ -1025,8 +1114,55 @@ def test_ec03_cosign_bundle_requires_terminal_nonempty_check_results(tmp_path, m
 
     result = _assess(target, "EC-03")
 
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "signature_mismatch"
+
+
+def test_ec03_classifies_signed_nonterminal_receipt_as_incomplete(tmp_path, monkeypatch):
+    from brigade import control_crosswalk_cosign
+
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["commands"][0]["status"] = "running"
+    _write_json(receipt_path, receipt)
+    bundle_path = run_dir / "attestation.sigstore.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    statement = attestation.build_statement(receipt)
+    bundle["dsseEnvelope"]["payload"] = base64.b64encode(attestation.canonical_statement_bytes(statement)).decode(
+        "ascii"
+    )
+    _write_json(bundle_path, bundle)
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+    monkeypatch.setattr(
+        control_crosswalk_cosign.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 0})(),
+    )
+
+    result = _assess(target, "EC-03")
+
     assert result["outcome"] == "incomplete"
     assert result["reason"] == "command_not_terminal"
+
+
+@pytest.mark.parametrize("schema_version", [None, 2.0, 999])
+def test_ec03_rejects_unsupported_receipt_schema(tmp_path, schema_version):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if schema_version is None:
+        receipt.pop("schema_version")
+    else:
+        receipt["schema_version"] = schema_version
+    _write_json(receipt_path, receipt)
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "invalid"
+    assert result["reason"] == "schema_missing"
 
 
 def test_ec03_cosign_bundle_rejects_signature_failure(tmp_path, monkeypatch):

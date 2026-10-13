@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from . import attestation, attestation_input, attestation_receipt, control_readiness, cosign_attestation
+from . import attestation, attestation_input, attestation_receipt, control_readiness, cosign_attestation, receipt_schema
 
 
 def _observation(
@@ -74,6 +74,13 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
             subject="unknown",
             reason="receipt_digest_mismatch",
         )
+    if (
+        type(snapshot.receipt.get("schema_version")) is not int
+        or snapshot.receipt.get("schema_version") != receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION
+    ):
+        return control_readiness.ArtifactObservation(
+            relpath, "discovered", "invalid", control_readiness.dims(), ["schema_missing"]
+        )
     if snapshot.receipt.get("run_id") != bundle_path.parent.name:
         return _observation(
             relpath,
@@ -83,23 +90,6 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
             reason="run_binding_mismatch",
             source_digest=hashlib.sha256(bundle_path.read_bytes()).hexdigest(),
         )
-
-    commands = snapshot.receipt.get("commands")
-    planned = snapshot.receipt.get("planned_commands")
-    if not isinstance(commands, list) or not commands:
-        return _observation(relpath, "incomplete", integrity="passed", reason="empty_commands")
-    if not isinstance(planned, list) or not planned or not all(isinstance(item, str) and item for item in planned):
-        return _observation(relpath, "incomplete", integrity="passed", reason="planned_commands_missing")
-    if len(commands) != len(planned) or any(
-        not isinstance(command, dict) or command.get("command") != expected
-        for command, expected in zip(commands, planned, strict=False)
-    ):
-        return _observation(relpath, "incomplete", integrity="passed", reason="planned_commands_mismatch")
-    if any(type(command.get("exit_code")) is not int or command.get("status") != "completed" for command in commands):
-        return _observation(relpath, "incomplete", integrity="passed", reason="command_not_terminal")
-    receipt_status = snapshot.receipt.get("status")
-    if not isinstance(receipt_status, str) or receipt_status not in {"completed", "failed", "rejected"}:
-        return _observation(relpath, "incomplete", integrity="passed", reason="status_not_terminal")
 
     try:
         statement = attestation.build_statement(snapshot)
@@ -170,6 +160,24 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
             reason="signature_mismatch",
             source_digest=digest,
         )
+
+    commands = snapshot.receipt.get("commands")
+    planned = snapshot.receipt.get("planned_commands")
+    if not isinstance(commands, list) or not commands:
+        return _observation(relpath, "incomplete", integrity="passed", reason="empty_commands")
+    if not isinstance(planned, list) or not planned or not all(isinstance(item, str) and item for item in planned):
+        return _observation(relpath, "incomplete", integrity="passed", reason="planned_commands_missing")
+    if len(commands) != len(planned) or any(
+        not isinstance(command, dict) or command.get("command") != expected
+        for command, expected in zip(commands, planned, strict=False)
+    ):
+        return _observation(relpath, "incomplete", integrity="passed", reason="planned_commands_mismatch")
+    if any(type(command.get("exit_code")) is not int or command.get("status") != "completed" for command in commands):
+        return _observation(relpath, "incomplete", integrity="passed", reason="command_not_terminal")
+    receipt_status = snapshot.receipt.get("status")
+    if not isinstance(receipt_status, str) or receipt_status not in {"completed", "failed", "rejected"}:
+        return _observation(relpath, "incomplete", integrity="passed", reason="status_not_terminal")
+
     if receipt_status != "completed" or any(command.get("exit_code") != 0 for command in commands):
         reason = (
             "status_rejected"

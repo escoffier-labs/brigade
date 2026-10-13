@@ -26,7 +26,6 @@ from . import (
     agent_request,
     approval,
     attestation,
-    attestation_input,
     attestation_receipt,
     causal_receipt,
     control_crosswalk_cosign,
@@ -243,62 +242,20 @@ def _discovery_path_present(ctx: _Context, out: _Discovery, path: Path, *, direc
 
 
 def _adapter_observation(
-    adapter: VerifierAdapter, ctx: _Context, artifact: Path, relpath: str
+    adapter: VerifierAdapter, ctx: _Context, artifact: Path, relpath: str, *, reserve_bytes: int = 0
 ) -> control_readiness.ArtifactObservation:
     """Run a verifier adapter and hold its result to the readiness vocabulary."""
     try:
         snapshot_artifact = ctx.reader.snapshot_target / artifact.relative_to(ctx.target)
         if stat.S_ISDIR(ctx.reader.info(artifact).st_mode):
-            package_reserve = evidence_package_snapshot.MAX_PACKAGE_BYTES if adapter is _verify_evidence_package else 0
-            package_fd = ctx.reader.directory(artifact)
-            actual_names = set(
-                _control_crosswalk_io.dirfd.child_names(package_fd, len(evidence_package.PACKAGE_FILES) + 2)
+            package_reserve = reserve_bytes if adapter is _verify_evidence_package else 0
+            snapshot_artifact = control_crosswalk_package.stage_source_package(
+                ctx.reader,
+                artifact,
+                lambda: _read_json_object(ctx, artifact / "manifest.json", reserve_bytes=package_reserve),
+                strict_package=adapter is _verify_evidence_package,
+                reserve_bytes=package_reserve,
             )
-            manifest = _read_json_object(ctx, artifact / "manifest.json", reserve_bytes=package_reserve)
-            if manifest is None:
-                raise _ReadRefusal("discovery_unreadable")
-            entries = manifest.get("entries")
-            if not isinstance(entries, list):
-                raise evidence_package_snapshot.PackageSnapshotError("malformed")
-            entry_names: set[str] = set()
-            for entry in entries:
-                if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
-                    raise evidence_package_snapshot.PackageSnapshotError("malformed")
-                name = entry["path"]
-                control_crosswalk_package.check_entry_name(name, strict_package=adapter is _verify_evidence_package)
-                entry_names.add(name)
-            if len(actual_names) > len(evidence_package.PACKAGE_FILES) + 1 or actual_names - {
-                "manifest.json",
-                *entry_names,
-            }:
-                raise evidence_package_snapshot.PackageSnapshotError("unsafe")
-            ctx.reader.copy(artifact / "manifest.json", reserve_bytes=package_reserve)
-            for name in entry_names:
-                entry_path = artifact / name
-                limit = attestation_input.MAX_JSON_BYTES if name == "receipt.json" else evidence_package.MAX_ENTRY_BYTES
-                try:
-                    entry_info = ctx.reader.info(entry_path)
-                except FileNotFoundError:
-                    entry_info = None
-                if entry_info is not None and (
-                    stat.S_ISLNK(entry_info.st_mode) or not stat.S_ISREG(entry_info.st_mode)
-                ):
-                    raise evidence_package_snapshot.PackageSnapshotError("unsafe")
-                try:
-                    ctx.reader.copy(entry_path, limit=limit, reserve_bytes=package_reserve)
-                except OSError as exc:
-                    try:
-                        entry_info = ctx.reader.info(entry_path)
-                    except OSError:
-                        raise exc from None
-                    if stat.S_ISLNK(entry_info.st_mode) or not stat.S_ISREG(entry_info.st_mode):
-                        raise evidence_package_snapshot.PackageSnapshotError("unsafe") from exc
-                    raise
-            final_names = set(
-                _control_crosswalk_io.dirfd.child_names(package_fd, len(evidence_package.PACKAGE_FILES) + 2)
-            )
-            if final_names != actual_names:
-                raise evidence_package_snapshot.PackageSnapshotError("unsafe")
         else:
             if adapter is _verify_evidence_package:
                 return _invalid(ctx, artifact, "schema_missing")
@@ -322,6 +279,14 @@ def _adapter_observation(
                 "rejected",
                 _dims(integrity=("failed", "entry_path_unsafe"), subject="unknown", population="passed"),
                 ["entry_path_unsafe"],
+            )
+        if exc.code == "mismatch":
+            return _obs(
+                relpath,
+                "claim_validated",
+                "rejected",
+                _dims(integrity=("failed", "package_snapshot_mismatch"), subject="unknown", population="passed"),
+                ["package_snapshot_mismatch"],
             )
         return _verifier_unavailable(relpath, "verifier_error")
     except Exception:
@@ -425,8 +390,6 @@ def _assess_verify_receipt(
     """EC-01 verification result with a rederived writer-compatible digest."""
     relpath = _relpath(ctx, path)
     schema_version = receipt.get("schema_version")
-    if type(schema_version) is not int or schema_version != receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION:
-        return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
     has_digest_evidence = "digests" in receipt
     receipt_digest: str | None = None
     if has_digest_evidence:
@@ -440,6 +403,8 @@ def _assess_verify_receipt(
                 _dims(integrity=("failed", "receipt_digest_mismatch"), subject="unknown", population="passed"),
                 ["receipt_digest_mismatch"],
             )
+    if type(schema_version) is not int or schema_version != receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION:
+        return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
     subject: str | tuple[str, str] = (
         "passed" if receipt.get("run_id") == run_dir.name else ("failed", "run_binding_mismatch")
     )
@@ -1382,10 +1347,12 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
     out = _Discovery(truncated=truncated)
     _record_discovery_error(out, ctx, root, error)
     adapter = _VERIFIER_ADAPTERS.get("evidence-package")
-    manifest_reserve = evidence_package_snapshot.MAX_PACKAGE_BYTES if adapter is _verify_evidence_package else 0
     package_dirs = ([root] if error is None and _discovery_path_present(ctx, out, root / "manifest.json") else []) + [
         child for child in children if _discovery_path_present(ctx, out, child, directory=True)
     ]
+    manifest_reserve = (
+        evidence_package_snapshot.MAX_PACKAGE_BYTES * len(package_dirs) if adapter is _verify_evidence_package else 0
+    )
     for package_dir in package_dirs:
         path = package_dir / "manifest.json"
         if not _discovery_path_present(ctx, out, path):
@@ -1398,8 +1365,11 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
         elif manifest is None:
             obs = _invalid(ctx, path, "invalid_json")
         elif adapter is not None:
-            obs = _adapter_observation(adapter, ctx, package_dir, relpath)
-            out.verifier_unavailable |= obs.proposed == "unavailable"
+            try:
+                obs = _adapter_observation(adapter, ctx, package_dir, relpath, reserve_bytes=manifest_reserve)
+            finally:
+                if adapter is _verify_evidence_package:
+                    ctx.reader.release_subtree(package_dir)
         else:
             obs = _assess_package_manifest(ctx, package_dir, relpath, manifest)
         source = manifest.get("source") if isinstance(manifest, dict) else None
@@ -1413,6 +1383,8 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
             if isinstance(source, dict)
             else {},
         )
+        if obs.scope == "in_scope":
+            out.verifier_unavailable |= obs.proposed == "unavailable"
         obs.timestamp = _first_timestamp(manifest, "created_at")
         _apply_period(obs, ctx)
         out.observations.append(obs)
