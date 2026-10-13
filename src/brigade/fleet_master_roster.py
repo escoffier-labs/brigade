@@ -75,7 +75,7 @@ _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"\b(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+|"
     r"(?:(?:use|configure)\s+(?:the\s+)?)?environment\s+variable\s+)"
-    r"[A-Za-z_][A-Za-z0-9_]*(?:\s*=(?!=|>)|\s+(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|will\s+be|has\s+been|have\s+been)\s+(?!(?:"
+    r"[\"'“‘`]?[A-Za-z_][A-Za-z0-9_]*[\"'”’`]?(?:\s*=(?!=|>)|\s+(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|will\s+be|has\s+been|have\s+been)\s+(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
     + r"))\S+|:\s*(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
@@ -84,7 +84,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
 )
 _PATH_LABEL = r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositor(?:y|ies)|repos?|locations?)"
 _PATH_DECLARATION_LINKER = r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
-_ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[\w.~-])")
+_ROOTED_PATH = re.compile(r"(?<![\w.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[\w.~-])")
 _EXPLICIT_TERMINAL_PATH = re.compile(
     r"\b(?:home\s+directory|" + _PATH_LABEL + r")\s*" + _PATH_DECLARATION_LINKER + r"\s*[\"'“‘`()\[{]*\s*"
     r"(?:~|/|\\|\.{1,2})(?=$|[\s,;!?\"'”’)\]}])",
@@ -201,6 +201,8 @@ def _has_disallowed_api_route_query(value: str) -> bool:
 
 
 _RELATIVE_PATH = re.compile(r"(?<![\w.-])(?P<path>(?:[\w.~-]+[/\\])+[\w.~-]+)(?![\w.~-])")
+# Slash pairs used as noun modifiers are prose when followed by a plural noun.
+_SLASH_PROSE_CONTINUATION = re.compile(r"\s+[A-Za-z][A-Za-z-]*s\b")
 _PATH_CONTEXT = re.compile(
     r"(?:\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store|"
     + _PATH_LABEL
@@ -375,7 +377,8 @@ def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -
         if standalone and not model_identifier and match.group("path").casefold() not in _PROSE_SLASH_TERMS:
             return True
         path_context = _has_path_context(path_text, match.start())
-        if path_context and match.group("path").casefold() not in _PROSE_SLASH_TERMS:
+        prose_continuation = _SLASH_PROSE_CONTINUATION.match(path_text[match.end() :])
+        if path_context and not prose_continuation and match.group("path").casefold() not in _PROSE_SLASH_TERMS:
             return True
         if any(component.startswith(".") or component.casefold() in _FILESYSTEM_COMPONENTS for component in components):
             return True

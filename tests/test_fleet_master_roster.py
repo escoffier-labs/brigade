@@ -248,6 +248,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Set env service_mode=production",
         "Environment variable service_mode=production",
         "Environment variable SERVICE_MODE is production",
+        'Environment variable "SERVICE_MODE" is production',
+        "Environment variable `SERVICE_MODE` is production",
         "The environment variable SERVICE_MODE value is production",
         "Environment variable SERVICE_MODE set to production",
         "Environment variable SERVICE_MODE configured as production",
@@ -649,6 +651,10 @@ def test_parse_accepts_ordinary_slash_delimited_descriptive_prose(text: str) -> 
         "Save time/effort on reviews",
         "Write clear/concise summaries",
         "Open source/proprietary model analysis",
+        "Read XML/JSON documents.",
+        "Write request/response examples.",
+        "Inspect source/target mappings.",
+        "支持 输入/输出 工作流。",
     ],
 )
 def test_parse_accepts_standalone_slash_prose(field: str, text: str) -> None:
