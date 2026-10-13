@@ -69,7 +69,12 @@ def _source_inventory(root_fd: int) -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
-def _verify_source_inventory(source: Path, names: tuple[str, ...], observation: tuple[int, int, int, int, int]) -> None:
+def _verify_source_inventory(
+    source: Path,
+    names: tuple[str, ...],
+    observation: tuple[int, int, int, int, int],
+    file_observations: dict[str, tuple[int, int, int, int, int]],
+) -> None:
     descriptor = -1
     try:
         descriptor = dirfd.open_directory_nofollow(source, writable=False)
@@ -78,6 +83,10 @@ def _verify_source_inventory(source: Path, names: tuple[str, ...], observation: 
             raise DerivativeExportError("source package inventory changed while reading")
         if _source_inventory(descriptor) != names:
             raise DerivativeExportError("source package inventory changed while reading")
+        for name, expected in file_observations.items():
+            current = dirfd.stat_child(descriptor, name)
+            if not stat.S_ISREG(current.st_mode) or _file_observation(current) != expected:
+                raise DerivativeExportError(f"source artifact changed while reading: {name}")
         if _file_observation(os.fstat(descriptor)) != observation:
             raise DerivativeExportError("source package inventory changed while reading")
     except DerivativeExportError:
@@ -89,7 +98,7 @@ def _verify_source_inventory(source: Path, names: tuple[str, ...], observation: 
             os.close(descriptor)
 
 
-def _read(root_fd: int, name: str) -> bytes:
+def _read(root_fd: int, name: str) -> tuple[bytes, tuple[int, int, int, int, int]]:
     descriptor = -1
     try:
         named = dirfd.stat_child(root_fd, name)
@@ -127,7 +136,7 @@ def _read(root_fd: int, name: str) -> bytes:
             or _file_observation(current) != _file_observation(initial)
         ):
             raise DerivativeExportError(f"source artifact changed while reading: {name}")
-        return b"".join(chunks)
+        return b"".join(chunks), _file_observation(initial)
     except DerivativeExportError:
         raise
     except (OSError, NotImplementedError, AttributeError) as exc:
@@ -240,7 +249,10 @@ def export_derivative(
         if "manifest.json" not in names or "receipt.json" not in names:
             raise DerivativeExportError("source is not a portable evidence package")
         known_names = [name for name in names if name in _SUPPORTED]
-        raw = {name: _read(root_fd, name) for name in known_names}
+        raw: dict[str, bytes] = {}
+        file_observations: dict[str, tuple[int, int, int, int, int]] = {}
+        for name in known_names:
+            raw[name], file_observations[name] = _read(root_fd, name)
         if _source_inventory(root_fd) != names or _file_observation(os.fstat(root_fd)) != root_observation:
             raise DerivativeExportError("source package inventory changed while reading")
     except DerivativeExportError:
@@ -348,7 +360,7 @@ def export_derivative(
         "limitations": ["not-original-signed-object", "no-recipient-authorization-validation", "local-export-only"],
     }
     encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
-    _verify_source_inventory(source, names, root_observation)
+    _verify_source_inventory(source, names, root_observation, file_observations)
     staging = out.parent / f".{out.name}.staging-{secrets.token_hex(4)}"
     try:
         out.parent.mkdir(parents=True, exist_ok=True)

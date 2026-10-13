@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 from brigade import cli, evidence_derivative, evidence_package, localio
 
@@ -341,6 +342,36 @@ def test_derivative_rejects_source_inventory_added_during_export(tmp_path: Path,
         assert str(exc) == "source package inventory changed while reading"
     else:
         raise AssertionError("derivative accepted an artifact added after its initial inventory")
+
+
+def test_derivative_rejects_artifact_rewritten_after_read_before_publish(tmp_path: Path, monkeypatch) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    patch_path = source / "changes.patch"
+    original_minimize = evidence_derivative._minimize_receipt
+
+    def rewrite_patch_after_read(value: dict[str, Any]) -> tuple[dict[str, Any], int, int]:
+        result = original_minimize(value)
+        patch_path.write_bytes(patch_path.read_bytes() + b"changed")
+        return result
+
+    monkeypatch.setattr(evidence_derivative, "_minimize_receipt", rewrite_patch_after_read)
+    try:
+        evidence_derivative.export_derivative(
+            source=source,
+            out=tmp_path / "derivative",
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == "source artifact changed while reading: changes.patch"
+    else:
+        raise AssertionError("derivative accepted an artifact rewritten after its read")
+
+    assert not (tmp_path / "derivative").exists()
 
 
 def test_derivative_rejects_patch_rewritten_with_recomputed_package_hashes(tmp_path: Path) -> None:
