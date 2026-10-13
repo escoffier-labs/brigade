@@ -234,6 +234,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "See https://example.com/password%253Dhunter2",
         "See https://example.com/SERVICE_MODE%253Dproduction",
         "password is [hunter2]",
+        'The "password" is hunter2',
+        "The `password` is hunter2",
         "token is (abcdefg)",
         "Configure a password as hunter2",
         "Store the password as hunter2",
@@ -719,9 +721,30 @@ def test_parse_accepts_lowercase_key_value_prose(field: str, text: str) -> None:
         "See https://example.com/config?path=..",
         "See https://example.com/download?file=~example/.ssh/config.",
         "See https://example.com/callback#path=/home/" + "example.",
+        "See https://example.com/api?output=%2Fetc%2Fpasswd",
+        "Call /api?output=/etc/passwd",
     ],
 )
 def test_parse_rejects_filesystem_paths_in_url_parameters(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Navigate to foo/bar directories",
+        "Copy foo/bar files",
+        "Read foo/bar files before launch",
+        'The path is "Shared Folder/file"',
+        "The directory is “Shared Folder/file”",
+    ],
+)
+def test_parse_rejects_paths_in_navigation_and_quoted_declarations(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 

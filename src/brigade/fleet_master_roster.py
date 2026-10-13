@@ -66,6 +66,12 @@ _DANGEROUS_VALUE = re.compile(
     r"(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))",
     re.IGNORECASE,
 )
+_QUOTED_CREDENTIAL_LABEL = re.compile(
+    r"([\"'“‘`])(?P<label>passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|"
+    r"auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
+    r"[\"'”’`]",
+    re.IGNORECASE,
+)
 _URL_CREDENTIAL_QUERY = re.compile(
     r"https?://[^\s<>\"']*?[?&](?:password|passwd|passphrase|secret|token|auth[_-]?token|"
     r"api[_-]?key|access[_-]?token|client[_-]?secret|private[_-]?key)=[^&#\s]+",
@@ -108,7 +114,6 @@ _HTTP_METHOD_ROUTE_CONTEXT = re.compile(
 )
 _HTTP_METHOD_ROUTE_ROOTS = frozenset({"applications", "config", "users"})
 _HTTP_URL = re.compile(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE)
-_URL_PATH_QUERY_KEYS = frozenset({"dir", "directory", "file", "filename", "filepath", "path", "root"})
 
 
 def _fully_unquote(value: str) -> str:
@@ -157,17 +162,11 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
                 or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(query_value)
             ):
                 return True
-            if key.casefold() not in _URL_PATH_QUERY_KEYS:
-                continue
             decoded_value = _fully_unquote(query_value)
             path_value = decoded_value.rstrip(",;!?")
             if path_value.endswith(".") and path_value not in {".", ".."}:
                 path_value = path_value.rstrip(".")
-            if (
-                _EXPLICIT_TERMINAL_PATH.search(f"path: {path_value}")
-                or _ROOTED_PATH.search(path_value)
-                or _RELATIVE_PATH.search(path_value)
-            ):
+            if _is_filesystem_path_value(path_value):
                 return True
     return False
 
@@ -186,16 +185,10 @@ def _has_disallowed_api_route_query(value: str) -> bool:
                 or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(pair)
             ):
                 return True
-            if key.casefold() not in _URL_PATH_QUERY_KEYS:
-                continue
             path_value = decoded_value.rstrip(",;!?")
             if path_value.endswith(".") and path_value not in {".", ".."}:
                 path_value = path_value.rstrip(".")
-            if (
-                _EXPLICIT_TERMINAL_PATH.search(f"path: {path_value}")
-                or _ROOTED_PATH.search(path_value)
-                or _RELATIVE_PATH.search(path_value)
-            ):
+            if _is_filesystem_path_value(path_value):
                 return True
     return False
 
@@ -203,6 +196,7 @@ def _has_disallowed_api_route_query(value: str) -> bool:
 _RELATIVE_PATH = re.compile(r"(?<![\w.-])(?P<path>(?:[\w.~-]+[/\\])+[\w.~-]+)(?![\w.~-])")
 # Slash pairs used as noun modifiers are prose when followed by a plural noun.
 _SLASH_PROSE_CONTINUATION = re.compile(r"\s+[A-Za-z][A-Za-z-]*s\b")
+_FILESYSTEM_NOUN_CONTINUATION = re.compile(r"\s+(?:[A-Za-z][A-Za-z-]*\s+){0,2}(?:files?|directories|folders?)\b", re.I)
 _PATH_CONTEXT = re.compile(
     r"(?:\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store|"
     + _PATH_LABEL
@@ -214,6 +208,10 @@ _PATH_CONTEXT = re.compile(
 )
 _EXPLICIT_PATH_DECLARATION = re.compile(
     r"\b" + _PATH_LABEL + r"\s*" + _PATH_DECLARATION_LINKER + r"\s*$",
+    re.IGNORECASE,
+)
+_QUOTED_PATH_DECLARATION_CONTEXT = re.compile(
+    r"\b" + _PATH_LABEL + r"\s*" + _PATH_DECLARATION_LINKER + r"\s*[\"'“‘][^\"'“”‘’]*$",
     re.IGNORECASE,
 )
 _QUOTED_PATH_CONTEXT = re.compile(
@@ -336,7 +334,19 @@ _SURROGATE = re.compile("[\\ud800-\\udfff]")
 def _has_path_context(text: str, position: int) -> bool:
     prefix = text[:position]
     return any(
-        pattern.search(prefix) is not None for pattern in (_PATH_CONTEXT, _QUOTED_PATH_CONTEXT, _SPACED_PATH_CONTEXT)
+        pattern.search(prefix) is not None
+        for pattern in (
+            _PATH_CONTEXT,
+            _QUOTED_PATH_CONTEXT,
+            _SPACED_PATH_CONTEXT,
+            _QUOTED_PATH_DECLARATION_CONTEXT,
+        )
+    )
+
+
+def _is_filesystem_path_value(value: str) -> bool:
+    return bool(
+        _EXPLICIT_TERMINAL_PATH.search(f"path: {value}") or _ROOTED_PATH.search(value) or _RELATIVE_PATH.search(value)
     )
 
 
@@ -361,7 +371,10 @@ def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -
         suffix_match = suffix.search(filename)
         trailing_text = path_text[match.end() :].strip(" .,;:!?")
         path_context = _has_path_context(path_text, match.start())
-        path_declaration = _EXPLICIT_PATH_DECLARATION.search(path_text[: match.start()]) is not None
+        path_declaration = any(
+            pattern.search(path_text[: match.start()]) is not None
+            for pattern in (_EXPLICIT_PATH_DECLARATION, _QUOTED_PATH_DECLARATION_CONTEXT)
+        )
         file_like = filename.casefold() not in _PROSE_DOTTED_TERMS and (
             filename.startswith(".")
             or sensitive_name
@@ -377,8 +390,14 @@ def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -
         if standalone and not model_identifier and match.group("path").casefold() not in _PROSE_SLASH_TERMS:
             return True
         path_context = _has_path_context(path_text, match.start())
-        prose_continuation = _SLASH_PROSE_CONTINUATION.match(path_text[match.end() :])
-        if path_context and not prose_continuation and match.group("path").casefold() not in _PROSE_SLASH_TERMS:
+        continuation = path_text[match.end() :]
+        prose_continuation = _SLASH_PROSE_CONTINUATION.match(continuation)
+        filesystem_noun = _FILESYSTEM_NOUN_CONTINUATION.match(continuation)
+        if (
+            path_context
+            and (not prose_continuation or filesystem_noun)
+            and match.group("path").casefold() not in _PROSE_SLASH_TERMS
+        ):
             return True
         if any(component.startswith(".") or component.casefold() in _FILESYSTEM_COMPONENTS for component in components):
             return True
@@ -410,16 +429,17 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         raise MasterRosterError(f"{field} must contain valid Unicode scalar values")
     if len(value) > MAX_TEXT or _has_control(value):
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
+    credential_screening_text = _QUOTED_CREDENTIAL_LABEL.sub(r"\g<label>", value)
     path_text = _without_api_route_references(value)
     if (
-        _DANGEROUS_VALUE.search(value)
+        _DANGEROUS_VALUE.search(credential_screening_text)
         or _URL_CREDENTIAL_QUERY.search(value)
         or _has_url_userinfo(value)
         or _has_filesystem_path_in_url_query(value)
         or _has_disallowed_api_route_query(value)
         or _ENVIRONMENT_ASSIGNMENT.search(path_text)
         or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(path_text)
-        or contains_credential(value)
+        or contains_credential(credential_screening_text)
         or (
             check_paths
             and (
