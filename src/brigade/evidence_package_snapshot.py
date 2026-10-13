@@ -181,7 +181,11 @@ def _read_child(
         descriptor = dirfd.open_child_file(
             root_fd,
             name,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0),
         )
         initial = _observation(os.fstat(descriptor))
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):

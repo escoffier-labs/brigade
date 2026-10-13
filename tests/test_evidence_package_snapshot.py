@@ -513,6 +513,27 @@ def test_every_opened_descriptor_is_closed_on_success_and_child_read_failure(
     assert not active
 
 
+def test_child_files_are_opened_in_binary_mode_when_supported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    directory = _write_package(tmp_path)
+    import brigade.evidence_package_snapshot as package_snapshot
+
+    binary_flag = 0x8000
+    monkeypatch.setattr(package_snapshot.os, "O_BINARY", binary_flag, raising=False)
+    real_open_child = package_snapshot.dirfd.open_child_file
+    flags_seen: list[int] = []
+
+    def open_child(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+        flags_seen.append(flags)
+        return real_open_child(parent, name, flags & ~binary_flag, mode)
+
+    monkeypatch.setattr(package_snapshot.dirfd, "open_child_file", open_child)
+
+    snapshot_package(directory)
+
+    assert flags_seen
+    assert all(flags & binary_flag for flags in flags_seen)
+
+
 def test_declared_companion_growth_uses_only_one_eof_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     directory = _write_package(tmp_path, files={"changes.patch": b"small"})
     import brigade.evidence_package_snapshot as package_snapshot
