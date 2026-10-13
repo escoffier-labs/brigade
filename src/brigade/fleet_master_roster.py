@@ -29,6 +29,8 @@ _DANGEROUS_VALUE = re.compile(
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s*[:=]\s*"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
+    r"\bauth(?:entication)?[ _-]profiles?\s+named\s+"
+    r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s+(?:\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with))\s+"
     r"auth(?:entication)?[ _-]profiles?\s+"
@@ -51,7 +53,7 @@ _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
 _API_ROUTE_CONTEXT = re.compile(
     r"\b(?:call|invoke|serve|expose|request|hit)\s+(?:the\s+)?"
-    r"(?P<path>/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*))",
+    r"(?P<path>/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)(?:\?[^\s<>\"']*)?)",
     re.IGNORECASE,
 )
 _HTTP_URL = re.compile(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE)
@@ -65,6 +67,7 @@ _PATH_CONTEXT = re.compile(
 _FILESYSTEM_COMPONENTS = frozenset(
     {
         "automation",
+        "applications",
         "bin",
         "boot",
         "cache",
@@ -77,9 +80,11 @@ _FILESYSTEM_COMPONENTS = frozenset(
         "home",
         "lib",
         "lib64",
+        "library",
         "logs",
         "media",
         "mnt",
+        "network",
         "opt",
         "passwd",
         "private",
@@ -98,6 +103,10 @@ _FILESYSTEM_COMPONENTS = frozenset(
         "var",
         "workspace",
         "project",
+        "system",
+        "users",
+        "volumes",
+        "cores",
         "src",
     }
 )
@@ -118,7 +127,7 @@ _EXTENSIONLESS_FILES = frozenset(
     {"containerfile", "dockerfile", "gnumakefile", "makefile", "justfile", "procfile", "readme"}
 )
 _PRIVATE_KEY_FILES = frozenset({"id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"})
-_FILE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{2,8}$")
+_FILE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 _MODEL_PATH_SUFFIX = re.compile(
     r"\.(?:7z|avif|bmp|bz2|c|cfg|conf|cpp|cs|css|csv|docx|exe|gif|go|gz|h|hpp|html|ico|ini|java|jpe?g|js|json|jsx|lock|md|mov|mp3|mp4|pdf|png|pptx|py|rar|rst|rs|sh|so|sql|svg|tar|tiff?|toml|ts|tsx|txt|wav|webp|woff2|xml|xlsx|yaml|yml|zip)$",
     re.IGNORECASE,
@@ -193,7 +202,7 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
     if (
         _DANGEROUS_VALUE.search(value)
-        or _ENVIRONMENT_ASSIGNMENT.search(_HTTP_URL.sub("", value))
+        or _ENVIRONMENT_ASSIGNMENT.search(_without_api_route_references(value))
         or contains_credential(value)
         or (
             check_paths

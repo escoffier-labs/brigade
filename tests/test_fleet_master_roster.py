@@ -109,6 +109,10 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Auth profile (production-admin).",
         "Use auth profiles: production-admin.",
         "Connect through auth profiles (production-admin).",
+        "Authentication profile named production-admin.",
+        "Call /Applications/Agent/Binary.",
+        "Invoke /Volumes/Data/Build.",
+        "Run foo/main.c",
         "Auth profile is production-admin.",
         "Use auth profile: production-admin",
         "Use auth-profile production-admin",
@@ -189,6 +193,7 @@ def test_parse_accepts_prose_that_mentions_auth_profiles(text: str) -> None:
         "Call /preference for routing.",
         "Invoke /health for readiness.",
         "Call /v1/chat/completions endpoint.",
+        "Call /search?lang=en endpoint.",
     ],
 )
 def test_parse_accepts_known_api_routes_in_descriptive_text(field: str, text: str) -> None:
