@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -272,6 +273,7 @@ def test_completed_verify_receipt_with_rederived_digest_is_validated(tmp_path):
 
     assert readiness["outcome"] == "validated"
     assert readiness["dimensions"]["integrity"] == {"status": "passed", "reason": None}
+    assert readiness["artifacts"][0]["source_digest_sha256"] == receipt["digests"]["receipt_sha256"]
 
 
 def test_completed_verify_receipt_with_changed_payload_is_rejected(tmp_path):
@@ -290,6 +292,23 @@ def test_completed_verify_receipt_with_changed_payload_is_rejected(tmp_path):
 
     assert readiness["outcome"] == "rejected"
     assert readiness["reason"] == "receipt_digest_mismatch"
+
+
+def test_completed_verify_receipt_with_wrong_directory_binding_is_rejected(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-b")
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    _write_json(run_dir / "receipt.json", receipt)
+
+    readiness = _assess(target, "EC-01")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "run_binding_mismatch"
 
 
 def test_run_scoped_query_excludes_other_producer_runs(tmp_path):
@@ -374,7 +393,58 @@ def test_ec11_parses_multiline_index_jsonl(tmp_path):
     assert readiness["dimensions"]["integrity"] == {"status": "not_checked", "reason": "verifier_not_wired"}
 
 
-def test_ec12_evidence_package_manifest_untested_passed_failed(tmp_path):
+def _write_strict_package(
+    package_dir: Path, *, producer_run_id: str | None = None, verify_run_id: str = "verify-a"
+) -> None:
+    producer_run_id = producer_run_id or RUN
+    receipt: dict = {
+        "schema_version": 2,
+        "run_id": verify_run_id,
+        "producer_run_id": producer_run_id,
+        "tree_fingerprint": "1" * 40,
+        "baseline_commit": "2" * 40,
+        "changes_patch_sha256": hashlib.sha256(b"patch").hexdigest(),
+    }
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    contents = {"receipt.json": json.dumps(receipt, sort_keys=True).encode(), "changes.patch": b"patch"}
+    allowed = {name: (kind, media) for name, kind, media in control_crosswalk.evidence_package.PACKAGE_FILES}
+    entries = [
+        {
+            "path": name,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+            "media_type": allowed[name][1],
+            "kind": allowed[name][0],
+        }
+        for name, data in sorted(contents.items())
+    ]
+    source = {
+        "verify_run_id": verify_run_id,
+        "producer_run_id": producer_run_id,
+        "tree_fingerprint": receipt["tree_fingerprint"],
+        "baseline_commit": receipt["baseline_commit"],
+        "changes_patch_sha256": receipt["changes_patch_sha256"],
+        "receipt_sha256": receipt["digests"]["receipt_sha256"],
+    }
+    manifest = {
+        "schema": control_crosswalk.evidence_package.SCHEMA,
+        "schema_version": 1,
+        "created_at": "2026-09-06T00:00:00Z",
+        "source": source,
+        "entries": entries,
+        "entries_sha256": localio.canonical_json_digest(entries),
+        "limitations": ["receipt-contains-local-paths", "integrity-only"],
+    }
+    package_dir.mkdir(parents=True, exist_ok=True)
+    for name, data in contents.items():
+        (package_dir / name).write_bytes(data)
+    _write_json(package_dir / "manifest.json", manifest)
+
+
+def test_ec12_strict_package_snapshot_validates_and_rejects_tampering(tmp_path):
     target = tmp_path / "ws"
     target.mkdir()
 
@@ -386,55 +456,26 @@ def test_ec12_evidence_package_manifest_untested_passed_failed(tmp_path):
     assert all(m["state"] == "untested" for m in ec12_rows), [m["state"] for m in ec12_rows]
 
     pkg_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
-    pkg_dir.mkdir(parents=True)
-    entries = [
-        {
-            "path": "receipt.json",
-            "sha256": "a" * 64,
-            "bytes": 2,
-            "media_type": "application/json",
-            "kind": "receipt",
-        }
-    ]
-    entries.sort(key=lambda e: e["path"])
-    manifest = {
-        "schema": "brigade.evidence_package.v1",
-        "schema_version": 1,
-        "created_at": "2026-09-06T00:00:00Z",
-        "source": {"verify_run_id": "run-1", "receipt_sha256": "b" * 64},
-        "entries": entries,
-        "entries_sha256": localio.canonical_json_digest(entries),
-        "limitations": [],
-    }
-    (pkg_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-
-    # A listed entry that is absent is rejected, not passed.
+    _write_strict_package(pkg_dir)
     evaluated = control_crosswalk.evaluate_controls(target)
     ec12_rows = [
         m for m in evaluated["mappings"] if m["claim_id"] == "EC-12" and m["relationship"] != "no-relationship"
     ]
-    assert all(m["state"] == "evidenced_failed" for m in ec12_rows), [m["state"] for m in ec12_rows]
-    assert evaluated["evidence_readiness"]["EC-12"]["reason"] == "entry_missing"
+    assert all(m["state"] == "evidenced_passed" for m in ec12_rows), [m["state"] for m in ec12_rows]
+    assert evaluated["evidence_readiness"]["EC-12"]["outcome"] == "validated"
+    assert (
+        evaluated["evidence_readiness"]["EC-12"]["artifacts"][0]["source_digest_sha256"]
+        == hashlib.sha256((pkg_dir / "manifest.json").read_bytes()).hexdigest()
+    )
 
-    # v2: a self-consistent manifest with present entries is structurally observed.
-    # Entry contents are not rehashed until the strict package verifier is wired,
-    # so it is not validated evidence.
-    (pkg_dir / "receipt.json").write_text("{}", encoding="utf-8")
-    evaluated = control_crosswalk.evaluate_controls(target)
-    ec12_rows = [
-        m for m in evaluated["mappings"] if m["claim_id"] == "EC-12" and m["relationship"] != "no-relationship"
-    ]
-    assert all(m["state"] == "untested" for m in ec12_rows), [m["state"] for m in ec12_rows]
-    assert all(m["evidence_outcome"] == "structure_observed" for m in ec12_rows)
-
-    manifest["entries_sha256"] = "c" * 64
-    (pkg_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    (pkg_dir / "changes.patch").write_text("tampered", encoding="utf-8")
 
     evaluated = control_crosswalk.evaluate_controls(target)
     ec12_rows = [
         m for m in evaluated["mappings"] if m["claim_id"] == "EC-12" and m["relationship"] != "no-relationship"
     ]
     assert all(m["state"] == "evidenced_failed" for m in ec12_rows), [m["state"] for m in ec12_rows]
+    assert evaluated["evidence_readiness"]["EC-12"]["reason"] == "receipt_digest_mismatch"
 
 
 def test_json_output_is_sorted_and_includes_schema(tmp_path, capsys):
@@ -723,7 +764,7 @@ _ISSUE_FIXTURES = {
     "EC-09": (_fixture_ec09, "incomplete", "no_explicit_verdict", "incomplete"),
     "EC-10": (_fixture_ec10, "invalid", "invalid_jsonl_line", "incomplete"),
     "EC-11": (_fixture_ec11, "invalid", "schema_missing", "incomplete"),
-    "EC-12": (_fixture_ec12, "rejected", "entry_missing", "incomplete"),
+    "EC-12": (_fixture_ec12, "invalid", "schema_missing", "incomplete"),
 }
 
 
@@ -753,13 +794,13 @@ def test_issue_1617_fixtures_are_not_presented_as_validated(tmp_path, claim_id):
 def test_issue_fixture_ec12_rejected_in_workspace_scope_and_unbound_for_run(tmp_path):
     target = _ws(tmp_path)
     _fixture_ec12(target)
-    assert control_crosswalk._evaluate_claim_state(target, "EC-12", None) == "evidenced_failed"
+    assert control_crosswalk._evaluate_claim_state(target, "EC-12", None) != "evidenced_passed"
     run_scoped = _assess(target, "EC-12", RUN)
     # Whole-workspace artifacts are never inferred to belong to the requested run.
     assert run_scoped["population"]["unbound"] == 1
     assert run_scoped["population"]["in_scope"] == 0
     assert run_scoped["reason"] == "artifact_not_run_bound"
-    assert run_scoped["artifacts"][0]["outcome"] == "rejected"
+    assert run_scoped["artifacts"][0]["outcome"] == "invalid"
     assert run_scoped["legacy_state"] == "untested"
 
 
@@ -832,18 +873,15 @@ def test_mixed_population_incomplete_and_malformed_siblings_are_not_hidden(tmp_p
 def test_mixed_population_valid_and_rejected_package_manifests(tmp_path):
     target = _ws(tmp_path)
     good = target / ".brigade" / "evidence-packages" / "pkg-a"
-    _write_json(good / "manifest.json", _package_manifest([_RECEIPT_ENTRY]))
-    (good / "receipt.json").write_text("{}")
-    bad_manifest = _package_manifest([_RECEIPT_ENTRY])
-    bad_manifest["entries_sha256"] = "c" * 64
+    _write_strict_package(good)
     bad = target / ".brigade" / "evidence-packages" / "pkg-b"
-    _write_json(bad / "manifest.json", bad_manifest)
-    (bad / "receipt.json").write_text("{}")
+    _write_strict_package(bad)
+    (bad / "changes.patch").write_text("tampered", encoding="utf-8")
 
     readiness = _assess(target, "EC-12")
     assert readiness["outcome"] == "rejected"
-    assert readiness["reason"] == "entries_digest_mismatch"
-    assert readiness["population"]["structure_observed"] == 1
+    assert readiness["reason"] == "receipt_digest_mismatch"
+    assert readiness["population"]["validated"] == 1
     assert readiness["population"]["rejected"] == 1
     assert readiness["dimensions"]["integrity"]["status"] == "failed"
 
@@ -1650,9 +1688,59 @@ def test_ec12_discovers_root_and_one_level_manifests_only(tmp_path):
         ".brigade/evidence-packages/manifest.json",
         ".brigade/evidence-packages/pkg-1/manifest.json",
     ]
-    assert readiness["outcome"] == "structure_observed"
+    assert readiness["outcome"] == "invalid"
     assert readiness["legacy_state"] == "untested"
-    assert "verifier_not_wired" in readiness["reason_codes"]
+    assert "schema_missing" in readiness["reason_codes"]
+
+
+def test_ec12_uses_strict_package_snapshot_and_retains_source_run_binding(tmp_path, monkeypatch):
+    from brigade import evidence_package_snapshot
+
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_json(
+        package_dir / "manifest.json",
+        {
+            "schema": "brigade.evidence_package.v1",
+            "entries": [],
+            "source": {"producer_run_id": RUN, "verify_run_id": "verify-a"},
+            "created_at": "2026-01-01T00:00:00Z",
+        },
+    )
+    seen: list[Path] = []
+
+    def snapshot(directory: Path):
+        seen.append(directory)
+        return type("Snapshot", (), {"manifest_sha256": "a" * 64})()
+
+    monkeypatch.setattr(evidence_package_snapshot, "snapshot_package", snapshot)
+    result = _assess(target, "EC-12", RUN)
+
+    assert result["outcome"] == "validated"
+    assert result["population"]["in_scope"] == 1
+    assert seen and seen[0] != package_dir
+    assert seen[0].name == package_dir.name
+    assert control_crosswalk._verify_evidence_package(target, package_dir).proposed == "validated"
+
+
+def test_ec12_snapshot_mismatch_is_rejected_with_bounded_reason(tmp_path, monkeypatch):
+    from brigade import evidence_package_snapshot
+
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_json(
+        package_dir / "manifest.json",
+        {"schema": "brigade.evidence_package.v1", "entries": [], "source": {"producer_run_id": RUN}},
+    )
+
+    def mismatch(_directory: Path):
+        raise evidence_package_snapshot.PackageSnapshotError("mismatch")
+
+    monkeypatch.setattr(evidence_package_snapshot, "snapshot_package", mismatch)
+    result = _assess(target, "EC-12")
+
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "receipt_digest_mismatch"
 
 
 @pytest.mark.parametrize(
@@ -1669,9 +1757,9 @@ def test_package_scope_accepts_each_recorded_run_namespace(tmp_path, selected_ru
     assert observed["population"]["in_scope"] == 1
     assert observed["population"]["wrong_run"] == 0
     assert observed["artifacts"][0]["run_binding"] == binding
-    assert observed["outcome"] == "incomplete"
-    assert observed["validation_level"] == "structure_observed"
-    assert observed["dimensions"]["subject"]["status"] == "unknown"
+    assert observed["outcome"] == "invalid"
+    assert observed["validation_level"] == "discovered"
+    assert "schema_missing" in observed["reason_codes"]
     foreign = _assess(target, "EC-12", "foreign-producer")
     assert foreign["population"]["wrong_run"] == 1
     assert foreign["outcome"] == "absent"

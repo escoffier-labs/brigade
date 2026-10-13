@@ -31,6 +31,7 @@ from . import (
     control_readiness,
     cosign_attestation,
     evidence_package,
+    evidence_package_snapshot,
     localio,
     receipts_trailer,
     run_journal,
@@ -357,12 +358,13 @@ def _assess_verify_receipt(
 ) -> control_readiness.ArtifactObservation:
     """EC-01 verification result with a rederived writer-compatible digest."""
     relpath = _relpath(ctx, path)
-    if not isinstance(receipt.get("schema_version"), int):
+    if type(receipt.get("schema_version")) is not int:
         return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
     has_digest_evidence = "digests" in receipt
+    receipt_digest: str | None = None
     if has_digest_evidence:
         try:
-            attestation_receipt.snapshot_stored_receipt(receipt)
+            receipt_digest = attestation_receipt.snapshot_stored_receipt(receipt).digest
         except attestation_receipt.ReceiptDigestError:
             return _obs(
                 relpath,
@@ -426,6 +428,7 @@ def _assess_verify_receipt(
             "validated" if subject == "passed" else "rejected",
             _dims(integrity="passed", subject=subject, population="passed"),
             [] if subject == "passed" else ["run_binding_mismatch"],
+            source_digest_sha256=receipt_digest,
         )
     return observed("structure_observed", "passed", ["verifier_not_wired"])
 
@@ -498,6 +501,44 @@ def _verifier_unavailable(relpath: str, reason: str) -> control_readiness.Artifa
         ),
         [reason],
     )
+
+
+def _verify_evidence_package(_target: Path, package_dir: Path) -> control_readiness.ArtifactObservation:
+    """Validate captured package bytes and their receipt-bound source metadata."""
+    try:
+        snapshot = evidence_package_snapshot.snapshot_package(package_dir)
+    except evidence_package_snapshot.PackageSnapshotError as exc:
+        if exc.code == "unavailable":
+            return _verifier_unavailable(package_dir.name, "verifier_tool_unavailable")
+        if exc.code == "changed":
+            return _verifier_unavailable(package_dir.name, "verifier_error")
+        if exc.code == "unsafe":
+            return _obs(
+                package_dir.name,
+                "claim_validated",
+                "rejected",
+                _dims(integrity=("failed", "entry_path_unsafe"), subject="unknown", population="passed"),
+                ["entry_path_unsafe"],
+            )
+        if exc.code == "malformed":
+            return _obs(package_dir.name, "discovered", "invalid", _dims(), ["schema_missing"])
+        return _obs(
+            package_dir.name,
+            "claim_validated",
+            "rejected",
+            _dims(integrity=("failed", "receipt_digest_mismatch"), subject="unknown", population="passed"),
+            ["receipt_digest_mismatch"],
+        )
+    return _obs(
+        package_dir.name,
+        "claim_validated",
+        "validated",
+        _dims(integrity="passed", subject="passed", population="passed"),
+        source_digest_sha256=snapshot.manifest_sha256,
+    )
+
+
+_VERIFIER_ADAPTERS["evidence-package"] = _verify_evidence_package
 
 
 def _ssh_keygen_available() -> bool:
@@ -1300,11 +1341,8 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
     `brigade receipts export package --out` accepts any path, so discovery covers two
     bounded staging locations: ``.brigade/evidence-packages/manifest.json``
     (the root itself was the output) and ``<package>/manifest.json`` one level
-    down.  Deeper nesting is not discovered.  Without the strict package
-    verifier adapter (#1618) this checks the manifest schema, the recomputed
-    ``entries_sha256`` and that each listed entry is a safe, present regular
-    file.  Entry contents are not rehashed, so integrity stays ``not_checked``
-    and the claim cannot validate.
+    down.  Deeper nesting is not discovered.  The strict package snapshot
+    validates captured entry bytes and rederives the source receipt digest.
     """
     root = ctx.target / ".brigade" / "evidence-packages"
     children, truncated, error = _bounded_children(ctx, root)
@@ -1444,7 +1482,11 @@ _EVALUATORS: dict[str, _Rule] = {
         _evaluate_verify_archive_index_exists, "structural", None, "not_wired", _WORKSPACE_REQUIRED
     ),
     "evidence-package-manifest": _Rule(
-        _evaluate_evidence_package_manifest, "structural", "evidence-package", "not_wired", _WORKSPACE_REQUIRED
+        _evaluate_evidence_package_manifest,
+        "in_module",
+        "evidence_package_snapshot.snapshot_package",
+        "wired",
+        _WORKSPACE_REQUIRED,
     ),
 }
 
@@ -1685,7 +1727,8 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "selected run is never lost behind the cap. Verify receipts bind to a run through recorded fields, so their "
     "scan stays bounded and can truncate. The run id must be a bare directory name. EC-12 discovers "
     "`.brigade/evidence-packages/manifest.json` and `.brigade/evidence-packages/<package>/manifest.json`; deeper "
-    "nesting is not discovered, and no strict package verification runs before #1618. Packages bind through "
+    "nesting is not discovered. The strict snapshot validates each package entry, its stored receipt digest, "
+    "and source metadata. Packages bind through "
     "either their recorded producer-run or verify-run identity. JSONL reads are capped at 8 MiB and 10,000 "
     "records. Discovery and reads refuse symlinked components beneath the canonical assessed target, "
     "including a linked `.brigade` or lifecycle `events/` ancestor. Metadata errors remain "
@@ -1700,9 +1743,9 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "matching its directory, and one `completed` command with exit code 0 per planned check whose `command` "
     "display string equals the planned entry at the same position. A different, missing or reordered command is "
     "`incomplete` with `planned_commands_mismatch`. An empty intended check list never shows that a test ran. The "
-    "stored receipt digest and optional local HMAC are not verified before #1618, so `integrity` is a required "
-    "dimension reported `not_checked` with `verifier_not_wired`, and even a well-formed successful receipt stops "
-    "at `structure_observed` (`untested`). A reused receipt (`reused_from`) copies the commands of an earlier run; "
+    "stored writer digest is rederived when present; without it, `integrity` is `not_checked` and a successful "
+    "receipt stops at `structure_observed` (`untested`). A digest mismatch is rejected. A reused receipt "
+    "(`reused_from`) copies the commands of an earlier run; "
     "it is recorded, reused evidence, not a new execution under the new receipt id. EC-02 pins re-derivation to "
     "the attestation's own directory receipt and rejects an attestation whose run differs from its directory. "
     "EC-06 rejects a journal whose events name another run.",
@@ -1752,9 +1795,9 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "the template schema remains `brigade.control_crosswalk.v1`. New root keys are `relationship_semantics`, "
     "`integrity_boundary`, `unmapped_evidence_properties`, `readiness_contract`, `assessment_period` and "
     "`evidence_readiness`. Mapping rows add `validation_level`, `evidence_outcome` and provenance fields. "
-    "`evidenced_passed` is stricter. Claims checked only "
-    "for presence or structure (EC-01, EC-03, EC-04, EC-07, EC-09, EC-10, EC-11 and EC-12) now report `untested` with "
-    "`structure_observed` until a dedicated verifier is wired. An EC-01 receipt with an empty command list or "
+    "Validated EC-01 and EC-12 artifact observations include `source_digest_sha256`. `evidenced_passed` is stricter. "
+    "Claims checked only for presence or structure (EC-03, EC-04, EC-07, EC-09, EC-10 and EC-11) report `untested` "
+    "with `structure_observed` until a dedicated verifier is wired. An EC-01 receipt with an empty command list or "
     "commands that do not match `planned_commands` is no longer a pass, and legacy receipts without "
     "`planned_commands` report `untested`. Artifacts now classified `invalid` (for example a previously accepted "
     "malformed cosign bundle or package manifest, or a ledger with a row lacking its required field) report "
