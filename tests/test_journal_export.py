@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import io
 import json
 import os
@@ -181,17 +182,39 @@ def test_disappeared_journal_is_rejected_instead_of_exporting_empty(
     assert not output.exists()
 
 
-@pytest.mark.parametrize("phase", ["after-stat", "during-validation"])
+@pytest.mark.parametrize("phase", ["after-stat", "during-validation", "during-validation-windows-sharing"])
 def test_same_run_journal_replacement_is_rejected(tmp_path, capsys, monkeypatch, phase):
     source, _ = _journal(tmp_path / "workspace")
     replacement, _ = _journal(tmp_path / "replacement", times=TIMES[:1])
     output = tmp_path / "export.jsonl"
     swapped = False
+    source_descriptor = None
+    source_info = source.stat()
+    real_open = run_dirfd.BoundRunDir.open_file
     real_stat = run_dirfd.BoundRunDir.stat
     real_read = run_journal.read_journal_bounded
 
+    def capture_source_open(bound, components, name, flags, mode=0o600):
+        nonlocal source_descriptor
+        descriptor = real_open(bound, components, name, flags, mode)
+        if components == ("events",) and name == "lifecycle.jsonl":
+            source_descriptor = descriptor
+        return descriptor
+
     def replace_source():
         nonlocal swapped
+        if phase == "during-validation-windows-sharing":
+            assert source_descriptor is not None
+            try:
+                held = os.fstat(source_descriptor)
+            except OSError as exc:
+                if exc.errno != errno.EBADF:
+                    raise
+            else:
+                # Windows can refuse replacing an existing open target even
+                # with delete sharing. Ignore reuse of the fd for another file.
+                if (held.st_dev, held.st_ino) == (source_info.st_dev, source_info.st_ino):
+                    raise PermissionError("Windows replacement refused: journal target is still open")
         replacement.replace(source)
         swapped = True
 
@@ -209,9 +232,11 @@ def test_same_run_journal_replacement_is_rejected(tmp_path, capsys, monkeypatch,
         monkeypatch.setattr(run_dirfd.BoundRunDir, "stat", swap_after_stat)
     else:
         monkeypatch.setattr(run_journal, "read_journal_bounded", swap_during_validation)
+        if phase == "during-validation-windows-sharing":
+            monkeypatch.setattr(run_dirfd.BoundRunDir, "open_file", capture_source_open)
     status = _export(tmp_path / "workspace", "--out", str(output))
     captured = capsys.readouterr()
-    assert swapped
+    assert swapped, captured.err
     assert status != 0 and captured.out == "" and "error: journal export:" in captured.err
     assert not output.exists()
 

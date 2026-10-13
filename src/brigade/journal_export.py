@@ -81,8 +81,12 @@ def _snapshot_report(bound: run_dirfd.BoundRunDir) -> run_journal.JournalReport:
                 if source.read(1):
                     raise OSError("journal source grew during snapshot")
             _check_source(bound, descriptor, metadata)
+            # Validation uses only the private copy. Release the original so
+            # writers can replace it on Windows while that copy is parsed.
+            source.close()
             report = run_journal.read_journal_bounded(Path(snapshot.name))
-            _check_source(bound, descriptor, metadata)
+            if _source_metadata(bound.stat(("events",), "lifecycle.jsonl")) != metadata:
+                raise OSError("journal source changed during export")
             if opened.st_size > 0 and not report.events and not report.chain_errors and report.partial_tail is None:
                 raise ValueError("nonempty journal validation snapshot disappeared or changed during read")
             return report

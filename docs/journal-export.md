@@ -53,8 +53,11 @@ The journal is opened relative to the bound events directory with no-follow
 semantics and POSIX nonblocking flags. Export checks the actual open file's
 type, identity, size, modification time, and change time against the initial
 source metadata. It copies at most the observed size, within the shared byte
-bound, and checks descriptor and named-source metadata before and after
-validation. Observed replacement, truncation, growth, or metadata changes
+bound, then checks descriptor and named-source metadata before closing the
+source file. Validation reads only the private copy, so later source changes
+cannot change the bytes being validated. After validation, export checks
+named-source metadata against the initial open file's metadata.
+Observed replacement, truncation, growth, or metadata changes
 fail before output. Export does not lock writers. Changes after the final
 metadata observation remain possible, and the output represents a validated
 snapshot observed during export.
