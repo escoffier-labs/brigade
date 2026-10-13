@@ -99,8 +99,12 @@ when the database is newer: the authenticated `GET` routes `/status`,
 `/claims`, `/nodes`, `/cloud`, `/models`, `/preference`, `/sessions`, and the
 `/policy` routes; the authenticated `POST` routes `/events`, `/claims`,
 `/nodes`, `/cloud`, `/models`, `/grokbot`, `/sessions`, and `/policy`;
-`PUT /preference`; the authenticated dashboard pages; and the Command Deck
-overview and repository pages. Other routes, including enrollment, the
+`PUT /preference`; the dashboard pages; and the Command Deck overview and
+repository pages. The dashboard and deck pages map the error only after
+authorization succeeds through an admin bearer token or a trusted Tailscale
+identity. A request authorized only by a dashboard session cookie can still get
+HTTP 401, because the cookie check opens the database and treats the refusal as
+a failed authorization. Other routes, including enrollment, the
 dashboard session API, the roster and policy form pages, observed work, the
 work queue, and the `/work/` routes, are not mapped by this slice and still
 return their generic database error.

@@ -73,7 +73,10 @@ def _validate_structure(conn: sqlite3.Connection) -> None:
     NOCASE equality, even when its current rows look valid. Refuse rather than
     repair: rewriting it could change which targets share a fence.
     """
-    entries = conn.execute("SELECT type, sql FROM sqlite_master WHERE tbl_name = 'claim_fences'").fetchall()
+    # NOCASE: SQLite stores a trigger's tbl_name as written in its ON clause.
+    entries = conn.execute(
+        "SELECT type, sql FROM sqlite_master WHERE tbl_name = 'claim_fences' COLLATE NOCASE"
+    ).fetchall()
     if not entries:
         raise ClaimFenceError("claim generation fence storage is missing or corrupt")
     tables = [sql for kind, sql in entries if kind == "table"]

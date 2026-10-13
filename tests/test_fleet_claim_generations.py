@@ -576,12 +576,17 @@ def test_unsupported_fence_table_shape_refuses_without_repair(authority, shape, 
     assert (snapshot(conn), fence_ddl(conn), conn.execute("PRAGMA user_version").fetchone()[0]) == before
 
 
-@pytest.mark.parametrize("extra", ["CREATE INDEX fake_idx ON claim_fences (generation)", "TRIGGER"])
+@pytest.mark.parametrize(
+    "extra", ["CREATE INDEX fake_idx ON claim_fences (generation)", "TRIGGER", "UPPERCASE_TRIGGER"]
+)
 def test_fence_table_with_extra_index_or_trigger_refuses(authority, extra):
     conn, path, _ = authority
     request(conn)
     if extra == "TRIGGER":
         extra = "CREATE TRIGGER fake_trg AFTER UPDATE ON claim_fences BEGIN SELECT 1; END"
+    elif extra == "UPPERCASE_TRIGGER":
+        # SQLite stores a trigger's tbl_name as written, so a case-sensitive lookup misses it.
+        extra = "CREATE TRIGGER fake_trg AFTER UPDATE ON CLAIM_FENCES BEGIN SELECT 1; END"
     conn.execute(extra)
     conn.commit()
     before = (snapshot(conn), fence_ddl(conn))
