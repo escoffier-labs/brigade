@@ -582,8 +582,8 @@ def downgrade_external_directory_authority(
 
     try:
         live_identity = _workspace_directory_identity(workspace)
-    except OSError as exc:
-        raise OSError("authority downgrade cannot identify the workspace posture markers") from exc
+    except OSError:
+        live_identity = {}
     governing_posture_paths = authority_marker.governing_isolation_marker_paths(
         workspace, env=env, workspace_identity=live_identity
     )

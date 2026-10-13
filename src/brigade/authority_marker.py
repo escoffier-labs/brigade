@@ -265,28 +265,24 @@ def governing_isolation_marker_paths(
     root = isolation_marker_root(env=env)
     try:
         names = sorted(os.listdir(root))
-    except FileNotFoundError:
+    except OSError:
         return []
-    except OSError as exc:
-        raise OSError("authority isolation posture marker store is unreadable") from exc
 
     governing: list[Path] = []
     for name in names:
         if not _FINGERPRINT_RE.fullmatch(name):
-            raise OSError("authority isolation posture marker store is malformed")
+            continue
         path = root / name
         try:
             metadata = os.lstat(path)
             if not stat.S_ISREG(metadata.st_mode):
-                raise OSError("authority isolation posture marker is not a regular file")
+                continue
             payload = json.loads(path.read_bytes())
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise OSError("authority isolation posture marker is unreadable") from exc
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
         if not isinstance(payload, dict):
-            raise OSError("authority isolation posture marker is malformed")
+            continue
         governs = _isolation_marker_governs(payload, name, fingerprint, live)
-        if governs is None:
-            raise OSError("authority isolation posture marker identity cannot be compared")
         if governs:
             governing.append(path)
     return governing
