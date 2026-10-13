@@ -672,6 +672,23 @@ def test_boards_render_through_the_shared_deck_shell():
     assert "background: #fff" not in page
 
 
+def test_machine_summary_counts_nodes_with_only_unread_messages():
+    page = fleet_dashboard.render_page(
+        view="machines",
+        query_string="",
+        runs=[],
+        claims=[],
+        nodes=[{"node_id": NODE_A}],
+        started_at={},
+        nonce="abc",
+        unread_counts={NODE_B: 3},
+    )
+
+    assert "2 machines" in page
+    assert f'data-node="{NODE_A}"' in page
+    assert f'data-node="{NODE_B}"' in page
+
+
 def test_interactive_sessions_stay_off_legacy_boards_and_station_capacity(tmp_path):
     config_path = tmp_path / "deck.json"
     config_path.write_text(

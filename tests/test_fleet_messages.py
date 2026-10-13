@@ -670,6 +670,32 @@ def test_unacked_recipient_index_supports_count_queries(message_hub):
     assert "fleet_messages_unacked_recipient" in plan
 
 
+def test_schema_v28_migrates_principal_retry_state_and_unacked_index(tmp_path):
+    db = tmp_path / "fleet.db"
+    conn = fleet_hub.init_db(db)
+    conn.execute("ALTER TABLE fleet_message_principals DROP COLUMN enrollment_id")
+    conn.execute("DROP INDEX fleet_messages_unacked_recipient")
+    conn.execute("PRAGMA user_version=28")
+    conn.commit()
+    conn.close()
+
+    migrated = fleet_hub.init_db(db)
+    try:
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 29
+        columns = {row[1] for row in migrated.execute("PRAGMA table_info(fleet_message_principals)")}
+        indexes = {row[1] for row in migrated.execute("PRAGMA index_list(fleet_messages)")}
+        assert "enrollment_id" in columns
+        assert "fleet_messages_unacked_recipient" in indexes
+        status, payload = fleet_hub_messages.handle_principal_admin(
+            migrated,
+            {"action": "add", "name": "migrated", "request_id": "m" * 32, "token": "t" * 40},
+        )
+        assert status == 201
+        assert payload["principal"]["token"] == "t" * 40
+    finally:
+        migrated.close()
+
+
 def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
@@ -1545,5 +1571,5 @@ def test_schema_migrates_existing_version_26_message_rows(tmp_path):
     client_id, payload_hash = conn.execute("SELECT client_id,payload_hash FROM fleet_messages WHERE id=1").fetchone()
     assert client_id == "legacy-1"
     assert payload_hash == fleet_hub_messages._payload_digest(NODE_B, "Legacy", "Keep me", None, "normal")
-    assert fleet_hub.SCHEMA_VERSION == 28
+    assert fleet_hub.SCHEMA_VERSION == 29
     conn.close()

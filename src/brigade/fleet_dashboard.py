@@ -744,6 +744,7 @@ def render_page(
         {str(node.get("node_id") or "") for node in nodes}
         | {row.node_id for row in all_rows}
         | {claim.owner_node for claim in claim_rows if claim.owner_node and not claim.expired}
+        | {node_id for node_id, count in (unread_counts or {}).items() if count > 0}
     )
     node_ids = [node_id for node_id in node_ids if node_id]
     if query.view == "repos":
