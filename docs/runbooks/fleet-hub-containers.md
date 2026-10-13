@@ -75,9 +75,15 @@ services:
   hub:
     image: ${image_id}
 EOF
-docker compose -f compose.yaml -f secrets/compose.image-id.yaml up -d --no-build
+docker compose -f compose.yaml -f secrets/compose.image-id.yaml up -d --no-build \
+  --wait --wait-timeout 120
 curl --fail http://127.0.0.1:3774/health
 ```
+
+The wait options require a Compose CLI that supports
+[`up --wait`](https://docs.docker.com/reference/cli/docker/compose/up/).
+Compose waits for the health check before returning. Then `curl` verifies the
+local endpoint.
 
 The health check reports an unhealthy container, but Docker restart policies
 apply only when a container terminates. An unhealthy Hub process may stay
@@ -86,7 +92,15 @@ running. Check its logs, then restart the pinned service and verify health:
 ```bash
 docker compose -f compose.yaml -f secrets/compose.image-id.yaml logs --tail=100 hub
 docker compose -f compose.yaml -f secrets/compose.image-id.yaml restart hub
-curl --fail http://127.0.0.1:3774/health
+attempt=0
+until curl --fail http://127.0.0.1:3774/health; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 60 ]; then
+    echo "Fleet Hub did not recover after restart" >&2
+    exit 1
+  fi
+  sleep 2
+done
 ```
 
 For an upgrade, follow the backup and stop sequence below before rebuilding
@@ -147,7 +161,8 @@ try:
  os.chown(database, 10001, 10001)
 finally:
  if os.path.exists(staged): os.remove(staged)'
-docker compose -f compose.yaml -f secrets/compose.image-id.yaml up -d --no-build
+docker compose -f compose.yaml -f secrets/compose.image-id.yaml up -d --no-build \
+  --wait --wait-timeout 120
 ```
 
 The restore validates a staged copy, then uses SQLite's online backup API to
@@ -181,8 +196,10 @@ docker compose -f compose.yaml -f secrets/compose.image-id.yaml stop hub
 ```
 
 After the backup succeeds and the service stops, rebuild the candidate, inspect
-it for its new ID, replace the override's `image` value, and start it. Starting
-it may migrate the database.
+it for its new ID, replace the override's `image` value, then start it with
+`docker compose -f compose.yaml -f secrets/compose.image-id.yaml up -d --no-build
+--wait --wait-timeout 120`. Starting it may migrate the database. Compose
+for the configured health check before returning.
 
 The named volume contains the database and its WAL/SHM sidecars. Keep it on a
 local filesystem, not NFS, SMB, or a cloud-synced directory. For ordinary

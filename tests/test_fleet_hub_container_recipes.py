@@ -92,6 +92,8 @@ def test_compose_runbook_pins_the_built_local_image_id():
         runbook,
     )
     assert "docker compose -f compose.yaml -f secrets/compose.image-id.yaml restart hub" in runbook
+    assert runbook.count("--wait --wait-timeout 120") == 3
+    assert "attempt=0\nuntil curl --fail http://127.0.0.1:3774/health; do" in runbook
     assert "rebuild the versioned tag, record its new local image ID" in runbook
     assert 'docker image save --output "$archive" "$previous_id"' in runbook
     assert 'docker image load --input "$archive"' in runbook
