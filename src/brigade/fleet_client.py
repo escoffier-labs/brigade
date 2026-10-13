@@ -730,12 +730,10 @@ def _write_spool_atomic(path: Path, events: list[dict[str, Any]], *, dir_fd: int
         raise
 
 
-def _spool_append_locked(path: Path, event: dict[str, Any], *, dir_fd: int | None = None) -> bool:
-    """Append under the caller's lock, enforcing ``MAX_SPOOL_BYTES``.
-
-    When the append would exceed the cap, the oldest events are dropped until
-    the newest half of the cap remains, and the drop is logged.
-    """
+def _spool_append_locked(
+    path: Path, event: dict[str, Any], *, dir_fd: int | None = None, evict_oldest: bool = True
+) -> bool:
+    """Append under lock; event callers may evict, durable callers refuse overflow."""
     line = _encode(event) + "\n"
     try:
         if dir_fd is not None:
@@ -745,6 +743,8 @@ def _spool_append_locked(path: Path, event: dict[str, Any], *, dir_fd: int | Non
     except OSError:
         current = 0
     if current + len(line.encode("utf-8")) > MAX_SPOOL_BYTES:
+        if not evict_oldest:
+            return False
         if len(line.encode("utf-8")) > MAX_SPOOL_BYTES // 2:
             _LOG.warning("fleet spool %s cannot retain the newest event within its overflow budget", path)
             return False

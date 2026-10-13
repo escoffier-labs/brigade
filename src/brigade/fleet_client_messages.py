@@ -142,7 +142,7 @@ def _online(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _queue_locked(path: Path, message: dict[str, Any], *, dir_fd: int | None = None) -> dict[str, Any]:
-    if not fleet_client._spool_append_locked(path, message, dir_fd=dir_fd):
+    if not fleet_client._spool_append_locked(path, message, dir_fd=dir_fd, evict_oldest=False):
         raise fleet_client.FleetClientError("fleet message could not be persisted to the local spool")
     return {"queued": True, "client_id": message["client_id"]}
 

@@ -1124,6 +1124,37 @@ def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
     assert not fleet_client_messages._spool_path(NODE_A).exists()
 
 
+def test_message_spool_refuses_overflow_without_evicting_queued_messages(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    messages = [
+        {
+            "action": "send",
+            "to": NODE_B,
+            "subject": "queued",
+            "body": "body",
+            "client_id": f"message-{index}",
+            "enqueued_at": "2026-01-01T00:00:00+00:00",
+        }
+        for index in range(3)
+    ]
+    encoded_size = len((fleet_client._encode(messages[0]) + "\n").encode("utf-8"))
+    monkeypatch.setattr(fleet_client, "MAX_SPOOL_BYTES", encoded_size * 3 - 1)
+    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    with fleet_client._spool_lock(path) as dir_fd:
+        assert fleet_client._spool_append_locked(path, messages[0], dir_fd=dir_fd)
+        assert fleet_client._spool_append_locked(path, messages[1], dir_fd=dir_fd)
+    original_spool = path.read_bytes()
+
+    with (
+        fleet_client._spool_lock(path) as dir_fd,
+        pytest.raises(fleet_client.FleetClientError, match="could not be persisted"),
+    ):
+        fleet_client_messages._queue_locked(path, messages[2], dir_fd=dir_fd)
+
+    assert path.read_bytes() == original_spool
+    assert fleet_client._read_spool(path) == messages[:2]
+
+
 @pytest.mark.parametrize(
     ("status", "response"),
     [
