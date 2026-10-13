@@ -13,6 +13,7 @@ HealthCmd=python -c "import urllib.request; urllib.request.urlopen('http://127.0
 HealthInterval=30s
 HealthTimeout=3s
 HealthRetries=3
+HealthOnFailure=kill
 
 [Service]
 Restart=on-failure

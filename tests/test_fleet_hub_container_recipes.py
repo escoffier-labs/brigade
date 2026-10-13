@@ -92,9 +92,22 @@ def test_compose_runbook_pins_the_built_local_image_id():
     assert 'test "$restored_id" = "$previous_id"' in runbook
     assert "image: ${previous_id}" in runbook
     assert "secrets/compose.image-id.yaml up -d --no-build" in runbook
+    assert "docker compose -f compose.yaml -f secrets/compose.image-id.yaml stop hub" in runbook
+    assert "source.backup(target)" in runbook
+    assert (
+        'docker cp "$(docker compose -f compose.yaml -f secrets/compose.image-id.yaml ps -q hub):/var/lib/brigade/fleet-hub-pre-upgrade.db" "$backup_path"'
+        in runbook
+    )
+    assert '"$PWD/$backup_path:/restore/fleet-hub.db:ro"' in runbook
+    assert "--user 0" in runbook
+    assert "os.chown(database, 10001, 10001)" in runbook
+    assert "PRAGMA integrity_check" in runbook
+    assert 'for suffix in ("", "-wal", "-shm")' in runbook
     assert "Docker Engine 28.0.0 or newer" in runbook
     assert "docker version --format '{{.Server.Version}}'" in runbook
-    assert 're.fullmatch(r"(\\d+)\\.(\\d+)\\.(\\d+)", sys.argv[1])' in runbook
+    assert 'python3 -c \'import re,sys; m=re.fullmatch(r"(\\d+)\\.(\\d+)\\.(\\d+)", sys.argv[1])' in runbook
+    assert 'generated_token="$(python3 -c' in runbook
+    assert "printf '%s\\n' \"$generated_token\" > secrets/admin-token.txt" in runbook
     assert 're.match(r"^(\\d+)\\.(\\d+)\\.(\\d+)", sys.argv[1])' not in runbook
 
 
@@ -110,7 +123,7 @@ def test_compose_runbook_pins_the_built_local_image_id():
 )
 def test_compose_runbook_version_check_rejects_prereleases(version, accepted):
     runbook = (ROOT / "docs" / "runbooks" / "fleet-hub-containers.md").read_text()
-    match = re.search(r"python -c '([^']+)' \"\$engine_version\"", runbook)
+    match = re.search(r"python3 -c '([^']+)' \"\$engine_version\"", runbook)
     assert match is not None
 
     result = subprocess.run(
@@ -135,6 +148,19 @@ def test_quadlet_runbook_archives_and_restores_the_recorded_image():
     assert 'podman secret create brigade-fleet-admin-token "$token_file"' in podman_runbook
     assert "if podman secret inspect brigade-fleet-admin-token" in podman_runbook
     assert 'token_file="$token_dir/admin-token"' in podman_runbook
+    assert 'generated_token="$(python3 -c' in podman_runbook
+    assert 'printf \'%s\\n\' "$generated_token" > "$token_file"' in podman_runbook
+    assert 'fleet_config="$HOME/.brigade/fleet.toml"' in podman_runbook
+    assert 'if [ -e "$fleet_config" ] || [ -L "$fleet_config" ]; then' in podman_runbook
+    assert 'elif [ -e "$token_file" ] || [ -L "$token_file" ]; then' in podman_runbook
+    assert "podman exec brigade-fleet-hub python -c" in podman_runbook
+    assert 'podman cp brigade-fleet-hub:/var/lib/brigade/fleet-hub-pre-upgrade.db "$backup_path"' in podman_runbook
+    assert "systemctl --user stop brigade-fleet.service" in podman_runbook
+    assert '"$backup_path:/restore/fleet-hub.db:ro,Z"' in podman_runbook
+    assert "--volume brigade-fleet-state:/var/lib/brigade" in podman_runbook
+    assert "os.chown(database, 10001, 10001)" in podman_runbook
+    assert "PRAGMA integrity_check" in podman_runbook
+    assert 'for suffix in ("", "-wal", "-shm")' in podman_runbook
     assert 'image_id_file="${archive%.tar}.image-id"' in podman_runbook
     assert 'previous_id="$(cat "$image_id_file")"' in podman_runbook
     assert 'chmod 0600 "$archive" "$image_id_file"' in podman_runbook
@@ -153,6 +179,7 @@ def test_quadlet_recipe_has_equivalent_persistence_health_and_restart_policy():
     assert "Volume=brigade-fleet.volume:/var/lib/brigade" in container
     assert "Secret=brigade-fleet-admin-token,target=admin_token" in container
     assert "HealthCmd=" in container
+    assert "HealthOnFailure=kill" in container
     assert "Restart=on-failure" in container
     assert "User=10001" in volume
     assert "Group=10001" in volume

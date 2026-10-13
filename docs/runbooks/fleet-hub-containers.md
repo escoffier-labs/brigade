@@ -13,10 +13,10 @@ recipe proposal pending operator acceptance.
 The image installs Brigade from reviewed source commit
 `e6009f6969dc6e45db2ab93790aa3e407c791409` (CLI version 0.28.0) on
 `python:3.12.14-slim-bookworm` (Debian 12). This immutable ref includes the
-loopback proxy trust option; released 0.27.0 does not. The CI acceptance check
+loopback proxy trust option. Released 0.27.0 does not include it. The CI acceptance check
 prints the OS, architecture, Python, OpenSSL, and linked SQLite versions for
 each built `linux/amd64` and `linux/arm64` image. It requires OpenSSL 3.0.20 or
-newer. Debian's DSA-6015-1 marks Bookworm's 3.0.20 package fixed; the pinned
+newer. Debian's DSA-6015-1 marks Bookworm's 3.0.20 package fixed. The pinned
 image reports OpenSSL 3.0.20. For a local image, record its immutable manifest
 digest before deployment:
 
@@ -41,13 +41,13 @@ hosts on the same layer-2 network. Check the server version before deployment:
 
 ```bash
 engine_version="$(docker version --format '{{.Server.Version}}')"
-python -c 'import re,sys; m=re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", sys.argv[1]); assert m and tuple(map(int, m.groups())) >= (28, 0, 0), f"Docker Engine 28.0.0 or newer is required, found {sys.argv[1]}"' "$engine_version"
+python3 -c 'import re,sys; m=re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", sys.argv[1]); assert m and tuple(map(int, m.groups())) >= (28, 0, 0), f"Docker Engine 28.0.0 or newer is required, found {sys.argv[1]}"' "$engine_version"
 ```
 
 Create a random token without putting it in command arguments, then protect the
 file. Compose file-backed secrets are read-only bind mounts, so the container
 must be able to read the source file's permissions. Keep the host directory
-private and make the file readable by the container's non-root UID; the file
+private and make the file readable by the container's non-root UID. The file
 remains inaccessible to other host users because they cannot traverse the
 directory. The example path is ignored by Git. See [Docker Compose secrets](https://docs.docker.com/compose/how-tos/use-secrets/).
 
@@ -55,13 +55,16 @@ directory. The example path is ignored by Git. See [Docker Compose secrets](http
 cd ops/fleet-hub
 install -d -m 0700 secrets
 umask 077
-python -c 'import secrets; print(secrets.token_urlsafe(32))' > secrets/admin-token.txt
+generated_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" || exit 1
+test -n "$generated_token" || { echo "Token generation returned an empty value" >&2; exit 1; }
+printf '%s\n' "$generated_token" > secrets/admin-token.txt
+unset generated_token
 chmod 0444 secrets/admin-token.txt
 ```
 
 Before starting the service, record the built image's immutable local image ID
 in an ignored Compose override. The base Compose file uses a version tag for
-the build; use the recorded ID for every start or recreation:
+the build. Use the recorded ID for every start or recreation:
 
 ```bash
 docker compose build --pull hub
@@ -95,21 +98,27 @@ the saved image and verify that its ID matches before restoring the old ID in
 the override:
 
 ```bash
+set -euo pipefail
 # Set these from the recorded image archive name and ID.
 archive="secrets/brigade-fleet-hub-REPLACE_WITH_RECORDED_IMAGE_ID.tar"
 previous_id="sha256:REPLACE_WITH_RECORDED_IMAGE_ID"
+backup_path="secrets/fleet-hub-pre-upgrade-REPLACE_WITH_TIMESTAMP.db"
 docker image load --input "$archive"
 restored_id="$(docker image inspect --format '{{.Id}}' "$previous_id")"
 test "$restored_id" = "$previous_id"
+docker compose -f compose.yaml -f secrets/compose.image-id.yaml stop hub
 cat > secrets/compose.image-id.yaml <<EOF
 services:
   hub:
     image: ${previous_id}
 EOF
+docker compose -f compose.yaml -f secrets/compose.image-id.yaml run --rm --no-deps \
+  --user 0 --volume "$PWD/$backup_path:/restore/fleet-hub.db:ro" \
+  --entrypoint python hub -c 'import os,shutil,sqlite3; database="/var/lib/brigade/fleet-hub.db"; [os.remove(database+suffix) for suffix in ("", "-wal", "-shm") if os.path.exists(database+suffix)]; shutil.copyfile("/restore/fleet-hub.db", database); os.chown(database, 10001, 10001); connection=sqlite3.connect(database); result=connection.execute("PRAGMA integrity_check").fetchone()[0]; connection.close(); assert result == "ok", result'
 docker compose -f compose.yaml -f secrets/compose.image-id.yaml up -d --no-build
 ```
 
-The archive, override, and token are ignored with the token directory; retain
+The archive, override, and token are ignored with the token directory. Retain
 the archive and ID alongside the database backup.
 
 Run the local image, token, persistence, backup/restore, and HTTPS proxy
@@ -117,6 +126,24 @@ acceptance check from the repository root with
 `./.venv/bin/python tests/fleet_hub_container_smoke.py`. It requires a running
 Docker daemon and builds the pinned package version before exercising the
 container.
+
+Before an upgrade, create a SQLite online backup while the current Hub is
+running. Keep it with the image archive and preserve it mode 0600:
+
+```bash
+set -euo pipefail
+backup_path="secrets/fleet-hub-pre-upgrade-$(date -u +%Y%m%dT%H%M%SZ).db"
+docker compose -f compose.yaml -f secrets/compose.image-id.yaml exec -T --user 10001 hub \
+  python -c 'import sqlite3; source=sqlite3.connect("/var/lib/brigade/fleet-hub.db"); target=sqlite3.connect("/var/lib/brigade/fleet-hub-pre-upgrade.db"); source.backup(target); target.close(); source.close()'
+docker cp "$(docker compose -f compose.yaml -f secrets/compose.image-id.yaml ps -q hub):/var/lib/brigade/fleet-hub-pre-upgrade.db" "$backup_path"
+chmod 0600 "$backup_path"
+docker compose -f compose.yaml -f secrets/compose.image-id.yaml exec -T hub \
+  rm /var/lib/brigade/fleet-hub-pre-upgrade.db
+docker compose -f compose.yaml -f secrets/compose.image-id.yaml stop hub
+```
+
+After the backup succeeds and the service stops, rebuild the candidate and start
+it with the updated image ID. Starting it may migrate the database.
 
 The named volume contains the database and its WAL/SHM sidecars. Keep it on a
 local filesystem, not NFS, SMB, or a cloud-synced directory. For ordinary
@@ -127,6 +154,8 @@ secrets/compose.image-id.yaml up -d --no-build`. Never add `--volumes` to
 database support.
 
 ## Rootless Podman Quadlet
+
+Use a Podman release whose Quadlet generator supports `HealthOnFailure=kill`.
 
 Build the pinned image locally and record its digest. Keep an operator copy of
 the admin token in a private file, import that file as a Podman secret, render
@@ -139,6 +168,12 @@ podman build -f ops/fleet-hub/Containerfile \
   -t localhost/brigade-fleet-hub:0.28.0-e6009f6 .
 image_digest="$(podman image inspect --format '{{.Digest}}' localhost/brigade-fleet-hub:0.28.0-e6009f6)"
 case "$image_digest" in sha256:*) ;; *) echo "Expected a sha256 image digest" >&2; exit 1 ;; esac
+install -d -m 0700 ~/.brigade
+fleet_config="$HOME/.brigade/fleet.toml"
+if [ -e "$fleet_config" ] || [ -L "$fleet_config" ]; then
+  echo "Existing $fleet_config was preserved. Merge [fleet] hub_url and token_file into it without removing node_token_file or other settings." >&2
+  exit 1
+fi
 umask 077
 token_dir="$HOME/.local/share/brigade-fleet-hub"
 install -d -m 0700 "$token_dir"
@@ -148,18 +183,23 @@ if podman secret inspect brigade-fleet-admin-token >/dev/null 2>&1; then
     echo "Existing Podman secret needs its saved operator token file at $token_file" >&2
     exit 1
   }
+elif [ -e "$token_file" ] || [ -L "$token_file" ]; then
+  echo "Token file exists without the Podman secret; inspect and reconcile this partial state before continuing" >&2
+  exit 1
 else
-  python -c 'import secrets; print(secrets.token_urlsafe(32))' > "$token_file"
+  generated_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" || exit 1
+  test -n "$generated_token" || { echo "Token generation returned an empty value" >&2; exit 1; }
+  printf '%s\n' "$generated_token" > "$token_file"
+  unset generated_token
   chmod 0600 "$token_file"
   podman secret create brigade-fleet-admin-token "$token_file"
 fi
-install -d -m 0700 ~/.brigade
-cat > ~/.brigade/fleet.toml <<EOF
+cat > "$fleet_config" <<EOF
 [fleet]
 hub_url = "http://127.0.0.1:3774"
 token_file = "$token_file"
 EOF
-chmod 0600 ~/.brigade/fleet.toml
+chmod 0600 "$fleet_config"
 install -d ~/.config/containers/systemd
 sed "s|REPLACE_WITH_RECORDED_DIGEST|${image_digest}|" \
   ops/fleet-hub/quadlet/brigade-fleet.container \
@@ -201,22 +241,49 @@ printf '%s\n' "$previous_id" > "$image_id_file"
 chmod 0600 "$archive" "$image_id_file"
 ```
 
+Before deploying a candidate that may migrate the database, create a SQLite
+online backup while the current Hub is running. This is the restore point for
+the archived image, because that image may reject the candidate's newer schema.
+Keep this file with the image archive and preserve it mode 0600:
+
+```bash
+set -euo pipefail
+backup_dir="$HOME/.local/share/brigade-fleet-hub/backups"
+install -d -m 0700 "$backup_dir"
+backup_path="$backup_dir/fleet-hub-pre-upgrade-$(date -u +%Y%m%dT%H%M%SZ).db"
+podman exec brigade-fleet-hub python -c 'import sqlite3; source=sqlite3.connect("/var/lib/brigade/fleet-hub.db"); target=sqlite3.connect("/var/lib/brigade/fleet-hub-pre-upgrade.db"); source.backup(target); target.close(); source.close()'
+podman cp brigade-fleet-hub:/var/lib/brigade/fleet-hub-pre-upgrade.db "$backup_path"
+chmod 0600 "$backup_path"
+podman exec brigade-fleet-hub rm /var/lib/brigade/fleet-hub-pre-upgrade.db
+systemctl --user stop brigade-fleet.service
+```
+
+After the backup succeeds and the user service stops, deploy the candidate
+image. Starting it may migrate the persistent database.
+
 Build and deploy the candidate image using the steps above, recording its new
 digest and replacing the digest in the installed unit. To roll back, load the
 archive, verify the restored image ID, render the old digest into the unit, and
 start the generated service again:
 
 ```bash
-# Set these from the saved archive name and recorded previous digest.
+set -euo pipefail
+# Set these from the saved archive name, digest, and pre-upgrade database backup.
 archive="$HOME/.local/share/brigade-fleet-hub/archives/brigade-fleet-hub-REPLACE_WITH_RECORDED_DIGEST.tar"
 previous_digest="sha256:REPLACE_WITH_RECORDED_DIGEST"
+backup_path="$HOME/.local/share/brigade-fleet-hub/backups/fleet-hub-pre-upgrade-REPLACE_WITH_TIMESTAMP.db"
 previous_ref="localhost/brigade-fleet-hub@${previous_digest}"
 image_id_file="${archive%.tar}.image-id"
 previous_id="$(cat "$image_id_file")"
 test -n "$previous_id"
+systemctl --user stop brigade-fleet.service
 podman image load --input "$archive"
 restored_id="$(podman image inspect --format '{{.Id}}' "$previous_ref")"
 test "$restored_id" = "$previous_id"
+podman run --rm --user 0:0 \
+  --volume brigade-fleet-state:/var/lib/brigade \
+  --volume "$backup_path:/restore/fleet-hub.db:ro,Z" \
+  --entrypoint python "$previous_ref" -c 'import os,shutil,sqlite3; database="/var/lib/brigade/fleet-hub.db"; [os.remove(database+suffix) for suffix in ("", "-wal", "-shm") if os.path.exists(database+suffix)]; shutil.copyfile("/restore/fleet-hub.db", database); os.chown(database, 10001, 10001); connection=sqlite3.connect(database); result=connection.execute("PRAGMA integrity_check").fetchone()[0]; connection.close(); assert result == "ok", result'
 sed "s|REPLACE_WITH_RECORDED_DIGEST|${previous_digest}|" \
   ops/fleet-hub/quadlet/brigade-fleet.container \
   > "$HOME/.config/containers/systemd/brigade-fleet.container"
@@ -225,10 +292,10 @@ systemctl --user daemon-reload
 systemctl --user restart brigade-fleet.service
 ```
 
-Rootless UID mapping must make volume UID 10001 writable; the volume Quadlet
+Rootless UID mapping must make volume UID 10001 writable. The volume Quadlet
 declares owner UID and group GID. Confirm it on the target Podman version before
 use. Quadlet generates this service, so start or update it with
-`systemctl --user restart`; restart starts an inactive service and reloads an
+`systemctl --user restart`. This starts an inactive service and reloads an
 active one. Do not enable the generated unit directly. Its `[Install]` section
 supplies the generator's startup wiring.
 Podman Compose is not Podman's Compose implementation: it invokes an external
@@ -244,7 +311,7 @@ to remain inaccessible from same-L2 hosts. Plain HTTP is therefore local-only
 under that requirement. The smoke check proves HTTPS
 enrollment and Secure cookies with a TLS proxy sharing the Hub's network
 namespace. The Hub binds to numeric loopback with `--trust-forwarded-proto`,
-and the proxy overwrites `X-Forwarded-Proto`; this makes its Hub-side peer
+and the proxy overwrites `X-Forwarded-Proto`. This makes its Hub-side peer
 loopback. A proxy on a separate container network is unsupported because host
 loopback publication does not make its peer loopback. Do not weaken the Hub
 check to make that topology work.
@@ -254,6 +321,6 @@ Python `sqlite3.Connection.backup`) to a separate local path, then test a clean
 restore with the candidate image. Upgrade only one instance, verify health,
 node authentication, event ingestion, dashboard enrollment, and restart
 retention, and retain the database backup and image archive. Compose rollback
-restores the archived image ID; Quadlet rollback uses its saved image digest.
+restores the archived image ID. Quadlet rollback uses its saved image digest.
 Restoring the schema-compatible database backup can lose every write made
 after it. Never downgrade a live database in place.
