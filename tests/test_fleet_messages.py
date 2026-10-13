@@ -96,6 +96,21 @@ def test_nodes_send_list_ack_and_reply(message_hub):
     assert reply["message"]["reply_to"] == sent["message"]["id"]
 
 
+def test_ack_requires_matching_response_message_id(monkeypatch):
+    monkeypatch.setattr(fleet_client_messages, "_settings", lambda: ("http://hub.invalid", "token", NODE_A))
+    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (200, {}))
+
+    with pytest.raises(fleet_client.FleetClientError, match="did not confirm the requested message"):
+        fleet_client_messages.ack(42)
+
+    monkeypatch.setattr(
+        fleet_client_messages,
+        "_request",
+        lambda *_args, **_kwargs: (200, {"message": {"id": 42}}),
+    )
+    assert fleet_client_messages.ack(42)["message"]["id"] == 42
+
+
 def test_recipient_scope_and_field_bounds(message_hub):
     base, token_a, token_b, _db = message_hub
     sent = _request(base, token_a, {"action": "send", "to": NODE_B, "subject": "S", "body": "B"})[1]
@@ -642,7 +657,15 @@ def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, 
     monkeypatch.setattr(
         fleet_client,
         "_read_bounded_response",
-        lambda *_args, **_kwargs: json.dumps({"principal": {"token": requests[-1]["token"]}}).encode(),
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "principal": {
+                    "principal_id": "agent:researcher",
+                    "name": "researcher",
+                    "token": requests[-1]["token"],
+                }
+            }
+        ).encode(),
     )
     calls = 0
 
@@ -662,6 +685,55 @@ def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, 
     assert requests[0]["request_id"] == requests[1]["request_id"]
     assert requests[0]["token"] == requests[1]["token"]
     assert not fleet_client_messages._principal_pending_path("researcher", "admin-token").exists()
+
+
+def test_principal_add_keeps_retry_state_until_response_matches_request(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "", "admin_token": "admin-token"},
+    )
+    requests = []
+
+    class Response:
+        status = 201
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def hub_open(request, **_kwargs):
+        requests.append(json.loads(request.data))
+        return Response()
+
+    monkeypatch.setattr(fleet_client, "_hub_open", hub_open)
+    monkeypatch.setattr(fleet_client, "_read_bounded_response", lambda *_args, **_kwargs: b"{}")
+
+    with pytest.raises(fleet_client.FleetClientError, match="did not confirm the enrolled principal"):
+        fleet_client_messages.manage_principal("add", name="researcher")
+    path = fleet_client_messages._principal_pending_path("researcher", "admin-token")
+    assert fleet_client._read_spool(path)[0]["request_id"] == requests[0]["request_id"]
+
+    monkeypatch.setattr(
+        fleet_client,
+        "_read_bounded_response",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "principal": {
+                    "principal_id": "agent:researcher",
+                    "name": "researcher",
+                    "token": requests[-1]["token"],
+                }
+            }
+        ).encode(),
+    )
+    assert fleet_client_messages.manage_principal("add", name="researcher")["principal"]["token"]
+    assert requests[0]["request_id"] == requests[1]["request_id"]
+    assert not path.exists()
 
 
 def test_unacked_recipient_index_supports_count_queries(message_hub):

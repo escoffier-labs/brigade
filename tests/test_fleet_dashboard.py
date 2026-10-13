@@ -1148,9 +1148,10 @@ class TestBoardBounds:
 
     def test_full_machine_page_links_to_unread_only_cards(self, hub, monkeypatch):
         now = datetime.now(timezone.utc).isoformat()
+        known_node_ids = [f"44444444-4444-4444-8444-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT)]
         events = [
             _event(
-                f"44444444-4444-4444-8444-{index:012d}",
+                node_id,
                 f"full-page-{index}",
                 1,
                 "run.dispatch.observed",
@@ -1158,20 +1159,21 @@ class TestBoardBounds:
                 harness="claude",
                 ts=now,
             )
-            for index in range(fleet_hub.BOARD_LIMIT)
+            for index, node_id in enumerate(known_node_ids)
         ]
         status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
         assert status == 200, text
         monkeypatch.setattr(
             fleet_hub_http.fleet_hub_messages,
             "unread_counts",
-            lambda _conn: {"unread-only-node": 1},
+            lambda _conn: {**dict.fromkeys(known_node_ids, 1), "unread-only-node": 1},
         )
 
         _status, _headers, first = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert "unread_only=1" in first
         _status, _headers, second = _request(hub, "GET", "/view/machines?unread_only=1", headers=_bearer())
         assert 'data-node="unread-only-node"' in second
+        assert second.count('class="machine-card"') == 1
         assert 'class="fleet-more"' not in second
 
     def test_node_filter_paginates_more_than_two_hundred_unread_cards(self, hub, monkeypatch):

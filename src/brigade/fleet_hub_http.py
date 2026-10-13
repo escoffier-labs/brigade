@@ -686,7 +686,9 @@ def make_handler(
                 )
                 page_claims = fleet_dashboard.build_claims(claims, now=current)
                 base_node_ids = fleet_dashboard._machine_base_node_ids(page_rows, nodes, page_claims, query_model)
-                unread_ids = fleet_dashboard._machine_unread_candidates(query_model, unread_counts)
+                unread_ids = fleet_dashboard._machine_unread_candidates(
+                    query_model, unread_counts, excluded_node_ids=base_node_ids
+                )
                 room = (
                     fleet_dashboard.MACHINE_CARD_LIMIT
                     if unread_only_page

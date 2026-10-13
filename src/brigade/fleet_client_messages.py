@@ -208,7 +208,11 @@ def list_messages(*, after: int = 0, unacked: bool = False) -> dict[str, Any]:
 
 def ack(message_id: int) -> dict[str, Any]:
     _validate_sqlite_integer(message_id, "message id")
-    return _online({"action": "ack", "id": message_id})
+    payload = _online({"action": "ack", "id": message_id})
+    message = payload.get("message")
+    if not isinstance(message, dict) or message.get("id") != message_id:
+        raise fleet_client.FleetClientError("fleet hub acknowledgement response did not confirm the requested message")
+    return payload
 
 
 def reply(message_id: int, *, body: str, subject: str | None, reference: str | None, priority: str) -> dict[str, Any]:
@@ -290,6 +294,16 @@ def manage_principal(action: str, *, name: str, label: str | None = None) -> dic
             _clear_principal_request(pending_path)
         raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
     if pending_path is not None:
+        principal = payload.get("principal")
+        returned_token = principal.get("token") if isinstance(principal, dict) else None
+        if (
+            not isinstance(principal, dict)
+            or principal.get("principal_id") != f"agent:{name}"
+            or principal.get("name") != name
+            or not isinstance(returned_token, str)
+            or not hmac.compare_digest(returned_token, body["token"])
+        ):
+            raise fleet_client.FleetClientError("fleet hub did not confirm the enrolled principal and token")
         _clear_principal_request(pending_path)
     return payload
 

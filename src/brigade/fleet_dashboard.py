@@ -569,13 +569,16 @@ def _machine_base_node_ids(
     return node_ids
 
 
-def _machine_unread_candidates(query: DashboardQuery, unread_counts: dict[str, int]) -> list[str]:
+def _machine_unread_candidates(
+    query: DashboardQuery, unread_counts: dict[str, int], *, excluded_node_ids: set[str] | None = None
+) -> list[str]:
     if query.attention_only or query.seat or query.state or query.repo:
         return []
+    excluded_node_ids = excluded_node_ids or set()
     return sorted(
         node_id
         for node_id, count in unread_counts.items()
-        if count > 0 and (not query.node or _contains(node_id, query.node))
+        if count > 0 and node_id not in excluded_node_ids and (not query.node or _contains(node_id, query.node))
     )
 
 
@@ -599,10 +602,8 @@ def _machine_board(
 
     node_ids = set() if unread_only_page else base_node_ids
     room = max(0, MACHINE_CARD_LIMIT - len(node_ids))
-    unread_ids = _machine_unread_candidates(query, unread_counts)
-    node_ids.update(
-        node_id for node_id in unread_ids[unread_offset : unread_offset + room] if node_id not in base_node_ids
-    )
+    unread_ids = _machine_unread_candidates(query, unread_counts, excluded_node_ids=base_node_ids)
+    node_ids.update(unread_ids[unread_offset : unread_offset + room])
 
     def card_key(node_id: str) -> tuple[int, str]:
         worst = min((_rank(row) for row in by_node.get(node_id, []) if row.live), default=_IDLE_RANK)
