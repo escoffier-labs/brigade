@@ -545,7 +545,7 @@ Generation comes from the durable target fence, and protocol is `legacy`.
 The exporter validates all fences in the same read snapshot as the claims.
 Missing, corrupt, or newer-schema fence state refuses claims export before any
 output is written. A pre-generation hub database must first be upgraded to schema
-26 by the hub. Event-only export remains available. Expired rows are
+26 by starting the upgraded hub once. Event-only export remains available. Expired rows are
 excluded unless the human export also passes `--include-expired`. `--since`
 filters on the event's `ts`. `--since-received` filters on the hub's
 `received_at` value. Incremental archives should use `--since-received` because
