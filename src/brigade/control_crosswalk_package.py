@@ -43,11 +43,18 @@ def stage_source_package(
     if not isinstance(entries, list):
         raise evidence_package_snapshot.PackageSnapshotError("malformed")
     entry_names: set[str] = set()
+    entry_sizes: dict[str, object] = {}
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
             raise evidence_package_snapshot.PackageSnapshotError("malformed")
         name = entry["path"]
         check_entry_name(name, strict_package=strict_package)
+        if strict_package:
+            declared_size = entry.get("bytes")
+            limit = attestation_input.MAX_JSON_BYTES if name == "receipt.json" else evidence_package.MAX_ENTRY_BYTES
+            if type(declared_size) is not int or not 0 <= declared_size <= limit:
+                raise evidence_package_snapshot.PackageSnapshotError("malformed")
+        entry_sizes[name] = entry.get("bytes")
         entry_names.add(name)
     if len(actual_names) > len(evidence_package.PACKAGE_FILES) + 1 or actual_names - {
         "manifest.json",
@@ -64,6 +71,8 @@ def stage_source_package(
             entry_info = None
         if entry_info is not None and (stat.S_ISLNK(entry_info.st_mode) or not stat.S_ISREG(entry_info.st_mode)):
             raise evidence_package_snapshot.PackageSnapshotError("unsafe")
+        if strict_package and entry_info is not None and entry_info.st_size != entry_sizes[name]:
+            raise evidence_package_snapshot.PackageSnapshotError("mismatch")
         source_metadata[name] = _control_crosswalk_io._package_entry_metadata(entry_info)
         try:
             reader.copy(entry_path, limit=limit, reserve_bytes=reserve_bytes)

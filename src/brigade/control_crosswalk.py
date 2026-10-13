@@ -610,7 +610,6 @@ def _evaluate_cosign_bundle_exists(ctx: _Context) -> _Discovery:
             obs = _invalid(ctx, path, "dsse_signatures_missing")
         elif adapter is not None:
             obs = _adapter_observation(adapter, ctx, path, relpath)
-            out.verifier_unavailable |= obs.proposed == "unavailable"
         else:
             not_wired = ("not_checked", "verifier_not_wired")
             obs = _obs(
@@ -627,6 +626,8 @@ def _evaluate_cosign_bundle_exists(ctx: _Context) -> _Discovery:
                 ["verifier_not_wired"],
             )
         _bind(obs, ctx, _receipt_binding(receipt))
+        if obs.scope == "in_scope":
+            out.verifier_unavailable |= obs.proposed == "unavailable"
         obs.timestamp = _first_timestamp(receipt, "completed_at", "started_at")
         _apply_period(obs, ctx)
         out.observations.append(obs)

@@ -784,6 +784,25 @@ def test_ec12_reports_malformed_entry_list_as_invalid(tmp_path, entries):
     assert readiness["reason"] == "schema_missing"
 
 
+def test_ec12_reports_oversized_declared_package_entry_as_malformed(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    patch_entry = next(entry for entry in manifest["entries"] if entry["path"] == "changes.patch")
+    patch_entry["bytes"] = control_crosswalk.evidence_package.MAX_ENTRY_BYTES + 1
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    with (package_dir / "changes.patch").open("wb") as stream:
+        stream.truncate(control_crosswalk.evidence_package.MAX_ENTRY_BYTES + 1)
+    _write_json(manifest_path, manifest)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "invalid"
+    assert readiness["reason"] == "schema_missing"
+
+
 @pytest.mark.parametrize("bad_name", ["bad\\name", "bad:name", "bad\x00name", "manifest.json"])
 def test_ec12_reports_descriptor_invalid_entry_names_as_malformed(tmp_path, bad_name):
     target = _ws(tmp_path)
@@ -1030,9 +1049,19 @@ def _fixture_ec03(target: Path) -> None:
     )
 
 
-def _write_cosign_assessment_fixture(target: Path, *, wrong_run: bool = False) -> Path:
-    run_dir = _verify_dir(target, "verify-a")
-    _write_verify_receipt(run_dir, run_id="verify-b" if wrong_run else "verify-a")
+def _write_cosign_assessment_fixture(
+    target: Path,
+    *,
+    wrong_run: bool = False,
+    run_dir_name: str = "verify-a",
+    producer_run_id: str | None = None,
+) -> Path:
+    run_dir = _verify_dir(target, run_dir_name)
+    _write_verify_receipt(
+        run_dir,
+        run_id="verify-b" if wrong_run else run_dir_name,
+        producer_run_id=producer_run_id,
+    )
     receipt_path = run_dir / "receipt.json"
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     receipt["tree_fingerprint"] = "1" * 40
@@ -1102,6 +1131,34 @@ def test_ec03_cosign_bundle_preserves_unavailable_verifier_state(tmp_path, monke
     assert result["reason"] == "verifier_tool_unavailable"
     assert result["verifier"]["status"] == "unavailable"
     assert not run_dir.joinpath("attestation.sigstore.json").is_symlink()
+
+
+def test_ec03_ignores_wrong_run_verifier_outage_for_claim_status(tmp_path, monkeypatch):
+    import subprocess
+
+    from brigade import control_crosswalk_cosign
+
+    target = _ws(tmp_path)
+    _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    _write_cosign_assessment_fixture(target, run_dir_name="verify-b", producer_run_id="other-run")
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+    calls = []
+
+    def timeout_wrong_run(command, **kwargs):
+        calls.append(command)
+        bundle_path = command[command.index("--bundle") + 1]
+        if "verify-b" in bundle_path:
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(control_crosswalk_cosign.subprocess, "run", timeout_wrong_run)
+
+    result = _assess(target, "EC-03", RUN)
+
+    assert result["outcome"] == "validated"
+    assert result["verifier"]["status"] == "wired"
+    assert result["population"]["wrong_run"] == 1
+    assert len(calls) == 2
 
 
 def test_ec03_rejects_receipt_tampering_before_incomplete_classification(tmp_path):
