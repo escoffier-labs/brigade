@@ -193,7 +193,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "See https://example.com/callback?token=hunter2",
         "See https://example.com/callback?%74oken=hunter2",
         "See https://example.com/config?env=SERVICE_MODE%3Dproduction",
-        "See https://example.com/#/callback?path=/home/example",
+        "See https://example.com/#/callback?path=/srv/private",
         "See https://example.com/callback?api%5Fkey=hunter2",
         "See https://example.com/password%3Dhunter2",
         "password is [hunter2]",
