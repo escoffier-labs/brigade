@@ -7,11 +7,12 @@ import json
 import os
 import secrets
 import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import attestation_input, attestation_receipt, evidence_package, evidence_redaction, localio
+from . import attestation_input, attestation_receipt, dirfd, evidence_package, evidence_redaction, localio
 
 SCHEMA = "brigade.evidence_package_derivative.v1"
 SCHEMA_VERSION = 1
@@ -45,12 +46,56 @@ class DerivativeReport:
     derivative_sha256: str
 
 
-def _read(path: Path) -> bytes:
-    if not path.is_file() or path.is_symlink():
-        raise DerivativeExportError(f"source artifact is not a regular file: {path.name}")
-    if path.stat().st_size > evidence_package.MAX_ENTRY_BYTES:
-        raise DerivativeExportError(f"source artifact exceeds size limit: {path.name}")
-    return path.read_bytes()
+def _file_observation(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def _read(root_fd: int, name: str) -> bytes:
+    descriptor = -1
+    try:
+        named = dirfd.stat_child(root_fd, name)
+        if not stat.S_ISREG(named.st_mode):
+            raise DerivativeExportError(f"source artifact is not a regular file: {name}")
+        if named.st_size > evidence_package.MAX_ENTRY_BYTES:
+            raise DerivativeExportError(f"source artifact exceeds size limit: {name}")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+        descriptor = dirfd.open_child_file(root_fd, name, flags)
+        initial = os.fstat(descriptor)
+        if not stat.S_ISREG(initial.st_mode):
+            raise DerivativeExportError(f"source artifact is not a regular file: {name}")
+        if _file_observation(initial) != _file_observation(named):
+            raise DerivativeExportError(f"source artifact changed while reading: {name}")
+        if initial.st_size < 0 or initial.st_size > evidence_package.MAX_ENTRY_BYTES:
+            raise DerivativeExportError(f"source artifact exceeds size limit: {name}")
+
+        chunks: list[bytes] = []
+        count = 0
+        while True:
+            chunk = os.read(descriptor, min(64 * 1024, evidence_package.MAX_ENTRY_BYTES + 1 - count))
+            if not chunk:
+                break
+            count += len(chunk)
+            if count > evidence_package.MAX_ENTRY_BYTES:
+                raise DerivativeExportError(f"source artifact exceeds size limit: {name}")
+            chunks.append(chunk)
+
+        final = os.fstat(descriptor)
+        current = dirfd.stat_child(root_fd, name)
+        if (
+            count != initial.st_size
+            or _file_observation(final) != _file_observation(initial)
+            or _file_observation(current) != _file_observation(initial)
+        ):
+            raise DerivativeExportError(f"source artifact changed while reading: {name}")
+        return b"".join(chunks)
+    except DerivativeExportError:
+        raise
+    except (OSError, NotImplementedError, AttributeError) as exc:
+        raise DerivativeExportError(f"source artifact could not be read safely: {name}") from exc
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
 
 
 def _json_object(data: bytes, name: str) -> dict[str, Any]:
@@ -149,7 +194,15 @@ def export_derivative(
     if "manifest.json" not in names or "receipt.json" not in names:
         raise DerivativeExportError("source is not a portable evidence package")
     known_names = [name for name in names if name in _SUPPORTED]
-    raw = {name: _read(source / name) for name in known_names}
+    root_fd = -1
+    try:
+        root_fd = dirfd.open_directory_nofollow(source, writable=False)
+        raw = {name: _read(root_fd, name) for name in known_names}
+    except OSError as exc:
+        raise DerivativeExportError("source package could not be opened safely") from exc
+    finally:
+        if root_fd != -1:
+            os.close(root_fd)
     manifest = _json_object(raw["manifest.json"], "manifest")
     if manifest.get("schema") != evidence_package.SCHEMA:
         raise DerivativeExportError("unsupported source package schema")
@@ -162,6 +215,17 @@ def export_derivative(
     source_metadata = manifest.get("source")
     if not isinstance(source_metadata, dict) or source_metadata.get("receipt_sha256") != receipt_snapshot.digest:
         raise DerivativeExportError("source manifest receipt digest does not match receipt")
+    source_identity_fields = {
+        "verify_run_id": "run_id",
+        "producer_run_id": "producer_run_id",
+        "tree_fingerprint": "tree_fingerprint",
+        "baseline_commit": "baseline_commit",
+    }
+    if any(
+        source_key not in source_metadata or source_metadata[source_key] != receipt.get(receipt_key)
+        for source_key, receipt_key in source_identity_fields.items()
+    ):
+        raise DerivativeExportError("source manifest identities do not match receipt")
     patch_data = raw.get("changes.patch")
     patch_digest = hashlib.sha256(patch_data).hexdigest() if patch_data is not None else None
     receipt_patch_digest = receipt.get("changes_patch_sha256")

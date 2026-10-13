@@ -168,6 +168,78 @@ def test_derivative_rejects_receipt_rewritten_with_recomputed_package_hashes(tmp
         raise AssertionError("derivative accepted a rewritten receipt with recomputed package hashes")
 
 
+def test_derivative_rejects_receipt_with_stale_manifest_source_identities(tmp_path: Path) -> None:
+    identity_fields = {
+        "producer_run_id": "20261013-120001-work-verify-altered",
+        "tree_fingerprint": "f" * 40,
+        "baseline_commit": "a" * 40,
+    }
+    for field, altered_value in identity_fields.items():
+        target = tmp_path / field
+        target.mkdir()
+        _, receipt = _fabricated_run_dir(target)
+        source = target / "source"
+        assert evidence_package.export_package(target=target, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+
+        altered = json.loads((source / "receipt.json").read_text(encoding="utf-8"))
+        altered[field] = altered_value
+        _stamp_receipt(altered)
+        receipt_bytes = json.dumps(altered, indent=2, sort_keys=True).encode() + b"\n"
+        (source / "receipt.json").write_bytes(receipt_bytes)
+        manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+        manifest["source"]["receipt_sha256"] = evidence_derivative.attestation_receipt.snapshot_stored_receipt(
+            altered
+        ).digest
+        (source / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _refresh_package_entry(source, "receipt.json", receipt_bytes)
+
+        try:
+            evidence_derivative.export_derivative(
+                source=source,
+                out=target / "derivative",
+                recipient="recipient-42",
+                authority="approved-case-7",
+                lawful_basis="contract",
+                necessity="review",
+            )
+        except evidence_derivative.DerivativeExportError as exc:
+            assert str(exc) == "source manifest identities do not match receipt"
+        else:
+            raise AssertionError(f"derivative accepted a stale {field} manifest identity")
+
+
+def test_derivative_rejects_source_artifact_replaced_after_initial_stat(tmp_path: Path, monkeypatch) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    original_open = evidence_derivative.dirfd.open_child_file
+    replaced = False
+
+    def replace_before_open(root_fd: int, name: str, flags: int, mode: int = 0o600) -> int:
+        nonlocal replaced
+        if name == "changes.patch" and not replaced:
+            replacement = tmp_path / "replacement.patch"
+            replacement.write_bytes(b"replacement")
+            replacement.replace(source / name)
+            replaced = True
+        return original_open(root_fd, name, flags, mode)
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "open_child_file", replace_before_open)
+    try:
+        evidence_derivative.export_derivative(
+            source=source,
+            out=tmp_path / "derivative",
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == "source artifact changed while reading: changes.patch"
+    else:
+        raise AssertionError("derivative accepted an artifact replaced after its initial stat")
+
+
 def test_derivative_rejects_patch_rewritten_with_recomputed_package_hashes(tmp_path: Path) -> None:
     _, receipt = _fabricated_run_dir(tmp_path)
     source = tmp_path / "source"
