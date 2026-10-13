@@ -113,6 +113,15 @@ def test_roster_snapshot_preserves_invalid_final_fallback():
     assert roster.agents["grok-review"].invalid_final_fallback == "cursor-grok"
 
 
+def test_legacy_approval_handoff_uses_run_transport_only_when_field_missing():
+    run_meta = {"codex_transport": "app-server"}
+
+    assert run_resume._is_resumable_appserver_result({}, run_meta)
+    assert run_resume._is_resumable_appserver_result({"transport": "codex-app-server"}, run_meta)
+    assert not run_resume._is_resumable_appserver_result({"transport": "direct"}, run_meta)
+    assert not run_resume._is_resumable_appserver_result({}, {"codex_transport": "direct"})
+
+
 def test_roster_snapshot_preserves_cloud_safe_mode():
     snapshot = {
         "orchestrator": "chef",

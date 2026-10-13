@@ -320,7 +320,8 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
     late_permission: dict[str, object] | None = None
     stream_finalized = False
     has_structured_jsonrpc_error = False
-    config_option_request_ids: set[tuple[str, str | int]] = set()
+    config_option_request_ids: dict[tuple[str, str | int], str] = {}
+    effective_model_locator: str | None = None
     for message in messages:
         method = message.get("method")
         message_id = message.get("id")
@@ -332,13 +333,16 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
         else:
             message_id_key = None
         if method in ("session/new", "session/set_config_option") and message_id_key is not None:
-            config_option_request_ids.add(message_id_key)
+            config_option_request_ids[message_id_key] = (
+                "acp-session-new-response" if method == "session/new" else "acp-set-config-option-response"
+            )
         is_response = "result" in message or "error" in message
         matched_config_request = (
             is_response and message_id_key is not None and message_id_key in config_option_request_ids
         )
+        response_locator = config_option_request_ids.get(message_id_key) if message_id_key is not None else None
         if is_response and message_id_key is not None:
-            config_option_request_ids.discard(message_id_key)
+            config_option_request_ids.pop(message_id_key, None)
         result = message.get("result")
         if isinstance(result, dict):
             version = result.get("protocolVersion")
@@ -346,6 +350,8 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
                 protocol_version = version
             if "error" not in message and "configOptions" in result and matched_config_request:
                 effective_model = _model_from_config_options(result["configOptions"])
+                if effective_model is not None:
+                    effective_model_locator = response_locator
             stop = result.get("stopReason")
             if isinstance(stop, str) and isinstance(message.get("id"), (str, int)):
                 stop_reasons[str(message["id"])] = stop
@@ -368,6 +374,8 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
             safe_events.append(safe_event)
             if kind == "config_option_update" and ("modelId" in update or "configOptions" in update):
                 effective_model = _model_from(update)
+                if effective_model is not None:
+                    effective_model_locator = "acp-config-option-update"
             if not stream_finalized and kind == "agent_message_chunk":
                 content = update.get("content")
                 if isinstance(content, dict) and content.get("type") == "text" and isinstance(content.get("text"), str):
@@ -399,6 +407,7 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
         "request_id": request_id,
         "stop_reason": stop_reason,
         "effective_model": effective_model,
+        "effective_model_locator": effective_model_locator,
         "events": safe_events,
         "prompt_completed": prompt_completed,
         "has_structured_jsonrpc_error": has_structured_jsonrpc_error,
@@ -583,6 +592,7 @@ def run_cursor(
                     transport="acpx",
                     requested_model=model,
                     effective_model=parsed["effective_model"],
+                    effective_model_locator=parsed["effective_model_locator"],
                     stop_reason=parsed["stop_reason"],
                     protocol_version=parsed["protocol_version"],
                     session_id=parsed["session_id"],
@@ -602,6 +612,7 @@ def run_cursor(
                 transport="acpx",
                 requested_model=model,
                 effective_model=parsed["effective_model"],
+                effective_model_locator=parsed["effective_model_locator"],
                 stop_reason=parsed["stop_reason"],
                 protocol_version=parsed["protocol_version"],
                 session_id=parsed["session_id"],
@@ -635,6 +646,7 @@ def run_cursor(
             transport="acpx",
             requested_model=model,
             effective_model=parsed.get("effective_model") if parsed is not None else None,
+            effective_model_locator=parsed.get("effective_model_locator") if parsed is not None else None,
             stop_reason=parsed.get("stop_reason") if parsed is not None else None,
             protocol_version=parsed.get("protocol_version") if parsed is not None else None,
             session_id=parsed.get("session_id") if parsed is not None else None,
@@ -656,6 +668,7 @@ def run_cursor(
             transport="acpx",
             requested_model=model,
             effective_model=parsed.get("effective_model") if parsed is not None else None,
+            effective_model_locator=parsed.get("effective_model_locator") if parsed is not None else None,
             stop_reason=parsed.get("stop_reason") if parsed is not None else None,
             protocol_version=parsed.get("protocol_version") if parsed is not None else None,
             session_id=parsed.get("session_id") if parsed is not None else None,
@@ -677,6 +690,7 @@ def run_cursor(
             transport="acpx",
             requested_model=model,
             effective_model=parsed["effective_model"],
+            effective_model_locator=parsed["effective_model_locator"],
             stop_reason=parsed["stop_reason"],
             protocol_version=parsed["protocol_version"],
             session_id=parsed["session_id"],
@@ -698,6 +712,7 @@ def run_cursor(
             transport="acpx",
             requested_model=model,
             effective_model=parsed["effective_model"],
+            effective_model_locator=parsed["effective_model_locator"],
             stop_reason=parsed["stop_reason"],
             protocol_version=parsed["protocol_version"],
             session_id=parsed["session_id"],
@@ -714,6 +729,7 @@ def run_cursor(
         transport="acpx",
         requested_model=model,
         effective_model=parsed["effective_model"],
+        effective_model_locator=parsed["effective_model_locator"],
         stop_reason=parsed["stop_reason"],
         protocol_version=parsed["protocol_version"],
         session_id=parsed["session_id"],

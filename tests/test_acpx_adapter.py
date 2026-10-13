@@ -281,6 +281,7 @@ def test_run_refuses_unauthenticated_cursor_before_acpx(monkeypatch, tmp_path):
     assert result.ok is False
     assert result.failure_phase == "preflight"
     assert result.failure_kind == "provider-auth"
+    assert result.requested_model == "composer-2.5"
     assert result.detail == (
         "cursor-agent CLI is not logged in; run `cursor-agent login` once, then verify with `cursor-agent status`"
     )
@@ -597,6 +598,9 @@ def test_parse_stream_reads_standard_model_config_options(message):
 
     assert error == ""
     assert parsed is not None and parsed["effective_model"] == "composer-2.5"
+    assert parsed["effective_model_locator"] == (
+        "acp-config-option-update" if message.get("method") == "session/update" else "acp-session-new-response"
+    )
 
 
 def test_parse_stream_ignores_config_options_from_unrelated_response():
@@ -718,6 +722,7 @@ def test_parse_stream_reads_model_config_from_set_option_response():
 
     assert error == ""
     assert parsed is not None and parsed["effective_model"] == "composer-2.5"
+    assert parsed["effective_model_locator"] == "acp-set-config-option-response"
 
 
 def test_failed_run_preserves_observed_model_and_session_metadata(monkeypatch, tmp_path):

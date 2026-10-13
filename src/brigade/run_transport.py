@@ -325,6 +325,7 @@ class WorkerResult:
     transport: str = "cli"
     requested_model: str | None = None
     effective_model: str | None = None
+    effective_model_locator: str | None = None
     reasoning: str | None = None
     stop_reason: str | None = None
     protocol_version: int | None = None
@@ -364,13 +365,13 @@ def _metadata_provenance(result: agents.AgentResult) -> dict[str, object] | None
     )
     fields["requested_model"] = {
         "source": "unknown" if result.requested_model is None else "declared",
-        "locator": "launch-argument",
+        "locator": "configured-request" if result.failure_phase == "preflight" else "launch-argument",
         "digest": None,
-        "unknown_reason": requested_unknown,
+        "unknown_reason": "execution-not-started" if result.failure_phase == "preflight" else requested_unknown,
     }
     fields["effective_model"] = {
         "source": "unknown" if result.effective_model is None else "observed",
-        "locator": "acp-config-option-update",
+        "locator": result.effective_model_locator or "no-backend-observation",
         "digest": None,
         "unknown_reason": "effective-model-not-reported"
         if result.effective_model is None
@@ -1084,6 +1085,7 @@ def dispatch(
                 transport=result.transport,
                 requested_model=result.requested_model,
                 effective_model=result.effective_model,
+                effective_model_locator=result.effective_model_locator,
                 reasoning=result.reasoning,
                 stop_reason=result.stop_reason,
                 protocol_version=result.protocol_version,

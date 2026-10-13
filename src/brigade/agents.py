@@ -570,6 +570,7 @@ class AgentResult:
     transport: str = "cli"
     requested_model: str | None = None
     effective_model: str | None = None
+    effective_model_locator: str | None = None
     reasoning: str | None = None
     stop_reason: str | None = None
     protocol_version: int | None = None

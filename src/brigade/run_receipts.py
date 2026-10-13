@@ -32,11 +32,18 @@ _ALLOWED_METADATA_PROVENANCE: dict[str, set[tuple[str, str, str | None]]] = {
     "requested_model": {
         ("declared", "launch-argument", "mutable-alias-not-backend-identity"),
         ("declared", "launch-argument", "launched-argument-not-backend-observation"),
+        ("declared", "configured-request", "execution-not-started"),
+        ("unknown", "configured-request", "execution-not-started"),
         ("unknown", "launch-argument", "requested-model-not-recorded"),
     },
     "effective_model": {
+        ("unknown", "no-backend-observation", "effective-model-not-reported"),
         ("observed", "acp-config-option-update", "backend-revision-unavailable"),
+        ("observed", "acp-session-new-response", "backend-revision-unavailable"),
+        ("observed", "acp-set-config-option-response", "backend-revision-unavailable"),
         ("unknown", "acp-config-option-update", "effective-model-not-reported"),
+        ("unknown", "acp-session-new-response", "effective-model-not-reported"),
+        ("unknown", "acp-set-config-option-response", "effective-model-not-reported"),
     },
     "acpx_version": {
         ("observed", "acpx-version-output", None),

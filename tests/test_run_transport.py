@@ -16,6 +16,30 @@ from brigade.roster import Agent, Roster
 from brigade.run_transport import Assignment
 
 
+def test_acpx_metadata_provenance_uses_adapter_evidence_locators():
+    response_result = agents.AgentResult(
+        text="answer",
+        ok=True,
+        transport="acpx",
+        requested_model="composer-2.5",
+        effective_model="composer-2.5",
+        effective_model_locator="acp-session-new-response",
+    )
+    preflight_result = agents.AgentResult(
+        text="",
+        ok=False,
+        failure_phase="preflight",
+        transport="acpx",
+        requested_model="composer-2.5",
+    )
+
+    response = run_transport._metadata_provenance(response_result)["fields"]
+    preflight = run_transport._metadata_provenance(preflight_result)["fields"]
+    assert response["effective_model"]["locator"] == "acp-session-new-response"
+    assert preflight["requested_model"]["locator"] == "configured-request"
+    assert preflight["requested_model"]["unknown_reason"] == "execution-not-started"
+
+
 def _roster() -> Roster:
     return Roster(
         orchestrator="chef",

@@ -317,6 +317,12 @@ def _interrupted_appserver_results(run_dir: Path) -> dict | None:
     return receipt_schema.worker_results_document(recovered)
 
 
+def _is_resumable_appserver_result(result: dict, run_meta: dict) -> bool:
+    return result.get("transport") == "codex-app-server" or (
+        "transport" not in result and run_meta.get("codex_transport") == "app-server"
+    )
+
+
 def _interrupted_salvage_blocked(
     run_dir: Path,
     run_meta: dict,
@@ -763,7 +769,7 @@ def _resume_locked(
     resumable = [
         r
         for r in results
-        if r.get("transport") == "codex-app-server"
+        if _is_resumable_appserver_result(r, run_meta)
         and isinstance(r.get("thread_id"), str)
         and not r.get("ok")
         and r.get("status") in _RESUMABLE_STATUSES
