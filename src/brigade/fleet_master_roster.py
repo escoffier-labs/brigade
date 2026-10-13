@@ -22,7 +22,7 @@ _DANGEROUS_VALUE = re.compile(
     r"\bauth(?:entication)?[ -]profile(?:\s*[:=]\s*|\s+)(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+')|"
     r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
-    r"(?:^|[^A-Za-z0-9_.-])(?:~[/\\]|/(?:home|Users|root|run/user)/|"
+    r"(?:^|[^A-Za-z0-9_.-])(?:~[/\\]|[/\\]|\.{1,2}[/\\]|"
     r"[A-Za-z]:[/\\]|%USERPROFILE%))",
     re.IGNORECASE,
 )
