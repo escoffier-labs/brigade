@@ -130,8 +130,14 @@ def receipt_binding_candidates(staged_package: Path) -> dict[str, object]:
 
 
 def binding_candidates(
-    obs: control_readiness.ArtifactObservation, source: object, receipt: dict[str, object]
+    obs: control_readiness.ArtifactObservation,
+    source: object,
+    receipt: dict[str, object],
+    *,
+    strict_package: bool,
 ) -> dict[str, object]:
+    if strict_package and obs.proposed == "invalid":
+        return {f"receipt.{name}": value for name, value in receipt.items()}
     if obs.proposed == "rejected" and not receipt:
         return {}
     candidates = (
@@ -144,6 +150,17 @@ def binding_candidates(
     )
     candidates.update(receipt)
     return candidates
+
+
+def unreadable_manifest_observation(
+    reader: _control_crosswalk_io._AssessmentReader, relpath: str, path: Path
+) -> control_readiness.ArtifactObservation:
+    reason = reader.errors.get(path)
+    if reason == "read_limit_exceeded":
+        return _unavailable(relpath, reason)
+    return control_readiness.ArtifactObservation(
+        relpath, "discovered", "invalid", control_readiness.dims(), ["invalid_json"]
+    )
 
 
 def needs_staged_receipt(obs: control_readiness.ArtifactObservation) -> bool:

@@ -703,6 +703,25 @@ def test_ec12_binds_package_mismatch_from_packaged_receipt(tmp_path):
     assert readiness["reason"] == "package_snapshot_mismatch"
 
 
+def test_ec12_does_not_bind_invalid_package_from_unstaged_manifest(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-invalid-binding"
+    _write_strict_package(package_dir, producer_run_id=RUN)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"]["producer_run_id"] = "other-run"
+    manifest["source"]["verify_run_id"] = "other-run"
+    manifest["entries"][0]["bytes"] = -1
+    _write_json(manifest_path, manifest)
+
+    result = _assess(target, "EC-12", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "invalid"
+    assert result["artifacts"][0]["scope"] == "unbound"
+
+
 def test_ec12_does_not_period_filter_rejected_package_from_manifest_timestamp(tmp_path):
     target = _ws(tmp_path)
     package_dir = target / ".brigade" / "evidence-packages" / "pkg-tampered-period"
@@ -749,7 +768,7 @@ def test_ec12_does_not_period_filter_schema_invalid_package_from_manifest_timest
     assert result["artifacts"][0]["scope"] == "in_scope"
 
 
-def test_ec12_reserves_manifest_reads_for_the_discovered_package_population(tmp_path, monkeypatch):
+def test_ec12_caps_manifest_and_entry_reads_for_the_discovered_population(tmp_path, monkeypatch):
     target = _ws(tmp_path)
     package_root = target / ".brigade" / "evidence-packages"
     first = package_root / "pkg-1"
@@ -763,7 +782,8 @@ def test_ec12_reserves_manifest_reads_for_the_discovered_package_population(tmp_
     readiness = _assess(target, "EC-12")
 
     assert readiness["artifacts"][0]["outcome"] == "validated"
-    assert readiness["artifacts"][1]["outcome"] == "validated"
+    assert readiness["artifacts"][1]["outcome"] == "unavailable"
+    assert "read_limit_exceeded" in readiness["artifacts"][1]["reason_codes"]
 
 
 def test_ec12_ignores_unavailable_wrong_run_package_verifier_state(tmp_path, monkeypatch):
@@ -2086,8 +2106,7 @@ def test_wrong_run_receipt_is_excluded_and_counted(tmp_path):
 def test_wrong_run_package_manifest_uses_recorded_verify_run_id(tmp_path):
     target = _ws(tmp_path)
     pkg = target / ".brigade" / "evidence-packages" / "pkg-1"
-    _write_json(pkg / "manifest.json", _package_manifest([_RECEIPT_ENTRY], verify_run_id="other-run"))
-    (pkg / "receipt.json").write_text("{}")
+    _write_strict_package(pkg, producer_run_id="other-producer", verify_run_id="other-run")
     readiness = _assess(target, "EC-12", RUN)
     assert readiness["population"]["wrong_run"] == 1
     assert readiness["outcome"] == "absent"
@@ -3013,17 +3032,13 @@ def test_ec12_unknown_snapshot_code_is_unavailable(tmp_path, monkeypatch):
 def test_package_scope_accepts_each_recorded_run_namespace(tmp_path, selected_run, binding):
     target = _ws(tmp_path)
     pkg = target / ".brigade" / "evidence-packages" / "pkg-1"
-    manifest = _package_manifest([_RECEIPT_ENTRY], verify_run_id="verify-other")
-    manifest["source"]["producer_run_id"] = RUN
-    _write_json(pkg / "manifest.json", manifest)
-    (pkg / "receipt.json").write_text("{}")
+    _write_strict_package(pkg, producer_run_id=RUN, verify_run_id="verify-other")
     observed = _assess(target, "EC-12", selected_run)
     assert observed["population"]["in_scope"] == 1
     assert observed["population"]["wrong_run"] == 0
     assert observed["artifacts"][0]["run_binding"] == binding
-    assert observed["outcome"] == "invalid"
-    assert observed["validation_level"] == "discovered"
-    assert "schema_missing" in observed["reason_codes"]
+    assert observed["outcome"] == "validated"
+    assert observed["validation_level"] == "claim_validated"
     foreign = _assess(target, "EC-12", "foreign-producer")
     assert foreign["population"]["wrong_run"] == 1
     assert foreign["outcome"] == "absent"

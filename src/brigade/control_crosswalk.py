@@ -1364,17 +1364,14 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
     adapter = _VERIFIER_ADAPTERS.get("evidence-package")
     strict_adapter = adapter is _verify_evidence_package
     package_dirs: list[Path] = []
-    reservable_package_count = 0
     if error is None and _discovery_path_present(ctx, out, root / "manifest.json"):
         package_dirs.append(root)
-        reservable_package_count += 1
     for child in children:
         if strict_adapter and _is_symlink(ctx, child):
             package_dirs.append(child)
         elif _discovery_path_present(ctx, out, child, directory=True):
             package_dirs.append(child)
-            reservable_package_count += 1
-    manifest_reserve = evidence_package_snapshot.MAX_PACKAGE_BYTES * reservable_package_count if strict_adapter else 0
+    manifest_reserve = evidence_package_snapshot.MAX_PACKAGE_BYTES if strict_adapter else 0
     for package_dir in package_dirs:
         path = package_dir / "manifest.json"
         staged_receipt_candidates: dict[str, object] = {}
@@ -1395,7 +1392,7 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
             else:
                 obs = _invalid(ctx, path, "symlink_refused")
         elif manifest is None:
-            obs = _invalid(ctx, path, "invalid_json")
+            obs = control_crosswalk_package.unreadable_manifest_observation(ctx.reader, relpath, path)
         elif adapter is not None:
             try:
                 obs = _adapter_observation(adapter, ctx, package_dir, relpath, reserve_bytes=manifest_reserve)
@@ -1408,7 +1405,9 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
         else:
             obs = _assess_package_manifest(ctx, package_dir, relpath, manifest)
         source = manifest.get("source") if isinstance(manifest, dict) else None
-        candidates = control_crosswalk_package.binding_candidates(obs, source, staged_receipt_candidates)
+        candidates = control_crosswalk_package.binding_candidates(
+            obs, source, staged_receipt_candidates, strict_package=strict_adapter
+        )
         _bind(obs, ctx, control_crosswalk_cosign.binding_candidates(obs, candidates))
         manifest = control_crosswalk_package.trusted_timestamp_manifest(manifest, obs, strict_package=strict_adapter)
         obs.timestamp = _first_timestamp(manifest, "created_at")
