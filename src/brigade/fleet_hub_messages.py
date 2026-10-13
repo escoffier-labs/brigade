@@ -107,6 +107,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "SELECT 1 FROM fleet_message_sends AS s WHERE s.sender=m.sender AND s.client_id=m.client_id)"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS fleet_messages_inbox ON fleet_messages (recipient, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS fleet_messages_created_at ON fleet_messages (created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS fleet_messages_reply_to ON fleet_messages (reply_to)")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS fleet_message_sends_sender_received ON fleet_message_sends (sender, received_at)"
     )
@@ -145,12 +147,14 @@ def _prune_expired(conn: sqlite3.Connection) -> None:
 
 
 def unread_counts(conn: sqlite3.Connection) -> dict[str, int]:
-    """Unread message totals keyed by recipient principal for the fleet board."""
+    """Unread message totals keyed by enrolled machine identity for the fleet board."""
     _prune_expired(conn)
     counts = {
         str(recipient): int(count)
         for recipient, count in conn.execute(
-            "SELECT recipient,COUNT(*) FROM fleet_messages WHERE acked_at IS NULL GROUP BY recipient"
+            "SELECT message.recipient,COUNT(*) FROM fleet_messages AS message "
+            "JOIN nodes ON nodes.node_id=message.recipient "
+            "WHERE message.acked_at IS NULL GROUP BY message.recipient"
         )
     }
     conn.commit()

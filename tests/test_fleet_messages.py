@@ -305,6 +305,19 @@ def test_expired_messages_are_pruned_before_read_ack_reply_and_unread_count(mess
     conn.close()
 
 
+def test_message_schema_indexes_retention_prune_columns(message_hub):
+    _base, _token_a, _token_b, db = message_hub
+    conn = sqlite3.connect(db)
+    indexes = {
+        tuple(column[2] for column in conn.execute(f'PRAGMA index_info("{row[1]}")'))
+        for row in conn.execute("PRAGMA index_list(fleet_messages)")
+    }
+    conn.close()
+
+    assert ("created_at",) in indexes
+    assert ("reply_to",) in indexes
+
+
 def test_expired_idempotent_retry_prunes_before_lookup(message_hub):
     base, token_a, _token_b, db = message_hub
     request = {"action": "send", "to": NODE_B, "subject": "Retry", "body": "Expire", "client_id": "expired-key"}
@@ -381,6 +394,8 @@ def test_named_external_principal_uses_its_own_revocable_identity(message_hub):
         {"action": "send", "to": "agent:miller", "subject": "Task", "body": "Review this", "client_id": "task-1"},
     )
     assert sent[0] == 201
+    page = _get(base, ADMIN, "/view/machines")
+    assert 'data-node="agent:miller"' not in page
     inbox = _request(base, token, {"action": "list", "unacked": True})
     assert inbox[0] == 200
     assert inbox[1]["messages"][0]["sender"] == NODE_A
