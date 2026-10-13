@@ -90,7 +90,7 @@ def _latest_sql(
             ", CASE WHEN latest.seat IS NOT NULL AND trim(latest.seat) != '' AND trim(latest.seat) != '-' "
             "THEN latest.seat ELSE (SELECT e2.seat FROM events e2 "
             "WHERE e2.run_id = latest.run_id AND ((latest.harness = 'grokbot' AND e2.harness = 'grokbot') "
-            "OR (latest.harness != 'grokbot' AND e2.node_id = latest.node_id)) "
+            "OR (COALESCE(latest.harness, '') != 'grokbot' AND e2.node_id = latest.node_id)) "
             "AND e2.seat IS NOT NULL AND trim(e2.seat) != '' AND e2.seat != '-' "
             "ORDER BY e2.sequence DESC, e2.received_at DESC, e2.digest DESC LIMIT 1) END AS last_known_seat"
         )

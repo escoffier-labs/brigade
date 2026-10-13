@@ -1652,7 +1652,7 @@ def test_spool_flush_resolves_reply_before_blocked_recipient_delivery(tmp_path, 
                 "recipient": NODE_B,
             }
         if message["action"] == "list":
-            return 200, {"messages": [{"id": 77, "sender": NODE_B}]}
+            return 200, {"messages": [{"id": 77, "sender": NODE_B}], "next_cursor": 77}
         return 201, {"message": {"client_id": message["client_id"]}}
 
     monkeypatch.setattr(fleet_client_messages, "_request", request)
@@ -1661,6 +1661,123 @@ def test_spool_flush_resolves_reply_before_blocked_recipient_delivery(tmp_path, 
 
     assert attempts == ["send", "list"]
     assert [message["client_id"] for message in fleet_client._read_spool(path)] == ["blocked-send", "blocked-reply"]
+
+
+def test_spool_reply_recipient_lookup_obeys_drain_deadline_and_batch_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client_messages, "monotonic", iter((0.0, 0.0, 0.0, 11.0)).__next__)
+    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    now = datetime.now(timezone.utc).isoformat()
+    messages = [
+        {"action": "send", "to": NODE_B, "client_id": "blocked-send", "enqueued_at": now},
+        {"action": "reply", "id": 77, "client_id": "blocked-reply-1", "enqueued_at": now},
+        {"action": "reply", "id": 78, "client_id": "blocked-reply-2", "enqueued_at": now},
+    ]
+    with fleet_client._spool_lock(path) as dir_fd:
+        for message in messages:
+            assert fleet_client._spool_append_locked(path, message, dir_fd=dir_fd)
+    attempts = []
+
+    def request(_hub, _token, message, **kwargs):
+        attempts.append((message["action"], kwargs.get("timeout")))
+        if message["action"] == "send":
+            return 429, {
+                "error": "recipient quota exceeded",
+                "code": "message_recipient_quota",
+                "recipient": NODE_B,
+            }
+        if message["action"] == "list":
+            next_cursor = message["after"] + 1
+            return 200, {"messages": [{"id": next_cursor, "sender": NODE_B}], "next_cursor": next_cursor}
+        return 201, {"message": {"client_id": message["client_id"]}}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+
+    assert fleet_client_messages._flush_locked(path, "https://hub.invalid", "node-token", max_messages=2) == 0
+
+    assert attempts == [("send", None), ("list", 1.0)]
+    assert [message["client_id"] for message in fleet_client._read_spool(path)] == [
+        "blocked-send",
+        "blocked-reply-1",
+        "blocked-reply-2",
+    ]
+
+
+def test_spool_drops_reply_when_parent_is_gone_and_continues_other_recipients(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    now = datetime.now(timezone.utc).isoformat()
+    messages = [
+        {"action": "send", "to": NODE_B, "client_id": "inactive-send", "enqueued_at": now},
+        {"action": "reply", "id": 77, "client_id": "orphan-reply", "enqueued_at": now},
+        {"action": "send", "to": NODE_A, "client_id": "deliver-send", "enqueued_at": now},
+    ]
+    with fleet_client._spool_lock(path) as dir_fd:
+        for message in messages:
+            assert fleet_client._spool_append_locked(path, message, dir_fd=dir_fd)
+    attempts = []
+
+    def request(_hub, _token, message, **_kwargs):
+        attempts.append(message["action"])
+        if message.get("client_id") == "inactive-send":
+            return 400, {
+                "error": "recipient is inactive",
+                "code": "message_recipient_inactive",
+                "recipient": NODE_B,
+            }
+        if message["action"] == "list":
+            return 200, {"messages": [], "next_cursor": 76}
+        return 201, {"message": {"client_id": message["client_id"]}}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+
+    assert fleet_client_messages._flush_locked(path, "https://hub.invalid", "node-token") == 1
+
+    assert attempts == ["send", "list", "send"]
+    assert [message["client_id"] for message in fleet_client._read_spool(path)] == ["inactive-send"]
+
+
+def test_new_send_does_not_probe_unresolved_replies_after_spool_batch_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
+    monkeypatch.setattr(fleet_client_messages, "MESSAGE_BATCH_SIZE", 1)
+    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    now = datetime.now(timezone.utc).isoformat()
+    messages = [
+        {"action": "send", "to": NODE_B, "client_id": "old-send", "enqueued_at": now},
+        {"action": "reply", "id": 77, "client_id": "old-reply", "enqueued_at": now},
+    ]
+    with fleet_client._spool_lock(path) as dir_fd:
+        for message in messages:
+            assert fleet_client._spool_append_locked(path, message, dir_fd=dir_fd)
+    attempts = []
+
+    def request(_hub, _token, message, **_kwargs):
+        attempts.append(message["action"])
+        return 201, {"message": {"client_id": message["client_id"]}}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+
+    result = fleet_client_messages.send(
+        recipient=NODE_A,
+        subject="New message",
+        body="Keep the batch bounded",
+        reference=None,
+        priority="normal",
+    )
+
+    assert result["queued"] is True
+    assert attempts == ["send"]
+    assert [message["client_id"] for message in fleet_client._read_spool(path)] == [
+        "old-reply",
+        result["client_id"],
+    ]
 
 
 @pytest.mark.parametrize(("recipient", "queued"), [(NODE_B, True), (NODE_A, False)])
@@ -1745,7 +1862,7 @@ def test_new_reply_waits_only_behind_blocked_messages_for_its_recipient(tmp_path
                 "recipient": NODE_B,
             }
         if message["action"] == "list":
-            return 200, {"messages": [{"id": 77, "sender": reply_recipient}]}
+            return 200, {"messages": [{"id": 77, "sender": reply_recipient}], "next_cursor": 77}
         return 201, {"message": {"client_id": message["client_id"]}}
 
     monkeypatch.setattr(fleet_client_messages, "_request", request)

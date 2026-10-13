@@ -1405,6 +1405,23 @@ class TestBoardBounds:
         assert "worker/codex" in unfiltered_page
         assert not any("SELECT seat FROM events WHERE node_id" in statement for statement in statements)
 
+    def test_machine_page_resolves_seat_when_latest_event_has_no_harness(self, hub):
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(NODE_A, "nullable-harness-seat", 1, "run.started", repo="repo", harness="codex", ts=stamp),
+            _event(NODE_A, "nullable-harness-seat", 2, "run.completed", repo="repo", harness="codex", ts=stamp),
+        ]
+        events[1]["harness"] = None
+        events[1]["seat"] = None
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+
+        status, _headers, page = _request(hub, "GET", "/view/machines?all=1&seat=worker", headers=_bearer())
+
+        assert status == 200
+        assert "nullable-harness-seat" in page
+        assert ">worker<" in page
+
     def test_claim_only_machine_cards_are_bounded_and_paginated(self, hub, monkeypatch):
         node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
         stamp = datetime.now(timezone.utc).isoformat()

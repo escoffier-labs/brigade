@@ -155,32 +155,29 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
     try:
         with fleet_client._spool_lock(path) as dir_fd:
             if _spool_exists_locked(path, dir_fd):
-                _delivered, globally_blocked = _drain_locked(
-                    path, hub, token, max_messages=MESSAGE_BATCH_SIZE, dir_fd=dir_fd
-                )
+                drain_started = monotonic()
+                batch_limit = MESSAGE_BATCH_SIZE - 1 if message.get("action") == "reply" else MESSAGE_BATCH_SIZE
+                _delivered, globally_blocked = _drain_locked(path, hub, token, max_messages=batch_limit, dir_fd=dir_fd)
                 pending = fleet_client._read_spool(path, dir_fd=dir_fd)
                 recipient = message.get("_recipient") or message.get("to")
-                unresolved_reply = False
-                resolved_reply = False
-                for queued in pending:
-                    if queued.get("action") == "reply" and _message_recipient(queued) is None:
-                        try:
-                            queued_recipient = _reply_recipient(hub, token, int(queued["id"]))
-                        except (KeyError, TypeError, ValueError, fleet_client.FleetClientError):
-                            unresolved_reply = True
-                            break
-                        queued["_recipient"] = queued_recipient
-                        resolved_reply = True
-                if unresolved_reply:
+                if any(queued.get("action") == "reply" and _message_recipient(queued) is None for queued in pending):
                     return _queue_locked(path, message, dir_fd=dir_fd)
-                if resolved_reply:
-                    fleet_client._write_spool_atomic(path, pending, dir_fd=dir_fd)
                 if pending and recipient is None and message.get("action") == "reply":
+                    remaining = MESSAGE_DRAIN_DEADLINE_SECONDS - (monotonic() - drain_started)
+                    if remaining <= 0:
+                        return _queue_locked(path, message, dir_fd=dir_fd)
                     try:
-                        recipient = _reply_recipient(hub, token, int(message["id"]))
-                        message["_recipient"] = recipient
+                        recipient = _reply_recipient(
+                            hub,
+                            token,
+                            int(message["id"]),
+                            timeout=min(fleet_client.FLUSH_TIMEOUT_SECONDS, remaining),
+                        )
                     except (KeyError, TypeError, ValueError, fleet_client.FleetClientError):
                         return _queue_locked(path, message, dir_fd=dir_fd)
+                    if recipient is None:
+                        raise fleet_client.FleetClientError("fleet hub did not return the replied-to message")
+                    message["_recipient"] = recipient
                 if any(_message_recipient(item) == recipient for item in pending) or globally_blocked:
                     return _queue_locked(path, message, dir_fd=dir_fd)
             try:
@@ -637,17 +634,34 @@ def _message_recipient(message: dict[str, Any]) -> str | None:
     return recipient if isinstance(recipient, str) else None
 
 
-def _reply_recipient(hub: str, token: str, message_id: int) -> str | None:
-    status, payload = _request(hub, token, {"action": "list", "after": message_id - 1, "unacked": False})
+def _reply_recipient(hub: str, token: str, message_id: int, *, timeout: float | None = None) -> str | None:
+    _validate_sqlite_integer(message_id, "message id")
+    body = {"action": "list", "after": message_id - 1, "unacked": False}
+    status, payload = _request(hub, token, body) if timeout is None else _request(hub, token, body, timeout=timeout)
     messages = payload.get("messages")
     if status != 200 or not isinstance(messages, list):
         raise fleet_client.FleetClientError("fleet hub could not resolve the reply recipient")
+    previous_id = message_id - 1
+    recipient = None
     for item in messages:
-        if isinstance(item, dict) and item.get("id") == message_id:
+        candidate_id = item.get("id") if isinstance(item, dict) else None
+        if (
+            isinstance(candidate_id, bool)
+            or not isinstance(candidate_id, int)
+            or candidate_id <= previous_id
+            or candidate_id > _message_limits.MAX_SQLITE_INTEGER
+        ):
+            raise fleet_client.FleetClientError("fleet hub returned an invalid reply-recipient page")
+        previous_id = candidate_id
+        if candidate_id == message_id:
             sender = item.get("sender")
-            if isinstance(sender, str) and sender:
-                return sender
-    raise fleet_client.FleetClientError("fleet hub did not return the replied-to message")
+            if not isinstance(sender, str) or not sender:
+                raise fleet_client.FleetClientError("fleet hub returned an invalid reply-recipient record")
+            recipient = sender
+    next_cursor = payload.get("next_cursor")
+    if isinstance(next_cursor, bool) or not isinstance(next_cursor, int) or next_cursor != previous_id:
+        raise fleet_client.FleetClientError("fleet hub returned an invalid reply-recipient cursor")
+    return recipient
 
 
 def _drain_locked(
@@ -663,10 +677,24 @@ def _drain_locked(
         if _expired(message):
             _LOG.warning("fleet message spool %s: dropping expired offline message", path)
             continue
+        if max_messages is not None and attempted >= max_messages:
+            retained.extend(messages[index:])
+            fleet_client._write_spool_atomic(path, retained, dir_fd=dir_fd)
+            return delivered, False
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            retained.extend(messages[index:])
+            fleet_client._write_spool_atomic(path, retained, dir_fd=dir_fd)
+            return delivered, True
         recipient = _message_recipient(message)
         if recipient is None and blocked_recipients and message.get("action") == "reply":
             try:
-                recipient = _reply_recipient(hub, token, int(message["id"]))
+                attempted += 1
+                lookup_timeout = min(fleet_client.FLUSH_TIMEOUT_SECONDS, remaining)
+                recipient = _reply_recipient(hub, token, int(message["id"]), timeout=lookup_timeout)
+                if recipient is None:
+                    _LOG.warning("fleet message spool %s: dropping reply because its parent expired", path)
+                    continue
                 message["_recipient"] = recipient
             except (KeyError, TypeError, ValueError, fleet_client.FleetClientError):
                 retained.extend(messages[index:])
