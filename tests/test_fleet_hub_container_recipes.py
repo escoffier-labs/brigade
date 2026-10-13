@@ -77,6 +77,15 @@ def test_compose_recipe_keeps_host_port_private_and_token_out_of_environment():
     assert "brigade-state:/var/lib/brigade" in text
 
 
+def test_compose_runbook_pins_the_built_local_image_id():
+    runbook = (ROOT / "docs" / "runbooks" / "fleet-hub-containers.md").read_text()
+
+    assert "docker image inspect --format '{{.Id}}'" in runbook
+    assert "image: ${image_id}" in runbook
+    assert "secrets/compose.image-id.yaml up -d --no-build" in runbook
+    assert "rebuild the versioned tag, record its new local image ID" in runbook
+
+
 def test_quadlet_recipe_has_equivalent_persistence_health_and_restart_policy():
     container = (CONTAINER / "quadlet" / "brigade-fleet.container").read_text()
     volume = (CONTAINER / "quadlet" / "brigade-fleet.volume").read_text()

@@ -46,9 +46,31 @@ install -d -m 0700 secrets
 umask 077
 python -c 'import secrets; print(secrets.token_urlsafe(32))' > secrets/admin-token.txt
 chmod 0444 secrets/admin-token.txt
-docker compose up --build -d
+```
+
+Before starting the service, record the built image's immutable local image ID
+in an ignored Compose override. The base Compose file uses a version tag for
+the build; use the recorded ID for every start or recreation:
+
+```bash
+docker compose build --pull hub
+image_id="$(docker image inspect --format '{{.Id}}' localhost/brigade-fleet-hub:0.28.0-e6009f6)"
+case "$image_id" in sha256:*) ;; *) echo "Expected a sha256 image ID" >&2; exit 1 ;; esac
+cat > secrets/compose.image-id.yaml <<EOF
+services:
+  hub:
+    image: ${image_id}
+EOF
+docker compose -f compose.yaml -f secrets/compose.image-id.yaml up -d --no-build
 curl --fail http://127.0.0.1:3774/health
 ```
+
+The override pins the local Docker image configuration digest and is ignored
+with the token directory. For an update, rebuild the versioned tag, replace
+the override's image ID with the newly inspected ID, then run the same Compose
+command. To update, run `docker compose build --pull hub`, inspect the
+versioned tag for its new ID, and replace the override's `image` value before
+recreating the service. Keep the prior ID with the backup for rollback.
 
 Run the local image, token, persistence, backup/restore, and HTTPS proxy
 acceptance check from the repository root with
@@ -57,9 +79,11 @@ Docker daemon and builds the pinned package version before exercising the
 container.
 
 The named volume contains the database and its WAL/SHM sidecars. Keep it on a
-local filesystem, not NFS, SMB, or a cloud-synced directory. Ordinary updates
-are `docker compose build --pull && docker compose up -d`; never add `--volumes`
-to `down`. This recipe intentionally runs one replica and has no shared-network
+local filesystem, not NFS, SMB, or a cloud-synced directory. For ordinary
+updates, rebuild the versioned tag, record its new local image ID in the ignored
+`secrets/compose.image-id.yaml`, then run `docker compose -f compose.yaml -f
+secrets/compose.image-id.yaml up -d --no-build`. Never add `--volumes` to
+`down`. This recipe intentionally runs one replica and has no shared-network
 database support.
 
 ## Rootless Podman Quadlet
