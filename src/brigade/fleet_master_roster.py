@@ -18,9 +18,9 @@ MAX_SEATS = 128
 MAX_TEXT = 512
 _SEAT_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
-_PROVIDER_MODEL = re.compile(r"^[A-Za-z0-9_-]+/(?:[A-Za-z0-9._:-]+/)*[A-Za-z0-9._:-]+$")
+_MODEL_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _DANGEROUS_VALUE = re.compile(
-    r"(?:(?<![A-Za-z0-9_])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|(?<![A-Za-z0-9_])xapp-[A-Za-z0-9-]{12,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
+    r"(?:(?<![A-Za-z0-9_])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|(?<![A-Za-z0-9_])xapp-[A-Za-z0-9-]{12,}|(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
     r"\bBearer\s+\S+|\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
     r"(?<![A-Za-z0-9])[A-Z_][A-Z0-9_]*\s*=|"
@@ -104,12 +104,13 @@ def _has_control(value: str) -> bool:
     return any(unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"} for character in value)
 
 
-def _has_relative_path_evidence(value: str, *, provider_model: bool = False) -> bool:
+def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -> bool:
     path_text = _HTTP_URL.sub("", value)
     for match in _STANDALONE_FILE.finditer(path_text):
         filename = match.group("file").rstrip(".,;:!?")
         sensitive_name = filename.casefold() in _EXTENSIONLESS_FILES | _PRIVATE_KEY_FILES | {"credentials"}
-        suffix_match = _FILE_SUFFIX.search(filename)
+        suffix = _MODEL_PATH_SUFFIX if model_identifier else _FILE_SUFFIX
+        suffix_match = suffix.search(filename)
         trailing_text = path_text[match.end() :].strip(" .,;:!?")
         file_like = (
             filename.startswith(".") or sensitive_name or (suffix_match and (not trailing_text or sensitive_name))
@@ -128,7 +129,7 @@ def _has_relative_path_evidence(value: str, *, provider_model: bool = False) -> 
             return True
         if any(component.startswith(".") or component.casefold() in _FILESYSTEM_COMPONENTS for component in components):
             return True
-        suffix = _MODEL_PATH_SUFFIX if provider_model else _FILE_SUFFIX
+        suffix = _MODEL_PATH_SUFFIX if model_identifier else _FILE_SUFFIX
         if components[-1].casefold() in _EXTENSIONLESS_FILES or suffix.search(components[-1]):
             return True
     return False
@@ -159,7 +160,7 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
                 _ROOTED_PATH.search(_HTTP_URL.sub("", value))
                 or _has_relative_path_evidence(
                     value,
-                    provider_model=field.endswith(".model") and _PROVIDER_MODEL.fullmatch(value) is not None,
+                    model_identifier=field.endswith(".model") and _MODEL_IDENTIFIER.fullmatch(value) is not None,
                 )
             )
         )

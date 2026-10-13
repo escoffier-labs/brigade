@@ -70,6 +70,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Authorization: Basic dXNlcjpwYXNz",
         "Use Slack token " + "xoxb-" + "A" * 20,
         "Use Slack app token " + "xapp-1-" + "A" * 24,
+        "Use Hugging Face token " + "hf_" + "A" * 24,
         "Use Stripe key " + "sk_live_" + "A" * 24,
         "Use Stripe test key " + "sk_test_" + "A" * 24,
         "Use Stripe restricted key " + "rk_live_" + "A" * 24,
@@ -206,6 +207,14 @@ def test_parse_rejects_fine_grained_github_pat() -> None:
     ],
 )
 def test_parse_accepts_provider_qualified_model_identifiers(model: str) -> None:
+    document = _document()
+    document["seats"][0]["model"] = model  # type: ignore[index]
+
+    assert fleet_master_roster.parse(document)["seats"][0]["model"] == model
+
+
+@pytest.mark.parametrize("model", ["model.2024", "release.10", "model.preview"])
+def test_parse_accepts_unqualified_inventory_model_identifiers(model: str) -> None:
     document = _document()
     document["seats"][0]["model"] = model  # type: ignore[index]
 
