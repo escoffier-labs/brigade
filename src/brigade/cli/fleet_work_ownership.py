@@ -142,7 +142,7 @@ def _projection(work_id: str, item_reply: object, ownership_reply: object) -> di
         "ownership": view,
         "consistency": "separate-reads",
         "liveness": "unknown",
-        "conflict_check": "not-performed",
+        "conflict_check": _choice(raw.get("conflict_check", "not-performed"), {"not-performed", "path-admission"}),
     }
 
 
@@ -174,7 +174,7 @@ def _human(payload: Mapping[str, Any]) -> None:
     if report["state"] == "observed":
         print(json.dumps(report, sort_keys=True, ensure_ascii=True))
     print(f"reads completed: item={payload['observations']['item']}; ownership={payload['observations']['ownership']}")
-    print("consistency: separate-reads; liveness: unknown; conflict_check: not-performed")
+    print(f"consistency: separate-reads; liveness: unknown; conflict_check: {payload['conflict_check']}")
 
 
 def _show(args: argparse.Namespace) -> int:

@@ -15,6 +15,7 @@ import re
 import sqlite3
 from typing import Any, Mapping
 
+from . import worklore_scope as scope
 from . import worklore_store as store
 from .worklore_validate import WorkloreValidationError, safe_text
 
@@ -351,6 +352,7 @@ def _transition(
         result["last_report"] = dict(incoming) | {"reporter_node": actor_id}
     elif action == "checkpoint":
         result.update({key: value for key, value in body.items() if key not in {"action", "generation"}})
+        result["conflict_check"] = "path-admission"
     else:
         result = _initial()
         result["generation"] = snapshot["generation"]
@@ -509,6 +511,8 @@ def ownership_action(
         result = _transition(
             current, body, actor_id=actor_id, actor_type="operator" if action == "offer" else actor_type, digest=digest
         )
+        if action == "checkpoint":
+            scope.admit_checkpoint(conn, work_id, body)
         result["last_seq"] = conn.execute(f"SELECT {store._EVENT_SEQ_SQL}").fetchone()[0]
         result["updated_at"] = store._utc_now()
         authority = {key: current[key] for key in ("generation", "owner_node", "offered_to", "holder_hash")}
