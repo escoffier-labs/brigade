@@ -1687,10 +1687,15 @@ def test_authority_downgrade_fails_before_mutation_when_new_audit_directory_fsyn
     signed_marker = authority_marker.signed_marker_path(authority_marker.target_fingerprint(tmp_path))
     posture_marker = _isolation_posture_marker_path(tmp_path)
 
-    def fail_directory_fsync(_directory: Path) -> None:
-        raise OSError("simulated new audit directory fsync failure")
+    original_fsync_directory = authority_key._fsync_directory
+    audit_directory = audit.parent.resolve()
 
-    monkeypatch.setattr(authority_key, "_fsync_directory", fail_directory_fsync)
+    def fail_audit_directory_fsync(directory: Path) -> None:
+        if directory.resolve() == audit_directory:
+            raise OSError("simulated new audit directory fsync failure")
+        original_fsync_directory(directory)
+
+    monkeypatch.setattr(authority_key, "_fsync_directory", fail_audit_directory_fsync)
     with pytest.raises(OSError, match="audit is unavailable; marker not removed"):
         ledger.downgrade_external_directory_authority(tmp_path)
 
