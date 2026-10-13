@@ -1690,6 +1690,10 @@ def test_run_rejects_invalid_utf8_stderr_with_valid_acp_stdout(monkeypatch, tmp_
     assert result.failure_phase == "harness"
     assert result.failure_kind == "decode-failure"
     assert decode_error in result.detail
+    assert result.effective_model == "composer-2.5"
+    assert result.effective_model_locator == "acp-config-option-update"
+    assert result.protocol_version == 1
+    assert result.session_id == "session-1"
     assert "hello" not in result.text
 
 

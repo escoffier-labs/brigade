@@ -735,6 +735,8 @@ def run_cursor(
         )
     if result.decode_failed:
         detail = (result.stderr.strip() or result.decode_failure_detail)[:200]
+        decoded_stdout, _parse_error = parse_stream(result.stdout, allow_empty_text=True)
+        parsed_metadata = decoded_stdout or {}
         return AgentResult(
             text="",
             ok=False,
@@ -747,8 +749,14 @@ def run_cursor(
             timed_out=result.code == 124,
             transport="acpx",
             requested_model=model,
+            effective_model=parsed_metadata.get("effective_model"),
+            effective_model_locator=parsed_metadata.get("effective_model_locator"),
+            stop_reason=parsed_metadata.get("stop_reason"),
+            protocol_version=parsed_metadata.get("protocol_version"),
+            session_id=parsed_metadata.get("session_id"),
+            request_id=parsed_metadata.get("request_id"),
             acpx_version=installed,
-            safe_events=(auth_event,),
+            safe_events=(auth_event, *parsed_metadata.get("events", [])),
         )
     parsed, parse_error = parse_stream(result.stdout, allow_empty_text=True)
     if result.code != 0:
