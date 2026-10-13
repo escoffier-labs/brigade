@@ -329,6 +329,36 @@ def test_patch_digest_must_match_source_receipt_entry_and_actual_bytes(tmp_path:
     _assert_refused(directory, "mismatch")
 
 
+def test_stale_receipt_digest_is_mismatch_and_malformed_digest_is_malformed(tmp_path: Path) -> None:
+    directory = _write_package(tmp_path)
+    receipt_path = directory / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["status"] = "tampered"
+    receipt_bytes = json.dumps(receipt, sort_keys=True).encode("utf-8")
+    receipt_path.write_bytes(receipt_bytes)
+    manifest = _manifest(directory)
+    receipt_entry = next(entry for entry in manifest["entries"] if entry["path"] == "receipt.json")
+    receipt_entry["bytes"] = len(receipt_bytes)
+    receipt_entry["sha256"] = _sha256(receipt_bytes)
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    _write_manifest(directory, manifest)
+    _assert_refused(directory, "mismatch")
+
+    directory = _write_package(tmp_path)
+    receipt_path = directory / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["digests"]["receipt_sha256"] = "not-a-sha256"
+    receipt_bytes = json.dumps(receipt, sort_keys=True).encode("utf-8")
+    receipt_path.write_bytes(receipt_bytes)
+    manifest = _manifest(directory)
+    receipt_entry = next(entry for entry in manifest["entries"] if entry["path"] == "receipt.json")
+    receipt_entry["bytes"] = len(receipt_bytes)
+    receipt_entry["sha256"] = _sha256(receipt_bytes)
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    _write_manifest(directory, manifest)
+    _assert_refused(directory, "malformed")
+
+
 def test_receipt_digest_equality_and_nullable_receipt_fields(tmp_path: Path) -> None:
     directory = _write_package(tmp_path)
     manifest = _manifest(directory)

@@ -348,16 +348,9 @@ def _validate_receipt(data: bytes, source: dict[str, Any]) -> str:
         _error("malformed")
     try:
         receipt_snapshot = attestation_receipt.snapshot_receipt(parsed)
+    except attestation_receipt.ReceiptDigestMismatchError:
+        _error("mismatch")
     except attestation_receipt.ReceiptDigestError:
-        digests = parsed.get("digests")
-        stored_digest = digests.get("receipt_sha256") if isinstance(digests, dict) else None
-        if (
-            isinstance(digests, dict)
-            and digests.get("algorithm") == "sha256"
-            and _is_digest(stored_digest, nullable=False)
-            and stored_digest != localio.canonical_json_digest(parsed, exclude_keys={"digests"})
-        ):
-            _error("mismatch")
         _error("malformed")
     for key in ("verify_run_id", "producer_run_id", "tree_fingerprint", "baseline_commit", "changes_patch_sha256"):
         receipt_key = "run_id" if key == "verify_run_id" else key
