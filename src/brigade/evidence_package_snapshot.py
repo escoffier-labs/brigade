@@ -96,6 +96,8 @@ def _unsupported_operation(error: OSError) -> bool:
 
 
 def _capabilities_available() -> bool:
+    if dirfd.nt_available():
+        return True
     return (
         os.name == "posix"
         and sys.platform != "win32"
@@ -122,28 +124,31 @@ def _same_observation(left: _Observation, right: _Observation) -> bool:
 
 
 def _scan_names(root_fd: int) -> frozenset[str]:
-    scan_fd = -1
     try:
-        scan_fd = os.open(".", dirfd.directory_flags(), dir_fd=root_fd)
-        names: set[str] = set()
-        entry_count = 0
-        with os.scandir(scan_fd) as iterator:
-            for entry in iterator:
-                entry_count += 1
-                if entry_count > len(_PACKAGE_NAMES) or entry.name not in _PACKAGE_NAMES or entry.name in names:
-                    _error("unsafe")
-                names.add(entry.name)
-        return frozenset(names)
+        if os.name == "posix":
+            scan_fd = os.open(".", dirfd.directory_flags(), dir_fd=root_fd)
+            try:
+                names: set[str] = set()
+                entry_count = 0
+                with os.scandir(scan_fd) as iterator:
+                    for entry in iterator:
+                        entry_count += 1
+                        if entry_count > len(_PACKAGE_NAMES) or entry.name not in _PACKAGE_NAMES or entry.name in names:
+                            _error("unsafe")
+                        names.add(entry.name)
+                return frozenset(names)
+            finally:
+                os.close(scan_fd)
+        windows_names: set[str] = set()
+        for name in dirfd.child_names(root_fd, len(_PACKAGE_NAMES) + 1):
+            if name not in _PACKAGE_NAMES or name in windows_names:
+                _error("unsafe")
+            windows_names.add(name)
+        return frozenset(windows_names)
     except PackageSnapshotError:
         raise
     except (NotImplementedError, OSError):
         _error("unavailable")
-    finally:
-        if scan_fd != -1:
-            try:
-                os.close(scan_fd)
-            except (NotImplementedError, OSError):
-                pass
 
 
 def _read_child(
@@ -156,13 +161,17 @@ def _read_child(
 ) -> tuple[bytes | None, str, _Observation]:
     descriptor = -1
     try:
-        named = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        named = (
+            os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            if os.name == "posix"
+            else dirfd.stat_child(root_fd, name)
+        )
         if not stat.S_ISREG(named.st_mode):
             _error("unsafe")
         descriptor = dirfd.open_child_file(
             root_fd,
             name,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
         )
         initial = _observation(os.fstat(descriptor))
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
@@ -298,7 +307,11 @@ def _final_child_checks(root_fd: int, observed: dict[str, _Observation], expecte
         _error("changed")
     for name, before in observed.items():
         try:
-            after = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            after = (
+                os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                if os.name == "posix"
+                else dirfd.stat_child(root_fd, name)
+            )
         except NotImplementedError:
             _error("unavailable")
         except OSError as error:
