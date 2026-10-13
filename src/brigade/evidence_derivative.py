@@ -8,6 +8,7 @@ import os
 import secrets
 import stat
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -190,6 +191,13 @@ def _validate_receipt_field_types(receipt: dict[str, Any]) -> None:
             key == "completed_at" and value is not None and (not isinstance(value, str) or not value.strip())
         ):
             raise DerivativeExportError(f"source receipt field is invalid: {key}")
+        if value is not None:
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise DerivativeExportError(f"source receipt field is invalid: {key}") from exc
+            if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+                raise DerivativeExportError(f"source receipt field is invalid: {key}")
     exit_code = receipt.get("exit_code")
     if exit_code is not None and type(exit_code) is not int:
         raise DerivativeExportError("source receipt field is invalid: exit_code")
