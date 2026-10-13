@@ -1841,6 +1841,40 @@ def test_authority_downgrade_attempts_every_restore_after_one_restore_fails(
     )
 
 
+def test_authority_downgrade_records_rollback_failure_after_completion_audit_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_home(monkeypatch, tmp_path / "home")
+    _bind_workspace(tmp_path)
+    config = tmp_path / ".brigade" / "security.toml"
+    original_append_audit = authority_marker.append_audit
+    original_restore = ledger._restore_authority_file
+
+    def fail_completion_audit(record: dict, *, env: dict[str, str] | None = None) -> Path:
+        if record.get("phase") == "complete":
+            raise OSError("simulated completion audit failure")
+        return original_append_audit(record, env=env)
+
+    def fail_config_restore(path: Path, data: bytes) -> None:
+        if path == config:
+            raise OSError("simulated config restore failure")
+        original_restore(path, data)
+
+    monkeypatch.setattr(authority_marker, "append_audit", fail_completion_audit)
+    monkeypatch.setattr(ledger, "_restore_authority_file", fail_config_restore)
+
+    with pytest.raises(OSError, match="authority downgrade audit failed and marker restore failed"):
+        ledger.downgrade_external_directory_authority(tmp_path)
+
+    records = [json.loads(line) for line in authority_marker.audit_path().read_text().splitlines()]
+    transaction_records = [record for record in records if record.get("action") == "authority-downgrade"]
+    phases = [record.get("phase") for record in transaction_records]
+    assert "intent" in phases
+    assert "rollback-failed" in phases
+    assert "complete" not in phases
+    assert 'isolation = "external-key"' not in config.read_text()
+
+
 def test_authority_downgrade_fails_closed_when_workspace_identity_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

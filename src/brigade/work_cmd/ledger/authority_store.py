@@ -725,6 +725,23 @@ def _downgrade_external_directory_authority_locked(
                 f"authority downgrade rollback incomplete for {len(failures)} file(s); first: {first_path.name}"
             ) from first_error
 
+    def _append_rollback_failed() -> None:
+        try:
+            authority_marker.append_audit(
+                {
+                    "action": "authority-downgrade",
+                    "actor": actor_value,
+                    "created_at": utc_now_iso_z(),
+                    "phase": "rollback-failed",
+                    "target": resolved,
+                    "target_fingerprint": fingerprint,
+                    "transaction_id": transaction_id,
+                },
+                env=env,
+            )
+        except OSError:
+            pass
+
     try:
         if unsigned_record is not None:
             _publish_authority_store_payload(
@@ -765,21 +782,7 @@ def _downgrade_external_directory_authority_locked(
         try:
             _restore_all()
         except OSError as restore_exc:
-            try:
-                authority_marker.append_audit(
-                    {
-                        "action": "authority-downgrade",
-                        "actor": actor_value,
-                        "created_at": utc_now_iso_z(),
-                        "phase": "rollback-failed",
-                        "target": resolved,
-                        "target_fingerprint": fingerprint,
-                        "transaction_id": transaction_id,
-                    },
-                    env=env,
-                )
-            except OSError:
-                pass
+            _append_rollback_failed()
             raise OSError(
                 "authority downgrade failed and rollback was incomplete; inspect authority state"
             ) from restore_exc
@@ -819,6 +822,7 @@ def _downgrade_external_directory_authority_locked(
         try:
             _restore_all()
         except OSError as restore_exc:
+            _append_rollback_failed()
             raise OSError("authority downgrade audit failed and marker restore failed") from restore_exc
         try:
             authority_marker.append_audit(
