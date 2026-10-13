@@ -130,6 +130,7 @@ def _response_confirms(payload: dict[str, Any], message: dict[str, Any]) -> bool
 
 
 def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -> dict[str, Any]:
+    fleet_client._require_encrypted_or_loopback_hub(hub)
     path = _spool_path(node_id, token)
     _warn_inactive_spools(node_id, path)
     try:
@@ -142,7 +143,7 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                 status, payload = _request(hub, token, message)
             except fleet_client.FleetClientError:
                 return _queue_locked(path, message, dir_fd=dir_fd)
-            if status in (408, 429) or status >= 500:
+            if status in (408, 425, 429) or status >= 500:
                 return _queue_locked(path, message, dir_fd=dir_fd)
             if not 200 <= status < 300:
                 if 300 <= status < 400:
@@ -392,7 +393,7 @@ def _flush_locked(
         except fleet_client.FleetClientError:
             fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
             return delivered
-        if 300 <= status < 400 or status >= 500 or status in (401, 408, 429):
+        if 300 <= status < 400 or status >= 500 or status in (401, 408, 425, 429):
             fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
             return delivered
         if not 200 <= status < 300 and status >= 400:

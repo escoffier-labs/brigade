@@ -831,7 +831,8 @@ def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
     assert not fleet_client_messages._spool_path(NODE_A).exists()
 
 
-def test_redirected_send_is_spooled_instead_of_reported_delivered(tmp_path, monkeypatch):
+@pytest.mark.parametrize("status", [302, 408, 425, 429, 503])
+def test_retryable_send_is_spooled_instead_of_reported_delivered(status, tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     monkeypatch.setattr(
@@ -842,13 +843,13 @@ def test_redirected_send_is_spooled_instead_of_reported_delivered(tmp_path, monk
     monkeypatch.setattr(
         fleet_client_messages,
         "_request",
-        lambda *_args, **_kwargs: (302, {"error": "redirected"}),
+        lambda *_args, **_kwargs: (status, {"error": "retry later"}),
     )
 
     result = fleet_client_messages.send(
         recipient=NODE_B,
-        subject="Keep after redirect",
-        body="A 3xx response is not delivery",
+        subject="Keep for retry",
+        body="A retryable response is not delivery",
         reference=None,
         priority="normal",
     )
@@ -856,7 +857,8 @@ def test_redirected_send_is_spooled_instead_of_reported_delivered(tmp_path, monk
     assert result["queued"] is True
     queued = fleet_client._read_spool(fleet_client_messages._spool_path(NODE_A, "node-secret"))
     assert len(queued) == 1
-    assert queued[0]["subject"] == "Keep after redirect"
+    assert queued[0]["subject"] == "Keep for retry"
+    assert queued[0]["client_id"] == result["client_id"]
 
 
 def test_send_spools_success_response_without_matching_client_id(tmp_path, monkeypatch):
@@ -884,7 +886,8 @@ def test_send_spools_success_response_without_matching_client_id(tmp_path, monke
     assert queued[0]["client_id"] == result["client_id"]
 
 
-def test_redirected_spool_flush_keeps_message_queued(tmp_path, monkeypatch):
+@pytest.mark.parametrize("status", [302, 408, 425, 429, 503])
+def test_retryable_spool_flush_keeps_message_queued(status, tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
     monkeypatch.setattr(
@@ -896,9 +899,9 @@ def test_redirected_spool_flush_keeps_message_queued(tmp_path, monkeypatch):
     message = {
         "action": "send",
         "to": NODE_B,
-        "subject": "Keep after redirect",
-        "body": "A 3xx response is not delivery",
-        "client_id": "redirected-message",
+        "subject": "Keep for retry",
+        "body": "A retryable response is not delivery",
+        "client_id": "retryable-message",
         "enqueued_at": datetime.now(timezone.utc).isoformat(),
     }
     with fleet_client._spool_lock(path) as dir_fd:
@@ -906,7 +909,7 @@ def test_redirected_spool_flush_keeps_message_queued(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fleet_client_messages,
         "_request",
-        lambda *_args, **_kwargs: (302, {"error": "redirected"}),
+        lambda *_args, **_kwargs: (status, {"error": "retry later"}),
     )
 
     assert fleet_client_messages.flush(NODE_A) == 0
@@ -1728,7 +1731,7 @@ def test_schema_migrates_existing_version_26_message_rows(tmp_path):
     conn.close()
 
 
-@pytest.mark.parametrize("action", ["list", "add", "revoke"])
+@pytest.mark.parametrize("action", ["send", "reply", "list", "add", "revoke"])
 @pytest.mark.parametrize("hub_url", ["http://hub.invalid", "http://127.0.0.1:9876", "https://hub.invalid"])
 def test_message_transports_guard_bearer_urls_before_request(action, hub_url, tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
@@ -1756,12 +1759,22 @@ def test_message_transports_guard_bearer_urls_before_request(action, hub_url, tm
         payload = {"principal": {"principal_id": "agent:researcher", "name": "researcher"}}
         if action == "add":
             payload["principal"]["token"] = body["token"]
+        elif action in ("send", "reply"):
+            payload = {"message": {"client_id": body["client_id"]}}
         return Response(json.dumps(payload).encode())
 
     monkeypatch.setattr(urllib.request, "Request", build_request)
     monkeypatch.setattr(fleet_client, "_hub_open", hub_open)
 
     def invoke():
+        if action == "send":
+            return fleet_client_messages.send(
+                recipient=NODE_B, subject="Transport", body="Check transport", reference=None, priority="normal"
+            )
+        if action == "reply":
+            return fleet_client_messages.reply(
+                1, body="Check transport", subject=None, reference=None, priority="normal"
+            )
         if action == "list":
             return fleet_client_messages.list_messages()
         return fleet_client_messages.manage_principal(action, name="researcher")
@@ -1773,7 +1786,10 @@ def test_message_transports_guard_bearer_urls_before_request(action, hub_url, tm
     else:
         assert invoke()
         assert len(requests) == len(opened) == 1
-        assert requests[0].get_header("Authorization") == f"Bearer {('node-token' if action == 'list' else ADMIN)}"
+        token = "node-token" if action in ("send", "reply", "list") else ADMIN
+        assert requests[0].get_header("Authorization") == f"Bearer {token}"
+    if action in ("send", "reply"):
+        assert not fleet_client_messages._spool_path(NODE_A, "node-token").exists()
 
 
 @pytest.mark.parametrize("label", [None, "Original label"])
