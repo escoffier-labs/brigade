@@ -126,6 +126,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "API key is abcd.efgh.ijkl.mnop",
         "password is hunter2!",
         "token is abcdefg.",
+        'password is "abcdefghijklmnop"',
+        'token is "hunter2!"',
         "token is abcdefghijklmnop",
         "auth token is abcdefghijklmnop",
     ],
@@ -363,7 +365,10 @@ def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None
 
 
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
-@pytest.mark.parametrize("text", ["Run automation/verify.", "Inspect checks/unit."])
+@pytest.mark.parametrize(
+    "text",
+    ["Run automation/verify.", "Inspect checks/unit.", "Run tools/build", "Inspect foo/bar"],
+)
 def test_parse_rejects_unenumerated_paths_in_descriptive_text(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
