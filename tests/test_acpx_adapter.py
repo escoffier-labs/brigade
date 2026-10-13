@@ -1163,6 +1163,34 @@ def test_failed_run_preserves_observed_model_and_session_metadata(monkeypatch, t
     assert result.safe_events
 
 
+@pytest.mark.parametrize(
+    "message",
+    (
+        "model unavailable",
+        "provider token" + "=" + "ghp_" + "FAKE0123456789abcdefghijklmnopqrstuvwxyz",
+        "x" * 300,
+    ),
+)
+def test_run_cursor_uses_sanitized_bounded_structured_error_without_stderr(monkeypatch, tmp_path, message):
+    stream = _stream({"jsonrpc": "2.0", "id": None, "error": {"code": -32602, "message": message}})
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter([proc.Result(0, "acpx 0.12.0\n", ""), proc.Result(1, stream, "")])
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.detail
+    assert len(result.detail) <= 200
+    if message == "model unavailable":
+        assert result.detail == message
+    elif "ghp_" in message:
+        assert "ghp_" not in result.detail
+
+
 def test_failed_run_redacts_credential_shaped_provider_diagnostic(monkeypatch, tmp_path):
     credential = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"
     stream = _stream(

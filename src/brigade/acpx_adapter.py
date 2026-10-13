@@ -383,6 +383,7 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
     late_permission: dict[str, object] | None = None
     stream_finalized = False
     has_structured_jsonrpc_error = False
+    structured_error_detail: str | None = None
     permission_error_detail: str | None = None
     effective_model_locator: str | None = None
     for message in messages:
@@ -473,6 +474,7 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
                 late_permission = None
                 stream_finalized = False
                 has_structured_jsonrpc_error = False
+                structured_error_detail = None
                 permission_error_detail = None
                 request_id = str(message["id"])
                 if message_id_key is not None:
@@ -496,6 +498,9 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
         rpc_error = message.get("error")
         if isinstance(rpc_error, dict) and not superseded_prompt_response:
             has_structured_jsonrpc_error = True
+            error_message = rpc_error.get("message")
+            if structured_error_detail is None and isinstance(error_message, str):
+                structured_error_detail = sanitize_diagnostic(error_message, limit=200)
         permission_error = None if superseded_prompt_response else _permission_prompt_diagnostic(rpc_error)
         if permission_error is not None:
             if prompt_completed:
@@ -524,11 +529,13 @@ def parse_stream(stdout: str | None, *, allow_empty_text: bool = False) -> tuple
         "prompt_completed": prompt_completed,
         "has_structured_jsonrpc_error": has_structured_jsonrpc_error,
     }
+    if structured_error_detail:
+        parsed["structured_error_detail"] = structured_error_detail
     if late_permission is not None:
         parsed["late_permission"] = late_permission
     if permission_error_detail is not None:
         return parsed, permission_error_detail
-    return parsed, "" if text else "ACP stream contained no final assistant text"
+    return parsed, "" if text else structured_error_detail or "ACP stream contained no final assistant text"
 
 
 def run_cursor(
@@ -740,7 +747,8 @@ def run_cursor(
                 safe_events=(auth_event, *parsed["events"]),
                 transport_warning=late_warning,
             )
-        raw_detail = result.stderr.strip() or parse_error or f"acpx exit {result.code}"
+        structured_error = parsed.get("structured_error_detail") if parsed is not None else None
+        raw_detail = result.stderr.strip() or parse_error or structured_error or f"acpx exit {result.code}"
         permission_denied = bool(_PERMISSION_FAILURE.search(raw_detail))
         detail = sanitize_diagnostic(raw_detail, limit=200)
         timed_out = result.code in {3, 124}

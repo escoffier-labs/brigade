@@ -907,6 +907,10 @@ def _resume_locked(
                 entry["requested_model"] = agent.model
             else:
                 entry.pop("requested_model", None)
+            if agent is not None and isinstance(agent.reasoning, str):
+                entry["reasoning"] = agent.reasoning
+            else:
+                entry.pop("reasoning", None)
             entry["transport"] = "codex-app-server"
             if agent is not None:
                 probe.invalidate(seat=agent.name)

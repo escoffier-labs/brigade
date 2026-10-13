@@ -1791,7 +1791,8 @@ class _StatusThread:
         self._detail = detail
         self._timed_out = timed_out
 
-    def run_turn(self, prompt, *, timeout, on_event=None):  # noqa: ARG002
+    def run_turn(self, prompt, *, timeout, effort=None, on_event=None):  # noqa: ARG002
+        self.effort = effort
         return codex_appserver.TurnResult(
             text=self._text,
             ok=self._ok,
@@ -1819,10 +1820,11 @@ class _StatusServer(_StubServer):
         self.turn_status = turn_status
         self.turn_detail = turn_detail
         self.turn_timed_out = turn_timed_out
+        self.last_thread = None
 
     def resume_thread(self, thread_id, *, cwd, model=None, sandbox=None):
         self.resumed.append(thread_id)
-        return _StatusThread(
+        self.last_thread = _StatusThread(
             thread_id,
             text=self.turn_text,
             ok=self.turn_ok,
@@ -1830,6 +1832,7 @@ class _StatusServer(_StubServer):
             detail=self.turn_detail,
             timed_out=self.turn_timed_out,
         )
+        return self.last_thread
 
 
 def test_resume_maps_timed_out_direct_worker_to_timeout(tmp_path, monkeypatch):
@@ -1974,11 +1977,11 @@ def test_resume_success_clears_stale_execution_metadata_and_keeps_attempt_histor
     meta = json.loads((run_dir / "run.json").read_text())
     meta["worker"] = "cook"
     (run_dir / "run.json").write_text(json.dumps(meta))
-    monkeypatch.setattr(
-        run_resume.codex_appserver,
-        "AppServer",
-        lambda *a, **k: _StatusServer(turn_text="resumed", turn_ok=True, turn_status="complete"),
-    )
+    roster = json.loads((run_dir / "roster.json").read_text())
+    roster["agents"]["cook"]["reasoning"] = "high"
+    (run_dir / "roster.json").write_text(json.dumps(roster))
+    server = _StatusServer(turn_text="resumed", turn_ok=True, turn_status="complete")
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", lambda *a, **k: server)
     monkeypatch.setattr(
         run_resume.agents,
         "run_agent",
@@ -1989,9 +1992,13 @@ def test_resume_success_clears_stale_execution_metadata_and_keeps_attempt_histor
     result = json.loads((run_dir / "worker-results.json").read_text())["results"][0]
     assert result["ok"] is True
     assert result["status"] == "complete"
-    for key in ("transport_warning", "exit_code", "duration_seconds", "stdout_log", "stderr_log", "reasoning"):
+    for key in ("transport_warning", "exit_code", "duration_seconds", "stdout_log", "stderr_log"):
         assert key not in result
+    assert result["reasoning"] == "high"
     assert result["attempts"][0]["failure"]["detail"] == "old timeout"
+    synthesis_result = json.loads((run_dir / "synthesis.json").read_text())["result"]
+    assert synthesis_result["reasoning"] == "high"
+    assert server.last_thread.effort == "high"
 
 
 def test_resume_clears_stale_attempt_metadata_when_provider_raises(tmp_path, monkeypatch):
