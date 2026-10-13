@@ -90,6 +90,14 @@ def test_parse_rejects_duplicate_seat_names() -> None:
         fleet_master_roster.parse(document)
 
 
+def test_parse_rejects_fallback_targets_that_define_fallbacks() -> None:
+    document = _document()
+    document["seats"][1]["fallbacks"] = ["implementer"]  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="fallback target.*must not define"):
+        fleet_master_roster.parse(document)
+
+
 def test_parse_rejects_non_utf8_json_bytes() -> None:
     encoded = json.dumps(_document()).encode("utf-16")
 
@@ -135,6 +143,17 @@ def test_parse_rejects_control_characters_in_json_property_names() -> None:
 def test_parse_normalizes_unpaired_surrogate_string_input() -> None:
     with pytest.raises(fleet_master_roster.MasterRosterError, match="valid UTF-8 JSON"):
         fleet_master_roster.parse("\ud800")
+
+
+def test_parse_rejects_escaped_lone_surrogate_in_json_text() -> None:
+    raw = (
+        b'{"schema":"brigade.fleet_master_roster.v1","revision":1,"seats":['
+        b'{"name":"worker","cli":"codex","model":"gpt","purpose":"\\ud800",'
+        b'"enabled":true}]}'
+    )
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="valid Unicode"):
+        fleet_master_roster.parse(raw)
 
 
 @pytest.mark.parametrize("field", ["model", "purpose"])

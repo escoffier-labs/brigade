@@ -26,6 +26,7 @@ _DANGEROUS_VALUE = re.compile(
     re.IGNORECASE,
 )
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_SURROGATE = re.compile("[\\ud800-\\udfff]")
 
 _TOP_FIELDS = frozenset({"schema", "revision", "seats"})
 _SEAT_FIELDS = frozenset({"name", "cli", "model", "purpose", "caveats", "fallbacks", "enabled"})
@@ -47,6 +48,8 @@ def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, An
 def _text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise MasterRosterError(f"{field} must be a non-empty string")
+    if _SURROGATE.search(value):
+        raise MasterRosterError(f"{field} must contain valid Unicode scalar values")
     if len(value) > MAX_TEXT or _CONTROL.search(value):
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls")
     if _DANGEROUS_VALUE.search(value):
@@ -131,10 +134,13 @@ def parse(raw: Mapping[str, Any] | bytes | str) -> dict[str, Any]:
                 "enabled": raw_seat["enabled"],
             }
         )
+    seats_by_name = {seat["name"]: seat for seat in clean_seats}
     for seat in clean_seats:
         for fallback in seat["fallbacks"]:
             if not _SEAT_NAME.fullmatch(fallback) or fallback not in names or fallback == seat["name"]:
                 raise MasterRosterError(f"{seat['name']} has an invalid fallback seat: {fallback}")
+            if seats_by_name[fallback]["fallbacks"]:
+                raise MasterRosterError(f"{seat['name']} fallback target {fallback!r} must not define its own fallback")
 
     document = {"schema": SCHEMA, "revision": revision, "seats": clean_seats}
     try:
