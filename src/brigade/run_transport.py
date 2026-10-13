@@ -103,12 +103,18 @@ def _is_direct_grok_invalid_final(
     )
 
 
-def _receipt_transport(agent: Agent) -> str:
-    """Map the roster dispatch mode to the runtime label used in receipts."""
-    return "acpx" if agent.transport == "acpx" else "cli"
+def _receipt_transport(agent: Agent, *, appserver: object | None = None) -> str:
+    """Map roster dispatch and execution context to the receipt transport."""
+    if agent.transport == "acpx":
+        return "acpx"
+    if agent.cli == "codex" and agent.env is None and appserver is not None:
+        return "codex-app-server"
+    return "cli"
 
 
-def _cloudflare_preflight_failure(agent: Agent, assignment: Assignment) -> WorkerResult | None:
+def _cloudflare_preflight_failure(
+    agent: Agent, assignment: Assignment, *, appserver: object | None = None
+) -> WorkerResult | None:
     """Return a preflight failure if the agent's Cloudflare route lacks env.
 
     Empty string values are treated as missing.
@@ -125,14 +131,14 @@ def _cloudflare_preflight_failure(agent: Agent, assignment: Assignment) -> Worke
         detail=detail,
         failure_phase="preflight",
         failure_kind="provider-config",
-        transport=_receipt_transport(agent),
+        transport=_receipt_transport(agent, appserver=appserver),
         requested_model=agent.model,
         metadata_provenance=_metadata_provenance(
             agents.AgentResult(
                 text="",
                 ok=False,
                 failure_phase="preflight",
-                transport=_receipt_transport(agent),
+                transport=_receipt_transport(agent, appserver=appserver),
                 requested_model=agent.model,
             )
         ),
@@ -144,6 +150,7 @@ def _selected_agent_preflight(
     *,
     roster: Roster,
     quarantine_state: SeatQuarantineState,
+    appserver: object | None = None,
 ) -> agents.AgentResult | None:
     """Refuse a candidate before any external call.
 
@@ -161,7 +168,7 @@ def _selected_agent_preflight(
             detail=f"seat {selected_agent.name} is quarantined for this run",
             failure_phase="preflight",
             failure_kind="unclassified",
-            transport=_receipt_transport(selected_agent),
+            transport=_receipt_transport(selected_agent, appserver=appserver),
             requested_model=selected_agent.model,
         )
     if selected_agent.cli is None or not is_cli_allowed(selected_agent.cli, roster):
@@ -175,7 +182,7 @@ def _selected_agent_preflight(
             ),
             failure_phase="preflight",
             failure_kind="unclassified",
-            transport=_receipt_transport(selected_agent),
+            transport=_receipt_transport(selected_agent, appserver=appserver),
             requested_model=selected_agent.model,
         )
     cloudflare_detail = agents.cloudflare_ai_gateway_preflight_detail(selected_agent.model)
@@ -186,7 +193,7 @@ def _selected_agent_preflight(
             detail=cloudflare_detail,
             failure_phase="preflight",
             failure_kind="provider-config",
-            transport=_receipt_transport(selected_agent),
+            transport=_receipt_transport(selected_agent, appserver=appserver),
             requested_model=selected_agent.model,
         )
     return None
@@ -682,14 +689,14 @@ def dispatch(
                 detail=f"seat {assignment.worker} is quarantined for this run",
                 failure_phase="preflight",
                 failure_kind="unclassified",
-                transport=_receipt_transport(agent),
+                transport=_receipt_transport(agent, appserver=appserver),
                 requested_model=agent.model,
                 metadata_provenance=_metadata_provenance(
                     agents.AgentResult(
                         text="",
                         ok=False,
                         failure_phase="preflight",
-                        transport=_receipt_transport(agent),
+                        transport=_receipt_transport(agent, appserver=appserver),
                         requested_model=agent.model,
                     )
                 ),
@@ -707,19 +714,19 @@ def dispatch(
                 ),
                 failure_phase="preflight",
                 failure_kind="unclassified",
-                transport=_receipt_transport(agent),
+                transport=_receipt_transport(agent, appserver=appserver),
                 requested_model=agent.model,
                 metadata_provenance=_metadata_provenance(
                     agents.AgentResult(
                         text="",
                         ok=False,
                         failure_phase="preflight",
-                        transport=_receipt_transport(agent),
+                        transport=_receipt_transport(agent, appserver=appserver),
                         requested_model=agent.model,
                     )
                 ),
             )
-        preflight = _cloudflare_preflight_failure(agent, assignment)
+        preflight = _cloudflare_preflight_failure(agent, assignment, appserver=appserver)
         if preflight is not None:
             return preflight
         prompt = build_prompt(
@@ -753,14 +760,14 @@ def dispatch(
                 detail=detail,
                 failure_phase="dispatch",
                 failure_kind=failure_kind,
-                transport=_receipt_transport(agent),
+                transport=_receipt_transport(agent, appserver=appserver),
                 requested_model=agent.model,
                 metadata_provenance=_metadata_provenance(
                     agents.AgentResult(
                         text="",
                         ok=False,
                         failure_phase="preflight",
-                        transport=_receipt_transport(agent),
+                        transport=_receipt_transport(agent, appserver=appserver),
                         requested_model=agent.model,
                     )
                 ),
@@ -810,7 +817,7 @@ def dispatch(
                     detail=exc.message[:200],
                     failure_phase="preflight",
                     failure_kind=exc.code,
-                    transport=_receipt_transport(selected_agent),
+                    transport=_receipt_transport(selected_agent, appserver=appserver),
                     requested_model=selected_agent.model,
                     reasoning=selected_agent.reasoning,
                 )
@@ -1042,6 +1049,7 @@ def dispatch(
                 selected_agent,
                 roster=roster,
                 quarantine_state=quarantine_state,
+                appserver=appserver,
             )
             if blocked is not None:
                 return blocked
@@ -1071,7 +1079,7 @@ def dispatch(
                                 detail=lease_error,
                                 failure_phase="preflight",
                                 failure_kind="fleet-model-policy",
-                                transport=_receipt_transport(selected_agent),
+                                transport=_receipt_transport(selected_agent, appserver=appserver),
                                 requested_model=selected_agent.model,
                             )
                         else:

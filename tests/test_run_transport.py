@@ -40,7 +40,13 @@ def test_acpx_metadata_provenance_uses_adapter_evidence_locators():
     assert preflight["requested_model"]["unknown_reason"] == "execution-not-started"
 
 
-def test_direct_cloudflare_preflight_uses_cli_receipt_transport(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("appserver", "expected_transport"),
+    [(None, "cli"), (object(), "codex-app-server")],
+)
+def test_direct_cloudflare_preflight_uses_runtime_receipt_transport(
+    monkeypatch, tmp_path, appserver, expected_transport
+):
     monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
     monkeypatch.delenv("CLOUDFLARE_GATEWAY_ID", raising=False)
     roster = Roster(
@@ -66,11 +72,12 @@ def test_direct_cloudflare_preflight_uses_cli_receipt_transport(monkeypatch, tmp
         cwd=tmp_path,
         read_only=True,
         output_dir=tmp_path,
+        appserver=appserver,
     )[0]
 
     assert result.ok is False
     assert result.failure_phase == "preflight"
-    assert result.transport == "cli"
+    assert result.transport == expected_transport
 
 
 def _roster() -> Roster:
