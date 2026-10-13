@@ -37,11 +37,11 @@ driver receives that value through `--job-started-at`, with these settings:
 
 | Option | CI value | Purpose |
 | --- | --- | --- |
-| `--job-limit` | 3600 seconds | Job allowance from the captured epoch |
+| `--job-limit` | 5400 seconds | Job allowance from the captured epoch |
 | `--startup-reserve` | 120 seconds | Conservative allowance for startup before the first step |
 | `--finalize-reserve` | 300 seconds | Conservative allowance for cleanup, record writing, and artifact upload |
-| `--job-timeout` | 3300 seconds | Local driver execution cap |
-| Driver step timeout | 55 minutes | Backup for a stuck driver |
+| `--job-timeout` | 5100 seconds | Local driver execution cap |
+| Driver step timeout | 85 minutes | Backup for a stuck driver |
 
 At `main()` entry the driver computes:
 
@@ -59,7 +59,7 @@ nonfinite, negative, or future epochs and negative or nonfinite reserves are
 configuration errors.
 
 The first-step timestamp approximates job start. The startup reserve covers
-the unmeasured interval, and the job's 60-minute timeout remains the outer
+the unmeasured interval, and the job's 90-minute timeout remains the outer
 limit. These reserves are conservative allowances, not measured guarantees
 of startup or artifact-upload duration.
 
@@ -76,6 +76,11 @@ names, discovery membership, and duplicates before launching any child. Nested n
 
 Selected files run first, one at a time, with no parallel workers active.
 The bounded parallel phase starts after the isolated phase has drained.
+The CI budget allows 30 minutes for two 900-second serial timeouts and
+53 minutes for the parallel phase before setup time is subtracted. This
+treats the roughly 46-minute sweep reported in
+[issue #1551](https://github.com/escoffier-labs/brigade/issues/1551) as an
+allowance for the parallel phase, in addition to both serial timeouts.
 If the budget expires during either phase, remaining files are incomplete.
 This scheduling guarantees isolation from other file workers. It has not
 been shown to fix flakiness or improve duration for the selected files.
