@@ -230,8 +230,10 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
     ):
         return _observation(relpath, "incomplete", **verified_trust, reason="planned_commands_mismatch")
     receipt_status = snapshot.receipt.get("status")
-    if not isinstance(receipt_status, str) or receipt_status not in {"completed", "failed", "rejected"}:
+    if not isinstance(receipt_status, str) or receipt_status not in {"completed", "failed", "rejected", "canceled"}:
         return _observation(relpath, "incomplete", **verified_trust, reason="status_not_terminal")
+    if receipt_status == "canceled":
+        return _observation(relpath, "incomplete", **verified_trust, reason="status_canceled")
     terminal_command_statuses = {"completed"}
     if receipt_status in {"failed", "rejected"}:
         terminal_command_statuses.update({"failed", "timed_out", "rejected"})
