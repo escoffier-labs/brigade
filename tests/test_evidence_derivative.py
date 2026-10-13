@@ -46,6 +46,24 @@ def _fabricated_run_dir(tmp_path: Path) -> tuple[Path, dict[str, object]]:
     return run_dir, receipt
 
 
+def test_source_inventory_stops_at_entry_limit_before_sorting(monkeypatch) -> None:
+    requested_limits: list[int] = []
+
+    def child_names(_root_fd: int, limit: int) -> list[str]:
+        requested_limits.append(limit)
+        return [f"unsupported-{index:04d}" for index in range(limit)]
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "child_names", child_names)
+    try:
+        evidence_derivative._source_inventory(0)
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == "source package inventory exceeds entry limit"
+    else:
+        raise AssertionError("oversized source inventory was accepted")
+
+    assert requested_limits == [evidence_derivative._MAX_SOURCE_INVENTORY_ENTRIES + 1]
+
+
 def test_derivative_minimizes_payloads_and_records_original_provenance(tmp_path: Path) -> None:
     run_dir, receipt = _fabricated_run_dir(tmp_path)
     sentinel = "fixture-derivative-value"
