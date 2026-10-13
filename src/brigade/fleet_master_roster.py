@@ -81,10 +81,16 @@ _URL_CREDENTIAL_QUERY = re.compile(
     re.IGNORECASE,
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
+_ROSTER_OWNERSHIP_QUALIFIER = (
+    r"(?:\s+(?:for|of|used\s+by|assigned\s+to)\s+(?:(?:this|the)\s+)?"
+    r"(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*))?"
+)
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"\b(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+|"
     r"(?:(?:use|configure)\s+(?:the\s+)?)?environment\s+variable\s+)"
-    r"(?:(?:named|called)\s+)?[\"'“‘`]?[A-Za-z_][A-Za-z0-9_]*[\"'”’`]?(?:\s*=(?!=|>)|\s+(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|will\s+be|has\s+been|have\s+been)\s+(?!(?:"
+    r"(?:(?:named|called)\s+)?[\"'“‘`]?[A-Za-z_][A-Za-z0-9_]*[\"'”’`]?"
+    + _ROSTER_OWNERSHIP_QUALIFIER
+    + r"(?:\s*=(?!=|>)|\s+(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|will\s+be|has\s+been|have\s+been)\s+(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
     + r"))\S+|\s+(?:value\s*)?(?:=(?!=|>)|:)\s*(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
@@ -127,6 +133,7 @@ _HTTP_METHOD_ROUTE_CONTEXT = re.compile(
     r"(?P<path>/(?:[A-Za-z0-9._~%-]+(?:/[A-Za-z0-9._~%-]+)*)(?:\?[^\s<>\"']*)?)"
 )
 _HTTP_METHOD_ROUTE_ROOTS = frozenset({"applications", "config", "users"})
+_COMMON_API_RESOURCE_COMPONENTS = frozenset({"cache", "project", "run"})
 _HTTP_URL = re.compile(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE)
 
 
@@ -195,7 +202,7 @@ def _has_disallowed_api_route_query(value: str) -> bool:
             component.casefold() for component in decoded_path.replace("\\", "/").split("/") if component
         ]
         if any(component in {".", ".."} for component in decoded_components) or any(
-            component in _FILESYSTEM_COMPONENTS - _HTTP_METHOD_ROUTE_ROOTS
+            component in _FILESYSTEM_COMPONENTS - _HTTP_METHOD_ROUTE_ROOTS - _COMMON_API_RESOURCE_COMPONENTS
             or component.startswith(".")
             or component == "~"
             or component in _PRIVATE_KEY_FILES

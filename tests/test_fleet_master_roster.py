@@ -449,6 +449,9 @@ def test_parse_accepts_prose_that_mentions_auth_profiles(text: str) -> None:
         "GET /users",
         "POST /applications",
         "DELETE /config/settings.json",
+        "Call /api/run",
+        "Call /api/cache",
+        "Call /api/project",
     ],
 )
 def test_parse_accepts_known_api_routes_in_descriptive_text(field: str, text: str) -> None:
@@ -855,6 +858,22 @@ def test_parse_rejects_encoded_assignments_in_api_route_paths(field: str, text: 
     ],
 )
 def test_parse_rejects_filesystem_paths_in_api_routes(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Environment variable SERVICE_MODE for this seat is production",
+        "Environment variable SERVICE_MODE used by this seat is production",
+    ],
+)
+def test_parse_rejects_ownership_qualified_environment_assignments(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 
