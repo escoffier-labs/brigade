@@ -333,10 +333,13 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Auth profile of implementer is production-admin",
         'Auth profile is "production admin"',
         "Auth profile is “production admin”",
+        "Auth profile is ‘production admin’",
         'Use auth profile "production admin"',
         "Use auth profile “production admin”",
+        "Use auth profile ‘production admin’",
         'Authentication profile named "production admin"',
         "Authentication profile named “production admin”",
+        "Authentication profile named ‘production admin’",
     ],
 )
 def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str) -> None:
@@ -869,6 +872,10 @@ def test_parse_rejects_encoded_assignments_in_api_route_paths(field: str, text: 
     "text",
     [
         "Call /api/%2Fetc/passwd",
+        "Call /api/%2Fetc/hosts",
+        "Call /api/%2Fhome/operator/file",
+        "Call /api/%252Fetc/hosts",
+        "Call /api/%252Fhome/operator/file",
         "Call /api/foo/%65tc/passwd",
         "Call /api/%7E/.ssh/id_rsa",
         "Call /api/etc/passwd",
@@ -890,6 +897,8 @@ def test_parse_rejects_filesystem_paths_in_api_routes(field: str, text: str) -> 
     [
         "Environment variable SERVICE_MODE for this seat is production",
         "Environment variable SERVICE_MODE used by this seat is production",
+        "Environment variable SERVICE_MODE used on this seat is production",
+        "Environment variable SERVICE_MODE used on implementer is production",
     ],
 )
 def test_parse_rejects_ownership_qualified_environment_assignments(field: str, text: str) -> None:
@@ -914,6 +923,8 @@ def test_parse_rejects_ownership_qualified_environment_assignments(field: str, t
         "The directory is “Shared Folder/file”",
         "Path assigned to this seat is foo/bar",
         "Path used by reviewer is foo/bar",
+        "Path used on this seat is foo/bar",
+        "Path used on reviewer is foo/bar",
     ],
 )
 def test_parse_rejects_paths_in_navigation_and_quoted_declarations(field: str, text: str) -> None:

@@ -82,7 +82,7 @@ _URL_CREDENTIAL_QUERY = re.compile(
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
 _ROSTER_OWNERSHIP_QUALIFIER = (
-    r"(?:\s+(?:for|of|used\s+by|assigned\s+to)\s+(?:(?:this|the)\s+)?"
+    r"(?:\s+(?:for|of|used\s+(?:by|on)|assigned\s+to)\s+(?:(?:this|the)\s+)?"
     r"(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?))?"
 )
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
@@ -100,7 +100,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     re.IGNORECASE,
 )
 _PATH_DECLARATION_LINKER = r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
-_PATH_DECLARATION_QUALIFIER = r"(?:\s+(?:(?:for|of|used\s+by|assigned\s+to)\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)))?"
+_PATH_DECLARATION_QUALIFIER = r"(?:\s+(?:(?:for|of|used\s+(?:by|on)|assigned\s+to)\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)))?"
 _PATH_DECLARATION = (
     r"\b" + _PATH_LABEL + r"(?:\s+value)?" + _PATH_DECLARATION_QUALIFIER + r"\s*" + _PATH_DECLARATION_LINKER
 )
@@ -224,6 +224,8 @@ def _has_disallowed_api_route_query(value: str) -> bool:
         route = match.group("path")
         route_path, _, route_query = route.partition("?")
         decoded_path = _fully_unquote(route_path)
+        if "//" in decoded_path:
+            return True
         decoded_components = [
             component.casefold() for component in decoded_path.replace("\\", "/").split("/") if component
         ]
@@ -511,6 +513,7 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
     screening_text = _QUOTED_PROTECTED_LABEL.sub(r"\g<label>", value)
     screening_text = re.sub(r"“([^”\n]+)”", r'"\1"', screening_text)
+    screening_text = re.sub(r"‘([^’\n]+)’", r"'\1'", screening_text)
     path_text = _without_api_route_references(screening_text)
     if (
         _DANGEROUS_VALUE.search(screening_text)
