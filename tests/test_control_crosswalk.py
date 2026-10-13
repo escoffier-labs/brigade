@@ -1616,8 +1616,11 @@ def test_ec03_reports_malformed_receipt_digest_metadata_as_invalid(tmp_path):
 
     result = _assess(target, "EC-03", RUN)
 
-    assert result["outcome"] == "invalid"
-    assert result["reason"] == "schema_missing"
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "invalid"
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["schema_missing"]
 
 
 def test_ec03_does_not_bind_rejected_bundle_from_tampered_receipt(tmp_path):
@@ -1690,8 +1693,31 @@ def test_ec03_classifies_missing_statement_subject_fields_as_invalid(tmp_path, f
 
     result = _assess(target, "EC-03", RUN)
 
-    assert result["outcome"] == "invalid"
-    assert result["reason"] == "schema_missing"
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "invalid"
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["schema_missing"]
+
+
+def test_ec03_does_not_bind_preverification_schema_failure_from_receipt(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt.pop("digests", None)
+    receipt.pop("tree_fingerprint")
+    receipt["run_id"] = "other-run"
+    receipt["producer_run_id"] = "other-run"
+    _write_json(receipt_path, receipt)
+
+    result = _assess(target, "EC-03", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "invalid"
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["schema_missing"]
 
 
 def test_ec12_binds_malformed_package_from_staged_receipt_identity(tmp_path):

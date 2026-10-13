@@ -18,6 +18,13 @@ def binding_candidates(obs: control_readiness.ArtifactObservation, candidates: d
 
 def receipt_claims_untrusted(obs: control_readiness.ArtifactObservation) -> bool:
     """Return whether receipt fields failed integrity or signed-payload checks."""
+    if (
+        obs.proposed == "invalid"
+        and "schema_missing" in obs.reasons
+        and obs.relpath.endswith("attestation.sigstore.json")
+        and obs.dimensions.get("signature", {}).get("status") != "passed"
+    ):
+        return True
     if obs.proposed == "invalid" and any(
         reason in {"invalid_json", "media_type_mismatch", "dsse_signatures_missing", "symlink_refused"}
         for reason in obs.reasons
