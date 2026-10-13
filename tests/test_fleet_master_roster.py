@@ -148,6 +148,38 @@ def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> N
     assert fleet_master_roster.parse(document)["seats"][0]["caveats"] == [text]
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "No auth profile is required.",
+        "Support auth profile selection.",
+        "Support auth profiles as needed.",
+    ],
+)
+def test_parse_accepts_prose_that_mentions_auth_profiles(text: str) -> None:
+    document = _document()
+    document["seats"][0]["purpose"] = text  # type: ignore[index]
+
+    assert fleet_master_roster.parse(document)["seats"][0]["purpose"] == text
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    ["Treat mode == fast as enabled.", "Use x==y predicates.", "Compare version >= 2.0 before launch."],
+)
+def test_parse_accepts_comparison_operators_in_descriptive_text(field: str, text: str) -> None:
+    document = _document()
+    if field == "purpose":
+        document["seats"][0][field] = text  # type: ignore[index]
+    else:
+        document["seats"][0][field] = [text]  # type: ignore[index]
+
+    parsed = fleet_master_roster.parse(document)
+
+    assert parsed["seats"][0][field] == (text if field == "purpose" else [text])
+
+
 @pytest.mark.parametrize("text", [".env", "credentials.json", "id_rsa"])
 def test_parse_rejects_standalone_sensitive_file_names(text: str) -> None:
     document = _document()

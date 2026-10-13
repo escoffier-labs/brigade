@@ -25,14 +25,16 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
     r"\bauth(?:entication)?[ _-]profile(?:\s*[:=]\s*|\s+)"
+    r"(?!(?:is|are|was|were|as|required|needed|necessary|optional|available|selection)\b)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
+    r"(?<![A-Za-z0-9_.-])(?!(?:no|any|a|an|the|some|our|your|their|its|this|that|support)\b)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))\s+auth(?:entication)?[ _-]profile\b|"
     r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%USERPROFILE%))",
     re.IGNORECASE,
 )
-_ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9])[A-Z_][A-Z0-9_]*\s*=", re.IGNORECASE)
+_ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)", re.IGNORECASE)
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
 _HTTP_URL = re.compile(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE)
 _RELATIVE_PATH = re.compile(
