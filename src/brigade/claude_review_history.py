@@ -109,9 +109,9 @@ def ingest_managed_review(
     if len(encoded) > _MAX_SNAPSHOT_BYTES:
         raise ValueError("sanitized snapshot exceeds 256 KiB")
     identity = hashlib.sha256(encoded).hexdigest()
-    ensure_schema(conn)
     if not conn.in_transaction:
         conn.execute("BEGIN")
+    ensure_schema(conn)
     conn.execute("SAVEPOINT brigade_review_ingest")
     try:
         # Acquire SQLite's writer lock before the replay/quota probes.
@@ -176,7 +176,9 @@ def _project(history: list[dict[str, Any]], current: str, truncated: bool) -> tu
                 record["reviewed_head"] = None
             _coverage(record, current)
             if kind == "annotations" and len(locations[record["identity_key"]]) > 1:
-                record["ambiguity"] = "ordinal-location-revised"
+                record["location_disposition"] = "ordinal-location-revised"
+                if record["ambiguity"] == "no-universal-immutable-id":
+                    record["ambiguity"] = "ordinal-location-revised"
             record["history_disposition"] = "conflicting-observations" if conflict else "latest-observed"
             if kind == "checks" and (
                 not complete or conflict or observation_head != current or record["identity_key"] not in enumerated
@@ -228,12 +230,16 @@ def read_managed_review_history(
     repository, current = _subject(owner, repo, pr_number, expected_app_id, expected_app_slug, current_head)
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError("history limit must be an integer from 1 through 100")
-    ensure_schema(conn)
-    rows = conn.execute(
-        f"SELECT observation_id, payload FROM {_TABLE} WHERE {_SUBJECT} "
-        "ORDER BY observed_sort DESC, observation_id LIMIT ?",
-        (repository, pr_number, expected_app_id, expected_app_slug, limit + 1),
-    ).fetchall()
+    exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (_TABLE,)).fetchone()
+    rows = (
+        conn.execute(
+            f"SELECT observation_id, payload FROM {_TABLE} WHERE {_SUBJECT} "
+            "ORDER BY observed_sort DESC, observation_id LIMIT ?",
+            (repository, pr_number, expected_app_id, expected_app_slug, limit + 1),
+        ).fetchall()
+        if exists is not None
+        else []
+    )
     truncated = len(rows) > limit
     history = [dict(json.loads(payload), observation_id=identity) for identity, payload in rows[:limit]]
     projection, complete = _project(history, current, truncated)

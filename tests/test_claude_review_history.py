@@ -81,6 +81,20 @@ def test_persistence_exact_replay_normalization_and_revisions(tmp_path):
         json.dumps(result)
 
 
+def test_mixed_case_source_url_survives_canonical_repository_replay():
+    conn = sqlite3.connect(":memory:")
+    url = "https://github.com/Example/Project/runs/10"
+    first = ingest(conn, FixtureGet([check(html_url=url)]))
+    replay = ingest(conn, FixtureGet([check(html_url=url)]), owner="EXAMPLE", repo="PROJECT")
+    result = read(conn)
+    assert result["repository"] == "example/project"
+    assert result["checks"][0]["source_url"] == url
+    assert result["history"][0]["checks"][0]["source_url"] == url
+    assert len(result["history"]) == 1
+    assert first["observation_id"] == replay["observation_id"]
+    assert replay["duplicate"] is True
+
+
 def test_caller_head_survives_delayed_old_completion_and_insertion_order():
     conn = sqlite3.connect(":memory:")
     ingest(conn, FixtureGet([check(11)]), observed="2026-01-04T00:00:00Z")
@@ -158,6 +172,27 @@ def test_bounded_read_truncation_and_subject_isolation():
     assert any("LIMIT 2" in s.upper() for s in statements)
 
 
+@pytest.mark.parametrize("readonly", [False, True])
+@pytest.mark.parametrize("active_transaction", [False, True])
+def test_missing_schema_read_is_empty_without_writes_or_transaction_changes(tmp_path, readonly, active_transaction):
+    path = tmp_path / "empty.sqlite"
+    sqlite3.connect(path).close()
+    with sqlite3.connect(f"file:{path}?mode={'ro' if readonly else 'rw'}", uri=True) as conn:
+        if active_transaction:
+            conn.execute("BEGIN")
+        result = read(conn)
+        assert all(result[kind] == [] for kind in ("history", "checks", "annotations", "reviews", "comments"))
+        assert result["repository"] == "example/project"
+        assert result["current_head"] == HEAD
+        assert result["history_truncated"] is False
+        assert result["latest_check_enumeration_complete"] is False
+        assert result["finding_totals"] is None
+        json.dumps(result)
+        assert conn.execute("SELECT name FROM sqlite_master").fetchall() == []
+        assert conn.total_changes == 0
+        assert conn.in_transaction is active_transaction
+
+
 @pytest.mark.parametrize(
     "options",
     [
@@ -201,6 +236,38 @@ def test_schema_and_savepoint_preserve_caller_rollback_and_unrelated_data():
     ingest(conn)
     conn.rollback()
     assert read(conn)["history"] == []
+
+
+@pytest.mark.parametrize("pending_caller_write", [False, True])
+@pytest.mark.parametrize("reject_append", [False, True])
+def test_ingest_schema_and_append_remain_in_caller_transaction(pending_caller_write, reject_append):
+    conn = sqlite3.connect(":memory:")
+    if pending_caller_write:
+        conn.execute("CREATE TABLE caller(value)")
+        conn.execute("INSERT INTO caller VALUES ('pending')")
+    if reject_append:
+
+        def deny_append(action, table, *_):
+            return (
+                sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_INSERT and table == api()._TABLE else sqlite3.SQLITE_OK
+            )
+
+        conn.set_authorizer(deny_append)
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            ingest(conn)
+        conn.set_authorizer(None)
+        assert conn.execute(f"SELECT count(*) FROM {api()._TABLE}").fetchone()[0] == 0
+    else:
+        ingest(conn)
+        assert conn.execute(f"SELECT count(*) FROM {api()._TABLE}").fetchone()[0] == 1
+    assert conn.in_transaction
+    if pending_caller_write:
+        assert conn.execute("SELECT * FROM caller").fetchall() == [("pending",)]
+    conn.rollback()
+    assert not conn.in_transaction
+    assert conn.execute("SELECT name FROM sqlite_master WHERE name=?", (api()._TABLE,)).fetchall() == []
+    if pending_caller_write:
+        assert conn.execute("SELECT * FROM caller").fetchall() == []
 
 
 def test_quotas_refuse_atomic_write_without_pruning_and_allow_replay():
@@ -288,6 +355,25 @@ def test_annotation_ordinal_relocation_keeps_history_and_projection_ambiguity():
     assert len(result["annotations"]) == 1
     assert [s["annotations"][0]["location"]["start_line"] for s in result["history"]] == [3, 2]
     assert result["annotations"][0]["ambiguity"] == "ordinal-location-revised"
+
+
+def test_relocated_annotation_keeps_duplicate_representation_ambiguity():
+    conn = sqlite3.connect(":memory:")
+    for day, line in ((3, 2), (4, 3)):
+        annotation = dict(path="src/example.py", start_line=line, end_line=line, annotation_level="warning")
+        inline = dict(id=50, path="src/example.py", line=line, side="RIGHT", original_commit_id=HEAD)
+        extras = {
+            "/repos/example/project/check-runs/10/annotations": [annotation],
+            "/repos/example/project/pulls/7/comments": [inline],
+        }
+        ingest(conn, FixtureGet([check()], extras=extras), observed=f"2026-01-0{day}T00:00:00Z")
+    result = read(conn)
+    assert len(result["annotations"]) == 1
+    assert result["annotations"][0]["location"]["start_line"] == 3
+    assert result["annotations"][0]["ambiguity"] == "possible-duplicate-representation"
+    assert result["annotations"][0]["location_disposition"] == "ordinal-location-revised"
+    assert [s["annotations"][0]["location"]["start_line"] for s in result["history"]] == [3, 2]
+    assert all(s["annotations"][0]["ambiguity"] == "possible-duplicate-representation" for s in result["history"])
 
 
 def test_later_completed_round_can_be_current_when_older_round_is_omitted():

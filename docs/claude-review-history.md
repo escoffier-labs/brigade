@@ -37,11 +37,13 @@ history = read_managed_review_history(
 
 `ensure_schema(conn)` creates `brigade_managed_review_history` and its subject
 index. It leaves other tables, `user_version`, connection settings and pending
-caller changes intact. Ingestion opens a transaction when the connection is
-idle and leaves commit or rollback to the caller. Existing transactions remain
-open. A savepoint protects the append and quota checks without committing
-unrelated changes. A rejected append rolls back its savepoint. If ingestion
-opened the transaction, the caller must still commit or roll it back.
+caller changes intact. Ingestion opens a transaction before schema creation
+when the connection is idle and leaves commit or rollback to the caller.
+Caller rollback also removes schema created by ingestion. Existing transactions
+remain open. A savepoint protects the append and quota checks without committing
+unrelated changes. A rejected append rolls back its savepoint and preserves
+pending caller changes. If ingestion opened the transaction, the caller must
+still commit or roll it back, including after a storage failure.
 
 `ingest_managed_review` calls `collect_managed_review` itself. It accepts the
 collector's optional `Limits` instance, never an arbitrary snapshot. Only the
@@ -49,7 +51,10 @@ collector's sanitized JSON enters storage. Its result contains `observation_id`
 and `duplicate`. The observation ID is a SHA-256 digest of canonical JSON,
 including normalized observation time. Exact replay keeps the existing row.
 Different timestamps or sanitized revisions produce separate snapshots.
-Repository identity is case-folded for collection, storage and reads. App ID
+Repository identity is case-folded for collection, storage and reads. Source
+URL validation compares the trusted owner/repository path prefix without case
+sensitivity and preserves the original validated URL. Resource paths, PR and
+object IDs, fragments and the `github.com` host retain exact matching. App ID
 and slug are both part of the subject.
 
 Writes refuse snapshots above 256 KiB, a 201st observation for a subject, or a
@@ -67,6 +72,12 @@ sanitized objects, source completeness, usage and collection limits. Object
 coverage and current finding flags are rebound to the read caller's head in
 both snapshots and the projection. Stored severity counts remain available
 when a historical flag becomes false.
+
+Reads never create schema or change the caller's transaction state. A bounded
+`sqlite_master` probe checks whether the history table exists. When it is
+absent, reads return the same empty history and projection as an unknown
+subject, including on a read-only connection. Both completeness and truncation
+flags are false.
 
 Reads fetch at most `limit + 1` rows for the exact subject. The default limit is
 20, and valid limits are integers from 1 through 100. An extra row sets
@@ -96,8 +107,13 @@ enumeration and history bounds. Individual check flags also require valid
 severity, execution, ordering and revision evidence.
 
 Annotations keep the collector's location-only identity limitations. If an
-ordinal's location changes across snapshots, the projection uses
-`ambiguity: ordinal-location-revised` and the snapshots preserve both locations.
+ordinal's location changes across snapshots, the projection adds
+`location_disposition: ordinal-location-revised` independently of representation
+ambiguity. It retains `ambiguity: possible-duplicate-representation` when the
+collector found a possible duplicate. For annotations whose collector ambiguity
+is only `no-universal-immutable-id`, the projection also retains the existing
+`ambiguity: ordinal-location-revised` label. Snapshots preserve both locations
+and their original collector ambiguity.
 This locator cannot establish that two representations describe one finding.
 Reviews and inline comments retain `provider_identity: unverified`, and
 comment thread state remains `thread_disposition: not-collected`.
