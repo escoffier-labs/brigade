@@ -45,7 +45,13 @@ def _write_run_dir(tmp_path: Path, *, results: list[dict]) -> Path:
     (run_dir / "plan.json").write_text(
         json.dumps({"assignments": [{"stage": 1, "worker": "cook", "task": "write code"}]})
     )
-    (run_dir / "worker-results.json").write_text(json.dumps({"results": results, "ground_truth": {}}))
+    normalized_results = [
+        {"transport": "codex-app-server", **result}
+        if isinstance(result.get("thread_id"), str) and "transport" not in result
+        else result
+        for result in results
+    ]
+    (run_dir / "worker-results.json").write_text(json.dumps({"results": normalized_results, "ground_truth": {}}))
     (run_dir / "synthesis.json").write_text(
         json.dumps(
             {
@@ -331,7 +337,7 @@ def test_resume_direct_worker_preserves_synthesis_provenance(tmp_path, monkeypat
     }
     direct_worker = {
         **_RESUMABLE_COOK,
-        "transport": "acpx",
+        "transport": "codex-app-server",
         "requested_model": "cursor-auto",
         "effective_model": "composer-2.5",
         "acpx_version": "0.12.0",
@@ -350,11 +356,28 @@ def test_resume_direct_worker_preserves_synthesis_provenance(tmp_path, monkeypat
 
     assert run_resume.resume(run_dir) == 0
     synthesis_result = json.loads((run_dir / "synthesis.json").read_text())["result"]
-    assert synthesis_result["transport"] == "acpx"
-    assert synthesis_result["requested_model"] == "cursor-auto"
-    assert synthesis_result["effective_model"] == "composer-2.5"
-    assert synthesis_result["acpx_version"] == "0.12.0"
-    assert synthesis_result["metadata_provenance"]["fields"]["effective_model"]["source"] == "observed"
+    assert synthesis_result["text"] == "finished now"
+    assert synthesis_result["transport"] == "codex-app-server"
+    assert "requested_model" not in synthesis_result
+    assert "effective_model" not in synthesis_result
+    assert "acpx_version" not in synthesis_result
+    assert "metadata_provenance" not in synthesis_result
+
+
+def test_resume_rejects_acp_transport_even_with_appserver_thread_id(tmp_path, monkeypatch, capsys):
+    acp_worker = {**_RESUMABLE_COOK, "transport": "acpx", "session_id": "acp-session"}
+    run_dir = _write_run_dir(tmp_path, results=[acp_worker])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["worker"] = "cook"
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("ACP worker must not resume through app-server")),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    assert "no resumable workers" in capsys.readouterr().err
 
 
 def test_resume_re_envelopes_output_and_drops_transplanted_identity(tmp_path, monkeypatch):
@@ -1147,6 +1170,7 @@ _RESUMABLE_COOK = {
     "text": "part",
     "thread_id": "t-1",
     "status": "interrupted",
+    "transport": "codex-app-server",
 }
 
 

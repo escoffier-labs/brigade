@@ -763,7 +763,10 @@ def _resume_locked(
     resumable = [
         r
         for r in results
-        if isinstance(r.get("thread_id"), str) and not r.get("ok") and r.get("status") in _RESUMABLE_STATUSES
+        if r.get("transport") == "codex-app-server"
+        and isinstance(r.get("thread_id"), str)
+        and not r.get("ok")
+        and r.get("status") in _RESUMABLE_STATUSES
     ]
     stuck = [r for r in results if not r.get("ok") and r not in resumable]
     for r in stuck:
@@ -876,6 +879,21 @@ def _resume_locked(
             entry["ok"] = turn.ok and bool(entry["text"])
             entry["detail"] = "" if entry["ok"] else redact_approval_token(turn.detail or f"turn {turn.status}")[:200]
             entry["status"] = turn.status
+            entry["transport"] = "codex-app-server"
+            if agent is not None and isinstance(agent.model, str):
+                entry["requested_model"] = agent.model
+            else:
+                entry.pop("requested_model", None)
+            for stale_key in (
+                "effective_model",
+                "acpx_version",
+                "metadata_provenance",
+                "session_id",
+                "request_id",
+                "protocol_version",
+                "safe_events",
+            ):
+                entry.pop(stale_key, None)
             entry["timed_out"] = bool(getattr(turn, "timed_out", False))
             if entry["timed_out"] and not entry["ok"]:
                 entry["failure_kind"] = "timeout"
