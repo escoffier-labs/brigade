@@ -1686,6 +1686,67 @@ def test_assessment_period_freshness(tmp_path):
     assert outside["legacy_state"] == "untested"
 
 
+@pytest.mark.parametrize("claim_id", ["EC-03", "EC-12"])
+def test_out_of_period_verifier_outage_does_not_change_claim_verifier_status(tmp_path, monkeypatch, claim_id):
+    from brigade import control_readiness
+
+    target = _ws(tmp_path)
+    root = target / ".brigade"
+    if claim_id == "EC-12":
+        root = root / "evidence-packages"
+        for name, created_at in (
+            ("pkg-in", "2026-09-06T00:00:00Z"),
+            ("pkg-out", "2026-10-06T00:00:00Z"),
+        ):
+            package = root / name
+            _write_strict_package(package)
+            manifest_path = package / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["created_at"] = created_at
+            _write_json(manifest_path, manifest)
+    else:
+        for name, completed_at in (
+            ("verify-in", "2026-09-06T00:00:01+00:00"),
+            ("verify-out", "2026-10-06T00:00:01+00:00"),
+        ):
+            run_dir = _write_cosign_assessment_fixture(target, run_dir_name=name, producer_run_id=RUN)
+            receipt_path = run_dir / "receipt.json"
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            receipt["completed_at"] = completed_at
+            _write_json(receipt_path, receipt)
+
+    def adapter(_target, artifact_path):
+        if (artifact_path.parent if claim_id == "EC-03" else artifact_path).name.endswith("out"):
+            return control_crosswalk._verifier_unavailable(artifact_path.name, "verifier_tool_unavailable")
+        return control_readiness.ArtifactObservation(
+            artifact_path.name,
+            "claim_validated",
+            "validated",
+            control_readiness.dims(
+                integrity="passed",
+                signature="passed",
+                authorization="passed",
+                subject="passed",
+                population="passed",
+            ),
+        )
+
+    adapter_name = "cosign-bundle" if claim_id == "EC-03" else "evidence-package"
+    monkeypatch.setitem(control_crosswalk._VERIFIER_ADAPTERS, adapter_name, adapter)
+
+    result = _assess(
+        target,
+        claim_id,
+        RUN if claim_id == "EC-03" else None,
+        period=("2026-09-01T00:00:00+00:00", "2026-09-30T23:59:59+00:00"),
+    )
+
+    assert result["outcome"] == "validated"
+    assert result["verifier"]["status"] == "wired"
+    assert result["population"]["in_scope"] == 1
+    assert result["population"]["out_of_period"] == 1
+
+
 def test_assessment_period_missing_timestamp_is_incomplete(tmp_path):
     target = _ws(tmp_path)
     receipt_path = _verify_dir(target, "v1") / "receipt.json"

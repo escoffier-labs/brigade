@@ -626,10 +626,10 @@ def _evaluate_cosign_bundle_exists(ctx: _Context) -> _Discovery:
                 ["verifier_not_wired"],
             )
         _bind(obs, ctx, _receipt_binding(receipt))
-        if obs.scope == "in_scope":
-            out.verifier_unavailable |= obs.proposed == "unavailable"
         obs.timestamp = _first_timestamp(receipt, "completed_at", "started_at")
         _apply_period(obs, ctx)
+        if obs.scope == "in_scope":
+            out.verifier_unavailable |= obs.proposed == "unavailable"
         out.observations.append(obs)
     return out
 
@@ -1384,10 +1384,10 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
             if isinstance(source, dict)
             else {},
         )
-        if obs.scope == "in_scope":
-            out.verifier_unavailable |= obs.proposed == "unavailable"
         obs.timestamp = _first_timestamp(manifest, "created_at")
         _apply_period(obs, ctx)
+        if obs.scope == "in_scope":
+            out.verifier_unavailable |= obs.proposed == "unavailable"
         out.observations.append(obs)
     return out
 
