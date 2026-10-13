@@ -276,6 +276,24 @@ def test_completed_verify_receipt_with_rederived_digest_is_validated(tmp_path):
     assert readiness["artifacts"][0]["source_digest_sha256"] == receipt["digests"]["receipt_sha256"]
 
 
+def test_completed_verify_receipt_rejects_unsupported_schema_version(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    receipt["schema_version"] = 999
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    _write_json(run_dir / "receipt.json", receipt)
+
+    readiness = _assess(target, "EC-01", RUN)
+
+    assert readiness["outcome"] == "invalid"
+    assert readiness["reason"] == "schema_missing"
+
+
 def test_completed_verify_receipt_with_changed_payload_is_rejected(tmp_path):
     target = _ws(tmp_path)
     run_dir = _verify_dir(target, "verify-a")

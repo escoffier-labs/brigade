@@ -34,6 +34,7 @@ from . import (
     evidence_package,
     evidence_package_snapshot,
     localio,
+    receipt_schema,
     receipts_trailer,
     run_journal,
 )
@@ -388,7 +389,7 @@ def _assess_verify_receipt(
 ) -> control_readiness.ArtifactObservation:
     """EC-01 verification result with a rederived writer-compatible digest."""
     relpath = _relpath(ctx, path)
-    if type(receipt.get("schema_version")) is not int:
+    if receipt.get("schema_version") != receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION:
         return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
     has_digest_evidence = "digests" in receipt
     receipt_digest: str | None = None
