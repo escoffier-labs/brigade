@@ -643,6 +643,7 @@ def _classify_entry(
             provider == "jules"
             and isinstance(provider_info, dict)
             and provider_info.get("has_outputs") is False
+            and not (isinstance(provider_info.get("pull_request_url"), str) and provider_info.get("pull_request_url"))
             and not (
                 isinstance(provider_info.get("activity_kinds"), list)
                 and JULES_WORK_ACTIVITY_KINDS.intersection(provider_info["activity_kinds"])
