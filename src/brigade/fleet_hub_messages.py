@@ -499,7 +499,37 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
         raise MessageError("id must be a positive integer within SQLite's range")
     original = _fetch(conn, message_id)
     if original is None or original["recipient"] != sender:
-        return None
+        client_id = _text(raw.get("client_id"), "client_id", 64, required=False)
+        if not client_id:
+            return None
+        accepted = conn.execute(
+            "SELECT recipient,subject,reference,priority FROM fleet_messages "
+            "WHERE sender=? AND client_id=? AND reply_to IS NULL",
+            (sender, client_id),
+        ).fetchone()
+        if accepted is None:
+            return None
+        subject = raw.get("subject")
+        if subject is None:
+            subject = str(accepted[1])
+        reference = raw.get("ref")
+        if reference is None:
+            reference = accepted[2]
+        message = send(
+            conn,
+            {
+                "to": accepted[0],
+                "subject": subject,
+                "body": raw.get("body"),
+                "ref": reference,
+                "priority": raw.get("priority", accepted[3]),
+                "client_id": client_id,
+                "enqueued_at": raw.get("enqueued_at"),
+            },
+            sender=sender,
+            reply_to=message_id,
+        )
+        return _fetch(conn, message["id"])
     subject = raw.get("subject")
     if subject is None:
         prefixed = f"Re: {original['subject']}"

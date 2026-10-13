@@ -421,7 +421,13 @@ def test_expiry_prune_clears_reply_link_to_deleted_parent(message_hub):
     base, token_a, token_b, db = message_hub
     parent = _request(base, token_a, {"action": "send", "to": NODE_B, "subject": "Parent", "body": "Old"})[1]
     parent_id = parent["message"]["id"]
-    reply = _request(base, token_b, {"action": "reply", "id": parent_id, "body": "Recent"})[1]
+    reply_request = {
+        "action": "reply",
+        "id": parent_id,
+        "body": "Recent",
+        "client_id": "reply-before-parent-expiry",
+    }
+    reply = _request(base, token_b, reply_request)[1]
     conn = sqlite3.connect(db)
     conn.execute(
         "UPDATE fleet_messages SET created_at=? WHERE id=?",
@@ -430,6 +436,9 @@ def test_expiry_prune_clears_reply_link_to_deleted_parent(message_hub):
     conn.commit()
     conn.close()
     _request(base, token_b, {"action": "list"})
+    replayed = _request(base, token_b, reply_request)
+    assert replayed[0] == 201
+    assert replayed[1]["message"]["id"] == reply["message"]["id"]
     inbox = _request(base, token_a, {"action": "list"})[1]
     assert inbox["messages"][0]["id"] == reply["message"]["id"]
     assert inbox["messages"][0]["reply_to"] is None
@@ -756,6 +765,31 @@ def test_redirected_send_is_spooled_instead_of_reported_delivered(tmp_path, monk
     queued = fleet_client._read_spool(fleet_client_messages._spool_path(NODE_A, "node-secret"))
     assert len(queued) == 1
     assert queued[0]["subject"] == "Keep after redirect"
+
+
+def test_send_spools_success_response_without_matching_client_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (201, {}))
+
+    result = fleet_client_messages.send(
+        recipient=NODE_B,
+        subject="Keep after invalid response",
+        body="A 2xx response must confirm delivery",
+        reference=None,
+        priority="normal",
+    )
+
+    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    queued = fleet_client._read_spool(path)
+    assert result["queued"] is True
+    assert len(queued) == 1
+    assert queued[0]["client_id"] == result["client_id"]
 
 
 def test_redirected_spool_flush_keeps_message_queued(tmp_path, monkeypatch):

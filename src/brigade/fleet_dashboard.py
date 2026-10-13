@@ -574,11 +574,11 @@ def _machine_board(
     if not query.node and not query.attention_only and not query.seat and not query.state and not query.repo:
         node_ids |= {node_id for node_id in info if node_id}
         node_ids |= claim_nodes
-        unread_ids = sorted(
-            node_id for node_id, count in unread_counts.items() if count > 0 and node_id not in node_ids
-        )
+        unread_ids = sorted(node_id for node_id, count in unread_counts.items() if count > 0)
         room = max(0, MACHINE_CARD_LIMIT - len(node_ids))
-        node_ids.update(unread_ids[unread_offset : unread_offset + room])
+        node_ids.update(
+            node_id for node_id in unread_ids[unread_offset : unread_offset + room] if node_id not in node_ids
+        )
     elif query.node:
         node_ids |= {node_id for node_id in info if node_id and _contains(node_id, query.node)}
         node_ids |= {node_id for node_id in claim_nodes if _contains(node_id, query.node)}

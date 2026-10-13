@@ -123,6 +123,11 @@ def _queue_locked(path: Path, message: dict[str, Any], *, dir_fd: int | None = N
     return {"queued": True, "client_id": message["client_id"]}
 
 
+def _response_confirms(payload: dict[str, Any], message: dict[str, Any]) -> bool:
+    response_message = payload.get("message")
+    return isinstance(response_message, dict) and response_message.get("client_id") == message.get("client_id")
+
+
 def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -> dict[str, Any]:
     path = _spool_path(node_id, token)
     _warn_inactive_spools(node_id, path)
@@ -142,6 +147,9 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                 if 300 <= status < 400:
                     return _queue_locked(path, message, dir_fd=dir_fd)
                 raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
+            if not _response_confirms(payload, message):
+                _LOG.warning("fleet message response did not confirm the submitted request; queueing it")
+                return _queue_locked(path, message, dir_fd=dir_fd)
             return payload
     except (KeyboardInterrupt, SystemExit):
         try:
@@ -360,8 +368,7 @@ def _flush_locked(
                 "fleet message spool %s: dropping rejected message: %s", path, _safe_log_text(payload.get("error"))
             )
         elif 200 <= status < 300:
-            response_message = payload.get("message")
-            if not isinstance(response_message, dict) or response_message.get("client_id") != message.get("client_id"):
+            if not _response_confirms(payload, message):
                 _LOG.warning("fleet message spool %s: response did not confirm the queued message", path)
                 fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
                 return delivered

@@ -12,7 +12,15 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from brigade import fleet_client, fleet_dashboard, fleet_hub, fleet_hub_grokbot, fleet_hub_sessions, fleet_hub_status
+from brigade import (
+    fleet_client,
+    fleet_dashboard,
+    fleet_hub,
+    fleet_hub_grokbot,
+    fleet_hub_http,
+    fleet_hub_sessions,
+    fleet_hub_status,
+)
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
@@ -1084,6 +1092,7 @@ class TestBoardBounds:
 
     def test_unread_only_machine_cards_are_bounded_and_paginated(self):
         unread = {f"unread-node-{index:03d}": 1 for index in range(300)}
+        existing_nodes = [{"node_id": f"existing-node-{index:03d}"} for index in range(100)]
 
         def render(offset):
             return fleet_dashboard.render_page(
@@ -1091,7 +1100,7 @@ class TestBoardBounds:
                 query_string="",
                 runs=[],
                 claims=[],
-                nodes=[],
+                nodes=existing_nodes,
                 started_at={},
                 nonce="test",
                 unread_counts=unread,
@@ -1099,10 +1108,39 @@ class TestBoardBounds:
             )
 
         first = render(0)
-        second = render(fleet_hub.BOARD_LIMIT)
+        second = render(100)
+        third = render(200)
         first_ids = {node_id for node_id in unread if f'data-node="{node_id}"' in first}
         second_ids = {node_id for node_id in unread if f'data-node="{node_id}"' in second}
+        third_ids = {node_id for node_id in unread if f'data-node="{node_id}"' in third}
 
-        assert len(first_ids) == fleet_hub.BOARD_LIMIT
+        assert len(first_ids) == 100
         assert len(second_ids) == 100
+        assert len(third_ids) == 100
         assert first_ids.isdisjoint(second_ids)
+        assert second_ids.isdisjoint(third_ids)
+        assert first_ids | second_ids | third_ids == set(unread)
+
+    def test_unread_more_link_advances_by_unread_cards_consumed(self, hub, monkeypatch):
+        now = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(
+                f"33333333-3333-4333-8333-{index:012d}",
+                f"unread-page-{index}",
+                1,
+                "run.started",
+                repo=f"repo-{index}",
+                harness="claude",
+                ts=now,
+            )
+            for index in range(100)
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        unread = {f"unread-node-{index:03d}": 1 for index in range(300)}
+        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: unread)
+
+        _status, _headers, page = _request(hub, "GET", "/view/machines", headers=_bearer())
+
+        assert "unread_offset=100" in page
+        assert 'class="fleet-more"' in page
