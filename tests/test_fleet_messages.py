@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import stat
 import threading
 import urllib.error
 import urllib.request
@@ -519,6 +521,66 @@ def test_message_schema_indexes_retention_prune_columns(message_hub):
     assert ("created_at",) in message_indexes
     assert ("reply_to",) in message_indexes
     assert ("received_at",) in send_indexes
+
+
+def test_schema_backfill_ignores_sends_outside_daily_quota_window(tmp_path, monkeypatch):
+    conn = fleet_hub.init_db(tmp_path / "fleet.db")
+    now = datetime.now(timezone.utc)
+    old_timestamp = (now - timedelta(days=2)).isoformat()
+    recent_timestamp = (now - timedelta(hours=1)).isoformat()
+    rows = [
+        ("old-send", old_timestamp),
+        ("recent-send", recent_timestamp),
+    ]
+    for client_id, received_at in rows:
+        conn.execute(
+            "INSERT INTO fleet_messages "
+            "(sender,recipient,subject,body,priority,client_id,payload_hash,created_at,received_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (NODE_A, NODE_B, client_id, "body", "normal", client_id, "legacy-hash", received_at, received_at),
+        )
+    conn.commit()
+    monkeypatch.setattr(fleet_hub_messages, "_prune_expired", lambda _conn: None)
+
+    fleet_hub_messages.ensure_schema(conn)
+
+    send_ids = [row[0] for row in conn.execute("SELECT client_id FROM fleet_message_sends ORDER BY client_id")]
+    conn.close()
+    assert send_ids == ["recent-send"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes are not portable")
+def test_hub_message_database_and_wal_files_are_owner_only(tmp_path):
+    old_umask = os.umask(0o022)
+    try:
+        db_dir = tmp_path / "hub-state"
+        db = db_dir / "fleet.db"
+        conn = fleet_hub.init_db(db)
+        conn.execute(
+            "INSERT INTO fleet_message_sends(sender,client_id,received_at) VALUES(?,?,?)",
+            (NODE_A, "permission-probe", datetime.now(timezone.utc).isoformat()),
+        )
+        assert stat.S_IMODE(db_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(db.stat().st_mode) == 0o600
+        for suffix in ("-wal", "-shm", "-journal"):
+            sidecar = Path(f"{db}{suffix}")
+            if sidecar.exists():
+                assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
+        conn.close()
+    finally:
+        os.umask(old_umask)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes are not portable")
+def test_hub_refuses_an_existing_shared_database_directory(tmp_path):
+    db_dir = tmp_path / "shared-hub-state"
+    db_dir.mkdir(mode=0o755)
+    os.chmod(db_dir, 0o755)
+
+    with pytest.raises(fleet_hub.FleetHubError, match="database directory must be private"):
+        fleet_hub.init_db(db_dir / "fleet.db")
+
+    assert not (db_dir / "fleet.db").exists()
 
 
 def test_expired_idempotent_retry_prunes_before_lookup(message_hub):
@@ -1122,6 +1184,47 @@ def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
     assert fleet_client_messages.flush(NODE_A) == 1
     assert len({attempt["client_id"] for attempt in attempts}) == 1
     assert not fleet_client_messages._spool_path(NODE_A).exists()
+
+
+def test_send_refuses_before_post_when_full_spool_cannot_retain_retry(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    queued_for_b = {
+        "action": "send",
+        "to": NODE_B,
+        "subject": "Blocked recipient",
+        "body": "Keep the retry key",
+        "client_id": "blocked-message",
+        "enqueued_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with fleet_client._spool_lock(path) as dir_fd:
+        assert fleet_client._spool_append_locked(path, queued_for_b, dir_fd=dir_fd)
+    monkeypatch.setattr(fleet_client, "MAX_SPOOL_BYTES", path.stat().st_size + 50)
+    attempts = []
+
+    def request(_hub, _token, message):
+        attempts.append(message.copy())
+        return 429, {"code": "message_recipient_quota", "recipient": NODE_B}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+
+    with pytest.raises(fleet_client.FleetClientError, match="spool is full"):
+        fleet_client_messages.send(
+            recipient="33333333-3333-4333-8333-333333333333",
+            subject="Preserve idempotency",
+            body="Do not post without queue capacity",
+            reference=None,
+            priority="normal",
+        )
+
+    assert [message["client_id"] for message in attempts] == ["blocked-message"]
+    assert fleet_client._read_spool(path)[0]["client_id"] == "blocked-message"
 
 
 def test_message_spool_refuses_overflow_without_evicting_queued_messages(tmp_path, monkeypatch):

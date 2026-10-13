@@ -147,6 +147,21 @@ def _queue_locked(path: Path, message: dict[str, Any], *, dir_fd: int | None = N
     return {"queued": True, "client_id": message["client_id"]}
 
 
+def _require_spool_capacity(path: Path, message: dict[str, Any], *, dir_fd: int | None) -> None:
+    try:
+        info = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False) if dir_fd is not None else path.lstat()
+    except FileNotFoundError:
+        current = 0
+    except OSError as exc:
+        raise fleet_client.FleetClientError("fleet message spool capacity could not be checked") from exc
+    else:
+        if not stat.S_ISREG(info.st_mode):
+            raise fleet_client.FleetClientError("fleet message spool is not a regular file")
+        current = info.st_size
+    if current + len((fleet_client._encode(message) + "\n").encode("utf-8")) > fleet_client.MAX_SPOOL_BYTES:
+        raise fleet_client.FleetClientError("fleet message spool is full; refusing delivery without retry capacity")
+
+
 def _response_confirms(payload: dict[str, Any], message: dict[str, Any]) -> bool:
     response_message = payload.get("message")
     return isinstance(response_message, dict) and response_message.get("client_id") == message.get("client_id")
@@ -186,6 +201,7 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                     message["_recipient"] = recipient
                 if any(_message_recipient(item) == recipient for item in pending) or globally_blocked:
                     return _queue_locked(path, message, dir_fd=dir_fd)
+            _require_spool_capacity(path, message, dir_fd=dir_fd)
             try:
                 status, payload = _request(hub, token, message)
             except fleet_client.FleetClientError:

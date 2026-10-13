@@ -96,6 +96,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import sys
 import threading
 import time
@@ -710,6 +711,43 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _secure_hub_database_storage(db_path: Path) -> None:
+    parent = db_path.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        parent_info = parent.lstat()
+    except OSError as exc:
+        raise FleetHubError(f"could not secure fleet hub database directory: {type(exc).__name__}") from exc
+    if not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode):
+        raise FleetHubError("fleet hub database parent must be a directory")
+    if os.name == "posix" and stat.S_IMODE(parent_info.st_mode) != 0o700:
+        raise FleetHubError("fleet hub database directory must be private (mode 0700)")
+
+    for path in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm"), Path(f"{db_path}-journal")):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if path != db_path:
+                continue
+            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                fd = os.open(path, flags, 0o600)
+            except FileExistsError:
+                info = path.lstat()
+            else:
+                os.close(fd)
+                info = path.lstat()
+        except OSError as exc:
+            raise FleetHubError(f"could not inspect fleet hub database file: {type(exc).__name__}") from exc
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise FleetHubError("fleet hub database files must be regular files")
+        if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600:
+            try:
+                os.chmod(path, 0o600, follow_symlinks=False)
+            except OSError as exc:
+                raise FleetHubError(f"could not secure fleet hub database file: {type(exc).__name__}") from exc
+
+
 def init_db(db_path: Path) -> sqlite3.Connection:
     """Open the hub database and create/migrate its schema.
 
@@ -720,13 +758,14 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     so request connections inherit it without re-issuing the pragma.
     """
     db_path = Path(db_path).expanduser()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    _secure_hub_database_storage(db_path)
     resolved = db_path.resolve()
     conn = sqlite3.connect(str(resolved), timeout=10)
     try:
         conn.execute(f"PRAGMA busy_timeout={_INIT_BUSY_TIMEOUT_MS}")
         with _migration_lock(resolved):
             _init_schema(conn, resolved)
+        _secure_hub_database_storage(resolved)
     except BaseException:
         conn.close()
         raise

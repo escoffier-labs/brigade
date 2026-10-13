@@ -103,6 +103,7 @@ if TYPE_CHECKING:
 
 from . import fleet_claim_lifecycle as _claim_lifecycle
 from . import fleet_claim_target as _claim_target
+from .fleet_client_spool import fsync_parent as _fsync_spool_parent
 from . import toml_compat as tomllib
 from .fleet_claim_lifecycle import _ConfirmedClaimLease as _ConfirmedClaimLease
 
@@ -644,7 +645,7 @@ def _read_spool(path: Path, *, dir_fd: int | None = None) -> list[dict[str, Any]
             text = handle.read()
     except FileNotFoundError:
         return events
-    except (OSError, FleetClientError) as exc:
+    except (OSError, UnicodeError, FleetClientError) as exc:
         raise FleetClientError(f"fleet spool could not be read: {type(exc).__name__}") from exc
     for line in text.splitlines():
         line = line.strip()
@@ -661,27 +662,23 @@ def _read_spool(path: Path, *, dir_fd: int | None = None) -> list[dict[str, Any]
 
 
 def _write_spool_atomic(path: Path, events: list[dict[str, Any]], *, dir_fd: int | None = None) -> None:
-    """Replace the spool contents atomically; remove it when empty.
-
-    The temp file is created exclusive with an unpredictable name in the
-    spool directory (#1154), never a predictable ``.tmp`` path a local
-    attacker could pre-create or symlink to. The final ``os.replace`` is a
-    rename: it swaps the directory entry itself and never follows a symlink
-    planted at the destination. When a validated directory descriptor is
-    available, both the temp creation and the replace address it by name
-    relative to that descriptor (#1157 round 3) — ``tempfile.mkstemp``
-    cannot target a descriptor, so the temp is opened here with
-    ``O_CREAT|O_EXCL|O_NOFOLLOW`` and 0600 — so a directory swapped in
-    under the old path cannot redirect the rewrite.
-    """
+    """Atomically replace a spool, sync its contents and directory, or remove it."""
     if not events:
         if dir_fd is not None:
+            removed = False
             try:
                 os.unlink(path.name, dir_fd=dir_fd)
+                removed = True
             except FileNotFoundError:
                 pass
         else:
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink()
+                removed = True
+            except FileNotFoundError:
+                removed = False
+        if removed:
+            _fsync_spool_parent(path, dir_fd)
         return
     if dir_fd is None:
         fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
@@ -692,6 +689,7 @@ def _write_spool_atomic(path: Path, events: list[dict[str, Any]], *, dir_fd: int
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp, path)
+            _fsync_spool_parent(path, dir_fd)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
@@ -721,6 +719,7 @@ def _write_spool_atomic(path: Path, events: list[dict[str, Any]], *, dir_fd: int
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_name, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        _fsync_spool_parent(path, dir_fd)
     except BaseException:
         if tmp_name:
             try:
@@ -767,6 +766,9 @@ def _spool_append_locked(
         fd = _open_private(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, dir_fd=dir_fd)
         with os.fdopen(fd, "a", encoding="utf-8") as handle:
             handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_spool_parent(path, dir_fd)
     except (FleetClientError, OSError) as exc:
         _LOG.warning("fleet spool %s refused: %s", path, type(exc).__name__)
         return False

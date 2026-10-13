@@ -16,6 +16,7 @@ REF_LIMIT = 256
 PRIORITIES = frozenset({"low", "normal", "high", "urgent"})
 UNACKED_QUOTA = 1000
 SENDER_DAILY_QUOTA = 1000
+SENDER_DAILY_WINDOW = timedelta(days=1)
 RETENTION_DAYS = 90
 MAX_LIST_RESPONSE_BYTES = 7 * 1024 * 1024
 MAX_FUTURE_SKEW = timedelta(minutes=5)
@@ -127,11 +128,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             sender TEXT NOT NULL, client_id TEXT NOT NULL, received_at TEXT NOT NULL
         )"""
     )
+    send_cutoff = (datetime.now(timezone.utc) - SENDER_DAILY_WINDOW).isoformat()
     conn.execute(
         "INSERT OR IGNORE INTO fleet_message_sends(sender,client_id,received_at) "
         "SELECT m.sender,m.client_id,m.received_at FROM fleet_messages AS m "
-        "WHERE m.received_at IS NOT NULL AND NOT EXISTS ("
-        "SELECT 1 FROM fleet_message_sends AS s WHERE s.sender=m.sender AND s.client_id=m.client_id)"
+        "WHERE m.received_at IS NOT NULL AND m.received_at>=? AND NOT EXISTS ("
+        "SELECT 1 FROM fleet_message_sends AS s WHERE s.sender=m.sender AND s.client_id=m.client_id)",
+        (send_cutoff,),
     )
     conn.execute("CREATE INDEX IF NOT EXISTS fleet_messages_inbox ON fleet_messages (recipient, id)")
     conn.execute(
@@ -172,7 +175,7 @@ def _prune_expired(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM fleet_messages WHERE created_at < ?", (cutoff,))
     conn.execute(
         "DELETE FROM fleet_message_sends WHERE received_at < ?",
-        ((datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),),
+        ((datetime.now(timezone.utc) - SENDER_DAILY_WINDOW).isoformat(),),
     )
     if not was_in_transaction:
         conn.commit()
@@ -479,7 +482,7 @@ def send(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str, reply_to
             raise MessageQuotaError(
                 "recipient message quota exceeded", code="message_recipient_quota", recipient=recipient
             )
-        sender_cutoff = (now - timedelta(days=1)).isoformat()
+        sender_cutoff = (now - SENDER_DAILY_WINDOW).isoformat()
         sender_count = conn.execute(
             "SELECT COUNT(*) FROM fleet_message_sends WHERE sender=? AND received_at>=?", (sender, sender_cutoff)
         ).fetchone()[0]

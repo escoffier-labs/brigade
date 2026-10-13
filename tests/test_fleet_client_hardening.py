@@ -124,6 +124,36 @@ class TestSpoolPrivacy:
 
         assert spool.read_bytes() == original
 
+    def test_flush_preserves_spool_with_invalid_utf8(self, home):
+        spool = _spool()
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        original = b"\xff\n"
+        spool.write_bytes(original)
+
+        with pytest.raises(fleet_client.FleetClientError, match="could not be read"):
+            fleet_client.flush_spool(fleet_client.resolve_node_id(), hub_url="http://127.0.0.1:9", token="token")
+
+        assert spool.read_bytes() == original
+
+    @pytest.mark.skipif(os.name != "posix", reason="directory durability is POSIX-specific")
+    def test_spool_mutations_sync_file_and_directory(self, home, monkeypatch):
+        spool = _spool()
+        real_fsync = os.fsync
+        synced_modes = []
+
+        def record_fsync(fd):
+            synced_modes.append(stat.S_IFMT(os.fstat(fd).st_mode))
+            real_fsync(fd)
+
+        monkeypatch.setattr(fleet_client.os, "fsync", record_fsync)
+        with fleet_client._spool_lock(spool) as dir_fd:
+            assert fleet_client._spool_append_locked(spool, {"run_id": "append"}, dir_fd=dir_fd)
+            fleet_client._write_spool_atomic(spool, [{"run_id": "replace"}], dir_fd=dir_fd)
+            fleet_client._write_spool_atomic(spool, [], dir_fd=dir_fd)
+
+        assert synced_modes.count(stat.S_IFREG) >= 2
+        assert synced_modes.count(stat.S_IFDIR) >= 3
+
     def test_oversized_new_event_preserves_existing_spool(self, home, monkeypatch):
         spool = _spool()
         spool.parent.mkdir(parents=True, exist_ok=True)
