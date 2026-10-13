@@ -332,11 +332,16 @@ def child_names(parent: int, limit: int) -> list[str]:
         raise ValueError("directory name limit must be positive")
     if posix_available():
         names: list[str] = []
-        with os.scandir(parent) as entries:
-            for entry in entries:
-                names.append(entry.name)
-                if len(names) == limit:
-                    break
+        # A fresh open description avoids stale enumeration state on the held fd.
+        scan_fd = os.open(".", directory_flags(), dir_fd=parent)
+        try:
+            with os.scandir(scan_fd) as entries:
+                for entry in entries:
+                    names.append(entry.name)
+                    if len(names) == limit:
+                        break
+        finally:
+            os.close(scan_fd)
         return names
     if nt_available():
         return list(_nt_dirfd().child_names(parent, limit))
