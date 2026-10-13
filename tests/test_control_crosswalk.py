@@ -1570,6 +1570,25 @@ def test_ec12_binds_malformed_package_from_staged_receipt_identity(tmp_path):
     assert artifact["reason_codes"] == ["schema_missing"]
 
 
+def test_ec12_leaves_pre_staging_package_rejections_unbound(tmp_path):
+    target = _ws(tmp_path)
+    package = target / ".brigade" / "evidence-packages" / "pkg-unsafe"
+    _write_strict_package(package, producer_run_id=RUN)
+    manifest_path = package / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"]["producer_run_id"] = "tampered-run"
+    _write_json(manifest_path, manifest)
+    (package / "unlisted.txt").write_text("unlisted", encoding="utf-8")
+
+    result = _assess(target, "EC-12", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "rejected"
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["entry_path_unsafe"]
+
+
 def test_ec12_classifies_a_missing_manifest_listed_entry_as_snapshot_mismatch(tmp_path):
     target = _ws(tmp_path)
     package = target / ".brigade" / "evidence-packages" / "pkg-missing-entry"
@@ -1579,7 +1598,8 @@ def test_ec12_classifies_a_missing_manifest_listed_entry_as_snapshot_mismatch(tm
     result = _assess(target, "EC-12", RUN)
 
     assert result["outcome"] == "rejected"
-    assert result["reason"] == "package_snapshot_mismatch"
+    assert result["artifacts"][0]["outcome"] == "rejected"
+    assert result["artifacts"][0]["scope"] == "in_scope"
     assert result["artifacts"][0]["reason_codes"] == ["package_snapshot_mismatch"]
 
 

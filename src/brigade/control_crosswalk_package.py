@@ -65,7 +65,7 @@ def stage_source_package(
     }:
         raise evidence_package_snapshot.PackageSnapshotError("unsafe")
     reader.copy(artifact / "manifest.json", reserve_bytes=reserve_bytes)
-    for name in entry_names:
+    for name in sorted(entry_names, key=lambda item: item != "receipt.json"):
         entry_path = artifact / name
         limit = attestation_input.MAX_JSON_BYTES if name == "receipt.json" else evidence_package.MAX_ENTRY_BYTES
         try:
@@ -129,7 +129,11 @@ def receipt_binding_candidates(staged_package: Path) -> dict[str, object]:
     }
 
 
-def binding_candidates(source: object, receipt: dict[str, object]) -> dict[str, object]:
+def binding_candidates(
+    obs: control_readiness.ArtifactObservation, source: object, receipt: dict[str, object]
+) -> dict[str, object]:
+    if obs.proposed == "rejected" and not receipt:
+        return {}
     candidates = (
         {
             "source.producer_run_id": source.get("producer_run_id"),

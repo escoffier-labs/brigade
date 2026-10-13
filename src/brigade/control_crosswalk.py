@@ -1408,7 +1408,7 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
         else:
             obs = _assess_package_manifest(ctx, package_dir, relpath, manifest)
         source = manifest.get("source") if isinstance(manifest, dict) else None
-        candidates = control_crosswalk_package.binding_candidates(source, staged_receipt_candidates)
+        candidates = control_crosswalk_package.binding_candidates(obs, source, staged_receipt_candidates)
         _bind(obs, ctx, control_crosswalk_cosign.binding_candidates(obs, candidates))
         obs.timestamp = _first_timestamp(manifest, "created_at")
         _apply_period(obs, ctx)
