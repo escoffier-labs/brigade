@@ -99,8 +99,6 @@ def test_inspect_exact_local_lineage_is_read_only(lineage, capsys, monkeypatch):
             "repo_id": "repo-a",
             "action_id": "action-a",
             "source_fingerprint": "a" * 16,
-            "import_id": item["id"],
-            "task_id": task["id"],
             "action_binding": "matched",
             "reason": None,
             "local_task_status": "done",
@@ -111,6 +109,57 @@ def test_inspect_exact_local_lineage_is_read_only(lineage, capsys, monkeypatch):
     assert "synthetic private content" not in output.out + output.err
     assert "private-repo" not in output.out + output.err
     assert str(target) not in output.out + output.err
+    assert snapshot(target) == before
+
+
+@pytest.mark.parametrize(
+    "case,reason",
+    [
+        ("matched", None),
+        ("action-missing", "action_missing"),
+        ("import-pending", "import_not_promoted"),
+        ("task-missing", "task_missing"),
+        ("task-mismatch", "task_mismatch"),
+    ],
+)
+def test_generated_lineage_ids_remain_internal(lineage, capsys, case, reason):
+    target, repo, actions, refs, action, _, _ = lineage
+    title = "Synthetic confidential merger codename"
+    sensitive_slug = "synthetic-confidential-merger-codename"
+    metadata = {"repo_id": "repo-a", "fleet_action_id": "action-a", "source_fingerprint": "a" * 16}
+    item = tasks_plans._make_import(title, kind="task", source="repo-fleet", metadata=metadata)
+    preview = import_model._task_preview_from_import(item)
+    preview["task_type"] = preview.pop("type")
+    task = tasks_plans._make_task(**preview)
+    assert sensitive_slug in item["id"]
+    assert sensitive_slug in task["id"]
+    item.update(status="promoted", task_id=task["id"])
+    task["status"] = "done"
+    action["dispatch"]["target_import_id"] = item["id"]
+    if case == "import-pending":
+        item["status"] = "pending"
+    elif case == "task-mismatch":
+        task["metadata"]["import_id"] = "unrelated-import"
+    actions.write_text(json.dumps({"actions": [] if case == "action-missing" else [action]}))
+    helpers._imports_path(repo).write_text(json.dumps(item) + "\n")
+    helpers._tasks_path(repo).write_text(json.dumps({"version": 1, "tasks": [] if case == "task-missing" else [task]}))
+    before = snapshot(target)
+    assert invoke(target, refs) == 0
+    output = capsys.readouterr()
+    result = json.loads(output.out)
+    member = result["members"][0]
+    matched = reason is None
+    assert member["action_binding"] == ("matched" if matched else "unknown")
+    assert member["reason"] == reason
+    assert member["local_task_status"] == ("done" if matched else "unknown")
+    assert member["specification_verification"] == member["launch_safety"] == "unknown"
+    assert result["summary"] == {"inspected": 1, "matched": int(matched), "unknown": int(not matched), "done": False}
+    assert title not in output.out + output.err
+    assert sensitive_slug not in output.out + output.err
+    assert item["id"] not in output.out + output.err
+    assert task["id"] not in output.out + output.err
+    assert "import_id" not in member
+    assert "task_id" not in member
     assert snapshot(target) == before
 
 

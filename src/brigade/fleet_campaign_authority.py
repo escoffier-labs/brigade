@@ -189,7 +189,6 @@ def _read_rows(
                     or not 1 <= version <= edges.TASK_LEDGER_VERSION
                 ):
                     raise campaign.PreviewError("ledger_refused")
-                edges.ensure_ledger_edges(payload)
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise campaign.PreviewError("ledger_refused")
         snapshot.check()
@@ -244,7 +243,6 @@ def _resolve(
     import_id = campaign.opaque_key(dispatch.get("target_import_id"))
     if "target_import_id" in action and action["target_import_id"] != import_id:
         raise campaign.PreviewError("lineage_mismatch")
-    member["import_id"] = import_id
     imports = _read_rows(entry.path, helpers._imports_path(entry.path), None, snapshots, stack)
     item = _exact(imports, "id", import_id, "import")
     metadata = item.get("metadata")
@@ -266,7 +264,6 @@ def _resolve(
     if item.get("status") != "promoted":
         raise campaign.PreviewError("import_status_invalid")
     task_id = campaign.opaque_key(item.get("task_id"))
-    member["task_id"] = task_id
     for record in (action, dispatch):
         if "target_task_id" in record and record["target_task_id"] != task_id:
             raise campaign.PreviewError("lineage_mismatch")
@@ -322,8 +319,6 @@ def inspect(
         for reference in sorted(references, key=lambda ref: ref["repo_id"]):
             member: dict[str, Any] = {
                 **reference,
-                "import_id": None,
-                "task_id": None,
                 "action_binding": "unknown",
                 "reason": None,
                 "local_task_status": "unknown",

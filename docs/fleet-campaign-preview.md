@@ -165,7 +165,7 @@ to that promoted import. An unrelated task or changed provenance reports
 If recorded, the action's `target_import_id` and `target_task_id` and the
 dispatch's `target_task_id` must agree with the chain. Contradictions report
 `lineage_mismatch`. Action status must be a known non-archived action state.
-missing or junk states report `action_status_invalid`. Archived or superseded
+Missing or junk states report `action_status_invalid`. Archived or superseded
 actions report `action_superseded`. Recorded resolution states may be
 `dispatched`, `in-progress` or `completed`, and dispatch status may be
 `dispatched`. Negative states (`superseded`, `dismissed`, `stale`,
@@ -174,14 +174,16 @@ These states confer no launch or completion authority.
 
 Prefixes, newer imports, synthesized fingerprints and task searches never
 repair missing lineage. Missing, duplicate, corrupt, superseded, mismatched or
-changed lineage stays unknown with a fixed reason code. Pending imports report
-`import_not_promoted`, dismissed imports report `import_dismissed`, and unknown
-import states report `import_status_invalid`. None yield a task observation.
+changed lineage stays unknown with a fixed reason code. There is no archive
+fallback: an archived import absent from the current import ledger reports
+`import_missing`. Pending imports report `import_not_promoted`, dismissed
+imports report `import_dismissed`, and unknown or missing import states report
+`import_status_invalid`. None yield a task observation.
 Stable malformed or unsafe ledgers report `ledger_refused`. Observed generation
 changes report `lineage_changed`.
 
 The JSON envelope contains `kind: "fleet-campaign-inspect"`, `read_only: true`,
-the campaign ID and members with opaque repository/action/import/task IDs,
+the campaign ID and members with opaque repository/action IDs,
 `source_fingerprint`, `action_binding`, `reason` and `local_task_status`.
 `action_binding: "matched"` means the recorded local chain reached an exact
 task with a recognized current status. It does not verify the requested
@@ -189,6 +191,10 @@ campaign specification. `specification_verification` and `launch_safety`
 always remain `unknown`. The summary counts `inspected`, `matched` and
 `unknown` members and always reports `done: false`, even for local `done`
 tasks. No members are excluded from preview's resume candidates.
+
+Exact import and task IDs remain internal to lineage matching and provenance
+checks. The envelope omits `import_id` and `task_id` on every path because
+production-generated IDs can contain title slugs.
 
 Paths, summaries, task text, prompts, artifacts, credentials and raw exceptions
 are excluded. Valid inspection returns exit 0 even when members are unknown.
