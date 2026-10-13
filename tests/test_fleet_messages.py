@@ -1124,7 +1124,14 @@ def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
     assert not fleet_client_messages._spool_path(NODE_A).exists()
 
 
-def test_new_send_reports_unauthorized_without_cross_credential_spooling(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("status", "response"),
+    [
+        (401, {"error": "unauthorized"}),
+        (403, {"error": "sender is not an active hub principal", "code": "message_sender_inactive"}),
+    ],
+)
+def test_new_send_reports_unauthorized_without_cross_credential_spooling(tmp_path, monkeypatch, status, response):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     monkeypatch.setattr(
@@ -1132,9 +1139,9 @@ def test_new_send_reports_unauthorized_without_cross_credential_spooling(tmp_pat
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
-    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (401, {"error": "unauthorized"}))
+    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (status, response))
 
-    with pytest.raises(fleet_client.FleetClientError, match="unauthorized"):
+    with pytest.raises(fleet_client.FleetClientError, match=response["error"]):
         fleet_client_messages.send(
             recipient=NODE_B,
             subject="Retry after credential recovery",
