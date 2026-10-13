@@ -335,6 +335,8 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Reviewer uses auth profile production-admin",
         "Reviewer is using auth profile production-admin",
         "This seat is using the authentication profile production-admin",
+        "Reviewer has auth profile production-admin",
+        "This seat has an auth profile production-admin",
         "Auth profile of this seat is production-admin",
         "Auth profile of implementer is production-admin",
         'Auth profile is "production admin"',
@@ -390,6 +392,8 @@ def test_parse_rejects_qualified_compact_credential_assignments(field: str, text
         "This seat is using the password hunter2",
         "Reviewer has API key shortkey",
         "Reviewer has the password hunter2",
+        "Reviewers have API key shortkey",
+        "Agents have the password hunter2",
     ],
 )
 def test_parse_rejects_subject_first_credential_disclosures(field: str, text: str) -> None:
@@ -885,6 +889,7 @@ def test_parse_rejects_filesystem_paths_in_url_parameters(field: str, text: str)
     [
         "Call /api/password%3Dhunter2",
         "Call /api/SERVICE_MODE%3Dproduction",
+        "Call /api/SERVICE_MODE=production",
         "Call /%65tc/passwd",
         "Call /api/%2e%2e/etc/passwd",
     ],

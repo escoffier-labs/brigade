@@ -41,7 +41,7 @@ _DANGEROUS_VALUE_PATTERN = (
     r"(?:[A-Za-z0-9_.-]+|\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|\[[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\]|\([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s+(?:\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|\[[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\]|\([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\))|"
     r"\b(?:(?:this|the|a|an|my|your|our|their|his|her|its)\s+)?"
-    r"[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?\s+(?:uses?|is\s+using)\s+"
+    r"[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?\s+(?:uses?|is\s+using|has|have)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?auth(?:entication)?[ _-]profiles?\s+"
     r"(?!(?:is|are|as|for|in|required|needed|necessary|optional|available|selection|rotation|management|regularly)\b)"
     r"(?:\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|"
@@ -71,7 +71,7 @@ _DANGEROUS_VALUE_PATTERN = (
     r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
     r"(?:to|as|with)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:(?:this|the|a|an|my|your|our|their|his|her|its)\s+)?"
-    r"[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?\s+(?:uses?|is\s+using|has)\s+"
+    r"[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?\s+(?:uses?|is\s+using|has|have)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
     r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE})\b)\S+|"
@@ -139,12 +139,12 @@ _CONTEXTUAL_TERMINAL_PATH = re.compile(
 )
 _API_ROUTE_CONTEXT = re.compile(
     r"\b(?:call|invoke|serve|expose|request|hit|get|head|post|put|patch|delete|connect|options|trace)\s+(?:the\s+)?"
-    r"(?P<path>/(?:[A-Za-z0-9._~%-]+(?:/[A-Za-z0-9._~%-]+)*)(?:\?[^\s<>\"']*)?)",
+    r"(?P<path>/(?:[A-Za-z0-9._~%=-]+(?:/[A-Za-z0-9._~%=-]+)*)(?:\?[^\s<>\"']*)?)",
     re.IGNORECASE,
 )
 _HTTP_METHOD_ROUTE_CONTEXT = re.compile(
     r"\b(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)\s+"
-    r"(?P<path>/(?:[A-Za-z0-9._~%-]+(?:/[A-Za-z0-9._~%-]+)*)(?:\?[^\s<>\"']*)?)"
+    r"(?P<path>/(?:[A-Za-z0-9._~%=-]+(?:/[A-Za-z0-9._~%=-]+)*)(?:\?[^\s<>\"']*)?)"
 )
 _HTTP_METHOD_ROUTE_ROOTS = frozenset({"applications", "config", "users"})
 _FILESYSTEM_ROUTE_ROOTS = frozenset(
