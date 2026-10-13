@@ -32,29 +32,29 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:Proxy-)?Authorization\s*:\s*Bearer\s+\S+|\bBearer\s+[A-Za-z0-9._~+/-]{20,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
-    r"\bauth(?:entication)?[ _-]profiles?\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|of\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|assigned\s+to\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|used\s+by\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|value)(?:\s+|(?=[:=])))?(?:(?:(?:is\s+)?provided\s+(?:as|with)|is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|configured\s+(?:as|to|with))\s+|[:=]\s*)"
+    r"\bauth(?:entication)?[ _-]profiles?\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|of\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|assigned\s+to\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|used\s+by\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|value)(?:\s+|(?=[:=])))?(?:(?:(?:is\s+)?provided\s+(?:as|with)|is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|configured\s+(?:as|to|with))\s+|[:=]\s*)"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
-    r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
+    r"(?:[A-Za-z0-9_.-]+|\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|\[[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\]|\([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s*[:=]\s*" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
-    r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
+    r"(?:[A-Za-z0-9_.-]+|\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|\[[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\]|\([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s+(?:named|called)\s+"
-    r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
-    r"\bauth(?:entication)?[ _-]profiles?\s+(?:\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
+    r"(?:[A-Za-z0-9_.-]+|\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|\[[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\]|\([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\))|"
+    r"\bauth(?:entication)?[ _-]profiles?\s+(?:\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|\[[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\]|\([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\))|"
     r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with|using))\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?auth(?:entication)?[ _-]profiles?\s+"
     r"(?!(?:is|are|as|for|in|required|needed|necessary|optional|available|selection|rotation|management|regularly)\b)"
-    r"[A-Za-z0-9_.-]+|"
+    r"(?:\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|\[[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\]|\([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\)|[A-Za-z0-9_.-]+)|"
     r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with|using))\s+"
-    r"(?:the\s+)?(?:\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\)|(?!(?:the)\b)[A-Za-z0-9_.-]+)\s+"
+    r"(?:the\s+)?(?:\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|\[[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\]|\([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\)|(?!(?:the)\b)[A-Za-z0-9_.-]+)\s+"
     r"auth(?:entication)?[ _-]profiles?\b|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s*[:=]\s*"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
-    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|of\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|assigned\s+to\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|used\s+by\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|value)(?:\s+|(?=[:=])))?"
+    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|of\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|assigned\s+to\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|used\s+by\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|value)(?:\s+|(?=[:=])))?"
     r"(?:provided\s+(?:as|with)|stored\s+(?:as|with)|generated\s+(?:as|with)|configured\s+(?:as|with|to))\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
-    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|of\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|assigned\s+to\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|used\s+by\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|value)(?:\s+|(?=[:=])))?"
+    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|of\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|assigned\s+to\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|used\s+by\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|value)(?:\s+|(?=[:=])))?"
     r"(?:(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to)\s+|[:=]\s*)"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:set|configure(?:d)?|store(?:d)?|provide(?:d)?|generate(?:d)?)\s+"
@@ -83,7 +83,7 @@ _URL_CREDENTIAL_QUERY = re.compile(
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
 _ROSTER_OWNERSHIP_QUALIFIER = (
     r"(?:\s+(?:for|of|used\s+by|assigned\s+to)\s+(?:(?:this|the)\s+)?"
-    r"(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*))?"
+    r"(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?))?"
 )
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"\b(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+|"
@@ -100,7 +100,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     re.IGNORECASE,
 )
 _PATH_DECLARATION_LINKER = r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
-_PATH_DECLARATION_QUALIFIER = r"(?:\s+(?:(?:for|of|used\s+by|assigned\s+to)\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)))?"
+_PATH_DECLARATION_QUALIFIER = r"(?:\s+(?:(?:for|of|used\s+by|assigned\s+to)\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)))?"
 _PATH_DECLARATION = (
     r"\b" + _PATH_LABEL + r"(?:\s+value)?" + _PATH_DECLARATION_QUALIFIER + r"\s*" + _PATH_DECLARATION_LINKER
 )
@@ -202,11 +202,15 @@ def _has_disallowed_api_route_query(value: str) -> bool:
             component.casefold() for component in decoded_path.replace("\\", "/").split("/") if component
         ]
         if any(component in {".", ".."} for component in decoded_components) or any(
-            component in _FILESYSTEM_COMPONENTS - _HTTP_METHOD_ROUTE_ROOTS - _COMMON_API_RESOURCE_COMPONENTS
-            or component.startswith(".")
+            component.startswith(".")
             or component == "~"
             or component in _PRIVATE_KEY_FILES
-            for component in decoded_components
+            or (
+                index == 0
+                and component in _FILESYSTEM_COMPONENTS - _HTTP_METHOD_ROUTE_ROOTS - _COMMON_API_RESOURCE_COMPONENTS
+            )
+            or component in {"credentials", "passwd", "secret", "secrets"}
+            for index, component in enumerate(decoded_components)
         ):
             return True
         if (
