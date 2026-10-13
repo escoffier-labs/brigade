@@ -89,6 +89,28 @@ def _assert_refused(directory: Path, code: str) -> None:
     assert raised.value.code == code
 
 
+def test_windows_reparse_stat_refusal_is_unsafe(monkeypatch: pytest.MonkeyPatch) -> None:
+    import brigade.evidence_package_snapshot as package_snapshot
+
+    reparse_error = package_snapshot.dirfd._nt_dirfd().ReparsePointRefusedError
+    monkeypatch.setattr(package_snapshot.os, "name", "nt")
+    monkeypatch.setattr(package_snapshot.dirfd, "nt_available", lambda: True)
+
+    def refuse_reparse(_parent: int, _name: str) -> os.stat_result:
+        raise reparse_error("path component is a reparse point")
+
+    monkeypatch.setattr(package_snapshot.dirfd, "stat_child", refuse_reparse)
+    with pytest.raises(PackageSnapshotError) as raised:
+        package_snapshot._read_child(
+            1,
+            "receipt.json",
+            limit=attestation_input.MAX_JSON_BYTES,
+            declared_size=None,
+            capture=True,
+        )
+    assert raised.value.code == "unsafe"
+
+
 def _restamp_package_receipt(directory: Path, receipt: dict[str, object]) -> None:
     _stamp_receipt(receipt)
     receipt_bytes = json.dumps(receipt, sort_keys=True).encode("utf-8")

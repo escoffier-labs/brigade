@@ -41,6 +41,11 @@ def nt_available() -> bool:
     return bool(_nt_dirfd().available())
 
 
+def is_reparse_point_refusal(error: OSError) -> bool:
+    """Return whether a Windows handle operation refused a reparse point."""
+    return nt_available() and isinstance(error, _nt_dirfd().ReparsePointRefusedError)
+
+
 def available() -> bool:
     return posix_available() or nt_available()
 

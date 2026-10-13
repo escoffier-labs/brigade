@@ -592,7 +592,17 @@ def _handle_from_fd(fd: int) -> int:
     return int(msvcrt.get_osfhandle(fd))  # type: ignore[attr-defined]
 
 
-def _reject_reparse(api: Any, handle: Any, *, expected_directory: bool | None, allow_reparse: bool = False) -> bool:
+class ReparsePointRefusedError(OSError):
+    """A handle-relative operation refused to follow a reparse point."""
+
+
+def _reject_reparse(
+    api: Any,
+    handle: Any,
+    *,
+    expected_directory: bool | None,
+    allow_reparse: bool = False,
+) -> bool:
     info = api.BY_HANDLE_FILE_INFORMATION()
     if not api.GetFileInformationByHandle(handle, ctypes.byref(info)):
         raise _win_error()
@@ -600,7 +610,7 @@ def _reject_reparse(api: Any, handle: Any, *, expected_directory: bool | None, a
     if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
         if allow_reparse:
             return True
-        raise OSError("path component is a reparse point")
+        raise ReparsePointRefusedError("path component is a reparse point")
     is_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
     if expected_directory and not is_directory:
         raise OSError("path component is not a directory")

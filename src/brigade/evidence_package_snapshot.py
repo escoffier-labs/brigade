@@ -147,7 +147,11 @@ def _scan_names(root_fd: int) -> frozenset[str]:
         return frozenset(windows_names)
     except PackageSnapshotError:
         raise
-    except (NotImplementedError, OSError):
+    except OSError as error:
+        if dirfd.is_reparse_point_refusal(error):
+            _error("unsafe")
+        _error("unavailable")
+    except NotImplementedError:
         _error("unavailable")
 
 
@@ -203,7 +207,11 @@ def _read_child(
         return (b"".join(chunks) if chunks is not None else None, digest.hexdigest(), initial)
     except PackageSnapshotError:
         raise
-    except (NotImplementedError, OSError):
+    except OSError as error:
+        if dirfd.is_reparse_point_refusal(error):
+            _error("unsafe")
+        _error("unavailable")
+    except NotImplementedError:
         _error("unavailable")
     finally:
         if descriptor != -1:
@@ -315,6 +323,8 @@ def _final_child_checks(root_fd: int, observed: dict[str, _Observation], expecte
         except NotImplementedError:
             _error("unavailable")
         except OSError as error:
+            if dirfd.is_reparse_point_refusal(error):
+                _error("unsafe")
             if _unsupported_operation(error):
                 _error("unavailable")
             _error("changed")

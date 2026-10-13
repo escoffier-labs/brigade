@@ -452,8 +452,10 @@ def test_nt_stat_child_refuses_unsafe_or_failed_metadata_without_leaks(
     if failure:
         kernel.failures.add(failure)
     try:
-        with pytest.raises(error, match=message):
+        with pytest.raises(error, match=message) as raised:
             dirfd.stat_child(parent, name)
+        if name in {"link", "junction"}:
+            assert isinstance(raised.value, nt_dirfd.ReparsePointRefusedError)
         assert kernel.live == {parent}
         assert len(kernel.closed) == int(child_closed)
     finally:
