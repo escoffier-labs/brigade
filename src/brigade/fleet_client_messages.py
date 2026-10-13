@@ -26,6 +26,10 @@ MESSAGE_DRAIN_DEADLINE_SECONDS = 12.0
 _NOT_PROVIDED = object()
 
 
+class _UnauthorizedError(fleet_client.FleetClientError):
+    """An authentication failure cannot safely queue work in a credential-scoped spool."""
+
+
 def _spool_path(node_id: str, token: str | None = None) -> Path:
     if token is None:
         token = fleet_client.load_fleet_settings()["node_token"]
@@ -640,6 +644,8 @@ def _reply_recipient(hub: str, token: str, message_id: int, *, timeout: float | 
     body = {"action": "list", "after": message_id - 1, "unacked": False}
     status, payload = _request(hub, token, body) if timeout is None else _request(hub, token, body, timeout=timeout)
     messages = payload.get("messages")
+    if status == 401:
+        raise _UnauthorizedError(str(payload.get("error") or "fleet hub returned HTTP 401"))
     if status != 200 or not isinstance(messages, list):
         raise fleet_client.FleetClientError("fleet hub could not resolve the reply recipient")
     previous_id = message_id - 1
@@ -697,6 +703,10 @@ def _drain_locked(
                     _LOG.warning("fleet message spool %s: dropping reply because its parent expired", path)
                     continue
                 message["_recipient"] = recipient
+            except _UnauthorizedError:
+                retained.extend(messages[index:])
+                fleet_client._write_spool_atomic(path, retained, dir_fd=dir_fd)
+                raise
             except (KeyError, TypeError, ValueError, fleet_client.FleetClientError):
                 retained.extend(messages[index:])
                 fleet_client._write_spool_atomic(path, retained, dir_fd=dir_fd)
@@ -725,6 +735,10 @@ def _drain_locked(
             fleet_client._write_spool_atomic(path, retained, dir_fd=dir_fd)
             return delivered, True
         code = payload.get("code")
+        if status == 401:
+            retained.extend(messages[index:])
+            fleet_client._write_spool_atomic(path, retained, dir_fd=dir_fd)
+            raise _UnauthorizedError(str(payload.get("error") or "fleet hub returned HTTP 401"))
         if status == 429 and code == "message_recipient_quota":
             rejected_recipient = payload.get("recipient") or recipient
             if isinstance(rejected_recipient, str):
@@ -742,7 +756,7 @@ def _drain_locked(
         if (
             300 <= status < 400
             or status >= 500
-            or status in (401, 408, 425, 429)
+            or status in (408, 425, 429)
             or (status == 400 and code == "message_timestamp_future")
         ):
             retained.extend(messages[index:])
