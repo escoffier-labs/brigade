@@ -29,6 +29,13 @@ class _ReadRefusal(OSError):
         self.reason = reason
 
 
+def _is_unsafe_link_refusal(error: OSError) -> bool:
+    """Identify a link refusal, including Windows reparse-point metadata errors."""
+    return (isinstance(error, _ReadRefusal) and error.reason == "symlink_refused") or dirfd.is_reparse_point_refusal(
+        error
+    )
+
+
 class _AssessmentReader:
     """Hold the canonical assessment root and every descended directory.
 
@@ -225,6 +232,10 @@ def package_source_issue(
             current = reader.info(artifact / name)
         except FileNotFoundError:
             current = None
+        except OSError as exc:
+            if _is_unsafe_link_refusal(exc):
+                return "unsafe"
+            raise
         if current is not None and (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode)):
             return "unsafe"
         observed = _package_entry_metadata(current)
@@ -232,7 +243,9 @@ def package_source_issue(
             return "mismatch"
     try:
         current_directory = dirfd.stat_child(reader.directory(artifact.parent), artifact.name)
-    except OSError:
+    except OSError as exc:
+        if _is_unsafe_link_refusal(exc):
+            return "unsafe"
         return "changed"
     if stat.S_ISLNK(current_directory.st_mode) or (getattr(current_directory, "st_file_attributes", 0) or 0) & 0x400:
         return "unsafe"

@@ -397,11 +397,14 @@ def _assess_verify_receipt(
     """EC-01 verification result with a rederived writer-compatible digest."""
     relpath = _relpath(ctx, path)
     schema_version = receipt.get("schema_version")
-    has_digest_evidence = "digests" in receipt
+    digests = receipt.get("digests")
+    has_digest_evidence = isinstance(digests, dict) and "receipt_sha256" in digests
     receipt_digest: str | None = None
-    if has_digest_evidence:
+    if "digests" in receipt:
         try:
-            receipt_digest = attestation_receipt.snapshot_stored_receipt(receipt).digest
+            snapshot = attestation_receipt.snapshot_receipt(receipt)
+            if has_digest_evidence:
+                receipt_digest = snapshot.digest
         except attestation_receipt.ReceiptDigestError:
             return _obs(
                 relpath,

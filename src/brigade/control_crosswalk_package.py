@@ -72,6 +72,10 @@ def stage_source_package(
             entry_info = reader.info(entry_path)
         except FileNotFoundError:
             entry_info = None
+        except OSError as exc:
+            if _control_crosswalk_io._is_unsafe_link_refusal(exc):
+                raise evidence_package_snapshot.PackageSnapshotError("unsafe") from exc
+            raise
         if entry_info is not None and (stat.S_ISLNK(entry_info.st_mode) or not stat.S_ISREG(entry_info.st_mode)):
             raise evidence_package_snapshot.PackageSnapshotError("unsafe")
         if strict_package and entry_info is not None and entry_info.st_size != entry_sizes[name]:
@@ -80,9 +84,13 @@ def stage_source_package(
         try:
             reader.copy(entry_path, limit=limit, reserve_bytes=reserve_bytes)
         except OSError as exc:
+            if _control_crosswalk_io._is_unsafe_link_refusal(exc):
+                raise evidence_package_snapshot.PackageSnapshotError("unsafe") from exc
             try:
                 entry_info = reader.info(entry_path)
-            except OSError:
+            except OSError as recheck_error:
+                if _control_crosswalk_io._is_unsafe_link_refusal(recheck_error):
+                    raise evidence_package_snapshot.PackageSnapshotError("unsafe") from recheck_error
                 raise exc from None
             if stat.S_ISLNK(entry_info.st_mode) or not stat.S_ISREG(entry_info.st_mode):
                 raise evidence_package_snapshot.PackageSnapshotError("unsafe") from exc

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -267,6 +268,21 @@ def test_completed_verify_receipt_without_stored_digest_is_structure_only(tmp_pa
     assert ec01["state"] == "untested"
     assert ec01["evidence_outcome"] == "structure_observed"
     assert ec02["state"] == "untested"
+
+
+def test_completed_verify_receipt_with_digest_algorithm_but_no_hash_is_structure_only(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["digests"] = {"algorithm": "sha256"}
+    _write_json(receipt_path, receipt)
+
+    readiness = _assess(target, "EC-01", RUN)
+
+    assert readiness["outcome"] == "structure_observed"
+    assert readiness["dimensions"]["integrity"] == {"status": "not_checked", "reason": "verifier_not_wired"}
 
 
 def test_completed_verify_receipt_with_rederived_digest_is_validated(tmp_path):
@@ -844,6 +860,71 @@ def test_ec12_rejects_symlinked_package_entry(tmp_path):
     assert readiness["outcome"] == "rejected"
     assert readiness["reason"] == "entry_path_unsafe"
     assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_rejects_reparse_refusal_for_package_entry_during_staging(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    reparse_error = control_crosswalk._control_crosswalk_io.dirfd._nt_dirfd().ReparsePointRefusedError
+    reader_type = control_crosswalk._AssessmentReader
+    real_info = reader_type.info
+
+    def refuse_reparse(reader, path):
+        if path.name == "changes.patch":
+            raise reparse_error("path component is a reparse point")
+        return real_info(reader, path)
+
+    monkeypatch.setattr(reader_type, "info", refuse_reparse)
+    monkeypatch.setattr(
+        control_crosswalk._control_crosswalk_io.dirfd,
+        "is_reparse_point_refusal",
+        lambda error: isinstance(error, reparse_error),
+    )
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "entry_path_unsafe"
+
+
+def test_package_source_recheck_maps_reparse_entry_to_unsafe(tmp_path, monkeypatch):
+    reader_type = control_crosswalk._AssessmentReader
+    io = control_crosswalk._control_crosswalk_io
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    reader = reader_type(target)
+    package_fd = reader.directory(package_dir)
+    initial_directory = io._package_entry_metadata(os.fstat(package_fd))
+    assert initial_directory is not None
+    expected_names = set(io.dirfd.child_names(package_fd, len(control_crosswalk.evidence_package.PACKAGE_FILES) + 2))
+    entry_path = package_dir / "changes.patch"
+    metadata = {"changes.patch": io._package_entry_metadata(os.stat(entry_path))}
+    reparse_error = io.dirfd._nt_dirfd().ReparsePointRefusedError
+    real_info = reader_type.info
+
+    def refuse_reparse(instance, path):
+        if instance is reader and path == entry_path:
+            raise reparse_error("path component is a reparse point")
+        return real_info(instance, path)
+
+    monkeypatch.setattr(reader_type, "info", refuse_reparse)
+    monkeypatch.setattr(io.dirfd, "is_reparse_point_refusal", lambda error: isinstance(error, reparse_error))
+    try:
+        issue = io.package_source_issue(
+            reader,
+            package_dir,
+            package_fd,
+            initial_directory,
+            expected_names,
+            metadata,
+            max_children=len(control_crosswalk.evidence_package.PACKAGE_FILES) + 2,
+        )
+    finally:
+        reader.close()
+
+    assert issue == "unsafe"
 
 
 @pytest.mark.parametrize(
