@@ -4,7 +4,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Container]
-Image=ghcr.io/escoffier-labs/brigade-fleet-hub:0.27.0
+Image=localhost/brigade-fleet-hub:0.28.0-e6009f6
 ContainerName=brigade-fleet-hub
 PublishPort=127.0.0.1:3774:3774
 Volume=brigade-fleet.volume:/var/lib/brigade

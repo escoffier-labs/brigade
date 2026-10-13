@@ -8,8 +8,9 @@ CONTAINER = ROOT / "ops" / "fleet-hub"
 def test_hub_image_is_non_root_and_has_a_single_writable_state_directory():
     text = (CONTAINER / "Containerfile").read_text()
 
-    assert "ARG BRIGADE_VERSION=0.27.0" in text
-    assert '"brigade-cli==${BRIGADE_VERSION}"' in text
+    assert "ARG BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409" in text
+    assert '"https://github.com/escoffier-labs/brigade/archive/${BRIGADE_REF}.tar.gz"' in text
+    assert 'org.opencontainers.image.revision="${BRIGADE_REF}"' in text
     assert "USER 10001:10001" in text
     assert 'VOLUME ["/var/lib/brigade"]' in text
     assert '"--db", "/var/lib/brigade/fleet-hub.db"' in text

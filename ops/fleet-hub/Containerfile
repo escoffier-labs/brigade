@@ -1,11 +1,13 @@
 FROM python:3.12.7-slim-bookworm
 
-ARG BRIGADE_VERSION=0.27.0
+ARG BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409
 LABEL org.opencontainers.image.source="https://github.com/escoffier-labs/brigade" \
-      org.opencontainers.image.version="${BRIGADE_VERSION}" \
+      org.opencontainers.image.version="0.28.0" \
+      org.opencontainers.image.revision="${BRIGADE_REF}" \
       org.opencontainers.image.description="Brigade Fleet Hub"
 
-RUN python -m pip install --no-cache-dir "brigade-cli==${BRIGADE_VERSION}" \
+RUN python -m pip install --no-cache-dir \
+        "https://github.com/escoffier-labs/brigade/archive/${BRIGADE_REF}.tar.gz" \
     && groupadd --gid 10001 brigade \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /var/lib/brigade brigade \
     && install -d -o 10001 -g 10001 -m 0700 /var/lib/brigade
