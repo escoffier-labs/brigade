@@ -114,7 +114,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 28
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -608,6 +608,7 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     fleet_hub_enrollment.ensure_schema(conn)
     from . import fleet_hub_messages
 
+    # v26 -> v28: additive message queue, quota ledger, and named principals.
     fleet_hub_messages.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 

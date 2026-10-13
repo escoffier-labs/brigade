@@ -526,6 +526,7 @@ def _machine_card(
     *,
     now: datetime,
     sort: str,
+    unread_count: int = 0,
 ) -> str:
     last_seen = _parse_stamp((node_info or {}).get("last_received_at"))
     last_age = (now - last_seen).total_seconds() if last_seen is not None else None
@@ -534,6 +535,8 @@ def _machine_card(
     events = (node_info or {}).get("events")
     if isinstance(events, int):
         meta.append(f"{events} events")
+    if unread_count:
+        meta.append(f"{unread_count} unread messages")
     holds = ""
     if held:
         items = "".join(f"<li>{esc(claim.target)}: {esc(_claim_text(claim))}</li>" for claim in held)
@@ -557,6 +560,7 @@ def _machine_board(
     query: DashboardQuery,
     *,
     now: datetime,
+    unread_counts: dict[str, int] | None = None,
 ) -> str:
     info = {str(node.get("node_id") or ""): node for node in nodes}
     by_node: dict[str, list[RunRow]] = {}
@@ -564,12 +568,17 @@ def _machine_board(
         by_node.setdefault(row.node_id, []).append(row)
     node_ids = set(by_node)
     claim_nodes = {claim.owner_node for claim in claims if claim.owner_node and not claim.expired}
+    unread_counts = unread_counts or {}
     if not query.node and not query.attention_only and not query.seat and not query.state and not query.repo:
         node_ids |= {node_id for node_id in info if node_id}
         node_ids |= claim_nodes
+        node_ids |= {node_id for node_id, count in unread_counts.items() if count > 0}
     elif query.node:
         node_ids |= {node_id for node_id in info if node_id and _contains(node_id, query.node)}
         node_ids |= {node_id for node_id in claim_nodes if _contains(node_id, query.node)}
+        node_ids |= {
+            node_id for node_id, count in unread_counts.items() if count > 0 and _contains(node_id, query.node)
+        }
 
     def card_key(node_id: str) -> tuple[int, str]:
         worst = min((_rank(row) for row in by_node.get(node_id, []) if row.live), default=_IDLE_RANK)
@@ -579,7 +588,15 @@ def _machine_board(
     for node_id in sorted(node_ids, key=card_key):
         held = [claim for claim in claims if claim.owner_node == node_id and not claim.expired]
         cards.append(
-            _machine_card(node_id, by_node.get(node_id, []), info.get(node_id), held, now=now, sort=query.sort)
+            _machine_card(
+                node_id,
+                by_node.get(node_id, []),
+                info.get(node_id),
+                held,
+                now=now,
+                sort=query.sort,
+                unread_count=unread_counts.get(node_id, 0),
+            )
         )
     if not cards:
         return f'<p class="machine-empty">{esc("No machines match.")}</p>'
@@ -711,6 +728,7 @@ def render_page(
     nonce: str,
     now: datetime | None = None,
     more_href: str | None = None,
+    unread_counts: dict[str, int] | None = None,
 ) -> str:
     """Render the full dashboard document for one board.
 
@@ -732,7 +750,7 @@ def render_page(
         board = _repo_board(_repo_entries(all_rows, claim_rows, query), query.sort)
         title = "Fleet: Repos"
     else:
-        board = _machine_board(visible, nodes, claim_rows, query, now=current)
+        board = _machine_board(visible, nodes, claim_rows, query, now=current, unread_counts=unread_counts)
         title = "Fleet: Machines"
     stamp = current.astimezone(timezone.utc).strftime("%H:%M:%S UTC")
     more = f'<p class="fleet-more"><a href="{esc(more_href)}">{esc("more")}</a></p>' if more_href else ""

@@ -733,7 +733,7 @@ def _write_spool_atomic(path: Path, events: list[dict[str, Any]], *, dir_fd: int
         raise
 
 
-def _spool_append_locked(path: Path, event: dict[str, Any], *, dir_fd: int | None = None) -> None:
+def _spool_append_locked(path: Path, event: dict[str, Any], *, dir_fd: int | None = None) -> bool:
     """Append under the caller's lock, enforcing ``MAX_SPOOL_BYTES``.
 
     When the append would exceed the cap, the oldest events are dropped until
@@ -762,14 +762,15 @@ def _spool_append_locked(path: Path, event: dict[str, Any], *, dir_fd: int | Non
         dropped = len(events) - len(kept)
         _LOG.warning("fleet spool %s exceeded %d bytes; dropped %d oldest event(s)", path, MAX_SPOOL_BYTES, dropped)
         _write_spool_atomic(path, kept, dir_fd=dir_fd)
-        return
+        return True
     try:
         fd = _open_private(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, dir_fd=dir_fd)
         with os.fdopen(fd, "a", encoding="utf-8") as handle:
             handle.write(line)
-    except FleetClientError:
-        _LOG.warning("fleet spool %s refused: not a regular file", path)
-        return
+    except (FleetClientError, OSError) as exc:
+        _LOG.warning("fleet spool %s refused: %s", path, type(exc).__name__)
+        return False
+    return True
 
 
 def _flush_locked(
@@ -885,12 +886,13 @@ def report_event(
     try:
         if spool.is_file():
             with _spool_lock(spool) as dir_fd:
-                _spool_append_locked(spool, event, dir_fd=dir_fd)
-                try:
-                    _flush_locked(spool, hub, token, max_batches=1, timeout=REPORT_TIMEOUT_SECONDS, dir_fd=dir_fd)
-                except (KeyboardInterrupt, SystemExit) as exc:
-                    interrupted = exc
-            delivered = not spool.is_file()
+                appended = _spool_append_locked(spool, event, dir_fd=dir_fd)
+                if appended:
+                    try:
+                        _flush_locked(spool, hub, token, max_batches=1, timeout=REPORT_TIMEOUT_SECONDS, dir_fd=dir_fd)
+                    except (KeyboardInterrupt, SystemExit) as exc:
+                        interrupted = exc
+            delivered = appended and not spool.is_file()
         else:
             try:
                 _post_events(hub, token, event, timeout=REPORT_TIMEOUT_SECONDS)
@@ -901,22 +903,20 @@ def report_event(
                 pass
             if not delivered:
                 with _spool_lock(spool) as dir_fd:
-                    _spool_append_locked(spool, event, dir_fd=dir_fd)
+                    if not _spool_append_locked(spool, event, dir_fd=dir_fd):
+                        return False
     except (KeyboardInterrupt, SystemExit) as exc:
-        # Interrupt during spool bookkeeping: the append/replace steps are
-        # atomic, so the spool is consistent; make a last attempt to keep the
-        # event, then propagate.
+        # Preserve the event after interrupted spool bookkeeping, then propagate.
         interrupted = exc
         if not delivered:
             try:
                 with _spool_lock(spool) as dir_fd:
                     if event not in _read_spool(spool, dir_fd=dir_fd):
-                        _spool_append_locked(spool, event, dir_fd=dir_fd)
+                        if not _spool_append_locked(spool, event, dir_fd=dir_fd):
+                            _LOG.warning("interrupted fleet event could not be persisted to the spool")
             except Exception as exc:
                 _LOG.warning("interrupted fleet event could not be made durable in the spool: %s", exc)
     except Exception as exc:
-        # A failed spool write must never be silent (#1157): whatever broke
-        # it, say why before giving up on the undelivered event.
         _LOG.warning("fleet event was not delivered and could not be spooled: %s", exc)
         return False
     if interrupted is not None:

@@ -230,6 +230,10 @@ def make_handler(
                 return True, None
             node_id, revoked = lookup_node_token(conn, presented)
             if node_id is None:
+                if self.path.partition("?")[0] == "/messages":
+                    principal = fleet_hub_messages.lookup_principal_token(conn, presented)
+                    if principal is not None:
+                        return False, principal
                 self._send_json(401, {"error": "unauthorized"})
                 return None
             if revoked:
@@ -646,6 +650,7 @@ def make_handler(
                     ],
                 )
                 nodes = node_summary(board.runs)
+                unread_counts = fleet_hub_messages.unread_counts(conn) if self._authorized() else {}
             except ClaimFenceError as exc:
                 self._send_json(503, {"error": str(exc)})
                 return
@@ -665,6 +670,7 @@ def make_handler(
                 started_at=started_at,
                 nonce=nonce,
                 more_href=more_href,
+                unread_counts=unread_counts,
             )
             # The legacy board used ``/`` as its machines route. Root now
             # belongs to the Command Deck, so keep every legacy navigation
@@ -1428,6 +1434,7 @@ def make_handler(
                 "/sessions",
                 "/policy",
                 "/messages",
+                "/message-principals",
             ):
                 self._send_json(404, {"error": "not found"})
                 return
@@ -1459,6 +1466,10 @@ def make_handler(
                 if path == "/nodes":
                     if not is_admin:
                         self._send_json(403, {"error": "the admin token is required to manage nodes"})
+                        return
+                elif path == "/message-principals":
+                    if not is_admin:
+                        self._send_json(403, {"error": "the admin token is required to enroll message principals"})
                         return
                 elif path == "/policy" and is_admin and not allow_admin_writes:
                     # Document writes stay admin. Resolve/prepare/ack need a node token.
@@ -1495,6 +1506,8 @@ def make_handler(
                     status, body_payload = handle_session(conn, parsed, caller_node=caller_node)
                 elif path == "/messages":
                     status, body_payload = fleet_hub_messages.handle(conn, parsed, caller=caller_node)
+                elif path == "/message-principals":
+                    status, body_payload = fleet_hub_messages.handle_principal_admin(conn, parsed)
                 elif path == "/cloud":
                     if (
                         is_admin
@@ -1579,6 +1592,15 @@ def make_handler(
                 return
             except fleet_hub_policy_api.FleetPolicyApiError as exc:
                 self._send_json(exc.status, exc.payload())
+                return
+            except fleet_hub_messages.MessageConflict as exc:
+                self._send_json(409, {"error": str(exc)})
+                return
+            except fleet_hub_messages.MessageQuotaError as exc:
+                self._send_json(429, {"error": str(exc)})
+                return
+            except fleet_hub_messages.MessageAuthError as exc:
+                self._send_json(403, {"error": str(exc)})
                 return
             except fleet_hub_messages.MessageError as exc:
                 self._send_json(400, {"error": str(exc)})

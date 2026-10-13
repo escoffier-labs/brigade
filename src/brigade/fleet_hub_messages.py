@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -11,39 +15,148 @@ BODY_LIMIT = 64 * 1024
 REF_LIMIT = 256
 PRIORITIES = frozenset({"low", "normal", "high", "urgent"})
 UNACKED_QUOTA = 1000
+SENDER_DAILY_QUOTA = 1000
 RETENTION_DAYS = 90
+MAX_LIST_RESPONSE_BYTES = 7 * 1024 * 1024
+MAX_FUTURE_SKEW = timedelta(minutes=5)
+_PRINCIPAL_NAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,62}$")
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS fleet_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    sender TEXT NOT NULL,
-    recipient TEXT NOT NULL,
-    subject TEXT NOT NULL,
-    body TEXT NOT NULL,
-    reference TEXT,
-    priority TEXT NOT NULL,
-    reply_to INTEGER REFERENCES fleet_messages(id),
+_PRINCIPAL_SCHEMA = """CREATE TABLE IF NOT EXISTS fleet_message_principals (
+    principal_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL,
-    acked_at TEXT,
-    acked_by TEXT
-);
-CREATE INDEX IF NOT EXISTS fleet_messages_inbox
-ON fleet_messages (recipient, id);
-"""
+    revoked_at TEXT
+)"""
 
 
 class MessageError(ValueError):
     """A bounded queue request was invalid."""
 
 
+class MessageConflict(MessageError):
+    """An idempotency key was reused for a different message payload."""
+
+
+class MessageQuotaError(MessageError):
+    """A temporary per-principal message quota is full."""
+
+
+class MessageAuthError(MessageError):
+    """A principal was revoked while its request was being processed."""
+
+
+def _payload_digest(
+    recipient: str, subject: str, body: str, reference: str | None, priority: str, reply_to: int | None = None
+) -> str:
+    value = json.dumps([recipient, subject, body, reference, priority, reply_to], ensure_ascii=False)
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(_SCHEMA)
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS fleet_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender TEXT NOT NULL,
+            recipient TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
+            reference TEXT,
+            priority TEXT NOT NULL,
+            client_id TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            reply_to INTEGER REFERENCES fleet_messages(id),
+            created_at TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            acked_at TEXT,
+            acked_by TEXT
+        )"""
+    )
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(fleet_messages)")}
+    if "client_id" not in columns:
+        conn.execute("ALTER TABLE fleet_messages ADD COLUMN client_id TEXT")
+    if "payload_hash" not in columns:
+        conn.execute("ALTER TABLE fleet_messages ADD COLUMN payload_hash TEXT")
+    if "received_at" not in columns:
+        conn.execute("ALTER TABLE fleet_messages ADD COLUMN received_at TEXT")
+    conn.execute("UPDATE fleet_messages SET client_id='legacy-' || id WHERE client_id IS NULL")
+    conn.execute("UPDATE fleet_messages SET received_at=created_at WHERE received_at IS NULL")
+    rows = conn.execute(
+        "SELECT id,recipient,subject,body,reference,priority,reply_to FROM fleet_messages WHERE payload_hash IS NULL"
+    ).fetchmany(1000)
+    while rows:
+        for message_id, recipient, subject, body, reference, priority, reply_to in rows:
+            digest = _payload_digest(str(recipient), str(subject), str(body), reference, str(priority), reply_to)
+            conn.execute("UPDATE fleet_messages SET payload_hash=? WHERE id=?", (digest, message_id))
+        rows = conn.execute(
+            "SELECT id,recipient,subject,body,reference,priority,reply_to FROM fleet_messages WHERE payload_hash IS NULL"
+        ).fetchmany(1000)
+    conn.execute(_PRINCIPAL_SCHEMA)
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS fleet_message_sends (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender TEXT NOT NULL, client_id TEXT NOT NULL, received_at TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO fleet_message_sends(sender,client_id,received_at) "
+        "SELECT m.sender,m.client_id,m.received_at FROM fleet_messages AS m "
+        "WHERE m.received_at IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM fleet_message_sends AS s WHERE s.sender=m.sender AND s.client_id=m.client_id)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS fleet_messages_inbox ON fleet_messages (recipient, id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS fleet_message_sends_sender_received ON fleet_message_sends (sender, received_at)"
+    )
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS fleet_messages_sender_client ON fleet_messages (sender, client_id)")
+    _prune_expired(conn)
+
+
+def _expiry_cutoff() -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
+
+
+def _prune_expired(conn: sqlite3.Connection) -> None:
+    was_in_transaction = conn.in_transaction
+    cutoff = _expiry_cutoff()
+    conn.execute(
+        "UPDATE fleet_messages SET reply_to=NULL WHERE reply_to IN "
+        "(SELECT id FROM fleet_messages WHERE created_at < ?)",
+        (cutoff,),
+    )
+    conn.execute("DELETE FROM fleet_messages WHERE created_at < ?", (cutoff,))
+    conn.execute(
+        "DELETE FROM fleet_message_sends WHERE received_at < ?",
+        ((datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),),
+    )
+    if not was_in_transaction:
+        conn.commit()
+
+
+def unread_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Unread message totals keyed by recipient principal for the fleet board."""
+    _prune_expired(conn)
+    counts = {
+        str(recipient): int(count)
+        for recipient, count in conn.execute(
+            "SELECT recipient,COUNT(*) FROM fleet_messages WHERE acked_at IS NULL GROUP BY recipient"
+        )
+    }
+    conn.commit()
+    return counts
 
 
 def _text(value: Any, name: str, limit: int, *, required: bool = True) -> str | None:
     if value is None and not required:
         return None
-    if not isinstance(value, str) or (required and not value.strip()) or len(value.encode("utf-8")) > limit:
+    if not isinstance(value, str) or (required and not value.strip()):
+        raise MessageError(f"{name} must be a non-empty UTF-8 string of at most {limit} bytes")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise MessageError(f"{name} must contain valid UTF-8 text") from exc
+    if size > limit:
         raise MessageError(f"{name} must be a non-empty UTF-8 string of at most {limit} bytes")
     return value
 
@@ -57,6 +170,7 @@ def _row(row: tuple[Any, ...]) -> dict[str, Any]:
         "body",
         "ref",
         "priority",
+        "client_id",
         "reply_to",
         "created_at",
         "acked_at",
@@ -67,7 +181,7 @@ def _row(row: tuple[Any, ...]) -> dict[str, Any]:
 
 def _fetch(conn: sqlite3.Connection, message_id: int) -> dict[str, Any] | None:
     row = conn.execute(
-        "SELECT id,sender,recipient,subject,body,reference,priority,reply_to,created_at,acked_at,acked_by "
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by "
         "FROM fleet_messages WHERE id=?",
         (message_id,),
     ).fetchone()
@@ -77,40 +191,201 @@ def _fetch(conn: sqlite3.Connection, message_id: int) -> dict[str, Any] | None:
 def _active_principal(conn: sqlite3.Connection, principal: str) -> bool:
     return (
         conn.execute("SELECT 1 FROM nodes WHERE node_id=? AND revoked_at IS NULL", (principal,)).fetchone() is not None
+        or conn.execute(
+            "SELECT 1 FROM fleet_message_principals WHERE principal_id=? AND revoked_at IS NULL", (principal,)
+        ).fetchone()
+        is not None
     )
 
 
-def send(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict[str, Any]:
+def _as_active_principal(conn: sqlite3.Connection, principal: str, operation: Any) -> Any:
+    opened = not conn.in_transaction
+    if opened:
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        if not _active_principal(conn, principal):
+            raise MessageAuthError("sender is not an active hub principal")
+        result = operation()
+        if opened:
+            conn.commit()
+        return result
+    except BaseException:
+        if opened:
+            conn.rollback()
+        raise
+
+
+def _enqueued_at(value: Any) -> str:
+    now = datetime.now(timezone.utc)
+    if value is None:
+        return now.isoformat()
+    text = _text(value, "enqueued_at", 64)
+    assert text is not None
+    try:
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise MessageError("enqueued_at must be an ISO-8601 timestamp") from exc
+    if stamp.tzinfo is None:
+        raise MessageError("enqueued_at must include a UTC offset")
+    stamp = stamp.astimezone(timezone.utc)
+    if stamp < now - timedelta(days=RETENTION_DAYS):
+        raise MessageError("message expired before delivery")
+    if stamp > now + MAX_FUTURE_SKEW:
+        raise MessageError("enqueued_at is too far in the future")
+    return stamp.isoformat()
+
+
+def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str]:
+    if not isinstance(raw, dict) or set(raw) - {"name", "label"}:
+        raise MessageError("principal enrollment requires only name and optional label")
+    name = _text(raw.get("name"), "name", 63)
+    label = _text(raw.get("label", name), "label", 128)
+    assert name is not None and label is not None
+    if _PRINCIPAL_NAME_RE.fullmatch(name) is None:
+        raise MessageError(
+            "name must start with a lowercase letter and contain only lowercase letters, digits, dots, underscores, or hyphens"
+        )
+    principal_id = f"agent:{name}"
+    secret = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        existing = conn.execute(
+            "SELECT revoked_at FROM fleet_message_principals WHERE principal_id=?", (principal_id,)
+        ).fetchone()
+        created_at = datetime.now(timezone.utc).isoformat()
+        if existing is None:
+            conn.execute(
+                "INSERT INTO fleet_message_principals(principal_id,name,label,token_hash,created_at) VALUES(?,?,?,?,?)",
+                (principal_id, name, label, token_hash, created_at),
+            )
+        elif existing[0] is not None:
+            conn.execute(
+                "UPDATE fleet_message_principals SET label=?,token_hash=?,created_at=?,revoked_at=NULL "
+                "WHERE principal_id=?",
+                (label, token_hash, created_at, principal_id),
+            )
+        else:
+            raise MessageError("message principal already exists")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return {"principal_id": principal_id, "name": name, "label": label, "token": secret}
+
+
+def lookup_principal_token(conn: sqlite3.Connection, presented: str) -> str | None:
+    digest = hashlib.sha256(presented.encode("utf-8")).hexdigest()
+    row = conn.execute(
+        "SELECT principal_id FROM fleet_message_principals WHERE token_hash=? AND revoked_at IS NULL", (digest,)
+    ).fetchone()
+    return str(row[0]) if row else None
+
+
+def revoke_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str] | None:
+    if not isinstance(raw, dict) or set(raw) != {"action", "name"} or raw.get("action") != "revoke":
+        raise MessageError("principal revocation requires action='revoke' and name")
+    name = _text(raw.get("name"), "name", 63)
+    assert name is not None
+    principal_id = f"agent:{name}"
+    cursor = conn.execute(
+        "UPDATE fleet_message_principals SET revoked_at=? WHERE principal_id=? AND revoked_at IS NULL",
+        (datetime.now(timezone.utc).isoformat(), principal_id),
+    )
+    conn.commit()
+    return {"principal_id": principal_id, "name": name} if cursor.rowcount else None
+
+
+def handle_principal_admin(conn: sqlite3.Connection, raw: object) -> tuple[int, dict[str, Any]]:
+    if isinstance(raw, dict) and raw.get("action") == "revoke":
+        principal = revoke_principal(conn, raw)
+        return (200, {"principal": principal}) if principal else (404, {"error": "principal not found"})
+    if isinstance(raw, dict) and raw.get("action") not in (None, "add"):
+        raise MessageError("principal action must be add or revoke")
+    if isinstance(raw, dict) and "action" in raw:
+        raw = {key: value for key, value in raw.items() if key != "action"}
+    return 201, {"principal": add_principal(conn, raw)}
+
+
+def send(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str, reply_to: int | None = None) -> dict[str, Any]:
+    _prune_expired(conn)
     recipient = _text(raw.get("to"), "to", 256)
     subject = _text(raw.get("subject"), "subject", SUBJECT_LIMIT)
     body = _text(raw.get("body"), "body", BODY_LIMIT)
     reference = _text(raw.get("ref"), "ref", REF_LIMIT, required=False)
+    client_id = _text(raw.get("client_id"), "client_id", 64, required=False) or secrets.token_hex(16)
+    enqueued_at = _enqueued_at(raw.get("enqueued_at"))
     priority = raw.get("priority", "normal")
-    if priority not in PRIORITIES:
+    if not isinstance(priority, str) or priority not in PRIORITIES:
         raise MessageError("priority must be low, normal, high, or urgent")
     assert recipient is not None and subject is not None and body is not None
-    if not _active_principal(conn, recipient):
-        raise MessageError("recipient is not an active hub principal")
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
-    conn.execute("DELETE FROM fleet_messages WHERE created_at < ?", (cutoff,))
-    count = conn.execute(
-        "SELECT COUNT(*) FROM fleet_messages WHERE recipient=? AND acked_at IS NULL", (recipient,)
-    ).fetchone()[0]
-    if count >= UNACKED_QUOTA:
-        raise MessageError("recipient message quota exceeded")
-    created_at = datetime.now(timezone.utc).isoformat()
-    cursor = conn.execute(
-        "INSERT INTO fleet_messages(sender,recipient,subject,body,reference,priority,created_at) VALUES(?,?,?,?,?,?,?)",
-        (sender, recipient, subject, body, reference, priority, created_at),
-    )
-    conn.commit()
-    message_id = cursor.lastrowid
-    if message_id is None:  # pragma: no cover - SQLite INSERT always supplies it
-        raise sqlite3.DatabaseError("message insert did not return an id")
-    return _fetch(conn, message_id) or {}
+    message_hash = _payload_digest(recipient, subject, body, reference, priority, reply_to)
+    opened = not conn.in_transaction
+    if opened:
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        now = datetime.now(timezone.utc)
+        if not _active_principal(conn, sender):
+            raise MessageAuthError("sender is not an active hub principal")
+        existing = conn.execute(
+            "SELECT id,payload_hash FROM fleet_messages WHERE sender=? AND client_id=?", (sender, client_id)
+        ).fetchone()
+        if existing is not None:
+            if existing[1] is not None and existing[1] != message_hash:
+                raise MessageConflict("client_id was already used for a different message")
+            if opened:
+                conn.commit()
+            return _fetch(conn, int(existing[0])) or {}
+        if not _active_principal(conn, recipient):
+            raise MessageError("recipient is not an active hub principal")
+        count = conn.execute(
+            "SELECT COUNT(*) FROM fleet_messages WHERE recipient=? AND acked_at IS NULL", (recipient,)
+        ).fetchone()[0]
+        if count >= UNACKED_QUOTA:
+            raise MessageQuotaError("recipient message quota exceeded")
+        sender_cutoff = (now - timedelta(days=1)).isoformat()
+        sender_count = conn.execute(
+            "SELECT COUNT(*) FROM fleet_message_sends WHERE sender=? AND received_at>=?", (sender, sender_cutoff)
+        ).fetchone()[0]
+        if sender_count >= SENDER_DAILY_QUOTA:
+            raise MessageQuotaError("sender message quota exceeded")
+        created_at = enqueued_at
+        cursor = conn.execute(
+            "INSERT INTO fleet_messages(sender,recipient,subject,body,reference,priority,client_id,payload_hash,reply_to,created_at,received_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                sender,
+                recipient,
+                subject,
+                body,
+                reference,
+                priority,
+                client_id,
+                message_hash,
+                reply_to,
+                created_at,
+                now.isoformat(),
+            ),
+        )
+        message_id = cursor.lastrowid
+        if message_id is None:  # pragma: no cover - SQLite INSERT always supplies it
+            raise sqlite3.DatabaseError("message insert did not return an id")
+        conn.execute(
+            "INSERT INTO fleet_message_sends(sender,client_id,received_at) VALUES(?,?,?)",
+            (sender, client_id, now.isoformat()),
+        )
+        if opened:
+            conn.commit()
+        return _fetch(conn, message_id) or {}
+    except BaseException:
+        if opened:
+            conn.rollback()
+        raise
 
 
 def list_messages(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: str) -> dict[str, Any]:
+    opened = not conn.in_transaction
+    _prune_expired(conn)
     after = raw.get("after", 0)
     if not isinstance(after, int) or isinstance(after, bool) or after < 0:
         raise MessageError("after must be a non-negative integer cursor")
@@ -118,17 +393,27 @@ def list_messages(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: s
     if not isinstance(unacked, bool):
         raise MessageError("unacked must be a boolean")
     rows = conn.execute(
-        "SELECT id,sender,recipient,subject,body,reference,priority,reply_to,created_at,acked_at,acked_by "
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by "
         "FROM fleet_messages WHERE recipient=? AND id>? "
         + ("AND acked_at IS NULL " if unacked else "")
         + "ORDER BY id LIMIT 100",
         (recipient, after),
     ).fetchall()
-    messages = [_row(row) for row in rows]
+    messages: list[dict[str, Any]] = []
+    for row in rows:
+        candidate = _row(row)
+        response = {"messages": [*messages, candidate], "next_cursor": candidate["id"]}
+        if len(json.dumps(response).encode("utf-8")) > MAX_LIST_RESPONSE_BYTES:
+            break
+        messages.append(candidate)
+    if opened:
+        conn.commit()
     return {"messages": messages, "next_cursor": messages[-1]["id"] if messages else after}
 
 
 def ack(conn: sqlite3.Connection, message_id: Any, *, recipient: str) -> dict[str, Any] | None:
+    opened = not conn.in_transaction
+    _prune_expired(conn)
     if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id < 1:
         raise MessageError("id must be a positive integer")
     now = datetime.now(timezone.utc).isoformat()
@@ -137,7 +422,8 @@ def ack(conn: sqlite3.Connection, message_id: Any, *, recipient: str) -> dict[st
         "WHERE id=? AND recipient=?",
         (now, recipient, message_id, recipient),
     )
-    conn.commit()
+    if opened:
+        conn.commit()
     return (
         _fetch(conn, message_id)
         if conn.execute("SELECT 1 FROM fleet_messages WHERE id=? AND recipient=?", (message_id, recipient)).fetchone()
@@ -146,11 +432,15 @@ def ack(conn: sqlite3.Connection, message_id: Any, *, recipient: str) -> dict[st
 
 
 def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict[str, Any] | None:
+    _prune_expired(conn)
     message_id = raw.get("id")
     original = _fetch(conn, message_id) if isinstance(message_id, int) and not isinstance(message_id, bool) else None
     if original is None or original["recipient"] != sender:
         return None
-    subject = raw.get("subject") or f"Re: {original['subject']}"
+    subject = raw.get("subject")
+    if not subject:
+        prefixed = f"Re: {original['subject']}"
+        subject = prefixed if len(prefixed.encode("utf-8")) <= SUBJECT_LIMIT else original["subject"]
     message = send(
         conn,
         {
@@ -159,11 +449,11 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
             "body": raw.get("body"),
             "ref": raw.get("ref") or original["ref"],
             "priority": raw.get("priority", "normal"),
+            "client_id": raw.get("client_id"),
         },
         sender=sender,
+        reply_to=message_id,
     )
-    conn.execute("UPDATE fleet_messages SET reply_to=? WHERE id=?", (message_id, message["id"]))
-    conn.commit()
     return _fetch(conn, message["id"])
 
 
@@ -174,13 +464,15 @@ def handle(conn: sqlite3.Connection, raw: Any, *, caller: str | None) -> tuple[i
         raise MessageError("message request must be an object")
     action = raw.get("action")
     if action == "send":
+        if caller.startswith("agent:"):
+            return 403, {"error": "named external principals may reply to messages but may not start messages"}
         return 201, {"message": send(conn, raw, sender=caller)}
     if action == "list":
-        return 200, list_messages(conn, raw, recipient=caller)
+        return 200, _as_active_principal(conn, caller, lambda: list_messages(conn, raw, recipient=caller))
     if action == "ack":
-        message = ack(conn, raw.get("id"), recipient=caller)
+        message = _as_active_principal(conn, caller, lambda: ack(conn, raw.get("id"), recipient=caller))
         return (200, {"message": message}) if message else (404, {"error": "message not found"})
     if action == "reply":
-        message = reply(conn, raw, sender=caller)
+        message = _as_active_principal(conn, caller, lambda: reply(conn, raw, sender=caller))
         return (201, {"message": message}) if message else (404, {"error": "message not found"})
     raise MessageError("action must be send, list, ack, or reply")
