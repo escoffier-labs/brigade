@@ -72,7 +72,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
 )
 _ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
 _EXPLICIT_TERMINAL_PATH = re.compile(
-    r"\b(?:home\s+directory|path|file(?:\s+name)?|filename|directory|folder|script|repository|repo|location)\s*"
+    r"\b(?:home\s+directory|path|file(?:\s+names?)?|filenames?|directory|folder|script|repository|repo|location)\s*"
     r"(?:is|was|equals|will\s+be|has\s+been|set\s+to|:|=)\s*[\"'“‘`()\[{]*\s*"
     r"(?:~|/|\\|\.{1,2})(?=$|[\s,;!?\"'”’)\]}])",
     re.IGNORECASE,
@@ -129,7 +129,14 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
             if key.casefold() not in _URL_PATH_QUERY_KEYS:
                 continue
             decoded_value = unquote(query_value)
-            if _ROOTED_PATH.search(decoded_value) or _RELATIVE_PATH.search(decoded_value):
+            path_value = decoded_value.rstrip(",;!?")
+            if path_value.endswith(".") and path_value not in {".", ".."}:
+                path_value = path_value.rstrip(".")
+            if (
+                _EXPLICIT_TERMINAL_PATH.search(f"path: {path_value}")
+                or _ROOTED_PATH.search(path_value)
+                or _RELATIVE_PATH.search(path_value)
+            ):
                 return True
     return False
 
@@ -138,15 +145,15 @@ _RELATIVE_PATH = re.compile(
     r"(?<![A-Za-z0-9_.-])(?P<path>(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+)(?![A-Za-z0-9_.~-])"
 )
 _PATH_CONTEXT = re.compile(
-    r"(?:\b(?:run|execute|inspect|open|read|write|load|save|path|file(?:\s+name)?|filename|directory|folder|script|repository|repo|location)\s+"
+    r"(?:\b(?:run|execute|inspect|open|read|write|load|save|path|file(?:\s+names?)?|filenames?|directory|folder|script|repository|repo|location)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?"
     r"[\"'“‘]*\s*(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?|"
-    r"\b(?:path|file(?:\s+name)?|filename|directory|folder|script|repository|repo|location)\s*(?:is|was|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s*)[\"'“‘`()\[{]*\s*$",
+    r"\b(?:path|file(?:\s+names?)?|filenames?|directory|folder|script|repository|repo|location)\s*(?:is|are|was|were|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s*)[\"'“‘`()\[{]*\s*$",
     re.IGNORECASE,
 )
 _EXPLICIT_PATH_DECLARATION = re.compile(
-    r"\b(?:path|file(?:\s+name)?|filename|directory|folder|script|repository|repo|location)\s*"
-    r"(?:is|was|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s*$",
+    r"\b(?:path|file(?:\s+names?)?|filenames?|directory|folder|script|repository|repo|location)\s*"
+    r"(?:is|are|was|were|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s*$",
     re.IGNORECASE,
 )
 _QUOTED_PATH_CONTEXT = re.compile(
@@ -156,8 +163,8 @@ _QUOTED_PATH_CONTEXT = re.compile(
 _SPACED_PATH_CONTEXT = re.compile(
     r"(?:\b(?:run|execute|inspect|open|read|write|load|save)\s+"
     r"(?:(?:from|at|in|to|into|under)\s+)?|"
-    r"\b(?:path|file(?:\s+name)?|filename|directory|folder|script|repository|repo|location)\s*"
-    r"(?:is|was|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s+)"
+    r"\b(?:path|file(?:\s+names?)?|filenames?|directory|folder|script|repository|repo|location)\s*"
+    r"(?:is|are|was|were|equals|will\s+be|has\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|:|=)\s+)"
     r"(?:[A-Za-z0-9_.~-]+\s+)+$",
     re.IGNORECASE,
 )
