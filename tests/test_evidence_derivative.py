@@ -240,6 +240,91 @@ def test_derivative_rejects_source_artifact_replaced_after_initial_stat(tmp_path
         raise AssertionError("derivative accepted an artifact replaced after its initial stat")
 
 
+def test_derivative_rejects_unsupported_portable_package_schema_versions(tmp_path: Path) -> None:
+    for target_name, artifact_name, field, value, expected_error in (
+        (
+            "manifest-version",
+            "manifest.json",
+            "schema_version",
+            99,
+            "source manifest does not satisfy the portable package schema",
+        ),
+        (
+            "receipt-version",
+            "receipt.json",
+            "schema_version",
+            1,
+            "source receipt does not satisfy the portable package schema",
+        ),
+    ):
+        target = tmp_path / target_name
+        target.mkdir()
+        _, receipt = _fabricated_run_dir(target)
+        source = target / "source"
+        assert evidence_package.export_package(target=target, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+
+        artifact = json.loads((source / artifact_name).read_text(encoding="utf-8"))
+        artifact[field] = value
+        if artifact_name == "receipt.json":
+            _stamp_receipt(artifact)
+            receipt_bytes = json.dumps(artifact, indent=2, sort_keys=True).encode() + b"\n"
+            (source / artifact_name).write_bytes(receipt_bytes)
+            manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+            manifest["source"]["receipt_sha256"] = evidence_derivative.attestation_receipt.snapshot_stored_receipt(
+                artifact
+            ).digest
+            (source / "manifest.json").write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            _refresh_package_entry(source, artifact_name, receipt_bytes)
+        else:
+            (source / artifact_name).write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        try:
+            evidence_derivative.export_derivative(
+                source=source,
+                out=target / "derivative",
+                recipient="recipient-42",
+                authority="approved-case-7",
+                lawful_basis="contract",
+                necessity="review",
+            )
+        except evidence_derivative.DerivativeExportError as exc:
+            assert str(exc) == expected_error
+        else:
+            raise AssertionError(f"derivative accepted unsupported {target_name} schema version")
+
+
+def test_derivative_rejects_source_inventory_added_during_export(tmp_path: Path, monkeypatch) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    original_open = evidence_derivative.dirfd.open_child_file
+    added = False
+
+    def add_artifact_after_inventory(root_fd: int, name: str, flags: int, mode: int = 0o600) -> int:
+        nonlocal added
+        if name == "changes.patch" and not added:
+            (source / "attestation.json").write_text("late artifact", encoding="utf-8")
+            added = True
+        return original_open(root_fd, name, flags, mode)
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "open_child_file", add_artifact_after_inventory)
+    try:
+        evidence_derivative.export_derivative(
+            source=source,
+            out=tmp_path / "derivative",
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == "source package inventory changed while reading"
+    else:
+        raise AssertionError("derivative accepted an artifact added after its initial inventory")
+
+
 def test_derivative_rejects_patch_rewritten_with_recomputed_package_hashes(tmp_path: Path) -> None:
     _, receipt = _fabricated_run_dir(tmp_path)
     source = tmp_path / "source"

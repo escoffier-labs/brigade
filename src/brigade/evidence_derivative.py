@@ -12,7 +12,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import attestation_input, attestation_receipt, dirfd, evidence_package, evidence_redaction, localio
+from . import (
+    attestation_input,
+    attestation_receipt,
+    dirfd,
+    evidence_package,
+    evidence_package_snapshot,
+    evidence_redaction,
+    localio,
+)
 
 SCHEMA = "brigade.evidence_package_derivative.v1"
 SCHEMA_VERSION = 1
@@ -32,6 +40,7 @@ _RECEIPT_FIELDS = frozenset(
     }
 )
 _SUPPORTED = frozenset({"manifest.json", *(name for name, _, _ in evidence_package.PACKAGE_FILES)})
+_MAX_SOURCE_INVENTORY_ENTRIES = 4096
 
 
 class DerivativeExportError(ValueError):
@@ -48,6 +57,36 @@ class DerivativeReport:
 
 def _file_observation(value: os.stat_result) -> tuple[int, int, int, int, int]:
     return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def _source_inventory(root_fd: int) -> tuple[str, ...]:
+    try:
+        names = dirfd.child_names(root_fd, _MAX_SOURCE_INVENTORY_ENTRIES + 1)
+    except (OSError, NotImplementedError) as exc:
+        raise DerivativeExportError("source package inventory could not be read safely") from exc
+    if len(names) > _MAX_SOURCE_INVENTORY_ENTRIES:
+        raise DerivativeExportError("source package inventory exceeds entry limit")
+    return tuple(sorted(names))
+
+
+def _verify_source_inventory(source: Path, names: tuple[str, ...], observation: tuple[int, int, int, int, int]) -> None:
+    descriptor = -1
+    try:
+        descriptor = dirfd.open_directory_nofollow(source, writable=False)
+        before = os.fstat(descriptor)
+        if not stat.S_ISDIR(before.st_mode) or _file_observation(before) != observation:
+            raise DerivativeExportError("source package inventory changed while reading")
+        if _source_inventory(descriptor) != names:
+            raise DerivativeExportError("source package inventory changed while reading")
+        if _file_observation(os.fstat(descriptor)) != observation:
+            raise DerivativeExportError("source package inventory changed while reading")
+    except DerivativeExportError:
+        raise
+    except (OSError, NotImplementedError, AttributeError) as exc:
+        raise DerivativeExportError("source package inventory changed while reading") from exc
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
 
 
 def _read(root_fd: int, name: str) -> bytes:
@@ -190,14 +229,22 @@ def export_derivative(
     else:
         raise DerivativeExportError("derivative output cannot be inside its source package")
 
-    names = sorted(path.name for path in source.iterdir())
-    if "manifest.json" not in names or "receipt.json" not in names:
-        raise DerivativeExportError("source is not a portable evidence package")
-    known_names = [name for name in names if name in _SUPPORTED]
     root_fd = -1
     try:
         root_fd = dirfd.open_directory_nofollow(source, writable=False)
+        root_info = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_info.st_mode):
+            raise DerivativeExportError("source package is not a directory")
+        root_observation = _file_observation(root_info)
+        names = _source_inventory(root_fd)
+        if "manifest.json" not in names or "receipt.json" not in names:
+            raise DerivativeExportError("source is not a portable evidence package")
+        known_names = [name for name in names if name in _SUPPORTED]
         raw = {name: _read(root_fd, name) for name in known_names}
+        if _source_inventory(root_fd) != names or _file_observation(os.fstat(root_fd)) != root_observation:
+            raise DerivativeExportError("source package inventory changed while reading")
+    except DerivativeExportError:
+        raise
     except OSError as exc:
         raise DerivativeExportError("source package could not be opened safely") from exc
     finally:
@@ -206,26 +253,39 @@ def export_derivative(
     manifest = _json_object(raw["manifest.json"], "manifest")
     if manifest.get("schema") != evidence_package.SCHEMA:
         raise DerivativeExportError("unsupported source package schema")
+    candidate_source = manifest.get("source")
+    candidate_entries = manifest.get("entries")
+    if (
+        isinstance(candidate_source, dict)
+        and "changes_patch_sha256" in candidate_source
+        and isinstance(candidate_entries, list)
+    ):
+        declares_patch = any(
+            isinstance(entry, dict) and entry.get("path") == "changes.patch" for entry in candidate_entries
+        )
+        if (candidate_source["changes_patch_sha256"] is None) != (not declares_patch):
+            raise DerivativeExportError("source patch digest does not match receipt and manifest")
+    try:
+        _, source_metadata, _ = evidence_package_snapshot._validate_manifest(manifest)
+    except evidence_package_snapshot.PackageSnapshotError as exc:
+        raise DerivativeExportError("source manifest does not satisfy the portable package schema") from exc
     _validate_manifest_entries(manifest, raw)
     receipt = _json_object(raw["receipt.json"], "receipt")
     try:
         receipt_snapshot = attestation_receipt.snapshot_stored_receipt(receipt)
     except attestation_receipt.ReceiptDigestError as exc:
         raise DerivativeExportError("source receipt digest is invalid") from exc
-    source_metadata = manifest.get("source")
-    if not isinstance(source_metadata, dict) or source_metadata.get("receipt_sha256") != receipt_snapshot.digest:
+    if source_metadata["receipt_sha256"] != receipt_snapshot.digest:
         raise DerivativeExportError("source manifest receipt digest does not match receipt")
-    source_identity_fields = {
-        "verify_run_id": "run_id",
-        "producer_run_id": "producer_run_id",
-        "tree_fingerprint": "tree_fingerprint",
-        "baseline_commit": "baseline_commit",
-    }
-    if any(
-        source_key not in source_metadata or source_metadata[source_key] != receipt.get(receipt_key)
-        for source_key, receipt_key in source_identity_fields.items()
-    ):
-        raise DerivativeExportError("source manifest identities do not match receipt")
+    try:
+        evidence_package_snapshot._validate_receipt(raw["receipt.json"], source_metadata)
+    except evidence_package_snapshot.PackageSnapshotError as exc:
+        message = (
+            "source receipt does not satisfy the portable package schema"
+            if exc.code == "malformed"
+            else "source manifest identities do not match receipt"
+        )
+        raise DerivativeExportError(message) from exc
     patch_data = raw.get("changes.patch")
     patch_digest = hashlib.sha256(patch_data).hexdigest() if patch_data is not None else None
     receipt_patch_digest = receipt.get("changes_patch_sha256")
@@ -288,6 +348,7 @@ def export_derivative(
         "limitations": ["not-original-signed-object", "no-recipient-authorization-validation", "local-export-only"],
     }
     encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+    _verify_source_inventory(source, names, root_observation)
     staging = out.parent / f".{out.name}.staging-{secrets.token_hex(4)}"
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
