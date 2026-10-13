@@ -216,6 +216,30 @@ def test_derivative_rejects_package_missing_patch_artifact(tmp_path: Path) -> No
         raise AssertionError("derivative accepted a package without its patch artifact")
 
 
+def test_derivative_accepts_package_without_patch_when_digest_is_unavailable(tmp_path: Path) -> None:
+    run_dir, receipt = _fabricated_run_dir(tmp_path)
+    receipt["changes_patch_sha256"] = None
+    _stamp_receipt(receipt)
+    (run_dir / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+    (run_dir / "changes.patch").unlink()
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+
+    out = tmp_path / "derivative"
+    evidence_derivative.export_derivative(
+        source=source,
+        out=out,
+        recipient="recipient-42",
+        authority="approved-case-7",
+        lawful_basis="contract",
+        necessity="review",
+    )
+
+    derivative = json.loads((out / "derivative.json").read_text(encoding="utf-8"))
+    assert "changes.patch" not in {artifact["path"] for artifact in derivative["source_artifacts"]}
+    assert derivative["evidence"]["receipt_metadata"]["status"] == "completed"
+
+
 def test_derivative_rejects_duplicate_json_properties(tmp_path: Path) -> None:
     for name in ("manifest.json", "receipt.json"):
         target = tmp_path / name.replace(".", "-")

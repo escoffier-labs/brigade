@@ -164,11 +164,12 @@ def export_derivative(
         raise DerivativeExportError("source manifest receipt digest does not match receipt")
     patch_data = raw.get("changes.patch")
     patch_digest = hashlib.sha256(patch_data).hexdigest() if patch_data is not None else None
-    if (
-        not isinstance(patch_digest, str)
-        or receipt.get("changes_patch_sha256") != patch_digest
-        or source_metadata.get("changes_patch_sha256") != patch_digest
-    ):
+    receipt_patch_digest = receipt.get("changes_patch_sha256")
+    manifest_patch_digest = source_metadata.get("changes_patch_sha256")
+    if patch_data is None:
+        if receipt_patch_digest is not None or manifest_patch_digest is not None:
+            raise DerivativeExportError("source patch digest does not match receipt and manifest")
+    elif receipt_patch_digest != patch_digest or manifest_patch_digest != patch_digest:
         raise DerivativeExportError("source patch digest does not match receipt and manifest")
     minimized, removed, redaction_occurrences = _minimize_receipt(receipt)
     excluded = len(names) - len(known_names)
