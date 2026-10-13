@@ -22,7 +22,7 @@ _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _MODEL_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _EXPLANATORY_SECRET_VALUE = (
-    r"(?:required|optional|needed|necessary|available|configured(?!\s+(?:as|to)\b)|set(?!\s+to\b)|missing|unset|unavailable|"
+    r"(?:required|optional|needed|necessary|available|configured(?!\s+(?:as|to|with)\b)|set(?!\s+to\b)|missing|unset|unavailable|"
     r"not\s+(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable)|"
     r"confidential|managed(?:\s+by\s+Vault)?|provided|stored(?:\s+securely)?|encrypted|protected|"
     r"handled|generated|rotated|masked|redacted)(?!\s+(?:as|to)\b)(?=$|\s|[.,;!?](?:\s|$))"
@@ -106,13 +106,18 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
     for match in _HTTP_URL.finditer(value):
         try:
             parsed = urlsplit(match.group())
+            fragment_query = parsed.fragment.partition("?")[2] or parsed.fragment
             query_pairs = parse_qsl(parsed.query, keep_blank_values=True) + parse_qsl(
-                parsed.fragment, keep_blank_values=True
+                fragment_query, keep_blank_values=True
             )
         except ValueError:
             continue
         for key, query_value in query_pairs:
-            if _DANGEROUS_VALUE.search(f"{key}={query_value}"):
+            if (
+                _DANGEROUS_VALUE.search(f"{key}={query_value}")
+                or _ENVIRONMENT_ASSIGNMENT.search(query_value)
+                or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(query_value)
+            ):
                 return True
             if key.casefold() not in _URL_PATH_QUERY_KEYS:
                 continue
