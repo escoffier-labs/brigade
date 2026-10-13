@@ -342,6 +342,8 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "This seat is using the authentication profile production-admin",
         "Reviewer has auth profile production-admin",
         "This seat has an auth profile production-admin",
+        "Auth profile had been production-admin",
+        "Auth profile will have been production-admin",
         "Auth profile is 生产环境",
         "Use auth profile 生产环境",
         "Reviewer uses auth profile 生产环境",
@@ -744,6 +746,8 @@ def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None
         "Files: config.json",
         "Directories: build",
         "Paths: foo/bar",
+        "Path: %2Fetc%2Fpasswd",
+        "Path: %2Fhome%2Fexample",
         "Repository path: foo/bar",
         "Path configured as foo/bar",
         "The path configured to foo/bar",
@@ -998,11 +1002,13 @@ def test_parse_rejects_ownership_qualified_environment_assignments(field: str, t
 @pytest.mark.parametrize(
     "text",
     [
+        "Environment variable SERVICE_MODE will have been production",
         "Environment variable SERVICE_MODE had been production",
         "Path had been foo/bar",
+        "Path will have been foo/bar",
     ],
 )
-def test_parse_rejects_past_perfect_disclosures(field: str, text: str) -> None:
+def test_parse_rejects_perfect_tense_disclosures(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 

@@ -32,7 +32,7 @@ _DANGEROUS_VALUE_PATTERN = (
     r"\b(?:Proxy-)?Authorization\s*:\s*Bearer\s+\S+|\bBearer\s+[A-Za-z0-9._~+/-]{20,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
-    r"\bauth(?:entication)?[ _-]profiles?\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|of\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|assigned\s+to\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|used\s+by\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|value)(?:\s+|(?=[:=])))?(?:(?:(?:is\s+)?provided\s+(?:as|with)|is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|configured\s+(?:as|to|with))\s+|[:=]\s*)"
+    r"\bauth(?:entication)?[ _-]profiles?\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|of\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|assigned\s+to\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|used\s+by\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|value)(?:\s+|(?=[:=])))?(?:(?:(?:is\s+)?provided\s+(?:as|with)|is|are|was|were|equals|will\s+be|has\s+been|have\s+been|had\s+been|will\s+have\s+been|set\s+to|configured\s+(?:as|to|with))\s+|[:=]\s*)"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
     r"(?:[^\s.,;!?]+|\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|\[[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\]|\([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s*[:=]\s*" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
@@ -104,7 +104,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"(?:(?:use|configure)\s+(?:the\s+)?)?environment\s+variable\s+)"
     r"(?:(?:named|called)\s+)?[\"'“‘`]?[A-Za-z_][A-Za-z0-9_]*[\"'”’`]?"
     + _ROSTER_OWNERSHIP_QUALIFIER
-    + r"(?:\s*=(?!=|>)|\s+(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|will\s+be|has\s+been|have\s+been|had\s+been)\s+(?!(?:"
+    + r"(?:\s*=(?!=|>)|\s+(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|will\s+be|has\s+been|have\s+been|had\s+been|will\s+have\s+been)\s+(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
     + r"))\S+|\s+(?:value\s*)?(?:=(?!=|>)|:)\s*(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
@@ -113,7 +113,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     + r"))\S+)",
     re.IGNORECASE,
 )
-_PATH_DECLARATION_LINKER = r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|had\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
+_PATH_DECLARATION_LINKER = r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|had\s+been|will\s+have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
 _PATH_DECLARATION_QUALIFIER = r"(?:\s+(?:(?:for|of|used\s+(?:by|on|for)|assigned\s+to)\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)))?"
 _PATH_DECLARATION = (
     r"\b" + _PATH_LABEL + r"(?:\s+value)?" + _PATH_DECLARATION_QUALIFIER + r"\s*" + _PATH_DECLARATION_LINKER
@@ -467,6 +467,13 @@ def _is_filesystem_path_value(value: str) -> bool:
     )
 
 
+def _decode_explicit_path_declarations(value: str) -> str:
+    decoded = value
+    for match in reversed(tuple(re.finditer(_PATH_DECLARATION, value, re.IGNORECASE))):
+        decoded = decoded[: match.end()] + _fully_unquote(decoded[match.end() :])
+    return decoded
+
+
 _TOP_FIELDS = frozenset({"schema", "revision", "seats"})
 _SEAT_FIELDS = frozenset({"name", "cli", "model", "purpose", "caveats", "fallbacks", "enabled"})
 
@@ -551,6 +558,7 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     screening_text = re.sub(r"“([^”\n]+)”", r'"\1"', screening_text)
     screening_text = re.sub(r"‘([^’\n]+)’", r"'\1'", screening_text)
     path_text = _without_api_route_references(screening_text)
+    decoded_path_text = _without_api_route_references(_decode_explicit_path_declarations(screening_text))
     if (
         _DANGEROUS_VALUE.search(screening_text)
         or _URL_CREDENTIAL_QUERY.search(screening_text)
@@ -563,11 +571,11 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         or (
             check_paths
             and (
-                _EXPLICIT_TERMINAL_PATH.search(path_text)
-                or _CONTEXTUAL_TERMINAL_PATH.search(path_text)
-                or _ROOTED_PATH.search(path_text)
+                _EXPLICIT_TERMINAL_PATH.search(decoded_path_text)
+                or _CONTEXTUAL_TERMINAL_PATH.search(decoded_path_text)
+                or _ROOTED_PATH.search(decoded_path_text)
                 or _has_relative_path_evidence(
-                    path_text,
+                    decoded_path_text,
                     model_identifier=field.endswith(".model") and _MODEL_IDENTIFIER.fullmatch(value) is not None,
                 )
             )
