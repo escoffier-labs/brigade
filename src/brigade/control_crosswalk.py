@@ -1375,8 +1375,7 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
 
     `brigade receipts export package --out` accepts any output path, so discover
     ``manifest.json`` at the root and one level below. Deeper nesting is not
-    discovered. The strict snapshot validates captured bytes and rederives the
-    source receipt digest.
+    discovered; the strict snapshot validates captured bytes and rederives the source receipt digest.
     """
     root = ctx.target / ".brigade" / "evidence-packages"
     children, truncated, error = _bounded_children(ctx, root)
@@ -1400,6 +1399,7 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
             obs = _invalid(ctx, path, "invalid_json")
         elif adapter is not None:
             obs = _adapter_observation(adapter, ctx, package_dir, relpath)
+            out.verifier_unavailable |= obs.proposed == "unavailable"
         else:
             obs = _assess_package_manifest(ctx, package_dir, relpath, manifest)
         source = manifest.get("source") if isinstance(manifest, dict) else None

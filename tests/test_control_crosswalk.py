@@ -2118,6 +2118,7 @@ def test_ec12_unknown_snapshot_code_is_unavailable(tmp_path, monkeypatch):
 
     assert result["outcome"] == "unavailable"
     assert result["reason"] == "verifier_error"
+    assert result["verifier"]["status"] == "unavailable"
 
 
 @pytest.mark.parametrize(
