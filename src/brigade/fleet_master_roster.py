@@ -84,7 +84,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
 )
 _PATH_LABEL = r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositor(?:y|ies)|repos?|locations?)"
 _PATH_DECLARATION_LINKER = r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
-_ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[A-Za-z0-9_.~-])")
+_ROOTED_PATH = re.compile(r"(?:^|[^A-Za-z0-9_.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[\w.~-])")
 _EXPLICIT_TERMINAL_PATH = re.compile(
     r"\b(?:home\s+directory|" + _PATH_LABEL + r")\s*" + _PATH_DECLARATION_LINKER + r"\s*[\"'“‘`()\[{]*\s*"
     r"(?:~|/|\\|\.{1,2})(?=$|[\s,;!?\"'”’)\]}])",
@@ -111,6 +111,14 @@ _HTTP_URL = re.compile(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE)
 _URL_PATH_QUERY_KEYS = frozenset({"dir", "directory", "file", "filename", "filepath", "path", "root"})
 
 
+def _fully_unquote(value: str) -> str:
+    while True:
+        decoded = unquote(value)
+        if decoded == value:
+            return value
+        value = decoded
+
+
 def _has_url_userinfo(value: str) -> bool:
     for match in _HTTP_URL.finditer(value):
         try:
@@ -126,7 +134,7 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
     for match in _HTTP_URL.finditer(value):
         try:
             parsed = urlsplit(match.group())
-            decoded_path = unquote(parsed.path)
+            decoded_path = _fully_unquote(parsed.path)
             if (
                 _DANGEROUS_VALUE.search(decoded_path)
                 or _ENVIRONMENT_ASSIGNMENT.search(decoded_path)
@@ -140,6 +148,8 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
         except ValueError:
             continue
         for key, query_value in query_pairs:
+            key = _fully_unquote(key)
+            query_value = _fully_unquote(query_value)
             if (
                 _DANGEROUS_VALUE.search(f"{key}={query_value}")
                 or _ENVIRONMENT_ASSIGNMENT.search(f"{key}={query_value}")
@@ -149,7 +159,7 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
                 return True
             if key.casefold() not in _URL_PATH_QUERY_KEYS:
                 continue
-            decoded_value = unquote(query_value)
+            decoded_value = _fully_unquote(query_value)
             path_value = decoded_value.rstrip(",;!?")
             if path_value.endswith(".") and path_value not in {".", ".."}:
                 path_value = path_value.rstrip(".")
@@ -167,7 +177,8 @@ def _has_disallowed_api_route_query(value: str) -> bool:
     for match in routes:
         route_query = match.group("path").partition("?")[2]
         for key, query_value in parse_qsl(route_query, keep_blank_values=True):
-            decoded_value = unquote(query_value)
+            key = _fully_unquote(key)
+            decoded_value = _fully_unquote(query_value)
             pair = f"{key}={decoded_value}"
             if (
                 _DANGEROUS_VALUE.search(pair)
@@ -189,9 +200,7 @@ def _has_disallowed_api_route_query(value: str) -> bool:
     return False
 
 
-_RELATIVE_PATH = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?P<path>(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+)(?![A-Za-z0-9_.~-])"
-)
+_RELATIVE_PATH = re.compile(r"(?<![\w.-])(?P<path>(?:[\w.~-]+[/\\])+[\w.~-]+)(?![\w.~-])")
 _PATH_CONTEXT = re.compile(
     r"(?:\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store|"
     + _PATH_LABEL
