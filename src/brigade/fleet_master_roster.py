@@ -25,7 +25,7 @@ _EXPLANATORY_SECRET_VALUE = (
     r"(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|"
     r"not\s+(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable)|"
     r"confidential|managed(?:\s+by\s+Vault)?|provided|stored(?:\s+securely)?|encrypted|protected|"
-    r"handled|generated|rotated|masked|redacted)(?=$|[.,;!?])"
+    r"handled|generated|rotated|masked|redacted)(?=$|\s|[.,;!?](?:\s|$))"
 )
 _DANGEROUS_VALUE = re.compile(
     r"(?:(?<![A-Za-z0-9_])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|(?<![A-Za-z0-9_])xapp-[A-Za-z0-9-]{12,}|(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{20,}|(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{36}\b|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
@@ -33,9 +33,9 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
     r"\bauth(?:entication)?[ _-]profiles?\s+(?:is|was|equals|will\s+be|has\s+been)\s+"
-    r"(?!(?:required|needed|necessary|optional|available|selection)\b)"
+    + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
-    r"\bauth(?:entication)?[ _-]profiles?\s*[:=]\s*"
+    r"\bauth(?:entication)?[ _-]profiles?\s*[:=]\s*" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s+(?:named|called)\s+"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
@@ -95,7 +95,7 @@ _RELATIVE_PATH = re.compile(
 _PATH_CONTEXT = re.compile(
     r"(?:\b(?:run|execute|inspect|open|read|write|load|save|path|file|directory|folder|script|repository|repo)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?|"
-    r"\b(?:path|file|directory|folder|script|repository|repo)\s*(?:is|:)\s*)[\"'“‘`()\[{]*\s*$",
+    r"\b(?:path|file|directory|folder|script|repository|repo)\s*(?:is|equals|:)\s*)[\"'“‘`()\[{]*\s*$",
     re.IGNORECASE,
 )
 _FILESYSTEM_COMPONENTS = frozenset(
