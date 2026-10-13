@@ -40,7 +40,7 @@ _DANGEROUS_VALUE = re.compile(
     r"\bauth(?:entication)?[ _-]profiles?\s+(?:named|called)\s+"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s+(?:\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
-    r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with))\s+"
+    r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with|using))\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?auth(?:entication)?[ _-]profiles?\s+"
     r"(?!(?:is|are|as|for|in|required|needed|necessary|optional|available|selection|rotation|management|regularly)\b)"
     r"[A-Za-z0-9_.-]+|"
@@ -50,10 +50,12 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s*[:=]\s*"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
-    r"\s+(?:provided\s+(?:as|with)|stored\s+(?:as|with)|generated\s+(?:as|with)|configured\s+(?:as|with|to))\s+"
+    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent)|value)\s+)?"
+    r"(?:provided\s+(?:as|with)|stored\s+(?:as|with)|generated\s+(?:as|with)|configured\s+(?:as|with|to))\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
-    r"\s+(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to)\s+"
+    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent)|value)\s+)?"
+    r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to)\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:set|configure(?:d)?|store(?:d)?|provide(?:d)?|generate(?:d)?)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
@@ -73,7 +75,7 @@ _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"\b(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+|"
     r"(?:(?:use|configure)\s+(?:the\s+)?)?environment\s+variable\s+)"
-    r"[A-Za-z_][A-Za-z0-9_]*(?:\s*=(?!=|>)|\s+(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|will\s+be|has\s+been|have\s+been)\s+(?!(?:"
+    r"[A-Za-z_][A-Za-z0-9_]*(?:\s*=(?!=|>)|\s+(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|will\s+be|has\s+been|have\s+been)\s+(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
     + r"))\S+|:\s*(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
@@ -89,7 +91,7 @@ _EXPLICIT_TERMINAL_PATH = re.compile(
     re.IGNORECASE,
 )
 _CONTEXTUAL_TERMINAL_PATH = re.compile(
-    r"\b(?:change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store)\s+"
+    r"\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
     r"(?:(?:from|at|in|to|into|under)\s+)?[\"'“‘`()\[{]*\s*"
     r"(?:~|/|\\|\.{1,2})(?=$|[,;!?\"'”’)\]}])",
@@ -165,7 +167,8 @@ def _has_disallowed_api_route_query(value: str) -> bool:
     for match in routes:
         route_query = match.group("path").partition("?")[2]
         for key, query_value in parse_qsl(route_query, keep_blank_values=True):
-            pair = f"{key}={query_value}"
+            decoded_value = unquote(query_value)
+            pair = f"{key}={decoded_value}"
             if (
                 _DANGEROUS_VALUE.search(pair)
                 or _ENVIRONMENT_ASSIGNMENT.search(pair)
@@ -174,7 +177,7 @@ def _has_disallowed_api_route_query(value: str) -> bool:
                 return True
             if key.casefold() not in _URL_PATH_QUERY_KEYS:
                 continue
-            path_value = query_value.rstrip(",;!?")
+            path_value = decoded_value.rstrip(",;!?")
             if path_value.endswith(".") and path_value not in {".", ".."}:
                 path_value = path_value.rstrip(".")
             if (
@@ -190,7 +193,7 @@ _RELATIVE_PATH = re.compile(
     r"(?<![A-Za-z0-9_.-])(?P<path>(?:[A-Za-z0-9_.~-]+[/\\])+[A-Za-z0-9_.~-]+)(?![A-Za-z0-9_.~-])"
 )
 _PATH_CONTEXT = re.compile(
-    r"(?:\b(?:change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store|"
+    r"(?:\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store|"
     + _PATH_LABEL
     + r")\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?"
@@ -207,7 +210,7 @@ _QUOTED_PATH_CONTEXT = re.compile(
     re.IGNORECASE,
 )
 _SPACED_PATH_CONTEXT = re.compile(
-    r"(?:\b(?:change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store)\s+"
+    r"(?:\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store)\s+"
     r"(?:(?:from|at|in|to|into|under)\s+)?|"
     r"\b" + _PATH_LABEL + r"\s*" + _PATH_DECLARATION_LINKER + r"\s+)"
     r"(?:[A-Za-z0-9_.~-]+\s+)+$",
