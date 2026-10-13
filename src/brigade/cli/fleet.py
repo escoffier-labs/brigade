@@ -1694,9 +1694,9 @@ def _dispatch_flush(args: argparse.Namespace) -> int:
         else:
             print(f"flushed {events} spooled event(s) for node {node_id}")
     if event_error is not None:
-        print(f"warning: could not flush fleet events: {event_error}", file=sys.stderr)
+        print(f"warning: could not flush fleet events: {_safe_table_cell(event_error)}", file=sys.stderr)
     if message_error is not None:
-        print(f"warning: could not flush fleet messages: {message_error}", file=sys.stderr)
+        print(f"warning: could not flush fleet messages: {_safe_table_cell(message_error)}", file=sys.stderr)
     return 1 if event_error is not None or message_error is not None else 0
 
 
