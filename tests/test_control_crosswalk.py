@@ -75,6 +75,16 @@ def test_assessment_reader_charges_failed_growing_reads_to_shared_budget(
         reader.close()
 
 
+def test_assessment_reader_default_budget_stays_at_64_mib(tmp_path):
+    from brigade.control_crosswalk import _AssessmentReader
+
+    reader = _AssessmentReader(tmp_path)
+    try:
+        assert reader.byte_budget == 64 * 1024 * 1024
+    finally:
+        reader.close()
+
+
 def test_assessment_reader_charges_chunks_before_later_io_error(tmp_path, monkeypatch):
     import os
 
@@ -512,6 +522,25 @@ def test_ec12_strict_package_snapshot_validates_and_rejects_tampering(tmp_path):
     ]
     assert all(m["state"] == "evidenced_failed" for m in ec12_rows), [m["state"] for m in ec12_rows]
     assert evaluated["evidence_readiness"]["EC-12"]["reason"] == "package_snapshot_mismatch"
+
+
+def test_ec12_valid_package_ignores_symlinked_public_trust_file(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    trust_dir = target / ".brigade" / "attestation"
+    trust_dir.mkdir()
+    external_signers = tmp_path / "allowed_signers"
+    external_signers.write_text("unrelated trust data", encoding="utf-8")
+    try:
+        (trust_dir / "allowed_signers").symlink_to(external_signers)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "validated"
+    assert readiness["artifacts"][0]["outcome"] == "validated"
 
 
 def test_ec12_rejects_unlisted_package_children(tmp_path):

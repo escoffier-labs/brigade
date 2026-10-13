@@ -102,7 +102,13 @@ class _AssessmentReader:
         self.errors[path] = reason
         return reason
 
-    def read(self, path: Path, limit: int = attestation_input.MAX_JSON_BYTES) -> bytes:
+    def read(
+        self,
+        path: Path,
+        limit: int = attestation_input.MAX_JSON_BYTES,
+        *,
+        reserve_bytes: int = 0,
+    ) -> bytes:
         if path in self.contents:
             cached = self.contents[path]
             if len(cached) > limit:
@@ -116,7 +122,7 @@ class _AssessmentReader:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode):
                 raise _ReadRefusal("discovery_unreadable")
-            permitted = min(limit, self.byte_budget - self.used)
+            permitted = min(limit, self.byte_budget + reserve_bytes - self.used)
             if permitted < 0 or info.st_size > permitted:
                 raise _ReadRefusal("read_limit_exceeded")
             raw = bytearray()
@@ -145,7 +151,13 @@ class _AssessmentReader:
             if descriptor != -1:
                 os.close(descriptor)
 
-    def copy(self, path: Path, *, limit: int = attestation_input.MAX_JSON_BYTES) -> Path:
+    def copy(
+        self,
+        path: Path,
+        *,
+        limit: int = attestation_input.MAX_JSON_BYTES,
+        reserve_bytes: int = 0,
+    ) -> Path:
         destination = self.snapshot_target / path.relative_to(self.target)
         if path in self.copied:
             return destination
@@ -157,7 +169,7 @@ class _AssessmentReader:
             self.refusal(path, exc)
             raise
         try:
-            raw = self.read(path, limit)
+            raw = self.read(path, limit, reserve_bytes=reserve_bytes)
         except FileNotFoundError as exc:
             # Disappearance after discovery is not optional-data absence.
             self.errors[path] = "discovery_unreadable"
@@ -198,10 +210,10 @@ def _path_refusal(ctx: _ReadContext, path: Path, *, include_leaf: bool = False) 
     return None
 
 
-def _read_json_object(ctx: _ReadContext, path: Path) -> dict[str, Any] | None:
+def _read_json_object(ctx: _ReadContext, path: Path, *, reserve_bytes: int = 0) -> dict[str, Any] | None:
     """Bounded, regular-file, handle-relative JSON read."""
     try:
-        value = attestation_input.strict_json_loads(ctx.reader.read(path))
+        value = attestation_input.strict_json_loads(ctx.reader.read(path, reserve_bytes=reserve_bytes))
         return value if isinstance(value, dict) else None
     except (attestation_input.AttestationInputError, OSError):
         return None

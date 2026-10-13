@@ -99,9 +99,7 @@ def load_crosswalk() -> dict[str, Any]:
     return json.loads(text)
 
 
-# Preserve the ordinary assessment allowance and reserve enough extra space to
-# stage one complete package at the strict verifier's maximum valid size.
-_ASSESSMENT_BYTE_BUDGET = 64 * 1024 * 1024 + evidence_package_snapshot.MAX_PACKAGE_BYTES
+_ASSESSMENT_BYTE_BUDGET = 64 * 1024 * 1024
 
 
 class _AssessmentReader(_control_crosswalk_io._AssessmentReader):
@@ -250,11 +248,12 @@ def _adapter_observation(
     try:
         snapshot_artifact = ctx.reader.snapshot_target / artifact.relative_to(ctx.target)
         if stat.S_ISDIR(ctx.reader.info(artifact).st_mode):
+            package_reserve = evidence_package_snapshot.MAX_PACKAGE_BYTES if adapter is _verify_evidence_package else 0
             package_fd = ctx.reader.directory(artifact)
             actual_names = set(
                 _control_crosswalk_io.dirfd.child_names(package_fd, len(evidence_package.PACKAGE_FILES) + 2)
             )
-            manifest = _read_json_object(ctx, artifact / "manifest.json")
+            manifest = _read_json_object(ctx, artifact / "manifest.json", reserve_bytes=package_reserve)
             if manifest is None:
                 raise _ReadRefusal("discovery_unreadable")
             entries = manifest.get("entries")
@@ -273,7 +272,7 @@ def _adapter_observation(
                 *entry_names,
             }:
                 raise evidence_package_snapshot.PackageSnapshotError("unsafe")
-            ctx.reader.copy(artifact / "manifest.json")
+            ctx.reader.copy(artifact / "manifest.json", reserve_bytes=package_reserve)
             for name in entry_names:
                 entry_path = artifact / name
                 limit = attestation_input.MAX_JSON_BYTES if name == "receipt.json" else evidence_package.MAX_ENTRY_BYTES
@@ -286,7 +285,7 @@ def _adapter_observation(
                 ):
                     raise evidence_package_snapshot.PackageSnapshotError("unsafe")
                 try:
-                    ctx.reader.copy(entry_path, limit=limit)
+                    ctx.reader.copy(entry_path, limit=limit, reserve_bytes=package_reserve)
                 except OSError as exc:
                     try:
                         entry_info = ctx.reader.info(entry_path)
@@ -300,7 +299,8 @@ def _adapter_observation(
                 return _invalid(ctx, artifact, "schema_missing")
             snapshot_artifact = ctx.reader.copy(artifact)
             ctx.reader.copy(artifact.parent / "receipt.json")
-        _copy_public_trust(ctx)
+        if adapter is not _verify_evidence_package:
+            _copy_public_trust(ctx)
         obs = control_readiness.validate_observation(adapter(ctx.reader.snapshot_target, snapshot_artifact))
     except evidence_package_snapshot.PackageSnapshotError as exc:
         if exc.code == "malformed":
