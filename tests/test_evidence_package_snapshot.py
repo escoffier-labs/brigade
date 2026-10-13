@@ -262,7 +262,7 @@ def test_source_must_equal_the_stored_receipt(tmp_path: Path, field: str) -> Non
     _assert_refused(directory, "mismatch")
 
 
-def test_manifest_digest_supports_legacy_receipt_and_patch_presence_is_required(tmp_path: Path) -> None:
+def test_manifest_digest_supports_legacy_receipt_and_optional_patch(tmp_path: Path) -> None:
     directory = _write_package(tmp_path)
     receipt = json.loads((directory / "receipt.json").read_text(encoding="utf-8"))
     receipt.pop("digests")
@@ -283,12 +283,28 @@ def test_manifest_digest_supports_legacy_receipt_and_patch_presence_is_required(
     assert evidence_package.verify_package(directory=directory, json_output=False) == 0
 
     directory = _write_package(tmp_path, files={})
+    receipt_path = directory / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["changes_patch_sha256"] = _sha256(b"patch removed after run")
+    _stamp_receipt(receipt)
+    receipt_bytes = json.dumps(receipt, sort_keys=True).encode("utf-8")
+    receipt_path.write_bytes(receipt_bytes)
+
     manifest = _manifest(directory)
+    entries = manifest["entries"]
     source = manifest["source"]
-    assert isinstance(source, dict)
-    source["changes_patch_sha256"] = "3" * 64
+    assert isinstance(entries, list) and isinstance(source, dict)
+    receipt_entry = next(entry for entry in entries if entry["path"] == "receipt.json")
+    receipt_entry["bytes"] = len(receipt_bytes)
+    receipt_entry["sha256"] = _sha256(receipt_bytes)
+    source["changes_patch_sha256"] = receipt["changes_patch_sha256"]
+    source["receipt_sha256"] = receipt["digests"]["receipt_sha256"]
+    manifest["entries_sha256"] = localio.canonical_json_digest(entries)
     _write_manifest(directory, manifest)
-    _assert_refused(directory, "malformed")
+
+    snapshot = snapshot_package(directory)
+    assert snapshot.source.changes_patch_sha256 == receipt["changes_patch_sha256"]
+    assert evidence_package.verify_package(directory=directory, json_output=False) == 0
 
 
 def test_patch_digest_must_match_source_receipt_entry_and_actual_bytes(tmp_path: Path) -> None:

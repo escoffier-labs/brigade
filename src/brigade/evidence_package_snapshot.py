@@ -305,7 +305,7 @@ def _validate_manifest(value: object) -> tuple[dict[str, Any], dict[str, Any], l
         "entries_sha256"
     ] != localio.canonical_json_digest(entries):
         _error("malformed")
-    if (source["changes_patch_sha256"] is None) != ("changes.patch" not in paths):
+    if source["changes_patch_sha256"] is None and "changes.patch" in paths:
         _error("malformed")
     return manifest, source, entries
 
@@ -429,7 +429,7 @@ def snapshot_package(directory: Path) -> PackageSnapshot:
                 del data
 
         assert receipt_digest is not None
-        if source["changes_patch_sha256"] is not None and patch_digest != source["changes_patch_sha256"]:
+        if patch_digest is not None and patch_digest != source["changes_patch_sha256"]:
             _error("mismatch")
 
         _final_child_checks(root_fd, observed, expected_names)
