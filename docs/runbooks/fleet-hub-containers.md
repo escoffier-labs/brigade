@@ -134,18 +134,27 @@ fd, staged = tempfile.mkstemp(prefix=".fleet-hub-restore-", dir=os.path.dirname(
 os.close(fd)
 try:
  shutil.copyfile(source, staged)
- connection=sqlite3.connect(staged)
- result=connection.execute("PRAGMA integrity_check").fetchone()[0]
- connection.close()
- if result != "ok": raise RuntimeError(result)
- os.chown(staged, 10001, 10001)
- for suffix in ("-wal", "-shm"):
-  if os.path.exists(database+suffix): os.remove(database+suffix)
- os.replace(staged, database)
+ source_connection=sqlite3.connect(staged)
+ target_connection=None
+ try:
+  result=source_connection.execute("PRAGMA integrity_check").fetchone()[0]
+  if result != "ok": raise RuntimeError(result)
+  target_connection=sqlite3.connect(database)
+  source_connection.backup(target_connection)
+ finally:
+  if target_connection is not None: target_connection.close()
+  source_connection.close()
+ os.chown(database, 10001, 10001)
 finally:
  if os.path.exists(staged): os.remove(staged)'
 docker compose -f compose.yaml -f secrets/compose.image-id.yaml up -d --no-build
 ```
+
+The restore validates a staged copy, then uses SQLite's online backup API to
+write into the stopped Hub database. If that copy fails before completion,
+SQLite rolls back the destination write transaction and manages the database's
+WAL/SHM sidecars with the live database. See [SQLite's backup API
+failure behavior](https://sqlite.org/c3ref/backup_finish.html).
 
 The archive, override, and token are ignored with the token directory. Retain
 the archive and ID alongside the database backup.
@@ -324,14 +333,17 @@ fd, staged = tempfile.mkstemp(prefix=".fleet-hub-restore-", dir=os.path.dirname(
 os.close(fd)
 try:
  shutil.copyfile(source, staged)
- connection=sqlite3.connect(staged)
- result=connection.execute("PRAGMA integrity_check").fetchone()[0]
- connection.close()
- if result != "ok": raise RuntimeError(result)
- os.chown(staged, 10001, 10001)
- for suffix in ("-wal", "-shm"):
-  if os.path.exists(database+suffix): os.remove(database+suffix)
- os.replace(staged, database)
+ source_connection=sqlite3.connect(staged)
+ target_connection=None
+ try:
+  result=source_connection.execute("PRAGMA integrity_check").fetchone()[0]
+  if result != "ok": raise RuntimeError(result)
+  target_connection=sqlite3.connect(database)
+  source_connection.backup(target_connection)
+ finally:
+  if target_connection is not None: target_connection.close()
+  source_connection.close()
+ os.chown(database, 10001, 10001)
 finally:
  if os.path.exists(staged): os.remove(staged)'
 sed "s|REPLACE_WITH_RECORDED_DIGEST|${previous_digest}|" \

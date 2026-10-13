@@ -1,5 +1,6 @@
 import importlib.util
 import re
+import sqlite3
 import subprocess
 import sys
 import urllib.error
@@ -106,12 +107,12 @@ def test_compose_runbook_pins_the_built_local_image_id():
     )
     assert '"$PWD/$backup_path:/restore/fleet-hub.db:ro"' in runbook
     assert "--user 0" in runbook
-    assert "os.chown(staged, 10001, 10001)" in runbook
+    assert "os.chown(database, 10001, 10001)" in runbook
     assert "PRAGMA integrity_check" in runbook
     assert runbook.count("if not os.path.isfile(source) or os.path.getsize(source) == 0") == 2
     assert runbook.count('tempfile.mkstemp(prefix=".fleet-hub-restore-"') == 2
     assert runbook.count('if result != "ok": raise RuntimeError(result)') == 2
-    assert runbook.count("os.replace(staged, database)") == 2
+    assert runbook.count("source_connection.backup(target_connection)") == 2
     assert "Docker Engine 28.0.0 or newer" in runbook
     assert "docker version --format '{{.Server.Version}}'" in runbook
     assert 'python3 -c \'import re,sys; m=re.fullmatch(r"(\\d+)\\.(\\d+)\\.(\\d+)", sys.argv[1])' in runbook
@@ -168,7 +169,7 @@ def test_quadlet_runbook_archives_and_restores_the_recorded_image():
     assert "systemctl --user stop brigade-fleet.service" in podman_runbook
     assert '"$backup_path:/restore/fleet-hub.db:ro,Z"' in podman_runbook
     assert "--volume brigade-fleet-state:/var/lib/brigade" in podman_runbook
-    assert "os.chown(staged, 10001, 10001)" in podman_runbook
+    assert "os.chown(database, 10001, 10001)" in podman_runbook
     assert "PRAGMA integrity_check" in podman_runbook
     assert 'image_id_file="${archive%.tar}.image-id"' in podman_runbook
     assert 'previous_id="$(cat "$image_id_file")"' in podman_runbook
@@ -177,6 +178,72 @@ def test_quadlet_runbook_archives_and_restores_the_recorded_image():
     assert "systemctl --user start brigade-fleet.service" not in podman_runbook
     assert 'loginctl enable-linger "$USER"' in podman_runbook
     assert 'loginctl show-user "$USER" --property=Linger --value' in podman_runbook
+
+
+def test_runbook_restore_keeps_live_database_when_sqlite_backup_fails(tmp_path):
+    runbook = (ROOT / "docs" / "runbooks" / "fleet-hub-containers.md").read_text()
+    commands = re.findall(
+        r'--entrypoint python (?:hub|"\$previous_ref") -c \'(.*?)\'\n',
+        runbook,
+        re.DOTALL,
+    )
+    assert len(commands) == 2
+
+    for index, command in enumerate(commands):
+        source = tmp_path / f"backup-{index}.db"
+        database = tmp_path / f"live-{index}.db"
+        with sqlite3.connect(source) as connection:
+            connection.execute("CREATE TABLE records (value TEXT)")
+            connection.execute("INSERT INTO records VALUES ('backup')")
+        with sqlite3.connect(database) as connection:
+            connection.execute("CREATE TABLE records (value TEXT)")
+            connection.execute("INSERT INTO records VALUES ('live')")
+
+        executable = command.replace('database="/var/lib/brigade/fleet-hub.db"', f"database={str(database)!r}").replace(
+            'source="/restore/fleet-hub.db"', f"source={str(source)!r}"
+        )
+        executable = executable.replace(
+            "target_connection=sqlite3.connect(database)",
+            'target_connection=sqlite3.connect(f"file:{database}?mode=ro", uri=True)',
+        )
+        result = subprocess.run([sys.executable, "-c", executable], capture_output=True, text=True)
+
+        assert result.returncode != 0
+        with sqlite3.connect(database) as connection:
+            assert connection.execute("SELECT value FROM records").fetchone() == ("live",)
+
+
+def test_runbook_restore_replaces_live_database_from_valid_backup(tmp_path):
+    runbook = (ROOT / "docs" / "runbooks" / "fleet-hub-containers.md").read_text()
+    commands = re.findall(
+        r'--entrypoint python (?:hub|"\$previous_ref") -c \'(.*?)\'\n',
+        runbook,
+        re.DOTALL,
+    )
+    assert len(commands) == 2
+
+    for index, command in enumerate(commands):
+        source = tmp_path / f"valid-backup-{index}.db"
+        database = tmp_path / f"restored-{index}.db"
+        with sqlite3.connect(source) as connection:
+            connection.execute("CREATE TABLE records (value TEXT)")
+            connection.execute("INSERT INTO records VALUES ('backup')")
+        with sqlite3.connect(database) as connection:
+            connection.execute("CREATE TABLE records (value TEXT)")
+            connection.execute("INSERT INTO records VALUES ('live')")
+
+        executable = command.replace('database="/var/lib/brigade/fleet-hub.db"', f"database={str(database)!r}").replace(
+            'source="/restore/fleet-hub.db"', f"source={str(source)!r}"
+        )
+        executable = executable.replace(
+            "os.chown(database, 10001, 10001)",
+            "os.chown(database, os.getuid(), os.getgid())",
+        )
+        result = subprocess.run([sys.executable, "-c", executable], capture_output=True, text=True)
+
+        assert result.returncode == 0, result.stderr
+        with sqlite3.connect(database) as connection:
+            assert connection.execute("SELECT value FROM records").fetchone() == ("backup",)
 
 
 def test_quadlet_recipe_has_equivalent_persistence_health_and_restart_policy():
