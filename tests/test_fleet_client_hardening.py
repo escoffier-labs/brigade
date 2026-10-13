@@ -94,6 +94,18 @@ class TestProxyDisabledTransport:
 
 
 class TestSpoolPrivacy:
+    def test_oversized_new_event_preserves_existing_spool(self, home, monkeypatch):
+        spool = _spool()
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        fleet_client._write_spool_atomic(spool, [{"run_id": "old", "body": "o" * 50}])
+        original = spool.read_text(encoding="utf-8")
+        monkeypatch.setattr(fleet_client, "MAX_SPOOL_BYTES", 120)
+
+        assert fleet_client._spool_append_locked(spool, {"run_id": "new", "body": "n" * 40}) is False
+
+        assert spool.read_text(encoding="utf-8") == original
+        assert [event["run_id"] for event in fleet_client._read_spool(spool)] == ["old"]
+
     @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
     def test_spool_dir_and_file_are_private(self, home):
         assert fleet_client.report_event({"run_id": "r1", "state": "run.started"}) is False

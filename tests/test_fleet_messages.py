@@ -967,6 +967,52 @@ def test_stale_principal_finalizer_preserves_new_enrollment_generation(tmp_path,
     assert fleet_client._read_spool(path) == [{"name": "researcher", "request_id": "newer-generation"}]
 
 
+def test_principal_revoke_reuses_generation_after_ambiguous_timeout(tmp_path, monkeypatch):
+    current_generation = "a" * 32
+    generation_reads = []
+    revoke_requests = []
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
+    )
+
+    def request(_hub, _admin, body):
+        nonlocal current_generation
+        if body["action"] == "get":
+            generation_reads.append(current_generation)
+            return 200, {
+                "principal": {
+                    "principal_id": "agent:researcher",
+                    "name": "researcher",
+                    "enrollment_id": current_generation,
+                }
+            }
+        revoke_requests.append(dict(body))
+        if len(revoke_requests) == 1:
+            raise fleet_client.FleetClientError("timeout after revoke commit")
+        if len(revoke_requests) == 2:
+            return 409, {"code": "principal_enrollment_changed", "error": "principal generation changed"}
+        return 200, {"principal": {"principal_id": "agent:researcher", "name": "researcher"}}
+
+    monkeypatch.setattr(fleet_client_messages, "_principal_admin_request", request)
+    with pytest.raises(fleet_client.FleetClientError, match="timeout after revoke commit"):
+        fleet_client_messages.manage_principal("revoke", name="researcher")
+
+    current_generation = "b" * 32
+    with pytest.raises(fleet_client.FleetClientError, match="principal generation changed"):
+        fleet_client_messages.manage_principal("revoke", name="researcher")
+
+    assert [body["expected_enrollment_id"] for body in revoke_requests] == ["a" * 32, "a" * 32]
+    assert generation_reads == ["a" * 32]
+    assert not fleet_client_messages._principal_revocation_path("researcher", ADMIN).exists()
+
+    fleet_client_messages.manage_principal("revoke", name="researcher")
+    assert revoke_requests[-1]["expected_enrollment_id"] == "b" * 32
+    assert generation_reads == ["a" * 32, "b" * 32]
+
+
 def test_unacked_recipient_index_supports_count_queries(message_hub):
     _base, _token_a, _token_b, db = message_hub
     with sqlite3.connect(db) as conn:

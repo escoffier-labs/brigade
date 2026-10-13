@@ -1135,6 +1135,30 @@ class TestBoardBounds:
         assert f'data-node="{NODE_A}"' in page
         assert "1 unread messages" in page
 
+    def test_complete_event_nodes_use_one_unpaged_projection(self, hub, monkeypatch):
+        node_ids = [f"11111111-1111-4111-8111-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(node_id, f"run-{index}", 1, "run.started", repo="repo", harness="codex", ts=stamp)
+            for index, node_id in enumerate(node_ids)
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+
+        page_calls = []
+        original_board_status = fleet_hub_http.board_status
+
+        def count_page_queries(*args, **kwargs):
+            page_calls.append(kwargs.get("offset", 0))
+            return original_board_status(*args, **kwargs)
+
+        monkeypatch.setattr(fleet_hub_http, "board_status", count_page_queries)
+        status, _headers, page = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
+
+        assert status == 200
+        assert f'data-node="{node_ids[0]}"' in page
+        assert page_calls == [0]
+
     def test_claim_only_machine_cards_are_bounded_and_paginated(self, hub, monkeypatch):
         node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
         stamp = datetime.now(timezone.utc).isoformat()

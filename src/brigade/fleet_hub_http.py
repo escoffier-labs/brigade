@@ -672,45 +672,19 @@ def make_handler(
                 )
                 complete_base_node_ids: set[str] = set()
                 if query_model is not None:
-                    page = board
-                    if offset:
-                        page = board_status(
-                            conn,
-                            include_all=include_all,
-                            offset=0,
-                            now=current,
-                            history_window_seconds=frozen_deck.stale_history_after_seconds,
-                            stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
-                        )
-                    while True:
-                        page_started = run_started_at(
-                            conn,
-                            [
-                                (
-                                    str(row["node_id"]),
-                                    str(row["run_id"]),
-                                    row["harness"] if isinstance(row.get("harness"), str) else None,
-                                )
-                                for row in page.runs
-                            ],
-                        )
-                        visible_rows = fleet_dashboard.filter_rows(
-                            fleet_dashboard.build_rows(page.runs, page_started, now=current), query_model
-                        )
-                        complete_base_node_ids.update(row.node_id for row in visible_rows if row.node_id)
-                        if not page.more:
-                            break
-                        next_offset = fleet_hub_status.clamp_board_offset(page.offset + page.limit)
-                        if next_offset <= page.offset:
-                            break
-                        page = board_status(
-                            conn,
-                            include_all=include_all,
-                            offset=next_offset,
-                            now=current,
-                            history_window_seconds=frozen_deck.stale_history_after_seconds,
-                            stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
-                        )
+                    complete_base_node_ids = fleet_hub_status.board_node_ids(
+                        conn,
+                        include_all=include_all,
+                        now=current,
+                        history_window_seconds=frozen_deck.stale_history_after_seconds,
+                        stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                        predicate=lambda entry: bool(
+                            fleet_dashboard.filter_rows(
+                                fleet_dashboard.build_rows([entry], {}, now=current), query_model
+                            )
+                        ),
+                        resolve_last_known_seat=bool(query_model.seat),
+                    )
                 claims = fleet_claim_display.list_display_claims(conn, include_all=include_all)
                 started_at = run_started_at(
                     conn,

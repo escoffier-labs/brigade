@@ -747,6 +747,9 @@ def _spool_append_locked(path: Path, event: dict[str, Any], *, dir_fd: int | Non
     except OSError:
         current = 0
     if current + len(line.encode("utf-8")) > MAX_SPOOL_BYTES:
+        if len(line.encode("utf-8")) > MAX_SPOOL_BYTES // 2:
+            _LOG.warning("fleet spool %s cannot retain the newest event within its overflow budget", path)
+            return False
         events = _read_spool(path, dir_fd=dir_fd)
         events.append(event)
         kept: list[dict[str, Any]] = []
@@ -865,8 +868,7 @@ def report_event(
     ``Exception`` never escapes. ``KeyboardInterrupt``/``SystemExit`` are
     re-raised after a best-effort attempt to preserve the event in the spool.
 
-    ``base_path`` (e.g. the journal path) is accepted and ignored: identity
-    resolution never depends on where a request originated (#1161).
+    ``base_path`` is ignored; identity is resolved independently of request origin (#1161).
     """
     try:
         config = load_fleet_config()

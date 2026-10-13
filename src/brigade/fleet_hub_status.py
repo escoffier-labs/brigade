@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from . import fleet_command_deck
 
@@ -196,12 +196,16 @@ def board_node_ids(
     include_all: bool = False,
     now: datetime | None = None,
     history_window_seconds: int = STALE_HISTORY_AFTER_SECONDS,
+    stale_history_after_seconds: int = STALE_HISTORY_AFTER_SECONDS,
+    predicate: Callable[[dict[str, Any]], bool] | None = None,
+    resolve_last_known_seat: bool = True,
 ) -> set[str]:
     """Return node identities represented by the complete board result set.
 
     This is used to keep supplemental dashboard cards stable across pages.
-    It shares the board's history window and latest-state projection, without
-    materializing run rows or applying a page limit.
+    It shares the board's history window and latest-state projection. With a
+    predicate, it materializes that projection once and filters the mapped
+    rows without repeating the full projection for each page.
     """
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     windowed = not include_all
@@ -213,7 +217,23 @@ def board_node_ids(
             tz=timezone.utc,
         ).isoformat()
         params = (cutoff,)
-    return {str(row[0]) for row in conn.execute(f"SELECT DISTINCT node_id FROM ({sql})", params) if row[0]}
+    if predicate is None:
+        return {str(row[0]) for row in conn.execute(f"SELECT DISTINCT node_id FROM ({sql})", params) if row[0]}
+
+    result: set[str] = set()
+    for row in conn.execute(sql, params):
+        entry = _status_entry(
+            conn,
+            row,
+            now=current,
+            age_stale=include_all,
+            stale_history_after_seconds=stale_history_after_seconds,
+            resolve_last_known_seat=resolve_last_known_seat,
+        )
+        node_id = entry["node_id"]
+        if node_id and predicate(entry):
+            result.add(str(node_id))
+    return result
 
 
 def _status_entry(
@@ -223,13 +243,14 @@ def _status_entry(
     now: datetime,
     age_stale: bool,
     stale_history_after_seconds: int,
+    resolve_last_known_seat: bool = True,
 ) -> dict[str, Any]:
     state = row[5]
     entry = {
         "node_id": row[0],
         "run_id": row[1],
         "repo": row[2],
-        "seat": _last_known_seat(conn, row[0], row[1], row[3]),
+        "seat": _last_known_seat(conn, row[0], row[1], row[3]) if resolve_last_known_seat else row[3],
         "harness": row[4],
         "state": state,
         "ts": row[6],
