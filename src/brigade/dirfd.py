@@ -202,17 +202,17 @@ def open_directory_nofollow(path: Path, *, writable: bool = True) -> int:
     raise unavailable("directory operations")
 
 
-def open_directory_chain(path: Path, *, create: bool = False) -> int:
+def open_directory_chain(path: Path, *, create: bool = False, writable: bool = True) -> int:
     """Walk an absolute directory path from its anchor without following links."""
     path = Path(path)
     if not path.is_absolute():
         raise OSError("directory path must be absolute")
-    descriptor = open_directory_nofollow(Path(path.anchor))
+    descriptor = open_directory_nofollow(Path(path.anchor), writable=False)
     try:
         for name in path.parts[1:]:
             validate_component(name)
             try:
-                child = open_child_directory(descriptor, name)
+                child = open_child_directory(descriptor, name, writable=False)
             except FileNotFoundError:
                 if not create:
                     raise
@@ -220,9 +220,13 @@ def open_directory_chain(path: Path, *, create: bool = False) -> int:
                     mkdir_child(descriptor, name)
                 except FileExistsError:
                     pass
-                child = open_child_directory(descriptor, name)
+                child = open_child_directory(descriptor, name, writable=False)
             os.close(descriptor)
             descriptor = child
+        if writable and nt_available():
+            writable_descriptor = _nt_dirfd().reopen_directory_writable(descriptor, modify=True)
+            os.close(descriptor)
+            descriptor = writable_descriptor
         return descriptor
     except BaseException:
         os.close(descriptor)
@@ -258,7 +262,11 @@ def mkdir_child(parent: int, name: str) -> None:
         _posix_mkdir_child(parent, name)
         return
     if nt_available():
-        _nt_mkdir_child(parent, name)
+        writable_parent = _nt_dirfd().reopen_directory_writable(parent)
+        try:
+            _nt_mkdir_child(writable_parent, name)
+        finally:
+            os.close(writable_parent)
         return
     raise unavailable("directory operations")
 
