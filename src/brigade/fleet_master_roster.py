@@ -21,7 +21,8 @@ _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _PROVIDER_MODEL = re.compile(r"^[A-Za-z0-9_-]+/[A-Za-z0-9._:-]+$")
 _DANGEROUS_VALUE = re.compile(
     r"(?:(?<![A-Za-z0-9_])sk_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
-    r"\bBearer\s+\S+|(?<![A-Za-z0-9])[A-Z_][A-Z0-9_]*\s*=|"
+    r"\bBearer\s+\S+|\bBasic\s+[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
+    r"(?<![A-Za-z0-9])[A-Z_][A-Z0-9_]*\s*=|"
     r"\bauth(?:entication)?[ _-]profile(?:\s*[:=]\s*|\s+)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\])|"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\])\s+auth(?:entication)?[ _-]profile\b|"
@@ -82,7 +83,7 @@ _EXTENSIONLESS_FILES = frozenset(
     {"containerfile", "dockerfile", "gnumakefile", "makefile", "justfile", "procfile", "readme"}
 )
 _PRIVATE_KEY_FILES = frozenset({"id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"})
-_FILE_SUFFIX = re.compile(r"\.[A-Za-z]{1,8}$")
+_FILE_SUFFIX = re.compile(r"\.[A-Za-z]{2,8}$")
 _STANDALONE_FILE = re.compile(r"(?<![A-Za-z0-9_.-])(?P<file>\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+)(?![A-Za-z0-9_.-])")
 _SURROGATE = re.compile("[\\ud800-\\udfff]")
 

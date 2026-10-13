@@ -67,6 +67,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
     "text",
     [
         "Use token sk-ant-abcdefghijklmnopqrstuvwxyz0123456789 for auth.",
+        "Authorization: Basic dXNlcjpwYXNz",
         "Use Slack token " + "xoxb-" + "A" * 20,
         "Use Stripe key " + "sk_live_" + "A" * 24,
         "Use Stripe test key " + "sk_test_" + "A" * 24,
@@ -118,6 +119,7 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "task-abcdefghijkl",
         "Run CI/CD workflows",
         "Read input/output formats",
+        "Read e.g., the guide",
     ],
 )
 def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> None:
