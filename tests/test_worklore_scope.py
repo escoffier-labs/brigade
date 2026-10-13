@@ -32,6 +32,42 @@ def another_owner(conn, *, node="node-b"):
     return work_id
 
 
+def clone_histories(conn, template, count):
+    """Expand one real lifecycle, including its template, in one durable transaction."""
+    work_ids = [template]
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        item = conn.execute(
+            f"SELECT {', '.join(store._ITEM_COLUMNS)} FROM work_items WHERE work_id=?", (template,)
+        ).fetchone()
+        events = conn.execute(
+            f"SELECT {', '.join(store._EVENT_COLUMNS)} FROM work_events WHERE work_id=? ORDER BY seq", (template,)
+        ).fetchall()
+        for _ in range(count - 1):
+            work_id = store._mint_id("wl-")
+            values = dict(zip(store._ITEM_COLUMNS, item, strict=True))
+            values["work_id"] = work_id
+            conn.execute(
+                f"INSERT INTO work_items ({', '.join(store._ITEM_COLUMNS)}) "
+                f"VALUES ({', '.join('?' for _ in store._ITEM_COLUMNS)})",
+                tuple(values[column] for column in store._ITEM_COLUMNS),
+            )
+            for event in events:
+                values = dict(zip(store._EVENT_COLUMNS, event, strict=True))
+                values.update(work_id=work_id, event_id=store._mint_id("evt-"))
+                detail = json.loads(values["detail_json"])
+                if "ownership" in detail:
+                    detail["ownership"]["last_seq"] = conn.execute(f"SELECT {store._EVENT_SEQ_SQL}").fetchone()[0]
+                    values["detail_json"] = json.dumps(detail)
+                conn.execute(
+                    f"INSERT INTO work_events ({', '.join(store._EVENT_INSERT_COLUMNS)}) "
+                    f"VALUES ({', '.join('?' for _ in store._EVENT_COLUMNS)}, {store._EVENT_SEQ_SQL})",
+                    tuple(values[column] for column in store._EVENT_COLUMNS),
+                )
+            work_ids.append(work_id)
+    return work_ids
+
+
 def checkpoint(conn, work_id, paths, *, repo="example/project", revision=2, node="node-a", nonce=NONCE_A, key="scope"):
     return request(
         conn,
@@ -300,18 +336,18 @@ def test_disjoint_maximum_scopes_keep_credential_work_bounded(ledger, monkeypatc
     conn, work_id, _ = ledger
     owned(conn, work_id)
     # Accepted historical declarations exercise the full production scan bound.
-    for index in range(1024):
-        other = another_owner(conn)
-        row = conn.execute(
-            "SELECT seq, detail_json FROM work_events WHERE work_id=? ORDER BY seq DESC LIMIT 1", (other,)
-        ).fetchone()
-        detail = json.loads(row[1])
-        detail["ownership"].update(
-            repo_identity="example/project",
-            write_scope=[f"held/{index:04d}/{part:02d}/" + "0f" * 121 + "0" for part in range(32)],
-        )
-        conn.execute("UPDATE work_events SET detail_json=? WHERE seq=?", (json.dumps(detail), row[0]))
-        conn.commit()
+    others = clone_histories(conn, another_owner(conn), 1024)
+    with conn:
+        for index, other in enumerate(others):
+            row = conn.execute(
+                "SELECT seq, detail_json FROM work_events WHERE work_id=? ORDER BY seq DESC LIMIT 1", (other,)
+            ).fetchone()
+            detail = json.loads(row[1])
+            detail["ownership"].update(
+                repo_identity="example/project",
+                write_scope=[f"held/{index:04d}/{part:02d}/" + "0f" * 121 + "0" for part in range(32)],
+            )
+            conn.execute("UPDATE work_events SET detail_json=? WHERE seq=?", (json.dumps(detail), row[0]))
     paths = [f"candidate/{part:02d}/" + "0f" * 121 + "0" for part in range(32)]
     operations = {"decode": 0, "hash": 0}
     decode, sha256 = base64.b64decode, hashlib.sha256
@@ -363,12 +399,12 @@ def test_departed_ownership_histories_do_not_consume_admission_budget(ledger, mo
 def test_withdrawn_histories_beyond_default_bound_allow_checkpoint(ledger):
     conn, work_id, _ = ledger
     owned(conn, work_id)
-    # Real completed offer/withdraw cycles exceed the production 1,024-item bound.
-    for _ in range(1025):
-        item = store.create_item(conn, {"title": "Departed fixture", "kind": "repo"}, actor_id="admin")
-        other = item["work_id"]
-        post(conn, other, OFFER, admin=True, key="offer")
-        post(conn, other, {"action": "withdraw"}, admin=True, revision=1, key="withdraw")
+    # Full histories from a real offer/withdraw cycle exceed the 1,024-item bound.
+    item = store.create_item(conn, {"title": "Departed fixture", "kind": "repo"}, actor_id="admin")
+    other = item["work_id"]
+    post(conn, other, OFFER, admin=True, key="offer")
+    post(conn, other, {"action": "withdraw"}, admin=True, revision=1, key="withdraw")
+    clone_histories(conn, other, 1025)
     status, reply = checkpoint(conn, work_id, ["src"])
     assert status == 200, reply
     assert event_count(conn, work_id) == 3
