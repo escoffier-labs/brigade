@@ -1333,6 +1333,66 @@ def test_append_consumes_exactly_one_authority_snapshot(
     assert len(acquisitions) == 1
 
 
+def test_authority_downgrade_clears_isolation_posture_marker_after_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1217: downgrade removes all governing markers, not just the marker
+    for the current path, so an explicit downgrade of a relocated workspace
+    removes the source marker too."""
+
+    source = tmp_path / "source"
+    source.mkdir()
+    _bind_workspace(source)
+    source_fingerprint = authority_marker.target_fingerprint(source)
+    source_posture_marker = _isolation_posture_marker_path(source)
+    assert source_posture_marker.is_file()
+
+    dest = tmp_path / "dest"
+    source.rename(dest)
+
+    from brigade.security_cmd.commands import authority_downgrade
+
+    # Reanchor creates a new marker for the destination path, leaving the
+    # source marker in place.
+    # We can trigger reanchor by appending a record or doing an identity read.
+    text = "reanchor trigger"
+    existing, incoming = _canonical_duplicate_row(text)
+    ledger._append_import_records(
+        dest,
+        [incoming],
+        provenance_source="handoff-ingest",
+        migrate_untrusted_identities=True,
+        existing_imports=[],
+    )
+
+    dest_fingerprint = authority_marker.target_fingerprint(dest)
+    dest_posture_marker = _isolation_posture_marker_path(dest)
+    assert source_posture_marker.is_file()
+    assert dest_posture_marker.is_file()
+
+    monkeypatch.setattr("sys.stdin", type("_NonTty", (), {"isatty": lambda self: False})())
+
+    assert authority_downgrade(target=dest, confirm=True) == 0
+
+    assert not source_posture_marker.exists()
+    assert not dest_posture_marker.exists()
+
+    # Verify audit records were written for both removed markers
+    import json
+
+    audit_log = authority_marker.audit_path()
+    assert audit_log.is_file()
+    lines = audit_log.read_text().splitlines()
+    downgrade_audits = [json.loads(line) for line in lines if "authority-downgrade" in line]
+    removed_fingerprints = {
+        record.get("target_fingerprint")
+        for record in downgrade_audits
+        if record.get("phase") == "complete" and record.get("posture_marker_removed") is True
+    }
+    assert source_fingerprint in removed_fingerprints
+    assert dest_fingerprint in removed_fingerprints
+
+
 def test_authority_downgrade_clears_isolation_posture_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """#881 round 3: the explicit confirmed downgrade command is the only path
     that clears the isolation posture marker; it removes both sticky markers

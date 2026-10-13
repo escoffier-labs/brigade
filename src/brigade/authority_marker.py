@@ -250,6 +250,44 @@ def isolation_marker_status(
     return MARKER_STATUS_CONFIRMED_ABSENT
 
 
+def governing_isolation_marker_paths(
+    target: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+    workspace_identity: Mapping[str, int] | None = None,
+) -> list[Path]:
+    """Return paths of all posture markers that govern this target."""
+
+    fingerprint = target_fingerprint(target)
+    live: dict[str, Any] | None = None
+    if workspace_identity is not None and "device" in workspace_identity and "inode" in workspace_identity:
+        live = {"device": workspace_identity["device"], "inode": workspace_identity["inode"]}
+    root = isolation_marker_root(env=env)
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+
+    governing: list[Path] = []
+    for name in names:
+        if not _FINGERPRINT_RE.fullmatch(name):
+            continue
+        path = root / name
+        try:
+            metadata = os.lstat(path)
+            if not stat.S_ISREG(metadata.st_mode):
+                continue
+            payload = json.loads(path.read_bytes())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        governs = _isolation_marker_governs(payload, name, fingerprint, live)
+        if governs:
+            governing.append(path)
+    return governing
+
+
 def _isolation_marker_governs(
     payload: dict[str, Any],
     filename: str,

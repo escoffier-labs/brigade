@@ -579,8 +579,17 @@ def downgrade_external_directory_authority(
     fingerprint = authority_marker.target_fingerprint(workspace)
     marker_path = authority_marker.signed_marker_path(fingerprint, env=env)
     authority_marker.reject_unsafe_marker_path(marker_path, workspace, env=env)
-    posture_path = authority_marker.isolation_marker_path(fingerprint, env=env)
-    authority_marker.reject_unsafe_marker_path(posture_path, workspace, env=env)
+
+    try:
+        live_identity = _workspace_directory_identity(workspace)
+    except OSError:
+        live_identity = {}
+    governing_posture_paths = authority_marker.governing_isolation_marker_paths(
+        workspace, env=env, workspace_identity=live_identity
+    )
+    for p in governing_posture_paths:
+        authority_marker.reject_unsafe_marker_path(p, workspace, env=env)
+
     isolation_path = security_config_path(workspace)
 
     store_backup, raw_payload = _read_raw_authority_store(store_path)
@@ -612,16 +621,16 @@ def downgrade_external_directory_authority(
         marker_bytes = None
     except OSError as exc:
         raise OSError("authority signed marker is unreadable") from exc
-    try:
-        posture_bytes = posture_path.read_bytes()
-    except FileNotFoundError:
-        posture_bytes = None
-    except OSError as exc:
-        raise OSError("authority isolation posture marker is unreadable") from exc
+    posture_backups: dict[Path, bytes] = {}
+    for p in governing_posture_paths:
+        try:
+            posture_backups[p] = p.read_bytes()
+        except OSError as exc:
+            raise OSError("authority isolation posture marker is unreadable") from exc
 
     actor_value = actor if actor is not None else authority_marker.operator_identity(env=env)
     resolved = str(workspace)
-    if unsigned_record is None and marker_bytes is None and posture_bytes is None:
+    if unsigned_record is None and marker_bytes is None and not posture_backups:
         return {
             "action": "authority-downgrade",
             "actor": actor_value,
@@ -665,7 +674,7 @@ def downgrade_external_directory_authority(
 
     changed: dict[Path, bytes] = {}
     marker_removed = False
-    posture_removed = False
+    postures_removed: list[Path] = []
 
     def _record_change(path: Path, backup: bytes | None) -> None:
         if backup is not None:
@@ -677,8 +686,9 @@ def downgrade_external_directory_authority(
             _restore_authority_file(path, backup)
         if marker_removed and marker_bytes is not None:
             _restore_authority_file(marker_path, marker_bytes)
-        if posture_removed and posture_bytes is not None:
-            _restore_authority_file(posture_path, posture_bytes)
+        for p in postures_removed:
+            if p in posture_backups:
+                _restore_authority_file(p, posture_backups[p])
 
     try:
         if unsigned_record is not None:
@@ -708,14 +718,33 @@ def downgrade_external_directory_authority(
             else:
                 marker_removed = True
                 _downgrade_durability_checkpoint(marker_path)
-        if posture_bytes is not None:
+        for p in governing_posture_paths:
             try:
-                posture_path.unlink()
+                p.unlink()
             except FileNotFoundError:
                 pass
             else:
-                posture_removed = True
-                _downgrade_durability_checkpoint(posture_path)
+                postures_removed.append(p)
+                _downgrade_durability_checkpoint(p)
+
+                # Append dedicated audit record for removed posture marker
+                try:
+                    authority_marker.append_audit(
+                        {
+                            "action": "authority-downgrade",
+                            "actor": actor_value,
+                            "created_at": utc_now_iso_z(),
+                            "phase": "complete",
+                            "removed": False,
+                            "posture_marker_removed": True,
+                            "store_unwrapped": False,
+                            "target": resolved,
+                            "target_fingerprint": p.name,
+                        },
+                        env=env,
+                    )
+                except OSError as exc:
+                    raise OSError("authority downgrade audit is unavailable; marker not removed") from exc
     except OSError:
         try:
             _restore_all()
@@ -729,7 +758,7 @@ def downgrade_external_directory_authority(
         "created_at": utc_now_iso_z(),
         "phase": "complete",
         "removed": marker_removed,
-        "posture_marker_removed": posture_removed,
+        "posture_marker_removed": bool(postures_removed),
         "store_unwrapped": unsigned_record is not None,
         "target": resolved,
         "target_fingerprint": fingerprint,
