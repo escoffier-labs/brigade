@@ -277,7 +277,10 @@ def manage_principal(
     label: str | None = None,
     _retried_revoked_enrollment: bool = False,
     _defer_finalize: bool = False,
+    _deferred_request_ids: list[str] | None = None,
 ) -> dict[str, Any]:
+    if _defer_finalize and _deferred_request_ids is None:
+        raise fleet_client.FleetClientError("deferred principal enrollment requires a request ID holder")
     settings = fleet_client.load_fleet_settings()
     if not settings["hub_url"]:
         raise fleet_client.FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
@@ -286,6 +289,7 @@ def manage_principal(
     fleet_client._require_encrypted_or_loopback_hub(settings["hub_url"])
     body: dict[str, Any] = {"action": action, "name": name}
     pending_path: Path | None = None
+    revoke_pending_request_id: str | None = None
     if action == "add":
         body.update(_pending_principal_request(name, settings["admin_token"], label))
         body["token"] = hmac.new(
@@ -294,6 +298,9 @@ def manage_principal(
             hashlib.sha256,
         ).hexdigest()
         pending_path = _principal_pending_path(name, settings["admin_token"])
+    elif action == "revoke":
+        pending_path = _principal_pending_path(name, settings["admin_token"])
+        revoke_pending_request_id = _pending_principal_request_id(pending_path, name)
     elif label is not None:
         body["label"] = label
     request = urllib.request.Request(
@@ -333,7 +340,7 @@ def manage_principal(
             and status == 409
             and payload.get("code") == "principal_enrollment_revoked"
         ):
-            _clear_principal_request(pending_path)
+            _clear_principal_request(pending_path, request_id=body["request_id"])
             if not _retried_revoked_enrollment:
                 return manage_principal(
                     action,
@@ -341,11 +348,13 @@ def manage_principal(
                     label=label,
                     _retried_revoked_enrollment=True,
                     _defer_finalize=_defer_finalize,
+                    _deferred_request_ids=_deferred_request_ids,
                 )
         if pending_path is not None and 400 <= status < 500 and status not in (408, 409, 425, 429):
-            _clear_principal_request(pending_path)
+            if action == "add":
+                _clear_principal_request(pending_path, request_id=body["request_id"])
         raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
-    if pending_path is not None:
+    if action == "add" and pending_path is not None:
         principal = payload.get("principal")
         returned_token = principal.get("token") if isinstance(principal, dict) else None
         if (
@@ -359,8 +368,11 @@ def manage_principal(
             or not hmac.compare_digest(returned_token, body["token"])
         ):
             raise fleet_client.FleetClientError("fleet hub did not confirm the enrolled principal and token")
-        if not _defer_finalize:
-            _clear_principal_request(pending_path)
+        if _defer_finalize:
+            if _deferred_request_ids is not None:
+                _deferred_request_ids.append(body["request_id"])
+        else:
+            _clear_principal_request(pending_path, request_id=body["request_id"])
     elif action == "revoke":
         principal = payload.get("principal")
         if (
@@ -369,16 +381,17 @@ def manage_principal(
             or principal.get("name") != name
         ):
             raise fleet_client.FleetClientError("fleet hub did not confirm the revoked principal")
-        _clear_principal_request(_principal_pending_path(name, settings["admin_token"]))
+        if revoke_pending_request_id is not None and pending_path is not None:
+            _clear_principal_request(pending_path, request_id=revoke_pending_request_id)
     return payload
 
 
-def finalize_principal_add(name: str) -> None:
+def finalize_principal_add(name: str, *, request_id: str) -> None:
     """Clear enrollment retry state after the caller has safely delivered the token."""
     settings = fleet_client.load_fleet_settings()
     if not settings["admin_token"]:
         raise fleet_client.FleetClientError("no fleet admin token configured")
-    _clear_principal_request(_principal_pending_path(name, settings["admin_token"]))
+    _clear_principal_request(_principal_pending_path(name, settings["admin_token"]), request_id=request_id)
 
 
 def _principal_pending_path(name: str, admin_token: str) -> Path:
@@ -402,14 +415,21 @@ def _pending_principal_request(name: str, admin_token: str, label: str | None) -
             with fleet_client._spool_lock(legacy_path) as legacy_fd:
                 legacy_pending = fleet_client._read_spool(legacy_path, dir_fd=legacy_fd)
             if legacy_pending:
+                legacy_request_id = next(
+                    (
+                        item.get("request_id")
+                        for item in legacy_pending
+                        if item.get("name") == name and isinstance(item.get("request_id"), str)
+                    ),
+                    None,
+                )
                 with fleet_client._spool_lock(path) as dir_fd:
                     pending = fleet_client._read_spool(path, dir_fd=dir_fd)
                     if not pending:
                         pending = legacy_pending
                         fleet_client._write_spool_atomic(path, pending, dir_fd=dir_fd)
-                if pending == legacy_pending:
-                    with fleet_client._spool_lock(legacy_path) as legacy_fd:
-                        fleet_client._write_spool_atomic(legacy_path, [], dir_fd=legacy_fd)
+                if pending == legacy_pending and isinstance(legacy_request_id, str):
+                    _clear_principal_request(legacy_path, request_id=legacy_request_id)
                 break
     if not pending:
         with fleet_client._spool_lock(path) as dir_fd:
@@ -430,9 +450,24 @@ def _pending_principal_request(name: str, admin_token: str, label: str | None) -
     raise fleet_client.FleetClientError("could not preserve pending principal enrollment request")
 
 
-def _clear_principal_request(path: Path) -> None:
+def _pending_principal_request_id(path: Path, name: str) -> str | None:
     with fleet_client._spool_lock(path) as dir_fd:
-        fleet_client._write_spool_atomic(path, [], dir_fd=dir_fd)
+        pending = fleet_client._read_spool(path, dir_fd=dir_fd)
+    for item in pending:
+        request_id = item.get("request_id")
+        if item.get("name") == name and isinstance(request_id, str) and request_id:
+            return request_id
+    return None
+
+
+def _clear_principal_request(path: Path, *, request_id: str) -> bool:
+    with fleet_client._spool_lock(path) as dir_fd:
+        pending = fleet_client._read_spool(path, dir_fd=dir_fd)
+        remaining = [item for item in pending if item.get("request_id") != request_id]
+        if len(remaining) == len(pending):
+            return False
+        fleet_client._write_spool_atomic(path, remaining, dir_fd=dir_fd)
+        return True
 
 
 def flush(node_id: str, *, hub_url: str | None = None, token: str | None = None) -> int:

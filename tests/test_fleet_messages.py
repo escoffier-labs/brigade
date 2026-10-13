@@ -781,10 +781,14 @@ def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, 
     # Recover retry state written by the older node-scoped format even after
     # the home node identity changes.
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_B)
-    enrolled = fleet_client_messages.manage_principal("add", name="researcher", _defer_finalize=True)
+    deferred_request_ids = []
+    enrolled = fleet_client_messages.manage_principal(
+        "add", name="researcher", _defer_finalize=True, _deferred_request_ids=deferred_request_ids
+    )
     assert enrolled["principal"]["token"]
     assert fleet_client._read_spool(stable_path)[0]["request_id"] == requests[-1]["request_id"]
-    fleet_client_messages.finalize_principal_add("researcher")
+    assert deferred_request_ids == [requests[-1]["request_id"]]
+    fleet_client_messages.finalize_principal_add("researcher", request_id=deferred_request_ids[0])
     assert not stable_path.exists()
     assert requests[0]["request_id"] == requests[1]["request_id"]
     assert requests[0]["token"] == requests[1]["token"]
@@ -822,7 +826,6 @@ def test_principal_add_keeps_retry_state_until_response_matches_request(tmp_path
         fleet_client_messages.manage_principal("add", name="researcher")
     path = fleet_client_messages._principal_pending_path("researcher", "admin-token")
     assert fleet_client._read_spool(path)[0]["request_id"] == requests[0]["request_id"]
-
     monkeypatch.setattr(
         fleet_client,
         "_read_bounded_response",
@@ -850,6 +853,29 @@ def test_principal_add_keeps_retry_state_until_response_matches_request(tmp_path
     assert fleet_client_messages.manage_principal("add", name="researcher")["principal"]["token"]
     assert requests[0]["request_id"] == requests[1]["request_id"]
     assert not path.exists()
+
+
+def test_stale_principal_finalizer_preserves_new_enrollment_generation(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": "admin-token"},
+    )
+    path = fleet_client_messages._principal_pending_path("researcher", "admin-token")
+    with fleet_client._spool_lock(path) as dir_fd:
+        fleet_client._write_spool_atomic(
+            path, [{"name": "researcher", "request_id": "older-generation"}], dir_fd=dir_fd
+        )
+
+    with fleet_client._spool_lock(path) as dir_fd:
+        fleet_client._write_spool_atomic(
+            path, [{"name": "researcher", "request_id": "newer-generation"}], dir_fd=dir_fd
+        )
+
+    fleet_client_messages.finalize_principal_add("researcher", request_id="older-generation")
+
+    assert fleet_client._read_spool(path) == [{"name": "researcher", "request_id": "newer-generation"}]
 
 
 def test_unacked_recipient_index_supports_count_queries(message_hub):
@@ -1718,13 +1744,19 @@ def test_principal_add_retry_state_finalizes_only_after_successful_output(monkey
         fleet_client_messages,
         "manage_principal",
         lambda *_args, **kwargs: (
-            events.append(("managed", kwargs.get("_defer_finalize"))) or {"principal": {"token": "one-time-token"}}
-        ),
+            kwargs["_deferred_request_ids"].append("enrollment-generation"),
+            events.append(("managed", kwargs.get("_defer_finalize"))),
+            {"principal": {"token": "one-time-token"}},
+        )[-1],
     )
-    monkeypatch.setattr(fleet_client_messages, "finalize_principal_add", lambda _name: events.append("finalized"))
+    monkeypatch.setattr(
+        fleet_client_messages,
+        "finalize_principal_add",
+        lambda _name, *, request_id: events.append(("finalized", request_id)),
+    )
 
     assert fleet_messages_cli._principal_add(args) == 0
-    assert events == [("managed", True), "output", "finalized"]
+    assert events == [("managed", True), "output", ("finalized", "enrollment-generation")]
 
     events.clear()
 

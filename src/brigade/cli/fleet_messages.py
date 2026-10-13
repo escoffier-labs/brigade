@@ -160,10 +160,20 @@ def _reply(args: argparse.Namespace) -> int:
 def _principal_add(args: argparse.Namespace) -> int:
     from .. import fleet_client_messages
 
+    deferred_request_ids: list[str] = []
+
     return _result(
         args,
-        lambda: fleet_client_messages.manage_principal("add", name=args.name, label=args.label, _defer_finalize=True),
-        after_output=lambda: fleet_client_messages.finalize_principal_add(args.name),
+        lambda: fleet_client_messages.manage_principal(
+            "add",
+            name=args.name,
+            label=args.label,
+            _defer_finalize=True,
+            _deferred_request_ids=deferred_request_ids,
+        ),
+        after_output=lambda: fleet_client_messages.finalize_principal_add(
+            args.name, request_id=deferred_request_ids[-1]
+        ),
     )
 
 
