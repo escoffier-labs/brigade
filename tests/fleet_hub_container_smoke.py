@@ -137,14 +137,17 @@ def run_hub(
 
 def wait_for_health(url: str, *, context: ssl.SSLContext | None = None) -> None:
     deadline = time.monotonic() + 20
+    last: object = None
     while time.monotonic() < deadline:
         try:
             status, _, _ = request(url, "/health", context=context)
             if status == 200:
                 return
-        except (OSError, urllib.error.URLError):
-            time.sleep(0.25)
-    raise RuntimeError("Fleet Hub did not become healthy")
+            last = status
+        except (OSError, urllib.error.URLError) as error:
+            last = error
+        time.sleep(0.25)
+    raise RuntimeError(f"Fleet Hub did not become healthy: {last!r}")
 
 
 def build_image(platform: str | None) -> None:

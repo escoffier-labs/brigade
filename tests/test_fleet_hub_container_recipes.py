@@ -1,8 +1,48 @@
+import importlib.util
+import re
+import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTAINER = ROOT / "ops" / "fleet-hub"
+SMOKE = ROOT / "tests" / "fleet_hub_container_smoke.py"
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        pytest.param((503, {}, b""), "503", id="http-503"),
+        pytest.param(urllib.error.URLError("proxy unavailable"), "proxy unavailable", id="request-error"),
+    ],
+)
+def test_wait_for_health_delays_retries_and_reports_last_failure(monkeypatch, failure, expected):
+    spec = importlib.util.spec_from_file_location("fleet_hub_container_smoke", SMOKE)
+    assert spec is not None and spec.loader is not None
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+
+    def request(*_args, **_kwargs):
+        if isinstance(failure, BaseException):
+            raise failure
+        return failure
+
+    times = iter((0.0, 1.0, 20.0))
+    delays = []
+    monkeypatch.setattr(smoke, "request", request)
+    monkeypatch.setattr(
+        smoke,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(times), sleep=delays.append),
+    )
+
+    with pytest.raises(RuntimeError, match=re.escape(expected)):
+        smoke.wait_for_health("http://hub.test")
+
+    assert delays == [0.25]
 
 
 def test_hub_image_is_non_root_and_has_a_single_writable_state_directory():
