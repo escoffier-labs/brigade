@@ -312,3 +312,12 @@ class TestSpoolPathFallbackWithoutDirFd:
             record.levelno == logging.WARNING and "could not be opened safely" in record.getMessage()
             for record in caplog.records
         ), "a failed spool write was swallowed silently"
+
+    def test_report_event_propagates_interrupt_when_spooling_fails(self, home, monkeypatch):
+        def interrupt(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(fleet_client, "_post_events", interrupt)
+        monkeypatch.setattr(fleet_client, "_spool_append_locked", lambda *_args, **_kwargs: False)
+        with pytest.raises(KeyboardInterrupt):
+            fleet_client.report_event({"run_id": "r1", "state": "run.started"})

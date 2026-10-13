@@ -903,7 +903,7 @@ def report_event(
                 pass
             if not delivered:
                 with _spool_lock(spool) as dir_fd:
-                    if not _spool_append_locked(spool, event, dir_fd=dir_fd):
+                    if not _spool_append_locked(spool, event, dir_fd=dir_fd) and interrupted is None:
                         return False
     except (KeyboardInterrupt, SystemExit) as exc:
         # Preserve the event after interrupted spool bookkeeping, then propagate.
