@@ -155,6 +155,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Authentication profile is provided as production-admin",
         "Connect through auth profiles (production-admin).",
         "Connect using auth profile production-admin.",
+        "Connect using production-admin auth profile.",
         "Authentication profile named production-admin.",
         "Authentication profile called production-admin.",
         "Call /Applications/Agent/Binary.",
@@ -801,7 +802,15 @@ def test_parse_rejects_filesystem_paths_in_url_parameters(field: str, text: str)
 
 
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
-@pytest.mark.parametrize("text", ["Call /api/password%3Dhunter2", "Call /api/SERVICE_MODE%3Dproduction"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Call /api/password%3Dhunter2",
+        "Call /api/SERVICE_MODE%3Dproduction",
+        "Call /%65tc/passwd",
+        "Call /api/%2e%2e/etc/passwd",
+    ],
+)
 def test_parse_rejects_encoded_assignments_in_api_route_paths(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]

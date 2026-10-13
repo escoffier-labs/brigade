@@ -44,7 +44,7 @@ _DANGEROUS_VALUE = re.compile(
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?auth(?:entication)?[ _-]profiles?\s+"
     r"(?!(?:is|are|as|for|in|required|needed|necessary|optional|available|selection|rotation|management|regularly)\b)"
     r"[A-Za-z0-9_.-]+|"
-    r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with))\s+"
+    r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with|using))\s+"
     r"(?:the\s+)?(?:\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\)|(?!(?:the)\b)[A-Za-z0-9_.-]+)\s+"
     r"auth(?:entication)?[ _-]profiles?\b|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s*[:=]\s*"
@@ -191,6 +191,12 @@ def _has_disallowed_api_route_query(value: str) -> bool:
         route = match.group("path")
         route_path, _, route_query = route.partition("?")
         decoded_path = _fully_unquote(route_path)
+        decoded_components = decoded_path.strip("/").split("/")
+        if route_path != decoded_path and (
+            any(component in {".", ".."} for component in decoded_components)
+            or decoded_components[0].casefold() in _FILESYSTEM_COMPONENTS - _HTTP_METHOD_ROUTE_ROOTS
+        ):
+            return True
         if (
             _DANGEROUS_VALUE.search(decoded_path)
             or _ENVIRONMENT_ASSIGNMENT.search(decoded_path)
