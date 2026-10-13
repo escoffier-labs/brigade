@@ -41,9 +41,13 @@ caller changes intact. Ingestion opens a transaction before schema creation
 when the connection is idle and leaves commit or rollback to the caller.
 Caller rollback also removes schema created by ingestion. Existing transactions
 remain open. A savepoint protects the append and quota checks without committing
-unrelated changes. A rejected append rolls back its savepoint and preserves
-pending caller changes. If ingestion opened the transaction, the caller must
-still commit or roll it back, including after a storage failure.
+unrelated changes. Normal append rejection rolls back only the savepoint and
+preserves pending caller changes. The caller must still commit or roll back
+that transaction, including one opened by ingestion. SQLite errors that
+automatically abort the whole transaction, such as a trigger's `RAISE(ROLLBACK)`,
+also roll back pending caller changes and remove the savepoint. Ingestion skips
+savepoint cleanup when SQLite has ended the transaction and propagates the
+original error.
 
 `ingest_managed_review` calls `collect_managed_review` itself. It accepts the
 collector's optional `Limits` instance, never an arbitrary snapshot. Only the
@@ -82,7 +86,11 @@ flags are false.
 Reads fetch at most `limit + 1` rows for the exact subject. The default limit is
 20, and valid limits are integers from 1 through 100. An extra row sets
 `history_truncated`. A truncated read cannot establish current known or zero
-findings. Observation order uses fixed microsecond UTC keys, including when
+findings or round supersession. Every projected and rebound historical check
+has `supersession_disposition: unknown` and `superseded_by: null` in that case.
+Loaded findings and reviewed-head coverage remain available. An omitted
+observation may contain a round whose start time falls between or after loaded
+rounds. Observation order uses fixed microsecond UTC keys, including when
 whole-second and fractional timestamps are mixed. Completion time, insertion
 order and provider numeric IDs do not establish observation order.
 
@@ -96,7 +104,8 @@ complete check enumeration. A later denied or truncated enumeration
 invalidates an earlier valid zero. A delayed observation of an old head keeps
 its findings stale after a push.
 
-Same-head checks are ordered by valid `started_at` across loaded snapshots.
+With complete history, same-head checks are ordered by valid `started_at`
+across loaded snapshots.
 Strictly later rounds supersede earlier checks, including when the latest
 fetch omits the later round. Missing or tied start times retain uncertainty.
 Omission of a known latest round disables current known and zero flags. An

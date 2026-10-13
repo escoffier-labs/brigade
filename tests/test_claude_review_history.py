@@ -172,6 +172,55 @@ def test_bounded_read_truncation_and_subject_isolation():
     assert any("LIMIT 2" in s.upper() for s in statements)
 
 
+@pytest.mark.parametrize("omitted_day,order", [(2, [10, 12, 11]), (4, [10, 11, 12])], ids=["between", "after"])
+def test_truncated_history_cannot_establish_round_supersession(omitted_day, order):
+    conn = sqlite3.connect(":memory:")
+    ingest(
+        conn,
+        FixtureGet([check(12, started_at=f"2026-01-0{omitted_day}T00:00:00Z", completed_at="2026-01-06T00:00:00Z")]),
+        observed="2026-01-10T00:00:00Z",
+    )
+    annotation = dict(path="src/example.py", start_line=2, end_line=2, annotation_level="warning")
+    for observed_day, identity, start_day in ((11, 11, 3), (12, 10, 1)):
+        extras = {f"/repos/example/project/check-runs/{identity}/annotations": [annotation]}
+        row = check(
+            identity,
+            started_at=f"2026-01-0{start_day}T00:00:00Z",
+            completed_at="2026-01-06T00:00:00Z",
+            output={"annotations_count": 1, "text": ZERO},
+        )
+        ingest(conn, FixtureGet([row], extras=extras), observed=f"2026-01-{observed_day}T00:00:00Z")
+    complete = read(conn, limit=3)
+    assert complete["history_truncated"] is False
+    expected = {identity: newer for identity, newer in zip(order, [*order[1:], None], strict=True)}
+    for row in complete["checks"] + [c for s in complete["history"] for c in s["checks"]]:
+        assert row["superseded_by"] == expected[row["check_id"]]
+        assert row["supersession_disposition"] == (
+            "latest-observed" if expected[row["check_id"]] is None else "superseded"
+        )
+    truncated = read(conn, limit=2)
+    assert truncated["history_truncated"] is True
+    assert truncated["latest_check_enumeration_complete"] is False
+    assert [s["observed_at"] for s in truncated["history"]] == [s["observed_at"] for s in complete["history"][:2]]
+    assert {c["check_id"] for c in truncated["checks"]} == {10, 11}
+    assert truncated["annotations"] == complete["annotations"]
+    preserved = ("reviewed_head", "current_head", "coverage", "severity", "started_at", "source_url")
+    for truncated_rows, complete_rows in (
+        (truncated["checks"], complete["checks"]),
+        (
+            [c for s in truncated["history"] for c in s["checks"]],
+            [c for s in complete["history"][:2] for c in s["checks"]],
+        ),
+    ):
+        original = {c["check_id"]: c for c in complete_rows}
+        for row in truncated_rows:
+            assert {k: row[k] for k in preserved} == {k: original[row["check_id"]][k] for k in preserved}
+            assert row["current_findings_known"] is False
+            assert row["current_zero_findings"] is False
+            assert row["supersession_disposition"] == "unknown"
+            assert row["superseded_by"] is None
+
+
 @pytest.mark.parametrize("readonly", [False, True])
 @pytest.mark.parametrize("active_transaction", [False, True])
 def test_missing_schema_read_is_empty_without_writes_or_transaction_changes(tmp_path, readonly, active_transaction):
@@ -268,6 +317,21 @@ def test_ingest_schema_and_append_remain_in_caller_transaction(pending_caller_wr
     assert conn.execute("SELECT name FROM sqlite_master WHERE name=?", (api()._TABLE,)).fetchall() == []
     if pending_caller_write:
         assert conn.execute("SELECT * FROM caller").fetchall() == []
+
+
+def test_sqlite_transaction_abort_preserves_original_ingest_error():
+    conn = sqlite3.connect(":memory:")
+    api().ensure_schema(conn)
+    conn.execute(
+        f"CREATE TRIGGER abort_ingest BEFORE INSERT ON {api()._TABLE} "
+        "BEGIN SELECT RAISE(ROLLBACK, 'fixture transaction abort'); END"
+    )
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError, match="^fixture transaction abort$"):
+        ingest(conn)
+    assert not conn.in_transaction
+    assert conn.execute(f"SELECT count(*) FROM {api()._TABLE}").fetchone()[0] == 0
+    assert read(conn)["history"] == []
 
 
 def test_quotas_refuse_atomic_write_without_pruning_and_allow_replay():

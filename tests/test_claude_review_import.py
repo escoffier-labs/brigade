@@ -367,7 +367,7 @@ def test_source_urls_accept_repository_case_only(kind, endpoint, suffix, variant
         "fragment-case": (suffix.split("#")[-1], suffix.split("#")[-1].upper()),
         "http": ("https:", "http:"),
         "host-case": ("github.com", "GitHub.com"),
-        "credentials": ("github.com", "user@github.com"),
+        "credentials": ("github.com", "user@github.com"),  # <!-- content-guard: allow email --> synthetic URL userinfo
         "port": ("github.com", "github.com:443"),
         "query": (suffix, suffix.replace("#", "?token=example#") if "#" in suffix else suffix + "?token=example"),
         "encoding": ("Example", "%45xample"),

@@ -130,8 +130,9 @@ def ingest_managed_review(
                 (identity, *subject, observed, _sort_time(observed), current, payload),
             )
     except BaseException:
-        conn.execute("ROLLBACK TO brigade_review_ingest")
-        conn.execute("RELEASE brigade_review_ingest")
+        if conn.in_transaction:
+            conn.execute("ROLLBACK TO brigade_review_ingest")
+            conn.execute("RELEASE brigade_review_ingest")
         raise
     conn.execute("RELEASE brigade_review_ingest")
     return {"observation_id": identity, "duplicate": duplicate}
@@ -186,6 +187,11 @@ def _project(history: list[dict[str, Any]], current: str, truncated: bool) -> tu
                 record["current_findings_known"] = False
                 record["current_zero_findings"] = False
             projection[kind].append(record)
+    if truncated:
+        for record in projection["checks"]:
+            record["supersession_disposition"] = "unknown"
+            record["superseded_by"] = None
+        return projection, complete
     groups: dict[str | None, list[dict[str, Any]]] = defaultdict(list)
     for record in projection["checks"]:
         groups[record["reviewed_head"]].append(record)
