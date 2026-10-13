@@ -116,6 +116,9 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Use auth profile [production-admin].",
         "Auth profile (production-admin).",
         "Authentication profile equals production-admin.",
+        "Authentication profile was production-admin.",
+        "Authentication profile will be production-admin.",
+        "Authentication profile has been production-admin.",
         "Use auth profiles: production-admin.",
         "Connect through auth profiles (production-admin).",
         "Authentication profile named production-admin.",
@@ -162,6 +165,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "token is abcdefgh",
         "api key is shortkey",
         "See https://example.com/callback?token=hunter2",
+        "See https://example.com/callback?%74oken=hunter2",
+        "See https://example.com/callback?api%5Fkey=hunter2",
         "password is [hunter2]",
         "token is (abcdefg)",
         "npm_" + "A" * 36,
@@ -472,12 +477,23 @@ def test_parse_accepts_slash_separated_descriptive_prose(text: str) -> None:
     assert fleet_master_roster.parse(document)["seats"][0]["purpose"] == f"Support {text} workflows"
 
 
-@pytest.mark.parametrize("text", ["CI/CD", "planner/reviewer"])
+@pytest.mark.parametrize("text", ["CI/CD", "planner/reviewer", "24/7", "yes/no", "review/approval"])
 def test_parse_accepts_ordinary_slash_delimited_descriptive_prose(text: str) -> None:
     document = _document()
     document["seats"][0]["purpose"] = f"Support {text} workflows"  # type: ignore[index]
 
     assert fleet_master_roster.parse(document)["seats"][0]["purpose"] == f"Support {text} workflows"
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize("text", ["24/7", "yes/no", "review/approval"])
+def test_parse_accepts_standalone_slash_prose(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    parsed = fleet_master_roster.parse(document)
+
+    assert parsed["seats"][0][field] == ([text] if field == "caveats" else text)
 
 
 @pytest.mark.parametrize("field", ["purpose", "caveats"])

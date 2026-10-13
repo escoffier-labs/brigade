@@ -32,7 +32,7 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:Proxy-)?Authorization\s*:\s*Bearer\s+\S+|\bBearer\s+[A-Za-z0-9._~+/-]{20,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
-    r"\bauth(?:entication)?[ _-]profiles?\s+(?:is|equals)\s+"
+    r"\bauth(?:entication)?[ _-]profiles?\s+(?:is|was|equals|will\s+be|has\s+been)\s+"
     r"(?!(?:required|needed|necessary|optional|available|selection)\b)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s*[:=]\s*"
@@ -79,6 +79,8 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
         except ValueError:
             continue
         for key, query_value in query_pairs:
+            if _DANGEROUS_VALUE.search(f"{key}={query_value}"):
+                return True
             if key.casefold() not in _URL_PATH_QUERY_KEYS:
                 continue
             decoded_value = unquote(query_value)
@@ -160,7 +162,18 @@ _EXTENSIONLESS_FILES = frozenset(
 )
 _PRIVATE_KEY_FILES = frozenset({"id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"})
 _PROSE_SLASH_TERMS = frozenset(
-    {"and/or", "ci/cd", "client/server", "input/output", "key/value", "planner/reviewer", "read/write"}
+    {
+        "24/7",
+        "and/or",
+        "ci/cd",
+        "client/server",
+        "input/output",
+        "key/value",
+        "planner/reviewer",
+        "read/write",
+        "review/approval",
+        "yes/no",
+    }
 )
 _PROSE_DOTTED_TERMS = frozenset({"e.g", "i.e", "node.js", "vs.code"})
 _VERSION_REFERENCE = re.compile(r"\b[A-Z][A-Za-z0-9.+-]*/\d+(?:\.\d+)+")
