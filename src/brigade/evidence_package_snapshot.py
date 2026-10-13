@@ -125,6 +125,10 @@ def _same_observation(left: _Observation, right: _Observation) -> bool:
     return left == right
 
 
+def _same_directory_identity(left: _Observation, right: _Observation) -> bool:
+    return (left.device, left.inode) == (right.device, right.inode)
+
+
 def _scan_names(root_fd: int) -> frozenset[str]:
     try:
         if os.name == "posix":
@@ -437,7 +441,7 @@ def snapshot_package(directory: Path) -> PackageSnapshot:
             if _unsupported_operation(error):
                 _error("unavailable")
             _error("changed")
-        if not stat.S_ISDIR(current_root.st_mode) or not _same_observation(root, _observation(current_root)):
+        if not stat.S_ISDIR(current_root.st_mode) or not _same_directory_identity(root, _observation(current_root)):
             _error("changed")
         return PackageSnapshot(
             manifest_bytes=manifest_bytes,

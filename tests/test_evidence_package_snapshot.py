@@ -9,6 +9,7 @@ import json
 import os
 from dataclasses import fields, is_dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -638,6 +639,42 @@ def test_final_scan_is_fresh_and_anchored_to_the_held_directory(
     assert raised.value.code in {"changed", "unsafe"}
     assert (directory / "unexpected-child").exists()
     assert calls == 2
+
+
+def test_root_path_metadata_drift_does_not_change_directory_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = _write_package(tmp_path)
+    import brigade.evidence_package_snapshot as package_snapshot
+
+    original_stat = os.stat
+
+    def stat_with_directory_metadata_drift(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if path == directory and kwargs.get("follow_symlinks") is False:
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino,
+                st_size=result.st_size + 1,
+                st_mtime_ns=result.st_mtime_ns + 1,
+                st_ctime_ns=result.st_ctime_ns + 1,
+                st_mode=result.st_mode,
+            )
+        return result
+
+    monkeypatch.setattr(package_snapshot.os, "stat", stat_with_directory_metadata_drift)
+    monkeypatch.setattr(
+        package_snapshot.os,
+        "supports_dir_fd",
+        set(package_snapshot.os.supports_dir_fd) | {stat_with_directory_metadata_drift},
+    )
+    monkeypatch.setattr(
+        package_snapshot.os,
+        "supports_follow_symlinks",
+        set(package_snapshot.os.supports_follow_symlinks) | {stat_with_directory_metadata_drift},
+    )
+
+    assert snapshot_package(directory).source.verify_run_id == "20260908-120000-work-verify-package"
 
 
 def test_scan_refuses_repeated_names_without_consuming_an_unbounded_tail(
