@@ -69,6 +69,17 @@ def test_child_directory_and_file_round_trip(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not dirfd.available(), reason="descriptor-relative directory operations required")
+def test_open_directory_chain_creates_nested_directories(tmp_path: Path) -> None:
+    target = tmp_path / "first" / "second"
+    descriptor = dirfd.open_directory_chain(target, create=True)
+    try:
+        assert target.is_dir()
+        assert os.fstat(descriptor).st_ino == target.stat().st_ino
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.skipif(not dirfd.available(), reason="descriptor-relative directory operations required")
 def test_replace_children_without_replacement_preserves_destination(tmp_path: Path) -> None:
     parent = dirfd.open_directory_nofollow(tmp_path)
     try:

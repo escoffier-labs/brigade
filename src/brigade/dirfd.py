@@ -202,6 +202,33 @@ def open_directory_nofollow(path: Path, *, writable: bool = True) -> int:
     raise unavailable("directory operations")
 
 
+def open_directory_chain(path: Path, *, create: bool = False) -> int:
+    """Walk an absolute directory path from its anchor without following links."""
+    path = Path(path)
+    if not path.is_absolute():
+        raise OSError("directory path must be absolute")
+    descriptor = open_directory_nofollow(Path(path.anchor))
+    try:
+        for name in path.parts[1:]:
+            validate_component(name)
+            try:
+                child = open_child_directory(descriptor, name)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    mkdir_child(descriptor, name)
+                except FileExistsError:
+                    pass
+                child = open_child_directory(descriptor, name)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def open_file_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
     """Open a file path without following a final symlink or reparse point."""
     nofollow = getattr(os, "O_NOFOLLOW", 0)

@@ -40,6 +40,7 @@ _RECEIPT_FIELDS = frozenset(
 )
 _SUPPORTED = frozenset({"manifest.json", *(name for name, _, _ in evidence_package.PACKAGE_FILES)})
 _MAX_SOURCE_INVENTORY_ENTRIES = 4096
+_RECEIPT_STATUSES = frozenset({"running", "completed", "failed", "rejected", "canceled"})
 
 
 class DerivativeExportError(ValueError):
@@ -97,13 +98,13 @@ def _verify_source_inventory(
             os.close(descriptor)
 
 
-def _read(root_fd: int, name: str) -> tuple[bytes, tuple[int, int, int, int, int]]:
+def _read(root_fd: int, name: str, *, limit: int) -> tuple[bytes, tuple[int, int, int, int, int]]:
     descriptor = -1
     try:
         named = dirfd.stat_child(root_fd, name)
         if not stat.S_ISREG(named.st_mode):
             raise DerivativeExportError(f"source artifact is not a regular file: {name}")
-        if named.st_size > evidence_package.MAX_ENTRY_BYTES:
+        if named.st_size < 0 or named.st_size > limit:
             raise DerivativeExportError(f"source artifact exceeds size limit: {name}")
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
@@ -113,17 +114,17 @@ def _read(root_fd: int, name: str) -> tuple[bytes, tuple[int, int, int, int, int
             raise DerivativeExportError(f"source artifact is not a regular file: {name}")
         if _file_observation(initial) != _file_observation(named):
             raise DerivativeExportError(f"source artifact changed while reading: {name}")
-        if initial.st_size < 0 or initial.st_size > evidence_package.MAX_ENTRY_BYTES:
+        if initial.st_size < 0 or initial.st_size > limit:
             raise DerivativeExportError(f"source artifact exceeds size limit: {name}")
 
         chunks: list[bytes] = []
         count = 0
         while True:
-            chunk = os.read(descriptor, min(64 * 1024, evidence_package.MAX_ENTRY_BYTES + 1 - count))
+            chunk = os.read(descriptor, min(64 * 1024, limit + 1 - count))
             if not chunk:
                 break
             count += len(chunk)
-            if count > evidence_package.MAX_ENTRY_BYTES:
+            if count > limit:
                 raise DerivativeExportError(f"source artifact exceeds size limit: {name}")
             chunks.append(chunk)
 
@@ -177,6 +178,21 @@ def _minimize_receipt(receipt: dict[str, Any]) -> tuple[dict[str, Any], int, int
         else:
             raise DerivativeExportError(f"allowlisted receipt field has an invalid type: {key}")
     return kept, len(set(receipt) - _RECEIPT_FIELDS), redaction_occurrences
+
+
+def _validate_receipt_field_types(receipt: dict[str, Any]) -> None:
+    status = receipt.get("status")
+    if not isinstance(status, str) or status not in _RECEIPT_STATUSES:
+        raise DerivativeExportError("source receipt field is invalid: status")
+    for key in ("started_at", "completed_at"):
+        value = receipt.get(key)
+        if (key == "started_at" and (not isinstance(value, str) or not value.strip())) or (
+            key == "completed_at" and value is not None and (not isinstance(value, str) or not value.strip())
+        ):
+            raise DerivativeExportError(f"source receipt field is invalid: {key}")
+    exit_code = receipt.get("exit_code")
+    if exit_code is not None and type(exit_code) is not int:
+        raise DerivativeExportError("source receipt field is invalid: exit_code")
 
 
 def _validate_manifest_entries(manifest: dict[str, Any], raw: dict[str, bytes]) -> None:
@@ -251,7 +267,14 @@ def export_derivative(
         raw: dict[str, bytes] = {}
         file_observations: dict[str, tuple[int, int, int, int, int]] = {}
         for name in known_names:
-            raw[name], file_observations[name] = _read(root_fd, name)
+            limit = (
+                evidence_package_snapshot._MANIFEST_MAX_BYTES
+                if name == "manifest.json"
+                else attestation_input.MAX_JSON_BYTES
+                if name == "receipt.json"
+                else evidence_package.MAX_ENTRY_BYTES
+            )
+            raw[name], file_observations[name] = _read(root_fd, name, limit=limit)
         if _source_inventory(root_fd) != names or _file_observation(os.fstat(root_fd)) != root_observation:
             raise DerivativeExportError("source package inventory changed while reading")
     except DerivativeExportError:
@@ -297,6 +320,7 @@ def export_derivative(
             else "source manifest identities do not match receipt"
         )
         raise DerivativeExportError(message) from exc
+    _validate_receipt_field_types(receipt)
     patch_data = raw.get("changes.patch")
     patch_digest = hashlib.sha256(patch_data).hexdigest() if patch_data is not None else None
     receipt_patch_digest = receipt.get("changes_patch_sha256")
@@ -367,12 +391,11 @@ def export_derivative(
     created_output = False
     published = False
     try:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        parent_fd = dirfd.open_directory_nofollow(out.parent)
+        parent_fd = dirfd.open_directory_chain(out.parent, create=True)
         parent_info = os.fstat(parent_fd)
         parent_identity = (parent_info.st_dev, parent_info.st_ino)
         _verify_source_inventory(source, names, root_observation, file_observations)
-        current_parent_fd = dirfd.open_directory_nofollow(out.parent)
+        current_parent_fd = dirfd.open_directory_chain(out.parent)
         try:
             current_parent = os.fstat(current_parent_fd)
             if (current_parent.st_dev, current_parent.st_ino) != parent_identity:
@@ -401,7 +424,7 @@ def export_derivative(
         while view:
             view = view[os.write(temp_fd, view) :]
         os.fsync(temp_fd)
-        current_parent_fd = dirfd.open_directory_nofollow(out.parent)
+        current_parent_fd = dirfd.open_directory_chain(out.parent)
         try:
             current_parent = os.fstat(current_parent_fd)
             if (current_parent.st_dev, current_parent.st_ino) != parent_identity:
@@ -424,7 +447,7 @@ def export_derivative(
         final_entry = dirfd.stat_child(output_fd, "derivative.json")
         if not stat.S_ISREG(final_entry.st_mode) or (final_entry.st_dev, final_entry.st_ino) != temp_identity:
             raise DerivativeExportError("derivative output file changed during publication")
-        current_parent_fd = dirfd.open_directory_nofollow(out.parent)
+        current_parent_fd = dirfd.open_directory_chain(out.parent)
         try:
             current_parent = os.fstat(current_parent_fd)
             if (current_parent.st_dev, current_parent.st_ino) != parent_identity:

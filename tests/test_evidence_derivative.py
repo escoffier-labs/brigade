@@ -480,13 +480,26 @@ def test_derivative_rejects_duplicate_json_properties(tmp_path: Path) -> None:
             raise AssertionError(f"derivative accepted duplicate properties in {name}")
 
 
-def test_derivative_rejects_manifest_over_portable_size_limit(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("name", "limit"),
+    [
+        ("manifest.json", evidence_derivative.evidence_package_snapshot._MANIFEST_MAX_BYTES),
+        ("receipt.json", evidence_derivative.attestation_input.MAX_JSON_BYTES),
+    ],
+)
+def test_derivative_rejects_oversized_json_before_opening(tmp_path: Path, monkeypatch, name: str, limit: int) -> None:
     _, receipt = _fabricated_run_dir(tmp_path)
     source = tmp_path / "source"
     assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
-    (source / "manifest.json").write_bytes(
-        b" " * (evidence_derivative.evidence_package_snapshot._MANIFEST_MAX_BYTES + 1)
-    )
+    (source / name).write_bytes(b" " * (limit + 1))
+    opened: list[str] = []
+    open_child_file = evidence_derivative.dirfd.open_child_file
+
+    def observe_open(parent: int, child: str, flags: int, mode: int = 0o600) -> int:
+        opened.append(child)
+        return open_child_file(parent, child, flags, mode)
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "open_child_file", observe_open)
 
     try:
         evidence_derivative.export_derivative(
@@ -498,9 +511,11 @@ def test_derivative_rejects_manifest_over_portable_size_limit(tmp_path: Path) ->
             necessity="review",
         )
     except evidence_derivative.DerivativeExportError as exc:
-        assert str(exc) == "source manifest is malformed"
+        assert str(exc) == f"source artifact exceeds size limit: {name}"
     else:
         raise AssertionError("derivative accepted a manifest over the portable size limit")
+    assert name not in opened
+    assert not (tmp_path / "derivative").exists()
 
 
 def test_derivative_does_not_replace_output_directory_created_during_publish(tmp_path: Path, monkeypatch) -> None:
@@ -682,6 +697,55 @@ def test_derivative_rejects_output_parent_replaced_with_source(tmp_path: Path, m
             displaced_parent.rename(out_parent)
 
 
+def test_derivative_rejects_symlinked_output_ancestor_after_resolution(tmp_path: Path, monkeypatch) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    source_entries = {path.name for path in source.iterdir()}
+    ancestor = tmp_path / "destination"
+    ancestor.mkdir()
+    displaced = tmp_path / "destination-before-race"
+    out_parent = ancestor / "nested"
+    open_chain = evidence_derivative.dirfd.open_directory_chain
+    swapped = False
+
+    def swap_ancestor(path: Path, *, create: bool = False) -> int:
+        nonlocal swapped
+        if path == out_parent and not swapped:
+            swapped = True
+            ancestor.rename(displaced)
+            try:
+                ancestor.symlink_to(source, target_is_directory=True)
+            except OSError as exc:
+                displaced.rename(ancestor)
+                pytest.skip(f"directory symlinks unavailable: {exc}")
+        return open_chain(path, create=create)
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "open_directory_chain", swap_ancestor)
+    try:
+        try:
+            evidence_derivative.export_derivative(
+                source=source,
+                out=out_parent / "derivative",
+                recipient="recipient-42",
+                authority="approved-case-7",
+                lawful_basis="contract",
+                necessity="review",
+            )
+        except evidence_derivative.DerivativeExportError as exc:
+            assert str(exc) == "derivative output could not be published"
+        else:
+            raise AssertionError("derivative followed a replaced output ancestor into its source package")
+
+        assert {path.name for path in source.iterdir()} == source_entries
+        assert not (source / "derivative").exists()
+    finally:
+        if ancestor.is_symlink():
+            ancestor.unlink()
+        if displaced.exists() and not ancestor.exists():
+            displaced.rename(ancestor)
+
+
 def test_derivative_wraps_unsupported_publication_link_errors(tmp_path: Path, monkeypatch) -> None:
     _, receipt = _fabricated_run_dir(tmp_path)
     source = tmp_path / "source"
@@ -707,6 +771,39 @@ def test_derivative_wraps_unsupported_publication_link_errors(tmp_path: Path, mo
         raise AssertionError("derivative exposed an unsupported hard-link error")
 
     assert not (tmp_path / "derivative").exists()
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("status", True), ("started_at", 7), ("completed_at", False), ("exit_code", True)],
+)
+def test_derivative_rejects_invalid_copied_receipt_field_types(tmp_path: Path, key: str, value: object) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    altered = json.loads((source / "receipt.json").read_text(encoding="utf-8"))
+    altered[key] = value
+    _stamp_receipt(altered)
+    receipt_bytes = json.dumps(altered, indent=2, sort_keys=True).encode() + b"\n"
+    (source / "receipt.json").write_bytes(receipt_bytes)
+    manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    manifest["source"]["receipt_sha256"] = altered["digests"]["receipt_sha256"]
+    (source / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _refresh_package_entry(source, "receipt.json", receipt_bytes)
+
+    try:
+        evidence_derivative.export_derivative(
+            source=source,
+            out=tmp_path / "derivative",
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == f"source receipt field is invalid: {key}"
+    else:
+        raise AssertionError(f"derivative accepted invalid receipt field type for {key}")
     assert not list(tmp_path.glob(".derivative.staging-*"))
 
 
