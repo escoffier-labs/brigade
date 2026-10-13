@@ -1,0 +1,117 @@
+{
+  "k": 5,
+  "queries": [
+    {
+      "id": "basename:linked-one",
+      "query": "lane 7ac9",
+      "gold": [
+        "orbit-deploy"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "candidate:linked-one",
+      "query": "orbit kit",
+      "gold": [
+        "orbit-deploy"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "basename:linked-two",
+      "query": "lane 4bd8",
+      "gold": [
+        "orbit-deploy"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "candidate:linked-two",
+      "query": "orbit kit",
+      "gold": [
+        "orbit-deploy"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "basename:explicit-task",
+      "query": "lane a129",
+      "gold": [
+        "active-token"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "candidate:explicit-task",
+      "query": "token refresh",
+      "gold": [
+        "active-token"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "basename:plain-fallback",
+      "query": "comet notes",
+      "gold": [
+        "comet"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "candidate:plain-fallback",
+      "query": "comet notes",
+      "gold": [
+        "comet"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "basename:blank-task",
+      "query": "lane 0ed3",
+      "gold": [
+        "orbit-deploy"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "candidate:blank-task",
+      "query": "orbit kit",
+      "gold": [
+        "orbit-deploy"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "basename:vague-task",
+      "query": "lane 2af0",
+      "gold": [
+        "active-token"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "candidate:vague-task",
+      "query": "fix thing",
+      "gold": [
+        "active-token"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "basename:stale-scope",
+      "query": "lane 9ac1",
+      "gold": [
+        "active-token"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "candidate:stale-scope",
+      "query": "token refresh",
+      "gold": [
+        "active-token"
+      ],
+      "category": "exact"
+    }
+  ]
+}
