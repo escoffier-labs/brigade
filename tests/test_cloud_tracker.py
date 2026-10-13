@@ -1281,6 +1281,80 @@ def test_jules_plan_only_session_is_not_ready_to_land(tmp_path: Path):
     assert row["url"] == "https://jules.google.com/session/14361725569735593935"
 
 
+def test_jules_completed_plan_only_session_is_observed_and_needs_approval(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("JULES_API_KEY", "fake-jules-key")
+    monkeypatch.setattr(
+        jules_cloud,
+        "list_sessions",
+        lambda *a, **k: [
+            {
+                "id": "sess-empty-output",
+                "state": "COMPLETED",
+                "url": "https://jules.google.com/session/sess-empty-output",
+                "has_outputs": False,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        jules_cloud,
+        "list_activities",
+        lambda *a, **k: [{"kind": "userMessaged"}, {"kind": "planGenerated"}],
+    )
+    cloud_tracker.register(
+        tmp_path,
+        provider="jules",
+        task_id="sess-empty-output",
+        label="jules:owner/repo@112233445566",
+        prompt_hash=_prompt_hash("x"),
+        dispatched_at=_iso(NOW),
+    )
+    observation = cloud_tracker._jules_cloud_observation(tmp_path)
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_observations={"jules": observation},
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+    )
+    row = next(r for r in payload["entries"] if r["task_id"] == "sess-empty-output")
+    assert row["classification"] == "needs-plan-approval"
+    assert row["url"] == "https://jules.google.com/session/sess-empty-output"
+
+
+def test_jules_completed_session_with_provider_pr_is_not_empty_output_investigation(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("JULES_API_KEY", "fake-jules-key")
+    monkeypatch.setattr(
+        jules_cloud,
+        "list_sessions",
+        lambda *a, **k: [
+            {
+                "id": "sess-provider-pr",
+                "state": "COMPLETED",
+                "url": "https://jules.google.com/session/sess-provider-pr",
+                "has_outputs": False,
+                "pull_request_url": "https://github.com/owner/repo/pull/42",
+            }
+        ],
+    )
+    cloud_tracker.register(
+        tmp_path,
+        provider="jules",
+        task_id="sess-provider-pr",
+        label="jules:owner/repo@223344556677",
+        prompt_hash=_prompt_hash("x"),
+        dispatched_at=_iso(NOW),
+    )
+    observation = cloud_tracker._jules_cloud_observation(tmp_path)
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_observations={"jules": observation},
+        github={"branches": [], "prs": []},
+    )
+    row = next(r for r in payload["entries"] if r["task_id"] == "sess-provider-pr")
+    assert row["classification"] == "ready-to-land"
+
+
 def test_jules_completed_session_with_outputs_is_ready_to_land(tmp_path: Path):
     cloud_tracker.register(
         tmp_path,
@@ -1522,7 +1596,7 @@ def test_jules_activity_fetch_failure_never_manufactures_plan_approval(monkeypat
         provider_observations={"jules": observation},
     )
     rows = {row["task_id"]: row["classification"] for row in payload["entries"]}
-    assert rows["sess-broken"] == "ready-to-land"
+    assert rows["sess-broken"] == "needs-investigation"
     assert rows["sess-plan"] == "needs-plan-approval"
 
 

@@ -209,11 +209,12 @@ def _append_critical_section(journal_path: Path | None = None) -> Iterator[None]
 def journal_mutation(journal_path: Path) -> Iterator[None]:
     """Serialize a journal read-verify-mutate window across processes."""
     with _append_critical_section(Path(journal_path)):
+        previous_reentry = getattr(_APPEND_TLS, "allow_journal_reentry", False)
         _APPEND_TLS.allow_journal_reentry = True
         try:
             yield
         finally:
-            _APPEND_TLS.allow_journal_reentry = False
+            _APPEND_TLS.allow_journal_reentry = previous_reentry
 
 
 class RunJournalError(RuntimeError):
@@ -222,6 +223,17 @@ class RunJournalError(RuntimeError):
     def __init__(self, diagnostic: str) -> None:
         super().__init__(diagnostic)
         self.diagnostic = diagnostic
+
+
+class IndeterminateOutcomeError(RunJournalError, OSError):
+    """A durability barrier failed, so visible history may have committed.
+
+    This exception is a current operation's observation, not persisted proof
+    of an earlier writer's outcome or delivery of its success response.
+    The OSError base preserves existing I/O catches; inspect outcome first.
+    """
+
+    outcome = "indeterminate"
 
 
 class StaleSequenceError(RunJournalError):
@@ -1000,8 +1012,23 @@ def lookup_idempotent_event(
         )
 
 
+def _sync_journal_fd(fd: int, journal_path: Path) -> None:
+    """Complete a fresh barrier or report an indeterminate outcome."""
+    try:
+        os.fsync(fd)
+        _fsync_directory(journal_path.parent)
+    except (OSError, RunJournalError) as exc:
+        raise IndeterminateOutcomeError(
+            _bound("journal outcome indeterminate: durability barrier failed; complete records may have committed")
+        ) from exc
+
+
 def _sync_existing_journal(journal_path: Path) -> None:
-    """Acknowledge visible history with a fresh sync barrier, without appending."""
+    """Acknowledge visible history with a fresh sync barrier, without appending.
+
+    Open and descriptor-validation failures remain ordinary journal errors:
+    they establish no barrier and make no claim about historical acceptance.
+    """
     try:
         fd = _open_nofollow(journal_path, os.O_WRONLY | os.O_APPEND)
     except OSError as exc:
@@ -1011,17 +1038,39 @@ def _sync_existing_journal(journal_path: Path) -> None:
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise RunJournalError(_bound("journal replay path is not a regular file"))
-            os.fsync(fd)
-            _fsync_directory(journal_path.parent)
+            _sync_journal_fd(fd, journal_path)
+        except IndeterminateOutcomeError:
+            raise
         except OSError as exc:
-            raise RunJournalError(_bound("journal replay fsync failed")) from exc
+            raise RunJournalError(_bound("journal replay descriptor check failed")) from exc
     except RunJournalError as exc:
         primary = exc
         raise
     finally:
         close_error = _close_guarded(fd, primary)
         if primary is None and close_error is not None:
-            raise close_error
+            raise IndeterminateOutcomeError(
+                _bound("journal outcome indeterminate: replay close failed; complete records may have committed")
+            ) from close_error
+
+
+def sync_journal_head(journal_path: Path, *, expected_sequence: int, expected_event_digest: str) -> None:
+    """Explicitly synchronize an exact verified head before recovery publication.
+
+    This mutation operation uses the writer lock and bounded validation. It
+    neither appends nor rewrites history. A successful return establishes a
+    fresh platform durability barrier for that head, not proof that an earlier
+    writer completed or that its caller received success. Forensic read APIs
+    remain non-mutating and make no durability claim.
+    """
+    journal_path = Path(journal_path)
+    with _append_critical_section(journal_path):
+        sequence, digest, _index, partial, _bytes = _read_tail_state(journal_path)
+        if partial is not None:
+            raise PartialTailError(_bound("journal ends in a partial line; recovery sync refused"))
+        if sequence != expected_sequence or digest != expected_event_digest:
+            raise StaleSequenceError(_bound("journal head changed before recovery sync"))
+        _sync_existing_journal(journal_path)
 
 
 def append_event(
@@ -1046,6 +1095,9 @@ def append_event(
     with returned-byte-count verification and ``fsync`` before return.
     ``workspace`` carries the verified run owner's location to fleet reporting
     without adding filesystem paths to the durable event envelope.
+
+    Raises IndeterminateOutcomeError when a durability barrier or post-write
+    close fails. Complete bytes may have committed and are never rolled back.
     """
     journal_path = Path(journal_path)
     ensure_journal(journal_path)
@@ -1107,15 +1159,26 @@ def append_event(
             raise RunJournalError(_bound("bound exceeded: journal above MAX_JOURNAL_BYTES"))
 
         fd = _open_nofollow(journal_path, _OPEN_FLAGS, _FILE_MODE)
+        primary: BaseException | None = None
         try:
             _chmod_fd_or_path(fd, journal_path, _FILE_MODE)
             written = os.write(fd, line)
             if written != len(line):
                 raise PartialWriteError(_bound(f"partial write: wrote {written} of {len(line)} bytes"))
-            os.fsync(fd)
-            _fsync_directory(journal_path.parent)
+            _sync_journal_fd(fd, journal_path)
+        except BaseException as exc:
+            primary = exc
+            raise
         finally:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError as exc:
+                if primary is None:
+                    raise IndeterminateOutcomeError(
+                        _bound(
+                            "journal outcome indeterminate: append close failed; complete records may have committed"
+                        )
+                    ) from exc
 
     # Fleet sync (issue #1123): best-effort report of the appended event to the
     # configured fleet hub. The journal line is already durable here, so no

@@ -334,7 +334,7 @@ jobs:
     if: github.event_name == 'pull_request'
     continue-on-error: true
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     defaults:
       run:
         shell: cmd
@@ -359,8 +359,8 @@ jobs:
       - name: Fetch pull request base
         run: git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }} || exit /b 1
       - name: Run per-file pytest ratchet
-        timeout-minutes: 55
-        run: python scripts/windows_pytest.py --record "%RUNNER_TEMP%\windows-pytest-results\summary.json" --job-started-at "%WINDOWS_PYTEST_JOB_STARTED_AT%" --job-limit 3600 --startup-reserve 120 --finalize-reserve 300 --job-timeout 3300 --base-ref ${{ github.event.pull_request.base.sha }} --serial test_runs_serve.py
+        timeout-minutes: 85
+        run: python scripts/windows_pytest.py --record "%RUNNER_TEMP%\windows-pytest-results\summary.json" --job-started-at "%WINDOWS_PYTEST_JOB_STARTED_AT%" --job-limit 5400 --startup-reserve 120 --finalize-reserve 300 --job-timeout 5100 --base-ref ${{ github.event.pull_request.base.sha }} --serial test_runs_serve.py --serial test_aboyeur.py
       - name: Upload per-file pytest results
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
@@ -693,7 +693,7 @@ jobs:
               def pytest_collectreport(self, report):
                   self.skipped |= report.skipped
           guard = NoNativeSkips()
-          result = pytest.main(["-q", "-ra", "-o", "addopts=", "tests/test_windows_job.py::TestNativeContainment"], plugins=[guard])
+          result = pytest.main(["-q", "-ra", "-o", "addopts=", "tests/test_windows_job.py::TestNativeContainment", "tests/test_skills_state_windows.py"], plugins=[guard])
           sys.exit(1 if guard.skipped else int(result))
           '@ | & $python -
           if ($LASTEXITCODE -ne 0) { throw "native containment failed or skipped" }

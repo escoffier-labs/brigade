@@ -61,7 +61,7 @@ New canonical cards mint one opaque `card-<uuid4>` ID in frontmatter. A valid ID
 
 ## Search recall signal
 
-`brigade memory search` appends a local-only event to `.brigade/memory/search-log.jsonl` on each real query (timestamp, normalized query, top-K card ids; no card body). The log is capped and drops oldest entries. `memory care status` (and `--json`) surfaces a rolling `search_recall` object: `searches`, `followup_rate`, plus the window and K constants. A follow-up within the window whose top-K ids share nothing with the prior search counts as a miss; overlap or no follow-up counts as satisfied. This is second-class evidence (like `brief_hit_rate`): it informs whether the keyword scorer is good enough and feeds failed queries into the offline retrieval eval harness, but it never flips doctor/`valid`. The dashboard list-all query (`:`) is not logged.
+`brigade memory search` appends a local-only event to `.brigade/memory/search-log.jsonl` on each real query (timestamp, normalized query, top-K card ids, no card body). The log is capped and drops oldest entries. `memory care status` prints search counts and the follow-up rate. `memory care status --json` surfaces a rolling `search_recall` object: `searches`, `followup_rate`, plus the window and K constants. It also reports `compared_pairs`, `repeat_queries`, `repeat_results`, and `repeat_query_results` over adjacent valid log events within the same window. Repeated queries ignore case and whitespace. Repeated results require equal nonempty card-id sets, regardless of order. The combined count requires both. Empty results, malformed events, backwards timestamps, and pairs outside the window do not count as repeated results. Card aliases are not resolved for these equality counts. Status reads the existing log without running searches or adding events. A follow-up within the window whose top-K ids share nothing with the prior search counts as a miss. Overlap or no follow-up counts as satisfied. This is second-class evidence (like `brief_hit_rate`): it informs whether the keyword scorer is good enough and feeds failed queries into the offline retrieval eval harness, but it never flips doctor/`valid`. The dashboard list-all query (`:`) is not logged.
 
 ## Safe Fix Planning
 
@@ -108,10 +108,29 @@ Memory care does not run a scheduler, mutate canonical memory, perform remote sy
 
 ## Session-start recall (#466 Slice 1)
 
-`brigade memory recall --target <hub-or-mirror> --cwd <session-cwd> --limit 5`
-runs the deterministic card search with terms derived from the cwd basename
-(split on `-` and `_`). Output is index-level only: title, tags, and card path
-(at most 5 matches / 10 lines). Card bodies never appear.
+`brigade memory recall --target <hub-or-mirror> --cwd <session-cwd> --query "token refresh" --limit 5`
+runs deterministic card search using caller-supplied task terms. `--query` is
+optional, normalized to one printable line, and bounded to 256 characters.
+Precedence is a nonempty explicit query, stable repository basename from the
+Git common directory at a checkout root, cwd basename split on `-` and `_`,
+then `workspace` when no basename exists. At the memory root, callers without
+a task query use `workspace` without probing Git. A blank task query falls back
+to checkout context. Linked worktrees share repository terms. Subdirectories
+and unavailable or untrusted Git context retain the cwd fallback.
+
+Query context never changes `--target`. Output is index-level only: title,
+tags, and card path (at most 5 matches / 10 lines). Card bodies never appear.
+Git identity and search run in the existing child process with a five-second
+deadline. Earlier target resolution is outside that deadline. Recall exits 0
+on missing targets, timeouts, or failures. Queries are explicit caller context,
+with no transcript inference.
+
+Repository terms improve query consistency, but keyword search does not filter
+individual card repository/task scope or freshness. The [task/worktree fixture
+comparison](../evals/memory-retrieval/task-recall/README.md) measures relevance
+and exposes those limits through the existing stale/scope checks. Retrieval
+relevance and repeat-search counts remain second-class diagnostics, separate
+from manifest-backed verification scores.
 
 Machine-local config key: `memory_recall_target` in `.brigade/config.json`.
 

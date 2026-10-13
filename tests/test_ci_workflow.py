@@ -324,7 +324,7 @@ def test_ci_workflow_runs_per_file_windows_pytest_and_uploads_results():
     assert "if: github.event_name == 'pull_request'" in section
     assert "continue-on-error: true" in section
     assert "runs-on: windows-latest" in section
-    assert "timeout-minutes: 60" in section
+    assert "timeout-minutes: 90" in section
     assert "shell: cmd" in section
     assert "persist-credentials: false" in section
     assert "git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}" in section
@@ -336,15 +336,15 @@ def test_ci_workflow_runs_per_file_windows_pytest_and_uploads_results():
     assert "ToUnixTimeSeconds()" in budget
     assert "$env:GITHUB_ENV" in budget
     driver = _workflow_step_section(text, "windows-pytest", "Run per-file pytest ratchet")
-    assert "timeout-minutes: 55" in driver
+    assert "timeout-minutes: 85" in driver
     assert '--record "%RUNNER_TEMP%\\windows-pytest-results\\summary.json"' in driver
     assert '--job-started-at "%WINDOWS_PYTEST_JOB_STARTED_AT%"' in driver
-    assert "--job-limit 3600 --startup-reserve 120 --finalize-reserve 300" in driver
-    assert "--job-timeout 3300" in driver
+    assert "--job-limit 5400 --startup-reserve 120 --finalize-reserve 300" in driver
+    assert "--job-timeout 5100" in driver
     assert "--base-ref ${{ github.event.pull_request.base.sha }}" in driver
-    assert driver.count("--serial ") == 1
+    assert driver.count("--serial ") == 2
     assert "--serial test_runs_serve.py" in driver
-    assert "--serial test_aboyeur.py" not in driver
+    assert "--serial test_aboyeur.py" in driver
     artifact = _workflow_step_section(text, "windows-pytest", "Upload per-file pytest results")
     assert "if: ${{ always() }}" in artifact
     assert "uses: actions/upload-artifact@v7" in artifact
@@ -1157,6 +1157,7 @@ def test_native_windows_containment_is_required_and_rejects_selected_skips():
     probe = _workflow_step_section(text, "windows-native-acceptance", "Run native Windows process containment")
     assert 'assert os.name == "nt"' in probe
     assert '"tests/test_windows_job.py::TestNativeContainment"' in probe
+    assert '"tests/test_skills_state_windows.py"' in probe
     assert "pytest_runtest_logreport" in probe and "pytest_collectreport" in probe
     assert "self.skipped |= report.skipped" in probe
     assert "sys.exit(1 if guard.skipped else int(result))" in probe

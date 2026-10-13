@@ -23,7 +23,7 @@ Inventory pages durable stores (cards, rules, tools, user, learnings) with fresh
 ## Recall
 
 ```bash
-brigade memory recall --target <hub-or-mirror> --cwd <session-cwd> --limit 5
+brigade memory recall --target <hub-or-mirror> --cwd <session-cwd> --query "token refresh" --limit 5
 ```
 
 Bounded session-start recall returns index-level matches only: title, tags, path. Card bodies never appear. Fail-open: missing or unreadable targets do not block the harness. Repo-depth installs need an explicit `memory_recall_target` in `.brigade/config.json`. Details: [memory care](memory-care.md#session-start-recall-466-slice-1).

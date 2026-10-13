@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from dataclasses import replace
 
@@ -372,19 +373,75 @@ def test_codex_cloud_model_reachability_skips_provider_smoke(monkeypatch):
     assert all(item.status == "passed" or item.cause_code == "probe-incomplete" for item in endpoint_result.checks)
 
 
-def test_overall_deadline_returns_timeout_results_without_serial_wait(monkeypatch):
-    monkeypatch.setattr(seat_health, "OVERALL_TIMEOUT_SECONDS", 0.01)
+@pytest.mark.parametrize("positive_budget", (False, True), ids=("already-expired", "positive-budget"))
+def test_overall_deadline_returns_timeout_results_without_serial_wait(monkeypatch, positive_budget):
+    if positive_budget:
+        monkeypatch.setattr(seat_health, "OVERALL_TIMEOUT_SECONDS", 0.1)
+    watchdog_seconds = 5.0
+    entered = {name: threading.Event() for name in ("primary", "backup")}
+    release = threading.Event()
+    deadline_exhausted = threading.Event()
+    returned = threading.Event()
+    workers = {}
+    results = []
+    errors = []
+    started = 100.0
+    expired = started + seat_health.OVERALL_TIMEOUT_SECONDS + 1.0
+    coordinator_clock_calls = 0
+
+    def clock():
+        nonlocal coordinator_clock_calls
+        if threading.current_thread() is coordinator:
+            coordinator_clock_calls += 1
+            if coordinator_clock_calls == 1:
+                return started
+            # Enter the real completion wait only after both real workers block.
+            for event in entered.values():
+                assert event.wait(1.0), "seat workers did not enter in parallel"
+            if positive_budget and coordinator_clock_calls == 2:
+                return started + seat_health.OVERALL_TIMEOUT_SECONDS / 2
+            deadline_exhausted.set()
+        return expired if deadline_exhausted.is_set() else started
 
     class HangingAdapter(FakeAdapter):
         def check(self, name, **kwargs):
-            time.sleep(0.05)
+            seat_name = kwargs["seat"].name
+            workers[seat_name] = threading.current_thread()
+            entered[seat_name].set()
+            assert release.wait(30.0), "adapter release watchdog expired"
             return super().check(name, **kwargs)
 
-    started = time.monotonic()
-    results = SeatHealthProbe(adapter=HangingAdapter()).probe_roster(_roster())
-    assert time.monotonic() - started < 0.04
-    assert len(results) == 2
-    assert [result.seat for result in results] == ["primary", "backup"]
-    assert len({result.seat for result in results}) == len(results)
-    assert all(result.status == "unhealthy" for result in results)
-    assert all(result.failure and result.failure.failure_class.value == "timeout" for result in results)
+    def coordinate():
+        try:
+            results.extend(SeatHealthProbe(adapter=HangingAdapter(), clock=clock).probe_roster(_roster()))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            returned.set()
+
+    coordinator = threading.Thread(target=coordinate, name="seat-health-test-coordinator")
+    coordinator.start()
+    try:
+        assert returned.wait(watchdog_seconds), "coordinator waited for blocked seat workers"
+        if errors:
+            raise errors[0]
+        assert deadline_exhausted.is_set()
+        assert clock() > started + seat_health.OVERALL_TIMEOUT_SECONDS
+        assert all(event.is_set() for event in entered.values())
+        assert not release.is_set()
+        assert all(worker.is_alive() for worker in workers.values())
+        assert len(results) == 2
+        assert [result.seat for result in results] == ["primary", "backup"]
+        assert len({result.seat for result in results}) == len(results)
+        assert all(result.status == "unhealthy" for result in results)
+        assert all(result.failure and result.failure.failure_class.value == "timeout" for result in results)
+    finally:
+        release.set()
+        cleanup_deadline = time.perf_counter() + watchdog_seconds
+        coordinator.join(max(cleanup_deadline - time.perf_counter(), 0.0))
+        for worker in tuple(workers.values()):
+            worker.join(max(cleanup_deadline - time.perf_counter(), 0.0))
+
+    # Keep cleanup assertions outside finally so they cannot mask the primary failure.
+    assert not coordinator.is_alive()
+    assert all(not worker.is_alive() for worker in workers.values())

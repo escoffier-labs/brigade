@@ -272,7 +272,7 @@ def _url(value: object, owner: str, repo: str, paths: set[str], fragments: set[s
         return None
     prefix = f"/{owner}/{repo}/"
     if (
-        not parsed.path.startswith(prefix)
+        parsed.path[: len(prefix)].casefold() != prefix.casefold()
         or parsed.path[len(prefix) :] not in paths
         or parsed.fragment not in fragments
     ):

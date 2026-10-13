@@ -187,7 +187,7 @@ def test_handoff_fences_old_holder_and_preserves_grant(ledger, target):
     )
     assert accepted["generation"] == 2 and accepted["owner_node"] == target
     assert accepted["exclusions"] == OFFER["exclusions"] and accepted["attempt_budget"] == OFFER["attempt_budget"]
-    assert accepted["liveness"] == "unknown" and accepted["conflict_check"] == "not-performed"
+    assert accepted["liveness"] == "unknown" and accepted["conflict_check"] == "path-admission"
     status, payload = request(
         conn, work_id, {"action": "release", "generation": 1}, revision=5, key="old", nonce=NONCE_A
     )

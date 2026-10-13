@@ -29,7 +29,9 @@ command says so and exits 0: a documented no-op, never a scheduled-job failure.
 
 The hub's HTTP surface (``/status``, ``/claims``, dashboard) is untouched:
 the exporter reads the hub SQLite database read-only on the host that owns it.
-Claim fencing tokens are capability secrets and are never exported.
+Claim fencing tokens are capability secrets and are never exported. Claim rows
+carry the durable ``generation`` fence. A claims export is refused, never
+repaired, when that fence state is missing, corrupt, or from a newer schema.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -49,6 +52,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO, cast
 
+from . import fleet_hub, fleet_hub_claims
 from . import toml_compat as tomllib
 from .fleet_client import FLEET_CONFIG_REL_PATH, brigade_home
 
@@ -70,7 +74,8 @@ _CLAIM_DB_COLUMNS = (
     "ttl_seconds",
     "expires_at",
 )
-CLAIM_COLUMNS = (*_CLAIM_DB_COLUMNS, "expired")
+CLAIM_COLUMNS = (*_CLAIM_DB_COLUMNS, "expired", "generation", "protocol")
+CLAIM_PROTOCOL = "legacy"
 
 _DOLT_SCHEMA_EVENTS = (
     f"CREATE TABLE IF NOT EXISTS {SINK_TABLE_EVENTS} ("
@@ -86,6 +91,25 @@ _DOLT_SCHEMA_EVENTS = (
     "received_at varchar(64) NOT NULL, "
     "PRIMARY KEY (node_id, run_id, sequence, digest))"
 )
+
+
+def _dolt_add_column_if_missing(table: str, column: str, definition: str) -> str:
+    """One static batch that adds ``column`` only when information_schema lacks it.
+
+    Dolt 2.4.2 has no ``ADD COLUMN IF NOT EXISTS``, and ``table import -r`` silently drops CSV columns the
+    existing table lacks. Arguments are module constants, never operator or hub input. Any ALTER failure
+    still aborts the ``sql -q`` step.
+    """
+    alter = f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+    return (
+        f"SET @brigade_ddl = (SELECT IF(COUNT(*) = 0, '{alter}', 'SELECT 1') FROM information_schema.columns "
+        f"WHERE table_schema = DATABASE() AND table_name = '{table}' AND column_name = '{column}'); "
+        "PREPARE brigade_stmt FROM @brigade_ddl; EXECUTE brigade_stmt; DEALLOCATE PREPARE brigade_stmt;"
+    )
+
+
+# Fresh tables require the fence columns. Pre-generation tables gain them nullable (old rows have unknown
+# metadata until the next successful full replace); the -r import then rewrites every row with real values.
 _DOLT_SCHEMA_CLAIMS = (
     f"CREATE TABLE IF NOT EXISTS {SINK_TABLE_CLAIMS} ("
     "target varchar(512) NOT NULL PRIMARY KEY, "
@@ -95,7 +119,12 @@ _DOLT_SCHEMA_CLAIMS = (
     "renewed_at varchar(64) NOT NULL, "
     "ttl_seconds bigint NOT NULL, "
     "expires_at varchar(64) NOT NULL, "
-    "expired boolean NOT NULL)"
+    "expired boolean NOT NULL, "
+    "generation bigint NOT NULL, "
+    "protocol varchar(16) NOT NULL); "
+    + _dolt_add_column_if_missing(SINK_TABLE_CLAIMS, "generation", "BIGINT NULL")
+    + " "
+    + _dolt_add_column_if_missing(SINK_TABLE_CLAIMS, "protocol", "VARCHAR(16) NULL")
 )
 
 
@@ -238,6 +267,27 @@ def iter_event_records(
         yield record
 
 
+def _require_claim_fences(conn: sqlite3.Connection) -> None:
+    """Refuse a claims export whose generation floor cannot be trusted, without writing.
+
+    Runs inside the export's read snapshot and checks every fence, including
+    those of expired rows the snapshot hides. A newer schema is refused rather
+    than labelled legacy. A pre-fence schema is refused rather than migrated.
+    """
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version > fleet_hub.SCHEMA_VERSION:
+        raise FleetExportError(
+            f"claims export refused: hub database has schema version {version}. "
+            f"this brigade supports {fleet_hub.SCHEMA_VERSION}"
+        )
+    # A missing claims table or column is a query error, not fence corruption.
+    conn.execute(f"SELECT {', '.join(_CLAIM_DB_COLUMNS)} FROM claims LIMIT 0")
+    try:
+        fleet_hub_claims.validate_schema(conn)
+    except fleet_hub_claims.ClaimFenceError as exc:
+        raise FleetExportError(f"claims export refused: {exc}") from exc
+
+
 def iter_claim_records(
     conn: sqlite3.Connection,
     *,
@@ -246,20 +296,31 @@ def iter_claim_records(
 ) -> Iterator[dict[str, Any]]:
     """Yield the current claims snapshot in ``target`` order.
 
-    Mirrors the hub's ``GET /claims`` payload columns; ``expires_at`` becomes
-    its UTC ISO-8601 form. ``holder_token`` is a fencing capability and is
-    never selected, so it can never leak into an export.
+    Mirrors the hub's ``GET /claims`` payload columns, including the durable
+    ``generation`` fence and ``protocol``; ``expires_at`` becomes its UTC
+    ISO-8601 form. Fences are validated before the first row, in the same read
+    snapshot. ``holder_token`` and lock values are capabilities and are never
+    selected, so they can never leak into an export.
     """
+    if not conn.in_transaction:
+        conn.execute("BEGIN")
+    _require_claim_fences(conn)
     now_epoch = now.timestamp()
     cursor = conn.execute(
-        f"SELECT {', '.join(_CLAIM_DB_COLUMNS)}, expires_at <= ? AS expired "
-        "FROM claims WHERE ? OR expires_at > ? ORDER BY target",
+        f"SELECT {', '.join('c.' + name for name in _CLAIM_DB_COLUMNS)}, c.expires_at <= ? AS expired, f.generation "
+        "FROM claims c LEFT JOIN claim_fences f ON f.target = c.target "
+        "WHERE ? OR c.expires_at > ? ORDER BY c.target",
         (now_epoch, include_expired, now_epoch),
     )
+    return _claim_rows(cursor)
+
+
+def _claim_rows(cursor: sqlite3.Cursor) -> Iterator[dict[str, Any]]:
     for row in cursor:
-        record = dict(zip(CLAIM_COLUMNS, row, strict=True))
+        record = dict(zip(CLAIM_COLUMNS[:-1], row, strict=True))
         record["expires_at"] = _epoch_to_iso(record.get("expires_at"))
         record["expired"] = bool(record["expired"])
+        record["protocol"] = CLAIM_PROTOCOL
         yield record
 
 
@@ -508,6 +569,45 @@ def _run_dolt(
     return True, "", proc.stdout
 
 
+_PORCELAIN_UNSUPPORTED = re.compile(r"^dolt status --porcelain failed: .*unknown option\W+porcelain\W*$")
+_DOLT_STATUS_QUERY = ["sql", "-r", "json", "-q", "SELECT table_name FROM dolt_status"]
+
+
+def _dolt_working_set_status(*, dolt_binary: str, cwd: Path, timeout_seconds: float) -> tuple[bool, str, str]:
+    """Return success, operator message, and one dirty table name per line (empty when clean).
+
+    ``dolt status --porcelain`` stays the preferred probe. Only Dolt's explicit unsupported-option error
+    (Dolt 2.4.2) falls back to the ``dolt_status`` system table. Every other failure, a malformed fallback
+    response, and the fallback's own errors or timeouts fail closed with no retry.
+    """
+    ok, message, status = _run_dolt(
+        ["status", "--porcelain"], dolt_binary=dolt_binary, cwd=cwd, timeout_seconds=timeout_seconds
+    )
+    if ok or not _PORCELAIN_UNSUPPORTED.match(message):
+        return ok, message, status
+    ok, message, raw = _run_dolt(_DOLT_STATUS_QUERY, dolt_binary=dolt_binary, cwd=cwd, timeout_seconds=timeout_seconds)
+    if not ok:
+        return False, message, ""
+    malformed = (False, "dolt_status fallback returned malformed JSON or an unexpected shape", "")
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return malformed
+    # Dolt prints `{}` for an empty result and `{"rows": [...]}` otherwise.
+    if not isinstance(payload, dict) or not set(payload) <= {"rows"}:
+        return malformed
+    rows = payload.get("rows", [])
+    if not isinstance(rows, list):
+        return malformed
+    tables: list[str] = []
+    for row in rows:
+        name = row.get("table_name") if isinstance(row, dict) else None
+        if not isinstance(name, str) or not name:
+            return malformed
+        tables.append(name)
+    return True, "", "\n".join(tables)
+
+
 def _read_event_watermark(dolt_dir: Path) -> datetime | None:
     """Return a valid event receipt watermark, else request a full export."""
     try:
@@ -611,11 +711,8 @@ def run_sink_pass(*, db_path: Path, config: SinkConfig) -> int:
                     return 1
             if config.events_incremental and event_stats.last_received_at is not None:
                 _write_event_watermark(dolt_dir, event_stats.last_received_at)
-            ok, message, status = _run_dolt(
-                ["status", "--porcelain"],
-                dolt_binary=dolt_binary,
-                cwd=dolt_dir,
-                timeout_seconds=config.timeout_seconds,
+            ok, message, status = _dolt_working_set_status(
+                dolt_binary=dolt_binary, cwd=dolt_dir, timeout_seconds=config.timeout_seconds
             )
             if not ok:
                 print(f"error: {message}", file=sys.stderr)
