@@ -85,9 +85,25 @@ Startup validates current-schema fencing state without recreating it. An
 old-schema upgrade also preserves and validates any existing fence history,
 without resetting generations or backfilling missing fences. Only an absent
 fence table in an old schema is created and seeded from legacy claims. Deleted
-current-schema fence storage is never silently rebuilt. A newer schema refuses
-startup and request opens, with a static HTTP 503 response that discloses no
-database path.
+current-schema fence storage is never silently rebuilt. Startup validation
+also requires the exact supported fence table definition: a `target TEXT NOT
+NULL PRIMARY KEY` with binary equality and a `generation INTEGER NOT NULL`
+integer-range `CHECK`. A hand-built table of any other shape, or with extra
+indexes or triggers, refuses without repair, recreation, or backfill.
+
+A newer schema refuses startup. A claim request also re-checks the schema
+version after it acquires its transaction, so a newer hub that migrates between
+the first check and the write lock cannot be written to by this hub. The
+following requests return a static HTTP 503 that discloses no database path
+when the database is newer: the authenticated `GET` routes `/status`,
+`/claims`, `/nodes`, `/cloud`, `/models`, `/preference`, `/sessions`, and the
+`/policy` routes; the authenticated `POST` routes `/events`, `/claims`,
+`/nodes`, `/cloud`, `/models`, `/grokbot`, `/sessions`, and `/policy`;
+`PUT /preference`; the authenticated dashboard pages; and the Command Deck
+overview and repository pages. Other routes, including enrollment, the
+dashboard session API, the roster and policy form pages, observed work, the
+work queue, and the `/work/` routes, are not mapped by this slice and still
+return their generic database error.
 
 Legacy clients still treat HTTP 503 as a hub-unavailable outcome and may fall
 back to a local-only lock. That fallback does not provide cross-machine

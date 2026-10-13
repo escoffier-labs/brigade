@@ -26,6 +26,7 @@ CREATE TABLE claim_fences (
         CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807)
 )
 """
+_FENCE_DEFINITION = " ".join(_FENCE_SCHEMA.split())
 
 
 class ClaimFenceError(hub.FleetHubError):
@@ -65,9 +66,28 @@ def _checked_generation(value: Any) -> int:
     return value
 
 
+def _validate_structure(conn: sqlite3.Connection) -> None:
+    """Admit only the exact table this slice creates, without writing.
+
+    A hand-built look-alike can lack the primary key or range CHECK, or use
+    NOCASE equality, even when its current rows look valid. Refuse rather than
+    repair: rewriting it could change which targets share a fence.
+    """
+    entries = conn.execute("SELECT type, sql FROM sqlite_master WHERE tbl_name = 'claim_fences'").fetchall()
+    if not entries:
+        raise ClaimFenceError("claim generation fence storage is missing or corrupt")
+    tables = [sql for kind, sql in entries if kind == "table"]
+    # The primary key's automatic index has no SQL. Any other index, trigger, or
+    # view could alter fence semantics.
+    others = [entry for entry in entries if entry[0] != "table" and not (entry[0] == "index" and entry[1] is None)]
+    if len(tables) != 1 or others or " ".join(tables[0].split()) != _FENCE_DEFINITION:
+        raise ClaimFenceError("claim generation fence storage has an unsupported definition")
+
+
 def validate_schema(conn: sqlite3.Connection) -> None:
     """Read-only integrity check. Never repair current-schema fence history."""
     try:
+        _validate_structure(conn)
         invalid = conn.execute(
             "SELECT 1 FROM claim_fences WHERE typeof(generation) != 'integer' OR generation < 1 "
             "OR generation > ? LIMIT 1",
@@ -88,9 +108,10 @@ def validate_schema(conn: sqlite3.Connection) -> None:
 
 def migrate_schema(conn: sqlite3.Connection) -> None:
     """One-time migration; caller owns schema transaction and version update."""
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'claim_fences'").fetchone():
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'claim_fences'").fetchone():
         # Existing history is authoritative even when user_version is old.
-        # Validate it without resetting generations or backfilling missing rows.
+        # Validate its definition and rows without resetting generations or
+        # backfilling missing rows.
         validate_schema(conn)
         return
     targets = conn.execute("SELECT target FROM claims ORDER BY target LIMIT ?", (MAX_CLAIM_TARGETS + 1,)).fetchall()
@@ -290,6 +311,11 @@ def _decide(conn: sqlite3.Connection, request: dict[str, Any], now: float) -> tu
     return 409, {"released": False, "error": error, "owner": hub._claim_payload(row)}
 
 
+def _refuse_newer_schema(conn: sqlite3.Connection) -> None:
+    if conn.execute("PRAGMA user_version").fetchone()[0] > hub.SCHEMA_VERSION:
+        raise hub.FleetHubUnsupportedSchema(hub.FleetHubUnsupportedSchema.public_message)
+
+
 def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None = None) -> tuple[int, dict[str, Any]]:
     request = hub._validate_claim_request(raw)
     if caller_node is not None and request["node_id"] != caller_node:
@@ -297,10 +323,12 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
             f"claim node_id {request['node_id']!r} does not match the caller's node token ({caller_node})"
         )
     _target_bytes(request["target"])
-    if conn.execute("PRAGMA user_version").fetchone()[0] > hub.SCHEMA_VERSION:
-        raise hub.FleetHubUnsupportedSchema(hub.FleetHubUnsupportedSchema.public_message)
+    # Early refusal avoids taking the write lock on a known-newer database. A
+    # newer hub can still migrate before BEGIN returns, so check again inside.
+    _refuse_newer_schema(conn)
     conn.execute("BEGIN" if request["action"] == "inspect" else "BEGIN IMMEDIATE")
     try:
+        _refuse_newer_schema(conn)
         # Read time only after acquiring the transaction. Never re-read an
         # owner after commit: the response belongs to this decision snapshot.
         response = _decide(conn, request, hub._now_epoch())

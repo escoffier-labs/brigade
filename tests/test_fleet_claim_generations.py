@@ -536,3 +536,88 @@ def test_claim_request_newer_schema_uses_static_refusal(authority):
     with pytest.raises(hub.FleetHubError, match="^fleet hub database schema is newer than supported$"):
         request(conn)
     assert snapshot(conn) == ([], [])
+
+
+_CHECK = "CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807)"
+_UNSUPPORTED_FENCE_TABLES = {
+    "no-primary-key": f"CREATE TABLE claim_fences (target TEXT NOT NULL, generation INTEGER NOT NULL {_CHECK})",
+    "no-check": "CREATE TABLE claim_fences (target TEXT NOT NULL PRIMARY KEY, generation INTEGER NOT NULL)",
+    "nocase": f"CREATE TABLE claim_fences (target TEXT NOT NULL PRIMARY KEY COLLATE NOCASE, generation INTEGER NOT NULL {_CHECK})",
+    "nullable-target": f"CREATE TABLE claim_fences (target TEXT PRIMARY KEY, generation INTEGER NOT NULL {_CHECK})",
+    "nullable-generation": f"CREATE TABLE claim_fences (target TEXT NOT NULL PRIMARY KEY, generation INTEGER {_CHECK})",
+    "extra-column": f"CREATE TABLE claim_fences (target TEXT NOT NULL PRIMARY KEY, generation INTEGER NOT NULL {_CHECK}, note TEXT)",
+}
+
+
+def fence_ddl(conn):
+    return conn.execute("SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'claim_fences'").fetchall()
+
+
+@pytest.mark.parametrize("version", [None, 25], ids=["current", "schema25"])
+@pytest.mark.parametrize("shape", sorted(_UNSUPPORTED_FENCE_TABLES))
+def test_unsupported_fence_table_shape_refuses_without_repair(authority, shape, version):
+    conn, path, _ = authority
+    request(conn)
+    request(conn, "release")
+    request(conn)
+    request(conn, "release", target="fake-free-history")
+    request(conn)
+    history = conn.execute("SELECT target, generation FROM claim_fences ORDER BY target").fetchall()
+    conn.execute("DROP TABLE claim_fences")
+    conn.execute(_UNSUPPORTED_FENCE_TABLES[shape])
+    conn.executemany("INSERT INTO claim_fences (target, generation) VALUES (?, ?)", history)
+    if version is not None:
+        conn.execute(f"PRAGMA user_version={version}")
+    conn.commit()
+    before = (snapshot(conn), fence_ddl(conn), conn.execute("PRAGMA user_version").fetchone()[0])
+    assert [row[:2] for row in before[0][1]] == history
+    with pytest.raises(hub.FleetHubError, match="fence"):
+        hub.init_db(path)
+    assert (snapshot(conn), fence_ddl(conn), conn.execute("PRAGMA user_version").fetchone()[0]) == before
+
+
+@pytest.mark.parametrize("extra", ["CREATE INDEX fake_idx ON claim_fences (generation)", "TRIGGER"])
+def test_fence_table_with_extra_index_or_trigger_refuses(authority, extra):
+    conn, path, _ = authority
+    request(conn)
+    if extra == "TRIGGER":
+        extra = "CREATE TRIGGER fake_trg AFTER UPDATE ON claim_fences BEGIN SELECT 1; END"
+    conn.execute(extra)
+    conn.commit()
+    before = (snapshot(conn), fence_ddl(conn))
+    with pytest.raises(hub.FleetHubError, match="fence"):
+        hub.init_db(path)
+    assert (snapshot(conn), fence_ddl(conn)) == before
+
+
+@pytest.mark.parametrize("action", ["acquire", "renew", "release", "inspect"])
+def test_schema_upgrade_between_preflight_and_write_lock_refuses(authority, monkeypatch, action):
+    conn, path, clock = authority
+    request(conn)
+    before = snapshot(conn)
+    reads = []
+
+    class UpgradeBeforeBegin(sqlite3.Connection):
+        """A newer hub migrates on a second real connection after the preflight check."""
+
+        upgraded = False
+
+        def execute(self, sql, *args):
+            if sql.startswith("BEGIN") and not self.upgraded:
+                self.upgraded = True
+                with sqlite3.connect(path, timeout=5) as newer:
+                    newer.execute(f"PRAGMA user_version={hub.SCHEMA_VERSION + 1}")
+            return super().execute(sql, *args)
+
+    monkeypatch.setattr(hub, "_now_epoch", lambda: reads.append(1) or clock["now"])
+    racing = sqlite3.connect(path, timeout=5, factory=UpgradeBeforeBegin)
+    try:
+        with pytest.raises(hub.FleetHubUnsupportedSchema, match="^fleet hub database schema is newer than supported$"):
+            request(racing, action)
+        assert racing.upgraded
+        assert not racing.in_transaction
+    finally:
+        racing.close()
+    assert reads == []
+    assert snapshot(conn) == before
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == hub.SCHEMA_VERSION + 1
