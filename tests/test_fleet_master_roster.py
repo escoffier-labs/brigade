@@ -401,6 +401,8 @@ def test_parse_rejects_qualified_compact_credential_assignments(field: str, text
         "Reviewer has the password hunter2",
         "Reviewer had API key shortkey",
         "This seat had the password hunter2",
+        "Password had been hunter2",
+        "API key had been shortkey",
         "Reviewers have API key shortkey",
         "Agents have the password hunter2",
     ],
@@ -884,10 +886,27 @@ def test_parse_accepts_lowercase_key_value_prose(field: str, text: str) -> None:
         "See https://example.com/path%3Foutput%3D%2Fetc%2Fhosts",
         "See https://example.com/?output%3D%2Fetc%2Fhosts",
         "See https://example.com/#output%3D%2Fetc%2Fhosts",
+        "See https://example.com/?%2Fhome%2Fexample=x",
         "Call /api?output=/etc/passwd",
     ],
 )
 def test_parse_rejects_filesystem_paths_in_url_parameters(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "See https://[invalid]/?path=/etc/passwd",
+        "See https://[invalid]/?SERVICE_MODE=production",
+    ],
+)
+def test_parse_rejects_sensitive_values_in_malformed_urls(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 

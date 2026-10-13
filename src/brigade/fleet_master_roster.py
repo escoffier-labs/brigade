@@ -61,7 +61,7 @@ _DANGEROUS_VALUE_PATTERN = (
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
     r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|of\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|assigned\s+to\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|used\s+by\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)|value)(?:\s+|(?=[:=])))?"
-    r"(?:(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to)\s+|[:=]\s*)"
+    r"(?:(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|had\s+been|set\s+to)\s+|[:=]\s*)"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\buse\s+(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
     r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
@@ -228,10 +228,13 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
             ):
                 return True
             decoded_value = _fully_unquote(query_value)
+            path_key = key.rstrip(",;!?")
+            if path_key.endswith(".") and path_key not in {".", ".."}:
+                path_key = path_key.rstrip(".")
             path_value = decoded_value.rstrip(",;!?")
             if path_value.endswith(".") and path_value not in {".", ".."}:
                 path_value = path_value.rstrip(".")
-            if _is_filesystem_path_value(path_value):
+            if _is_filesystem_path_value(path_key) or _is_filesystem_path_value(path_value):
                 return True
     return False
 
@@ -380,7 +383,14 @@ def _without_api_route_references(value: str) -> str:
             return match.group(0)
         return match.group(0).replace(route, "")
 
-    text = _HTTP_URL.sub("", value)
+    def remove_valid_url(match: re.Match[str]) -> str:
+        try:
+            urlsplit(match.group())
+        except ValueError:
+            return match.group()
+        return ""
+
+    text = _HTTP_URL.sub(remove_valid_url, value)
 
     def remove_http_method_route(match: re.Match[str]) -> str:
         path = match.group("path")
