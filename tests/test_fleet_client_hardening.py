@@ -94,6 +94,36 @@ class TestProxyDisabledTransport:
 
 
 class TestSpoolPrivacy:
+    def test_flush_preserves_spool_when_read_fails(self, home, monkeypatch):
+        spool = _spool()
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        spool.write_text(json.dumps({"run_id": "keep"}) + "\n", encoding="utf-8")
+        original = spool.read_bytes()
+
+        def fail_read(path, _flags, *, dir_fd=None):
+            if path == spool:
+                raise PermissionError("temporarily unreadable")
+            return real_open(path, _flags, dir_fd=dir_fd)
+
+        real_open = fleet_client._open_private
+        monkeypatch.setattr(fleet_client, "_open_private", fail_read)
+
+        with pytest.raises(fleet_client.FleetClientError, match="could not be read"):
+            fleet_client.flush_spool(fleet_client.resolve_node_id(), hub_url="http://127.0.0.1:9", token="token")
+
+        assert spool.read_bytes() == original
+
+    def test_flush_preserves_malformed_spool(self, home):
+        spool = _spool()
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        original = b'{"run_id":\n'
+        spool.write_bytes(original)
+
+        with pytest.raises(fleet_client.FleetClientError, match="malformed JSON"):
+            fleet_client.flush_spool(fleet_client.resolve_node_id(), hub_url="http://127.0.0.1:9", token="token")
+
+        assert spool.read_bytes() == original
+
     def test_oversized_new_event_preserves_existing_spool(self, home, monkeypatch):
         spool = _spool()
         spool.parent.mkdir(parents=True, exist_ok=True)

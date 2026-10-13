@@ -1395,6 +1395,26 @@ def test_flush_reports_legacy_unscoped_message_spool(tmp_path, monkeypatch, capl
     assert "no credential scope" in caplog.text
 
 
+def test_message_flush_preserves_malformed_spool(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    path = fleet_client_messages._spool_path(NODE_A)
+    path.parent.mkdir(parents=True)
+    original = b'{"client_id":\n'
+    path.write_bytes(original)
+
+    with pytest.raises(fleet_client.FleetClientError, match="malformed JSON"):
+        fleet_client_messages.flush(NODE_A)
+
+    assert path.read_bytes() == original
+
+
 def test_flush_reports_spools_scoped_to_replaced_credentials(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})

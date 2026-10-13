@@ -592,14 +592,9 @@ def _open_private(path: Path, flags: int, *, dir_fd: int | None = None) -> int:
 
 @contextmanager
 def _spool_lock(path: Path) -> Iterator[int | None]:
-    """Cross-process + cross-thread guard for one node's spool.
+    """Guard a spool across processes and threads.
 
-    Mirrors ``run_journal._append_critical_section``'s lock-file shape
-    (``fcntl.flock`` on an adjacent lock file) with an ``msvcrt.locking``
-    branch so the same guarantee holds on Windows. Yields the spool
-    directory descriptor validated by ``_ensure_private_dir`` (POSIX) so
-    the guarded operations open their files ``dir_fd``, or ``None`` where
-    that hardening is unavailable (Windows).
+    Yields a validated directory descriptor for relative I/O, or None on Windows.
     """
     dir_fd = _ensure_private_dir(path.parent)
     lock_name = path.name + ".lock"
@@ -647,8 +642,10 @@ def _read_spool(path: Path, *, dir_fd: int | None = None) -> list[dict[str, Any]
         fd = _open_private(path, os.O_RDONLY, dir_fd=dir_fd)
         with os.fdopen(fd, encoding="utf-8") as handle:
             text = handle.read()
-    except (OSError, FleetClientError):
+    except FileNotFoundError:
         return events
+    except (OSError, FleetClientError) as exc:
+        raise FleetClientError(f"fleet spool could not be read: {type(exc).__name__}") from exc
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -656,9 +653,10 @@ def _read_spool(path: Path, *, dir_fd: int | None = None) -> list[dict[str, Any]
         try:
             parsed = json.loads(line)
         except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            events.append(parsed)
+            raise FleetClientError("fleet spool contains malformed JSON") from None
+        if not isinstance(parsed, dict):
+            raise FleetClientError("fleet spool contains an invalid record")
+        events.append(parsed)
     return events
 
 

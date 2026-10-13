@@ -78,7 +78,7 @@ def _latest_sql(
     inner = _LATEST_PARTITION
     predicates = []
     if received_after:
-        predicates.append("e.received_at >= ?")
+        predicates.append("(e.harness = 'grokbot' OR e.received_at >= ?)")
     if node_ids:
         placeholders = ",".join("?" for _ in node_ids)
         predicates.append(f"(e.harness = 'grokbot' OR e.node_id IN ({placeholders}))")
@@ -89,11 +89,14 @@ def _latest_sql(
         columns += (
             ", CASE WHEN latest.seat IS NOT NULL AND trim(latest.seat) != '' AND trim(latest.seat) != '-' "
             "THEN latest.seat ELSE (SELECT e2.seat FROM events e2 "
-            "WHERE e2.node_id = latest.node_id AND e2.run_id = latest.run_id "
+            "WHERE e2.run_id = latest.run_id AND ((latest.harness = 'grokbot' AND e2.harness = 'grokbot') "
+            "OR (latest.harness != 'grokbot' AND e2.node_id = latest.node_id)) "
             "AND e2.seat IS NOT NULL AND trim(e2.seat) != '' AND e2.seat != '-' "
             "ORDER BY e2.sequence DESC, e2.received_at DESC, e2.digest DESC LIMIT 1) END AS last_known_seat"
         )
     outer = f"SELECT {columns} FROM ({inner}) AS latest WHERE rn = 1"
+    if received_after:
+        outer += " AND received_at >= ?"
     if node_ids:
         outer += f" AND node_id IN ({','.join('?' for _ in node_ids)})"
     return outer
@@ -182,8 +185,8 @@ def board_status(
 
     Default (``include_all=False``) keeps live runs and terminal history
     inside ``history_window_seconds`` (deck ``stale_history_after_seconds``,
-    default 24h) by filtering ``events.received_at`` before the window
-    function. ``include_all=True`` (``?all=1``) drops the time window so
+    default 24h). Grokbot revisions are globally ranked before the horizon
+    is applied so an older revision cannot replace a newer one. ``include_all=True`` (``?all=1``) drops the time window so
     older terminals remain visible, still paginated. Neither path rewrites
     or deletes events.
     """
@@ -198,7 +201,7 @@ def board_status(
             current.timestamp() - max(1, int(history_window_seconds)),
             tz=timezone.utc,
         ).isoformat()
-        params.append(cutoff)
+        params.extend((cutoff, cutoff))
     params.extend((page_limit + 1, page_offset))
     rows = conn.execute(sql, params).fetchall()
     more = len(rows) > page_limit
@@ -224,9 +227,10 @@ def board_status_for_nodes(
     history_window_seconds: int = STALE_HISTORY_AFTER_SECONDS,
     stale_history_after_seconds: int = STALE_HISTORY_AFTER_SECONDS,
     resolve_last_known_seat: bool = False,
-    required_run_ids: dict[str, str] | None = None,
+    predicate: Callable[[dict[str, Any]], bool] | None = None,
+    priority: Callable[[dict[str, Any]], int] | None = None,
 ) -> tuple[list[dict[str, Any]], set[str]]:
-    """Return a bounded latest-run view and identities with truncated history."""
+    """Return bounded matching runs first, with identities whose history was truncated."""
     if not node_ids:
         return [], set()
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -243,64 +247,43 @@ def board_status_for_nodes(
         ).isoformat()
         params.append(cutoff)
     params.extend(node_ids)
+    if windowed:
+        params.append(cutoff)
     params.extend(node_ids)
-    columns = _LATEST_COLUMNS.split(", ")
-    if resolve_last_known_seat:
-        columns.append("last_known_seat")
-    required = required_run_ids or {}
-    required_values = list(required.items())
-    required_cte = (
-        "required(node_id, run_id) AS (VALUES " + ",".join("(?, ?)" for _ in required_values) + "), "
-        if required_values
-        else ""
-    )
-    required_match = (
-        "EXISTS (SELECT 1 FROM required WHERE required.node_id = latest.node_id AND required.run_id = latest.run_id)"
-        if required_values
-        else "0"
-    )
-    ranked_sql = (
-        f"WITH latest AS ({sql}), "
-        f"{required_cte}"
-        "node_ranked AS ("
-        f"SELECT latest.*, CASE WHEN {required_match} THEN 0 ELSE 1 END AS required_rank, "
-        "ROW_NUMBER() OVER (PARTITION BY node_id "
-        f"ORDER BY CASE WHEN {required_match} THEN 0 ELSE 1 END, received_at DESC, run_id) "
-        "AS machine_rank FROM latest), "
-        "page_ranked AS ("
-        "SELECT node_ranked.*, ROW_NUMBER() OVER ("
-        "ORDER BY machine_rank, received_at DESC, node_id, run_id) AS page_rank "
-        "FROM node_ranked), "
-        "marked AS ("
-        "SELECT page_ranked.*, MAX(CASE WHEN machine_rank > ? OR page_rank > ? THEN 1 ELSE 0 END) "
-        "OVER (PARTITION BY node_id) AS node_truncated FROM page_ranked) "
-    )
-    params.extend(value for pair in required_values for value in pair)
-    run_columns = ", ".join(columns)
-    empty_columns = ", ".join("node_id" if name == "node_id" else f"NULL AS {name}" for name in columns)
-    ranked_sql += (
-        f"SELECT 'run' AS row_kind, {run_columns}, node_truncated FROM marked "
-        "WHERE machine_rank <= ? AND page_rank <= ? "
-        "UNION ALL "
-        f"SELECT 'truncated' AS row_kind, {empty_columns}, 1 AS node_truncated "
-        "FROM (SELECT DISTINCT node_id FROM marked WHERE node_truncated = 1)"
-    )
-    params.extend((MACHINE_RUN_LIMIT, MACHINE_PAGE_RUN_LIMIT, MACHINE_RUN_LIMIT, MACHINE_PAGE_RUN_LIMIT))
-    rows = conn.execute(ranked_sql, params).fetchall()
-    truncated = {str(row[1]) for row in rows if row[0] == "truncated" and row[1]}
-    runs = [
-        _status_entry(
+    per_node: dict[str, list[tuple[tuple[int, int, float, str], dict[str, Any]]]] = {}
+    truncated: set[str] = set()
+    for row in conn.execute(sql, params):
+        entry = _status_entry(
             conn,
-            row[1 : len(columns) + 1],
+            row,
             now=current,
             age_stale=include_all,
             stale_history_after_seconds=stale_history_after_seconds,
             resolve_last_known_seat=resolve_last_known_seat,
         )
-        for row in rows
-        if row[0] == "run"
-    ]
-    return runs, truncated
+        node_id = str(entry["node_id"])
+        matches = predicate is None or predicate(entry)
+        match_priority = priority(entry) if matches and priority is not None else 0
+        age = _received_at_age_seconds(entry.get("received_at"), now=current)
+        order = (0 if matches else 1, match_priority, age if age is not None else float("inf"), str(entry["run_id"]))
+        ranked = per_node.setdefault(node_id, [])
+        ranked.append((order, entry))
+        ranked.sort(key=lambda item: item[0])
+        if len(ranked) > MACHINE_RUN_LIMIT:
+            ranked.pop()
+            truncated.add(node_id)
+
+    page_rows = sorted(
+        (
+            (rank, order, node_id, entry)
+            for node_id, ranked in per_node.items()
+            for rank, (order, entry) in enumerate(ranked)
+        ),
+        key=lambda item: (item[0], item[1], item[2]),
+    )
+    if len(page_rows) > MACHINE_PAGE_RUN_LIMIT:
+        truncated.update(row[2] for row in page_rows[MACHINE_PAGE_RUN_LIMIT:])
+    return [row[3] for row in page_rows[:MACHINE_PAGE_RUN_LIMIT]], truncated
 
 
 def board_machine_page(
@@ -315,7 +298,7 @@ def board_machine_page(
     predicate: Callable[[dict[str, Any]], bool] | None = None,
     resolve_last_known_seat: bool = True,
     priority: Callable[[dict[str, Any]], int] | None = None,
-) -> tuple[set[str], list[str], bool, dict[str, str]]:
+) -> tuple[set[str], list[str], bool]:
     """Return complete matching identities and a prioritized bounded page.
 
     The query streams the latest projection once, retaining only one ranking
@@ -332,9 +315,8 @@ def board_machine_page(
             current.timestamp() - max(1, int(history_window_seconds)),
             tz=timezone.utc,
         ).isoformat()
-        params.append(cutoff)
+        params.extend((cutoff, cutoff))
     node_priorities: dict[str, int] = {}
-    required_run_ids: dict[str, str] = {}
     for row in conn.execute(sql, params):
         entry = _status_entry(
             conn,
@@ -350,16 +332,10 @@ def board_machine_page(
             current_key = node_priorities.get(str(node_id))
             if current_key is None or key < current_key:
                 node_priorities[str(node_id)] = key
-                required_run_ids[str(node_id)] = str(entry["run_id"])
     ordered_ids = sorted(node_priorities, key=lambda item: (node_priorities[item], item))
     page_ids = ordered_ids[page_offset : page_offset + page_limit]
     more = len(ordered_ids) > page_offset + page_limit
-    return (
-        set(node_priorities),
-        page_ids,
-        more,
-        {node_id: required_run_ids[node_id] for node_id in page_ids if node_id in required_run_ids},
-    )
+    return set(node_priorities), page_ids, more
 
 
 def _status_entry(
@@ -372,17 +348,14 @@ def _status_entry(
     resolve_last_known_seat: bool = True,
 ) -> dict[str, Any]:
     state = row[5]
+    seat = row[13] if resolve_last_known_seat and len(row) > 13 else row[3]
+    if resolve_last_known_seat and len(row) <= 13:
+        seat = _last_known_seat(conn, row[0], row[1], row[3], harness=row[4])
     entry = {
         "node_id": row[0],
         "run_id": row[1],
         "repo": row[2],
-        "seat": (
-            row[13]
-            if resolve_last_known_seat and len(row) > 13
-            else _last_known_seat(conn, row[0], row[1], row[3])
-            if resolve_last_known_seat
-            else row[3]
-        ),
+        "seat": seat,
         "harness": row[4],
         "state": state,
         "ts": row[6],
@@ -401,14 +374,16 @@ def _status_entry(
     return entry
 
 
-def _last_known_seat(conn: sqlite3.Connection, node_id: str, run_id: str, latest: Any) -> Any:
+def _last_known_seat(conn: sqlite3.Connection, node_id: str, run_id: str, latest: Any, *, harness: Any = None) -> Any:
     """Keep the last non-empty seat when a terminal event drops it."""
     if isinstance(latest, str) and latest.strip() and latest.strip() != "-":
         return latest
+    identity = "harness = 'grokbot' AND run_id = ?" if harness == "grokbot" else "node_id = ? AND run_id = ?"
+    params = (run_id,) if harness == "grokbot" else (node_id, run_id)
     row = conn.execute(
-        "SELECT seat FROM events WHERE node_id = ? AND run_id = ? "
+        f"SELECT seat FROM events WHERE {identity} "
         "AND seat IS NOT NULL AND trim(seat) != '' AND seat != '-' "
         "ORDER BY sequence DESC, received_at DESC, digest DESC LIMIT 1",
-        (node_id, run_id),
+        params,
     ).fetchone()
     return row[0] if row else latest

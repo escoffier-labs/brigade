@@ -352,17 +352,50 @@ class TestBoards:
 
     def test_machine_page_does_not_resurrect_old_grokbot_revision(self, hub):
         stamp = datetime.now(timezone.utc).isoformat()
+        old_stamp = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
         events = [
             _event(NODE_A, "stable-machine-run", 1, "run.started", repo="repo", harness="codex", ts=stamp),
             _event(NODE_A, "shared-grok", 1, "external.queued", repo="repo", harness="grokbot", ts=stamp),
-            _event(NODE_B, "shared-grok", 2, "external.completed", repo="repo", harness="grokbot", ts=stamp),
+            _event(NODE_B, "shared-grok", 2, "external.completed", repo="repo", harness="grokbot", ts=old_stamp),
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            conn.execute(
+                "UPDATE events SET received_at = ? WHERE run_id = ? AND sequence = 2", (old_stamp, "shared-grok")
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        _status, _headers, page = _request(hub, "GET", "/view/machines", headers=_bearer())
+
+        assert "shared-grok" not in page
+
+    def test_grokbot_last_known_seat_is_global_across_nodes(self, hub):
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            {
+                **_event(NODE_A, "cross-node-seat", 1, "external.claimed", repo="repo", harness="grokbot", ts=stamp),
+                "seat": "implementation-worker",
+            },
+            {
+                **_event(NODE_B, "cross-node-seat", 2, "external.completed", repo="repo", harness="grokbot", ts=stamp),
+                "seat": "-",
+            },
         ]
         status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
         assert status == 200, text
 
-        _status, _headers, page = _request(hub, "GET", f"/view/machines?all=1&node={NODE_A}", headers=_bearer())
+        status, _headers, page = _request(
+            hub, "GET", "/view/machines?all=1&seat=implementation-worker", headers=_bearer()
+        )
 
-        assert "shared-grok" not in page
+        assert status == 200
+        assert f'data-node="{NODE_B}"' in page
+        assert 'title="cross-node-seat"' in page
+        assert "implementation-worker" in page
 
     def test_finished_verify_buckets_use_exit_status(self, hub):
         now = datetime.now(timezone.utc).isoformat()
@@ -1186,7 +1219,10 @@ class TestBoardBounds:
     def test_machine_page_keeps_run_that_matched_before_history_cap(self, hub):
         old_stamp = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
         recent_stamp = datetime.now(timezone.utc).isoformat()
-        events = [_event(NODE_A, "matching-active", 1, "run.started", repo="repo", harness="codex", ts=old_stamp)]
+        events = [
+            _event(NODE_A, "matching-active", 1, "run.started", repo="repo", harness="codex", ts=old_stamp),
+            _event(NODE_A, "matching-terminal", 1, "run.completed", repo="repo", harness="codex", ts=old_stamp),
+        ]
         events.extend(
             _event(
                 NODE_A,
@@ -1201,6 +1237,16 @@ class TestBoardBounds:
         )
         status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
         assert status == 200, text
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            conn.execute(
+                "UPDATE events SET received_at = ? WHERE run_id IN (?, ?)",
+                (old_stamp, "matching-active", "matching-terminal"),
+            )
+            conn.execute("UPDATE events SET received_at = ? WHERE run_id LIKE 'newer-terminal-%'", (recent_stamp,))
+            conn.commit()
+        finally:
+            conn.close()
 
         status, _headers, default_page = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert status == 200
@@ -1209,6 +1255,7 @@ class TestBoardBounds:
         status, _headers, filtered_page = _request(hub, "GET", "/view/machines?all=1&repo=repo", headers=_bearer())
         assert status == 200
         assert 'title="matching-active"' in filtered_page
+        assert 'title="matching-terminal"' in filtered_page
 
     def test_machine_page_caps_total_runs_and_marks_truncation(self, hub):
         node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(21)]
