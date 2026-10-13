@@ -764,6 +764,26 @@ def test_ec12_rejects_unsafe_manifest_entry_path(tmp_path):
     assert readiness["artifacts"][0]["outcome"] == "rejected"
 
 
+def test_ec12_rejects_symlinked_package_manifest(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    external_manifest = tmp_path / "manifest.json"
+    external_manifest.write_bytes(manifest_path.read_bytes())
+    manifest_path.unlink()
+    try:
+        manifest_path.symlink_to(external_manifest)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "entry_path_unsafe"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
 def test_ec12_rejects_symlinked_package_entry(tmp_path):
     target = _ws(tmp_path)
     package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"

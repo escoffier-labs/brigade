@@ -1362,7 +1362,16 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
         linked = _is_symlink(ctx, package_dir) or _is_symlink(ctx, path)
         manifest = None if linked else _read_json_object(ctx, path, reserve_bytes=manifest_reserve)
         if _is_symlink(ctx, package_dir) or _is_symlink(ctx, path):
-            obs = _invalid(ctx, path, "symlink_refused")
+            if adapter is _verify_evidence_package:
+                obs = _obs(
+                    relpath,
+                    "claim_validated",
+                    "rejected",
+                    _dims(integrity=("failed", "entry_path_unsafe"), subject="unknown", population="passed"),
+                    ["entry_path_unsafe"],
+                )
+            else:
+                obs = _invalid(ctx, path, "symlink_refused")
         elif manifest is None:
             obs = _invalid(ctx, path, "invalid_json")
         elif adapter is not None:
