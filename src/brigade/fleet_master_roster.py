@@ -36,7 +36,7 @@ _DANGEROUS_VALUE = re.compile(
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s*[:=]\s*"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
-    r"\bauth(?:entication)?[ _-]profiles?\s+named\s+"
+    r"\bauth(?:entication)?[ _-]profiles?\s+(?:named|called)\s+"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s+(?:\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with))\s+"
@@ -50,7 +50,7 @@ _DANGEROUS_VALUE = re.compile(
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
     r"\s+is\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
-    r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%USERPROFILE%))",
+    r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%USERPROFILE%|\$env:[A-Za-z_][A-Za-z0-9_]*))",
     re.IGNORECASE,
 )
 _URL_CREDENTIAL_QUERY = re.compile(
@@ -72,7 +72,7 @@ _RELATIVE_PATH = re.compile(
 _PATH_CONTEXT = re.compile(
     r"(?:\b(?:run|execute|inspect|open|read|write|load|save|path|file|directory|folder|script|repository|repo)\s+"
     r"(?:(?:the|a|an)\s+)?(?:(?:from|at|in|to|into|under)\s+)?|"
-    r"\b(?:path|file|directory|folder|script|repository|repo)\s*(?:is|:)\s*)$",
+    r"\b(?:path|file|directory|folder|script|repository|repo)\s*(?:is|:)\s*)[\"'“‘`()\[{]*\s*$",
     re.IGNORECASE,
 )
 _FILESYSTEM_COMPONENTS = frozenset(
