@@ -112,6 +112,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS fleet_message_sends_sender_received ON fleet_message_sends (sender, received_at)"
     )
+    conn.execute("CREATE INDEX IF NOT EXISTS fleet_message_sends_received ON fleet_message_sends (received_at)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS fleet_messages_sender_client ON fleet_messages (sender, client_id)")
     _prune_expired(conn)
 

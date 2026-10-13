@@ -308,14 +308,19 @@ def test_expired_messages_are_pruned_before_read_ack_reply_and_unread_count(mess
 def test_message_schema_indexes_retention_prune_columns(message_hub):
     _base, _token_a, _token_b, db = message_hub
     conn = sqlite3.connect(db)
-    indexes = {
+    message_indexes = {
         tuple(column[2] for column in conn.execute(f'PRAGMA index_info("{row[1]}")'))
         for row in conn.execute("PRAGMA index_list(fleet_messages)")
     }
+    send_indexes = {
+        tuple(column[2] for column in conn.execute(f'PRAGMA index_info("{row[1]}")'))
+        for row in conn.execute("PRAGMA index_list(fleet_message_sends)")
+    }
     conn.close()
 
-    assert ("created_at",) in indexes
-    assert ("reply_to",) in indexes
+    assert ("created_at",) in message_indexes
+    assert ("reply_to",) in message_indexes
+    assert ("received_at",) in send_indexes
 
 
 def test_expired_idempotent_retry_prunes_before_lookup(message_hub):
@@ -505,6 +510,42 @@ def test_new_send_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
 
     assert newest["message"]["client_id"] == attempts[-1]["client_id"]
     assert [message["subject"] for message in attempts[2:]] == ["Older", "Newer", "Newest"]
+
+
+def test_reply_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    attempts = []
+    offline = True
+
+    def request(_hub: str, _token: str, message: dict):
+        attempts.append(message)
+        if offline:
+            return 503, {"error": "temporarily unavailable"}
+        return 201, {"message": {"client_id": message["client_id"]}}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+    queued = fleet_client_messages.send(
+        recipient=NODE_B,
+        subject="Older",
+        body="Queued first",
+        reference=None,
+        priority="normal",
+    )
+    assert queued["queued"] is True
+
+    offline = False
+    replied = fleet_client_messages.reply(
+        17, body="Reply second", subject="Re: task", reference=None, priority="normal"
+    )
+
+    assert replied["message"]["client_id"] == attempts[-1]["client_id"]
+    assert [message["action"] for message in attempts[1:]] == ["send", "reply"]
 
 
 def test_ambiguous_reply_is_spooled_and_retried_with_same_client_id(tmp_path, monkeypatch):

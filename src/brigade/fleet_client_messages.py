@@ -64,12 +64,28 @@ def _online(body: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _queue_ambiguous(message: dict[str, Any], node_id: str) -> dict[str, Any]:
+def _queue_locked(path: Path, message: dict[str, Any], *, dir_fd: int | None = None) -> dict[str, Any]:
+    if not fleet_client._spool_append_locked(path, message, dir_fd=dir_fd):
+        raise fleet_client.FleetClientError("fleet message could not be persisted to the local spool")
+    return {"queued": True, "client_id": message["client_id"]}
+
+
+def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -> dict[str, Any]:
     path = _spool_path(node_id)
     with fleet_client._spool_lock(path) as dir_fd:
-        if not fleet_client._spool_append_locked(path, message, dir_fd=dir_fd):
-            raise fleet_client.FleetClientError("fleet message could not be persisted to the local spool")
-    return {"queued": True, "client_id": message["client_id"]}
+        if path.exists() and not path.is_symlink():
+            _flush_locked(path, hub, token, dir_fd=dir_fd)
+            if fleet_client._read_spool(path, dir_fd=dir_fd):
+                return _queue_locked(path, message, dir_fd=dir_fd)
+        try:
+            status, payload = _request(hub, token, message)
+        except fleet_client.FleetClientError:
+            return _queue_locked(path, message, dir_fd=dir_fd)
+        if status in (408, 429) or status >= 500:
+            return _queue_locked(path, message, dir_fd=dir_fd)
+        if status >= 400:
+            raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
+        return payload
 
 
 def _validate_sqlite_integer(value: Any, field: str, *, allow_zero: bool = False) -> None:
@@ -105,27 +121,7 @@ def send(*, recipient: str, subject: str, body: str, reference: str | None, prio
         "client_id": uuid4().hex,
         "enqueued_at": datetime.now(timezone.utc).isoformat(),
     }
-    path = _spool_path(node_id)
-    with fleet_client._spool_lock(path) as dir_fd:
-        if path.exists() and not path.is_symlink():
-            _flush_locked(path, hub, token, dir_fd=dir_fd)
-            if fleet_client._read_spool(path, dir_fd=dir_fd):
-                if not fleet_client._spool_append_locked(path, message, dir_fd=dir_fd):
-                    raise fleet_client.FleetClientError("fleet message could not be persisted to the local spool")
-                return {"queued": True, "client_id": message["client_id"]}
-        try:
-            status, payload = _request(hub, token, message)
-        except fleet_client.FleetClientError:
-            if not fleet_client._spool_append_locked(path, message, dir_fd=dir_fd):
-                raise fleet_client.FleetClientError("fleet message could not be persisted to the local spool") from None
-            return {"queued": True, "client_id": message["client_id"]}
-        if status in (408, 429) or status >= 500:
-            if not fleet_client._spool_append_locked(path, message, dir_fd=dir_fd):
-                raise fleet_client.FleetClientError("fleet message could not be persisted to the local spool")
-            return {"queued": True, "client_id": message["client_id"]}
-        if status >= 400:
-            raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
-        return payload
+    return _send_ordered(message, hub, token, node_id)
 
 
 def list_messages(*, after: int = 0, unacked: bool = False) -> dict[str, Any]:
@@ -160,15 +156,7 @@ def reply(message_id: int, *, body: str, subject: str | None, reference: str | N
         "client_id": uuid4().hex,
         "enqueued_at": datetime.now(timezone.utc).isoformat(),
     }
-    try:
-        status, payload = _request(hub, token, message)
-    except fleet_client.FleetClientError:
-        return _queue_ambiguous(message, node_id)
-    if status in (408, 429) or status >= 500:
-        return _queue_ambiguous(message, node_id)
-    if status >= 400:
-        raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
-    return payload
+    return _send_ordered(message, hub, token, node_id)
 
 
 def manage_principal(action: str, *, name: str, label: str | None = None) -> dict[str, Any]:
