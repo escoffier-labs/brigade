@@ -73,6 +73,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Use auth profile production-admin.",
         'Use auth profile "production-admin".',
         "Use auth profile 'production-admin'.",
+        "Use auth profile: production-admin",
+        "Use auth-profile production-admin",
         "password: actual-secret",
     ],
 )

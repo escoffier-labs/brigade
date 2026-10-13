@@ -19,7 +19,7 @@ _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _DANGEROUS_VALUE = re.compile(
     r"(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{16,}|"
     r"\bBearer\s+\S+|\b[A-Z][A-Z0-9_]{2,}\s*=|"
-    r"\bauth(?:entication)?\s+profile\s+(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+')|"
+    r"\bauth(?:entication)?[ -]profile(?:\s*[:=]\s*|\s+)(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+')|"
     r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
     r"(?:^|[^A-Za-z0-9_.-])(?:~[/\\]|/(?:home|Users|root|run/user)/|"
