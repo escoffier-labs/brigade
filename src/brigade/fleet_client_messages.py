@@ -64,6 +64,26 @@ def _online(body: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _queue_ambiguous(message: dict[str, Any], node_id: str) -> dict[str, Any]:
+    path = _spool_path(node_id)
+    with fleet_client._spool_lock(path) as dir_fd:
+        if not fleet_client._spool_append_locked(path, message, dir_fd=dir_fd):
+            raise fleet_client.FleetClientError("fleet message could not be persisted to the local spool")
+    return {"queued": True, "client_id": message["client_id"]}
+
+
+def _validate_sqlite_integer(value: Any, field: str, *, allow_zero: bool = False) -> None:
+    minimum = 0 if allow_zero else 1
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < minimum
+        or value > _message_limits.MAX_SQLITE_INTEGER
+    ):
+        qualifier = "a non-negative" if allow_zero else "a positive"
+        raise fleet_client.FleetClientError(f"{field} must be {qualifier} integer within SQLite's range")
+
+
 def send(*, recipient: str, subject: str, body: str, reference: str | None, priority: str) -> dict[str, Any]:
     hub, token, node_id = _settings()
     try:
@@ -88,40 +108,55 @@ def send(*, recipient: str, subject: str, body: str, reference: str | None, prio
     try:
         status, payload = _request(hub, token, message)
     except fleet_client.FleetClientError:
-        with fleet_client._spool_lock(_spool_path(node_id)) as dir_fd:
-            if not fleet_client._spool_append_locked(_spool_path(node_id), message, dir_fd=dir_fd):
-                raise fleet_client.FleetClientError("fleet message could not be persisted to the local spool") from None
-        return {"queued": True, "client_id": message["client_id"]}
+        return _queue_ambiguous(message, node_id)
     if status in (408, 429) or status >= 500:
-        with fleet_client._spool_lock(_spool_path(node_id)) as dir_fd:
-            if not fleet_client._spool_append_locked(_spool_path(node_id), message, dir_fd=dir_fd):
-                raise fleet_client.FleetClientError("fleet message could not be persisted to the local spool")
-        return {"queued": True, "client_id": message["client_id"]}
+        return _queue_ambiguous(message, node_id)
     if status >= 400:
         raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
     return payload
 
 
 def list_messages(*, after: int = 0, unacked: bool = False) -> dict[str, Any]:
+    _validate_sqlite_integer(after, "after cursor", allow_zero=True)
     return _online({"action": "list", "after": after, "unacked": unacked})
 
 
 def ack(message_id: int) -> dict[str, Any]:
+    _validate_sqlite_integer(message_id, "message id")
     return _online({"action": "ack", "id": message_id})
 
 
 def reply(message_id: int, *, body: str, subject: str | None, reference: str | None, priority: str) -> dict[str, Any]:
-    return _online(
-        {
-            "action": "reply",
-            "id": message_id,
-            "body": body,
-            "subject": subject,
-            "ref": reference,
-            "priority": priority,
-            "client_id": uuid4().hex,
-        }
-    )
+    hub, token, node_id = _settings()
+    _validate_sqlite_integer(message_id, "message id")
+    try:
+        body = _message_limits._text(body, "body", _message_limits.BODY_LIMIT) or ""
+        if subject is not None:
+            subject = _message_limits._text(subject, "subject", _message_limits.SUBJECT_LIMIT)
+        reference = _message_limits._text(reference, "ref", _message_limits.REF_LIMIT, required=False)
+    except _message_limits.MessageError as exc:
+        raise fleet_client.FleetClientError(str(exc)) from exc
+    if not isinstance(priority, str) or priority not in _message_limits.PRIORITIES:
+        raise fleet_client.FleetClientError("priority must be low, normal, high, or urgent")
+    message = {
+        "action": "reply",
+        "id": message_id,
+        "body": body,
+        "subject": subject,
+        "ref": reference,
+        "priority": priority,
+        "client_id": uuid4().hex,
+        "enqueued_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        status, payload = _request(hub, token, message)
+    except fleet_client.FleetClientError:
+        return _queue_ambiguous(message, node_id)
+    if status in (408, 429) or status >= 500:
+        return _queue_ambiguous(message, node_id)
+    if status >= 400:
+        raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
+    return payload
 
 
 def manage_principal(action: str, *, name: str, label: str | None = None) -> dict[str, Any]:

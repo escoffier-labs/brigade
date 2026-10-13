@@ -440,6 +440,168 @@ def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
     assert not fleet_client_messages._spool_path(NODE_A).exists()
 
 
+def test_ambiguous_reply_is_spooled_and_retried_with_same_client_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub.invalid"})
+    attempts = []
+
+    def request(_hub: str, _token: str, message: dict):
+        attempts.append(message)
+        if len(attempts) == 1:
+            raise fleet_client.FleetClientError("response lost after hub commit")
+        return 201, {"message": {"client_id": message["client_id"]}}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+    queued = fleet_client_messages.reply(17, body="Done", subject="Re: task", reference=None, priority="normal")
+
+    assert queued["queued"] is True
+    assert queued["client_id"] == attempts[0]["client_id"]
+    assert fleet_client_messages.flush(NODE_A) == 1
+    assert attempts[1] == attempts[0]
+
+
+@pytest.mark.parametrize(
+    ("message_id", "body", "subject", "reference", "priority", "error"),
+    [
+        (17, "x" * (fleet_hub_messages.BODY_LIMIT + 1), None, None, "normal", "body"),
+        (17, "Done", "   ", None, "normal", "subject"),
+        (17, "Done", "x" * (fleet_hub_messages.SUBJECT_LIMIT + 1), None, "normal", "subject"),
+        (17, "Done", None, "x" * (fleet_hub_messages.REF_LIMIT + 1), "normal", "ref"),
+        (17, "Done", None, None, "critical", "priority"),
+        (0, "Done", None, None, "normal", "message id"),
+        (2**63, "Done", None, None, "normal", "message id"),
+    ],
+)
+def test_invalid_offline_reply_is_not_claimed_queued(
+    tmp_path, monkeypatch, message_id, body, subject, reference, priority, error
+):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    monkeypatch.setattr(
+        fleet_client_messages,
+        "_request",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("invalid reply reached transport")),
+    )
+
+    with pytest.raises(fleet_client.FleetClientError, match=error):
+        fleet_client_messages.reply(
+            message_id,
+            body=body,
+            subject=subject,
+            reference=reference,
+            priority=priority,
+        )
+    assert not fleet_client_messages._spool_path(NODE_A).exists()
+
+
+def test_reply_preserves_enqueue_time_and_rejects_expired_delivery(message_hub):
+    base, token_a, token_b, _db = message_hub
+    sent = _request(base, token_a, {"action": "send", "to": NODE_B, "subject": "Task", "body": "Review"})[1]
+    enqueued_at = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    delivered = _request(
+        base,
+        token_b,
+        {
+            "action": "reply",
+            "id": sent["message"]["id"],
+            "body": "Done",
+            "client_id": "delayed-reply",
+            "enqueued_at": enqueued_at,
+        },
+    )
+
+    assert delivered[0] == 201
+    assert delivered[1]["message"]["created_at"] == enqueued_at
+    expired = _request(
+        base,
+        token_b,
+        {
+            "action": "reply",
+            "id": sent["message"]["id"],
+            "body": "Too late",
+            "client_id": "expired-reply",
+            "enqueued_at": (
+                datetime.now(timezone.utc) - timedelta(days=fleet_hub_messages.RETENTION_DAYS + 1)
+            ).isoformat(),
+        },
+    )
+    assert expired[0] == 400
+    assert "expired" in expired[1]["error"]
+
+
+def test_hub_rejects_ids_outside_sqlite_integer_range(message_hub):
+    base, token_a, token_b, _db = message_hub
+    sent = _request(base, token_a, {"action": "send", "to": NODE_B, "subject": "Task", "body": "Review"})[1]
+    assert sent["message"]["id"] < 2**63
+
+    status, error = _request(base, token_b, {"action": "reply", "id": 2**63, "body": "Invalid"})
+
+    assert status == 400
+    assert "SQLite's range" in error["error"]
+
+    ack_status, ack_error = _request(base, token_b, {"action": "ack", "id": 2**63})
+    assert ack_status == 400
+    assert "SQLite's range" in ack_error["error"]
+
+    list_status, list_error = _request(base, token_b, {"action": "list", "after": 2**63})
+    assert list_status == 400
+    assert "SQLite's range" in list_error["error"]
+
+
+@pytest.mark.parametrize(("field", "value"), [("subject", 0), ("ref", [])])
+def test_hub_rejects_falsy_non_string_reply_fields(message_hub, field, value):
+    base, token_a, token_b, _db = message_hub
+    sent = _request(base, token_a, {"action": "send", "to": NODE_B, "subject": "Task", "body": "Review"})[1]
+    status, error = _request(
+        base,
+        token_b,
+        {"action": "reply", "id": sent["message"]["id"], "body": "Done", field: value},
+    )
+
+    assert status == 400
+    assert field in error["error"]
+
+
+def test_client_rejects_ids_outside_sqlite_integer_range_before_transport(monkeypatch):
+    monkeypatch.setattr(
+        fleet_client_messages,
+        "_request",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("invalid ID reached transport")),
+    )
+    with pytest.raises(fleet_client.FleetClientError, match="SQLite's range"):
+        fleet_client_messages.ack(2**63)
+    with pytest.raises(fleet_client.FleetClientError, match="SQLite's range"):
+        fleet_client_messages.list_messages(after=2**63)
+
+
+@pytest.mark.parametrize("command", ["ack", "reply"])
+def test_msg_ack_and_reply_escape_subject_control_characters(command, tmp_path, monkeypatch, capsys):
+    result = {"message": {"id": 7, "recipient": "node-a", "subject": "task\x1b[31mred"}}
+    monkeypatch.setattr(fleet_client_messages, "ack", lambda _message_id: result)
+    monkeypatch.setattr(fleet_client_messages, "reply", lambda *_args, **_kwargs: result)
+    argv = ["fleet", "msg", command, "7"]
+    if command == "reply":
+        body_file = tmp_path / "reply.txt"
+        body_file.write_text("Done", encoding="utf-8")
+        argv.extend(("--body-file", str(body_file)))
+
+    assert cli.main(argv) == 0
+    output = capsys.readouterr().out
+    assert "\x1b" not in output
+    assert "\\x1b[31m" in output
+
+
 def test_offline_send_does_not_claim_queued_when_spool_is_unsafe(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)

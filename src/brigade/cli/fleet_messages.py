@@ -77,7 +77,12 @@ def _result(args: argparse.Namespace, operation: Callable[[], dict[str, Any]]) -
     else:
         message = payload.get("message")
         if isinstance(message, dict):
-            print(f"message {message.get('id')} {message.get('recipient')} {message.get('subject')}")
+            from .fleet import _safe_table_cell
+
+            print(
+                f"message {_safe_table_cell(message.get('id'))} "
+                f"{_safe_table_cell(message.get('recipient'))} {_safe_table_cell(message.get('subject'))}"
+            )
         elif payload.get("queued"):
             print(f"message queued for delivery ({payload.get('client_id')})")
         else:

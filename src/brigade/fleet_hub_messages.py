@@ -8,7 +8,7 @@ import re
 import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, TypeGuard
 
 SUBJECT_LIMIT = 200
 BODY_LIMIT = 64 * 1024
@@ -19,6 +19,7 @@ SENDER_DAILY_QUOTA = 1000
 RETENTION_DAYS = 90
 MAX_LIST_RESPONSE_BYTES = 7 * 1024 * 1024
 MAX_FUTURE_SKEW = timedelta(minutes=5)
+MAX_SQLITE_INTEGER = (1 << 63) - 1
 _PRINCIPAL_NAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,62}$")
 
 _PRINCIPAL_SCHEMA = """CREATE TABLE IF NOT EXISTS fleet_message_principals (
@@ -115,6 +116,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
 def _expiry_cutoff() -> str:
     return (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
+
+
+def _sqlite_integer(value: Any, *, allow_zero: bool = False) -> TypeGuard[int]:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and (value >= 0 if allow_zero else value >= 1)
+        and value <= MAX_SQLITE_INTEGER
+    )
 
 
 def _prune_expired(conn: sqlite3.Connection) -> None:
@@ -387,8 +397,8 @@ def list_messages(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: s
     opened = not conn.in_transaction
     _prune_expired(conn)
     after = raw.get("after", 0)
-    if not isinstance(after, int) or isinstance(after, bool) or after < 0:
-        raise MessageError("after must be a non-negative integer cursor")
+    if not _sqlite_integer(after, allow_zero=True):
+        raise MessageError("after must be a non-negative integer within SQLite's range")
     unacked = raw.get("unacked", False)
     if not isinstance(unacked, bool):
         raise MessageError("unacked must be a boolean")
@@ -414,8 +424,8 @@ def list_messages(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: s
 def ack(conn: sqlite3.Connection, message_id: Any, *, recipient: str) -> dict[str, Any] | None:
     opened = not conn.in_transaction
     _prune_expired(conn)
-    if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id < 1:
-        raise MessageError("id must be a positive integer")
+    if not _sqlite_integer(message_id):
+        raise MessageError("id must be a positive integer within SQLite's range")
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         "UPDATE fleet_messages SET acked_at=COALESCE(acked_at,?), acked_by=COALESCE(acked_by,?) "
@@ -434,22 +444,32 @@ def ack(conn: sqlite3.Connection, message_id: Any, *, recipient: str) -> dict[st
 def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict[str, Any] | None:
     _prune_expired(conn)
     message_id = raw.get("id")
-    original = _fetch(conn, message_id) if isinstance(message_id, int) and not isinstance(message_id, bool) else None
+    if not _sqlite_integer(message_id):
+        raise MessageError("id must be a positive integer within SQLite's range")
+    original = _fetch(conn, message_id)
     if original is None or original["recipient"] != sender:
         return None
     subject = raw.get("subject")
-    if not subject:
+    if subject is None:
         prefixed = f"Re: {original['subject']}"
         subject = prefixed if len(prefixed.encode("utf-8")) <= SUBJECT_LIMIT else original["subject"]
+    else:
+        subject = _text(subject, "subject", SUBJECT_LIMIT)
+    reference = raw.get("ref")
+    if reference is None:
+        reference = original["ref"]
+    else:
+        reference = _text(reference, "ref", REF_LIMIT, required=False)
     message = send(
         conn,
         {
             "to": original["sender"],
             "subject": subject,
             "body": raw.get("body"),
-            "ref": raw.get("ref") or original["ref"],
+            "ref": reference,
             "priority": raw.get("priority", "normal"),
             "client_id": raw.get("client_id"),
+            "enqueued_at": raw.get("enqueued_at"),
         },
         sender=sender,
         reply_to=message_id,
