@@ -1990,15 +1990,17 @@ def test_ec12_classifies_a_missing_manifest_listed_entry_as_snapshot_mismatch(tm
 
 
 @pytest.mark.parametrize(
-    ("receipt_status", "command_status", "reason"),
+    ("receipt_status", "mutate", "reason"),
     [
-        ("completed", "running", "command_not_terminal"),
-        ("completed", [], "command_not_terminal"),
-        ("completed", {}, "command_not_terminal"),
-        ("canceled", "interrupted", "status_canceled"),
+        ("completed", lambda receipt: receipt["commands"][0].update(status="running"), "command_not_terminal"),
+        ("completed", lambda receipt: receipt["commands"][0].update(status=[]), "command_not_terminal"),
+        ("completed", lambda receipt: receipt["commands"][0].update(status={}), "command_not_terminal"),
+        ("canceled", lambda receipt: receipt["commands"][0].update(status="interrupted"), "status_canceled"),
+        ("canceled", lambda receipt: receipt.update(commands=[]), "status_canceled"),
+        ("canceled", lambda receipt: receipt.update(planned_commands=["first", "second"]), "status_canceled"),
     ],
 )
-def test_ec03_classifies_incomplete_receipts(tmp_path, monkeypatch, receipt_status, command_status, reason):
+def test_ec03_classifies_incomplete_receipts(tmp_path, monkeypatch, receipt_status, mutate, reason):
     from brigade import control_crosswalk_cosign
 
     target = _ws(tmp_path)
@@ -2006,7 +2008,7 @@ def test_ec03_classifies_incomplete_receipts(tmp_path, monkeypatch, receipt_stat
     receipt_path = run_dir / "receipt.json"
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     receipt["status"] = receipt_status
-    receipt["commands"][0]["status"] = command_status
+    mutate(receipt)
     _write_json(receipt_path, receipt)
     bundle_path = run_dir / "attestation.sigstore.json"
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))

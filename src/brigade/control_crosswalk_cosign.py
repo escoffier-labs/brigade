@@ -222,6 +222,11 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
         "subject": "passed",
         "source_digest": digest,
     }
+    receipt_status = snapshot.receipt.get("status")
+    if not isinstance(receipt_status, str) or receipt_status not in {"completed", "failed", "rejected", "canceled"}:
+        return _observation(relpath, "incomplete", **verified_trust, reason="status_not_terminal")
+    if receipt_status == "canceled":
+        return _observation(relpath, "incomplete", **verified_trust, reason="status_canceled")
     if not isinstance(commands, list) or not commands:
         return _observation(relpath, "incomplete", **verified_trust, reason="empty_commands")
     if not isinstance(planned, list) or not planned or not all(isinstance(item, str) and item for item in planned):
@@ -231,11 +236,6 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
         for command, expected in zip(commands, planned, strict=False)
     ):
         return _observation(relpath, "incomplete", **verified_trust, reason="planned_commands_mismatch")
-    receipt_status = snapshot.receipt.get("status")
-    if not isinstance(receipt_status, str) or receipt_status not in {"completed", "failed", "rejected", "canceled"}:
-        return _observation(relpath, "incomplete", **verified_trust, reason="status_not_terminal")
-    if receipt_status == "canceled":
-        return _observation(relpath, "incomplete", **verified_trust, reason="status_canceled")
     terminal_command_statuses = {"completed"}
     if receipt_status in {"failed", "rejected"}:
         terminal_command_statuses.update({"failed", "timed_out", "rejected"})
