@@ -50,11 +50,11 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s*[:=]\s*"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
-    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|value)(?:\s+|(?=[:=])))?"
+    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|assigned\s+to\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|value)(?:\s+|(?=[:=])))?"
     r"(?:provided\s+(?:as|with)|stored\s+(?:as|with)|generated\s+(?:as|with)|configured\s+(?:as|with|to))\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
-    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|value)(?:\s+|(?=:)))?"
+    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|assigned\s+to\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|value)(?:\s+|(?=:)))?"
     r"(?:(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to)\s+|[:=]\s*)"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:set|configure(?:d)?|store(?:d)?|provide(?:d)?|generate(?:d)?)\s+"
@@ -84,7 +84,7 @@ _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"\b(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+|"
     r"(?:(?:use|configure)\s+(?:the\s+)?)?environment\s+variable\s+)"
-    r"[\"'“‘`]?[A-Za-z_][A-Za-z0-9_]*[\"'”’`]?(?:\s*=(?!=|>)|\s+(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|will\s+be|has\s+been|have\s+been)\s+(?!(?:"
+    r"(?:(?:named|called)\s+)?[\"'“‘`]?[A-Za-z_][A-Za-z0-9_]*[\"'”’`]?(?:\s*=(?!=|>)|\s+(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|will\s+be|has\s+been|have\s+been)\s+(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
     + r"))\S+|\s+(?:value\s*)?(?:=(?!=|>)|:)\s*(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
@@ -94,10 +94,19 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     re.IGNORECASE,
 )
 _PATH_DECLARATION_LINKER = r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
-_PATH_DECLARATION = r"\b" + _PATH_LABEL + r"(?:\s+value)?\s*" + _PATH_DECLARATION_LINKER
+_PATH_DECLARATION_QUALIFIER = r"(?:\s+(?:for|of)\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*))?"
+_PATH_DECLARATION = (
+    r"\b" + _PATH_LABEL + r"(?:\s+value)?" + _PATH_DECLARATION_QUALIFIER + r"\s*" + _PATH_DECLARATION_LINKER
+)
 _ROOTED_PATH = re.compile(r"(?<![\w.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[\w.~-])")
 _EXPLICIT_TERMINAL_PATH = re.compile(
-    r"\b(?:home\s+directory|" + _PATH_LABEL + r")(?:\s+value)?\s*" + _PATH_DECLARATION_LINKER + r"\s*[\"'“‘`()\[{]*\s*"
+    r"\b(?:home\s+directory|"
+    + _PATH_LABEL
+    + r")(?:\s+value)?"
+    + _PATH_DECLARATION_QUALIFIER
+    + r"\s*"
+    + _PATH_DECLARATION_LINKER
+    + r"\s*[\"'“‘`()\[{]*\s*"
     r"(?:~|/|\\|\.{1,2})(?=$|[\s,;!?\"'”’)\]}])",
     re.IGNORECASE,
 )
@@ -219,8 +228,7 @@ _PATH_CONTEXT = re.compile(
     + _PATH_LABEL
     + r")\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?"
-    r"[\"'“‘]*\s*(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?|"
-    r"\b" + _PATH_LABEL + r"(?:\s+value)?\s*" + _PATH_DECLARATION_LINKER + r"\s*)[\"'“‘`()\[{]*\s*$",
+    r"[\"'“‘]*\s*(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?|" + _PATH_DECLARATION + r"\s*)[\"'“‘`()\[{]*\s*$",
     re.IGNORECASE,
 )
 _EXPLICIT_NAVIGATION_CONTEXT = re.compile(
@@ -244,8 +252,7 @@ _QUOTED_PATH_CONTEXT = re.compile(
 )
 _SPACED_PATH_CONTEXT = re.compile(
     r"(?:\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store)\s+"
-    r"(?:(?:from|at|in|to|into|under)\s+)?|"
-    r"\b" + _PATH_LABEL + r"(?:\s+value)?\s*" + _PATH_DECLARATION_LINKER + r"\s+)"
+    r"(?:(?:from|at|in|to|into|under)\s+)?|" + _PATH_DECLARATION + r"\s+)"
     r"(?:[A-Za-z0-9_.~-]+\s+)+$",
     re.IGNORECASE,
 )
