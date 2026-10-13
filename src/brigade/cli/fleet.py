@@ -1674,16 +1674,16 @@ def _dispatch_flush(args: argparse.Namespace) -> int:
     from .. import fleet_client, fleet_client_messages
 
     node_id = fleet_client.resolve_node_id()
-    event_error: fleet_client.FleetClientError | None = None
+    event_error: fleet_client.FleetClientError | OSError | None = None
     try:
         events = fleet_client.flush_spool(node_id)
-    except fleet_client.FleetClientError as exc:
+    except (fleet_client.FleetClientError, OSError) as exc:
         events = 0
         event_error = exc
-    message_error: fleet_client.FleetClientError | None = None
+    message_error: fleet_client.FleetClientError | OSError | None = None
     try:
         messages = fleet_client_messages.flush(node_id)
-    except fleet_client.FleetClientError as exc:
+    except (fleet_client.FleetClientError, OSError) as exc:
         messages = 0
         message_error = exc
     if event_error is not None:
