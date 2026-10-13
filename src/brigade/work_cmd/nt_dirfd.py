@@ -132,10 +132,12 @@ class _FILE_DISPOSITION_INFORMATION(ctypes.Structure):
 
 
 def _make_unicode(name: str) -> tuple[_UNICODE_STRING, Any]:
+    encoded = name.encode("utf-16-le", errors="surrogatepass")
     buf = ctypes.create_unicode_buffer(name)
     us = _UNICODE_STRING()
-    us.Length = len(name) * 2
-    us.MaximumLength = len(buf) * 2
+    # NT counts UTF-16 bytes. Non-BMP characters occupy two code units.
+    us.Length = len(encoded)
+    us.MaximumLength = len(encoded) + 2
     us.Buffer = ctypes.cast(buf, wintypes.LPWSTR)
     return us, buf
 
@@ -656,7 +658,7 @@ def _nt_set_info(api: Any, handle: Any, info: Any, length: int, klass: int, *, n
 
 def _rename_information(api: Any, parent: int, destination: str, *, replace: bool) -> tuple[Any, int]:
     encoded = destination.encode("utf-16-le")
-    nchars = len(destination)
+    nchars = len(encoded) // 2
     rename_class = api.make_rename_class(nchars)
     info = rename_class()
     info.ReplaceIfExists = bool(replace)

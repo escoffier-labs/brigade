@@ -395,14 +395,25 @@ def test_native_skills_long_unicode_tree_can_read_replace_append_and_remove(tmp_
 
 
 @native_windows
-def test_native_skills_import_install_history_inbox_pack_lifecycle(tmp_path, capsys):
+@pytest.mark.parametrize(
+    "nested, filename", [("nested", "資料.txt"), ("nested-😀", "helper-🚀.txt")], ids=["bmp", "nonbmp"]
+)
+def test_native_skills_import_install_history_inbox_pack_lifecycle(tmp_path, capsys, nested, filename):
     source = _write_skill(tmp_path / "source")
-    (source / "scripts" / "nested").mkdir(parents=True)
-    (source / "scripts" / "nested" / "資料.txt").write_bytes(b"script data\n")
+    (source / "scripts" / nested).mkdir(parents=True)
+    (source / "scripts" / nested / filename).write_bytes(b"script data\n")
+    expected_scripts = {("scripts", nested, filename): b"script data\n"}
     assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
     capsys.readouterr()
+    assert skills_cmd.lint(target=tmp_path, skill="registry:security-review", json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["valid"] is True
     assert skills_cmd.install(workspace=tmp_path, skill="security-review", harness="mcp", json_output=True) == 0
     capsys.readouterr()
+    with skills_cmd._held_state_root(tmp_path, writable=False) as anchor:
+        for location in ("registry", "mcp-resources"):
+            dirs, files = skills_cmd._read_tree_from_anchor(anchor, "skills", location, "security-review")
+            assert ("scripts", nested) in dirs
+            assert {parts: data for parts, data in files.items() if parts[0] == "scripts"} == expected_scripts
     assert skills_cmd.history(target=tmp_path, json_output=True) == 0
     assert json.loads(capsys.readouterr().out)["count"] == 1
     assert skills_cmd.inbox_add(target=tmp_path, source=source, json_output=True) == 0
@@ -420,9 +431,143 @@ def test_native_skills_import_install_history_inbox_pack_lifecycle(tmp_path, cap
     archive = tmp_path / ".brigade" / "skills" / "packs-archive" / pack
     assert skills_cmd.pack_import(target=tmp_path, pack=archive, force=True, json_output=True) == 0
     capsys.readouterr()
-    assert (
-        tmp_path / ".brigade" / "skills" / "registry" / "security-review" / "scripts" / "nested" / "資料.txt"
-    ).read_bytes() == b"script data\n"
+    with skills_cmd._held_state_root(tmp_path, writable=False) as anchor:
+        _dirs, files = skills_cmd._read_tree_from_anchor(anchor, "skills", "registry", "security-review")
+        assert {parts: data for parts, data in files.items() if parts[0] == "scripts"} == expected_scripts
     assert skills_cmd.uninstall(workspace=tmp_path, skill="security-review", harness="mcp", json_output=True) == 0
     capsys.readouterr()
     assert not (tmp_path / ".brigade" / "skills" / "mcp-resources" / "security-review").exists()
+
+
+@native_windows
+@pytest.mark.parametrize("directory", [False, True], ids=["file", "directory"])
+def test_native_dirfd_nonbmp_child_lookup_and_enumeration(tmp_path, directory):
+    name = "child-😀"
+    child = tmp_path / name
+    if directory:
+        child.mkdir()
+        (child / "data.txt").write_bytes(b"child data\n")
+    else:
+        child.write_bytes(b"child data\n")
+    with ExitStack() as stack:
+        parent = dirfd.open_directory_nofollow(tmp_path, writable=False)
+        stack.callback(os.close, parent)
+        assert dirfd.child_names(parent, 10) == [name]
+        metadata = dirfd.stat_child(parent, name)
+        assert stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(metadata.st_mode)
+        if directory:
+            held = dirfd.open_child_directory(parent, name, writable=False)
+            stack.callback(os.close, held)
+            assert dirfd.child_names(held, 10) == ["data.txt"]
+            fd = dirfd.open_child_file(held, "data.txt", os.O_RDONLY | os.O_BINARY)
+        else:
+            fd = dirfd.open_child_file(parent, name, os.O_RDONLY | os.O_BINARY)
+        stack.callback(os.close, fd)
+        assert os.read(fd, 100) == b"child data\n"
+    for closed in (parent, fd):
+        with pytest.raises(OSError):
+            os.fstat(closed)
+
+
+@native_windows
+def test_native_dirfd_rename_to_and_from_nonbmp_destination(tmp_path):
+    (tmp_path / "source.txt").write_bytes(b"rename data\n")
+    destination = "renamed-😀🚀.txt"
+    with ExitStack() as stack:
+        parent = dirfd.open_directory_nofollow(tmp_path)
+        stack.callback(os.close, parent)
+        for source, target in (("source.txt", destination), (destination, "restored.txt")):
+            dirfd.replace_children(parent, source, target)
+            assert dirfd.child_names(parent, 10) == [target]
+            assert not (tmp_path / source).exists()
+            assert (tmp_path / target).read_bytes() == b"rename data\n"
+            fd = dirfd.open_child_file(parent, target, os.O_RDONLY | os.O_BINARY)
+            try:
+                assert os.read(fd, 100) == b"rename data\n"
+            finally:
+                os.close(fd)
+    with pytest.raises(OSError):
+        os.fstat(parent)
+
+
+@native_windows
+def test_native_dirfd_lone_surrogate_child_lookup(tmp_path):
+    name = "child-\ud800.txt"
+    (tmp_path / name).write_bytes(b"child data\n")
+    parent = dirfd.open_directory_nofollow(tmp_path, writable=False)
+    try:
+        fd = dirfd.open_child_file(parent, name, os.O_RDONLY | os.O_BINARY)
+        try:
+            assert os.read(fd, 100) == b"child data\n"
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent)
+
+
+@contextmanager
+def _outcome_state_path_probes(monkeypatch, state):
+    """Observe real pathname metadata calls, leaving descriptor calls alone."""
+    probes = []
+
+    def observe(operation, original):
+        def call(path, *args, **kwargs):
+            if not isinstance(path, int) and kwargs.get("follow_symlinks", True):
+                candidate = Path(os.fsdecode(path))
+                if candidate.is_relative_to(state):
+                    probes.append((operation, str(candidate)))
+            return original(path, *args, **kwargs)
+
+        return call
+
+    with monkeypatch.context() as patch:
+        for operation in ("stat", "scandir", "access"):
+            patch.setattr(os, operation, observe(operation, getattr(os, operation)))
+        # Native Python also uses direct Windows metadata APIs for these helpers.
+        for operation in ("exists", "isdir"):
+            patch.setattr(os.path, operation, observe(operation, getattr(os.path, operation)))
+        yield probes
+
+
+@native_windows
+@pytest.mark.parametrize("junction", ["root", "skills"])
+@pytest.mark.parametrize("operation", ["names", "artifact"])
+def test_native_outcome_discovery_never_walks_state_junction(tmp_path, monkeypatch, junction, operation):
+    workspace = tmp_path / "workspace"
+    harness = workspace / ".codex" / "skills" / "local-skill" / "SKILL.md"
+    harness.parent.mkdir(parents=True)
+    harness.write_bytes(b"local harness skill\n")
+    state = workspace / ".brigade"
+    outside = tmp_path / "outside"
+    outside_skills = outside / "skills" if junction == "root" else outside
+    foreign = outside_skills / "outside-only" / "SKILL.md"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_bytes(b"outside content\n")
+    link = state if junction == "root" else state / "skills"
+    link.parent.mkdir(exist_ok=True)
+    with _reparse_replacement_setup(link):
+        _link_directory(link, outside)
+    assert link.resolve() == outside.resolve(), "junction must redirect before discovery starts"
+    with _read_only_directory_acl(workspace), _outcome_state_path_probes(monkeypatch, state) as probes:
+        if operation == "names":
+            assert outcome_discovery._skill_names_at(workspace) == {"local-skill"}
+        else:
+            assert outcome_discovery._artifact_content_path_at(workspace, "outside-only") is None
+            assert outcome_discovery._artifact_content_path_at(workspace, "local-skill") == harness
+    assert not probes, f"state pathname metadata lookup through a live junction: {probes}"
+    assert foreign.read_bytes() == b"outside content\n"
+
+
+@native_windows
+@pytest.mark.parametrize("present", [False, True], ids=["missing", "registry"])
+def test_native_outcome_discovery_uses_read_only_state_anchor(tmp_path, monkeypatch, present):
+    state = tmp_path / ".brigade"
+    skill = state / "skills" / "registry" / "registry-only" / "SKILL.md"
+    if present:
+        skill.parent.mkdir(parents=True)
+        skill.write_bytes(b"registry skill\n")
+    with _read_only_directory_acl(tmp_path), _outcome_state_path_probes(monkeypatch, state) as probes:
+        assert outcome_discovery._skill_names_at(tmp_path) == ({"registry-only"} if present else set())
+        assert outcome_discovery._artifact_content_path_at(tmp_path, "registry-only") == (skill if present else None)
+    assert not probes, f"state inspection must use the held descriptor: {probes}"
+    assert state.exists() is present
