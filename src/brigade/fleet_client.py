@@ -918,7 +918,6 @@ def report_event(
                 _LOG.warning("interrupted fleet event could not be made durable in the spool: %s", exc)
     except Exception as exc:
         _LOG.warning("fleet event was not delivered and could not be spooled: %s", exc)
-        return False
     if interrupted is not None:
         raise interrupted
     return delivered

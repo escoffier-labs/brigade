@@ -321,3 +321,15 @@ class TestSpoolPathFallbackWithoutDirFd:
         monkeypatch.setattr(fleet_client, "_spool_append_locked", lambda *_args, **_kwargs: False)
         with pytest.raises(KeyboardInterrupt):
             fleet_client.report_event({"run_id": "r1", "state": "run.started"})
+
+    def test_report_event_propagates_interrupt_when_spool_setup_fails(self, home, monkeypatch):
+        def interrupt(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+        def fail_spool_setup(*_args, **_kwargs):
+            raise fleet_client.FleetClientError("simulated spool setup failure")
+
+        monkeypatch.setattr(fleet_client, "_post_events", interrupt)
+        monkeypatch.setattr(fleet_client, "_ensure_private_dir", fail_spool_setup)
+        with pytest.raises(KeyboardInterrupt):
+            fleet_client.report_event({"run_id": "r1", "state": "run.started"})
