@@ -21,11 +21,12 @@ _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _PROVIDER_MODEL = re.compile(r"^[A-Za-z0-9_-]+/[A-Za-z0-9._:-]+$")
 _DANGEROUS_VALUE = re.compile(
     r"(?:(?<![A-Za-z0-9_])sk_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
-    r"\bBearer\s+\S+|\bBasic\s+[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
+    r"\bBearer\s+\S+|\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
+    r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
     r"(?<![A-Za-z0-9])[A-Z_][A-Z0-9_]*\s*=|"
     r"\bauth(?:entication)?[ _-]profile(?:\s*[:=]\s*|\s+)"
-    r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\])|"
-    r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\])\s+auth(?:entication)?[ _-]profile\b|"
+    r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
+    r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))\s+auth(?:entication)?[ _-]profile\b|"
     r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:[/\\]|%USERPROFILE%))",
@@ -138,7 +139,7 @@ def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, An
     return result
 
 
-def _text(value: Any, field: str) -> str:
+def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     if not isinstance(value, str) or not value.strip():
         raise MasterRosterError(f"{field} must be a non-empty string")
     if _SURROGATE.search(value):
@@ -148,10 +149,15 @@ def _text(value: Any, field: str) -> str:
     if (
         _DANGEROUS_VALUE.search(value)
         or contains_credential(value)
-        or _ROOTED_PATH.search(_HTTP_URL.sub("", value))
-        or _has_relative_path_evidence(
-            value,
-            provider_model=field.endswith(".model") and _PROVIDER_MODEL.fullmatch(value) is not None,
+        or (
+            check_paths
+            and (
+                _ROOTED_PATH.search(_HTTP_URL.sub("", value))
+                or _has_relative_path_evidence(
+                    value,
+                    provider_model=field.endswith(".model") and _PROVIDER_MODEL.fullmatch(value) is not None,
+                )
+            )
         )
     ):
         raise MasterRosterError(f"{field} contains a credential, environment assignment, or home path")
@@ -207,7 +213,7 @@ def parse(raw: Mapping[str, Any] | bytes | str) -> dict[str, Any]:
         if not isinstance(raw_seat, Mapping):
             raise MasterRosterError(f"{where} must be an object")
         _unknown_fields(raw_seat, _SEAT_FIELDS, where)
-        name = _text(raw_seat.get("name"), f"{where}.name")
+        name = _text(raw_seat.get("name"), f"{where}.name", check_paths=False)
         cli = _text(raw_seat.get("cli"), f"{where}.cli")
         model = _text(raw_seat.get("model"), f"{where}.model")
         purpose = _text(raw_seat.get("purpose"), f"{where}.purpose")
@@ -233,7 +239,9 @@ def parse(raw: Mapping[str, Any] | bytes | str) -> dict[str, Any]:
                 "model": model,
                 "purpose": purpose,
                 "caveats": [_text(item, f"{where}.caveats[{i}]") for i, item in enumerate(caveats)],
-                "fallbacks": [_text(item, f"{where}.fallbacks[{i}]") for i, item in enumerate(fallbacks)],
+                "fallbacks": [
+                    _text(item, f"{where}.fallbacks[{i}]", check_paths=False) for i, item in enumerate(fallbacks)
+                ],
                 "enabled": raw_seat["enabled"],
             }
         )

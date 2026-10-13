@@ -96,6 +96,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Use auth profile 'production-admin'.",
         "Use auth profile `production-admin`.",
         "Use auth profile [production-admin].",
+        "Auth profile (production-admin).",
         "Use auth profile: production-admin",
         "Use auth-profile production-admin",
         "Use auth_profile production-admin",
@@ -120,6 +121,8 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Run CI/CD workflows",
         "Read input/output formats",
         "Read e.g., the guide",
+        "Basic code review",
+        "Use basic mode",
     ],
 )
 def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> None:
@@ -136,6 +139,20 @@ def test_parse_rejects_standalone_sensitive_file_names(text: str) -> None:
 
     with pytest.raises(fleet_master_roster.MasterRosterError):
         fleet_master_roster.parse(document)
+
+
+def test_parse_accepts_dotted_seat_names_and_fallbacks() -> None:
+    document = _document()
+    seats = document["seats"]
+    assert isinstance(seats, list)
+    seats[0]["name"] = "builder.prod"
+    seats[0]["fallbacks"] = ["reviewer.prod"]
+    seats[1]["name"] = "reviewer.prod"
+
+    parsed = fleet_master_roster.parse(document)
+
+    assert parsed["seats"][0]["name"] == "builder.prod"
+    assert parsed["seats"][0]["fallbacks"] == ["reviewer.prod"]
 
 
 def test_parse_rejects_fine_grained_github_pat() -> None:
