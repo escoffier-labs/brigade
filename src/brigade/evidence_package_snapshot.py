@@ -33,6 +33,8 @@ _SOURCE_KEYS = frozenset(
 )
 _ENTRY_KEYS = frozenset({"path", "sha256", "bytes", "media_type", "kind"})
 _LIMITATIONS = ["receipt-contains-local-paths", "integrity-only"]
+# Export and standalone package verification accept legacy schema-v1 receipts.
+_SUPPORTED_RECEIPT_SCHEMA_VERSIONS = frozenset({1, 2})
 _ALLOWED = {name: (kind, media_type) for name, kind, media_type in evidence_package.PACKAGE_FILES}
 _PACKAGE_NAMES = frozenset({"manifest.json", *_ALLOWED})
 MAX_PACKAGE_BYTES = _MANIFEST_MAX_BYTES + sum(
@@ -342,7 +344,7 @@ def _validate_receipt(data: bytes, source: dict[str, Any]) -> str:
     if (
         not isinstance(parsed, dict)
         or type(parsed.get("schema_version")) is not int
-        or parsed["schema_version"] != 2
+        or parsed["schema_version"] not in _SUPPORTED_RECEIPT_SCHEMA_VERSIONS
         or not _is_run_id(parsed.get("run_id"), nullable=False)
     ):
         _error("malformed")

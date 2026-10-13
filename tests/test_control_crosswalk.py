@@ -523,10 +523,14 @@ def test_ec11_parses_multiline_index_jsonl(tmp_path):
 
 
 def _write_strict_package(
-    package_dir: Path, *, producer_run_id: str | None = RUN, verify_run_id: str = "verify-a"
+    package_dir: Path,
+    *,
+    producer_run_id: str | None = RUN,
+    verify_run_id: str = "verify-a",
+    receipt_schema_version: int = 2,
 ) -> None:
     receipt: dict = {
-        "schema_version": 2,
+        "schema_version": receipt_schema_version,
         "run_id": verify_run_id,
         "producer_run_id": producer_run_id,
         "tree_fingerprint": "1" * 40,
@@ -604,6 +608,17 @@ def test_ec12_strict_package_snapshot_validates_and_rejects_tampering(tmp_path):
     ]
     assert all(m["state"] == "evidenced_failed" for m in ec12_rows), [m["state"] for m in ec12_rows]
     assert evaluated["evidence_readiness"]["EC-12"]["reason"] == "package_snapshot_mismatch"
+
+
+def test_ec12_accepts_export_supported_legacy_receipt_schema(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-legacy"
+    _write_strict_package(package_dir, receipt_schema_version=1)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "validated"
+    assert readiness["artifacts"][0]["outcome"] == "validated"
 
 
 def test_ec12_rejects_stale_stored_receipt_digest_as_package_mismatch(tmp_path):
