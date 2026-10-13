@@ -1355,18 +1355,25 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
     out = _Discovery(truncated=truncated)
     _record_discovery_error(out, ctx, root, error)
     adapter = _VERIFIER_ADAPTERS.get("evidence-package")
-    package_dirs = ([root] if error is None and _discovery_path_present(ctx, out, root / "manifest.json") else []) + [
-        child for child in children if _discovery_path_present(ctx, out, child, directory=True)
-    ]
-    manifest_reserve = (
-        evidence_package_snapshot.MAX_PACKAGE_BYTES * len(package_dirs) if adapter is _verify_evidence_package else 0
-    )
+    strict_adapter = adapter is _verify_evidence_package
+    package_dirs: list[Path] = []
+    reservable_package_count = 0
+    if error is None and _discovery_path_present(ctx, out, root / "manifest.json"):
+        package_dirs.append(root)
+        reservable_package_count += 1
+    for child in children:
+        if strict_adapter and _is_symlink(ctx, child):
+            package_dirs.append(child)
+        elif _discovery_path_present(ctx, out, child, directory=True):
+            package_dirs.append(child)
+            reservable_package_count += 1
+    manifest_reserve = evidence_package_snapshot.MAX_PACKAGE_BYTES * reservable_package_count if strict_adapter else 0
     for package_dir in package_dirs:
         path = package_dir / "manifest.json"
-        if not _discovery_path_present(ctx, out, path):
+        linked = _is_symlink(ctx, package_dir) or _is_symlink(ctx, path)
+        if not linked and not _discovery_path_present(ctx, out, path):
             continue
         relpath = _relpath(ctx, path)
-        linked = _is_symlink(ctx, package_dir) or _is_symlink(ctx, path)
         manifest = None if linked else _read_json_object(ctx, path, reserve_bytes=manifest_reserve)
         if _is_symlink(ctx, package_dir) or _is_symlink(ctx, path):
             if adapter is _verify_evidence_package:
