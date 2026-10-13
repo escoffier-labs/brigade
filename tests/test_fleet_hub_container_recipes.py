@@ -1,5 +1,7 @@
 import importlib.util
 import re
+import subprocess
+import sys
 import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,6 +94,32 @@ def test_compose_runbook_pins_the_built_local_image_id():
     assert "secrets/compose.image-id.yaml up -d --no-build" in runbook
     assert "Docker Engine 28.0.0 or newer" in runbook
     assert "docker version --format '{{.Server.Version}}'" in runbook
+    assert 're.fullmatch(r"(\\d+)\\.(\\d+)\\.(\\d+)", sys.argv[1])' in runbook
+    assert 're.match(r"^(\\d+)\\.(\\d+)\\.(\\d+)", sys.argv[1])' not in runbook
+
+
+@pytest.mark.parametrize(
+    ("version", "accepted"),
+    [
+        ("27.9.9", False),
+        ("28.0.0-rc.1", False),
+        ("28.0.0-beta.1", False),
+        ("28.0.0", True),
+        ("28.0.1", True),
+    ],
+)
+def test_compose_runbook_version_check_rejects_prereleases(version, accepted):
+    runbook = (ROOT / "docs" / "runbooks" / "fleet-hub-containers.md").read_text()
+    match = re.search(r"python -c '([^']+)' \"\$engine_version\"", runbook)
+    assert match is not None
+
+    result = subprocess.run(
+        [sys.executable, "-c", match.group(1), version],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is accepted, result.stderr
 
 
 def test_quadlet_runbook_archives_and_restores_the_recorded_image():
@@ -101,6 +129,8 @@ def test_quadlet_runbook_archives_and_restores_the_recorded_image():
     assert 'podman image load --input "$archive"' in runbook
     assert 'test "$restored_id" = "$previous_id"' in runbook
     assert "REPLACE_WITH_RECORDED_DIGEST" in runbook
+    assert runbook.count("systemctl --user restart brigade-fleet.service") == 2
+    assert "systemctl --user start brigade-fleet.service" not in runbook
 
 
 def test_quadlet_recipe_has_equivalent_persistence_health_and_restart_policy():

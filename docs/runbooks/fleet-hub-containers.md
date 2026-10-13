@@ -41,7 +41,7 @@ hosts on the same layer-2 network. Check the server version before deployment:
 
 ```bash
 engine_version="$(docker version --format '{{.Server.Version}}')"
-python -c 'import re,sys; m=re.match(r"^(\d+)\.(\d+)\.(\d+)", sys.argv[1]); assert m and tuple(map(int, m.groups())) >= (28, 0, 0), f"Docker Engine 28.0.0 or newer is required, found {sys.argv[1]}"' "$engine_version"
+python -c 'import re,sys; m=re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", sys.argv[1]); assert m and tuple(map(int, m.groups())) >= (28, 0, 0), f"Docker Engine 28.0.0 or newer is required, found {sys.argv[1]}"' "$engine_version"
 ```
 
 Create a random token without putting it in command arguments, then protect the
@@ -149,7 +149,7 @@ chmod 0644 ~/.config/containers/systemd/brigade-fleet.container
 install -m 0644 ops/fleet-hub/quadlet/brigade-fleet.volume \
   ~/.config/containers/systemd/
 systemctl --user daemon-reload
-systemctl --user start brigade-fleet.service
+systemctl --user restart brigade-fleet.service
 curl --fail http://127.0.0.1:3774/health
 ```
 
@@ -189,14 +189,15 @@ sed "s|REPLACE_WITH_RECORDED_DIGEST|${previous_digest}|" \
   > "$HOME/.config/containers/systemd/brigade-fleet.container"
 chmod 0644 "$HOME/.config/containers/systemd/brigade-fleet.container"
 systemctl --user daemon-reload
-systemctl --user start brigade-fleet.service
+systemctl --user restart brigade-fleet.service
 ```
 
 Rootless UID mapping must make volume UID 10001 writable; the volume Quadlet
 declares owner UID and group GID. Confirm it on the target Podman version before
-use. Quadlet generates this service, so start it with `systemctl --user start`;
-do not enable the generated unit directly. Its `[Install]` section supplies the
-generator's startup wiring.
+use. Quadlet generates this service, so start or update it with
+`systemctl --user restart`; restart starts an inactive service and reloads an
+active one. Do not enable the generated unit directly. Its `[Install]` section
+supplies the generator's startup wiring.
 Podman Compose is not Podman's Compose implementation: it invokes an external
 provider such as `docker-compose` or `podman-compose`. On Docker/Podman Desktop,
 containers and named volumes live inside its Linux VM, so backup and restore
