@@ -74,13 +74,6 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
             subject="unknown",
             reason="receipt_digest_mismatch",
         )
-    if (
-        type(snapshot.receipt.get("schema_version")) is not int
-        or snapshot.receipt.get("schema_version") != receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION
-    ):
-        return control_readiness.ArtifactObservation(
-            relpath, "discovered", "invalid", control_readiness.dims(), ["schema_missing"]
-        )
     if snapshot.receipt.get("run_id") != bundle_path.parent.name:
         return _observation(
             relpath,
@@ -158,6 +151,20 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
             signature=("failed", "signature_mismatch"),
             subject="passed",
             reason="signature_mismatch",
+            source_digest=digest,
+        )
+    if (
+        type(snapshot.receipt.get("schema_version")) is not int
+        or snapshot.receipt.get("schema_version") != receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION
+    ):
+        return _observation(
+            relpath,
+            "invalid",
+            integrity="passed",
+            signature="passed",
+            authorization="passed",
+            subject="passed",
+            reason="schema_missing",
             source_digest=digest,
         )
 

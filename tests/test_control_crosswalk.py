@@ -543,6 +543,31 @@ def test_ec12_strict_package_snapshot_validates_and_rejects_tampering(tmp_path):
     assert evaluated["evidence_readiness"]["EC-12"]["reason"] == "package_snapshot_mismatch"
 
 
+def test_ec12_rejects_stale_stored_receipt_digest_as_package_mismatch(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+
+    receipt_path = package_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["status"] = "failed"
+    _write_json(receipt_path, receipt)
+
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    receipt_entry = next(entry for entry in manifest["entries"] if entry["path"] == "receipt.json")
+    receipt_bytes = receipt_path.read_bytes()
+    receipt_entry["bytes"] = len(receipt_bytes)
+    receipt_entry["sha256"] = hashlib.sha256(receipt_bytes).hexdigest()
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    _write_json(manifest_path, manifest)
+
+    result = _assess(target, "EC-12")
+
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "package_snapshot_mismatch"
+
+
 def test_ec12_reserves_manifest_reads_for_the_discovered_package_population(tmp_path, monkeypatch):
     target = _ws(tmp_path)
     package_root = target / ".brigade" / "evidence-packages"
@@ -1349,6 +1374,40 @@ def test_ec03_rejects_unsupported_receipt_schema(tmp_path, schema_version):
     else:
         receipt["schema_version"] = schema_version
     _write_json(receipt_path, receipt)
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "signature_mismatch"
+
+
+@pytest.mark.parametrize("schema_version", [None, 2.0, 999])
+def test_ec03_invalidates_authenticated_unsupported_receipt_schema(tmp_path, monkeypatch, schema_version):
+    from brigade import control_crosswalk_cosign
+
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if schema_version is None:
+        receipt.pop("schema_version")
+    else:
+        receipt["schema_version"] = schema_version
+    _write_json(receipt_path, receipt)
+
+    bundle_path = run_dir / "attestation.sigstore.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    statement = attestation.build_statement(receipt)
+    bundle["dsseEnvelope"]["payload"] = base64.b64encode(attestation.canonical_statement_bytes(statement)).decode(
+        "ascii"
+    )
+    _write_json(bundle_path, bundle)
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+    monkeypatch.setattr(
+        control_crosswalk_cosign.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 0})(),
+    )
 
     result = _assess(target, "EC-03")
 
