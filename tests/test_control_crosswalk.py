@@ -525,6 +525,22 @@ def test_ec12_strict_package_snapshot_validates_and_rejects_tampering(tmp_path):
     assert evaluated["evidence_readiness"]["EC-12"]["reason"] == "package_snapshot_mismatch"
 
 
+def test_ec12_reserves_manifest_reads_after_large_package_staging(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_root = target / ".brigade" / "evidence-packages"
+    first = package_root / "pkg-1"
+    second = package_root / "pkg-2"
+    _write_strict_package(first)
+    _write_strict_package(second)
+    (first / "changes.patch").write_bytes(b"p" * 8192)
+    monkeypatch.setattr(control_crosswalk, "_ASSESSMENT_BYTE_BUDGET", 4096)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+    assert readiness["artifacts"][1]["outcome"] == "validated"
+
+
 def test_ec12_valid_package_ignores_symlinked_public_trust_file(tmp_path):
     target = _ws(tmp_path)
     package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"

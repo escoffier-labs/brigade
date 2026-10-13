@@ -1373,17 +1373,17 @@ def _evaluate_verify_archive_index_exists(ctx: _Context) -> _Discovery:
 def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
     """EC-12: evidence package manifests staged under ``.brigade/evidence-packages/``.
 
-    `brigade receipts export package --out` accepts any path, so discovery covers two
-    bounded staging locations: ``.brigade/evidence-packages/manifest.json``
-    (the root itself was the output) and ``<package>/manifest.json`` one level
-    down.  Deeper nesting is not discovered.  The strict package snapshot
-    validates captured entry bytes and rederives the source receipt digest.
+    `brigade receipts export package --out` accepts any output path, so discover
+    ``manifest.json`` at the root and one level below. Deeper nesting is not
+    discovered. The strict snapshot validates captured bytes and rederives the
+    source receipt digest.
     """
     root = ctx.target / ".brigade" / "evidence-packages"
     children, truncated, error = _bounded_children(ctx, root)
     out = _Discovery(truncated=truncated)
     _record_discovery_error(out, ctx, root, error)
     adapter = _VERIFIER_ADAPTERS.get("evidence-package")
+    manifest_reserve = evidence_package_snapshot.MAX_PACKAGE_BYTES if adapter is _verify_evidence_package else 0
     package_dirs = ([root] if error is None and _discovery_path_present(ctx, out, root / "manifest.json") else []) + [
         child for child in children if _discovery_path_present(ctx, out, child, directory=True)
     ]
@@ -1392,7 +1392,8 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
         if not _discovery_path_present(ctx, out, path):
             continue
         relpath = _relpath(ctx, path)
-        manifest = None if (_is_symlink(ctx, package_dir) or _is_symlink(ctx, path)) else _read_json_object(ctx, path)
+        linked = _is_symlink(ctx, package_dir) or _is_symlink(ctx, path)
+        manifest = None if linked else _read_json_object(ctx, path, reserve_bytes=manifest_reserve)
         if _is_symlink(ctx, package_dir) or _is_symlink(ctx, path):
             obs = _invalid(ctx, path, "symlink_refused")
         elif manifest is None:
