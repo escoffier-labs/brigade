@@ -20,7 +20,7 @@ _SEAT_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _PROVIDER_MODEL = re.compile(r"^[A-Za-z0-9_-]+/(?:[A-Za-z0-9._:-]+/)*[A-Za-z0-9._:-]+$")
 _DANGEROUS_VALUE = re.compile(
-    r"(?:(?<![A-Za-z0-9_])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
+    r"(?:(?<![A-Za-z0-9_])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|(?<![A-Za-z0-9_])xapp-[A-Za-z0-9-]{12,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
     r"\bBearer\s+\S+|\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
     r"(?<![A-Za-z0-9])[A-Z_][A-Z0-9_]*\s*=|"
@@ -108,10 +108,11 @@ def _has_relative_path_evidence(value: str, *, provider_model: bool = False) -> 
     path_text = _HTTP_URL.sub("", value)
     for match in _STANDALONE_FILE.finditer(path_text):
         filename = match.group("file").rstrip(".,;:!?")
+        sensitive_name = filename.casefold() in _EXTENSIONLESS_FILES | _PRIVATE_KEY_FILES | {"credentials"}
+        suffix_match = _FILE_SUFFIX.search(filename)
+        trailing_text = path_text[match.end() :].strip(" .,;:!?")
         file_like = (
-            filename.startswith(".")
-            or filename.casefold() in _EXTENSIONLESS_FILES | _PRIVATE_KEY_FILES | {"credentials"}
-            or _FILE_SUFFIX.search(filename)
+            filename.startswith(".") or sensitive_name or (suffix_match and (not trailing_text or sensitive_name))
         )
         standalone = path_text.strip().rstrip(".,;:!?") == filename
         if file_like and (_PATH_CONTEXT.search(path_text[: match.start()]) or standalone):
