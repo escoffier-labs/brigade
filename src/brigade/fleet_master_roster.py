@@ -27,7 +27,7 @@ _EXPLANATORY_SECRET_VALUE = (
     r"confidential|managed(?:\s+by\s+Vault)?|provided|stored(?:\s+securely)?|encrypted|protected|"
     r"handled|generated|rotated|masked|redacted)(?!\s+(?:as|to|with)\b)(?=$|\s|[.,;!?](?:\s|$))"
 )
-_DANGEROUS_VALUE = re.compile(
+_DANGEROUS_VALUE_PATTERN = (
     r"(?:(?<![A-Za-z0-9_])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|(?<![A-Za-z0-9_])xapp-[A-Za-z0-9-]{12,}|(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{20,}|(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{36}\b|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Bearer\s+\S+|\bBearer\s+[A-Za-z0-9._~+/-]{20,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
@@ -63,9 +63,9 @@ _DANGEROUS_VALUE = re.compile(
     r"(?:to|as|with)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:(?:[/\\]|[^\s])|%[A-Za-z_][A-Za-z0-9_]*%|"
     r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][^}]*\})"
-    r"(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))",
-    re.IGNORECASE,
+    r"(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))"
 )
+_DANGEROUS_VALUE = re.compile(_DANGEROUS_VALUE_PATTERN.replace(r"used\s+by", r"used\s+(?:by|on)"), re.IGNORECASE)
 _PATH_LABEL = r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositor(?:y|ies)|repos?|locations?)"
 _QUOTED_PROTECTED_LABEL = re.compile(
     r"[\"'“‘`](?P<label>passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|"
@@ -133,7 +133,32 @@ _HTTP_METHOD_ROUTE_CONTEXT = re.compile(
     r"(?P<path>/(?:[A-Za-z0-9._~%-]+(?:/[A-Za-z0-9._~%-]+)*)(?:\?[^\s<>\"']*)?)"
 )
 _HTTP_METHOD_ROUTE_ROOTS = frozenset({"applications", "config", "users"})
-_COMMON_API_RESOURCE_COMPONENTS = frozenset({"cache", "project", "run"})
+_FILESYSTEM_ROUTE_ROOTS = frozenset(
+    {
+        "applications",
+        "bin",
+        "boot",
+        "dev",
+        "etc",
+        "home",
+        "lib",
+        "lib64",
+        "media",
+        "mnt",
+        "opt",
+        "private",
+        "proc",
+        "root",
+        "sbin",
+        "srv",
+        "sys",
+        "system",
+        "tmp",
+        "usr",
+        "var",
+        "volumes",
+    }
+)
 _HTTP_URL = re.compile(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE)
 
 
@@ -195,6 +220,7 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
 def _has_disallowed_api_route_query(value: str) -> bool:
     routes = (*_API_ROUTE_CONTEXT.finditer(value), *_HTTP_METHOD_ROUTE_CONTEXT.finditer(value))
     for match in routes:
+        method_route = re.match(r"(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)\s+", match.group(), re.I)
         route = match.group("path")
         route_path, _, route_query = route.partition("?")
         decoded_path = _fully_unquote(route_path)
@@ -205,10 +231,7 @@ def _has_disallowed_api_route_query(value: str) -> bool:
             component.startswith(".")
             or component == "~"
             or component in _PRIVATE_KEY_FILES
-            or (
-                index == 0
-                and component in _FILESYSTEM_COMPONENTS - _HTTP_METHOD_ROUTE_ROOTS - _COMMON_API_RESOURCE_COMPONENTS
-            )
+            or (index == 0 and component in _FILESYSTEM_ROUTE_ROOTS and not method_route)
             or component in {"credentials", "passwd", "secret", "secrets"}
             for index, component in enumerate(decoded_components)
         ):
@@ -333,7 +356,7 @@ def _without_api_route_references(value: str) -> str:
         first_component = components[0].casefold()
         if any(component in {".", ".."} for component in components):
             return match.group(0)
-        if first_component in _FILESYSTEM_COMPONENTS:
+        if first_component in _FILESYSTEM_ROUTE_ROOTS:
             return match.group(0)
         return match.group(0).replace(route, "")
 
@@ -487,6 +510,7 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     if len(value) > MAX_TEXT or _has_control(value):
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
     screening_text = _QUOTED_PROTECTED_LABEL.sub(r"\g<label>", value)
+    screening_text = re.sub(r"“([^”\n]+)”", r'"\1"', screening_text)
     path_text = _without_api_route_references(screening_text)
     if (
         _DANGEROUS_VALUE.search(screening_text)

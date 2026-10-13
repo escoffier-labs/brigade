@@ -332,8 +332,11 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Auth profile of this seat is production-admin",
         "Auth profile of implementer is production-admin",
         'Auth profile is "production admin"',
+        "Auth profile is “production admin”",
         'Use auth profile "production admin"',
+        "Use auth profile “production admin”",
         'Authentication profile named "production admin"',
+        "Authentication profile named “production admin”",
     ],
 )
 def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str) -> None:
@@ -355,6 +358,7 @@ def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str)
         "The API key of implementer is shortkey",
         "The API key for seat implementer is shortkey",
         "The API key for the reviewer seat is shortkey",
+        "The API key used on this seat is shortkey",
     ],
 )
 def test_parse_rejects_qualified_compact_credential_assignments(field: str, text: str) -> None:
@@ -464,6 +468,9 @@ def test_parse_accepts_prose_that_mentions_auth_profiles(text: str) -> None:
         "Call /api/v1/docs",
         "GET /api/v1/logs",
         "Invoke /api/v1/tests",
+        "Call /docs",
+        "GET /logs",
+        "Invoke /tests",
     ],
 )
 def test_parse_accepts_known_api_routes_in_descriptive_text(field: str, text: str) -> None:
