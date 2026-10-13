@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, control_crosswalk, localio
+from brigade import attestation_input, cli, control_crosswalk, localio
 from brigade.control_crosswalk import (
     EVIDENCE_CONTROLS_SCHEMA,
     HEADER_NOTICE,
@@ -476,6 +476,50 @@ def test_ec12_strict_package_snapshot_validates_and_rejects_tampering(tmp_path):
     ]
     assert all(m["state"] == "evidenced_failed" for m in ec12_rows), [m["state"] for m in ec12_rows]
     assert evaluated["evidence_readiness"]["EC-12"]["reason"] == "receipt_digest_mismatch"
+
+
+def test_ec12_rejects_unlisted_package_children(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    (package_dir / "unlisted.txt").write_text("unexpected", encoding="utf-8")
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "entry_path_unsafe"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_accepts_package_entry_above_json_limit(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    patch = b"p" * (attestation_input.MAX_JSON_BYTES + 1)
+    receipt_path = package_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["changes_patch_sha256"] = hashlib.sha256(patch).hexdigest()
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    receipt_bytes = json.dumps(receipt, sort_keys=True).encode()
+    receipt_path.write_bytes(receipt_bytes)
+    (package_dir / "changes.patch").write_bytes(patch)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"]["changes_patch_sha256"] = hashlib.sha256(patch).hexdigest()
+    manifest["source"]["receipt_sha256"] = receipt["digests"]["receipt_sha256"]
+    for entry in manifest["entries"]:
+        data = (package_dir / entry["path"]).read_bytes()
+        entry["sha256"] = hashlib.sha256(data).hexdigest()
+        entry["bytes"] = len(data)
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    _write_json(manifest_path, manifest)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "validated"
 
 
 def test_json_output_is_sorted_and_includes_schema(tmp_path, capsys):
@@ -1688,8 +1732,9 @@ def test_ec12_discovers_root_and_one_level_manifests_only(tmp_path):
         ".brigade/evidence-packages/manifest.json",
         ".brigade/evidence-packages/pkg-1/manifest.json",
     ]
-    assert readiness["outcome"] == "invalid"
-    assert readiness["legacy_state"] == "untested"
+    assert readiness["outcome"] == "rejected"
+    assert "entry_path_unsafe" in readiness["reason_codes"]
+    assert readiness["legacy_state"] == "evidenced_failed"
     assert "schema_missing" in readiness["reason_codes"]
 
 

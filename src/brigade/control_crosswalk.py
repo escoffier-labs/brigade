@@ -26,6 +26,7 @@ from . import (
     agent_request,
     approval,
     attestation,
+    attestation_input,
     attestation_receipt,
     causal_receipt,
     control_readiness,
@@ -245,19 +246,43 @@ def _adapter_observation(
     try:
         snapshot_artifact = ctx.reader.snapshot_target / artifact.relative_to(ctx.target)
         if stat.S_ISDIR(ctx.reader.info(artifact).st_mode):
+            package_fd = ctx.reader.directory(artifact)
+            actual_names = set(_control_crosswalk_io.dirfd.child_names(package_fd, 5))
             manifest = _read_json_object(ctx, artifact / "manifest.json")
+            if manifest is None:
+                raise _ReadRefusal("discovery_unreadable")
+            entries = manifest.get("entries")
+            if not isinstance(entries, list):
+                raise _ReadRefusal("discovery_unreadable")
+            entry_names: set[str] = set()
+            for entry in entries:
+                name = entry.get("path") if isinstance(entry, dict) else None
+                if not isinstance(name, str) or not evidence_package._is_safe_entry_path(name):
+                    raise _ReadRefusal("discovery_unreadable")
+                entry_names.add(name)
+            if actual_names - {"manifest.json", *entry_names}:
+                raise evidence_package_snapshot.PackageSnapshotError("unsafe")
             ctx.reader.copy(artifact / "manifest.json")
-            if manifest is not None:
-                for entry in manifest.get("entries", []):
-                    name = entry.get("path") if isinstance(entry, dict) else None
-                    if not isinstance(name, str) or not evidence_package._is_safe_entry_path(name):
-                        raise _ReadRefusal("discovery_unreadable")
-                    ctx.reader.copy(artifact / name)
+            for name in entry_names:
+                limit = attestation_input.MAX_JSON_BYTES if name == "receipt.json" else evidence_package.MAX_ENTRY_BYTES
+                ctx.reader.copy(artifact / name, limit=limit)
         else:
+            if adapter is _verify_evidence_package:
+                return _invalid(ctx, artifact, "schema_missing")
             snapshot_artifact = ctx.reader.copy(artifact)
             ctx.reader.copy(artifact.parent / "receipt.json")
         _copy_public_trust(ctx)
         obs = control_readiness.validate_observation(adapter(ctx.reader.snapshot_target, snapshot_artifact))
+    except evidence_package_snapshot.PackageSnapshotError as exc:
+        if exc.code == "unsafe":
+            return _obs(
+                relpath,
+                "claim_validated",
+                "rejected",
+                _dims(integrity=("failed", "entry_path_unsafe"), subject="unknown", population="passed"),
+                ["entry_path_unsafe"],
+            )
+        return _verifier_unavailable(relpath, "verifier_error")
     except Exception:
         return _verifier_unavailable(relpath, "verifier_error")
     obs.relpath = relpath
