@@ -327,6 +327,8 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Auth profile for implementer is production-admin",
         "Authentication profile for the implementer is production-admin",
         "Auth profile for reviewer: production-admin",
+        "Auth profile used by this seat is production-admin",
+        "Auth profile used by implementer: production-admin",
     ],
 )
 def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str) -> None:
@@ -852,6 +854,8 @@ def test_parse_rejects_encoded_filesystem_paths_in_api_routes(field: str, text: 
         'Work from "Shared Folder/file"',
         'The path is "Shared Folder/file"',
         "The directory is “Shared Folder/file”",
+        "Path assigned to this seat is foo/bar",
+        "Path used by reviewer is foo/bar",
     ],
 )
 def test_parse_rejects_paths_in_navigation_and_quoted_declarations(field: str, text: str) -> None:

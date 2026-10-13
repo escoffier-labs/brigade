@@ -32,7 +32,7 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:Proxy-)?Authorization\s*:\s*Bearer\s+\S+|\bBearer\s+[A-Za-z0-9._~+/-]{20,}|"
     r"\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
-    r"\bauth(?:entication)?[ _-]profiles?\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|assigned\s+to\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|value)(?:\s+|(?=[:=])))?(?:(?:(?:is\s+)?provided\s+(?:as|with)|is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|configured\s+(?:as|to|with))\s+|[:=]\s*)"
+    r"\bauth(?:entication)?[ _-]profiles?\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|assigned\s+to\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|used\s+by\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)|value)(?:\s+|(?=[:=])))?(?:(?:(?:is\s+)?provided\s+(?:as|with)|is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|configured\s+(?:as|to|with))\s+|[:=]\s*)"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
     r"(?:[A-Za-z0-9_.-]+|\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s*[:=]\s*" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)"
@@ -94,7 +94,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     re.IGNORECASE,
 )
 _PATH_DECLARATION_LINKER = r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
-_PATH_DECLARATION_QUALIFIER = r"(?:\s+(?:for|of)\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*))?"
+_PATH_DECLARATION_QUALIFIER = r"(?:\s+(?:(?:for|of|used\s+by|assigned\s+to)\s+(?:(?:this|the)\s+)?(?:seat|service|agent|[A-Za-z][A-Za-z0-9_.-]*)))?"
 _PATH_DECLARATION = (
     r"\b" + _PATH_LABEL + r"(?:\s+value)?" + _PATH_DECLARATION_QUALIFIER + r"\s*" + _PATH_DECLARATION_LINKER
 )
