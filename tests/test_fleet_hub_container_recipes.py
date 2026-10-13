@@ -84,6 +84,11 @@ def test_compose_runbook_pins_the_built_local_image_id():
     assert "image: ${image_id}" in runbook
     assert "secrets/compose.image-id.yaml up -d --no-build" in runbook
     assert "rebuild the versioned tag, record its new local image ID" in runbook
+    assert 'docker image save --output "$archive" "$previous_id"' in runbook
+    assert 'docker image load --input "$archive"' in runbook
+    assert 'test "$restored_id" = "$previous_id"' in runbook
+    assert "image: ${previous_id}" in runbook
+    assert "secrets/compose.image-id.yaml up -d --no-build" in runbook
 
 
 def test_quadlet_recipe_has_equivalent_persistence_health_and_restart_policy():

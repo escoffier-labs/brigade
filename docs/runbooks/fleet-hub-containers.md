@@ -66,11 +66,40 @@ curl --fail http://127.0.0.1:3774/health
 ```
 
 The override pins the local Docker image configuration digest and is ignored
-with the token directory. For an update, rebuild the versioned tag, replace
-the override's image ID with the newly inspected ID, then run the same Compose
-command. To update, run `docker compose build --pull hub`, inspect the
-versioned tag for its new ID, and replace the override's `image` value before
-recreating the service. Keep the prior ID with the backup for rollback.
+with the token directory. Before rebuilding the versioned tag for an update,
+save the current image locally. This preserves its bytes if the tag is
+retargeted or Docker later prunes unused images:
+
+```bash
+previous_id="$(docker image inspect --format '{{.Id}}' localhost/brigade-fleet-hub:0.28.0-e6009f6)"
+case "$previous_id" in sha256:*) ;; *) echo "Expected a sha256 image ID" >&2; exit 1 ;; esac
+archive="secrets/brigade-fleet-hub-${previous_id#sha256:}.tar"
+docker image save --output "$archive" "$previous_id"
+chmod 0600 "$archive"
+```
+
+Then rebuild the versioned tag, inspect it for the new ID, replace the
+override's `image` value, and run the same Compose command. To roll back, load
+the saved image and verify that its ID matches before restoring the old ID in
+the override:
+
+```bash
+# Set these from the recorded image archive name and ID.
+archive="secrets/brigade-fleet-hub-REPLACE_WITH_RECORDED_IMAGE_ID.tar"
+previous_id="sha256:REPLACE_WITH_RECORDED_IMAGE_ID"
+docker image load --input "$archive"
+restored_id="$(docker image inspect --format '{{.Id}}' "$previous_id")"
+test "$restored_id" = "$previous_id"
+cat > secrets/compose.image-id.yaml <<EOF
+services:
+  hub:
+    image: ${previous_id}
+EOF
+docker compose -f compose.yaml -f secrets/compose.image-id.yaml up -d --no-build
+```
+
+The archive, override, and token are ignored with the token directory; retain
+the archive and ID alongside the database backup.
 
 Run the local image, token, persistence, backup/restore, and HTTPS proxy
 acceptance check from the repository root with
@@ -138,6 +167,7 @@ Before an upgrade, stop writes and use SQLite's online backup API (for example,
 Python `sqlite3.Connection.backup`) to a separate local path, then test a clean
 restore with the candidate image. Upgrade only one instance, verify health,
 node authentication, event ingestion, dashboard enrollment, and restart
-retention, and retain the old image digest plus backup. Rollback means restoring
-that schema-compatible backup with the old digest and can lose every write made
-after the backup. Never downgrade a live database in place.
+retention, and retain the database backup and image archive. Compose rollback
+restores the archived image ID; Quadlet rollback uses its saved image digest.
+Restoring the schema-compatible database backup can lose every write made
+after it. Never downgrade a live database in place.
