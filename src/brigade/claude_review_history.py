@@ -204,41 +204,71 @@ def _project(
                 record["current_findings_known"] = False
                 record["current_zero_findings"] = False
             projection[kind].append(record)
-    if truncated:
-        for record in projection["checks"]:
-            record["supersession_disposition"] = "unknown"
-            record["superseded_by"] = None
-        return projection, complete
+    _order_checks(history, projection["checks"], enumerated, truncated)
+    return projection, complete
+
+
+def _order_checks(
+    history: list[dict[str, Any]], checks: list[dict[str, Any]], enumerated: set[str], truncated: bool
+) -> None:
+    heads: dict[int, set[str]] = defaultdict(set)
+    starts: dict[int, set[str]] = defaultdict(set)
+    for snapshot in history:
+        for record in snapshot["checks"]:
+            if record["reviewed_head"] is not None:
+                heads[record["check_id"]].add(record["reviewed_head"])
+            if record["started_at"] is not None:
+                starts[record["check_id"]].add(_sort_time(record["started_at"]))
+    uncertain = set()
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for record in projection["checks"]:
-        if record["reviewed_head"] is None:
-            # No reviewed head is no evidence that two runs belong to one revision.
+    for record in checks:
+        identity = record["check_id"]
+        if len(starts[identity]) > 1:
+            record["history_disposition"] = "conflicting-observations"
+        if (
+            truncated
+            or record["reviewed_head"] is None
+            or record["started_at"] is None
+            or record["history_disposition"] == "conflicting-observations"
+        ):
+            uncertain.add(identity)
             record["supersession_disposition"] = "unknown"
             record["superseded_by"] = None
             record["current_findings_known"] = False
             record["current_zero_findings"] = False
-        else:
-            groups[record["reviewed_head"]].append(record)
+        # Keep older known-head claims even when the selected revision lost its head.
+        for head in heads[identity]:
+            groups[head].append(record)
+    if truncated:
+        return
     for peers in groups.values():
+        rivals = [r for r in peers if r["check_id"] in uncertain]
         rounds: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for record in peers:
-            if record["started_at"] is not None:
+            if record["check_id"] not in uncertain:
                 rounds[_sort_time(record["started_at"])].append(record)
         times = sorted(rounds)
         next_round = {time: rounds[times[n + 1]] for n, time in enumerate(times[:-1])}
-        order_known = sum(len(r) for r in rounds.values()) == len(peers)
-        latest_round = rounds[times[-1]] if times else peers
-        absent_round = any(r["identity_key"] not in enumerated for r in latest_round if r["reviewed_head"] == current)
-        for record in peers:
-            start = _sort_time(record["started_at"]) if record["started_at"] is not None else None
-            newer = next_round.get(start, []) if start is not None else []
-            known = order_known and start is not None and len(rounds[start]) == 1
-            record["supersession_disposition"] = "superseded" if newer else "latest-observed" if known else "unknown"
-            record["superseded_by"] = newer[0]["check_id"] if len(newer) == 1 else None
-            if newer or not known or absent_round:
-                record["current_findings_known"] = False
-                record["current_zero_findings"] = False
-    return projection, complete
+        latest_round = rounds[times[-1]] if times else []
+        absent_round = any(
+            r["identity_key"] not in enumerated for r in latest_round if r["reviewed_head"] == peers[0]["current_head"]
+        )
+        for round_start, records in rounds.items():
+            # A digest-selected start cannot prove a peer latest or name its next run.
+            blocked = any(
+                r["started_at"] is None or not starts[r["check_id"]] or max(starts[r["check_id"]]) >= round_start
+                for r in rivals
+            )
+            newer = [] if blocked else next_round.get(round_start, [])
+            known = not blocked and len(records) == 1
+            for record in records:
+                record["supersession_disposition"] = (
+                    "superseded" if newer else "latest-observed" if known else "unknown"
+                )
+                record["superseded_by"] = newer[0]["check_id"] if len(newer) == 1 else None
+                if newer or not known or absent_round:
+                    record["current_findings_known"] = False
+                    record["current_zero_findings"] = False
 
 
 def read_managed_review_history(

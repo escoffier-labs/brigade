@@ -571,3 +571,86 @@ def test_unreviewed_head_checks_never_establish_supersession(second):
         else:
             _unknown_check(row)
             assert row["supersession_disposition"] == "unknown" and row["superseded_by"] is None
+
+
+@pytest.mark.parametrize("newest_head", [OLD, None], ids=["contradicted", "missing"])
+@pytest.mark.parametrize("omitted", [False, True], ids=["present", "omitted"])
+def test_uncertain_later_head_claim_cannot_restore_older_peer_confidence(newest_head, omitted):
+    conn = sqlite3.connect(":memory:")
+    later = check(10, started_at="2026-01-01T12:00:00Z")
+    ingest(conn, FixtureGet([later, check(11)]))
+    assert {r["check_id"]: r for r in read(conn)["checks"]}[11]["superseded_by"] == 10
+    ingest(conn, FixtureGet([check(10, head_sha=newest_head)]), head=OLD, observed="2026-01-04T00:00:00Z")
+    ingest(conn, FixtureGet([check(11)] if omitted else [later, check(11)]), observed="2026-01-05T00:00:00Z")
+    result = read(conn)
+    for row in (*result["checks"], *(c for s in result["history"] for c in s["checks"])):
+        assert row["supersession_disposition"] == "unknown" and row["superseded_by"] is None
+        assert row["current_findings_known"] is False and row["current_zero_findings"] is False
+    claims = [c for s in result["history"] for c in s["checks"] if c["check_id"] == 10]
+    assert {c["reviewed_head"] for c in claims} == {HEAD, newest_head}
+    assert {c["started_at"] for c in claims} == {later["started_at"], check()["started_at"]}
+
+
+@pytest.mark.parametrize("tied_observation", [False, True], ids=["different-observations", "tied-observations"])
+@pytest.mark.parametrize("peer_day", [2, 3, 4], ids=["between", "tied-start", "known-later"])
+@pytest.mark.parametrize("omitted", [False, True], ids=["present", "omitted"])
+def test_all_start_claims_bound_peer_order_without_digest_selection(tied_observation, peer_day, omitted):
+    conn = sqlite3.connect(":memory:")
+    first = check(10, completed_at="2026-01-03T00:00:00Z")
+    second = check(10, started_at="2026-01-03T00:00:00Z", completed_at="2026-01-03T00:00:00Z")
+    ingest(conn, FixtureGet([first]), observed=f"2026-01-0{4 if tied_observation else 3}T00:00:00Z")
+    ingest(conn, FixtureGet([second]), observed="2026-01-04T00:00:00Z")
+    peer = check(100, started_at=f"2026-01-0{peer_day}T00:00:00Z", completed_at="2026-01-04T00:00:00Z")
+    transport = FixtureGet([peer] if omitted else [first, peer])
+    ingest(conn, transport, observed="2026-01-05T00:00:00Z")
+    replay = ingest(conn, transport, observed="2026-01-05T00:00:00Z")
+    assert replay["duplicate"] is True
+    result = read(conn)
+    rows = {r["check_id"]: r for r in result["checks"]}
+    uncertain = rows[10]
+    assert uncertain["supersession_disposition"] == "unknown" and uncertain["superseded_by"] is None
+    assert uncertain["current_findings_known"] is False and uncertain["current_zero_findings"] is False
+    assert rows[100]["supersession_disposition"] == ("latest-observed" if peer_day == 4 else "unknown")
+    assert rows[100]["superseded_by"] is None
+    assert rows[100]["current_findings_known"] is (peer_day == 4)
+    assert rows[100]["current_zero_findings"] is (peer_day == 4)
+    for snapshot in result["history"]:
+        for row in snapshot["checks"]:
+            assert row["supersession_disposition"] == rows[row["check_id"]]["supersession_disposition"]
+            assert row["superseded_by"] is None
+            if row["check_id"] == 10 or peer_day != 4:
+                assert row["current_findings_known"] is False and row["current_zero_findings"] is False
+    assert {c["started_at"] for s in result["history"] for c in s["checks"] if c["check_id"] == 10} == {
+        first["started_at"],
+        second["started_at"],
+    }
+
+
+def test_newest_missing_head_keeps_older_claim_in_peer_order():
+    conn = sqlite3.connect(":memory:")
+    later = check(10, started_at="2026-01-01T12:00:00Z")
+    ingest(conn, FixtureGet([later, check(11)]))
+    ingest(
+        conn,
+        FixtureGet([check(10, head_sha=None, started_at=later["started_at"])]),
+        head=OLD,
+        observed="2026-01-04T00:00:00Z",
+    )
+    ingest(conn, FixtureGet([check(11)]), observed="2026-01-05T00:00:00Z")
+    result = read(conn)
+    assert {r["check_id"]: r for r in result["checks"]}[10]["reviewed_head"] is None
+    for row in (*result["checks"], *(c for s in result["history"] for c in s["checks"])):
+        assert row["supersession_disposition"] == "unknown" and row["superseded_by"] is None
+        assert row["current_findings_known"] is False and row["current_zero_findings"] is False
+
+
+def test_rerun_after_all_uncertain_starts_can_establish_current_zero():
+    conn = sqlite3.connect(":memory:")
+    ingest(conn, FixtureGet([check(10), check(11, started_at="2026-01-01T12:00:00Z")]))
+    ingest(conn, FixtureGet([check(10, head_sha=OLD)]), head=OLD, observed="2026-01-04T00:00:00Z")
+    rerun = check(12, started_at="2026-01-02T00:00:00Z")
+    ingest(conn, FixtureGet([rerun]), observed="2026-01-05T00:00:00Z")
+    rows = {r["check_id"]: r for r in read(conn)["checks"]}
+    assert rows[10]["supersession_disposition"] == "unknown" and rows[10]["superseded_by"] is None
+    assert rows[11]["superseded_by"] == 12 and rows[11]["current_zero_findings"] is False
+    assert rows[12]["supersession_disposition"] == "latest-observed" and rows[12]["current_zero_findings"] is True

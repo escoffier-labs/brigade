@@ -96,9 +96,12 @@ order and provider numeric IDs do not establish observation order.
 
 The projection selects the latest loaded revision per `identity_key` and
 marks tied conflicting revisions with
-`history_disposition: conflicting-observations`. Conflicting head revisions
-leave the projected reviewed head null and coverage unknown. Snapshots retain
-all loaded revisions. Tied contradictory latest snapshots for the requested head disable
+`history_disposition: conflicting-observations`. A check run's head is immutable.
+Different known heads claimed for the same check ID across any loaded observations
+leave that check's projected reviewed head null and coverage unknown. Its parent
+head also becomes unknown on projected annotations. Rebound historical checks
+and annotations retain their raw head claims with unknown coverage. Snapshots
+retain all loaded revisions. Tied contradictory latest snapshots for the requested head disable
 current finding claims. The latest observation for that head must have a
 complete check enumeration. A later denied or truncated enumeration
 invalidates an earlier valid zero. A delayed observation of an old head keeps
@@ -108,6 +111,22 @@ With complete history, same-head checks are ordered by valid `started_at`
 across loaded snapshots.
 Strictly later rounds supersede earlier checks, including when the latest
 fetch omits the later round. Missing or tied start times retain uncertainty.
+Different valid start times claimed for one check ID, at tied or different
+observation times, also mark its projection `conflicting-observations`.
+An uncertain check has unknown supersession, null `superseded_by`, and false
+current finding flags, even when one selected revision appears to order it safely.
+Checks with no known head claim never establish supersession. If the newest
+revision has no head, older known head claims still affect peers on those heads.
+A contradicted check also retains every claimed head for peer ordering.
+Affected peers have unknown supersession and false current finding flags unless
+every possible rival start is strictly earlier than the peer's start. Missing
+rival start evidence cannot establish that ordering. A known later check can
+remain current when all uncertain rival starts are earlier. These rules also
+apply when the latest enumeration omits the uncertain run, and to supersession
+metadata rebound into historical snapshots. Digest selection cannot establish
+ordering or raise current finding confidence. Historical missing heads followed
+by a known head on the same ID may inherit that run's global supersession while
+retaining unknown coverage and false historical flags.
 Omission of a known latest round disables current known and zero flags. An
 older omitted round does not prevent a valid later enumerated round from
 being current. `superseded_by` names the uniquely observed next round when
