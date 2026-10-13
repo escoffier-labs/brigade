@@ -7,11 +7,14 @@ import sqlite3
 import threading
 import urllib.error
 import urllib.request
+from io import BytesIO
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
 from brigade import cli, fleet_client, fleet_client_messages, fleet_hub, fleet_hub_messages
+from brigade.cli import fleet_messages as fleet_messages_cli
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
@@ -126,6 +129,19 @@ def test_recipient_scope_and_field_bounds(message_hub):
     )
     assert expired[0] == 400
     assert "expired" in expired[1]["error"]
+    out_of_range = _request(
+        base,
+        token_a,
+        {
+            "action": "send",
+            "to": NODE_B,
+            "subject": "Out of range",
+            "body": "Invalid timestamp",
+            "client_id": "out-of-range-timestamp",
+            "enqueued_at": "0001-01-01T00:00:00+14:00",
+        },
+    )
+    assert out_of_range[0] == 400
 
 
 def test_message_pages_stay_below_client_response_limit(message_hub):
@@ -156,7 +172,7 @@ def test_retry_deduplication_quota_and_dashboard_unread_count(message_hub, monke
         "subject": "Retry-safe",
         "body": "One message",
         "client_id": "retry-key-1",
-        "enqueued_at": "2026-10-13T04:00:00+00:00",
+        "enqueued_at": datetime.now(timezone.utc).isoformat(),
     }
     first = _request(base, token_a, first_body)
     duplicate = _request(base, token_a, first_body)
@@ -548,6 +564,56 @@ def test_reply_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
     assert [message["action"] for message in attempts[1:]] == ["send", "reply"]
 
 
+def test_new_send_bounds_opportunistic_spool_drain(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub.invalid"})
+    spool = fleet_client_messages._spool_path(NODE_A)
+    now = datetime.now(timezone.utc).isoformat()
+    with fleet_client._spool_lock(spool) as dir_fd:
+        for index in range(fleet_client_messages.MESSAGE_BATCH_SIZE + 1):
+            assert fleet_client._spool_append_locked(
+                spool,
+                {
+                    "action": "send",
+                    "to": NODE_B,
+                    "subject": f"Queued {index}",
+                    "body": "Older request",
+                    "client_id": f"queued-{index}",
+                    "enqueued_at": now,
+                },
+                dir_fd=dir_fd,
+            )
+
+    attempts = []
+    monkeypatch.setattr(
+        fleet_client_messages,
+        "_request",
+        lambda _hub, _token, message: (
+            attempts.append(message) or (201, {"message": {"client_id": message["client_id"]}})
+        ),
+    )
+    result = fleet_client_messages.send(
+        recipient=NODE_B,
+        subject="New request",
+        body="Keep this behind the backlog",
+        reference=None,
+        priority="normal",
+    )
+
+    assert result["queued"] is True
+    assert len(attempts) == fleet_client_messages.MESSAGE_BATCH_SIZE
+    pending = fleet_client._read_spool(spool)
+    assert [message["subject"] for message in pending] == ["Queued 100", "New request"]
+    assert fleet_client_messages.flush(NODE_A) == 2
+    assert [message["subject"] for message in attempts[-2:]] == ["Queued 100", "New request"]
+
+
 def test_ambiguous_reply_is_spooled_and_retried_with_same_client_id(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
@@ -708,6 +774,20 @@ def test_msg_ack_and_reply_escape_subject_control_characters(command, tmp_path, 
     output = capsys.readouterr().out
     assert "\x1b" not in output
     assert "\\x1b[31m" in output
+
+
+def test_message_body_file_read_is_bounded(monkeypatch):
+    reads = []
+
+    class ReadSpy(BytesIO):
+        def read(self, size=-1):
+            reads.append(size)
+            return super().read(size)
+
+    monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: ReadSpy(b"x" * (fleet_hub_messages.BODY_LIMIT + 2)))
+    with pytest.raises(ValueError, match="message body file exceeds"):
+        fleet_messages_cli._read_body(Path("large-message.txt"))
+    assert reads == [fleet_hub_messages.BODY_LIMIT + 1]
 
 
 def test_offline_send_does_not_claim_queued_when_spool_is_unsafe(tmp_path, monkeypatch):

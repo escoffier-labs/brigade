@@ -242,7 +242,10 @@ def _enqueued_at(value: Any) -> str:
         raise MessageError("enqueued_at must be an ISO-8601 timestamp") from exc
     if stamp.tzinfo is None:
         raise MessageError("enqueued_at must include a UTC offset")
-    stamp = stamp.astimezone(timezone.utc)
+    try:
+        stamp = stamp.astimezone(timezone.utc)
+    except OverflowError as exc:
+        raise MessageError("enqueued_at is outside the supported timestamp range") from exc
     if stamp < now - timedelta(days=RETENTION_DAYS):
         raise MessageError("message expired before delivery")
     if stamp > now + MAX_FUTURE_SKEW:

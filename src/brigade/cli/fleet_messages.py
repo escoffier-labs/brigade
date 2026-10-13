@@ -9,6 +9,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .. import fleet_hub_messages
+
 
 def register(fleet_sub: argparse._SubParsersAction) -> None:
     parser = fleet_sub.add_parser("msg", help="Send and manage durable Fleet Hub messages.")
@@ -59,8 +61,15 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
 
 def _read_body(path: Path) -> str:
     try:
-        return path.read_text(encoding="utf-8")
+        with path.open("rb") as stream:
+            raw = stream.read(fleet_hub_messages.BODY_LIMIT + 1)
     except (OSError, UnicodeError) as exc:
+        raise ValueError(f"cannot read message body file {path}: {exc}") from exc
+    if len(raw) > fleet_hub_messages.BODY_LIMIT:
+        raise ValueError(f"message body file exceeds {fleet_hub_messages.BODY_LIMIT} bytes: {path}")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
         raise ValueError(f"cannot read message body file {path}: {exc}") from exc
 
 

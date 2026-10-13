@@ -74,7 +74,7 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
     path = _spool_path(node_id)
     with fleet_client._spool_lock(path) as dir_fd:
         if path.exists() and not path.is_symlink():
-            _flush_locked(path, hub, token, dir_fd=dir_fd)
+            _flush_locked(path, hub, token, max_messages=MESSAGE_BATCH_SIZE, dir_fd=dir_fd)
             if fleet_client._read_spool(path, dir_fd=dir_fd):
                 return _queue_locked(path, message, dir_fd=dir_fd)
         try:
@@ -204,11 +204,16 @@ def flush(node_id: str, *, hub_url: str | None = None, token: str | None = None)
         return _flush_locked(path, hub, auth, dir_fd=dir_fd)
 
 
-def _flush_locked(path: Path, hub: str, token: str, *, dir_fd: int | None = None) -> int:
+def _flush_locked(
+    path: Path, hub: str, token: str, *, max_messages: int | None = None, dir_fd: int | None = None
+) -> int:
     messages = fleet_client._read_spool(path, dir_fd=dir_fd)
     delivered = 0
     index = 0
     for message in messages:
+        if max_messages is not None and index >= max_messages:
+            fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
+            return delivered
         if _expired(message):
             _LOG.warning("fleet message spool %s: dropping expired offline message", path)
             index += 1
