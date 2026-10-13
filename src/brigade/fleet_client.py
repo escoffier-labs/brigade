@@ -29,9 +29,8 @@ Contract (the journal writer depends on every line of this):
   than retried forever. 401 (bad token), 5xx, and network failures keep the
   spool for a later flush.
 - **Never raises.** ``report_event`` swallows ``Exception``.
-  ``KeyboardInterrupt``/``SystemExit`` are re-raised only after the event
-  has been made durable in the spool, so an interrupt never loses an event
-  that the journal already committed.
+  ``KeyboardInterrupt``/``SystemExit`` are re-raised after a best-effort
+  attempt to preserve the event in the spool; persistence can fail.
 
 Configuration (never stores secrets): ``~/.brigade/fleet.toml``::
 
@@ -864,7 +863,7 @@ def report_event(
     ``REPORT_TIMEOUT_SECONDS`` end to end.
 
     ``Exception`` never escapes. ``KeyboardInterrupt``/``SystemExit`` are
-    re-raised, but only after the event is durable in the spool.
+    re-raised after a best-effort attempt to preserve the event in the spool.
 
     ``base_path`` (e.g. the journal path) is accepted and ignored: identity
     resolution never depends on where a request originated (#1161).
