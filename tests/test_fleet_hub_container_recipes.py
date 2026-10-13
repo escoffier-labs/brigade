@@ -86,11 +86,17 @@ def test_compose_runbook_pins_the_built_local_image_id():
     assert "image: ${image_id}" in runbook
     assert "previous_id=\"$(sed -n 's/^[[:space:]]*image: //p' secrets/compose.image-id.yaml)\"" in runbook
     assert "secrets/compose.image-id.yaml up -d --no-build" in runbook
+    assert re.search(
+        r"Docker restart policies\s+apply only when a container terminates\.",
+        runbook,
+    )
+    assert "docker compose -f compose.yaml -f secrets/compose.image-id.yaml restart hub" in runbook
     assert "rebuild the versioned tag, record its new local image ID" in runbook
     assert 'docker image save --output "$archive" "$previous_id"' in runbook
     assert 'docker image load --input "$archive"' in runbook
     assert 'test "$restored_id" = "$previous_id"' in runbook
     assert "image: ${previous_id}" in runbook
+    assert "For an upgrade, follow the backup and stop sequence below before rebuilding" in runbook
     assert "secrets/compose.image-id.yaml up -d --no-build" in runbook
     assert "docker compose -f compose.yaml -f secrets/compose.image-id.yaml stop hub" in runbook
     assert "source.backup(target)" in runbook
@@ -100,9 +106,12 @@ def test_compose_runbook_pins_the_built_local_image_id():
     )
     assert '"$PWD/$backup_path:/restore/fleet-hub.db:ro"' in runbook
     assert "--user 0" in runbook
-    assert "os.chown(database, 10001, 10001)" in runbook
+    assert "os.chown(staged, 10001, 10001)" in runbook
     assert "PRAGMA integrity_check" in runbook
-    assert 'for suffix in ("", "-wal", "-shm")' in runbook
+    assert runbook.count("if not os.path.isfile(source) or os.path.getsize(source) == 0") == 2
+    assert runbook.count('tempfile.mkstemp(prefix=".fleet-hub-restore-"') == 2
+    assert runbook.count('if result != "ok": raise RuntimeError(result)') == 2
+    assert runbook.count("os.replace(staged, database)") == 2
     assert "Docker Engine 28.0.0 or newer" in runbook
     assert "docker version --format '{{.Server.Version}}'" in runbook
     assert 'python3 -c \'import re,sys; m=re.fullmatch(r"(\\d+)\\.(\\d+)\\.(\\d+)", sys.argv[1])' in runbook
@@ -146,6 +155,7 @@ def test_quadlet_runbook_archives_and_restores_the_recorded_image():
     assert 'previous_id="REPLACE_WITH_RECORDED_IMAGE_ID"' not in podman_runbook
     assert 'previous_id="sha256:REPLACE_WITH_RECORDED_IMAGE_ID"' not in podman_runbook
     assert 'podman secret create brigade-fleet-admin-token "$token_file"' in podman_runbook
+    assert "no Fleet config or unit was installed" in podman_runbook
     assert "if podman secret inspect brigade-fleet-admin-token" in podman_runbook
     assert 'token_file="$token_dir/admin-token"' in podman_runbook
     assert 'generated_token="$(python3 -c' in podman_runbook
@@ -158,9 +168,8 @@ def test_quadlet_runbook_archives_and_restores_the_recorded_image():
     assert "systemctl --user stop brigade-fleet.service" in podman_runbook
     assert '"$backup_path:/restore/fleet-hub.db:ro,Z"' in podman_runbook
     assert "--volume brigade-fleet-state:/var/lib/brigade" in podman_runbook
-    assert "os.chown(database, 10001, 10001)" in podman_runbook
+    assert "os.chown(staged, 10001, 10001)" in podman_runbook
     assert "PRAGMA integrity_check" in podman_runbook
-    assert 'for suffix in ("", "-wal", "-shm")' in podman_runbook
     assert 'image_id_file="${archive%.tar}.image-id"' in podman_runbook
     assert 'previous_id="$(cat "$image_id_file")"' in podman_runbook
     assert 'chmod 0600 "$archive" "$image_id_file"' in podman_runbook

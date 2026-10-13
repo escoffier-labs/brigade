@@ -79,6 +79,20 @@ docker compose -f compose.yaml -f secrets/compose.image-id.yaml up -d --no-build
 curl --fail http://127.0.0.1:3774/health
 ```
 
+The health check reports an unhealthy container, but Docker restart policies
+apply only when a container terminates. An unhealthy Hub process may stay
+running. Check its logs, then restart the pinned service and verify health:
+
+```bash
+docker compose -f compose.yaml -f secrets/compose.image-id.yaml logs --tail=100 hub
+docker compose -f compose.yaml -f secrets/compose.image-id.yaml restart hub
+curl --fail http://127.0.0.1:3774/health
+```
+
+For an upgrade, follow the backup and stop sequence below before rebuilding
+or starting a candidate image. The preceding start command is for the initial
+deployment only.
+
 The override pins the local Docker image configuration digest and is ignored
 with the token directory. Before rebuilding the versioned tag for an update,
 save the current image locally. This preserves its bytes if the tag is
@@ -92,10 +106,8 @@ docker image save --output "$archive" "$previous_id"
 chmod 0600 "$archive"
 ```
 
-Then rebuild the versioned tag, inspect it for the new ID, replace the
-override's `image` value, and run the same Compose command. To roll back, load
-the saved image and verify that its ID matches before restoring the old ID in
-the override:
+To roll back, load the saved image and verify that its ID matches before
+restoring the old ID in the override:
 
 ```bash
 set -euo pipefail
@@ -114,7 +126,24 @@ services:
 EOF
 docker compose -f compose.yaml -f secrets/compose.image-id.yaml run --rm --no-deps \
   --user 0 --volume "$PWD/$backup_path:/restore/fleet-hub.db:ro" \
-  --entrypoint python hub -c 'import os,shutil,sqlite3; database="/var/lib/brigade/fleet-hub.db"; [os.remove(database+suffix) for suffix in ("", "-wal", "-shm") if os.path.exists(database+suffix)]; shutil.copyfile("/restore/fleet-hub.db", database); os.chown(database, 10001, 10001); connection=sqlite3.connect(database); result=connection.execute("PRAGMA integrity_check").fetchone()[0]; connection.close(); assert result == "ok", result'
+  --entrypoint python hub -c 'import os,shutil,sqlite3,tempfile
+database="/var/lib/brigade/fleet-hub.db"
+source="/restore/fleet-hub.db"
+if not os.path.isfile(source) or os.path.getsize(source) == 0: raise SystemExit("Backup must be a nonempty regular file")
+fd, staged = tempfile.mkstemp(prefix=".fleet-hub-restore-", dir=os.path.dirname(database))
+os.close(fd)
+try:
+ shutil.copyfile(source, staged)
+ connection=sqlite3.connect(staged)
+ result=connection.execute("PRAGMA integrity_check").fetchone()[0]
+ connection.close()
+ if result != "ok": raise RuntimeError(result)
+ os.chown(staged, 10001, 10001)
+ for suffix in ("-wal", "-shm"):
+  if os.path.exists(database+suffix): os.remove(database+suffix)
+ os.replace(staged, database)
+finally:
+ if os.path.exists(staged): os.remove(staged)'
 docker compose -f compose.yaml -f secrets/compose.image-id.yaml up -d --no-build
 ```
 
@@ -142,8 +171,9 @@ docker compose -f compose.yaml -f secrets/compose.image-id.yaml exec -T hub \
 docker compose -f compose.yaml -f secrets/compose.image-id.yaml stop hub
 ```
 
-After the backup succeeds and the service stops, rebuild the candidate and start
-it with the updated image ID. Starting it may migrate the database.
+After the backup succeeds and the service stops, rebuild the candidate, inspect
+it for its new ID, replace the override's `image` value, and start it. Starting
+it may migrate the database.
 
 The named volume contains the database and its WAL/SHM sidecars. Keep it on a
 local filesystem, not NFS, SMB, or a cloud-synced directory. For ordinary
@@ -192,7 +222,10 @@ else
   printf '%s\n' "$generated_token" > "$token_file"
   unset generated_token
   chmod 0600 "$token_file"
-  podman secret create brigade-fleet-admin-token "$token_file"
+  podman secret create brigade-fleet-admin-token "$token_file" || {
+    echo "Could not create the Podman secret; no Fleet config or unit was installed" >&2
+    exit 1
+  }
 fi
 cat > "$fleet_config" <<EOF
 [fleet]
@@ -283,7 +316,24 @@ test "$restored_id" = "$previous_id"
 podman run --rm --user 0:0 \
   --volume brigade-fleet-state:/var/lib/brigade \
   --volume "$backup_path:/restore/fleet-hub.db:ro,Z" \
-  --entrypoint python "$previous_ref" -c 'import os,shutil,sqlite3; database="/var/lib/brigade/fleet-hub.db"; [os.remove(database+suffix) for suffix in ("", "-wal", "-shm") if os.path.exists(database+suffix)]; shutil.copyfile("/restore/fleet-hub.db", database); os.chown(database, 10001, 10001); connection=sqlite3.connect(database); result=connection.execute("PRAGMA integrity_check").fetchone()[0]; connection.close(); assert result == "ok", result'
+  --entrypoint python "$previous_ref" -c 'import os,shutil,sqlite3,tempfile
+database="/var/lib/brigade/fleet-hub.db"
+source="/restore/fleet-hub.db"
+if not os.path.isfile(source) or os.path.getsize(source) == 0: raise SystemExit("Backup must be a nonempty regular file")
+fd, staged = tempfile.mkstemp(prefix=".fleet-hub-restore-", dir=os.path.dirname(database))
+os.close(fd)
+try:
+ shutil.copyfile(source, staged)
+ connection=sqlite3.connect(staged)
+ result=connection.execute("PRAGMA integrity_check").fetchone()[0]
+ connection.close()
+ if result != "ok": raise RuntimeError(result)
+ os.chown(staged, 10001, 10001)
+ for suffix in ("-wal", "-shm"):
+  if os.path.exists(database+suffix): os.remove(database+suffix)
+ os.replace(staged, database)
+finally:
+ if os.path.exists(staged): os.remove(staged)'
 sed "s|REPLACE_WITH_RECORDED_DIGEST|${previous_digest}|" \
   ops/fleet-hub/quadlet/brigade-fleet.container \
   > "$HOME/.config/containers/systemd/brigade-fleet.container"
