@@ -1458,6 +1458,27 @@ def test_authority_downgrade_fails_closed_when_posture_marker_root_is_dangling_s
     assert signed_marker.is_file()
 
 
+@pytest.mark.parametrize(("field", "value"), [("device", "1"), ("inode", 1.5)])
+def test_authority_downgrade_fails_closed_when_posture_identity_is_not_integer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    set_home(monkeypatch, tmp_path / "home")
+    _bind_workspace(tmp_path)
+    posture_marker = _isolation_posture_marker_path(tmp_path)
+    payload = json.loads(posture_marker.read_text(encoding="utf-8"))
+    payload["workspace_identity"][field] = value
+    posture_marker.write_text(json.dumps(payload), encoding="utf-8")
+    store_before = _store_path(tmp_path).read_bytes()
+    signed_marker = authority_marker.signed_marker_path(authority_marker.target_fingerprint(tmp_path))
+
+    with pytest.raises(OSError, match="posture marker identity cannot be compared"):
+        ledger.downgrade_external_directory_authority(tmp_path)
+
+    assert posture_marker.is_file()
+    assert _store_path(tmp_path).read_bytes() == store_before
+    assert signed_marker.is_file()
+
+
 def test_authority_downgrade_fails_closed_when_workspace_identity_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -317,8 +317,8 @@ def _isolation_marker_governs(
             not isinstance(bound, dict)
             or "device" not in bound
             or "inode" not in bound
-            or isinstance(bound.get("device"), bool)
-            or isinstance(bound.get("inode"), bool)
+            or type(bound.get("device")) is not int
+            or type(bound.get("inode")) is not int
             or live_identity is None
         ):
             return None
