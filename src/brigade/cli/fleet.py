@@ -1674,18 +1674,30 @@ def _dispatch_flush(args: argparse.Namespace) -> int:
     from .. import fleet_client, fleet_client_messages
 
     node_id = fleet_client.resolve_node_id()
-    events = fleet_client.flush_spool(node_id)
+    event_error: fleet_client.FleetClientError | None = None
+    try:
+        events = fleet_client.flush_spool(node_id)
+    except fleet_client.FleetClientError as exc:
+        events = 0
+        event_error = exc
+    message_error: fleet_client.FleetClientError | None = None
     try:
         messages = fleet_client_messages.flush(node_id)
     except fleet_client.FleetClientError as exc:
-        print(f"flushed {events} spooled event(s) for node {node_id}")
-        print(f"warning: could not flush fleet messages: {exc}", file=sys.stderr)
-        return 1
-    if messages:
-        print(f"flushed {events} spooled event(s) and {messages} message(s) for node {node_id}")
+        messages = 0
+        message_error = exc
+    if event_error is not None:
+        print(f"flushed {messages} message(s) for node {node_id}")
     else:
-        print(f"flushed {events} spooled event(s) for node {node_id}")
-    return 0
+        if messages:
+            print(f"flushed {events} spooled event(s) and {messages} message(s) for node {node_id}")
+        else:
+            print(f"flushed {events} spooled event(s) for node {node_id}")
+    if event_error is not None:
+        print(f"warning: could not flush fleet events: {event_error}", file=sys.stderr)
+    if message_error is not None:
+        print(f"warning: could not flush fleet messages: {message_error}", file=sys.stderr)
+    return 1 if event_error is not None or message_error is not None else 0
 
 
 def _print_work_payload(payload: object, *, json_output: bool) -> int:
