@@ -29,6 +29,7 @@ from . import (
     attestation_input,
     attestation_receipt,
     causal_receipt,
+    control_crosswalk_package,
     control_readiness,
     cosign_attestation,
     evidence_package,
@@ -541,43 +542,7 @@ def _verifier_unavailable(relpath: str, reason: str) -> control_readiness.Artifa
     )
 
 
-def _verify_evidence_package(_target: Path, package_dir: Path) -> control_readiness.ArtifactObservation:
-    """Validate captured package bytes and their receipt-bound source metadata."""
-    try:
-        snapshot = evidence_package_snapshot.snapshot_package(package_dir)
-    except evidence_package_snapshot.PackageSnapshotError as exc:
-        if exc.code == "unavailable":
-            return _verifier_unavailable(package_dir.name, "verifier_tool_unavailable")
-        if exc.code == "changed":
-            return _verifier_unavailable(package_dir.name, "verifier_error")
-        if exc.code == "unsafe":
-            return _obs(
-                package_dir.name,
-                "claim_validated",
-                "rejected",
-                _dims(integrity=("failed", "entry_path_unsafe"), subject="unknown", population="passed"),
-                ["entry_path_unsafe"],
-            )
-        if exc.code == "malformed":
-            return _obs(package_dir.name, "discovered", "invalid", _dims(), ["schema_missing"])
-        if exc.code == "mismatch":
-            return _obs(
-                package_dir.name,
-                "claim_validated",
-                "rejected",
-                _dims(integrity=("failed", "package_snapshot_mismatch"), subject="unknown", population="passed"),
-                ["package_snapshot_mismatch"],
-            )
-        return _verifier_unavailable(package_dir.name, "verifier_error")
-    return _obs(
-        package_dir.name,
-        "claim_validated",
-        "validated",
-        _dims(integrity="passed", subject="passed", population="passed"),
-        source_digest_sha256=snapshot.manifest_sha256,
-    )
-
-
+_verify_evidence_package = control_crosswalk_package.verify_evidence_package
 _VERIFIER_ADAPTERS["evidence-package"] = _verify_evidence_package
 
 
