@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 
-def project(raw: object, *, lane: str) -> dict[str, object]:
+def project(raw: object, *, lane: str, requested_model: str | None = None) -> dict[str, object]:
     """Return a stable readiness projection without probing or mutating a browser."""
     evidence = dict(raw) if isinstance(raw, Mapping) else {}
+    expected_model = requested_model.strip().casefold() if isinstance(requested_model, str) else ""
     blocker: str | None = None
 
     if not evidence:
@@ -32,6 +33,8 @@ def project(raw: object, *, lane: str) -> dict[str, object]:
         blocker = "mode-unavailable"
     elif not _nonempty_string(evidence.get("model")) or str(evidence.get("model")).strip().casefold() == "unverified":
         blocker = "unknown-model"
+    elif expected_model and str(evidence.get("model")).strip().casefold() != expected_model:
+        blocker = "model-mismatch"
     elif evidence.get("collector_status") != "available":
         blocker = "missing-collector"
     elif evidence.get("status") not in (None, "ready", "resumable"):

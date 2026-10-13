@@ -169,6 +169,7 @@ def _probe_healthy(
     *,
     executable: str | None,
     browser_lane: str | None = None,
+    browser_model: str | None = None,
 ) -> bool:
     auth_status = str(probe_result.get("auth_status") or "unknown")
     failure_kind = probe_result.get("failure_kind")
@@ -179,7 +180,11 @@ def _probe_healthy(
     if not executable:
         return False
     if browser_lane is not None:
-        projection = browser_preflight.project(probe_result.get("browser_preflight"), lane=browser_lane)
+        projection = browser_preflight.project(
+            probe_result.get("browser_preflight"),
+            lane=browser_lane,
+            requested_model=browser_model,
+        )
         return browser_preflight.ready(projection)
     return True
 
@@ -247,10 +252,16 @@ def _build_lane(
         "detail": detail,
     }
     if agent is not None and agent.cli == "oracle":
-        lane["browser_preflight"] = browser_preflight.project(
+        projection = browser_preflight.project(
             probe_result.get("browser_preflight"),
             lane=agent.name,
+            requested_model=agent.model,
         )
+        lane["browser_preflight"] = projection
+        blocker = projection.get("blocker")
+        if isinstance(blocker, str):
+            prefix = f"{detail}; " if detail else ""
+            lane["detail"] = f"{prefix}browser preflight blocker: {blocker}"
     if failure_kind:
         lane["failure_kind"] = failure_kind
     if fallback_seat is not None:
@@ -322,6 +333,7 @@ def doctor_payload(
                 probe_result,
                 executable=executable if isinstance(executable, str) else None,
                 browser_lane=agent.name if agent.cli == "oracle" else None,
+                browser_model=agent.model if agent.cli == "oracle" else None,
             )
             failure_kind = probe_result.get("failure_kind")
             if not isinstance(failure_kind, str):
@@ -380,6 +392,7 @@ def doctor_payload(
             primary_probe,
             executable=primary_executable if isinstance(primary_executable, str) else None,
             browser_lane=primary.name if primary.cli == "oracle" else None,
+            browser_model=primary.model if primary.cli == "oracle" else None,
         )
 
         fallback_seat: str | None = None
@@ -404,6 +417,7 @@ def doctor_payload(
                     fallback_probe,
                     executable=fallback_executable if isinstance(fallback_executable, str) else None,
                     browser_lane=fallback_agent.name if fallback_agent.cli == "oracle" else None,
+                    browser_model=fallback_agent.model if fallback_agent.cli == "oracle" else None,
                 )
                 if fallback_seat is None:
                     fallback_seat = name

@@ -473,6 +473,7 @@ def test_doctor_projects_named_browser_preflight_states(monkeypatch, tmp_path: P
         ({**base, "mode": "standard"}, "mode-unavailable", "warn"),
         ({**base, "model": "unverified"}, "unknown-model", "warn"),
         ({**base, "model": " UNVERIFIED "}, "unknown-model", "warn"),
+        ({**base, "model": "gemini-2.0-flash"}, "model-mismatch", "warn"),
         ({**base, "collector_status": "missing"}, "missing-collector", "warn"),
         (base, None, "ok"),
         ({**base, "status": "stale"}, "unknown-readiness-state", "warn"),
@@ -487,6 +488,8 @@ def test_doctor_projects_named_browser_preflight_states(monkeypatch, tmp_path: P
         lane = browser_lane(evidence)
         assert lane["status"] == status
         assert lane["browser_preflight"]["blocker"] == blocker
+        if blocker is not None:
+            assert f"browser preflight blocker: {blocker}" in lane["detail"]
         if evidence.get("status") == "resumable":
             assert lane["browser_preflight"]["session_ref"] == "conversation-42"
             if "output_receipt" in evidence:
