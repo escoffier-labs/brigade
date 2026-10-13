@@ -296,6 +296,47 @@ def test_latest_snapshot_scan_bound_refuses_without_truncating_admission(ledger,
     assert checkpoint(conn, work_id, [])[0] == 200
 
 
+def test_disjoint_maximum_scopes_keep_credential_work_bounded(ledger, monkeypatch):
+    conn, work_id, _ = ledger
+    owned(conn, work_id)
+    # Accepted historical declarations exercise the full production scan bound.
+    for index in range(1024):
+        other = another_owner(conn)
+        row = conn.execute(
+            "SELECT seq, detail_json FROM work_events WHERE work_id=? ORDER BY seq DESC LIMIT 1", (other,)
+        ).fetchone()
+        detail = json.loads(row[1])
+        detail["ownership"].update(
+            repo_identity="example/project",
+            write_scope=[f"held/{index:04d}/{part:02d}/" + "0f" * 121 + "0" for part in range(32)],
+        )
+        conn.execute("UPDATE work_events SET detail_json=? WHERE seq=?", (json.dumps(detail), row[0]))
+        conn.commit()
+    paths = [f"candidate/{part:02d}/" + "0f" * 121 + "0" for part in range(32)]
+    operations = {"decode": 0, "hash": 0}
+    decode, sha256 = base64.b64decode, hashlib.sha256
+
+    def count_decode(*args, **kwargs):
+        operations["decode"] += 1
+        return decode(*args, **kwargs)
+
+    def count_hash(*args, **kwargs):
+        operations["hash"] += 1
+        return sha256(*args, **kwargs)
+
+    with monkeypatch.context() as counting:
+        counting.setattr(base64, "b64decode", count_decode)
+        counting.setattr(hashlib, "sha256", count_hash)
+        status, reply = checkpoint(conn, work_id, paths)
+    assert status == 200, reply
+    assert reply["ownership"]["write_scope"] == paths
+    assert reply["ownership"]["conflict_check"] == "path-admission"
+    assert snapshot(conn, work_id)["revision"] == 3 and event_count(conn, work_id) == 3
+    # Allow ample normal header authentication/fingerprinting, independent of
+    # peer path count. Disjoint declarations disclose no credential candidates.
+    assert sum(operations.values()) <= 64, operations
+
+
 @pytest.mark.parametrize("reset", ["release", "offer", "withdraw"])
 def test_departed_ownership_histories_do_not_consume_admission_budget(ledger, monkeypatch, reset):
     from brigade import worklore_scope

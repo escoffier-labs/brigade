@@ -72,12 +72,18 @@ retain handoff-pending state. Their owner must match the stored authenticated
 node principal. These checks and canonical lowercase SHA256 digest validation
 also apply to empty scopes and holders in other repositories. Inconsistent
 active events refuse admission rather than freeing a reservation.
+Future validator changes must preserve compatibility with legitimately persisted
+ownership events or use a reviewed versioned migration.
 
 Every reflected identity and path passes the same private-data guard before
-path pairs are compared. It refuses case-equivalent holder digests and embedded
+its conflict record is appended. Count and escaped-byte bounds are checked first,
+so omitted records and disjoint paths require no reflection scanning. It refuses
+case-equivalent holder digests and embedded
 32-byte nonce candidates whose SHA256 matches the stored digest, including
 canonical base64url, standard base64 and hex spellings. Each bounded string is
-scanned once per snapshot, without returning the digest or nonce. An incomplete
+scanned at most once per snapshot, without returning the digest or nonce. Generic
+active-event and scope validation still applies before overlap comparison, even
+after the output budget is exhausted. An incomplete
 assessment never admits a writer.
 Resolution codes describe an end state for ownership review. They do not
 instruct callers to release another holder automatically.
@@ -86,6 +92,12 @@ These structured details are supported through raw HTTP. The existing Python
 client exposes the refusal's error code and sanitized message, discarding
 `conflicts`, `resolution` and `truncated`. Bounded client propagation remains
 epic work.
+
+## Current-work paging
+
+Current-work and change-history paging seek from the composite continuation
+keys on their existing ordered indexes. Bounded filtered reads can continue
+past sparse matches without scanning earlier pages again.
 
 ## Historical observation and limits
 

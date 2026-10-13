@@ -44,7 +44,7 @@ class ScopeAdmissionError(store.WorkloreConflict):
 
 
 def _reject_reflection(digest: str, texts: list[str]) -> None:
-    """Assess each bounded output string once, before enumerating path pairs."""
+    """Reject private metadata in bounded strings before appending their record."""
     for text in set(texts):
         if digest in text.lower():
             raise ValueError("private reservation metadata")
@@ -137,7 +137,7 @@ def admit_checkpoint(conn: sqlite3.Connection, work_id: str, body: Mapping[str, 
             if repo.casefold() != body["repo_identity"].casefold():
                 continue
             paths = [ownership._path(path) for path in raw_paths]
-            _reject_reflection(digest, [identifier, owner, *requested, *paths])
+            checked: set[str] = set()
             for path in requested:
                 for held in paths:
                     if path != held and not path.startswith(held + "/") and not held.startswith(path + "/"):
@@ -157,6 +157,9 @@ def admit_checkpoint(conn: sqlite3.Connection, work_id: str, body: Mapping[str, 
                     ):
                         truncated = True
                         continue
+                    unchecked = {identifier, owner, path, held} - checked
+                    _reject_reflection(digest, list(unchecked))
+                    checked.update(unchecked)
                     conflicts.append(record)
                     conflict_bytes += record_bytes
         except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, WorkloreValidationError):

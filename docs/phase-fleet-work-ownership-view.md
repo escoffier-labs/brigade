@@ -14,10 +14,6 @@ remains the canonical memory authority.
 
 ## Contract and bounded plan
 
-Current-work and change-history paging seek from the composite continuation
-keys on their existing ordered indexes. Bounded filtered reads can continue
-past sparse matches without scanning earlier pages again.
-
 1. Add CLI tests for GET-only transport, recognized projections, independent
    revisions/observations, absent metadata, malformed replies, and safe refusals.
    Run them through Brigade and observe the missing command fail.
@@ -54,8 +50,9 @@ the existing private-data and terminal-control validation.
 
 ## Remaining #1595 criteria
 
-Path arbitration, eligibility/scheduling, dependency reconciliation, actual
+Physical-filesystem exclusion, eligibility/scheduling, dependency reconciliation, actual
 handoff orchestration and controlled three-owner acceptance remain open.
+Checkpoint admission for declared paths is implemented in the linked contract.
 There are no ownership writes, provider calls, queues, schemas, migrations,
 new runtime dependencies or deployment changes in this slice. Expansion needs
 an explicitly authorized follow-on contract, not inferred operator authority.
