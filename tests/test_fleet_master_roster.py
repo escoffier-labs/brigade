@@ -71,6 +71,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Use Slack token " + "xoxb-" + "A" * 20,
         "Use Stripe key " + "sk_live_" + "A" * 24,
         "Use Stripe test key " + "sk_test_" + "A" * 24,
+        "Use Stripe restricted key " + "rk_live_" + "A" * 24,
+        "Use Stripe restricted test key " + "rk_test_" + "A" * 24,
         "Use GitLab token " + "glpat-" + "A" * 20,
         "OPENAI_API_KEY=placeholder-secret",
         "CI=production",
@@ -142,6 +144,17 @@ def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> N
 def test_parse_rejects_standalone_sensitive_file_names(text: str) -> None:
     document = _document()
     document["seats"][0]["caveats"] = [text]  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["model", "purpose", "caveats"])
+@pytest.mark.parametrize("filename", ["video.mp4", "archive.7z", "font.woff2"])
+def test_parse_rejects_digit_bearing_filename_extensions(field: str, filename: str) -> None:
+    document = _document()
+    text = f"Load {filename}"
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 
     with pytest.raises(fleet_master_roster.MasterRosterError):
         fleet_master_roster.parse(document)

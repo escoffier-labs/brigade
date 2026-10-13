@@ -20,7 +20,7 @@ _SEAT_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _PROVIDER_MODEL = re.compile(r"^[A-Za-z0-9_-]+/(?:[A-Za-z0-9._:-]+/)*[A-Za-z0-9._:-]+$")
 _DANGEROUS_VALUE = re.compile(
-    r"(?:(?<![A-Za-z0-9_])sk_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
+    r"(?:(?<![A-Za-z0-9_])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{16,}|"
     r"\bBearer\s+\S+|\b(?:Proxy-)?Authorization\s*:\s*Basic\s+"
     r"[A-Za-z0-9+/]{4,}={0,2}(?![A-Za-z0-9+/=])|"
     r"(?<![A-Za-z0-9])[A-Z_][A-Z0-9_]*\s*=|"
@@ -84,9 +84,9 @@ _EXTENSIONLESS_FILES = frozenset(
     {"containerfile", "dockerfile", "gnumakefile", "makefile", "justfile", "procfile", "readme"}
 )
 _PRIVATE_KEY_FILES = frozenset({"id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"})
-_FILE_SUFFIX = re.compile(r"\.[A-Za-z]{2,8}$")
+_FILE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{2,8}$")
 _MODEL_PATH_SUFFIX = re.compile(
-    r"\.(?:7z|avif|bmp|bz2|c|cfg|conf|cpp|cs|css|csv|docx|exe|gif|go|gz|h|hpp|html|ico|ini|java|jpe?g|js|json|jsx|lock|md|mov|mp3|mp4|pdf|png|pptx|py|rar|rst|rs|sh|so|sql|svg|tar|tiff?|toml|ts|tsx|txt|wav|webp|xml|xlsx|yaml|yml|zip)$",
+    r"\.(?:7z|avif|bmp|bz2|c|cfg|conf|cpp|cs|css|csv|docx|exe|gif|go|gz|h|hpp|html|ico|ini|java|jpe?g|js|json|jsx|lock|md|mov|mp3|mp4|pdf|png|pptx|py|rar|rst|rs|sh|so|sql|svg|tar|tiff?|toml|ts|tsx|txt|wav|webp|woff2|xml|xlsx|yaml|yml|zip)$",
     re.IGNORECASE,
 )
 _STANDALONE_FILE = re.compile(r"(?<![A-Za-z0-9_.-])(?P<file>\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+)(?![A-Za-z0-9_.-])")
