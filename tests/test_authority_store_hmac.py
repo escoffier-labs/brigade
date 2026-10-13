@@ -741,8 +741,12 @@ def test_downgrade_restores_all_artifacts_after_durability_failure(
         "isolation": config,
     }[artifact].resolve()
 
+    failed = False
+
     def _boom(path: Path) -> None:
-        if path.resolve() == fail_path:
+        nonlocal failed
+        if path.resolve() == fail_path and not failed:
+            failed = True
             raise OSError("injected durability failure")
 
     monkeypatch.setattr(ledger, "_downgrade_durability_checkpoint", _boom)
@@ -782,8 +786,12 @@ def test_downgrade_restores_markers_when_posture_directory_fsync_fails(
         opened_directories[descriptor] = path.resolve()
         return descriptor
 
+    failed_posture_root = False
+
     def fail_posture_root(descriptor: int) -> None:
-        if opened_directories.get(descriptor) == posture_root:
+        nonlocal failed_posture_root
+        if opened_directories.get(descriptor) == posture_root and not failed_posture_root:
+            failed_posture_root = True
             raise OSError("simulated posture marker directory fsync failure")
         original_fsync(descriptor)
 
