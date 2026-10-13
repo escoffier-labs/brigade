@@ -148,6 +148,8 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
             if not 200 <= status < 300:
                 if 300 <= status < 400:
                     return _queue_locked(path, message, dir_fd=dir_fd)
+                if status == 400 and payload.get("code") == "message_timestamp_future":
+                    return _queue_locked(path, message, dir_fd=dir_fd)
                 raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
             if not _response_confirms(payload, message):
                 _LOG.warning("fleet message response did not confirm the submitted request; queueing it")
@@ -205,7 +207,19 @@ def send(*, recipient: str, subject: str, body: str, reference: str | None, prio
 
 def list_messages(*, after: int = 0, unacked: bool = False) -> dict[str, Any]:
     _validate_sqlite_integer(after, "after cursor", allow_zero=True)
-    return _online({"action": "list", "after": after, "unacked": unacked})
+    payload = _online({"action": "list", "after": after, "unacked": unacked})
+    messages = payload.get("messages")
+    next_cursor = payload.get("next_cursor")
+    if (
+        not isinstance(messages, list)
+        or any(not isinstance(message, dict) for message in messages)
+        or isinstance(next_cursor, bool)
+        or not isinstance(next_cursor, int)
+        or next_cursor < after
+        or next_cursor > _message_limits.MAX_SQLITE_INTEGER
+    ):
+        raise fleet_client.FleetClientError("fleet hub returned an invalid message page")
+    return payload
 
 
 def ack(message_id: int) -> dict[str, Any]:
@@ -340,29 +354,52 @@ def manage_principal(
 
 
 def _principal_pending_path(name: str, admin_token: str) -> Path:
-    node_id = fleet_client.resolve_node_id()
     token_scope = hashlib.sha256(admin_token.encode("utf-8")).hexdigest()
     name_scope = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
-    base = _spool_path(node_id, admin_token)
-    return base.with_name(f"{node_id}.principal-{name_scope}-{token_scope}.jsonl")
+    return fleet_client.brigade_home() / fleet_client.SPOOL_DIRNAME / f"principal-{name_scope}-{token_scope}.jsonl"
 
 
 def _pending_principal_request(name: str, admin_token: str, label: str | None) -> dict[str, Any]:
     path = _principal_pending_path(name, admin_token)
     with fleet_client._spool_lock(path) as dir_fd:
         pending = fleet_client._read_spool(path, dir_fd=dir_fd)
-        for item in pending:
-            request_id = item.get("request_id")
-            if item.get("name") == name and isinstance(request_id, str) and request_id:
-                pending_request: dict[str, Any] = {"name": name, "request_id": request_id}
-                if isinstance(item.get("label"), str):
-                    pending_request["label"] = item["label"]
-                return pending_request
-        new_request: dict[str, Any] = {"name": name, "request_id": uuid4().hex}
-        if label is not None:
-            new_request["label"] = label
-        fleet_client._write_spool_atomic(path, [new_request], dir_fd=dir_fd)
-        return new_request
+    if not pending:
+        # Migrate requests written before retry state stopped depending on the
+        # mutable node identity. Never nest spool locks: they share a process lock.
+        name_scope = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+        token_scope = hashlib.sha256(admin_token.encode("utf-8")).hexdigest()
+        for legacy_path in sorted(path.parent.glob(f"*.principal-{name_scope}-{token_scope}.jsonl")):
+            if legacy_path == path or legacy_path.is_symlink() or not legacy_path.is_file():
+                continue
+            with fleet_client._spool_lock(legacy_path) as legacy_fd:
+                legacy_pending = fleet_client._read_spool(legacy_path, dir_fd=legacy_fd)
+            if legacy_pending:
+                with fleet_client._spool_lock(path) as dir_fd:
+                    pending = fleet_client._read_spool(path, dir_fd=dir_fd)
+                    if not pending:
+                        pending = legacy_pending
+                        fleet_client._write_spool_atomic(path, pending, dir_fd=dir_fd)
+                if pending == legacy_pending:
+                    with fleet_client._spool_lock(legacy_path) as legacy_fd:
+                        fleet_client._write_spool_atomic(legacy_path, [], dir_fd=legacy_fd)
+                break
+    if not pending:
+        with fleet_client._spool_lock(path) as dir_fd:
+            pending = fleet_client._read_spool(path, dir_fd=dir_fd)
+            if not pending:
+                new_request: dict[str, Any] = {"name": name, "request_id": uuid4().hex}
+                if label is not None:
+                    new_request["label"] = label
+                fleet_client._write_spool_atomic(path, [new_request], dir_fd=dir_fd)
+                return new_request
+    for item in pending:
+        request_id = item.get("request_id")
+        if item.get("name") == name and isinstance(request_id, str) and request_id:
+            pending_request = {"name": name, "request_id": request_id}
+            if isinstance(item.get("label"), str):
+                pending_request["label"] = item["label"]
+            return pending_request
+    raise fleet_client.FleetClientError("could not preserve pending principal enrollment request")
 
 
 def _clear_principal_request(path: Path) -> None:
@@ -410,7 +447,12 @@ def _flush_locked(
         except fleet_client.FleetClientError:
             fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
             return delivered
-        if 300 <= status < 400 or status >= 500 or status in (401, 408, 425, 429):
+        if (
+            300 <= status < 400
+            or status >= 500
+            or status in (401, 408, 425, 429)
+            or (status == 400 and payload.get("code") == "message_timestamp_future")
+        ):
             fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
             return delivered
         if not 200 <= status < 300 and status >= 400:

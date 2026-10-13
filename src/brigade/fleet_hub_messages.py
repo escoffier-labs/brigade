@@ -39,6 +39,10 @@ class MessageError(ValueError):
     """A bounded queue request was invalid."""
 
 
+class MessageFutureTimestamp(MessageError):
+    """A queued message timestamp that may become valid after clock correction."""
+
+
 class MessageConflict(MessageError):
     """An idempotency key was reused for a different message payload."""
 
@@ -169,7 +173,7 @@ def unread_counts(conn: sqlite3.Connection) -> dict[str, int]:
         for recipient, count in conn.execute(
             "SELECT message.recipient,COUNT(*) FROM fleet_messages AS message "
             "JOIN nodes ON nodes.node_id=message.recipient "
-            "WHERE message.acked_at IS NULL GROUP BY message.recipient"
+            "WHERE message.acked_at IS NULL AND nodes.revoked_at IS NULL GROUP BY message.recipient"
         )
     }
     conn.commit()
@@ -263,7 +267,7 @@ def _enqueued_at(value: Any) -> str:
     if stamp < now - timedelta(days=RETENTION_DAYS):
         raise MessageError("message expired before delivery")
     if stamp > now + MAX_FUTURE_SKEW:
-        raise MessageError("enqueued_at is too far in the future")
+        raise MessageFutureTimestamp("enqueued_at is too far in the future")
     return stamp.isoformat()
 
 

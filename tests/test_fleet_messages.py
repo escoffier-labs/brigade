@@ -87,13 +87,32 @@ def test_nodes_send_list_ack_and_reply(message_hub):
     assert status == 200
     assert inbox["messages"] == [sent["message"]]
     assert inbox["next_cursor"] == sent["message"]["id"]
-
     status, acked = _request(base, token_b, {"action": "ack", "id": sent["message"]["id"]})
     assert (status, acked["message"]["acked_by"]) == (200, NODE_B)
     status, reply = _request(base, token_b, {"action": "reply", "id": sent["message"]["id"], "body": "Done"})
     assert status == 201
     assert reply["message"]["recipient"] == NODE_A
     assert reply["message"]["reply_to"] == sent["message"]["id"]
+
+
+def test_future_message_timestamp_returns_retryable_error_code(message_hub):
+    base, token_a, _token_b, _db = message_hub
+    future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    status, payload = _request(
+        base,
+        token_a,
+        {
+            "action": "send",
+            "to": NODE_B,
+            "subject": "Clock skew",
+            "body": "Retry after correcting the clock",
+            "client_id": "future-clock-retry",
+            "enqueued_at": future,
+        },
+    )
+
+    assert status == 400
+    assert payload["code"] == "message_timestamp_future"
 
 
 def test_ack_requires_matching_response_message_id(monkeypatch):
@@ -111,13 +130,30 @@ def test_ack_requires_matching_response_message_id(monkeypatch):
         )
         with pytest.raises(fleet_client.FleetClientError, match="did not confirm the requested message"):
             fleet_client_messages.ack(42)
-
     monkeypatch.setattr(
         fleet_client_messages,
         "_request",
         lambda *_args, **_kwargs: (200, {"message": {"id": 42}}),
     )
     assert fleet_client_messages.ack(42)["message"]["id"] == 42
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"messages": {}, "next_cursor": 0},
+        {"messages": [None], "next_cursor": 0},
+        {"messages": [], "next_cursor": -1},
+        {"messages": [], "next_cursor": True},
+    ],
+)
+def test_message_list_rejects_invalid_success_payload(monkeypatch, payload):
+    monkeypatch.setattr(fleet_client_messages, "_settings", lambda: ("https://hub.invalid", "token", NODE_A))
+    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (200, payload))
+
+    with pytest.raises(fleet_client.FleetClientError, match="invalid message page"):
+        fleet_client_messages.list_messages()
 
 
 def test_recipient_scope_and_field_bounds(message_hub):
@@ -401,6 +437,18 @@ def test_expired_messages_are_pruned_before_read_ack_reply_and_unread_count(mess
     conn.close()
     conn = sqlite3.connect(db)
     assert conn.execute("SELECT COUNT(*) FROM fleet_messages WHERE id=?", (unread_id,)).fetchone()[0] == 0
+    conn.close()
+
+
+def test_revoked_node_unread_messages_are_excluded_from_board_counts(message_hub):
+    base, token_a, _token_b, db = message_hub
+    status, _payload = _request(
+        base, token_a, {"action": "send", "to": NODE_B, "subject": "Unread", "body": "Recipient revoked"}
+    )
+    assert status == 201
+    conn = sqlite3.connect(db)
+    fleet_hub.revoke_node(conn, NODE_B)
+    assert fleet_hub_messages.unread_counts(conn) == {}
     conn.close()
 
 
@@ -706,10 +754,17 @@ def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, 
     with pytest.raises(fleet_client.FleetClientError, match="TimeoutError"):
         fleet_client_messages.manage_principal("add", name="researcher")
 
+    stable_path = fleet_client_messages._principal_pending_path("researcher", "admin-token")
+    legacy_path = stable_path.with_name(f"{NODE_A}.{stable_path.name}")
+    stable_path.rename(legacy_path)
+    # Recover retry state written by the older node-scoped format even after
+    # the home node identity changes.
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_B)
     assert fleet_client_messages.manage_principal("add", name="researcher")["principal"]["token"]
     assert requests[0]["request_id"] == requests[1]["request_id"]
     assert requests[0]["token"] == requests[1]["token"]
-    assert not fleet_client_messages._principal_pending_path("researcher", "admin-token").exists()
+    assert not stable_path.exists()
+    assert fleet_client._read_spool(legacy_path) == []
 
 
 def test_principal_add_keeps_retry_state_until_response_matches_request(tmp_path, monkeypatch):
@@ -1383,6 +1438,42 @@ def test_new_send_bounds_opportunistic_spool_drain(tmp_path, monkeypatch):
     assert [message["subject"] for message in attempts[-2:]] == ["Queued 100", "New request"]
 
 
+def test_future_timestamp_rejection_keeps_queued_message_for_retry(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
+    attempts = []
+    clock_skewed = True
+
+    def request(_hub: str, _token: str, message: dict):
+        attempts.append(message.copy())
+        if clock_skewed:
+            return 400, {"code": "message_timestamp_future", "error": "enqueued_at is too far in the future"}
+        return 201, {"message": {"client_id": message["client_id"]}}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+    queued = fleet_client_messages.send(
+        recipient=NODE_B,
+        subject="Clock skew",
+        body="Retry when the hub clock accepts this timestamp",
+        reference=None,
+        priority="normal",
+    )
+    assert queued["queued"] is True
+    spool = fleet_client_messages._spool_path(NODE_A)
+    assert fleet_client._read_spool(spool) == [attempts[0]]
+
+    clock_skewed = False
+    assert fleet_client_messages.flush(NODE_A) == 1
+    assert attempts[1] == attempts[0]
+    assert fleet_client._read_spool(spool) == []
+
+
 @pytest.mark.parametrize("action", ["send", "reply"])
 @pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
 def test_interrupted_send_is_spooled_before_reraising(tmp_path, monkeypatch, action, interrupt):
@@ -1777,6 +1868,8 @@ def test_message_transports_guard_bearer_urls_before_request(action, hub_url, tm
             payload["principal"]["token"] = body["token"]
         elif action in ("send", "reply"):
             payload = {"message": {"client_id": body["client_id"]}}
+        elif action == "list":
+            payload = {"messages": [], "next_cursor": body["after"]}
         return Response(json.dumps(payload).encode())
 
     monkeypatch.setattr(urllib.request, "Request", build_request)
