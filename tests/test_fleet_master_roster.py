@@ -132,6 +132,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "password is “abcdefghijklmnop”",
         "token is ‘hunter2!’",
         "password is hunter2",
+        'passphrase is "correct horse battery staple"',
+        'password is "hunter 2"',
         "token: hunter2",
         "auth token: hunter2",
         "token is abcdefgh",
@@ -168,6 +170,8 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Use basic mode",
         "Plan A: review changes",
         "Use option B: fast mode",
+        "Token: optional.",
+        "Authentication token: managed by Vault.",
         "Password is required.",
         "Password is confidential.",
         "Password is managed by Vault.",
@@ -413,7 +417,18 @@ def test_parse_rejects_unenumerated_paths_in_descriptive_text(field: str, text: 
         fleet_master_roster.parse(document)
 
 
-@pytest.mark.parametrize("text", ["and/or", "input/output", "read/write", "input / output", "planner / reviewer"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "and/or",
+        "input/output",
+        "read/write",
+        "input / output",
+        "planner / reviewer",
+        "Write in key/value format.",
+        "Read in client/server mode.",
+    ],
+)
 def test_parse_accepts_slash_separated_descriptive_prose(text: str) -> None:
     document = _document()
     document["seats"][0]["purpose"] = f"Support {text} workflows"  # type: ignore[index]

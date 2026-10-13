@@ -39,13 +39,14 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:use|select|choose|load|set|activate|switch\s+to|connect\s+(?:through|with))\s+"
     r"(?:the\s+)?(?:\"[A-Za-z0-9_.-]+\"|'[A-Za-z0-9_.-]+'|`[A-Za-z0-9_.-]+`|\[[A-Za-z0-9_.-]+\]|\([A-Za-z0-9_.-]+\)|(?!(?:the)\b)[A-Za-z0-9_.-]+)\s+"
     r"auth(?:entication)?[ _-]profiles?\b|"
-    r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|"
-    r"client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
+    r"\b(?:token|auth[_ -]?token)\s*[:=]\s*"
+    r"(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\b)\S+|"
+    r"\b(?:password|passwd|passphrase|secret|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S+|"
     r"\b(?:password|passwd|passphrase|secret|token|auth[_ -]?token|api[_ -]?key|access[_ -]?token|client[_ -]?secret|private[_ -]?key)"
     r"\s+is\s+(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\b)"
     r"(?:\[(?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\])[A-Za-z0-9_-]{3,}\]|"
     r"\((?!(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable|not|confidential|managed|provided|stored|encrypted|protected|handled|generated|rotated|masked|redacted)\))[A-Za-z0-9_-]{3,}\)|"
-    r"\"[^\s\"]{7,}\"|'[^\s']{7,}'|`[^\s`]{7,}`|“[^\s“”]{7,}”|‘[^\s‘’]{7,}’|"
+    r"\"[^\"]{7,}\"|'[^']{7,}'|`[^`]{7,}`|“[^“”]{7,}”|‘[^‘’]{7,}’|"
     r"[A-Za-z0-9_-]{3,}|"
     r"(?=[^\s]{8,})(?=[^\s]*[.@!#$%^&*+=~?][A-Za-z0-9])\S+|"
     r"(?=[^\s]{7,}[.!?](?:\s|$))\S+)|"
@@ -136,7 +137,9 @@ _EXTENSIONLESS_FILES = frozenset(
     {"containerfile", "dockerfile", "gnumakefile", "makefile", "justfile", "procfile", "readme"}
 )
 _PRIVATE_KEY_FILES = frozenset({"id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"})
-_PROSE_SLASH_TERMS = frozenset({"and/or", "ci/cd", "input/output", "planner/reviewer", "read/write"})
+_PROSE_SLASH_TERMS = frozenset(
+    {"and/or", "ci/cd", "client/server", "input/output", "key/value", "planner/reviewer", "read/write"}
+)
 _PROSE_DOTTED_TERMS = frozenset({"e.g", "i.e", "node.js", "vs.code"})
 _VERSION_REFERENCE = re.compile(r"\b[A-Z][A-Za-z0-9.+-]*/\d+(?:\.\d+)+")
 _FILE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,8}$")
