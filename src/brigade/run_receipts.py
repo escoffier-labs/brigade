@@ -288,6 +288,10 @@ def agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
         ("acpx_version", result.acpx_version),
     ):
         if value is not None:
+            if key in {"requested_model", "effective_model", "acpx_version"}:
+                value = _safe_metadata_label(value)
+                if value is None:
+                    continue
             payload[key] = value
     if result.safe_events:
         payload["events"] = list(result.safe_events)
