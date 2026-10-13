@@ -79,7 +79,9 @@ _FILESYSTEM_COMPONENTS = frozenset(
 _EXTENSIONLESS_FILES = frozenset(
     {"containerfile", "dockerfile", "gnumakefile", "makefile", "justfile", "procfile", "readme"}
 )
+_PRIVATE_KEY_FILES = frozenset({"id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"})
 _FILE_SUFFIX = re.compile(r"\.[A-Za-z]{1,8}$")
+_STANDALONE_FILE = re.compile(r"(?<![A-Za-z0-9_.-])(?P<file>\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+)(?![A-Za-z0-9_.-])")
 _SURROGATE = re.compile("[\\ud800-\\udfff]")
 
 _TOP_FIELDS = frozenset({"schema", "revision", "seats"})
@@ -96,6 +98,14 @@ def _has_control(value: str) -> bool:
 
 def _has_relative_path_evidence(value: str, *, provider_model: bool = False) -> bool:
     path_text = _HTTP_URL.sub("", value)
+    for match in _STANDALONE_FILE.finditer(path_text):
+        filename = match.group("file").rstrip(".,;:!?")
+        if _PATH_CONTEXT.search(path_text[: match.start()]) and (
+            filename.startswith(".")
+            or filename.casefold() in _EXTENSIONLESS_FILES | _PRIVATE_KEY_FILES | {"credentials"}
+            or _FILE_SUFFIX.search(filename)
+        ):
+            return True
     for match in _RELATIVE_PATH.finditer(path_text):
         components = re.split(r"[/\\]", match.group("path"))
         if _PATH_CONTEXT.search(path_text[: match.start()]):
