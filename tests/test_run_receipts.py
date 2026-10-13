@@ -195,6 +195,29 @@ def test_worker_payload_drops_invalid_metadata_provenance_blocks():
 
 def test_worker_payload_bounds_model_and_adapter_version_labels():
     credential_shaped_model = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"
+    metadata_provenance = {
+        "observed_at": "2026-10-13T12:00:00+00:00",
+        "fields": {
+            "requested_model": {
+                "source": "declared",
+                "locator": "launch-argument",
+                "digest": None,
+                "unknown_reason": "launched-argument-not-backend-observation",
+            },
+            "effective_model": {
+                "source": "observed",
+                "locator": "acp-config-option-update",
+                "digest": None,
+                "unknown_reason": "backend-revision-unavailable",
+            },
+            "acpx_version": {
+                "source": "observed",
+                "locator": "acpx-version-output",
+                "digest": None,
+                "unknown_reason": None,
+            },
+        },
+    }
     result = WorkerResult(
         worker="cursor-worker",
         task="inspect metadata",
@@ -204,6 +227,7 @@ def test_worker_payload_bounds_model_and_adapter_version_labels():
         requested_model=credential_shaped_model,
         effective_model="Bearer private-value",
         acpx_version="v" * 129,
+        metadata_provenance=metadata_provenance,
         attempts=(
             WorkerAttempt(
                 kind="retry",
@@ -230,6 +254,13 @@ def test_worker_payload_bounds_model_and_adapter_version_labels():
     assert "effective_model" not in entry
     assert "acpx_version" not in entry
     assert "model" not in entry["attempts"][0]
+    fields = entry["metadata_provenance"]["fields"]
+    assert fields["requested_model"]["source"] == "unknown"
+    assert fields["requested_model"]["unknown_reason"] == "requested-model-not-recorded"
+    assert fields["effective_model"]["source"] == "unknown"
+    assert fields["effective_model"]["unknown_reason"] == "effective-model-not-reported"
+    assert fields["acpx_version"]["source"] == "unknown"
+    assert fields["acpx_version"]["unknown_reason"] == "acpx-version-not-reported"
     assert "requested_model" not in synthesis
 
     documented_model_id = "grok-4.5[effort=high,fast=true]"

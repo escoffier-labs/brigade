@@ -317,6 +317,46 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys, requ
     assert json.loads(synthesis_revisions[1].read_text()) == json.loads((run_dir / "synthesis.json").read_text())
 
 
+def test_resume_direct_worker_preserves_synthesis_provenance(tmp_path, monkeypatch):
+    metadata_provenance = {
+        "observed_at": "2026-10-13T12:00:00+00:00",
+        "fields": {
+            "effective_model": {
+                "source": "observed",
+                "locator": "acp-config-option-update",
+                "digest": None,
+                "unknown_reason": "backend-revision-unavailable",
+            }
+        },
+    }
+    direct_worker = {
+        **_RESUMABLE_COOK,
+        "transport": "acpx",
+        "requested_model": "cursor-auto",
+        "effective_model": "composer-2.5",
+        "acpx_version": "0.12.0",
+        "metadata_provenance": metadata_provenance,
+    }
+    run_dir = _write_run_dir(tmp_path, results=[direct_worker])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["worker"] = "cook"
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("direct-worker resume must not invoke chef")),
+    )
+
+    assert run_resume.resume(run_dir) == 0
+    synthesis_result = json.loads((run_dir / "synthesis.json").read_text())["result"]
+    assert synthesis_result["transport"] == "acpx"
+    assert synthesis_result["requested_model"] == "cursor-auto"
+    assert synthesis_result["effective_model"] == "composer-2.5"
+    assert synthesis_result["acpx_version"] == "0.12.0"
+    assert synthesis_result["metadata_provenance"]["fields"]["effective_model"]["source"] == "observed"
+
+
 def test_resume_re_envelopes_output_and_drops_transplanted_identity(tmp_path, monkeypatch):
     from brigade import aboyeur, message_envelope
 

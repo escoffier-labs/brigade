@@ -36,7 +36,7 @@ from .aboyeur.direct_worker_finish import (
 )
 from .aboyeur.planning import resolve_run_sandbox
 from .roster import Agent, Roster, _as_bool, _as_capabilities, _as_command, _as_env
-from .run_receipts import agent_result_from_worker
+from .run_receipts import agent_result_from_worker, agent_result_payload
 from .run_transport import Assignment
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
@@ -975,11 +975,7 @@ def _resume_locked(
             )
         )
         final = agent_result_from_worker(direct_result)
-        synthesis_result: dict[str, object] = {"ok": final.ok, "detail": final.detail, "text": final.text}
-        if final.failure_phase is not None:
-            synthesis_result["failure_phase"] = final.failure_phase
-        if final.failure_kind is not None:
-            synthesis_result["failure_kind"] = final.failure_kind
+        synthesis_result = agent_result_payload(final)
         synthesis_payload = receipt_schema.synthesis_document(
             mode="direct-worker",
             worker=run_meta.get("worker") if isinstance(run_meta.get("worker"), str) else None,

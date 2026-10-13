@@ -55,7 +55,9 @@ def _safe_metadata_label(key: str, value: object) -> str | None:
     return None
 
 
-def _safe_metadata_provenance(value: object) -> dict[str, object] | None:
+def _safe_metadata_provenance(
+    value: object, *, available_labels: dict[str, str | None] | None = None
+) -> dict[str, object] | None:
     """Copy the closed provenance vocabulary, dropping arbitrary adapter data."""
     if not isinstance(value, dict):
         return None
@@ -95,6 +97,13 @@ def _safe_metadata_provenance(value: object) -> dict[str, object] | None:
             return None
         if unknown_reason is not None and not isinstance(unknown_reason, str):
             return None
+        if available_labels is not None and source != "unknown" and available_labels.get(name) is None:
+            source = "unknown"
+            unknown_reason = {
+                "requested_model": "requested-model-not-recorded",
+                "effective_model": "effective-model-not-reported",
+                "acpx_version": "acpx-version-not-reported",
+            }[name]
         if (source, locator, unknown_reason) not in allowed_claims:
             return None
         if digest is not None:
@@ -141,6 +150,14 @@ def worker_payload_one(result: WorkerResult) -> dict[str, object]:
 def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
     payload: list[dict[str, object]] = []
     for result in results:
+        safe_metadata_labels = {
+            name: _safe_metadata_label(name, value)
+            for name, value in (
+                ("requested_model", result.requested_model),
+                ("effective_model", result.effective_model),
+                ("acpx_version", result.acpx_version),
+            )
+        }
         entry: dict[str, object] = {
             "worker": result.worker,
             "task": result.task,
@@ -167,7 +184,9 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
         if result.cloud_environment is not None:
             entry["cloud_environment"] = dict(result.cloud_environment)
         if result.metadata_provenance is not None:
-            metadata_provenance = _safe_metadata_provenance(result.metadata_provenance)
+            metadata_provenance = _safe_metadata_provenance(
+                result.metadata_provenance, available_labels=safe_metadata_labels
+            )
             if metadata_provenance is not None:
                 entry["metadata_provenance"] = metadata_provenance
         if result.output_truncated:
@@ -200,7 +219,7 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
         ):
             if value is not None:
                 if key in {"requested_model", "effective_model", "acpx_version"}:
-                    value = _safe_metadata_label(key, value)
+                    value = safe_metadata_labels[key]
                     if value is None:
                         continue
                 entry[key] = value
@@ -260,6 +279,14 @@ def _attempt_payload(attempt: WorkerAttempt, *, attempt_number: int) -> dict[str
 
 
 def agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
+    safe_metadata_labels = {
+        name: _safe_metadata_label(name, value)
+        for name, value in (
+            ("requested_model", result.requested_model),
+            ("effective_model", result.effective_model),
+            ("acpx_version", result.acpx_version),
+        )
+    }
     payload: dict[str, object] = {
         "ok": result.ok,
         "detail": _bound_detail(result.detail),
@@ -296,12 +323,14 @@ def agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
     ):
         if value is not None:
             if key in {"requested_model", "effective_model", "acpx_version"}:
-                value = _safe_metadata_label(key, value)
+                value = safe_metadata_labels[key]
                 if value is None:
                     continue
             payload[key] = value
     if result.metadata_provenance is not None:
-        metadata_provenance = _safe_metadata_provenance(result.metadata_provenance)
+        metadata_provenance = _safe_metadata_provenance(
+            result.metadata_provenance, available_labels=safe_metadata_labels
+        )
         if metadata_provenance is not None:
             payload["metadata_provenance"] = metadata_provenance
     if result.safe_events:
