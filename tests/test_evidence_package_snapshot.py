@@ -426,11 +426,13 @@ def test_successful_repeated_snapshots_close_each_root_descriptor(
 
     opened: list[int] = []
     closed: list[int] = []
+    writable_modes: list[bool] = []
     real_open = package_snapshot.dirfd.open_directory_nofollow
     real_close = os.close
 
-    def record_open(path: Path) -> int:
-        descriptor = real_open(path)
+    def record_open(path: Path, *, writable: bool = True) -> int:
+        writable_modes.append(writable)
+        descriptor = real_open(path, writable=writable)
         opened.append(descriptor)
         return descriptor
 
@@ -442,6 +444,7 @@ def test_successful_repeated_snapshots_close_each_root_descriptor(
     monkeypatch.setattr(os, "close", record_close)
     assert snapshot_package(directory).entries
     assert snapshot_package(directory).entries
+    assert writable_modes == [False, False]
     assert opened == [descriptor for descriptor in opened if descriptor in closed]
 
 
@@ -472,7 +475,7 @@ def test_every_opened_descriptor_is_closed_on_success_and_child_read_failure(
     monkeypatch.setattr(
         package_snapshot.dirfd,
         "open_directory_nofollow",
-        lambda path: track(real_open(path, package_snapshot.dirfd.root_directory_flags())),
+        lambda path, *, writable=True: track(real_open(path, package_snapshot.dirfd.root_directory_flags())),
     )
 
     def open_child(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
@@ -603,7 +606,7 @@ def test_capability_refusals_happen_before_root_open(
     monkeypatch.setattr(
         package_snapshot.dirfd,
         "open_directory_nofollow",
-        lambda path: (_ for _ in ()).throw(AssertionError("root open should not occur")),
+        lambda path, *, writable=True: (_ for _ in ()).throw(AssertionError("root open should not occur")),
     )
     if missing:
         monkeypatch.setattr(package_snapshot.os, "supports_fd", set())
@@ -688,8 +691,8 @@ def test_root_replacement_after_open_cannot_redirect_child_reads(
     real_open = package_snapshot.dirfd.open_directory_nofollow
     real_child_open = package_snapshot.dirfd.open_child_file
 
-    def open_and_replace(path: Path) -> int:
-        descriptor = real_open(path)
+    def open_and_replace(path: Path, *, writable: bool = True) -> int:
+        descriptor = real_open(path, writable=writable)
         moved = tmp_path / "original-held"
         directory.rename(moved)
         if as_symlink:
@@ -888,7 +891,7 @@ def test_embedded_nul_and_runtime_unsupported_primitives_fail_closed(
 
     opened = False
 
-    def fail_if_opened(path: Path) -> int:
+    def fail_if_opened(path: Path, *, writable: bool = True) -> int:
         nonlocal opened
         opened = True
         raise AssertionError("embedded NUL reached root open")
@@ -899,7 +902,7 @@ def test_embedded_nul_and_runtime_unsupported_primitives_fail_closed(
 
     directory = _write_package(tmp_path)
 
-    def unavailable_root(path: Path) -> int:
+    def unavailable_root(path: Path, *, writable: bool = True) -> int:
         raise NotImplementedError
 
     monkeypatch.setattr(package_snapshot.dirfd, "open_directory_nofollow", unavailable_root)
@@ -908,7 +911,7 @@ def test_embedded_nul_and_runtime_unsupported_primitives_fail_closed(
     monkeypatch.setattr(
         package_snapshot.dirfd,
         "open_directory_nofollow",
-        lambda path: (_ for _ in ()).throw(OSError(errno.ENOSYS, "unsupported")),
+        lambda path, *, writable=True: (_ for _ in ()).throw(OSError(errno.ENOSYS, "unsupported")),
     )
     _assert_refused(directory, "unavailable")
 
@@ -955,8 +958,8 @@ def test_runtime_unsupported_primitives_after_capability_admission_close_descrip
         active.add(descriptor)
         return descriptor
 
-    def open_root(path: Path) -> int:
-        return track(real_root_open(path))
+    def open_root(path: Path, *, writable: bool = True) -> int:
+        return track(real_root_open(path, writable=writable))
 
     def open_child(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
         if operation == "child-open":

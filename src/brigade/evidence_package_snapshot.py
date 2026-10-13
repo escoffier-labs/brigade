@@ -374,7 +374,7 @@ def snapshot_package(directory: Path) -> PackageSnapshot:
     root_fd = -1
     try:
         try:
-            root_fd = dirfd.open_directory_nofollow(directory)
+            root_fd = dirfd.open_directory_nofollow(directory, writable=False)
         except NotImplementedError:
             _error("unavailable")
         except OSError as error:
