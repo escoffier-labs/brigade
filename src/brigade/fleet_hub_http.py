@@ -92,12 +92,21 @@ def _board_include_all(params: dict[str, list[str]]) -> bool:
 
 
 def _board_more_href(
-    path: str, params: dict[str, list[str]], *, next_offset: int, unread_offset: int | None = None
+    path: str,
+    params: dict[str, list[str]],
+    *,
+    next_offset: int,
+    unread_offset: int | None = None,
+    unread_only_page: bool = False,
 ) -> str:
     next_params = {key: list(values) for key, values in params.items()}
     next_params["offset"] = [str(next_offset)]
     if unread_offset is not None:
         next_params["unread_offset"] = [str(unread_offset)]
+    if unread_only_page:
+        next_params["unread_only"] = ["1"]
+    else:
+        next_params.pop("unread_only", None)
     rest = urlencode(next_params, doseq=True)
     return f"{path}?{rest}" if rest else path
 
@@ -668,33 +677,43 @@ def make_handler(
                 conn.close()
             more_href = _board_more_href(path, params, next_offset=board.offset + board.limit) if board.more else None
             unread_offset = fleet_hub_status.clamp_board_offset(params.get("unread_offset", ["0"])[0])
-            if view == "machines" and unread_counts:
+            unread_only_page = params.get("unread_only", [""])[0] == "1"
+            if view == "machines":
                 query_model = fleet_dashboard.parse_query(urlencode(params, doseq=True), view=view)
-                if not (
-                    query_model.node
-                    or query_model.attention_only
-                    or query_model.seat
-                    or query_model.state
-                    or query_model.repo
-                ):
-                    known_nodes = {str(row.get("node_id") or "") for row in board.runs}
-                    known_nodes.update(str(node.get("node_id") or "") for node in nodes)
-                    known_nodes.update(
-                        str(claim.get("owner_node") or "") for claim in claims if not claim.get("expired")
+                current = datetime.now(timezone.utc)
+                page_rows = fleet_dashboard.filter_rows(
+                    fleet_dashboard.build_rows(board.runs, started_at, now=current), query_model
+                )
+                page_claims = fleet_dashboard.build_claims(claims, now=current)
+                base_node_ids = fleet_dashboard._machine_base_node_ids(page_rows, nodes, page_claims, query_model)
+                unread_ids = fleet_dashboard._machine_unread_candidates(query_model, unread_counts)
+                room = (
+                    fleet_dashboard.MACHINE_CARD_LIMIT
+                    if unread_only_page
+                    else max(0, fleet_dashboard.MACHINE_CARD_LIMIT - len(base_node_ids))
+                )
+                consumed = len(unread_ids[unread_offset : unread_offset + room])
+                next_unread_offset = unread_offset + consumed
+                unread_more = next_unread_offset < len(unread_ids)
+                if unread_more:
+                    # Once unread cards continue to another page, suppress the
+                    # repeated run and claim cards while walking that cursor.
+                    more_href = _board_more_href(
+                        path,
+                        params,
+                        next_offset=offset,
+                        unread_offset=next_unread_offset,
+                        unread_only_page=True,
                     )
-                    room = max(0, fleet_dashboard.MACHINE_CARD_LIMIT - len(known_nodes))
-                    unread_ids = sorted(node_id for node_id, count in unread_counts.items() if count > 0)
-                    consumed = len(unread_ids[unread_offset : unread_offset + room])
-                    next_unread_offset = unread_offset + consumed
-                    unread_more = next_unread_offset < len(unread_ids)
-                    if board.more or unread_more:
-                        next_event_offset = board.offset + board.limit if board.more else offset
-                        more_href = _board_more_href(
-                            path,
-                            params,
-                            next_offset=next_event_offset,
-                            unread_offset=next_unread_offset,
-                        )
+                elif board.more:
+                    more_href = _board_more_href(
+                        path,
+                        params,
+                        next_offset=board.offset + board.limit,
+                        unread_offset=next_unread_offset,
+                    )
+                elif unread_only_page and not consumed:
+                    more_href = None
             nonce = secrets.token_urlsafe(16)
             page = fleet_dashboard.render_page(
                 view=view,
@@ -707,6 +726,7 @@ def make_handler(
                 more_href=more_href,
                 unread_counts=unread_counts,
                 unread_offset=unread_offset,
+                unread_only_page=unread_only_page,
             )
             # The legacy board used ``/`` as its machines route. Root now
             # belongs to the Command Deck, so keep every legacy navigation

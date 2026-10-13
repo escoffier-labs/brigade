@@ -1143,4 +1143,49 @@ class TestBoardBounds:
         _status, _headers, page = _request(hub, "GET", "/view/machines", headers=_bearer())
 
         assert "unread_offset=100" in page
+        assert "unread_only=1" in page
         assert 'class="fleet-more"' in page
+
+    def test_full_machine_page_links_to_unread_only_cards(self, hub, monkeypatch):
+        now = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(
+                f"44444444-4444-4444-8444-{index:012d}",
+                f"full-page-{index}",
+                1,
+                "run.dispatch.observed",
+                repo=f"repo-{index}",
+                harness="claude",
+                ts=now,
+            )
+            for index in range(fleet_hub.BOARD_LIMIT)
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        monkeypatch.setattr(
+            fleet_hub_http.fleet_hub_messages,
+            "unread_counts",
+            lambda _conn: {"unread-only-node": 1},
+        )
+
+        _status, _headers, first = _request(hub, "GET", "/view/machines", headers=_bearer())
+        assert "unread_only=1" in first
+        _status, _headers, second = _request(hub, "GET", "/view/machines?unread_only=1", headers=_bearer())
+        assert 'data-node="unread-only-node"' in second
+        assert 'class="fleet-more"' not in second
+
+    def test_node_filter_paginates_more_than_two_hundred_unread_cards(self, hub, monkeypatch):
+        unread = {f"filtered-target-{index:03d}": 1 for index in range(fleet_hub.BOARD_LIMIT + 1)}
+        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: unread)
+
+        _status, _headers, first = _request(hub, "GET", "/view/machines?node=filtered-target", headers=_bearer())
+        assert "unread_offset=200" in first
+        assert "node=filtered-target" in first
+        _status, _headers, second = _request(
+            hub,
+            "GET",
+            "/view/machines?node=filtered-target&unread_offset=200&unread_only=1",
+            headers=_bearer(),
+        )
+        assert 'data-node="filtered-target-200"' in second
+        assert 'class="fleet-more"' not in second

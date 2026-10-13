@@ -554,6 +554,31 @@ def _machine_card(
     )
 
 
+def _machine_base_node_ids(
+    rows: list[RunRow], nodes: list[dict[str, Any]], claims: list[ClaimRow], query: DashboardQuery
+) -> set[str]:
+    node_ids = {row.node_id for row in rows}
+    info_ids = {str(node.get("node_id") or "") for node in nodes}
+    claim_ids = {claim.owner_node for claim in claims if claim.owner_node and not claim.expired}
+    if not query.node and not query.attention_only and not query.seat and not query.state and not query.repo:
+        node_ids |= {node_id for node_id in info_ids if node_id}
+        node_ids |= claim_ids
+    elif query.node:
+        node_ids |= {node_id for node_id in info_ids if node_id and _contains(node_id, query.node)}
+        node_ids |= {node_id for node_id in claim_ids if _contains(node_id, query.node)}
+    return node_ids
+
+
+def _machine_unread_candidates(query: DashboardQuery, unread_counts: dict[str, int]) -> list[str]:
+    if query.attention_only or query.seat or query.state or query.repo:
+        return []
+    return sorted(
+        node_id
+        for node_id, count in unread_counts.items()
+        if count > 0 and (not query.node or _contains(node_id, query.node))
+    )
+
+
 def _machine_board(
     rows: list[RunRow],
     nodes: list[dict[str, Any]],
@@ -563,28 +588,21 @@ def _machine_board(
     now: datetime,
     unread_counts: dict[str, int] | None = None,
     unread_offset: int = 0,
+    unread_only_page: bool = False,
 ) -> str:
     info = {str(node.get("node_id") or ""): node for node in nodes}
     by_node: dict[str, list[RunRow]] = {}
     for row in rows:
         by_node.setdefault(row.node_id, []).append(row)
-    node_ids = set(by_node)
-    claim_nodes = {claim.owner_node for claim in claims if claim.owner_node and not claim.expired}
     unread_counts = unread_counts or {}
-    if not query.node and not query.attention_only and not query.seat and not query.state and not query.repo:
-        node_ids |= {node_id for node_id in info if node_id}
-        node_ids |= claim_nodes
-        unread_ids = sorted(node_id for node_id, count in unread_counts.items() if count > 0)
-        room = max(0, MACHINE_CARD_LIMIT - len(node_ids))
-        node_ids.update(
-            node_id for node_id in unread_ids[unread_offset : unread_offset + room] if node_id not in node_ids
-        )
-    elif query.node:
-        node_ids |= {node_id for node_id in info if node_id and _contains(node_id, query.node)}
-        node_ids |= {node_id for node_id in claim_nodes if _contains(node_id, query.node)}
-        node_ids |= {
-            node_id for node_id, count in unread_counts.items() if count > 0 and _contains(node_id, query.node)
-        }
+    base_node_ids = _machine_base_node_ids(rows, nodes, claims, query)
+
+    node_ids = set() if unread_only_page else base_node_ids
+    room = max(0, MACHINE_CARD_LIMIT - len(node_ids))
+    unread_ids = _machine_unread_candidates(query, unread_counts)
+    node_ids.update(
+        node_id for node_id in unread_ids[unread_offset : unread_offset + room] if node_id not in base_node_ids
+    )
 
     def card_key(node_id: str) -> tuple[int, str]:
         worst = min((_rank(row) for row in by_node.get(node_id, []) if row.live), default=_IDLE_RANK)
@@ -736,6 +754,7 @@ def render_page(
     more_href: str | None = None,
     unread_counts: dict[str, int] | None = None,
     unread_offset: int = 0,
+    unread_only_page: bool = False,
 ) -> str:
     """Render the full dashboard document for one board.
 
@@ -766,6 +785,7 @@ def render_page(
             now=current,
             unread_counts=unread_counts,
             unread_offset=unread_offset,
+            unread_only_page=unread_only_page,
         )
         title = "Fleet: Machines"
     stamp = current.astimezone(timezone.utc).strftime("%H:%M:%S UTC")
