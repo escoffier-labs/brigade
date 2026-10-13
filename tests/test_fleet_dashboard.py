@@ -1081,3 +1081,28 @@ class TestBoardBounds:
         assert len(second_ids) == 1
         assert first_ids.isdisjoint(second_ids)
         assert len(first_ids | second_ids) == fleet_hub.BOARD_LIMIT + 1
+
+    def test_unread_only_machine_cards_are_bounded_and_paginated(self):
+        unread = {f"unread-node-{index:03d}": 1 for index in range(300)}
+
+        def render(offset):
+            return fleet_dashboard.render_page(
+                view="machines",
+                query_string="",
+                runs=[],
+                claims=[],
+                nodes=[],
+                started_at={},
+                nonce="test",
+                unread_counts=unread,
+                unread_offset=offset,
+            )
+
+        first = render(0)
+        second = render(fleet_hub.BOARD_LIMIT)
+        first_ids = {node_id for node_id in unread if f'data-node="{node_id}"' in first}
+        second_ids = {node_id for node_id in unread if f'data-node="{node_id}"' in second}
+
+        assert len(first_ids) == fleet_hub.BOARD_LIMIT
+        assert len(second_ids) == 100
+        assert first_ids.isdisjoint(second_ids)

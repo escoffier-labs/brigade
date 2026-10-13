@@ -360,6 +360,11 @@ def _flush_locked(
                 "fleet message spool %s: dropping rejected message: %s", path, _safe_log_text(payload.get("error"))
             )
         elif 200 <= status < 300:
+            response_message = payload.get("message")
+            if not isinstance(response_message, dict) or response_message.get("client_id") != message.get("client_id"):
+                _LOG.warning("fleet message spool %s: response did not confirm the queued message", path)
+                fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)
+                return delivered
             delivered += 1
         else:
             fleet_client._write_spool_atomic(path, messages[index:], dir_fd=dir_fd)

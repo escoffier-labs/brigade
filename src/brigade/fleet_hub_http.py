@@ -663,6 +663,15 @@ def make_handler(
             finally:
                 conn.close()
             more_href = _board_more_href(path, params, next_offset=board.offset + board.limit) if board.more else None
+            if view == "machines" and unread_counts:
+                visible_node_ids = {str(row.get("node_id") or "") for row in board.runs}
+                visible_node_ids.update(str(node.get("node_id") or "") for node in nodes)
+                visible_node_ids.update(str(claim.get("owner_node") or "") for claim in claims)
+                unread_only_count = sum(
+                    1 for node_id, count in unread_counts.items() if count > 0 and node_id not in visible_node_ids
+                )
+                if unread_only_count > offset + _hub.BOARD_LIMIT:
+                    more_href = _board_more_href(path, params, next_offset=offset + _hub.BOARD_LIMIT)
             nonce = secrets.token_urlsafe(16)
             page = fleet_dashboard.render_page(
                 view=view,
@@ -674,6 +683,7 @@ def make_handler(
                 nonce=nonce,
                 more_href=more_href,
                 unread_counts=unread_counts,
+                unread_offset=offset,
             )
             # The legacy board used ``/`` as its machines route. Root now
             # belongs to the Command Deck, so keep every legacy navigation

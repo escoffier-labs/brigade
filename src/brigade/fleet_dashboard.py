@@ -33,6 +33,7 @@ from .fleet_command_deck import is_terminal_state
 from . import ui_theme
 
 REFRESH_SECONDS = 10
+MACHINE_CARD_LIMIT = 200
 # A non-terminal run whose latest event is older than this has no heartbeat
 # reaching the hub; it needs a human look.
 STALE_AFTER_SECONDS = 30 * 60
@@ -561,6 +562,7 @@ def _machine_board(
     *,
     now: datetime,
     unread_counts: dict[str, int] | None = None,
+    unread_offset: int = 0,
 ) -> str:
     info = {str(node.get("node_id") or ""): node for node in nodes}
     by_node: dict[str, list[RunRow]] = {}
@@ -572,7 +574,11 @@ def _machine_board(
     if not query.node and not query.attention_only and not query.seat and not query.state and not query.repo:
         node_ids |= {node_id for node_id in info if node_id}
         node_ids |= claim_nodes
-        node_ids |= {node_id for node_id, count in unread_counts.items() if count > 0}
+        unread_ids = sorted(
+            node_id for node_id, count in unread_counts.items() if count > 0 and node_id not in node_ids
+        )
+        room = max(0, MACHINE_CARD_LIMIT - len(node_ids))
+        node_ids.update(unread_ids[unread_offset : unread_offset + room])
     elif query.node:
         node_ids |= {node_id for node_id in info if node_id and _contains(node_id, query.node)}
         node_ids |= {node_id for node_id in claim_nodes if _contains(node_id, query.node)}
@@ -585,7 +591,7 @@ def _machine_board(
         return (worst if query.sort in ("attention", "state", "age") else 0, node_id)
 
     cards = []
-    for node_id in sorted(node_ids, key=card_key):
+    for node_id in sorted(node_ids, key=card_key)[:MACHINE_CARD_LIMIT]:
         held = [claim for claim in claims if claim.owner_node == node_id and not claim.expired]
         cards.append(
             _machine_card(
@@ -729,6 +735,7 @@ def render_page(
     now: datetime | None = None,
     more_href: str | None = None,
     unread_counts: dict[str, int] | None = None,
+    unread_offset: int = 0,
 ) -> str:
     """Render the full dashboard document for one board.
 
@@ -751,7 +758,15 @@ def render_page(
         board = _repo_board(_repo_entries(all_rows, claim_rows, query), query.sort)
         title = "Fleet: Repos"
     else:
-        board = _machine_board(visible, nodes, claim_rows, query, now=current, unread_counts=unread_counts)
+        board = _machine_board(
+            visible,
+            nodes,
+            claim_rows,
+            query,
+            now=current,
+            unread_counts=unread_counts,
+            unread_offset=unread_offset,
+        )
         title = "Fleet: Machines"
     stamp = current.astimezone(timezone.utc).strftime("%H:%M:%S UTC")
     more = f'<p class="fleet-more"><a href="{esc(more_href)}">{esc("more")}</a></p>' if more_href else ""

@@ -787,6 +787,29 @@ def test_redirected_spool_flush_keeps_message_queued(tmp_path, monkeypatch):
     assert fleet_client._read_spool(path) == [message]
 
 
+def test_spool_flush_keeps_message_when_success_response_does_not_confirm_client_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub.invalid"})
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "http://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    message = {
+        "action": "send",
+        "to": NODE_B,
+        "client_id": "queued-message",
+        "enqueued_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with fleet_client._spool_lock(path) as dir_fd:
+        assert fleet_client._spool_append_locked(path, message, dir_fd=dir_fd)
+    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (201, {}))
+
+    assert fleet_client_messages.flush(NODE_A) == 0
+    assert fleet_client._read_spool(path) == [message]
+
+
 def test_spool_flush_drops_forbidden_send_and_delivers_next_message(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub.invalid"})
@@ -806,7 +829,11 @@ def test_spool_flush_drops_forbidden_send_and_delivers_next_message(tmp_path, mo
 
     def request(_hub, _token, message, **_kwargs):
         attempts.append(message["client_id"])
-        return (403, {"error": "external principals may only reply"}) if len(attempts) == 1 else (201, {})
+        return (
+            (403, {"error": "external principals may only reply"})
+            if len(attempts) == 1
+            else (201, {"message": {"client_id": message["client_id"]}})
+        )
 
     monkeypatch.setattr(fleet_client_messages, "_request", request)
 
@@ -1006,10 +1033,10 @@ def test_spool_flush_obeys_aggregate_wall_clock_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client_messages, "monotonic", lambda: clock[0], raising=False)
     timeouts = []
 
-    def request(_hub, _token, _message, *, timeout=fleet_client.FLUSH_TIMEOUT_SECONDS):
+    def request(_hub, _token, message, *, timeout=fleet_client.FLUSH_TIMEOUT_SECONDS):
         timeouts.append(timeout)
         clock[0] += timeout
-        return 201, {}
+        return 201, {"message": {"client_id": message["client_id"]}}
 
     monkeypatch.setattr(fleet_client_messages, "_request", request)
 
