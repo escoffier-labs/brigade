@@ -33,7 +33,8 @@ import json
 import os
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,17 @@ def signed_marker_root(*, env: Mapping[str, str] | None = None) -> Path:
 
 def isolation_marker_root(*, env: Mapping[str, str] | None = None) -> Path:
     return user_brigade_dir(env=env) / ISOLATION_MARKER_DIRNAME
+
+
+@contextmanager
+def isolation_marker_lock(*, env: Mapping[str, str] | None = None) -> Iterator[None]:
+    """Serialize posture-marker writers and authority downgrades."""
+
+    from .inbox_lock import held_file_lock
+
+    lock = user_brigade_dir(env=env) / ".authority-isolation.lock"
+    with held_file_lock(lock, deadline_seconds=5):
+        yield
 
 
 def target_fingerprint(target: Path) -> str:
@@ -264,25 +276,35 @@ def governing_isolation_marker_paths(
         live = {"device": workspace_identity["device"], "inode": workspace_identity["inode"]}
     root = isolation_marker_root(env=env)
     try:
-        names = sorted(os.listdir(root))
-    except OSError:
+        root_metadata = os.lstat(root)
+    except FileNotFoundError:
         return []
+    except OSError as exc:
+        raise OSError("authority isolation posture marker store is unreadable") from exc
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        raise OSError("authority isolation posture marker store is unreadable")
+    try:
+        names = sorted(os.listdir(root))
+    except OSError as exc:
+        raise OSError("authority isolation posture marker store is unreadable") from exc
 
     governing: list[Path] = []
     for name in names:
         if not _FINGERPRINT_RE.fullmatch(name):
-            continue
+            raise OSError("authority isolation posture marker store is malformed")
         path = root / name
         try:
             metadata = os.lstat(path)
             if not stat.S_ISREG(metadata.st_mode):
-                continue
+                raise OSError("authority isolation posture marker is not a regular file")
             payload = json.loads(path.read_bytes())
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise OSError("authority isolation posture marker is unreadable") from exc
         if not isinstance(payload, dict):
-            continue
+            raise OSError("authority isolation posture marker is malformed")
         governs = _isolation_marker_governs(payload, name, fingerprint, live)
+        if governs is None:
+            raise OSError("authority isolation posture marker identity cannot be compared")
         if governs:
             governing.append(path)
     return governing
@@ -296,24 +318,70 @@ def _isolation_marker_governs(
 ) -> bool | None:
     """Whether one isolation-marker payload governs this target.
 
-    Returns ``None`` when the binding cannot be compared (malformed bound
-    identity, or an identity-carrying marker read without a live identity):
-    callers must classify that as ``unknown``.
+    Returns ``None`` for malformed marker records or bindings that cannot be
+    compared; callers must classify that as ``unknown``.
     """
 
+    if not _isolation_marker_payload_is_well_formed(payload, filename):
+        return None
     bound = payload.get("workspace_identity")
     if bound is not None:
         if (
             not isinstance(bound, dict)
             or "device" not in bound
             or "inode" not in bound
-            or isinstance(bound.get("device"), bool)
-            or isinstance(bound.get("inode"), bool)
+            or type(bound.get("device")) is not int
+            or type(bound.get("inode")) is not int
             or live_identity is None
         ):
             return None
         return {"device": bound["device"], "inode": bound["inode"]} == live_identity
     return filename == fingerprint
+
+
+def _isolation_marker_payload_is_well_formed(payload: Mapping[str, Any], filename: str) -> bool:
+    version = payload.get("schema_version")
+    target = payload.get("target")
+    recorded_by = payload.get("recorded_by")
+    created_at = payload.get("created_at")
+    if (
+        type(version) is not int
+        or version not in (1, ISOLATION_MARKER_SCHEMA_VERSION)
+        or payload.get("kind") != "isolation-posture"
+        or not isinstance(target, str)
+        or not target
+        or payload.get("target_fingerprint") != filename
+        or not isinstance(recorded_by, str)
+        or not isinstance(created_at, str)
+    ):
+        return False
+    try:
+        if not Path(target).is_absolute() or hashlib.sha256(target.encode("utf-8")).hexdigest() != filename:
+            return False
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+    bound = payload.get("workspace_identity")
+    if version == 1 and "workspace_identity" in payload:
+        return False
+    if (
+        version == ISOLATION_MARKER_SCHEMA_VERSION
+        and bound is not None
+        and (not isinstance(bound, dict) or type(bound.get("device")) is not int or type(bound.get("inode")) is not int)
+    ):
+        return False
+    carried_from = payload.get("carried_from_fingerprint")
+    transferred_at = payload.get("transferred_at")
+    if (carried_from is None) != (transferred_at is None):
+        return False
+    if carried_from is not None and (
+        version != ISOLATION_MARKER_SCHEMA_VERSION
+        or not isinstance(carried_from, str)
+        or not _FINGERPRINT_RE.fullmatch(carried_from)
+        or not isinstance(transferred_at, str)
+    ):
+        return False
+    return True
 
 
 def isolation_marker_exists(
@@ -417,26 +485,27 @@ def record_isolation_marker(
     observation callers must treat that as fail-closed, never best effort.
     """
 
-    fingerprint = target_fingerprint(target)
-    path = isolation_marker_path(fingerprint, env=env)
-    reject_unsafe_marker_path(path, target, env=env)
-    if path.is_file() and not path.is_symlink():
-        return path
-    payload: dict[str, Any] = {
-        "schema_version": ISOLATION_MARKER_SCHEMA_VERSION,
-        "kind": "isolation-posture",
-        "target": str(target.expanduser().resolve()),
-        "target_fingerprint": fingerprint,
-        "recorded_by": operator_identity(env=env),
-        "created_at": utc_now_iso_z(),
-    }
-    if workspace_identity is not None and "device" in workspace_identity and "inode" in workspace_identity:
-        payload["workspace_identity"] = {
-            "device": workspace_identity["device"],
-            "inode": workspace_identity["inode"],
+    with isolation_marker_lock(env=env):
+        fingerprint = target_fingerprint(target)
+        path = isolation_marker_path(fingerprint, env=env)
+        reject_unsafe_marker_path(path, target, env=env)
+        if path.is_file() and not path.is_symlink():
+            return path
+        payload: dict[str, Any] = {
+            "schema_version": ISOLATION_MARKER_SCHEMA_VERSION,
+            "kind": "isolation-posture",
+            "target": str(target.expanduser().resolve()),
+            "target_fingerprint": fingerprint,
+            "recorded_by": operator_identity(env=env),
+            "created_at": utc_now_iso_z(),
         }
-    _publish_private_marker(path, payload)
-    return path
+        if workspace_identity is not None and "device" in workspace_identity and "inode" in workspace_identity:
+            payload["workspace_identity"] = {
+                "device": workspace_identity["device"],
+                "inode": workspace_identity["inode"],
+            }
+        _publish_private_marker(path, payload)
+        return path
 
 
 def transfer_isolation_marker(
@@ -457,47 +526,48 @@ def transfer_isolation_marker(
     proceed rather than silently drop the posture.
     """
 
-    source_fingerprint = target_fingerprint(source_target)
-    try:
-        source_path = isolation_marker_path(source_fingerprint, env=env)
-        raw = source_path.read_bytes()
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise OSError("isolation posture marker is unreadable") from exc
-    try:
-        payload = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise OSError("isolation posture marker is malformed") from exc
-    if not isinstance(payload, dict) or payload.get("kind") != "isolation-posture":
-        raise OSError("isolation posture marker is malformed")
-    bound = payload.get("workspace_identity")
-    identity: dict[str, Any] | None = None
-    if destination_identity is not None and "device" in destination_identity and "inode" in destination_identity:
-        identity = {"device": destination_identity["device"], "inode": destination_identity["inode"]}
-    elif isinstance(bound, dict) and "device" in bound and "inode" in bound:
-        identity = {"device": bound["device"], "inode": bound["inode"]}
-    destination_fingerprint = target_fingerprint(destination_target)
-    carried: dict[str, Any] = {
-        "schema_version": ISOLATION_MARKER_SCHEMA_VERSION,
-        "kind": "isolation-posture",
-        "target": str(destination_target.expanduser().resolve()),
-        "target_fingerprint": destination_fingerprint,
-        "workspace_identity": identity,
-        "recorded_by": (
-            payload["recorded_by"] if isinstance(payload.get("recorded_by"), str) else operator_identity(env=env)
-        ),
-        "created_at": (payload["created_at"] if isinstance(payload.get("created_at"), str) else utc_now_iso_z()),
-        "carried_from_fingerprint": source_fingerprint,
-        "transferred_at": utc_now_iso_z(),
-    }
-    destination_path = isolation_marker_path(destination_fingerprint, env=env)
-    reject_unsafe_marker_path(destination_path, destination_target, env=env)
-    _publish_private_marker(destination_path, carried)
-    status = isolation_marker_status(destination_target, env=env, workspace_identity=identity)
-    if status != MARKER_STATUS_PRESENT:
-        raise OSError("isolation posture marker transfer failed verification")
-    return destination_path
+    with isolation_marker_lock(env=env):
+        source_fingerprint = target_fingerprint(source_target)
+        try:
+            source_path = isolation_marker_path(source_fingerprint, env=env)
+            raw = source_path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise OSError("isolation posture marker is unreadable") from exc
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise OSError("isolation posture marker is malformed") from exc
+        if not isinstance(payload, dict) or not _isolation_marker_payload_is_well_formed(payload, source_fingerprint):
+            raise OSError("isolation posture marker is malformed")
+        bound = payload.get("workspace_identity")
+        identity: dict[str, Any] | None = None
+        if destination_identity is not None and "device" in destination_identity and "inode" in destination_identity:
+            identity = {"device": destination_identity["device"], "inode": destination_identity["inode"]}
+        elif isinstance(bound, dict) and "device" in bound and "inode" in bound:
+            identity = {"device": bound["device"], "inode": bound["inode"]}
+        destination_fingerprint = target_fingerprint(destination_target)
+        carried: dict[str, Any] = {
+            "schema_version": ISOLATION_MARKER_SCHEMA_VERSION,
+            "kind": "isolation-posture",
+            "target": str(destination_target.expanduser().resolve()),
+            "target_fingerprint": destination_fingerprint,
+            "workspace_identity": identity,
+            "recorded_by": (
+                payload["recorded_by"] if isinstance(payload.get("recorded_by"), str) else operator_identity(env=env)
+            ),
+            "created_at": (payload["created_at"] if isinstance(payload.get("created_at"), str) else utc_now_iso_z()),
+            "carried_from_fingerprint": source_fingerprint,
+            "transferred_at": utc_now_iso_z(),
+        }
+        destination_path = isolation_marker_path(destination_fingerprint, env=env)
+        reject_unsafe_marker_path(destination_path, destination_target, env=env)
+        _publish_private_marker(destination_path, carried)
+        status = isolation_marker_status(destination_target, env=env, workspace_identity=identity)
+        if status != MARKER_STATUS_PRESENT:
+            raise OSError("isolation posture marker transfer failed verification")
+        return destination_path
 
 
 def audit_path(*, env: Mapping[str, str] | None = None) -> Path:
@@ -528,6 +598,10 @@ def actor_name(*, env: Mapping[str, str] | None = None) -> str:
     return operator_identity(env=env)
 
 
+def _audit_fsync(descriptor: int) -> None:
+    os.fsync(descriptor)
+
+
 def append_audit(record: Mapping[str, Any], *, env: Mapping[str, str] | None = None) -> Path:
     path = audit_path(env=env)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -540,21 +614,34 @@ def append_audit(record: Mapping[str, Any], *, env: Mapping[str, str] | None = N
         raise OSError("authority downgrade audit is unavailable") from exc
     line = json.dumps(dict(record), sort_keys=True, separators=(",", ":")) + "\n"
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    try:
-        descriptor = os.open(path, flags, 0o600)
-    except OSError as exc:
-        raise OSError("authority downgrade audit is unavailable") from exc
-    try:
-        with os.fdopen(os.dup(descriptor), "a", encoding="utf-8") as handle:
-            handle.write(line)
-            handle.flush()
-            os.fsync(handle.fileno())
-    finally:
-        os.close(descriptor)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    from .inbox_lock import held_file_lock
+
+    lock = user_brigade_dir(env=env) / ".authority-audit.lock"
+    with held_file_lock(lock, deadline_seconds=5):
+        try:
+            descriptor = os.open(path, flags, 0o600)
+        except OSError as exc:
+            raise OSError("authority downgrade audit is unavailable") from exc
+        original_size = os.fstat(descriptor).st_size
+        try:
+            try:
+                with os.fdopen(os.dup(descriptor), "a", encoding="utf-8") as handle:
+                    handle.write(line)
+                    handle.flush()
+                    _audit_fsync(handle.fileno())
+            except OSError as exc:
+                try:
+                    os.ftruncate(descriptor, original_size)
+                    _audit_fsync(descriptor)
+                except OSError as rollback_exc:
+                    raise OSError("authority downgrade audit append failed; audit state is uncertain") from rollback_exc
+                raise OSError("authority downgrade audit append failed; partial record removed") from exc
+        finally:
+            os.close(descriptor)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
     return path
 
 
