@@ -50,12 +50,12 @@ _DANGEROUS_VALUE = re.compile(
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s*[:=]\s*"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
-    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent)|value)\s+)?"
+    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent)|value)(?:\s+|(?=:)))?"
     r"(?:provided\s+(?:as|with)|stored\s+(?:as|with)|generated\s+(?:as|with)|configured\s+(?:as|with|to))\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)"
-    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent)|value)\s+)?"
-    r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to)\s+"
+    r"\s+(?:(?:for\s+(?:(?:this|the)\s+)?(?:seat|service|agent)|value)(?:\s+|(?=:)))?"
+    r"(?:(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to)\s+|:\s*)"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:set|configure(?:d)?|store(?:d)?|provide(?:d)?|generate(?:d)?)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
@@ -195,8 +195,12 @@ def _has_disallowed_api_route_query(value: str) -> bool:
 
 _RELATIVE_PATH = re.compile(r"(?<![\w.-])(?P<path>(?:[\w.~-]+[/\\])+[\w.~-]+)(?![\w.~-])")
 # Slash pairs used as noun modifiers are prose when followed by a plural noun.
-_SLASH_PROSE_CONTINUATION = re.compile(r"\s+[A-Za-z][A-Za-z-]*s\b")
-_FILESYSTEM_NOUN_CONTINUATION = re.compile(r"\s+(?:[A-Za-z][A-Za-z-]*\s+){0,2}(?:files?|directories|folders?)\b", re.I)
+_SLASH_PROSE_CONTINUATION = re.compile(
+    r"\s+(?!(?:for|before|after|with|where|when|while|from|at|in|on|under|to|into|through)\b)[A-Za-z][A-Za-z-]*\b"
+)
+_FILESYSTEM_NOUN_CONTINUATION = re.compile(
+    r"\s+(?:[A-Za-z][A-Za-z-]*\s+){0,2}(?:files?|directories|folders?|scripts?|helpers?)\b", re.I
+)
 _PATH_CONTEXT = re.compile(
     r"(?:\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store|"
     + _PATH_LABEL
@@ -215,7 +219,9 @@ _QUOTED_PATH_DECLARATION_CONTEXT = re.compile(
     re.IGNORECASE,
 )
 _QUOTED_PATH_CONTEXT = re.compile(
-    r"\b(?:run|execute|inspect|open|read|write|load|save)\s+[\"'“‘][^\"'“”‘’]*$",
+    r"\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store)\s+"
+    r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?"
+    r"[\"'“‘][^\"'“”‘’]*$",
     re.IGNORECASE,
 )
 _SPACED_PATH_CONTEXT = re.compile(
