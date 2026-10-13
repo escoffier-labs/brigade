@@ -665,11 +665,15 @@ def make_handler(
                     history_window_seconds=frozen_deck.stale_history_after_seconds,
                     stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
                 )
-                complete_base_node_ids = fleet_hub_status.board_node_ids(
-                    conn,
-                    include_all=include_all,
-                    now=current,
-                    history_window_seconds=frozen_deck.stale_history_after_seconds,
+                complete_base_node_ids = (
+                    fleet_hub_status.board_node_ids(
+                        conn,
+                        include_all=include_all,
+                        now=current,
+                        history_window_seconds=frozen_deck.stale_history_after_seconds,
+                    )
+                    if view == "machines"
+                    else set()
                 )
                 claims = fleet_claim_display.list_display_claims(conn, include_all=include_all)
                 started_at = run_started_at(
@@ -725,7 +729,9 @@ def make_handler(
                     render_started_at = {}
                     claim_ids = claim_only_ids[claim_offset : claim_offset + fleet_dashboard.MACHINE_CARD_LIMIT]
                     render_claims = [claim for claim in claims if claim.get("owner_node") in claim_ids]
-                    render_unread_counts = {}
+                    render_unread_counts = {
+                        node_id: unread_counts[node_id] for node_id in claim_ids if node_id in unread_counts
+                    }
                     next_claim_offset = claim_offset + len(claim_ids)
                     if next_claim_offset < len(claim_only_ids):
                         more_href = _board_more_href(
@@ -742,6 +748,15 @@ def make_handler(
                             next_offset=board.offset,
                             unread_offset=unread_offset,
                             unread_only_page=True,
+                            claim_offset=next_claim_offset,
+                        )
+                    elif board.more:
+                        more_href = _board_more_href(
+                            path,
+                            params,
+                            next_offset=board.offset + board.limit,
+                            unread_offset=unread_offset,
+                            claim_offset=next_claim_offset,
                         )
                     else:
                         more_href = None
@@ -774,6 +789,7 @@ def make_handler(
                             next_offset=board.offset,
                             unread_offset=next_unread_offset,
                             unread_only_page=True,
+                            claim_offset=next_claim_offset,
                         )
                     elif claim_more:
                         more_href = _board_more_href(
@@ -790,6 +806,7 @@ def make_handler(
                             params,
                             next_offset=board.offset + board.limit,
                             unread_offset=next_unread_offset,
+                            claim_offset=next_claim_offset,
                         )
                     else:
                         more_href = None
