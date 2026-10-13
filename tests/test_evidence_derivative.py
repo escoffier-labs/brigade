@@ -37,9 +37,11 @@ def _fabricated_run_dir(tmp_path: Path) -> tuple[Path, dict[str, object]]:
         "target": str(tmp_path),
         "commands": [],
     }
+    patch = "private patch fixture-derivative-value"
+    receipt["changes_patch_sha256"] = hashlib.sha256(patch.encode()).hexdigest()
     _stamp_receipt(receipt)
     (run_dir / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
-    (run_dir / "changes.patch").write_text("private patch fixture-derivative-value", encoding="utf-8")
+    (run_dir / "changes.patch").write_text(patch, encoding="utf-8")
     (run_dir / "summary.md").write_text("private summary fixture-derivative-value", encoding="utf-8")
     return run_dir, receipt
 
@@ -164,6 +166,54 @@ def test_derivative_rejects_receipt_rewritten_with_recomputed_package_hashes(tmp
         assert str(exc) == "source manifest receipt digest does not match receipt"
     else:
         raise AssertionError("derivative accepted a rewritten receipt with recomputed package hashes")
+
+
+def test_derivative_rejects_patch_rewritten_with_recomputed_package_hashes(tmp_path: Path) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    patch_bytes = b"rewritten patch bytes"
+    (source / "changes.patch").write_bytes(patch_bytes)
+    _refresh_package_entry(source, "changes.patch", patch_bytes)
+
+    try:
+        evidence_derivative.export_derivative(
+            source=source,
+            out=tmp_path / "derivative",
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == "source patch digest does not match receipt and manifest"
+    else:
+        raise AssertionError("derivative accepted a rewritten patch with recomputed package hashes")
+
+
+def test_derivative_rejects_package_missing_patch_artifact(tmp_path: Path) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    (source / "changes.patch").unlink()
+    manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    manifest["entries"] = [entry for entry in manifest["entries"] if entry["path"] != "changes.patch"]
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    (source / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    try:
+        evidence_derivative.export_derivative(
+            source=source,
+            out=tmp_path / "derivative",
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    except evidence_derivative.DerivativeExportError as exc:
+        assert str(exc) == "source patch digest does not match receipt and manifest"
+    else:
+        raise AssertionError("derivative accepted a package without its patch artifact")
 
 
 def test_derivative_rejects_duplicate_json_properties(tmp_path: Path) -> None:
