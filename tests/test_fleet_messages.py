@@ -1630,6 +1630,39 @@ def test_spool_flush_skips_recipient_quota_without_reordering_that_recipient(tmp
     assert [message["client_id"] for message in fleet_client._read_spool(path)] == ["blocked-1", "blocked-2"]
 
 
+def test_spool_flush_resolves_reply_before_blocked_recipient_delivery(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    now = datetime.now(timezone.utc).isoformat()
+    messages = [
+        {"action": "send", "to": NODE_B, "client_id": "blocked-send", "enqueued_at": now},
+        {"action": "reply", "id": 77, "client_id": "blocked-reply", "enqueued_at": now},
+    ]
+    with fleet_client._spool_lock(path) as dir_fd:
+        for message in messages:
+            assert fleet_client._spool_append_locked(path, message, dir_fd=dir_fd)
+    attempts = []
+
+    def request(_hub, _token, message, *, timeout=fleet_client.FLUSH_TIMEOUT_SECONDS):
+        attempts.append(message["action"])
+        if message["action"] == "send":
+            return 429, {
+                "error": "recipient quota exceeded",
+                "code": "message_recipient_quota",
+                "recipient": NODE_B,
+            }
+        if message["action"] == "list":
+            return 200, {"messages": [{"id": 77, "sender": NODE_B}]}
+        return 201, {"message": {"client_id": message["client_id"]}}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+
+    assert fleet_client_messages._flush_locked(path, "https://hub.invalid", "node-token") == 0
+
+    assert attempts == ["send", "list"]
+    assert [message["client_id"] for message in fleet_client._read_spool(path)] == ["blocked-send", "blocked-reply"]
+
+
 @pytest.mark.parametrize(("recipient", "queued"), [(NODE_B, True), (NODE_A, False)])
 def test_new_send_only_waits_behind_blocked_messages_for_its_recipient(tmp_path, monkeypatch, recipient, queued):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)

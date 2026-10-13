@@ -664,6 +664,14 @@ def _drain_locked(
             _LOG.warning("fleet message spool %s: dropping expired offline message", path)
             continue
         recipient = _message_recipient(message)
+        if recipient is None and blocked_recipients and message.get("action") == "reply":
+            try:
+                recipient = _reply_recipient(hub, token, int(message["id"]))
+                message["_recipient"] = recipient
+            except (KeyError, TypeError, ValueError, fleet_client.FleetClientError):
+                retained.extend(messages[index:])
+                fleet_client._write_spool_atomic(path, retained, dir_fd=dir_fd)
+                return delivered, True
         if recipient in blocked_recipients:
             retained.append(message)
             continue
