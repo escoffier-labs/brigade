@@ -247,7 +247,9 @@ def _adapter_observation(
         snapshot_artifact = ctx.reader.snapshot_target / artifact.relative_to(ctx.target)
         if stat.S_ISDIR(ctx.reader.info(artifact).st_mode):
             package_fd = ctx.reader.directory(artifact)
-            actual_names = set(_control_crosswalk_io.dirfd.child_names(package_fd, 5))
+            actual_names = set(
+                _control_crosswalk_io.dirfd.child_names(package_fd, len(evidence_package.PACKAGE_FILES) + 2)
+            )
             manifest = _read_json_object(ctx, artifact / "manifest.json")
             if manifest is None:
                 raise _ReadRefusal("discovery_unreadable")
@@ -258,9 +260,12 @@ def _adapter_observation(
             for entry in entries:
                 name = entry.get("path") if isinstance(entry, dict) else None
                 if not isinstance(name, str) or not evidence_package._is_safe_entry_path(name):
-                    raise _ReadRefusal("discovery_unreadable")
+                    raise evidence_package_snapshot.PackageSnapshotError("unsafe")
                 entry_names.add(name)
-            if actual_names - {"manifest.json", *entry_names}:
+            if len(actual_names) > len(evidence_package.PACKAGE_FILES) + 1 or actual_names - {
+                "manifest.json",
+                *entry_names,
+            }:
                 raise evidence_package_snapshot.PackageSnapshotError("unsafe")
             ctx.reader.copy(artifact / "manifest.json")
             for name in entry_names:

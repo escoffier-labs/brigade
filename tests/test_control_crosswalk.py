@@ -491,6 +491,35 @@ def test_ec12_rejects_unlisted_package_children(tmp_path):
     assert readiness["artifacts"][0]["outcome"] == "rejected"
 
 
+def test_ec12_rejects_unlisted_child_after_five_package_entries(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    (package_dir / "zzz-unlisted.txt").write_text("unexpected", encoding="utf-8")
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "entry_path_unsafe"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_rejects_unsafe_manifest_entry_path(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["entries"][0]["path"] = "../receipt.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "entry_path_unsafe"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
 def test_ec12_accepts_package_entry_above_json_limit(tmp_path):
     target = _ws(tmp_path)
     package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
