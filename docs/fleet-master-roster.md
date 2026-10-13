@@ -31,11 +31,13 @@ add fields deliberately.
 ```
 
 The contract caps documents at 256 KiB, seats at 128, and free text at 512
-characters. It rejects credentials, environment assignments, home paths,
-command wrappers, unknown fields, duplicate seat names, and invalid fallback
-references. `cli` is a bare executable name; launch arguments stay local.
-Tokens, environment values, auth profile names, and filesystem paths are never
-part of the master document.
+characters. It rejects recognized credential patterns, environment
+assignments, home paths, command wrappers, unknown fields, duplicate seat
+names, and invalid fallback references. The credential checks are pattern
+based, not a general secret scanner, so manually review free-text fields
+before sharing. `cli` is a bare executable name; launch arguments stay local.
+Tokens, environment values, auth profile names, and filesystem paths must not
+be part of the master document.
 
 Validate a candidate file locally before sharing it:
 
