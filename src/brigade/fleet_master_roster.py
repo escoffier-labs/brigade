@@ -65,7 +65,7 @@ _DANGEROUS_VALUE_PATTERN = (
     r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][^}]*\})"
     r"(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))"
 )
-_DANGEROUS_VALUE = re.compile(_DANGEROUS_VALUE_PATTERN.replace(r"used\s+by", r"used\s+(?:by|on)"), re.IGNORECASE)
+_DANGEROUS_VALUE = re.compile(_DANGEROUS_VALUE_PATTERN.replace(r"used\s+by", r"used\s+(?:by|on|for)"), re.IGNORECASE)
 _PATH_LABEL = r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositor(?:y|ies)|repos?|locations?)"
 _QUOTED_PROTECTED_LABEL = re.compile(
     r"[\"'“‘`](?P<label>passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|"
@@ -82,7 +82,7 @@ _URL_CREDENTIAL_QUERY = re.compile(
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
 _ROSTER_OWNERSHIP_QUALIFIER = (
-    r"(?:\s+(?:for|of|used\s+(?:by|on)|assigned\s+to)\s+(?:(?:this|the)\s+)?"
+    r"(?:\s+(?:for|of|used\s+(?:by|on|for)|assigned\s+to)\s+(?:(?:this|the)\s+)?"
     r"(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?))?"
 )
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
@@ -100,7 +100,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     re.IGNORECASE,
 )
 _PATH_DECLARATION_LINKER = r"(?:is|are|was|were|equals|will\s+be|has\s+been|have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
-_PATH_DECLARATION_QUALIFIER = r"(?:\s+(?:(?:for|of|used\s+(?:by|on)|assigned\s+to)\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)))?"
+_PATH_DECLARATION_QUALIFIER = r"(?:\s+(?:(?:for|of|used\s+(?:by|on|for)|assigned\s+to)\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)))?"
 _PATH_DECLARATION = (
     r"\b" + _PATH_LABEL + r"(?:\s+value)?" + _PATH_DECLARATION_QUALIFIER + r"\s*" + _PATH_DECLARATION_LINKER
 )
@@ -224,14 +224,13 @@ def _has_disallowed_api_route_query(value: str) -> bool:
         route = match.group("path")
         route_path, _, route_query = route.partition("?")
         decoded_path = _fully_unquote(route_path)
-        if "//" in decoded_path:
+        normalized_path = decoded_path.replace("\\", "/")
+        if "//" in normalized_path:
             return True
-        decoded_components = [
-            component.casefold() for component in decoded_path.replace("\\", "/").split("/") if component
-        ]
+        decoded_components = [component.casefold() for component in normalized_path.split("/") if component]
         if any(component in {".", ".."} for component in decoded_components) or any(
             component.startswith(".")
-            or component == "~"
+            or component.startswith("~")
             or component in _PRIVATE_KEY_FILES
             or (index == 0 and component in _FILESYSTEM_ROUTE_ROOTS and not method_route)
             or component in {"credentials", "passwd", "secret", "secrets"}

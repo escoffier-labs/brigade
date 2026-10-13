@@ -362,6 +362,8 @@ def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str)
         "The API key for seat implementer is shortkey",
         "The API key for the reviewer seat is shortkey",
         "The API key used on this seat is shortkey",
+        "The API key used for this seat is shortkey",
+        "The API key used for implementer is shortkey",
     ],
 )
 def test_parse_rejects_qualified_compact_credential_assignments(field: str, text: str) -> None:
@@ -876,6 +878,9 @@ def test_parse_rejects_encoded_assignments_in_api_route_paths(field: str, text: 
         "Call /api/%2Fhome/operator/file",
         "Call /api/%252Fetc/hosts",
         "Call /api/%252Fhome/operator/file",
+        "Call /api/%5CUsers%5Cexample%5Cfile",
+        "Call /api/%7Eexample/work/repo",
+        "Call /api/~example/work/repo",
         "Call /api/foo/%65tc/passwd",
         "Call /api/%7E/.ssh/id_rsa",
         "Call /api/etc/passwd",
