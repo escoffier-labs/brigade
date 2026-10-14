@@ -1481,6 +1481,7 @@ def test_parse_rejects_dotted_credential_query_keys(field: str, text: str) -> No
         "Private key had previously been hunter2",
         "Password has often been hunter2",
         "The password for this seat has often been hunter2",
+        "The password for this seat has also been hunter2",
         "The API key assigned to this seat has sometimes been shortkey",
         "The API keys for this seat have sometimes been shortkey",
         "The password for this seat had previously been hunter2",
@@ -1582,6 +1583,7 @@ def test_parse_rejects_filesystem_paths_in_api_routes(field: str, text: str) -> 
         "Environment variable SERVICE_MODE used by this seat is production",
         "Environment variable SERVICE_MODE used on this seat is production",
         "Environment variable SERVICE_MODE used on implementer is production",
+        "Environment variable SERVICE_MODE for this seat has recently been production",
     ],
 )
 def test_parse_rejects_ownership_qualified_environment_assignments(field: str, text: str) -> None:
@@ -1598,6 +1600,8 @@ def test_parse_rejects_ownership_qualified_environment_assignments(field: str, t
     [
         "Environment variable SERVICE_MODE will have been production",
         "Environment variable SERVICE_MODE had been production",
+        "Path had previously been acme/internal",
+        "Path has often been foo/bar",
         "Path had been foo/bar",
         "Path will have been foo/bar",
     ],

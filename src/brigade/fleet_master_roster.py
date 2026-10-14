@@ -29,6 +29,7 @@ _ASSIGNMENT_ADVERB = (
     r"(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily|previously|"
     r"often|sometimes|seldom)"
 )
+_PERFECT_TENSE_MODIFIER = r"(?:[A-Za-z]+(?:ly)?\s+)*"
 _EXPLANATORY_SECRET_VALUE = (
     r"(?:required|optional|needed|necessary|available|configured(?!\s+(?:as|to|with)\b)|set(?!\s+to\b)|missing|unset|unavailable|"
     r"not\s+(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable)|"
@@ -93,10 +94,10 @@ _DANGEROUS_VALUE = re.compile(
     _DANGEROUS_VALUE_PATTERN.replace(r"used\s+by", r"used\s+(?:by|on|for)")
     .replace(
         r"has\s+been",
-        rf"has\s+(?:{_ASSIGNMENT_ADVERB}\s+)*(?:been|(?:(?:the|a)\s+)?value(?:\s+of)?)",
+        rf"has\s+{_PERFECT_TENSE_MODIFIER}(?:been|(?:(?:the|a)\s+)?value(?:\s+of)?)",
     )
-    .replace(r"have\s+been", rf"have\s+(?:{_ASSIGNMENT_ADVERB}\s+)*been")
-    .replace(r"had\s+been", rf"had\s+(?:{_ASSIGNMENT_ADVERB}\s+)*been"),
+    .replace(r"have\s+been", rf"have\s+{_PERFECT_TENSE_MODIFIER}been")
+    .replace(r"had\s+been", rf"had\s+{_PERFECT_TENSE_MODIFIER}been"),
     re.IGNORECASE,
 )
 _PROFILE_ASSIGNMENT = re.compile(
@@ -107,7 +108,7 @@ _ADVERB_QUALIFIED_CREDENTIAL_ASSIGNMENT = re.compile(
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|"
     r"api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
     r"(?:(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily)\s+)*"
-    r"(?:is|are|was|were|equals|remains|remain|" + rf"(?:has|have|had)\s+(?:{_ASSIGNMENT_ADVERB}\s+)*been|"
+    r"(?:is|are|was|were|equals|remains|remain|" + rf"(?:has|have|had)\s+{_PERFECT_TENSE_MODIFIER}been|"
     r"will\s+be|will\s+have\s+been)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE})\b)\S+",
     re.IGNORECASE,
 )
@@ -160,7 +161,7 @@ _COMPOUND_ASSIGNMENT = re.compile(
 _COMPOUND_NAMED_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*(?::(?!:)\s*|"
     + rf"(?:(?:(?:{_ASSIGNMENT_ADVERB})\s+)*(?:value\s+)?(?:is|are|was|were|equals|remains|remain|"
-    + rf"(?:has|have|had)\s+(?:{_ASSIGNMENT_ADVERB}\s+)*been|will\s+(?:{_ASSIGNMENT_ADVERB}\s+)*have\s+been|"
+    + rf"(?:has|have|had)\s+{_PERFECT_TENSE_MODIFIER}been|will\s+(?:{_ASSIGNMENT_ADVERB}\s+)*have\s+been|"
     + r"(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?)|"
     r"has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|set\s+to|configured\s+(?:as|to|with))\s+)"
     r"(?P<value>(?:" + _EXPLANATORY_SECRET_VALUE + r")|[^\s&,;]+)",
@@ -290,7 +291,8 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"(?:(?:named|called)\s+)?[\"'“‘`]?[A-Za-z_][A-Za-z0-9_]*[\"'”’`]?|"
     r"(?:the\s+)?[A-Za-z_][A-Za-z0-9_]*\s+environment\s+variable)"
     + _ROSTER_OWNERSHIP_QUALIFIER
-    + r"(?:\s*=(?!=|>)|\s+(?:(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily)\s+)*(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|becomes?|became|contains?|includes?|has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+been|have\s+been|had\s+been|will\s+have\s+been)\s+(?!(?:"
+    + r"(?:\s*=(?!=|>)|\s+(?:(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily)\s+)*(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|becomes?|became|contains?|includes?|has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|"
+    + rf"has\s+{_PERFECT_TENSE_MODIFIER}been|have\s+{_PERFECT_TENSE_MODIFIER}been|had\s+{_PERFECT_TENSE_MODIFIER}been|will\s+have\s+been)\s+(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
     + r"))\S+|\s+(?:value\s*)?(?:=(?!=|>)|:)\s*(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
@@ -299,7 +301,15 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     + r"))\S+)",
     re.IGNORECASE,
 )
-_PATH_DECLARATION_LINKER = r"(?:(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily)\s+)*(?:is|are|was|were|equals|becomes?|became|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|has\s+been|have\s+been|had\s+been|will\s+have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
+_PATH_DECLARATION_LINKER = (
+    r"(?:(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily)\s+)*(?:is|are|was|were|equals|becomes?|became|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|has\s+"
+    + _PERFECT_TENSE_MODIFIER
+    + r"been|have\s+"
+    + _PERFECT_TENSE_MODIFIER
+    + r"been|had\s+"
+    + _PERFECT_TENSE_MODIFIER
+    + r"been|will\s+have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
+)
 _PATH_DECLARATION_QUALIFIER = r"(?:\s+(?:(?:for|of|on|used\s+(?:by|on|for)|assigned\s+to)\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)))?"
 _PATH_DECLARATION = (
     r"\b" + _PATH_LABEL + r"(?:\s+value)?" + _PATH_DECLARATION_QUALIFIER + r"\s*" + _PATH_DECLARATION_LINKER
