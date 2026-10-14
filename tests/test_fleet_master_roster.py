@@ -455,6 +455,26 @@ def test_parse_rejects_modal_credential_assignments(field: str, text: str) -> No
 @pytest.mark.parametrize(
     "text",
     [
+        "Environment variable SERVICE_MODE should be production",
+        "Environment variable SERVICE_MODE must be production",
+        "Path should be foo/bar",
+        "Path must be foo/bar",
+        "Call%20/api%3Fpath%3D%2Fetc%2Fpasswd",
+        "Call%20/api%3FSERVICE_MODE%3Dproduction",
+    ],
+)
+def test_parse_rejects_modal_declarations_and_encoded_api_routes(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
         "See https%3A%2F%2Fexample.com%2F%3Fpath%3D%2Fetc%2Fhosts",
         "See https%3A%2F%2Fexample.com%2F%3FSERVICE_MODE%3Dproduction",
     ],
