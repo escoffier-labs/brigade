@@ -143,6 +143,18 @@ def _online(body: dict[str, Any]) -> dict[str, Any]:
 
 def _queue_locked(path: Path, message: dict[str, Any], *, dir_fd: int | None = None) -> dict[str, Any]:
     if not fleet_client._spool_append_locked(path, message, dir_fd=dir_fd, evict_oldest=False):
+        try:
+            pending = fleet_client._read_spool(path, dir_fd=dir_fd)
+        except fleet_client.FleetClientError as exc:
+            raise fleet_client.FleetClientError(
+                f"fleet message persistence is ambiguous for client_id {message['client_id']}; "
+                "do not resubmit until the local spool can be checked"
+            ) from exc
+        if any(entry.get("client_id") == message["client_id"] for entry in pending):
+            raise fleet_client.FleetClientError(
+                f"fleet message persistence is ambiguous for client_id {message['client_id']}; "
+                "do not resubmit until the local spool is flushed"
+            )
         raise fleet_client.FleetClientError("fleet message could not be persisted to the local spool")
     return {"queued": True, "client_id": message["client_id"]}
 
@@ -481,6 +493,7 @@ def manage_principal(
             not isinstance(principal, dict)
             or principal.get("principal_id") != f"agent:{name}"
             or principal.get("name") != name
+            or principal.get("enrollment_id") != body["request_id"]
             or not isinstance(returned_token, str)
             or len(returned_token) != len(body["token"])
             or not returned_token.isascii()

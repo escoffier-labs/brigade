@@ -172,16 +172,18 @@ class TestSpoolPrivacy:
     @pytest.mark.skipif(os.name != "posix", reason="directory durability is POSIX-specific")
     def test_existing_execute_only_ancestor_does_not_block_spool_setup(self, tmp_path):
         root = tmp_path / "execute-only"
-        root.mkdir(mode=0o711)
-        os.chmod(root, 0o711)
+        root.mkdir(mode=0o700)
         home = root / "home"
         home.mkdir(mode=0o700)
         spool_dir = home / "fleet-spool"
-
-        descriptor = fleet_client._ensure_private_dir(spool_dir)
-        assert descriptor is not None
-        os.close(descriptor)
-        assert stat.S_IMODE(os.stat(spool_dir).st_mode) == 0o700
+        os.chmod(root, 0o111)
+        try:
+            descriptor = fleet_client._ensure_private_dir(spool_dir)
+            assert descriptor is not None
+            os.close(descriptor)
+            assert stat.S_IMODE(os.stat(spool_dir).st_mode) == 0o700
+        finally:
+            os.chmod(root, 0o700)
 
     def test_oversized_new_event_preserves_existing_spool(self, home, monkeypatch):
         spool = _spool()

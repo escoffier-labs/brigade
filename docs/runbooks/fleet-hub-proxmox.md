@@ -438,8 +438,10 @@ set -eu
 
 backup_dir=/var/backups/brigade
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
-install -d -o root -g root -m 0750 "$backup_dir"
+umask 077
+install -d -o root -g root -m 0700 "$backup_dir"
 sqlite3 /var/lib/brigade/fleet-hub.db ".backup '$backup_dir/fleet-hub-$stamp.db'"
+chmod 0600 "$backup_dir/fleet-hub-$stamp.db"
 find "$backup_dir" -type f -name 'fleet-hub-*.db' -mtime +14 -delete
 ```
 
@@ -458,6 +460,7 @@ After=brigade-fleet.service
 
 [Service]
 Type=oneshot
+UMask=0077
 ExecStart=/usr/local/sbin/brigade-fleet-backup
 ```
 
@@ -487,6 +490,18 @@ ls -lh /var/backups/brigade/
 ```
 
 Copy backups off the CT through the operator's existing backup system. The local timer is not a replacement for an off-host copy.
+
+For an existing backup directory, stop the timer, confirm the path is the
+dedicated backup directory, then tighten it and existing database backups:
+
+```bash
+systemctl stop brigade-fleet-backup.timer
+test -d /var/backups/brigade && test ! -L /var/backups/brigade
+chown root:root /var/backups/brigade
+chmod 0700 /var/backups/brigade
+find /var/backups/brigade -type f -name 'fleet-hub-*.db' -exec chmod 0600 {} +
+systemctl start brigade-fleet-backup.timer
+```
 
 ## 9. Compact the event journal (optional)
 

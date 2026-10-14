@@ -714,14 +714,31 @@ def open_db(db_path: Path) -> sqlite3.Connection:
 def _secure_hub_database_storage(db_path: Path) -> None:
     parent = db_path.parent
     try:
+        try:
+            parent.lstat()
+            created = False
+        except FileNotFoundError:
+            created = True
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         parent_info = parent.lstat()
     except OSError as exc:
         raise FleetHubError(f"could not secure fleet hub database directory: {type(exc).__name__}") from exc
     if not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode):
         raise FleetHubError("fleet hub database parent must be a directory")
-    if os.name == "posix" and stat.S_IMODE(parent_info.st_mode) != 0o700:
-        raise FleetHubError("fleet hub database directory must be private (mode 0700)")
+    if created and os.name == "posix":
+        try:
+            fd = os.open(
+                parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                os.fchmod(fd, 0o700)
+                if stat.S_IMODE(os.fstat(fd).st_mode) != 0o700:
+                    raise FleetHubError("fleet hub database directory could not be made private (mode 0700)")
+            finally:
+                os.close(fd)
+        except (OSError, NotImplementedError) as exc:
+            raise FleetHubError(f"could not secure fleet hub database directory: {type(exc).__name__}") from exc
 
     for path in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm"), Path(f"{db_path}-journal")):
         try:
@@ -743,8 +760,14 @@ def _secure_hub_database_storage(db_path: Path) -> None:
             raise FleetHubError("fleet hub database files must be regular files")
         if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600:
             try:
-                os.chmod(path, 0o600, follow_symlinks=False)
-            except OSError as exc:
+                fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    if not stat.S_ISREG(os.fstat(fd).st_mode):
+                        raise FleetHubError("fleet hub database files must be regular files")
+                    os.fchmod(fd, 0o600)
+                finally:
+                    os.close(fd)
+            except (OSError, NotImplementedError) as exc:
                 raise FleetHubError(f"could not secure fleet hub database file: {type(exc).__name__}") from exc
 
 

@@ -103,6 +103,7 @@ if TYPE_CHECKING:
 
 from . import fleet_claim_lifecycle as _claim_lifecycle
 from . import fleet_claim_target as _claim_target
+from .fleet_client_spool import append_record as _append_spool_record
 from .fleet_client_spool import ensure_directory as _ensure_spool_directory
 from .fleet_client_spool import fsync_parent as _fsync_spool_parent
 from . import toml_compat as tomllib
@@ -754,11 +755,10 @@ def _spool_append_locked(
         return True
     try:
         fd = _open_private(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, dir_fd=dir_fd)
-        with os.fdopen(fd, "a", encoding="utf-8") as handle:
-            handle.write(line)
-            handle.flush()
-            os.fsync(handle.fileno())
-        _fsync_spool_parent(path, dir_fd)
+        try:
+            _append_spool_record(fd, line.encode("utf-8"), path, dir_fd)
+        finally:
+            os.close(fd)
     except (FleetClientError, OSError) as exc:
         _LOG.warning("fleet spool %s refused: %s", path, type(exc).__name__)
         return False

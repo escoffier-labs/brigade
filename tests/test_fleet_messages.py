@@ -572,15 +572,19 @@ def test_hub_message_database_and_wal_files_are_owner_only(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes are not portable")
-def test_hub_refuses_an_existing_shared_database_directory(tmp_path):
+def test_hub_preserves_existing_shared_database_directory(tmp_path):
     db_dir = tmp_path / "shared-hub-state"
     db_dir.mkdir(mode=0o755)
     os.chmod(db_dir, 0o755)
+    db = db_dir / "fleet.db"
+    db.write_bytes(b"")
+    os.chmod(db, 0o644)
 
-    with pytest.raises(fleet_hub.FleetHubError, match="database directory must be private"):
-        fleet_hub.init_db(db_dir / "fleet.db")
+    conn = fleet_hub.init_db(db)
+    conn.close()
 
-    assert not (db_dir / "fleet.db").exists()
+    assert stat.S_IMODE(db_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE(db.stat().st_mode) == 0o600
 
 
 def test_expired_idempotent_retry_prunes_before_lookup(message_hub):
@@ -935,6 +939,7 @@ def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, 
                     "principal_id": "agent:researcher",
                     "name": "researcher",
                     "token": requests[-1]["token"],
+                    "enrollment_id": requests[-1]["request_id"],
                 }
             }
         ).encode(),
@@ -1027,12 +1032,31 @@ def test_principal_add_keeps_retry_state_until_response_matches_request(tmp_path
                     "principal_id": "agent:researcher",
                     "name": "researcher",
                     "token": requests[-1]["token"],
+                    "enrollment_id": "wrong-generation",
+                }
+            }
+        ).encode(),
+    )
+    with pytest.raises(fleet_client.FleetClientError, match="did not confirm the enrolled principal"):
+        fleet_client_messages.manage_principal("add", name="researcher")
+    assert fleet_client._read_spool(path)[0]["request_id"] == requests[0]["request_id"]
+
+    monkeypatch.setattr(
+        fleet_client,
+        "_read_bounded_response",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "principal": {
+                    "principal_id": "agent:researcher",
+                    "name": "researcher",
+                    "token": requests[-1]["token"],
+                    "enrollment_id": requests[-1]["request_id"],
                 }
             }
         ).encode(),
     )
     assert fleet_client_messages.manage_principal("add", name="researcher")["principal"]["token"]
-    assert requests[0]["request_id"] == requests[1]["request_id"]
+    assert len({request["request_id"] for request in requests}) == 1
     assert not path.exists()
 
 
@@ -1160,9 +1184,6 @@ def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
-    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
-    with fleet_client._spool_lock(path):
-        pass
     attempts = []
 
     def request(_hub: str, _token: str, body: dict):
@@ -1230,7 +1251,8 @@ def test_send_refuses_before_post_when_full_spool_cannot_retain_retry(tmp_path, 
     assert fleet_client._read_spool(path)[0]["client_id"] == "blocked-message"
 
 
-def test_send_does_not_post_until_spool_fsync_succeeds(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failed_mode", [stat.S_IFREG, stat.S_IFDIR])
+def test_send_does_not_post_until_spool_fsync_succeeds(tmp_path, monkeypatch, failed_mode):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     monkeypatch.setattr(
@@ -1242,15 +1264,19 @@ def test_send_does_not_post_until_spool_fsync_succeeds(tmp_path, monkeypatch):
     with fleet_client._spool_lock(path):
         pass
     attempts = []
+    real_fsync = os.fsync
+    failure_injected = False
 
     def request(_hub, _token, message):
         attempts.append(message.copy())
         return 503, {"error": "response lost after commit"}
 
     def fail_fsync(fd):
-        if stat.S_ISREG(os.fstat(fd).st_mode):
+        nonlocal failure_injected
+        if stat.S_IFMT(os.fstat(fd).st_mode) == failed_mode and not failure_injected:
+            failure_injected = True
             raise OSError("disk full")
-        os.fsync(fd)
+        real_fsync(fd)
 
     monkeypatch.setattr(fleet_client_messages, "_request", request)
     monkeypatch.setattr(fleet_client.os, "fsync", fail_fsync)
@@ -1265,6 +1291,44 @@ def test_send_does_not_post_until_spool_fsync_succeeds(tmp_path, monkeypatch):
         )
 
     assert attempts == []
+    assert fleet_client._read_spool(path) == []
+
+
+def test_ambiguous_spool_append_surfaces_client_id_without_posting(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+    )
+    real_append = fleet_client._spool_append_locked
+    attempts = []
+
+    def ambiguous_append(path, message, *, dir_fd=None, evict_oldest=True):
+        assert real_append(path, message, dir_fd=dir_fd, evict_oldest=evict_oldest)
+        return False
+
+    monkeypatch.setattr(fleet_client, "_spool_append_locked", ambiguous_append)
+    monkeypatch.setattr(
+        fleet_client_messages,
+        "_request",
+        lambda _hub, _token, message: attempts.append(message.copy()),
+    )
+
+    with pytest.raises(fleet_client.FleetClientError, match="persistence is ambiguous.*client_id") as error:
+        fleet_client_messages.send(
+            recipient=NODE_B,
+            subject="Keep the retained ID",
+            body="Do not post after an ambiguous append result",
+            reference=None,
+            priority="normal",
+        )
+
+    assert attempts == []
+    retained_id = error.value.args[0].split("client_id ", 1)[1].split(";", 1)[0]
+    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    assert [entry["client_id"] for entry in fleet_client._read_spool(path)] == [retained_id]
 
 
 def test_message_spool_refuses_overflow_without_evicting_queued_messages(tmp_path, monkeypatch):
@@ -3046,6 +3110,7 @@ def test_principal_add_clears_pending_request_after_definitive_validation_error(
                 "name": "researcher",
                 "label": body["label"],
                 "token": body["token"],
+                "enrollment_id": body["request_id"],
             }
         }
         return Response(json.dumps(response).encode())
@@ -3096,6 +3161,7 @@ def test_principal_add_retries_after_revoked_pending_enrollment(tmp_path, monkey
                         "name": "researcher",
                         "label": body["label"],
                         "token": body["token"],
+                        "enrollment_id": body["request_id"],
                     }
                 }
             ).encode()

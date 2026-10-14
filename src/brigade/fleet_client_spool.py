@@ -6,6 +6,31 @@ import os
 from pathlib import Path
 
 
+class AppendRollbackError(OSError):
+    """An append failed and its rollback could not be synced."""
+
+
+def append_record(fd: int, data: bytes, path: Path, dir_fd: int | None) -> None:
+    original_size = os.fstat(fd).st_size
+    try:
+        remaining = memoryview(data)
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError("spool append made no progress")
+            remaining = remaining[written:]
+        os.fsync(fd)
+        fsync_parent(path, dir_fd)
+    except OSError:
+        try:
+            os.ftruncate(fd, original_size)
+            os.fsync(fd)
+            fsync_parent(path, dir_fd)
+        except OSError as rollback_error:
+            raise AppendRollbackError("spool append rollback could not be synced") from rollback_error
+        raise
+
+
 def ensure_directory(path: Path) -> None:
     """Create missing directory components and persist their parent entries."""
     for directory in reversed(path.parents):
