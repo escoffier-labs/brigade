@@ -28,7 +28,7 @@ _ROSTER_SUBJECT = r"[^\W\d_][\w.-]*"
 _EXPLANATORY_SECRET_VALUE = (
     r"(?:required|optional|needed|necessary|available|configured(?!\s+(?:as|to|with)\b)|set(?!\s+to\b)|missing|unset|unavailable|"
     r"not\s+(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable)|"
-    r"confidential|authentication|management|rotation|support|handling|managed(?:\s+by\s+Vault)?|provided|stored(?:\s+securely)?|encrypted|protected|"
+    r"confidential|authentication|management|rotation|support|handling|managed(?:\s+by\s+Vault)?|provided|stored(?:\s+securely)?|encrypted|protected|reliable|stable|"
     r"handled|generated|rotated|masked|redacted)(?!\s+(?:as|to|with)\b)(?=$|\s|[.,;!?](?:\s|$))"
 )
 _DANGEROUS_VALUE_PATTERN = (
@@ -237,7 +237,7 @@ _DECLARATIVE_AUTH_PROFILE = re.compile(
 )
 _CLOUD_PROVIDER = (
     r"(?:aws|amazon\s+web\s+services|azure|microsoft\s+azure|gcp|google\s+cloud(?:\s+platform)?|"
-    r"oci|oracle\s+cloud(?:\s+infrastructure)?|ibm\s+cloud|alibaba\s+cloud)"
+    r"oci|oracle\s+cloud(?:\s+infrastructure)?|ibm\s+cloud|alibaba\s+cloud)(?!\s+(?:platform|infrastructure)\b)"
 )
 _PROVIDER_AUTH_PROFILE = re.compile(
     r"\b(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+)?"

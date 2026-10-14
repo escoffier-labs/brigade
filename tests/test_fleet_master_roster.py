@@ -958,6 +958,8 @@ def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> N
         "Authentication profile values are prohibited.",
         "AWS profiles require approval.",
         "Amazon Web Services profiles require approval.",
+        "Google Cloud Platform profiles require approval.",
+        "No Oracle Cloud Infrastructure profile exists.",
         "Use AWS account profile for this service.",
         "AWS configuration profile selection is supported.",
         "No AWS profile.",
@@ -970,6 +972,8 @@ def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> N
         "Rotate each AWS profile monthly.",
         "Document AWS profiles.",
         "Audit AWS profiles before sharing.",
+        "The API generally is reliable.",
+        "CLI currently is stable.",
     ],
 )
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
