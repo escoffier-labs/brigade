@@ -1482,6 +1482,8 @@ def test_parse_rejects_dotted_credential_query_keys(field: str, text: str) -> No
         "Password has often been hunter2",
         "The password for this seat has often been hunter2",
         "The API key assigned to this seat has sometimes been shortkey",
+        "The API keys for this seat have sometimes been shortkey",
+        "The password for this seat had previously been hunter2",
         "API key now equals shortkey",
         "Password remains hunter2",
         "db_password: hunter2",

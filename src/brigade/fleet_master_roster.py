@@ -90,10 +90,13 @@ _DANGEROUS_VALUE_PATTERN = (
     r"(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))"
 )
 _DANGEROUS_VALUE = re.compile(
-    _DANGEROUS_VALUE_PATTERN.replace(r"used\s+by", r"used\s+(?:by|on|for)").replace(
+    _DANGEROUS_VALUE_PATTERN.replace(r"used\s+by", r"used\s+(?:by|on|for)")
+    .replace(
         r"has\s+been",
         rf"has\s+(?:{_ASSIGNMENT_ADVERB}\s+)*(?:been|(?:(?:the|a)\s+)?value(?:\s+of)?)",
-    ),
+    )
+    .replace(r"have\s+been", rf"have\s+(?:{_ASSIGNMENT_ADVERB}\s+)*been")
+    .replace(r"had\s+been", rf"had\s+(?:{_ASSIGNMENT_ADVERB}\s+)*been"),
     re.IGNORECASE,
 )
 _PROFILE_ASSIGNMENT = re.compile(
