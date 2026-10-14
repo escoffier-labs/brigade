@@ -408,6 +408,7 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Authentication profile named ‘production admin’",
         "Use AWS profile production",
         "Use the production AWS profile",
+        "Use production AWS profile",
     ],
 )
 def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str) -> None:
@@ -934,6 +935,8 @@ def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> N
         "Authentication profile values are prohibited.",
         "AWS profiles require approval.",
         "Configure AWS profile selection.",
+        "Document AWS profiles.",
+        "Audit AWS profiles before sharing.",
     ],
 )
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
@@ -1227,6 +1230,9 @@ def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None
         "Config is stored in alpha/beta",
         "The path is Shared Folder/file",
         "Open Shared Folder/file for instructions",
+        "Open alpha/beta guide",
+        "Read alpha/beta guide",
+        "Run alpha/beta workflow",
         "GET /etc/passwd",
         "GET /users/../etc/passwd",
         "GET /v1/../etc/passwd",

@@ -233,15 +233,16 @@ _DECLARATIVE_AUTH_PROFILE = re.compile(
 _PROVIDER_AUTH_PROFILE = re.compile(
     r"\b(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+)?"
     r"(?:(?:the|a|an|my|your|our|their)\s+)?"
-    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profiles?\s+"
+    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profile\s+"
     r"(?!(?:required|needed|require|requires|selection|support|supported|configure|rotate|management|policy|policies|configuration|availability|"
     r"available|regularly|rotation|names|values|must|should|can|could|may|might|will|would|are|is|were|was)\b)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)|"
-    r"\b(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+)?"
-    r"(?:(?:the|a|an|my|your|our|their)\s+)?"
-    r"(?!(?:required|needed|require|requires|selection|support|supported|configure|rotate|management|policy|policies|configuration|availability|"
-    r"available|regularly|rotation|names|values|must|should|can|could|may|might|will|would)\b)"
+    r"\b(?:(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+"
+    r"(?:(?:the|a|an|my|your|our|their)\s+)?)|(?:the|a|an|my|your|our|their)\s+)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
+    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profiles?\b|"
+    r"\b(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
+    r"(?:is|are|was|were)\s+(?:the|a|an)\s+"
     r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profiles?\b",
     re.IGNORECASE,
 )
@@ -622,7 +623,9 @@ _EXPLICIT_NAVIGATION_CONTEXT = re.compile(
     re.IGNORECASE,
 )
 _FILESYSTEM_NOUN_CONTINUATION = re.compile(
-    r"\s+(?:[A-Za-z][A-Za-z-]*\s+){0,2}(?:files?|directories|folders?|scripts?|helpers?|data|content|output)\b", re.I
+    r"\s+(?:[A-Za-z][A-Za-z-]*\s+){0,2}"
+    r"(?:files?|directories|folders?|scripts?|helpers?|guides?|workflows?|data|content|output)\b",
+    re.I,
 )
 _PATH_CONTEXT = re.compile(
     r"(?:\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store|"
