@@ -409,6 +409,7 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Use AWS profile production",
         "Use the production AWS profile",
         "Use production AWS profile",
+        "Use AWS production-admin profile.",
         "production AWS profile",
     ],
 )
@@ -939,6 +940,8 @@ def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> N
         "Authentication profile values are prohibited.",
         "AWS profiles require approval.",
         "No AWS profile.",
+        "No AWS profile exists.",
+        "No AWS profile does not store credentials.",
         "The AWS profile.",
         "Configure AWS profile selection.",
         "Configure the AWS profile selection.",

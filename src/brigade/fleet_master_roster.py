@@ -236,8 +236,15 @@ _PROVIDER_AUTH_PROFILE = re.compile(
     r"(?:(?:the|a|an|my|your|our|their)\s+)?"
     r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profile\s+"
     r"(?!(?:required|needed|require|requires|selection|support|supported|configure|rotate|management|policy|policies|configuration|availability|"
-    r"available|regularly|daily|weekly|monthly|quarterly|yearly|annually|rotation|names|values|must|should|can|could|may|might|will|would|are|is|were|was)\b)"
+    r"available|regularly|daily|weekly|monthly|quarterly|yearly|annually|rotation|names|values|must|should|can|could|may|might|will|would|are|is|were|was|exists?|does|do)\b)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)|"
+    r"\b(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+)?"
+    r"(?:(?:the|a|an|my|your|our|their)\s+)?"
+    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+"
+    r"(?!(?:profile|profiles|cloud|account|selection|support|supported|configure|rotate|management|policy|policies|configuration|availability|"
+    r"available|required|needed|regularly|daily|weekly|monthly|quarterly|yearly|annually|rotation|names|values|for|with|as|to|is|are|was|were|"
+    r"must|should|can|could|may|might|will|would|exists?|does|do)\b)"
+    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+profiles?\b|"
     r"\b(?:(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+"
     r"(?:(?:the|a|an|my|your|our|their)\s+)?)|(?:the|a|an|my|your|our|their)\s+)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
@@ -615,6 +622,11 @@ def _query_shaped_fragment_pairs(fragment: str) -> list[tuple[str, str]]:
     return parse_qsl(query, keep_blank_values=True)
 
 
+_NEGATIVE_PROVIDER_PROFILE_PROSE = re.compile(
+    r"\bno\s+(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+"
+    r"profiles?\s+(?:exists?|does\s+not\s+store\s+credentials)\b",
+    re.IGNORECASE,
+)
 _RELATIVE_PATH = re.compile(r"(?<![\w.-])(?P<path>(?:[\w.~-]+[/\\])+[\w.~-]+)(?![\w.~-])")
 # Slash pairs used as noun modifiers are prose when followed by a plural noun.
 _SLASH_PROSE_CONTINUATION = re.compile(
@@ -834,6 +846,7 @@ def _has_control(value: str) -> bool:
 
 def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -> bool:
     path_text = _VERSION_REFERENCE.sub("", _HTTP_URL.sub("", value))
+    path_text = _NEGATIVE_PROVIDER_PROFILE_PROSE.sub("", path_text)
     if _VALUE_FIRST_PATH_DECLARATION.search(path_text):
         return True
     standalone_text = path_text.strip().rstrip(".,;:!?")
