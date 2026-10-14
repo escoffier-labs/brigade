@@ -104,6 +104,14 @@ _VALUE_FIRST_CREDENTIAL_ASSIGNMENT = re.compile(
     r"api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\b",
     re.IGNORECASE,
 )
+_SENSITIVE_CLI_ARGUMENT = re.compile(
+    r"(?<![\w-])--(?:api[-_]?keys?|auth[-_]?tokens?|access[-_]?tokens?|client[-_]?secrets?|"
+    r"private[-_]?keys?|passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?)"
+    r"(?:=|\s+)(?!"
+    + rf"(?:{_EXPLANATORY_SECRET_VALUE}|is|are|was|were|equals|remains|remain|option|argument|flag|parameter|setting)\b"
+    + r")\S+",
+    re.IGNORECASE,
+)
 _COMPOUND_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*=(?!=|>)\s*(?P<value>[^\s&,;]+)"
 )
@@ -748,6 +756,8 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     if (
         _DANGEROUS_VALUE.search(decoded_sensitive_text)
         or _DANGEROUS_VALUE.search(decoded_form_text)
+        or _SENSITIVE_CLI_ARGUMENT.search(decoded_sensitive_text)
+        or _SENSITIVE_CLI_ARGUMENT.search(decoded_form_text)
         or _VALUE_FIRST_CREDENTIAL_ASSIGNMENT.search(decoded_sensitive_text)
         or _VALUE_FIRST_CREDENTIAL_ASSIGNMENT.search(decoded_form_text)
         or _ADVERB_QUALIFIED_CREDENTIAL_ASSIGNMENT.search(decoded_sensitive_text)

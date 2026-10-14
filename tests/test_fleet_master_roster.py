@@ -396,6 +396,23 @@ def test_parse_rejects_value_first_credential_disclosures(field: str, text: str)
 
 
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Run provider-cli --api-key actual-secret",
+        "Run provider-cli --token hunter2",
+        "Run provider-cli --password hunter2",
+    ],
+)
+def test_parse_rejects_secrets_in_separate_cli_arguments(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
 @pytest.mark.parametrize("text", ["Auth profile prod-admin.", "Authentication profile production-admin."])
 def test_parse_rejects_bare_auth_profile_labels(field: str, text: str) -> None:
     document = _document()
@@ -697,6 +714,7 @@ def test_parse_rejects_encoded_quoted_protected_labels(field: str, text: str) ->
         "Auth profiles are required.",
         "Password is confidential.",
         "Password is managed by Vault.",
+        "The --password option is required.",
         "Auth profile is required.",
         "Environment variable SERVICE_MODE is required.",
     ],
