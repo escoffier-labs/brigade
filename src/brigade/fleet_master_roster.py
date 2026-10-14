@@ -215,6 +215,40 @@ def _normalize_protected_labels(value: str) -> str:
     return _QUOTED_PROTECTED_LABEL.sub(r"\g<label>", value)
 
 
+_UNICODE_OWNERSHIP_TARGET = re.compile(
+    r"(?P<qualifier>\b(?:for|of|on|used\s+(?:by|on|for)|assigned\s+to)\s+)"
+    r"(?P<determiner>(?:(?:this|the)\s+)?)"
+    r"(?:(?P<prefix_role>seat|service|agent)\s+)?"
+    r"(?P<subject>[^\W\d_][\w.-]*)"
+    r"(?P<suffix_role>\s+(?:seat|service|agent))?",
+    re.IGNORECASE,
+)
+
+
+def _normalize_ownership_targets(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        subject = match.group("subject")
+        if subject.isascii():
+            return match.group()
+        return (
+            match.group("qualifier")
+            + match.group("determiner")
+            + ((match.group("prefix_role") + " ") if match.group("prefix_role") else "")
+            + "rosterowner"
+            + (match.group("suffix_role") or "")
+        )
+
+    return _UNICODE_OWNERSHIP_TARGET.sub(replace, value)
+
+
+def _has_bracketed_credential_query_key(key: str, value: str) -> bool:
+    if "[" not in key and "]" not in key:
+        return False
+    return any(
+        _DANGEROUS_VALUE.search(f"{segment}={value}") for segment in re.split(r"[\[\]]+", key) if segment.strip()
+    )
+
+
 def _has_url_userinfo(value: str) -> bool:
     for match in _HTTP_URL.finditer(value):
         try:
@@ -266,6 +300,7 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
             query_value = _fully_unquote(query_value)
             if (
                 _DANGEROUS_VALUE.search(f"{key}={query_value}")
+                or _has_bracketed_credential_query_key(key, query_value)
                 or _ENVIRONMENT_ASSIGNMENT.search(f"{key}={query_value}")
                 or _ENVIRONMENT_ASSIGNMENT.search(query_value)
                 or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(query_value)
@@ -324,6 +359,7 @@ def _has_disallowed_api_route_query(value: str) -> bool:
             pair = f"{key}={decoded_value}"
             if (
                 _DANGEROUS_VALUE.search(pair)
+                or _has_bracketed_credential_query_key(key, decoded_value)
                 or _ENVIRONMENT_ASSIGNMENT.search(pair)
                 or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(pair)
             ):
@@ -610,7 +646,7 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         raise MasterRosterError(f"{field} must contain valid Unicode scalar values")
     if len(value) > MAX_TEXT or _has_control(value):
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
-    screening_text = _normalize_protected_labels(value)
+    screening_text = _normalize_ownership_targets(_normalize_protected_labels(value))
     decoded_sensitive_text = _normalize_protected_labels(_fully_unquote(screening_text))
     decoded_form_text = _normalize_protected_labels(_fully_unquote_plus(screening_text))
     path_text = _without_api_route_references(screening_text)

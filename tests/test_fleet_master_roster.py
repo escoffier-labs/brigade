@@ -382,6 +382,9 @@ def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str)
         "The API key used on this seat is shortkey",
         "The API key used for this seat is shortkey",
         "The API key used for implementer is shortkey",
+        "The API key for 审查员 is shortkey",
+        "Password assigned to 审查员 is hunter2",
+        "Auth profile on 审查员 is production-admin",
     ],
 )
 def test_parse_rejects_qualified_compact_credential_assignments(field: str, text: str) -> None:
@@ -1084,6 +1087,9 @@ def test_parse_accepts_url_routes_with_filesystem_named_components(field: str, t
         "See https://example.com/path%3Foutput%3D%2Fetc%2Fhosts",
         "See https://example.com/?output%3D%2Fetc%2Fhosts",
         "See https://example.com/#output%3D%2Fetc%2Fhosts",
+        "https://example.com/callback?password[]=hunter2",
+        "https://example.com/callback?api_key[value]=shortkey",
+        "Call /api?token%5B%5D=hunter2",
         "See https://example.com/?%2Fhome%2Fexample=x",
         "See https://example.com/foo;path=foo/bar",
         "See https://example.com/foo;path=~example/work/repo",
