@@ -99,6 +99,13 @@ _ADVERB_QUALIFIED_CREDENTIAL_ASSIGNMENT = re.compile(
 _COMPOUND_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*=(?!=|>)\s*(?P<value>[^\s&,;]+)"
 )
+_COMPOUND_NAMED_ASSIGNMENT = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*(?::(?!:)\s*|"
+    r"(?:is|are|was|were|equals|remains|remain|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|"
+    r"has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|set\s+to|configured\s+(?:as|to|with))\s+)"
+    r"(?P<value>[^\s&,;]+)",
+    re.IGNORECASE,
+)
 _PATH_LABEL = r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositor(?:y|ies)|repos?|locations?)"
 _QUOTED_PROTECTED_LABEL = re.compile(
     r"[\"'“‘`](?P<label>passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|"
@@ -276,7 +283,7 @@ def _normalize_ownership_targets(value: str) -> str:
     return _OWNERSHIP_TARGET.sub(replace, value)
 
 
-def _has_sensitive_assignment_key(key: str, value: str) -> bool:
+def _has_sensitive_assignment_key(key: str, value: str, *, include_environment: bool = True) -> bool:
     """Check each query-key component and suffix as a possible assignment label."""
     key = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", key)
     components = [component for component in re.split(r"[.\[\]_-]+", key) if component]
@@ -285,16 +292,23 @@ def _has_sensitive_assignment_key(key: str, value: str) -> bool:
     }
     return any(
         _DANGEROUS_VALUE.search(f"{candidate}={value}")
-        or _ENVIRONMENT_ASSIGNMENT.search(f"{candidate}={value}")
-        or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(f"{candidate}={value}")
+        or (
+            include_environment
+            and (
+                _ENVIRONMENT_ASSIGNMENT.search(f"{candidate}={value}")
+                or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(f"{candidate}={value}")
+            )
+        )
         for candidate in candidates
     )
 
 
 def _has_compound_sensitive_assignment(value: str) -> bool:
     return any(
-        _has_sensitive_assignment_key(match.group("key"), match.group("value"))
-        for match in _COMPOUND_ASSIGNMENT.finditer(value)
+        not re.fullmatch(_EXPLANATORY_SECRET_VALUE, match.group("value"), re.IGNORECASE)
+        and _has_sensitive_assignment_key(match.group("key"), match.group("value"), include_environment=False)
+        for pattern in (_COMPOUND_ASSIGNMENT, _COMPOUND_NAMED_ASSIGNMENT)
+        for match in pattern.finditer(value)
     )
 
 
@@ -698,8 +712,8 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     if len(value) > MAX_TEXT or _has_control(value):
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
     screening_text = _normalize_ownership_targets(_normalize_protected_labels(value))
-    decoded_sensitive_text = _normalize_protected_labels(_fully_unquote(screening_text))
-    decoded_form_text = _normalize_protected_labels(_fully_unquote_plus(screening_text))
+    decoded_sensitive_text = _normalize_ownership_targets(_normalize_protected_labels(_fully_unquote(screening_text)))
+    decoded_form_text = _normalize_ownership_targets(_normalize_protected_labels(_fully_unquote_plus(screening_text)))
     path_text = _without_api_route_references(screening_text)
     decoded_sensitive_path_text = _without_api_route_references(decoded_sensitive_text)
     decoded_form_path_text = _without_api_route_references(decoded_form_text)
