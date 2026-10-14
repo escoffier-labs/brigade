@@ -17,6 +17,8 @@ SCHEMA = "brigade.fleet_master_roster.v1"
 MAX_DOCUMENT_BYTES = 262144
 MAX_SEATS = 128
 MAX_TEXT = 512
+MAX_REVISION = (1 << 63) - 1
+_MAX_JSON_INTEGER_DIGITS = len(str(MAX_REVISION))
 _SEAT_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _MODEL_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
@@ -176,7 +178,8 @@ _URL_CREDENTIAL_QUERY = re.compile(
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
 _BARE_ENVIRONMENT_ASSIGNMENT = re.compile(
-    r"(?P<action>(?i:set|use))\s+(?P<name>[\"'`“‘]?[A-Z_][A-Z0-9_]*[\"'`”’]?)"
+    r"(?P<action>(?i:set|use|configure|assign|define))\s+"
+    r"(?P<name>[\"'`“‘]?[A-Z_][A-Z0-9_]*[\"'`”’]?)"
     r"(?P<linker>\s+(?:to|as)\s+|\s*[:=]\s*)(?P<value>\S+)"
 )
 _MAPPING_ENVIRONMENT_ASSIGNMENT = re.compile(
@@ -844,6 +847,14 @@ def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, An
     return result
 
 
+def _bounded_json_integer(value: str) -> int:
+    """Parse bounded JSON integers consistently across supported Python versions."""
+    digits = value.lstrip("-")
+    if len(digits) > _MAX_JSON_INTEGER_DIGITS:
+        raise ValueError("JSON integer exceeds the supported digit limit")
+    return int(value)
+
+
 def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     if not isinstance(value, str) or not value.strip():
         raise MasterRosterError(f"{field} must be a non-empty string")
@@ -935,7 +946,11 @@ def parse(raw: Mapping[str, Any] | bytes | str) -> dict[str, Any]:
             encoded = raw.encode("utf-8") if isinstance(raw, str) else raw
             if len(encoded) > MAX_DOCUMENT_BYTES:
                 raise MasterRosterError(f"document must be at most {MAX_DOCUMENT_BYTES} bytes")
-            decoded = json.loads(encoded.decode("utf-8"), object_pairs_hook=_object_without_duplicate_keys)
+            decoded = json.loads(
+                encoded.decode("utf-8"),
+                object_pairs_hook=_object_without_duplicate_keys,
+                parse_int=_bounded_json_integer,
+            )
         except MasterRosterError:
             raise
         except (UnicodeError, ValueError, RecursionError) as exc:
@@ -952,8 +967,8 @@ def parse(raw: Mapping[str, Any] | bytes | str) -> dict[str, Any]:
     if source.get("schema") != SCHEMA:
         raise MasterRosterError(f"schema must be {SCHEMA}")
     revision = source.get("revision")
-    if type(revision) is not int or revision < 1:
-        raise MasterRosterError("revision must be a positive integer")
+    if type(revision) is not int or not 1 <= revision <= MAX_REVISION:
+        raise MasterRosterError(f"revision must be a positive integer at most {MAX_REVISION}")
     seats = source.get("seats")
     if not isinstance(seats, list) or len(seats) > MAX_SEATS:
         raise MasterRosterError(f"seats must be a list of at most {MAX_SEATS} entries")

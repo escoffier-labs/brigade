@@ -420,6 +420,9 @@ def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str)
     [
         "Set DEPLOY_PASSWORD to hunter2",
         "Set SERVICE_MODE to production",
+        "Configure SERVICE_PASSWORD as hunter2",
+        "Assign SERVICE_MODE to production",
+        "Define OPENAI_API_KEY as shortkey",
         "Use DEPLOY_PASSWORD = hunter2",
         "Use SERVICE_MODE as production",
         "Use MODE to production",
@@ -1720,21 +1723,36 @@ def test_parse_rejects_whitespace_only_required_text(field: str) -> None:
         fleet_master_roster.parse(document)
 
 
-@pytest.mark.skipif(sys.version_info < (3, 10, 7), reason="requires Python's integer-string digit limit")
-def test_parse_normalizes_oversized_mapping_revision() -> None:
+def test_parse_rejects_oversized_mapping_revision() -> None:
     document = _document()
     document["revision"] = 10**5000
 
-    with pytest.raises(fleet_master_roster.MasterRosterError, match="JSON"):
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="revision"):
         fleet_master_roster.parse(document)
 
 
-@pytest.mark.skipif(sys.version_info < (3, 10, 7), reason="requires Python's integer-string digit limit")
-def test_parse_normalizes_json_integer_digit_limit() -> None:
+def test_parse_rejects_json_integer_above_revision_limit() -> None:
     raw = b'{"schema":"brigade.fleet_master_roster.v1","revision":' + b"9" * 5000 + b',"seats":[]}'
 
     with pytest.raises(fleet_master_roster.MasterRosterError, match="valid UTF-8 JSON"):
         fleet_master_roster.parse(raw)
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_parse_rejects_revision_above_supported_limit(as_json: bool) -> None:
+    document = _document()
+    document["revision"] = fleet_master_roster.MAX_REVISION + 1
+    raw = json.dumps(document).encode("utf-8") if as_json else document
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="revision"):
+        fleet_master_roster.parse(raw)
+
+
+def test_parse_accepts_maximum_supported_revision() -> None:
+    document = _document()
+    document["revision"] = fleet_master_roster.MAX_REVISION
+
+    assert fleet_master_roster.parse(document)["revision"] == fleet_master_roster.MAX_REVISION
 
 
 def test_fleet_roster_validate_cli_reports_document_digest(tmp_path, capsys) -> None:
