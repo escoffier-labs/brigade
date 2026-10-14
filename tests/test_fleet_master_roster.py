@@ -406,6 +406,8 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         'Authentication profile named "production admin"',
         "Authentication profile named “production admin”",
         "Authentication profile named ‘production admin’",
+        "Use AWS profile production",
+        "Use the production AWS profile",
     ],
 )
 def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str) -> None:
@@ -930,6 +932,8 @@ def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> N
         "Authentication profile names must remain local.",
         "Authentication profile policies require rotation.",
         "Authentication profile values are prohibited.",
+        "AWS profiles require approval.",
+        "Configure AWS profile selection.",
     ],
 )
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
@@ -1288,6 +1292,8 @@ def test_parse_accepts_ordinary_slash_delimited_descriptive_prose(text: str) -> 
         "Read request/response data.",
         "Inspect source/target mapping.",
         "支持 输入/输出 工作流。",
+        "Run fast/slow tests.",
+        "Run red/green deployments.",
     ],
 )
 def test_parse_accepts_standalone_slash_prose(field: str, text: str) -> None:

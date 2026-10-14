@@ -230,6 +230,21 @@ _DECLARATIVE_AUTH_PROFILE = re.compile(
     r"(?:is\s+)?(?:the\s+)?auth(?:entication)?[ _-]?profiles?\b)",
     re.IGNORECASE,
 )
+_PROVIDER_AUTH_PROFILE = re.compile(
+    r"\b(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+)?"
+    r"(?:(?:the|a|an|my|your|our|their)\s+)?"
+    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profiles?\s+"
+    r"(?!(?:required|needed|require|requires|selection|support|supported|configure|rotate|management|policy|policies|configuration|availability|"
+    r"available|regularly|rotation|names|values|must|should|can|could|may|might|will|would|are|is|were|was)\b)"
+    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)|"
+    r"\b(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+)?"
+    r"(?:(?:the|a|an|my|your|our|their)\s+)?"
+    r"(?!(?:required|needed|require|requires|selection|support|supported|configure|rotate|management|policy|policies|configuration|availability|"
+    r"available|regularly|rotation|names|values|must|should|can|could|may|might|will|would)\b)"
+    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
+    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profiles?\b",
+    re.IGNORECASE,
+)
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"\b(?:"
     r"(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+|"
@@ -600,6 +615,12 @@ _RELATIVE_PATH = re.compile(r"(?<![\w.-])(?P<path>(?:[\w.~-]+[/\\])+[\w.~-]+)(?!
 _SLASH_PROSE_CONTINUATION = re.compile(
     r"\s+(?!(?:for|before|after|with|where|when|while|from|at|in|on|under|to|into|through)\b)[A-Za-z][A-Za-z-]*\b"
 )
+_EXPLICIT_NAVIGATION_CONTEXT = re.compile(
+    r"\b(?:cd\s+|change\s+directory\s+(?:to|in|into|under)\s+|"
+    r"navigate\s+(?:to|in|into|through)\s+|move\s+(?:to|in|into|from|under)\s+)"
+    r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?[\"'“‘]*\s*$",
+    re.IGNORECASE,
+)
 _FILESYSTEM_NOUN_CONTINUATION = re.compile(
     r"\s+(?:[A-Za-z][A-Za-z-]*\s+){0,2}(?:files?|directories|folders?|scripts?|helpers?|data|content|output)\b", re.I
 )
@@ -614,12 +635,6 @@ _LOCATION_PATH_CONTEXT = re.compile(
     r"\b(?:working|current|home|project|repository|repo|config(?:uration)?|data|cache|output|input|log|temp(?:orary)?)"
     r"(?:\s+(?:directory|folder|path|location|file))?\s+(?:(?:is|are|was|were)\s+)?"
     r"(?:located|stored|lives?|resides?|saved|kept)\s+(?:at|in|under)\s*$",
-    re.IGNORECASE,
-)
-_EXPLICIT_NAVIGATION_CONTEXT = re.compile(
-    r"\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store|"
-    r"delete|remove|edit|update|modify|rename|create|touch)\s+"
-    r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?[\"'“‘]*\s*$",
     re.IGNORECASE,
 )
 _EXPLICIT_PATH_DECLARATION = re.compile(
@@ -846,10 +861,10 @@ def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -
         if standalone and not model_identifier and slash_term not in _PROSE_SLASH_TERMS:
             return True
         path_context = _has_path_context(path_text, match.start())
-        explicit_navigation = _EXPLICIT_NAVIGATION_CONTEXT.search(path_text[: match.start()]) is not None
         continuation = path_text[match.end() :]
         prose_continuation = _SLASH_PROSE_CONTINUATION.match(continuation)
         filesystem_noun = _FILESYSTEM_NOUN_CONTINUATION.match(continuation)
+        explicit_navigation = _EXPLICIT_NAVIGATION_CONTEXT.search(path_text[: match.start()]) is not None
         if (
             path_context
             and (not prose_continuation or filesystem_noun or explicit_navigation)
@@ -922,6 +937,8 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         or _SUBJECT_FIRST_AUTH_PROFILE.search(decoded_form_text)
         or _DECLARATIVE_AUTH_PROFILE.search(decoded_sensitive_text)
         or _DECLARATIVE_AUTH_PROFILE.search(decoded_form_text)
+        or _PROVIDER_AUTH_PROFILE.search(decoded_sensitive_text)
+        or _PROVIDER_AUTH_PROFILE.search(decoded_form_text)
         or _URL_CREDENTIAL_QUERY.search(decoded_sensitive_text)
         or _URL_CREDENTIAL_QUERY.search(decoded_form_text)
         or _has_url_userinfo(decoded_sensitive_text)
