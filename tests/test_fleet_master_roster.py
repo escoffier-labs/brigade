@@ -402,9 +402,29 @@ def test_parse_rejects_value_first_credential_disclosures(field: str, text: str)
         "Run provider-cli --api-key actual-secret",
         "Run provider-cli --token hunter2",
         "Run provider-cli --password hunter2",
+        "Run provider-cli --user-password hunter2",
+        "Run provider-cli --db_password hunter2",
+        "Run provider-cli --github-token hunter2",
+        "Run provider-cli --userPassword hunter2",
     ],
 )
 def test_parse_rejects_secrets_in_separate_cli_arguments(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        'os.environ["SERVICE_MODE"] = "production"',
+        "env['SERVICE_MODE'] = 'production'",
+    ],
+)
+def test_parse_rejects_mapping_style_environment_assignments(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 
@@ -715,6 +735,7 @@ def test_parse_rejects_encoded_quoted_protected_labels(field: str, text: str) ->
         "Password is confidential.",
         "Password is managed by Vault.",
         "The --password option is required.",
+        "The --user-password option is required.",
         "Auth profile is required.",
         "Environment variable SERVICE_MODE is required.",
     ],

@@ -105,12 +105,37 @@ _VALUE_FIRST_CREDENTIAL_ASSIGNMENT = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_CLI_ARGUMENT = re.compile(
-    r"(?<![\w-])--(?:api[-_]?keys?|auth[-_]?tokens?|access[-_]?tokens?|client[-_]?secrets?|"
-    r"private[-_]?keys?|passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?)"
-    r"(?:=|\s+)(?!"
-    + rf"(?:{_EXPLANATORY_SECRET_VALUE}|is|are|was|were|equals|remains|remain|option|argument|flag|parameter|setting)\b"
-    + r")\S+",
+    r"(?<![\w-])--(?P<name>[A-Za-z][A-Za-z0-9_-]*)(?:=|\s+)(?P<value>\S+)",
     re.IGNORECASE,
+)
+_SENSITIVE_CLI_ARGUMENT_SUFFIXES = frozenset(
+    {
+        ("password",),
+        ("passwords",),
+        ("passwd",),
+        ("passwds",),
+        ("passphrase",),
+        ("passphrases",),
+        ("secret",),
+        ("secrets",),
+        ("credential",),
+        ("credentials",),
+        ("token",),
+        ("tokens",),
+        ("api", "key"),
+        ("api", "keys"),
+        ("auth", "token"),
+        ("auth", "tokens"),
+        ("access", "token"),
+        ("access", "tokens"),
+        ("client", "secret"),
+        ("client", "secrets"),
+        ("private", "key"),
+        ("private", "keys"),
+    }
+)
+_CLI_ARGUMENT_PROSE_VALUES = frozenset(
+    {"is", "are", "was", "were", "equals", "remains", "remain", "option", "argument", "flag", "parameter", "setting"}
 )
 _COMPOUND_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*=(?!=|>)\s*(?P<value>[^\s&,;]+)"
@@ -144,6 +169,11 @@ _URL_CREDENTIAL_QUERY = re.compile(
     re.IGNORECASE,
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
+_MAPPING_ENVIRONMENT_ASSIGNMENT = re.compile(
+    r"\b(?:(?:os\s*\.\s*)?environ|env)\s*\[\s*(['\"`])[A-Za-z_][A-Za-z0-9_]*\1\s*\]"
+    r"\s*=(?!=|>)\s*\S+",
+    re.IGNORECASE,
+)
 _ROSTER_OWNERSHIP_QUALIFIER = (
     r"(?:\s+(?:for|of|on|used\s+(?:by|on|for)|assigned\s+to)\s+(?:(?:this|the)\s+)?"
     r"(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?))?"
@@ -333,6 +363,22 @@ def _has_compound_sensitive_assignment(value: str) -> bool:
         for pattern in (_COMPOUND_ASSIGNMENT, _COMPOUND_NAMED_ASSIGNMENT)
         for match in pattern.finditer(value)
     )
+
+
+def _has_sensitive_cli_argument(value: str) -> bool:
+    """Reject command-line options whose compound names disclose a protected value."""
+    for match in _SENSITIVE_CLI_ARGUMENT.finditer(value):
+        name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", match.group("name")).casefold()
+        components = tuple(component for component in re.split(r"[-_]+", name) if component)
+        if not any(components[-len(suffix) :] == suffix for suffix in _SENSITIVE_CLI_ARGUMENT_SUFFIXES):
+            continue
+        argument = match.group("value")
+        if argument.casefold() in _CLI_ARGUMENT_PROSE_VALUES or re.fullmatch(
+            _EXPLANATORY_SECRET_VALUE, argument, re.IGNORECASE
+        ):
+            continue
+        return True
+    return False
 
 
 def _has_url_userinfo(value: str) -> bool:
@@ -756,8 +802,8 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     if (
         _DANGEROUS_VALUE.search(decoded_sensitive_text)
         or _DANGEROUS_VALUE.search(decoded_form_text)
-        or _SENSITIVE_CLI_ARGUMENT.search(decoded_sensitive_text)
-        or _SENSITIVE_CLI_ARGUMENT.search(decoded_form_text)
+        or _has_sensitive_cli_argument(decoded_sensitive_text)
+        or _has_sensitive_cli_argument(decoded_form_text)
         or _VALUE_FIRST_CREDENTIAL_ASSIGNMENT.search(decoded_sensitive_text)
         or _VALUE_FIRST_CREDENTIAL_ASSIGNMENT.search(decoded_form_text)
         or _ADVERB_QUALIFIED_CREDENTIAL_ASSIGNMENT.search(decoded_sensitive_text)
@@ -785,6 +831,8 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(path_text)
         or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_sensitive_path_text)
         or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_form_path_text)
+        or _MAPPING_ENVIRONMENT_ASSIGNMENT.search(decoded_sensitive_text)
+        or _MAPPING_ENVIRONMENT_ASSIGNMENT.search(decoded_form_text)
         or contains_credential(decoded_sensitive_text)
         or contains_credential(decoded_form_text)
         or (
