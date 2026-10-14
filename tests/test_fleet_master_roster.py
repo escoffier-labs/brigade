@@ -438,6 +438,39 @@ def test_parse_rejects_percent_encoded_credential_disclosures(field: str, text: 
 @pytest.mark.parametrize(
     "text",
     [
+        "API key would be shortkey",
+        "API key must be shortkey",
+        "Password could be hunter2",
+    ],
+)
+def test_parse_rejects_modal_credential_assignments(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "See https%3A%2F%2Fexample.com%2F%3Fpath%3D%2Fetc%2Fhosts",
+        "See https%3A%2F%2Fexample.com%2F%3FSERVICE_MODE%3Dproduction",
+    ],
+)
+def test_parse_rejects_encoded_url_schemes_with_sensitive_values(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
         'The "auth profile" is production-admin',
         '"Environment variable" SERVICE_MODE is production',
         'The "path" is foo/bar',
