@@ -494,7 +494,7 @@ def test_parse_rejects_form_encoded_secrets_and_embedded_url_paths(field: str, t
 @pytest.mark.parametrize(
     "text",
     [
-        "See https:///home/example/file",
+        "See https:///tmp/example/file",
         "See http:///etc/hosts",
         "The SERVICE_MODE environment variable is production",
         "SERVICE_MODE environment variable is production",
