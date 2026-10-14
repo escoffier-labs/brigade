@@ -267,6 +267,17 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin ${{ github.base_ref || 'main' }}
           python scripts/check_size_ratchet_baseline.py --base-ref origin/${{ github.base_ref || 'main' }}
+      - name: Windows allowlist ratchet
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BASE_SHA" ]; then
+            echo "::error::Windows allowlist base SHA is missing"
+            exit 1
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          python scripts/windows_pytest.py --check-allowlist-only --base-ref "$BASE_SHA"
       - name: Version sync
         run: python scripts/version_sync.py --check
       - name: Managed snapshot
@@ -329,45 +340,6 @@ jobs:
           path: .coverage.${{ matrix.python }}.${{ matrix.shard }}
           include-hidden-files: true
           if-no-files-found: error
-
-  windows-pytest:
-    if: github.event_name == 'pull_request'
-    continue-on-error: true
-    runs-on: windows-latest
-    timeout-minutes: 90
-    defaults:
-      run:
-        shell: cmd
-    steps:
-      - name: Capture job budget
-        shell: pwsh
-        run: |
-          "WINDOWS_PYTEST_JOB_STARTED_AT=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" >> $env:GITHUB_ENV
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip || exit /b 1
-          python -m pip install -e ".[dev]"
-      - name: Fetch pull request base
-        run: git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }} || exit /b 1
-      - name: Run per-file pytest ratchet
-        timeout-minutes: 85
-        run: python scripts/windows_pytest.py --record "%RUNNER_TEMP%\windows-pytest-results\summary.json" --job-started-at "%WINDOWS_PYTEST_JOB_STARTED_AT%" --job-limit 5400 --startup-reserve 120 --finalize-reserve 300 --job-timeout 5100 --base-ref ${{ github.event.pull_request.base.sha }} --serial test_runs_serve.py --serial test_aboyeur.py
-      - name: Upload per-file pytest results
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: windows-pytest-results
-          path: ${{ runner.temp }}/windows-pytest-results
-          if-no-files-found: warn
 
   coverage:
     needs: test-shards
