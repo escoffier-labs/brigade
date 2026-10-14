@@ -423,6 +423,8 @@ def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str)
         "Use DEPLOY_PASSWORD = hunter2",
         "Use SERVICE_MODE as production",
         "Use MODE to production",
+        "Use MODE to production on staging",
+        'Use "MODE" to production for this seat',
         "Set `DEPLOY_PASSWORD` to hunter2",
         'Set "SERVICE_MODE" to production',
     ],

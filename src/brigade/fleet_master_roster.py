@@ -403,14 +403,24 @@ def _has_bare_environment_assignment(value: str) -> bool:
             r"\s+to\s+", match.group("linker"), re.IGNORECASE
         ):
             tail = value[match.end() :]
+            has_assignment_qualifier = (
+                re.match(
+                    r"\s+(?:for|of|on|used\s+(?:by|on|for)|assigned\s+to)\b",
+                    tail,
+                    re.IGNORECASE,
+                )
+                is not None
+            )
             # An uppercase acronym followed by "to <verb> <object>" is ordinary
             # purpose prose. Environment-style names with separators or digits
             # remain screened, and a terminal value such as "production" does too.
+            # Trailing ownership qualifiers keep the text classified as an assignment.
             if (
                 "_" not in name
                 and not any(char.isdigit() for char in name)
                 and re.fullmatch(r"[a-z][a-z-]*", assigned_value)
                 and re.search(r"\s+\S", tail)
+                and not has_assignment_qualifier
             ):
                 continue
         return True
