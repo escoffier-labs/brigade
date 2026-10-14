@@ -146,13 +146,17 @@ _SENSITIVE_CLI_ARGUMENT_SUFFIXES = frozenset(
 _CLI_ARGUMENT_PROSE_VALUES = frozenset(
     {"is", "are", "was", "were", "equals", "remains", "remain", "option", "argument", "flag", "parameter", "setting"}
 )
+_ASSIGNMENT_ADVERB = (
+    r"(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily|previously)"
+)
 _COMPOUND_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*=(?!=|>)\s*(?P<value>[^\s&,;]+)"
 )
 _COMPOUND_NAMED_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*(?::(?!:)\s*|"
-    r"(?:(?:value\s+)?(?:is|are|was|were|equals|remains|remain|has\s+been|have\s+been|had\s+been|will\s+have\s+been|"
-    r"(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?)|"
+    r"(?:(?:value\s+)?(?:is|are|was|were|equals|remains|remain|"
+    + rf"(?:has|have|had)\s+(?:{_ASSIGNMENT_ADVERB}\s+)*been|will\s+(?:{_ASSIGNMENT_ADVERB}\s+)*have\s+been|"
+    + r"(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?)|"
     r"has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|set\s+to|configured\s+(?:as|to|with))\s+)"
     r"(?P<value>(?:" + _EXPLANATORY_SECRET_VALUE + r")|[^\s&,;]+)",
     re.IGNORECASE,
@@ -179,7 +183,6 @@ _URL_CREDENTIAL_QUERY = re.compile(
     re.IGNORECASE,
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
-_ASSIGNMENT_ADVERB = r"(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily)"
 _BARE_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"(?P<action>(?i:set|use|configure|assign|define))\s+"
     r"(?P<name>[\"'`“‘]?[A-Z_][A-Z0-9_]*[\"'`”’]?)"
@@ -268,8 +271,9 @@ _PROVIDER_AUTH_PROFILE = re.compile(
 _PROVIDER_OWNED_AUTH_PROFILE_ASSIGNMENT = re.compile(
     r"\b(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profiles?"
     + _ROSTER_OWNERSHIP_QUALIFIER
-    + r"\s+(?:is|are|was|were|equals|remains|remain|becomes?|became|has\s+been|have\s+been|had\s+been|"
-    r"will\s+have\s+been|set\s+to|configured\s+(?:as|to|with)|=|:)\s+"
+    + r"\s+(?:is|are|was|were|equals|remains|remain|becomes?|became|"
+    + rf"(?:has|have|had)\s+(?:{_ASSIGNMENT_ADVERB}\s+)*been|will\s+(?:{_ASSIGNMENT_ADVERB}\s+)*have\s+been|"
+    + r"(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|set\s+to|configured\s+(?:as|to|with)|=|:)\s+"
     r"(?!(?:required|needed|selection|support|supported|configuration|policy|availability|available|rotation)\b)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)",
     re.IGNORECASE,

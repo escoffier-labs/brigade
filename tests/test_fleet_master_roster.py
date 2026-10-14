@@ -145,6 +145,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "The SERVICE_PASSWORD value is hunter2",
         "OPENAI_API_KEY value was shortkey",
         "OPENAI_API_KEY value had been shortkey",
+        "OPENAI_API_KEY value has always been shortkey",
+        "OPENAI_API_KEY value had previously been shortkey",
         "Password value = hunter2",
         "Password: stored as hunter2",
         "Password is generated as hunter2",
@@ -420,6 +422,9 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "AWS profile for this seat is production-admin",
         "AWS profile used by this seat is production-admin",
         "AWS profile for this seat had been production-admin",
+        "AWS profile for this seat will be production-admin",
+        "AWS profile for this seat may be production-admin",
+        "AWS profile for this seat should be production-admin",
     ],
 )
 def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str) -> None:
