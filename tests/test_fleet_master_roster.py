@@ -1061,6 +1061,9 @@ def test_parse_rejects_perfect_tense_disclosures(field: str, text: str) -> None:
         "Path used by reviewer is foo/bar",
         "Path used on this seat is foo/bar",
         "Path used on reviewer is foo/bar",
+        "%2Fetc%2Fpasswd",
+        "%252Fetc%252Fpasswd",
+        "See %2Fhome%2Fexample",
     ],
 )
 def test_parse_rejects_paths_in_navigation_and_quoted_declarations(field: str, text: str) -> None:

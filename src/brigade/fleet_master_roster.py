@@ -573,6 +573,7 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     decoded_sensitive_path_text = _without_api_route_references(decoded_sensitive_text)
     decoded_paths = _decode_contextual_path_values(_decode_explicit_path_declarations(screening_text))
     decoded_path_text = _without_api_route_references(decoded_paths)
+    path_texts = (decoded_path_text, decoded_sensitive_path_text)
     if (
         _DANGEROUS_VALUE.search(decoded_sensitive_text)
         or _URL_CREDENTIAL_QUERY.search(decoded_sensitive_text)
@@ -586,14 +587,15 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         or contains_credential(decoded_sensitive_text)
         or (
             check_paths
-            and (
-                _EXPLICIT_TERMINAL_PATH.search(decoded_path_text)
-                or _CONTEXTUAL_TERMINAL_PATH.search(decoded_path_text)
-                or _ROOTED_PATH.search(decoded_path_text)
+            and any(
+                _EXPLICIT_TERMINAL_PATH.search(candidate)
+                or _CONTEXTUAL_TERMINAL_PATH.search(candidate)
+                or _ROOTED_PATH.search(candidate)
                 or _has_relative_path_evidence(
-                    decoded_path_text,
+                    candidate,
                     model_identifier=field.endswith(".model") and _MODEL_IDENTIFIER.fullmatch(value) is not None,
                 )
+                for candidate in path_texts
             )
         )
     ):
