@@ -151,7 +151,7 @@ _COMPOUND_ASSIGNMENT = re.compile(
 )
 _COMPOUND_NAMED_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*(?::(?!:)\s*|"
-    r"(?:value\s+is|is|are|was|were|equals|remains|remain|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|"
+    r"(?:(?:value\s+)?(?:is|are|was|were|equals|remains|remain|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?)|"
     r"has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|set\s+to|configured\s+(?:as|to|with))\s+)"
     r"(?P<value>(?:" + _EXPLANATORY_SECRET_VALUE + r")|[^\s&,;]+)",
     re.IGNORECASE,
@@ -262,6 +262,14 @@ _PROVIDER_AUTH_PROFILE = re.compile(
     r"^\s*(?!(?:no|the|a|an|this|that|these|those|my|your|our|their|each|every|any|all|some|multiple|several)\b)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
     r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profile\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_PROVIDER_OWNED_AUTH_PROFILE_ASSIGNMENT = re.compile(
+    r"\b(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profiles?"
+    + _ROSTER_OWNERSHIP_QUALIFIER
+    + r"\s+(?:is|are|was|were|equals|remains|remain|becomes?|became|set\s+to|configured\s+(?:as|to|with)|=|:)\s+"
+    r"(?!(?:required|needed|selection|support|supported|configuration|policy|availability|available|rotation)\b)"
+    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)",
     re.IGNORECASE,
 )
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
@@ -966,6 +974,8 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         or _DECLARATIVE_AUTH_PROFILE.search(decoded_form_text)
         or _PROVIDER_AUTH_PROFILE.search(decoded_sensitive_text)
         or _PROVIDER_AUTH_PROFILE.search(decoded_form_text)
+        or _PROVIDER_OWNED_AUTH_PROFILE_ASSIGNMENT.search(decoded_sensitive_text)
+        or _PROVIDER_OWNED_AUTH_PROFILE_ASSIGNMENT.search(decoded_form_text)
         or _URL_CREDENTIAL_QUERY.search(decoded_sensitive_text)
         or _URL_CREDENTIAL_QUERY.search(decoded_form_text)
         or _has_url_userinfo(decoded_sensitive_text)
