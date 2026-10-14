@@ -26,7 +26,8 @@ _MODEL_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _ROSTER_SUBJECT = r"[^\W\d_][\w.-]*"
 _ASSIGNMENT_ADVERB = (
-    r"(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily|previously)"
+    r"(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily|previously|"
+    r"often|sometimes|seldom)"
 )
 _EXPLANATORY_SECRET_VALUE = (
     r"(?:required|optional|needed|necessary|available|configured(?!\s+(?:as|to|with)\b)|set(?!\s+to\b)|missing|unset|unavailable|"
