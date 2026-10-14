@@ -369,6 +369,16 @@ def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str)
 
 
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize("text", ["Auth profile prod-admin.", "Authentication profile production-admin."])
+def test_parse_rejects_bare_auth_profile_labels(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
 @pytest.mark.parametrize(
     "text",
     [
@@ -916,6 +926,9 @@ def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None
     "text",
     [
         "Run automation/verify.",
+        "Delete credentials.json after use.",
+        "Edit config.toml before running.",
+        "Remove foo/bar after cleanup.",
         "Inspect checks/unit.",
         "Run tools/build",
         'Open "tools/build" for instructions',

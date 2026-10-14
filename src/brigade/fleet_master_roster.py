@@ -119,6 +119,14 @@ _ON_OWNED_PROTECTED_ASSIGNMENT = re.compile(
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)\S+",
     re.IGNORECASE,
 )
+_BARE_AUTH_PROFILE_NAME = re.compile(
+    r"\bauth(?:entication)?[ _-]profiles?\s+"
+    r"(?!(?:this|the|a|an|is|are|was|were|has|have|had|will|can|could|should|must|may|might|"
+    r"selection|rotation|management|support|configuration|policy|availability|required|needed|"
+    r"necessary|optional|available|regularly|for|in|as|to|with)\b)"
+    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)",
+    re.IGNORECASE,
+)
 _SUBJECT_FIRST_AUTH_PROFILE = re.compile(
     r"\bauth(?:entication)?[ _-]profiles?\s+"
     r"(?!(?:this|the|a|an|selection|rotation|management|support|configuration|policy|availability)\b)"
@@ -398,14 +406,14 @@ _FILESYSTEM_NOUN_CONTINUATION = re.compile(
 )
 _PATH_CONTEXT = re.compile(
     r"(?:\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store|"
-    + _PATH_LABEL
-    + r")\s+"
+    r"delete|remove|edit|update|modify|rename|create|touch|" + _PATH_LABEL + r")\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?"
     r"[\"'“‘]*\s*(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?|" + _PATH_DECLARATION + r"\s*)[\"'“‘`()\[{]*\s*$",
     re.IGNORECASE,
 )
 _EXPLICIT_NAVIGATION_CONTEXT = re.compile(
-    r"\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store)\s+"
+    r"\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store|"
+    r"delete|remove|edit|update|modify|rename|create|touch)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?[\"'“‘]*\s*$",
     re.IGNORECASE,
 )
@@ -418,13 +426,15 @@ _QUOTED_PATH_DECLARATION_CONTEXT = re.compile(
     re.IGNORECASE,
 )
 _QUOTED_PATH_CONTEXT = re.compile(
-    r"\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store)\s+"
+    r"\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store|"
+    r"delete|remove|edit|update|modify|rename|create|touch)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?(?:(?:from|at|in|to|into|under)\s+)?"
     r"[\"'“‘][^\"'“”‘’]*$",
     re.IGNORECASE,
 )
 _SPACED_PATH_CONTEXT = re.compile(
-    r"(?:\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store)\s+"
+    r"(?:\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store|"
+    r"delete|remove|edit|update|modify|rename|create|touch)\s+"
     r"(?:(?:from|at|in|to|into|under)\s+)?|" + _PATH_DECLARATION + r"\s+)"
     r"(?:[A-Za-z0-9_.~-]+\s+)+$",
     re.IGNORECASE,
@@ -676,6 +686,8 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         or _DANGEROUS_VALUE.search(decoded_form_text)
         or _ON_OWNED_PROTECTED_ASSIGNMENT.search(decoded_sensitive_text)
         or _ON_OWNED_PROTECTED_ASSIGNMENT.search(decoded_form_text)
+        or _BARE_AUTH_PROFILE_NAME.search(decoded_sensitive_text)
+        or _BARE_AUTH_PROFILE_NAME.search(decoded_form_text)
         or _SUBJECT_FIRST_AUTH_PROFILE.search(decoded_sensitive_text)
         or _SUBJECT_FIRST_AUTH_PROFILE.search(decoded_form_text)
         or _URL_CREDENTIAL_QUERY.search(decoded_sensitive_text)
