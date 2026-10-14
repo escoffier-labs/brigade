@@ -151,7 +151,7 @@ _COMPOUND_ASSIGNMENT = re.compile(
 )
 _COMPOUND_NAMED_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*(?::(?!:)\s*|"
-    r"(?:is|are|was|were|equals|remains|remain|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|"
+    r"(?:value\s+is|is|are|was|were|equals|remains|remain|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|"
     r"has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|set\s+to|configured\s+(?:as|to|with))\s+)"
     r"(?P<value>(?:" + _EXPLANATORY_SECRET_VALUE + r")|[^\s&,;]+)",
     re.IGNORECASE,
@@ -236,7 +236,7 @@ _PROVIDER_AUTH_PROFILE = re.compile(
     r"(?:(?:the|a|an|my|your|our|their)\s+)?"
     r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profile\s+"
     r"(?!(?:required|needed|require|requires|selection|support|supported|configure|rotate|management|policy|policies|configuration|availability|"
-    r"available|regularly|daily|weekly|monthly|quarterly|yearly|annually|rotation|names|values|must|should|can|could|may|might|will|would|are|is|were|was|exists?|does|do)\b)"
+    r"available|regularly|daily|weekly|monthly|quarterly|yearly|annually|rotation|names|values|for|with|as|to|must|should|can|could|may|might|will|would|are|is|were|was|exists?|does|do)\b)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)|"
     r"\b(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+)?"
     r"(?:(?:the|a|an|my|your|our|their)\s+)?"
@@ -245,6 +245,13 @@ _PROVIDER_AUTH_PROFILE = re.compile(
     r"available|required|needed|regularly|daily|weekly|monthly|quarterly|yearly|annually|rotation|names|values|for|with|as|to|is|are|was|were|"
     r"must|should|can|could|may|might|will|would|exists?|does|do)\b)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+profiles?\b|"
+    r"\b(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+)?"
+    r"(?:(?:the|a|an|my|your|our|their)\s+)?"
+    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+"
+    r"(?:account|configuration|tenant|cloud)\s+profiles?\s+"
+    r"(?!(?:required|needed|require|requires|selection|support|supported|configure|rotate|management|policy|policies|configuration|availability|"
+    r"available|regularly|daily|weekly|monthly|quarterly|yearly|annually|rotation|names|values|for|with|as|to|must|should|can|could|may|might|will|would|are|is|were|was|exists?|does|do)\b)"
+    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)|"
     r"\b(?:(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+"
     r"(?:(?:the|a|an|my|your|our|their)\s+)?)|(?:the|a|an|my|your|our|their)\s+)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
