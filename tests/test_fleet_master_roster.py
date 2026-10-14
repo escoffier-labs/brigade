@@ -425,6 +425,10 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "AWS profile for this seat will be production-admin",
         "AWS profile for this seat may be production-admin",
         "AWS profile for this seat should be production-admin",
+        "Amazon Web Services profile for this seat is production-admin",
+        "Microsoft Azure profile for this seat is production-admin",
+        "Google Cloud Platform profile for this seat is production-admin",
+        "Oracle Cloud Infrastructure profile for this seat is production-admin",
     ],
 )
 def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str) -> None:
@@ -953,6 +957,7 @@ def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> N
         "Authentication profile policies require rotation.",
         "Authentication profile values are prohibited.",
         "AWS profiles require approval.",
+        "Amazon Web Services profiles require approval.",
         "Use AWS account profile for this service.",
         "AWS configuration profile selection is supported.",
         "No AWS profile.",
@@ -1463,6 +1468,8 @@ def test_parse_rejects_dotted_credential_query_keys(field: str, text: str) -> No
         "https://example.com/config?env[SERVICE_MODE]=production",
         "Call /api?SERVICE_MODE[]=production",
         "API key currently is shortkey",
+        "OPENAI_API_KEY currently is hunter2",
+        "db_password currently has been hunter2",
         "API key now equals shortkey",
         "Password remains hunter2",
         "db_password: hunter2",

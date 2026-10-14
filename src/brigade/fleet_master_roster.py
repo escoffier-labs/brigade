@@ -154,7 +154,7 @@ _COMPOUND_ASSIGNMENT = re.compile(
 )
 _COMPOUND_NAMED_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*(?::(?!:)\s*|"
-    r"(?:(?:value\s+)?(?:is|are|was|were|equals|remains|remain|"
+    + rf"(?:(?:(?:{_ASSIGNMENT_ADVERB})\s+)*(?:value\s+)?(?:is|are|was|were|equals|remains|remain|"
     + rf"(?:has|have|had)\s+(?:{_ASSIGNMENT_ADVERB}\s+)*been|will\s+(?:{_ASSIGNMENT_ADVERB}\s+)*have\s+been|"
     + r"(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?)|"
     r"has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|set\s+to|configured\s+(?:as|to|with))\s+)"
@@ -235,41 +235,41 @@ _DECLARATIVE_AUTH_PROFILE = re.compile(
     r"(?:is\s+)?(?:the\s+)?auth(?:entication)?[ _-]?profiles?\b)",
     re.IGNORECASE,
 )
+_CLOUD_PROVIDER = (
+    r"(?:aws|amazon\s+web\s+services|azure|microsoft\s+azure|gcp|google\s+cloud(?:\s+platform)?|"
+    r"oci|oracle\s+cloud(?:\s+infrastructure)?|ibm\s+cloud|alibaba\s+cloud)"
+)
 _PROVIDER_AUTH_PROFILE = re.compile(
     r"\b(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+)?"
-    r"(?:(?:the|a|an|my|your|our|their)\s+)?"
-    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profile\s+"
+    r"(?:(?:the|a|an|my|your|our|their)\s+)?" + _CLOUD_PROVIDER + r"\s+profile\s+"
     r"(?!(?:required|needed|require|requires|selection|support|supported|configure|rotate|management|policy|policies|configuration|availability|"
     r"available|regularly|daily|weekly|monthly|quarterly|yearly|annually|rotation|names|values|for|with|as|to|must|should|can|could|may|might|will|would|are|is|were|was|exists?|does|do)\b)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)|"
     r"\b(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+)?"
-    r"(?:(?:the|a|an|my|your|our|their)\s+)?"
-    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+"
+    r"(?:(?:the|a|an|my|your|our|their)\s+)?" + _CLOUD_PROVIDER + r"\s+"
     r"(?!(?:profile|profiles|cloud|account|selection|support|supported|configure|rotate|management|policy|policies|configuration|availability|"
     r"available|required|needed|regularly|daily|weekly|monthly|quarterly|yearly|annually|rotation|names|values|for|with|as|to|is|are|was|were|"
     r"must|should|can|could|may|might|will|would|exists?|does|do)\b)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+profiles?\b|"
     r"\b(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+)?"
-    r"(?:(?:the|a|an|my|your|our|their)\s+)?"
-    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+"
+    r"(?:(?:the|a|an|my|your|our|their)\s+)?" + _CLOUD_PROVIDER + r"\s+"
     r"(?:account|configuration|tenant|cloud)\s+profiles?\s+"
     r"(?!(?:required|needed|require|requires|selection|support|supported|configure|rotate|management|policy|policies|configuration|availability|"
     r"available|regularly|daily|weekly|monthly|quarterly|yearly|annually|rotation|names|values|for|with|as|to|must|should|can|could|may|might|will|would|are|is|were|was|exists?|does|do)\b)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)|"
     r"\b(?:(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+"
     r"(?:(?:the|a|an|my|your|our|their)\s+)?)|(?:the|a|an|my|your|our|their)\s+)"
-    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
-    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profiles?\b|"
+    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+" + _CLOUD_PROVIDER + r"\s+profiles?\b|"
     r"\b(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
-    r"(?:is|are|was|were)\s+(?:the|a|an)\s+"
-    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profiles?\b|"
+    r"(?:is|are|was|were)\s+(?:the|a|an)\s+" + _CLOUD_PROVIDER + r"\s+profiles?\b|"
     r"^\s*(?!(?:no|the|a|an|this|that|these|those|my|your|our|their|each|every|any|all|some|multiple|several)\b)"
-    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
-    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profile\s*[.!?]*\s*$",
+    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+" + _CLOUD_PROVIDER + r"\s+profile\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
 _PROVIDER_OWNED_AUTH_PROFILE_ASSIGNMENT = re.compile(
-    r"\b(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profiles?"
+    r"\b"
+    + _CLOUD_PROVIDER
+    + r"\s+profiles?"
     + _ROSTER_OWNERSHIP_QUALIFIER
     + r"\s+(?:is|are|was|were|equals|remains|remain|becomes?|became|"
     + rf"(?:has|have|had)\s+(?:{_ASSIGNMENT_ADVERB}\s+)*been|will\s+(?:{_ASSIGNMENT_ADVERB}\s+)*have\s+been|"
@@ -645,7 +645,7 @@ def _query_shaped_fragment_pairs(fragment: str) -> list[tuple[str, str]]:
 
 
 _NEGATIVE_PROVIDER_PROFILE_PROSE = re.compile(
-    r"\bno\s+(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+"
+    r"\bno\s+" + _CLOUD_PROVIDER + r"\s+"
     r"profiles?\s+(?:exists?|does\s+not\s+store\s+credentials)\b",
     re.IGNORECASE,
 )
