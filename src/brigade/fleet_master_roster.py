@@ -96,6 +96,14 @@ _ADVERB_QUALIFIED_CREDENTIAL_ASSIGNMENT = re.compile(
     r"will\s+be|will\s+have\s+been)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE})\b)\S+",
     re.IGNORECASE,
 )
+_VALUE_FIRST_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"\b(?:(?:use|set|configure|store|provide|supply)\s+)?" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE})\b)"
+    r"[^\s.,;!?]+\s+(?:(?:is|was|equals|as|for)\s+)"
+    r"(?:(?:the|a|an)\s+)?"
+    r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|"
+    r"api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\b",
+    re.IGNORECASE,
+)
 _COMPOUND_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*=(?!=|>)\s*(?P<value>[^\s&,;]+)"
 )
@@ -107,6 +115,13 @@ _COMPOUND_NAMED_ASSIGNMENT = re.compile(
     re.IGNORECASE,
 )
 _PATH_LABEL = r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositor(?:y|ies)|repos?|locations?)"
+_VALUE_FIRST_PATH_DECLARATION = re.compile(
+    r"\b(?:(?:set|choose|select|use|configure|store|save|copy|move)\s+)?"
+    r"(?P<path>(?:[\w.~-]+[/\\])+[\w.~-]+)\s+"
+    r"(?:(?:is|are|was|were|equals|means)\s+(?:(?:the|a|an)\s+)?|"
+    r"(?:as|for)\s+(?:(?:the|a|an)\s+)?)" + _PATH_LABEL + r"\b",
+    re.IGNORECASE,
+)
 _QUOTED_PROTECTED_LABEL = re.compile(
     r"[\"'“‘`](?P<label>passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|"
     r"auth(?:entication)?[ _-]?profiles?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|"
@@ -350,11 +365,10 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
                 return True
             decoded_query = _fully_unquote(parsed.query)
             decoded_fragment = _fully_unquote(parsed.fragment)
-            fragment_query = decoded_fragment.partition("?")[2] or decoded_fragment
             query_pairs = (
                 parse_qsl(embedded_query, keep_blank_values=True)
                 + parse_qsl(decoded_query, keep_blank_values=True)
-                + parse_qsl(fragment_query, keep_blank_values=True)
+                + _query_shaped_fragment_pairs(decoded_fragment)
             )
         except ValueError:
             continue
@@ -414,8 +428,7 @@ def _has_disallowed_api_route_query(value: str) -> bool:
             or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_path)
         ):
             return True
-        fragment_query = route_fragment.partition("?")[2] or route_fragment
-        route_pairs = parse_qsl(route_query, keep_blank_values=True) + parse_qsl(fragment_query, keep_blank_values=True)
+        route_pairs = parse_qsl(route_query, keep_blank_values=True) + _query_shaped_fragment_pairs(route_fragment)
         for key, query_value in route_pairs:
             key = _fully_unquote(key)
             decoded_value = _fully_unquote(query_value)
@@ -433,6 +446,16 @@ def _has_disallowed_api_route_query(value: str) -> bool:
             if _is_filesystem_path_value(key) or _is_filesystem_path_value(path_value):
                 return True
     return False
+
+
+def _query_shaped_fragment_pairs(fragment: str) -> list[tuple[str, str]]:
+    if "?" in fragment:
+        query = fragment.partition("?")[2]
+    elif "=" in fragment:
+        query = fragment
+    else:
+        return []
+    return parse_qsl(query, keep_blank_values=True)
 
 
 _RELATIVE_PATH = re.compile(r"(?<![\w.-])(?P<path>(?:[\w.~-]+[/\\])+[\w.~-]+)(?![\w.~-])")
@@ -645,6 +668,8 @@ def _has_control(value: str) -> bool:
 
 def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -> bool:
     path_text = _VERSION_REFERENCE.sub("", _HTTP_URL.sub("", value))
+    if _VALUE_FIRST_PATH_DECLARATION.search(path_text):
+        return True
     for match in _STANDALONE_FILE.finditer(path_text):
         filename = match.group("file").rstrip(".,;:!?")
         sensitive_name = filename.casefold() in _EXTENSIONLESS_FILES | _PRIVATE_KEY_FILES | {"credentials"}
@@ -723,6 +748,8 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     if (
         _DANGEROUS_VALUE.search(decoded_sensitive_text)
         or _DANGEROUS_VALUE.search(decoded_form_text)
+        or _VALUE_FIRST_CREDENTIAL_ASSIGNMENT.search(decoded_sensitive_text)
+        or _VALUE_FIRST_CREDENTIAL_ASSIGNMENT.search(decoded_form_text)
         or _ADVERB_QUALIFIED_CREDENTIAL_ASSIGNMENT.search(decoded_sensitive_text)
         or _ADVERB_QUALIFIED_CREDENTIAL_ASSIGNMENT.search(decoded_form_text)
         or _has_compound_sensitive_assignment(decoded_sensitive_text)

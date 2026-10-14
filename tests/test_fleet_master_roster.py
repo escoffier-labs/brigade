@@ -379,6 +379,23 @@ def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str)
 
 
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use hunter2 as the password",
+        "Use shortkey as the API key",
+        "hunter2 is the password",
+    ],
+)
+def test_parse_rejects_value_first_credential_disclosures(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
 @pytest.mark.parametrize("text", ["Auth profile prod-admin.", "Authentication profile production-admin."])
 def test_parse_rejects_bare_auth_profile_labels(field: str, text: str) -> None:
     document = _document()
@@ -732,6 +749,8 @@ def test_parse_accepts_prose_that_mentions_auth_profiles(field: str, text: str) 
         "Target Python/3.12 runtimes.",
         "Handle TLS/1.3 connections.",
         "GET /health endpoint",
+        "See https://example.com/#/settings/profile",
+        "See https://example.com/#guide/intro",
         "GET /.well-known/openid-configuration",
         "Call /api/.well-known/info",
         "POST /v1/jobs",
@@ -992,6 +1011,9 @@ def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None
         "The path value is foo/bar",
         "Path set to foo/bar",
         "The path is set to foo/bar",
+        "foo/bar is the path",
+        "Set foo/bar as the path",
+        "Choose foo/bar for the directory",
         "The path is Shared Folder/file",
         "Open Shared Folder/file for instructions",
         "GET /etc/passwd",
