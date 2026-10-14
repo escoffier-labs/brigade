@@ -214,11 +214,17 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
             parsed = urlsplit(match.group())
             decoded_path = _fully_unquote(parsed.path)
             decoded_path, _, embedded_query = decoded_path.partition("?")
+            matrix_path_values = re.findall(
+                r"(?:^|;)(?:path|file|filename|directory|folder|location|workdir)=([^;]*)",
+                decoded_path,
+                re.IGNORECASE,
+            )
             if (
                 _DANGEROUS_VALUE.search(decoded_path)
                 or _ENVIRONMENT_ASSIGNMENT.search(decoded_path)
                 or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_path)
                 or "//" in decoded_path.replace("\\", "/")
+                or any(_is_filesystem_path_value(_fully_unquote(path_value)) for path_value in matrix_path_values)
                 or _has_disallowed_api_route_query(f"GET {decoded_path}")
                 or any(
                     _has_disallowed_api_route_query(f"Call {decoded_path[index:]}")
@@ -273,12 +279,15 @@ def _has_disallowed_api_route_query(value: str) -> bool:
         route_components = [component.casefold() for component in normalized_path.split("/") if component]
         if any(component in {".", ".."} for component in route_components):
             return True
+        application_resource_route = route_components[:1] == ["applications"] and len(route_components) == 2
         decoded_components = [component.rstrip(".,;!?") for component in route_components]
         if any(
             (component.startswith(".") and component != ".well-known")
             or component.startswith("~")
             or component in _PRIVATE_KEY_FILES
-            or (index == 0 and component in _FILESYSTEM_ROUTE_ROOTS and not method_route)
+            or (
+                index == 0 and component in _FILESYSTEM_ROUTE_ROOTS and not (method_route or application_resource_route)
+            )
             or component in {"credentials", "passwd", "secret", "secrets"}
             for index, component in enumerate(decoded_components)
         ):
@@ -405,7 +414,8 @@ def _without_api_route_references(value: str) -> str:
         first_component = components[0].casefold()
         if any(component in {".", ".."} for component in components):
             return match.group(0)
-        if first_component in _FILESYSTEM_ROUTE_ROOTS:
+        application_resource_route = first_component == "applications" and len(components) == 2
+        if first_component in _FILESYSTEM_ROUTE_ROOTS and not application_resource_route:
             return match.group(0)
         return match.group(0).replace(route, "")
 
