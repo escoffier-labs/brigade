@@ -153,7 +153,7 @@ _COMPOUND_NAMED_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*(?::(?!:)\s*|"
     r"(?:is|are|was|were|equals|remains|remain|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|"
     r"has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|set\s+to|configured\s+(?:as|to|with))\s+)"
-    r"(?P<value>[^\s&,;]+)",
+    r"(?P<value>(?:" + _EXPLANATORY_SECRET_VALUE + r")|[^\s&,;]+)",
     re.IGNORECASE,
 )
 _PATH_LABEL = r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositor(?:y|ies)|repos?|locations?)"
@@ -245,7 +245,8 @@ _PROVIDER_AUTH_PROFILE = re.compile(
     r"\b(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
     r"(?:is|are|was|were)\s+(?:the|a|an)\s+"
     r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profiles?\b|"
-    r"^\s*(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
+    r"^\s*(?!(?:no|the|a|an|this|that|these|those|my|your|our|their|each|every|any|all|some|multiple|several)\b)"
+    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
     r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profile\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
