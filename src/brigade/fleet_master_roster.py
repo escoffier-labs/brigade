@@ -177,10 +177,11 @@ _URL_CREDENTIAL_QUERY = re.compile(
     re.IGNORECASE,
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
+_ASSIGNMENT_ADVERB = r"(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily)"
 _BARE_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"(?P<action>(?i:set|use|configure|assign|define))\s+"
     r"(?P<name>[\"'`“‘]?[A-Z_][A-Z0-9_]*[\"'`”’]?)"
-    r"(?P<linker>\s+(?:to|as)\s+|\s*[:=]\s*)(?P<value>\S+)"
+    rf"(?P<linker>\s+(?:(?:{_ASSIGNMENT_ADVERB})\s+)*(?:to|as)\s+|\s*[:=]\s*)(?P<value>\S+)"
 )
 _MAPPING_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"\b(?:(?:os\s*\.\s*)?environ|env)\s*\[\s*(['\"`])[A-Za-z_][A-Za-z0-9_]*\1\s*\]"
@@ -371,12 +372,25 @@ def _has_sensitive_assignment_key(key: str, value: str, *, include_environment: 
 
 
 def _has_compound_sensitive_assignment(value: str) -> bool:
-    return any(
-        not re.fullmatch(_EXPLANATORY_SECRET_VALUE, match.group("value"), re.IGNORECASE)
-        and _has_sensitive_assignment_key(match.group("key"), match.group("value"), include_environment=False)
-        for pattern in (_COMPOUND_ASSIGNMENT, _COMPOUND_NAMED_ASSIGNMENT)
-        for match in pattern.finditer(value)
-    )
+    for pattern in (_COMPOUND_ASSIGNMENT, _COMPOUND_NAMED_ASSIGNMENT):
+        for match in pattern.finditer(value):
+            assigned_value = match.group("value")
+            if re.fullmatch(_EXPLANATORY_SECRET_VALUE, assigned_value, re.IGNORECASE):
+                continue
+            key = match.group("key")
+            if _has_sensitive_assignment_key(key, assigned_value, include_environment=False):
+                return True
+            # Named assignments use only environment-style names here. Running
+            # every component as an environment key would classify prose such
+            # as "Plan A: review changes" as a variable assignment.
+            if (
+                len(key) >= 3
+                and re.fullmatch(r"[A-Z_][A-Z0-9_]*", key)
+                and not re.match(_EXPLANATORY_SECRET_VALUE, assigned_value, re.IGNORECASE)
+                and _ENVIRONMENT_ASSIGNMENT.search(f"{key}={assigned_value}")
+            ):
+                return True
+    return False
 
 
 def _has_sensitive_cli_argument(value: str) -> bool:
@@ -403,7 +417,7 @@ def _has_bare_environment_assignment(value: str) -> bool:
             continue
         name = match.group("name").strip("\"'`“‘”’")
         if match.group("action").casefold() == "use" and re.fullmatch(
-            r"\s+to\s+", match.group("linker"), re.IGNORECASE
+            rf"\s+(?:(?:{_ASSIGNMENT_ADVERB})\s+)*to\s+", match.group("linker"), re.IGNORECASE
         ):
             tail = value[match.end() :]
             has_assignment_qualifier = (
