@@ -143,26 +143,6 @@ _SENSITIVE_CLI_ARGUMENT_SUFFIXES = frozenset(
 _CLI_ARGUMENT_PROSE_VALUES = frozenset(
     {"is", "are", "was", "were", "equals", "remains", "remain", "option", "argument", "flag", "parameter", "setting"}
 )
-_BARE_ASSIGNMENT_USE_INFINITIVES = frozenset(
-    {
-        "access",
-        "call",
-        "check",
-        "configure",
-        "create",
-        "enable",
-        "find",
-        "get",
-        "load",
-        "query",
-        "read",
-        "retrieve",
-        "run",
-        "set",
-        "use",
-        "write",
-    }
-)
 _COMPOUND_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*=(?!=|>)\s*(?P<value>[^\s&,;]+)"
 )
@@ -196,7 +176,7 @@ _URL_CREDENTIAL_QUERY = re.compile(
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
 _BARE_ENVIRONMENT_ASSIGNMENT = re.compile(
-    r"(?P<action>(?i:set|use))\s+(?P<name>[A-Z_][A-Z0-9_]*)"
+    r"(?P<action>(?i:set|use))\s+(?P<name>[\"'`“‘]?[A-Z_][A-Z0-9_]*[\"'`”’]?)"
     r"(?P<linker>\s+(?:to|as)\s+|\s*[:=]\s*)(?P<value>\S+)"
 )
 _MAPPING_ENVIRONMENT_ASSIGNMENT = re.compile(
@@ -418,12 +398,21 @@ def _has_bare_environment_assignment(value: str) -> bool:
         assigned_value = match.group("value")
         if re.match(_EXPLANATORY_SECRET_VALUE, assigned_value, re.IGNORECASE):
             continue
-        if (
-            match.group("action").casefold() == "use"
-            and re.fullmatch(r"\s+to\s+", match.group("linker"), re.IGNORECASE)
-            and assigned_value.casefold() in _BARE_ASSIGNMENT_USE_INFINITIVES
+        name = match.group("name").strip("\"'`“‘”’")
+        if match.group("action").casefold() == "use" and re.fullmatch(
+            r"\s+to\s+", match.group("linker"), re.IGNORECASE
         ):
-            continue
+            tail = value[match.end() :]
+            # An uppercase acronym followed by "to <verb> <object>" is ordinary
+            # purpose prose. Environment-style names with separators or digits
+            # remain screened, and a terminal value such as "production" does too.
+            if (
+                "_" not in name
+                and not any(char.isdigit() for char in name)
+                and re.fullmatch(r"[a-z][a-z-]*", assigned_value)
+                and re.search(r"\s+\S", tail)
+            ):
+                continue
         return True
     return False
 

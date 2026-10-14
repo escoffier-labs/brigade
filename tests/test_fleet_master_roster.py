@@ -422,6 +422,9 @@ def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str)
         "Set SERVICE_MODE to production",
         "Use DEPLOY_PASSWORD = hunter2",
         "Use SERVICE_MODE as production",
+        "Use MODE to production",
+        "Set `DEPLOY_PASSWORD` to hunter2",
+        'Set "SERVICE_MODE" to production',
     ],
 )
 def test_parse_rejects_bare_environment_variable_assignments(field: str, text: str) -> None:
@@ -519,7 +522,13 @@ def test_parse_rejects_profile_assignments_and_transition_disclosures(field: str
         fleet_master_roster.parse(document)
 
 
-@pytest.mark.parametrize("text", ["Use the token budget efficiently.", "Use token budgets efficiently."])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use the token budget efficiently.",
+        "Use token budgets efficiently.",
+    ],
+)
 def test_parse_accepts_token_budget_prose(text: str) -> None:
     document = _document()
     document["seats"][0]["purpose"] = text
@@ -530,6 +539,22 @@ def test_parse_accepts_token_budget_prose(text: str) -> None:
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
 def test_parse_accepts_api_infinitive_prose(field: str) -> None:
     text = "Use API to retrieve the roster status."
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    assert fleet_master_roster.parse(document)["seats"][0][field] == ([text] if field == "caveats" else text)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use API to validate requests.",
+        "Use JSON to serialize output.",
+        "Use HTTP to communicate with the service.",
+    ],
+)
+def test_parse_accepts_acronym_infinitive_prose(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 
