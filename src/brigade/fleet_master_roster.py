@@ -43,7 +43,7 @@ _DANGEROUS_VALUE_PATTERN = (
     r"\bauth(?:entication)?[ _-]profiles?\s+(?:\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|\[[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\]|\([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\))|"
     r"\b(?:(?:this|the|a|an|my|your|our|their|his|her|its)\s+)?"
     + _ROSTER_SUBJECT
-    + r"(?:\s+(?:seat|service|agent))?\s+(?:uses?|used|is\s+using|are\s+using|was\s+using|were\s+using|will\s+be\s+using|has|have|had)\s+"
+    + r"(?:\s+(?:seat|service|agent))?\s+(?:uses?|used|is\s+using|are\s+using|was\s+using|were\s+using|(?:can|could|may|might|must|shall|should|will|would)\s+be\s+using|has|have|had)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?auth(?:entication)?[ _-]profiles?\s+"
     r"(?!(?:is|are|as|for|in|required|needed|necessary|optional|available|selection|rotation|management|regularly)\b)"
     r"(?:\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|"
@@ -74,7 +74,7 @@ _DANGEROUS_VALUE_PATTERN = (
     r"(?:to|as|with)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:(?:this|the|a|an|my|your|our|their|his|her|its)\s+)?"
     + _ROSTER_SUBJECT
-    + r"(?:\s+(?:seat|service|agent))?\s+(?:uses?|used|is\s+using|are\s+using|was\s+using|were\s+using|will\s+be\s+using|has|have|had)\s+"
+    + r"(?:\s+(?:seat|service|agent))?\s+(?:uses?|used|is\s+using|are\s+using|was\s+using|were\s+using|(?:can|could|may|might|must|shall|should|will|would)\s+be\s+using|has|have|had)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
     r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE})\b)\S+|"
@@ -131,7 +131,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     re.IGNORECASE,
 )
 _PATH_DECLARATION_LINKER = r"(?:is|are|was|were|equals|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+been|have\s+been|had\s+been|will\s+have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
-_PATH_DECLARATION_QUALIFIER = r"(?:\s+(?:(?:for|of|used\s+(?:by|on|for)|assigned\s+to)\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)))?"
+_PATH_DECLARATION_QUALIFIER = r"(?:\s+(?:(?:for|of|on|used\s+(?:by|on|for)|assigned\s+to)\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)))?"
 _PATH_DECLARATION = (
     r"\b" + _PATH_LABEL + r"(?:\s+value)?" + _PATH_DECLARATION_QUALIFIER + r"\s*" + _PATH_DECLARATION_LINKER
 )

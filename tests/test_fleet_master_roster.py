@@ -413,6 +413,38 @@ def test_parse_rejects_on_qualified_protected_assignments(field: str, text: str)
 @pytest.mark.parametrize(
     "text",
     [
+        "Reviewer should be using API key shortkey",
+        "Reviewer must be using password hunter2",
+    ],
+)
+def test_parse_rejects_modal_progressive_credential_disclosures(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Path on this seat is foo/bar",
+        "Repository on this service should be private/repo",
+    ],
+)
+def test_parse_rejects_on_qualified_paths(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
         "This seat uses API key shortkey",
         "Reviewer uses the password hunter2",
         "Reviewer is using API key shortkey",
