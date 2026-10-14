@@ -418,6 +418,24 @@ def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str)
 @pytest.mark.parametrize(
     "text",
     [
+        "Set DEPLOY_PASSWORD to hunter2",
+        "Set SERVICE_MODE to production",
+        "Use DEPLOY_PASSWORD = hunter2",
+        "Use SERVICE_MODE as production",
+    ],
+)
+def test_parse_rejects_bare_environment_variable_assignments(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
         "Use hunter2 as the password",
         "Use shortkey as the API key",
         "hunter2 is the password",
@@ -507,6 +525,15 @@ def test_parse_accepts_token_budget_prose(text: str) -> None:
     document["seats"][0]["purpose"] = text
 
     assert fleet_master_roster.parse(document)["seats"][0]["purpose"] == text
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+def test_parse_accepts_api_infinitive_prose(field: str) -> None:
+    text = "Use API to retrieve the roster status."
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    assert fleet_master_roster.parse(document)["seats"][0][field] == ([text] if field == "caveats" else text)
 
 
 def test_parse_does_not_rescan_path_context_for_ordinary_words(monkeypatch) -> None:

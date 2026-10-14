@@ -143,6 +143,26 @@ _SENSITIVE_CLI_ARGUMENT_SUFFIXES = frozenset(
 _CLI_ARGUMENT_PROSE_VALUES = frozenset(
     {"is", "are", "was", "were", "equals", "remains", "remain", "option", "argument", "flag", "parameter", "setting"}
 )
+_BARE_ASSIGNMENT_USE_INFINITIVES = frozenset(
+    {
+        "access",
+        "call",
+        "check",
+        "configure",
+        "create",
+        "enable",
+        "find",
+        "get",
+        "load",
+        "query",
+        "read",
+        "retrieve",
+        "run",
+        "set",
+        "use",
+        "write",
+    }
+)
 _COMPOUND_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*=(?!=|>)\s*(?P<value>[^\s&,;]+)"
 )
@@ -175,6 +195,10 @@ _URL_CREDENTIAL_QUERY = re.compile(
     re.IGNORECASE,
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
+_BARE_ENVIRONMENT_ASSIGNMENT = re.compile(
+    r"(?P<action>(?i:set|use))\s+(?P<name>[A-Z_][A-Z0-9_]*)"
+    r"(?P<linker>\s+(?:to|as)\s+|\s*[:=]\s*)(?P<value>\S+)"
+)
 _MAPPING_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"\b(?:(?:os\s*\.\s*)?environ|env)\s*\[\s*(['\"`])[A-Za-z_][A-Za-z0-9_]*\1\s*\]"
     r"\s*=(?!=|>)\s*\S+",
@@ -382,6 +406,22 @@ def _has_sensitive_cli_argument(value: str) -> bool:
         argument = match.group("value")
         if argument.casefold() in _CLI_ARGUMENT_PROSE_VALUES or re.fullmatch(
             _EXPLANATORY_SECRET_VALUE, argument, re.IGNORECASE
+        ):
+            continue
+        return True
+    return False
+
+
+def _has_bare_environment_assignment(value: str) -> bool:
+    """Reject assignments to environment-style names without an explicit label."""
+    for match in _BARE_ENVIRONMENT_ASSIGNMENT.finditer(value):
+        assigned_value = match.group("value")
+        if re.match(_EXPLANATORY_SECRET_VALUE, assigned_value, re.IGNORECASE):
+            continue
+        if (
+            match.group("action").casefold() == "use"
+            and re.fullmatch(r"\s+to\s+", match.group("linker"), re.IGNORECASE)
+            and assigned_value.casefold() in _BARE_ASSIGNMENT_USE_INFINITIVES
         ):
             continue
         return True
@@ -853,6 +893,8 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(path_text)
         or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_sensitive_path_text)
         or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_form_path_text)
+        or _has_bare_environment_assignment(decoded_sensitive_text)
+        or _has_bare_environment_assignment(decoded_form_text)
         or _MAPPING_ENVIRONMENT_ASSIGNMENT.search(decoded_sensitive_text)
         or _MAPPING_ENVIRONMENT_ASSIGNMENT.search(decoded_form_text)
         or contains_credential(decoded_sensitive_text)
