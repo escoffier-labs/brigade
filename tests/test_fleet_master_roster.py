@@ -413,6 +413,7 @@ def test_parse_rejects_qualified_compact_credential_assignments(field: str, text
         "API key had been shortkey",
         "Reviewers have API key shortkey",
         "Agents have the password hunter2",
+        "审查员 uses API key shortkey",
     ],
 )
 def test_parse_rejects_subject_first_credential_disclosures(field: str, text: str) -> None:
@@ -1021,6 +1022,8 @@ def test_parse_rejects_perfect_tense_disclosures(field: str, text: str) -> None:
     "text",
     [
         "Navigate to foo/bar directories",
+        "Open %2Fetc%2Fpasswd",
+        "Read %2Fhome%2Fexample",
         "Copy foo/bar files",
         "Read foo/bar files before launch",
         'Navigate to "Shared Folder/file"',

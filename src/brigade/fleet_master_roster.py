@@ -21,6 +21,7 @@ _SEAT_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _MODEL_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_ROSTER_SUBJECT = r"[^\W\d_][\w.-]*"
 _EXPLANATORY_SECRET_VALUE = (
     r"(?:required|optional|needed|necessary|available|configured(?!\s+(?:as|to|with)\b)|set(?!\s+to\b)|missing|unset|unavailable|"
     r"not\s+(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable)|"
@@ -41,7 +42,8 @@ _DANGEROUS_VALUE_PATTERN = (
     r"(?:[^\s.,;!?]+|\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|\[[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\]|\([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\))|"
     r"\bauth(?:entication)?[ _-]profiles?\s+(?:\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|\[[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\]|\([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*\))|"
     r"\b(?:(?:this|the|a|an|my|your|our|their|his|her|its)\s+)?"
-    r"[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?\s+(?:uses?|used|is\s+using|are\s+using|was\s+using|were\s+using|will\s+be\s+using|has|have|had)\s+"
+    + _ROSTER_SUBJECT
+    + r"(?:\s+(?:seat|service|agent))?\s+(?:uses?|used|is\s+using|are\s+using|was\s+using|were\s+using|will\s+be\s+using|has|have|had)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?auth(?:entication)?[ _-]profiles?\s+"
     r"(?!(?:is|are|as|for|in|required|needed|necessary|optional|available|selection|rotation|management|regularly)\b)"
     r"(?:\"[^\"\n]+\"|'[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*'|`[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*`|"
@@ -71,7 +73,8 @@ _DANGEROUS_VALUE_PATTERN = (
     r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
     r"(?:to|as|with)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\b(?:(?:this|the|a|an|my|your|our|their|his|her|its)\s+)?"
-    r"[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?\s+(?:uses?|used|is\s+using|are\s+using|was\s+using|were\s+using|will\s+be\s+using|has|have|had)\s+"
+    + _ROSTER_SUBJECT
+    + r"(?:\s+(?:seat|service|agent))?\s+(?:uses?|used|is\s+using|are\s+using|was\s+using|were\s+using|will\s+be\s+using|has|have|had)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
     r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE})\b)\S+|"
@@ -474,6 +477,14 @@ def _decode_explicit_path_declarations(value: str) -> str:
     return decoded
 
 
+def _decode_contextual_path_values(value: str) -> str:
+    decoded = value
+    for match in reversed(tuple(re.finditer(r"%[0-9a-fA-F]{2}[^\s<>\"'“”‘’)\]},;!?]*", value))):
+        if _has_path_context(value, match.start()):
+            decoded = decoded[: match.start()] + _fully_unquote(match.group()) + decoded[match.end() :]
+    return decoded
+
+
 _TOP_FIELDS = frozenset({"schema", "revision", "seats"})
 _SEAT_FIELDS = frozenset({"name", "cli", "model", "purpose", "caveats", "fallbacks", "enabled"})
 
@@ -558,7 +569,8 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     screening_text = re.sub(r"“([^”\n]+)”", r'"\1"', screening_text)
     screening_text = re.sub(r"‘([^’\n]+)’", r"'\1'", screening_text)
     path_text = _without_api_route_references(screening_text)
-    decoded_path_text = _without_api_route_references(_decode_explicit_path_declarations(screening_text))
+    decoded_paths = _decode_contextual_path_values(_decode_explicit_path_declarations(screening_text))
+    decoded_path_text = _without_api_route_references(decoded_paths)
     if (
         _DANGEROUS_VALUE.search(screening_text)
         or _URL_CREDENTIAL_QUERY.search(screening_text)
