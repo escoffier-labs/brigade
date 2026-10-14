@@ -494,6 +494,24 @@ def test_parse_rejects_form_encoded_secrets_and_embedded_url_paths(field: str, t
 @pytest.mark.parametrize(
     "text",
     [
+        "See https:///home/example/file",
+        "See http:///etc/hosts",
+        "The SERVICE_MODE environment variable is production",
+        "SERVICE_MODE environment variable is production",
+    ],
+)
+def test_parse_rejects_authorityless_url_paths_and_variable_first_assignments(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
         "See https%3A%2F%2Fexample.com%2F%3Fpath%3D%2Fetc%2Fhosts",
         "See https%3A%2F%2Fexample.com%2F%3FSERVICE_MODE%3Dproduction",
     ],

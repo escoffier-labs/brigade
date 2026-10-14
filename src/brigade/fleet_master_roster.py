@@ -103,9 +103,11 @@ _ROSTER_OWNERSHIP_QUALIFIER = (
     r"(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?))?"
 )
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
-    r"\b(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+|"
+    r"\b(?:"
+    r"(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+|"
     r"(?:(?:use|configure)\s+(?:the\s+)?)?environment\s+variable\s+)"
-    r"(?:(?:named|called)\s+)?[\"'“‘`]?[A-Za-z_][A-Za-z0-9_]*[\"'”’`]?"
+    r"(?:(?:named|called)\s+)?[\"'“‘`]?[A-Za-z_][A-Za-z0-9_]*[\"'”’`]?|"
+    r"(?:the\s+)?[A-Za-z_][A-Za-z0-9_]*\s+environment\s+variable)"
     + _ROSTER_OWNERSHIP_QUALIFIER
     + r"(?:\s*=(?!=|>)|\s+(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+been|have\s+been|had\s+been|will\s+have\s+been)\s+(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
@@ -409,8 +411,10 @@ def _without_api_route_references(value: str) -> str:
 
     def remove_valid_url(match: re.Match[str]) -> str:
         try:
-            urlsplit(match.group())
+            parsed = urlsplit(match.group())
         except ValueError:
+            return match.group()
+        if not parsed.netloc or not parsed.hostname:
             return match.group()
         return ""
 
