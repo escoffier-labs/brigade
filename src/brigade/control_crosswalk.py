@@ -1356,13 +1356,15 @@ def _evaluate_verify_archive_index_exists(ctx: _Context) -> _Discovery:
 def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
     """EC-12 validates root and one-level package manifests with strict snapshots."""
     root = ctx.target / ".brigade" / "evidence-packages"
-    children, truncated, error = _bounded_children(ctx, root)
-    out = _Discovery(truncated=truncated)
-    _record_discovery_error(out, ctx, root, error)
     adapter = _VERIFIER_ADAPTERS.get("evidence-package")
     strict_adapter = adapter is _verify_evidence_package
+    root_linked = strict_adapter and control_crosswalk_package.linked_package(ctx, root)
+    children, truncated, error = _bounded_children(ctx, root)
+    children = [child for child in children if child.name != "manifest.json"]
+    out = _Discovery(truncated=truncated)
+    _record_discovery_error(out, ctx, root, error)
     package_dirs: list[Path] = []
-    if error is None and _discovery_path_present(ctx, out, root / "manifest.json"):
+    if error is None and (root_linked or _discovery_path_present(ctx, out, root / "manifest.json")):
         package_dirs.append(root)
     for child in children:
         if strict_adapter and _is_symlink(ctx, child):
@@ -1379,7 +1381,7 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
         relpath = _relpath(ctx, path)
         manifest = None if linked else _read_json_object(ctx, path, manifest_reserve, strict_adapter)
         if linked:
-            if adapter is _verify_evidence_package:
+            if strict_adapter:
                 obs = _obs(
                     relpath,
                     "claim_validated",
@@ -1396,11 +1398,11 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
         elif adapter is not None:
             try:
                 obs = _adapter_observation(adapter, ctx, package_dir, relpath, reserve_bytes=manifest_reserve)
-                if adapter is _verify_evidence_package and control_crosswalk_package.needs_staged_receipt(obs):
+                if strict_adapter and control_crosswalk_package.needs_staged_receipt(obs):
                     staged_package = ctx.reader.snapshot_target / package_dir.relative_to(ctx.target)
                     staged_receipt_candidates = control_crosswalk_package.receipt_binding_candidates(staged_package)
             finally:
-                if adapter is _verify_evidence_package:
+                if strict_adapter:
                     ctx.reader.release_subtree(package_dir)
         else:
             obs = _assess_package_manifest(ctx, package_dir, relpath, manifest)
@@ -1412,8 +1414,7 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
         manifest = control_crosswalk_package.trusted_timestamp_manifest(manifest, obs, strict_package=strict_adapter)
         obs.timestamp = _first_timestamp(manifest, "created_at")
         _apply_period(obs, ctx)
-        if obs.scope == "in_scope":
-            out.verifier_unavailable |= obs.proposed == "unavailable"
+        out.verifier_unavailable |= obs.scope == "in_scope" and obs.proposed == "unavailable"
         out.observations.append(obs)
     return out
 

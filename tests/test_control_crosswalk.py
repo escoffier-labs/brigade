@@ -2458,6 +2458,31 @@ def test_ec12_run_scope_consumes_reparse_refusal_after_package_rejection(tmp_pat
     assert readiness["artifacts"][0]["outcome"] == "rejected"
 
 
+def test_ec12_run_scope_classifies_root_manifest_reparse_as_package_rejection(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    root = target / ".brigade" / "evidence-packages"
+    _write_json(root / "manifest.json", _package_manifest([_RECEIPT_ENTRY]))
+    reader_type = control_crosswalk._AssessmentReader
+    real_info = reader_type.info
+    manifest_path = root / "manifest.json"
+
+    def refuse_root_manifest_reparse(reader, path):
+        if path == manifest_path:
+            raise control_crosswalk._ReadRefusal("symlink_refused")
+        return real_info(reader, path)
+
+    monkeypatch.setattr(reader_type, "info", refuse_root_manifest_reparse)
+
+    readiness = _assess(target, "EC-12", RUN)
+
+    assert readiness["outcome"] == "incomplete"
+    assert readiness["population"]["unbound"] == 1, readiness["artifacts"]
+    assert readiness["population"]["in_scope"] == 0
+    assert readiness["artifacts"][0]["relpath"] == ".brigade/evidence-packages/manifest.json"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+    assert readiness["artifacts"][0]["reason_codes"] == ["entry_path_unsafe"]
+
+
 def test_ec02_unreadable_receipt_no_longer_skips_run_check(tmp_path):
     target = _ws(tmp_path)
     run_dir = _verify_dir(target, "v1")
