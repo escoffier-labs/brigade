@@ -567,6 +567,8 @@ def test_parse_accepts_api_infinitive_prose(field: str) -> None:
         "Use API to validate requests.",
         "Use JSON to serialize output.",
         "Use HTTP to communicate with the service.",
+        "Use JSON as the output format.",
+        "Use API as the source of truth.",
     ],
 )
 def test_parse_accepts_acronym_infinitive_prose(field: str, text: str) -> None:
@@ -935,6 +937,9 @@ def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> N
         "Authentication profile values are prohibited.",
         "AWS profiles require approval.",
         "Configure AWS profile selection.",
+        "Configure the AWS profile selection.",
+        "Check your AWS profile.",
+        "Rotate each AWS profile monthly.",
         "Document AWS profiles.",
         "Audit AWS profiles before sharing.",
     ],

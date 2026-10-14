@@ -7,7 +7,7 @@ Those existing surfaces remain unchanged.
 ## Version 1 document
 
 The JSON document contains `schema`, a positive integer `revision` no greater
-than `9223372036854775807`, and a list of `seats`. Each seat has a unique `name`,
+than `9007199254740991`, and a list of `seats`. Each seat has a unique `name`,
 one executable `cli` name, a `model`, human-readable `purpose` and `caveats`, a
 list of named `fallbacks`, and an `enabled` flag. The parser rejects unknown
 properties so future versions must add fields deliberately.

@@ -17,7 +17,8 @@ SCHEMA = "brigade.fleet_master_roster.v1"
 MAX_DOCUMENT_BYTES = 262144
 MAX_SEATS = 128
 MAX_TEXT = 512
-MAX_REVISION = (1 << 63) - 1
+# Keep revisions in the interoperable integer range used by JSON implementations.
+MAX_REVISION = (1 << 53) - 1
 _MAX_JSON_INTEGER_DIGITS = len(str(MAX_REVISION))
 _SEAT_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
@@ -235,7 +236,7 @@ _PROVIDER_AUTH_PROFILE = re.compile(
     r"(?:(?:the|a|an|my|your|our|their)\s+)?"
     r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profile\s+"
     r"(?!(?:required|needed|require|requires|selection|support|supported|configure|rotate|management|policy|policies|configuration|availability|"
-    r"available|regularly|rotation|names|values|must|should|can|could|may|might|will|would|are|is|were|was)\b)"
+    r"available|regularly|daily|weekly|monthly|quarterly|yearly|annually|rotation|names|values|must|should|can|could|may|might|will|would|are|is|were|was)\b)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)|"
     r"\b(?:(?:(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+"
     r"(?:(?:the|a|an|my|your|our|their)\s+)?)|(?:the|a|an|my|your|our|their)\s+)"
@@ -444,7 +445,7 @@ def _has_bare_environment_assignment(value: str) -> bool:
             continue
         name = match.group("name").strip("\"'`“‘”’")
         if match.group("action").casefold() == "use" and re.fullmatch(
-            rf"\s+(?:(?:{_ASSIGNMENT_ADVERB})\s+)*to\s+", match.group("linker"), re.IGNORECASE
+            rf"\s+(?:(?:{_ASSIGNMENT_ADVERB})\s+)*(?:to|as)\s+", match.group("linker"), re.IGNORECASE
         ):
             tail = value[match.end() :]
             has_assignment_qualifier = (
