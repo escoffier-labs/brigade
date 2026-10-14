@@ -462,11 +462,19 @@ def _has_disallowed_api_route_query(value: str) -> bool:
         normalized_path = decoded_path.replace("\\", "/")
         if "//" in normalized_path:
             return True
-        route_components = [component.casefold() for component in normalized_path.split("/") if component]
+        raw_components = [component for component in normalized_path.split("/") if component]
+        route_components = [component.casefold() for component in raw_components]
         if any(component in {".", ".."} for component in route_components):
             return True
         application_resource_route = route_components[:1] == ["applications"] and len(route_components) == 2
         decoded_components = [component.rstrip(".,;!?") for component in route_components]
+        if any(
+            _has_sensitive_assignment_key(
+                raw_components[index].rstrip(".,;!?"), decoded_components[index + 1], include_environment=False
+            )
+            for index in range(len(decoded_components) - 1)
+        ):
+            return True
         if any(
             (component.startswith(".") and component != ".well-known")
             or component.startswith("~")
