@@ -197,6 +197,12 @@ def _fully_unquote_plus(value: str) -> str:
         value = decoded
 
 
+def _normalize_protected_labels(value: str) -> str:
+    value = re.sub(r"“([^”\n]+)”", r'"\1"', value)
+    value = re.sub(r"‘([^’\n]+)’", r"'\1'", value)
+    return _QUOTED_PROTECTED_LABEL.sub(r"\g<label>", value)
+
+
 def _has_url_userinfo(value: str) -> bool:
     for match in _HTTP_URL.finditer(value):
         try:
@@ -592,11 +598,9 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         raise MasterRosterError(f"{field} must contain valid Unicode scalar values")
     if len(value) > MAX_TEXT or _has_control(value):
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters without controls or separators")
-    screening_text = _QUOTED_PROTECTED_LABEL.sub(r"\g<label>", value)
-    screening_text = re.sub(r"“([^”\n]+)”", r'"\1"', screening_text)
-    screening_text = re.sub(r"‘([^’\n]+)’", r"'\1'", screening_text)
-    decoded_sensitive_text = _fully_unquote(screening_text)
-    decoded_form_text = _fully_unquote_plus(screening_text)
+    screening_text = _normalize_protected_labels(value)
+    decoded_sensitive_text = _normalize_protected_labels(_fully_unquote(screening_text))
+    decoded_form_text = _normalize_protected_labels(_fully_unquote_plus(screening_text))
     path_text = _without_api_route_references(screening_text)
     decoded_sensitive_path_text = _without_api_route_references(decoded_sensitive_text)
     decoded_form_path_text = _without_api_route_references(decoded_form_text)

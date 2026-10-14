@@ -541,6 +541,23 @@ def test_parse_rejects_quoted_protected_labels(field: str, text: str) -> None:
         fleet_master_roster.parse(document)
 
 
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "%22API%20key%22%3Dshortkey",
+        "%22auth%20profile%22%3Dproduction-admin",
+        "%E2%80%9Cpassword%E2%80%9D%3Dhunter2",
+    ],
+)
+def test_parse_rejects_encoded_quoted_protected_labels(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
 @pytest.mark.parametrize(
     "text",
     [
